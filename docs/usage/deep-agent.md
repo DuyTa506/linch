@@ -16,17 +16,32 @@ Unlike a [workflow](./workflows.md), a deep agent is LLM-driven: the model itsel
 ## `create_deep_agent()`
 
 ```python
-from linch import create_deep_agent
+import os
+from linch import (
+    CompositeFileBackend, PostgresRunStore, StateFileBackend,
+)
+from linch.ext.deep_agent import create_deep_agent
+from linch.filesystem.postgres import PostgresFileBackend
 from linch.providers import OpenAIChatCompletionsProvider
+from linch.sessions.postgres import PostgresSessionStore
 
+dsn = os.environ["LINCH_POSTGRES_DSN"]
 agent = create_deep_agent(
     model="deepseek-v4-pro",
     provider=OpenAIChatCompletionsProvider(...),  # any provider
-    cwd=".",                           # workspace root
-    durable=True,                      # SQLite session + run + /memories stores
+    cwd=".",
+    durable=True,
+    session_store=PostgresSessionStore(dsn),
+    run_store=PostgresRunStore(dsn),
+    filesystem=CompositeFileBackend(
+        default=StateFileBackend(),
+        routes={"/memories/": PostgresFileBackend(dsn)},
+    ),
     permissions={"mode": "skip-dangerous"},
 )
 session = await agent.session()
+# At application shutdown:
+await agent.close()
 ```
 
 The default `profile="balanced"` is bounded to 64 turns and 1,000,000 tokens,
@@ -36,15 +51,21 @@ retains workers for continue, and enables durable state. Use
 controls. The factory explicitly enables the skills, subagents, and filesystem
 features it assembles; MCP is enabled only when servers are configured.
 
-`durable=True` sets up three persistent stores: `SqliteSessionStore`,
-`SqliteRunStore`, and a `CompositeFileBackend` with a persistent `/memories`
-partition (SQLite-backed). Everything else in the virtual filesystem is
-ephemeral (`StateFileBackend`). With `durable=False` all stores are in-memory.
-Durable checkpoints and session history can be resumed after a process restart;
-an active detached worker task and its in-memory completion notification cannot
-be reconstructed.
+`durable=True` requires explicit `session_store` and `run_store` adapters plus
+an explicit `filesystem` when that feature is enabled. There are no automatic
+persistent stores or implicit environment-based defaults. Missing configuration
+raises `ConfigError`; explicit InMemory adapters are accepted for host-controlled
+tests but provide only process-lifetime state. Use `durable=False` for an
+ephemeral demo. When filesystem features are disabled, no filesystem is required.
 
-Durability is what lets a deep-agent run survive a process restart and resume mid-task — the session state and run checkpoint are read back from SQLite. See [Agent configuration](./agent.md) for the underlying store types, and [Virtual filesystem](./filesystem.md) for how the `/memories` partition is routed inside the `CompositeFileBackend`.
+For restart durability, use the Postgres stores shown above. The composite
+filesystem keeps bulk offloads in ephemeral state and routes `/memories/` to
+Postgres. Configure the local database with the [Quickstart](./quickstart.md#5-keep-state-when-the-process-restarts).
+Session history and checkpoints can then resume after restart; active detached
+worker tasks and completion notifications cannot be reconstructed.
+
+See [Agent configuration](./agent.md) and [Virtual filesystem](./filesystem.md)
+for the underlying store and routing contracts.
 
 ---
 
@@ -156,11 +177,16 @@ agent = create_deep_agent(
     durable=False,
     permissions={"mode": "skip-dangerous"},
 )
-# Parent has no Edit/Write/Bash/Grep/Glob/Read — only Subagent/SubagentContinue/TaskStop + task tools
-# Workers receive full tool access via SubagentTool → build_child_tools
+# Parent omits the built-in Edit/Write/Bash/Grep/Glob/Read tools.
+# It still has orchestration tools, and may also expose Skill, supplied tools,
+# or configured MCP tools. Workers use the configured worker tool registry.
 ```
 
-With `coordinator=True` the parent agent is stripped of heavy tools and is left to orchestrate only — it plans and delegates, while the workers it spawns get full tool access. This keeps the coordinator's context focused on task management rather than file contents and command output.
+With `coordinator=True` the parent agent omits the built-in heavy workspace
+tools and keeps the orchestration surface. The default profile also enables the
+`Skill` tool; caller-supplied tools and configured MCP servers can add more
+tools. Workers use the configured worker registry, which keeps the coordinator's
+context focused on task management rather than file contents and command output.
 
 To stop a running background worker: `TaskStop(task_id='agent-xxxx')`. The handle stays in `session.workers` so it can be continued later with `SubagentContinue`. Stopping cancels the in-flight task but does not discard the worker — you can re-engage it once you have what you need.
 

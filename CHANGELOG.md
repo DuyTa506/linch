@@ -2,7 +2,187 @@
 
 Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
-and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
+and persisted formats share a wire generation separate from the package version,
+reflected by `linch.RUN_SCHEMA_VERSION`.
+
+## 3.0.0 (unreleased)
+
+### Breaking and new features
+
+- **Kernel and plugins.** `Context`, reversible `Disposable`, typed lifecycle bus, and `Plugin` mounts through `agent.use()` are now the extension foundation; see [the kernel guide](docs/architecture/kernel.md#plugins).
+- **Versioned profiles.** `Profile` and `RunOptions(profile=...)` select immutable per-run roles, plugin rows, tool restrictions, budgets, schemas, and resume-pinned content; see [domain profiles](docs/usage/profiles.md).
+- **Deferred tool search.** `ToolSearchPlugin` keeps small catalogs byte-identical and defers large tool/skill schemas until `tool_search` loads them; see [tool search](docs/usage/tools.md#tool-search-for-large-catalogs).
+- **Lifecycle catalog and tracing.** Typed lifecycle points have a generated producer/consumer catalog, and `trace_id` follows events, logs, tools, jobs, and subagents; see [events](docs/architecture/events.md#typed-lifecycle-catalog).
+- **Per-run identity and RBAC.** `Principal(tenant, user, roles)` is carried through `RunOptions`, permission rules, tool context, and the durable run contract; see [role rules](docs/usage/tools.md#per-run-principals-and-role-rules).
+- **RAG and grounding.** `RagConnector` returns sourced chunks and optional final-answer grounding enforces `[doc:<id>]` citations; see [context and memory](docs/usage/context-and-memory.md#sourced-retrieval-and-grounding).
+- **Durable run ownership.** Postgres runs use lease epochs, fenced writes, checkpoints before side effects, and reconnect-by-sequence event streams; see [run stores](docs/usage/run-stores.md).
+- **Worker fleet runtime.** Optional `linch.worker` uses PgQueuer for dispatch, leases, retries, graceful drain, cron, and takeover after worker/database failures; see [production scale-out](docs/usage/production.md#scale-out).
+- **File-backed memory.** Scoped `MEMORY.md` indexes are loaded through the filesystem backend; semantic recall is an optional host plugin rather than a core memory store; see [file memory](docs/usage/context-and-memory.md#file-memory).
+- **OpenTelemetry instrumentation.** Core uses `opentelemetry-api` at run/turn/provider/tool/compaction boundaries; hosts own SDK/exporter setup and message-content capture policy; see [traces and metrics](docs/usage/events.md#opentelemetry-traces-and-metrics).
+- **Explicit extension namespace.** Workflows, evals, deep-agent presets, reports, loop runners, and the scaffold CLI live under `linch.ext.*`; see [the extension boundary](docs/architecture/overview.md#extensions).
+- **Neutral agent defaults and tool protocols.** Bare agents have no domain tools or discovery features by default; `workspace_tools()`, duck-typed tools, reversible registry handles, hooks, and explicit plugin mounts make trust boundaries opt-in; see [tools](docs/usage/tools.md).
+- **Reliability and finalization.** Default response reliability, prerequisites, completion gates, and the serial `turn-stopping` seam make malformed or incomplete responses observable and recoverable; see [reliability](docs/usage/agent.md#tool-and-response-reliability).
+- **Unified execution world.** Shell and filesystem access use coherent `ExecutionBackend` transports with durable policy identity; see [execution backends](docs/usage/extending.md#executionbackend--one-shell--filesystem-world).
+- **Append-only session state.** `SessionLog` is the durable source for detached `provider_view`/`full_history` projections; per-request RAG/context remains ephemeral; see [session invariants](docs/architecture/invariants.md).
+- **Canonical tool output and durable delivery.** JSON Schema tool results, progress/attachments, durable inbox notifications, and exact pending model-input snapshots are available through the Postgres capabilities; see [events](docs/usage/events.md).
+- **Accounting and compaction.** Model-call receipts settle cumulative primary/compaction usage before budget admission, with fail-closed unknown usage and durable built-in compaction replay; see [accounting and compaction migration](docs/migration-3.0.md#accounting-and-compaction).
+- **Wire and runtime floor.** Python 3.11+ and wire generation 3 are required; pre-3.0 persisted data and legacy readers are rejected; see [Migrating to 3.0](docs/migration-3.0.md).
+- **Provider and dependency changes.** Gemini/Vertex AI use `google-genai`, durable state is Postgres plus InMemory for tests/dev, and SQLite stores are removed; see [provider setup](docs/usage/providers.md) and [run stores](docs/usage/run-stores.md).
+
+See [Migrating to 3.0](docs/migration-3.0.md) for replacement imports,
+removed compatibility paths, and required durable-state changes.
+
+### Development entries
+
+- Interrupt resumable runs on transient durable-store connection failures without
+  writing a failed terminal; worker retry or lease takeover resumes the checkpoint.
+
+- Migrate Gemini and Vertex AI to `google-genai`, preserving streaming tools and structured output, with native thinking, signed-part replay, token accounting, typed errors and async transport cleanup.
+
+- Reconnect workers after transient database outages with bounded jitter, a fresh
+  queue/LISTEN connection per manager cycle, and cancellation-safe callback drain.
+
+- Create the initial startup checkpoint atomically with run adoption, recover
+  startup events and append the prompt once across worker takeover, and commit
+  worker setup failures with an atomic error/result tail and journal totals.
+
+- Add default, provider-independent response reliability with a shared bounded
+  correction budget, optional tool prerequisites and completion gates, durable
+  run-local state, and `ReliabilityEvent`. `reliability=None` opts out. Text
+  tool-call envelopes request a native resend; text rescue is dropped.
+
+- Reuse worker-owned run and session stores across jobs, verifying schemas once
+  per borrowed pool. Factories must use both `job.run_store` and
+  `job.session_store`; agent teardown preserves their initialized handles.
+
+- Commit terminal status and pending events atomically, preserving guard-tail
+  replay across crashes and cancellation.
+
+- Bound checkpoint recovery state with journal watermarks and fixed-size
+  BLAKE2b loop-guard digests; remove the private guard-delta journal while
+  retaining detached projection getters and the incremental history digest.
+- Require combined checkpoint/event writes when a phase has pending events,
+  preserving durable-before-side-effect ordering. Postgres writes now use
+  fenced autocommit statements with last-sequence allocation, and store-owned
+  pools use a clean asyncpg reset callback. The hot-path loop also avoids
+  duplicate checkpoint serialization traversals. A D15 msgspec checkpoint
+  prototype measured below 1% on the scale cases and was dropped. See the
+  [hot-path measurements](docs/superpowers/measurements/2026-10-31-hot-path.md).
+
+- Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
+
+- Retry nonterminal worker exits after ownership loss or cancellation. Retry
+  transient lease renewal failures within the last confirmed TTL; cancel the
+  run task on lease loss/expiry without writing a terminal aborted status.
+  Protect teardown from queue callback cancellation. Move pending-run inserts
+  and contract-checked adoption into the run stores with shared conformance tests.
+
+- Add explicit `linch.worker` (`worker` extra): atomic pending-run dispatch and
+  batching through PgQueuer, fleet queue limits, lease heartbeats, checkpoint
+  recovery, W3C trace propagation, and deferred cron/interval schedule jobs.
+  Replace coordination scheduling and `Agent(schedule_store=...)` with
+  host-mounted, reversible schedule tools. Add a runnable fleet example and
+  local enqueue/NOTIFY measurements to the production guide.
+
+- Raise public `RunNotResumableError` with `run_id` and `status` when resuming
+  terminal runs or runs without checkpoints, replacing the silent no-op.
+- Remove all SQLite stores and their executor. Durable sessions, runs, and
+  virtual files use Postgres; InMemory stores remain for tests and development.
+  Built-in mailboxes now last only for the process lifetime.
+- Require explicit session/run stores and an explicit enabled filesystem for
+  `create_deep_agent(durable=True)`; use `durable=False` for an ephemeral preset.
+- Read durable run reports from Postgres via `scripts/run_report.py --dsn` or
+  `LINCH_POSTGRES_DSN`; remove `--runs-db`. Runtime benchmarks use memory stores
+  and no longer apply former database latency thresholds.
+- Replace the custom observer protocol, dispatchers, collectors and
+  `RunTelemetryHook` with direct OpenTelemetry source instrumentation. The API
+  is a core dependency; the SDK/exporter is host-owned and test/dev-only here.
+  Inject providers through Agent Context for tenant isolation. Emit run, step,
+  chat, tool and compaction spans plus token, operation and store histograms;
+  message/tool content requires the standard OTel capture environment switch.
+  No-op spans pass streamed iterators through unchanged; metrics-only hosts and
+  valid sampled-out trace contexts retain instrumentation.
+
+- Require Python 3.11+; remove the Python 3.10 scaffold TOML fallbacks.
+- Require shared wire version 3 for all persisted envelopes, including workflow
+  metadata. Reject missing, old, or unknown versions; start new runs and use
+  fresh databases. Remove automatic schema upgrades, legacy resume overrides,
+  checkpoint defaults, cursorless tool recovery, and old workflow readers.
+- Require coherent `.shell`/`.fs` execution backends; remove the shell-only
+  adapter and unaccounted stream entry point.
+- Always validate configured structured-output schemas with core `jsonschema`;
+  remove the missing-dependency bypass.
+- Use one compaction recovery driver, preserving default per-turn retry and
+  ladder per-run limits, accounting, and lifecycle-hook ordering.
+- Remove legacy public API aliases, unused configuration/middleware types,
+  and camelCase properties/arguments. Use the configurable `workspace_tools`
+  preset and `ToolRegistry.register/unregister`.
+- Remove dormant discovery types/codecs/capability plumbing and obsolete
+  runtime helpers; reject removed discovery controls during message decoding.
+- Consolidate strict JSON traversal, custom token estimation, Postgres pool
+  lifecycle, permission signatures, client close, and claim validation while
+  preserving serialization bytes, fingerprints, and caller-specific policies.
+- Remove stale Studio ignore/documentation references.
+- Replace keyword, tiered, and database memory stores with run-scoped file
+  memory: `ScopedFileBackend` isolates paths, `FileMemoryContextBuilder` loads
+  `/memories/MEMORY.md` once per run (bounded to 200 lines), and the mem0
+  integration is documented as an optional example recipe.
+- Replace the old versioning exceptions with the unrestricted 3.0 transition
+  policy and normal SemVer for releases after 3.0 stable.
+
+See [Migrating to Linch 3.0](docs/migration-3.0.md) for each removal,
+and replacement.
+
+## 3.0.0a1 — 2026-10-30
+
+This is the first incremental 3.0 prerelease. It adds model-call accounting
+for the primary turn and context compaction while keeping the existing neutral
+defaults, persona, prompts, and opt-in compaction strategies unchanged. The
+later 3.0 reliability policy and other roadmap lanes are not part of this
+release.
+
+### Added
+
+- **Cumulative model-call usage.** Reported usage is settled once per physical
+  provider delivery and the run total now includes both primary deliveries and
+  auxiliary compaction deliveries. A rejected or unusable compaction response
+  still counts when the provider reached `message_end` with valid usage.
+- **Accounting journal surface.** `ModelCallEvent` and
+  `is_model_call_event` are public for typed journal envelopes. Ordinary
+  primary model-call records remain journal-only; auxiliary compaction usage is
+  represented by additive `UsageEvent` metadata (`source="compaction"`,
+  `call_id`, `logical_call_id`, and `model`).
+- **Budget-safe compaction.** A compaction receipt settles before hooks,
+  summary application, or the next dispatch. Admission is checked again after
+  compaction, so a summary that exhausts a token or USD cap prevents the main
+  turn from starting.
+- **Fail-closed unknown usage.** A dispatched delivery without valid final
+  usage is unknown, not zero. Capped runs stop before another model call until
+  the host resolves the accounting fence; uncapped runs may finish with a
+  lower-bound total and `usage_complete=False`.
+- **Durable built-in recovery.** With matching durable run/session state,
+  accepted `DefaultCompaction` and `DetailedCompaction` receipts carry a
+  bounded summary and ordered hash-only source anchor. Resume can apply that
+  paid result without another provider call or duplicate charge. A custom
+  strategy using Linch's supplied provider facade receives accounting,
+  cancellation, and limiter guarantees, but arbitrary external calls or
+  transformations do not gain deterministic paid replay.
+
+### Migration notes
+
+- No prompt, persona, default-strategy, or normal primary-input behavior
+  changes in this prerelease. Existing custom strategies remain supported when
+  they use the supplied provider facade for calls that should be accounted.
+- Unknown or unpriced models do not receive a synthetic USD price. Token usage
+  remains known when reported, while aggregate cost is partial and cost caps
+  cannot enforce an unknown price.
+- Receipt ownership is physical delivery ID, not logical operation ID. Retries
+  and fallbacks that reach final usage are separate billed deliveries.
+- Durable runs with an old in-flight accounting shape fail closed, including
+  when legacy resume is explicitly opted into; start a fresh run or migrate the
+  durable state under the matching contract.
+- This release does not promise distributed-tree cap recovery, exactly-once
+  external-provider billing, or reservations against concurrent admissions.
 
 ## 2.0.0 — 2026-09-14
 
@@ -238,7 +418,7 @@ upgrade checklist.
   2.x API.
 
   This lands in a PATCH because no name in `linch.__all__` changed — see
-  [docs/versioning.md](docs/versioning.md#optional-extra-dependencies-are-not-covered),
+  [docs/versioning.md](docs/versioning.md#dependencies-and-reproducible-builds),
   which does not cover an extra's dependency floor. **If you are held on mcp 1.x,
   pin `linch<=1.2.0`.** Nothing else here requires action: your server config is
   unchanged, and `McpServerConfig.headers` still works — it now rides on the

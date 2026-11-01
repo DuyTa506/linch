@@ -5,13 +5,21 @@
 Hooks are the **canonical extension mechanism** for the Linch runtime. A hook is
 a plain Python object with one or more `on_*` methods; you register hooks with
 `Agent(hooks=[...])` and the loop calls them at typed chokepoints. Through hooks
-you can observe a run (telemetry), transform data in flight (rewrite prompts,
-tool input/output, the final answer), or control the loop (block a tool, stop
-early, force another turn).
+you can observe events, transform data in flight (rewrite prompts, tool
+input/output, the final answer), or control the loop (block a tool, stop early,
+force another turn). Runtime traces and metrics come from OpenTelemetry at the
+I/O source; they do not require a telemetry hook.
 
-Hooks replace the older `observers=`, `middleware=`, `context_builder=`,
-`verifiers=`, and `RunOptions(stop_when=...)` parameters. Each of those is now a
-built-in **adapter** you wrap in a hook (see [Built-in adapters](#built-in-adapters)).
+Every hook chokepoint is a `hook` point in the generated [lifecycle
+catalog](../architecture/events.md#typed-lifecycle-catalog); `HookDispatcher`
+awaits hooks in registration order. The separate `tools/pre-execute`,
+`tools/execute`, and `tools/post-execute` points are waterfalls for tool
+wrappers; user hooks stay on the adapter so mutation composition, failure
+isolation, and the security-sensitive `PreToolUse` ordering remain explicit.
+
+Hooks replace the older `middleware=`, `context_builder=`, `verifiers=`, and
+`RunOptions(stop_when=...)` parameters. Each of those is now a built-in
+**adapter** you wrap in a hook (see [Built-in adapters](#built-in-adapters)).
 
 ```python
 from linch import Agent, HookResult, workspace_tools
@@ -143,7 +151,6 @@ core ones are also re-exported from `linch`).
 | `ToolMiddlewareHook(middleware)` | tool middleware (`before_tool_call` / `after_tool_result`) | `middleware=` |
 | `FinalAnswerVerifierHook(verifiers, max_retries=2)` | output verifiers | `verifiers=` / `max_verification_retries=` |
 | `StopPredicateHook(predicate)` | a `(session) -> bool` stop predicate | `RunOptions(stop_when=...)` |
-| `RunTelemetryHook(observers)` | one or more `RunObserver`s | `observers=` |
 | `ToolCacheHook(config)` | per-run memoization of read-scope tool calls | `tool_cache=` — see [tool-cache.md](./tool-cache.md) |
 | `ReadBeforeWriteHook(config)` | read-before-edit gate for the virtual filesystem | `read_before_write=` (opt-in) |
 | `RedactionHook(config)` | host-supplied regex scrubbing of tool results, the final answer, and (opt-in) the prompt | add to `hooks=[...]` |
@@ -152,7 +159,6 @@ core ones are also re-exported from `linch`).
 from linch.hooks import (
     ContextInjectionHook,
     FinalAnswerVerifierHook,
-    RunTelemetryHook,
     StopPredicateHook,
     ToolMiddlewareHook,
 )
@@ -164,7 +170,6 @@ agent = Agent(
         ToolMiddlewareHook(MyGovernanceMiddleware()),  # transform/redact tool I/O
         FinalAnswerVerifierHook(MyVerifier(), max_retries=2),
         StopPredicateHook(lambda s: saw_enough(s)),
-        RunTelemetryHook([LoggingObserver()]),         # → OTel, Langfuse, etc.
     ],
 )
 ```
@@ -188,7 +193,7 @@ Notes:
   (`Write`/`write_file`) are allowed by default — that is their purpose — but a
   host can opt into overwrite-gating of *existing* files via
   `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed (`offset`/`limit`)
-  read does not unlock edits to the unseen parts of a file. A bare Linch 2.0
+  read does not unlock edits to the unseen parts of a file. A bare Linch 3.0
   `Agent` has no filesystem tools, no offload backend, and no read-before-write
   hook unless the embedder opts into them.
 - **Tool progress is live-only.** `ToolContext.report_progress(...)` is
@@ -202,39 +207,54 @@ Notes:
   embedder and an empty rule set is a no-op. A bad regex raises at construction,
   not mid-run. See [`examples/core/governance_redaction.py`](../../examples/core/governance_redaction.py).
   For richer, stateful transforms use `ToolMiddlewareHook` instead.
-- **`RunTelemetryHook`** translates loop events into the `RunObserver` protocol
-  (`on_run_start/end`, `on_turn_*`, `on_provider_call_*`, `on_tool_*`,
-  `on_event`). It also forwards `aclose()`/`close()` to the wrapped observers on
-  `Agent.close()`, so exporters get flushed. Vendor backends (Langfuse,
-  LangSmith, Honeycomb, Datadog) are reached through the OpenTelemetry observer.
 
-### GenAI semantic conventions
+### OpenTelemetry
 
-`OpenTelemetryObserver` emits the OTel **GenAI semantic-convention** attributes
-alongside the stable `linch.*` attributes (which are unchanged), so semconv-aware
-backends group Linch traces without custom mapping:
+Linch uses `opentelemetry-api` directly. With no SDK configured, its tracer and
+meter calls are no-ops. A host can inject SDK providers into an agent's
+`Context`, keeping tenants isolated when several agents run in one process:
 
-| Span | GenAI attributes |
-|---|---|
-| `agent.run` | `gen_ai.operation.name="invoke_agent"`, `gen_ai.conversation.id` (session id), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens` |
-| `gen_ai.chat` | `gen_ai.operation.name="chat"`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.finish_reasons` (string array), `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.usage.cache_read_input_tokens`/`cache_creation_input_tokens` (only when non-zero) |
-| `execute_tool` | `gen_ai.operation.name="execute_tool"`, `gen_ai.tool.name`, `gen_ai.tool.call.id` |
+```python
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.trace import TracerProvider
+from linch import Agent, Context
 
-Notes:
+host_context = Context()
+host_context.register("tracer_provider", TracerProvider())
+host_context.register("meter_provider", MeterProvider())
+agent = Agent(model="gpt-5", provider=my_provider, context=host_context)
+```
 
-- `gen_ai.provider.name` maps provider ids to semconv well-known values:
-  `openai-chat`/`openai-responses` → `openai` (same vendor, two API shapes),
-  `gemini` → `gcp.gemini`. Self-hosted runtimes (`vllm`, `sglang`, `llamacpp`)
-  pass through with their own distinct names — they are never merged. Caveat: an
-  OpenAI-compatible provider pointed at a non-OpenAI endpoint (custom
-  `base_url`) still reports `openai`, because the client identifies the API
-  shape, not the backend.
-- `gen_ai.response.finish_reasons` is a **string array** per semconv (it was a
-  plain string before); dashboards doing string equality should switch to
-  membership.
-- The cache-token attribute names follow the emerging convention and may be
-  renamed if the semconv stabilizes different ones; such a rename will be a
-  documented migration.
+Hosts own the SDK providers and their exporter lifecycle. Registering a direct
+`tracer` or `meter` in the context is also supported when a host already has
+instrumentation objects. The built-in source instrumentation emits this span
+tree: `invoke_agent` for each run, `step` for each turn, `chat` for each
+provider call, `execute_tool` for each tool, and one span per compaction. It
+records GenAI attributes such as `gen_ai.operation.name`,
+`gen_ai.provider.name`, `gen_ai.request.model`, finish reasons, usage/cache
+tokens, conversation and tool identifiers, plus `linch.run_id` and
+`linch.turn_index`. The metrics are `gen_ai.client.token.usage`,
+`gen_ai.client.operation.duration`, and `linch.store.duration` (with an `op`
+attribute around loop store calls).
+
+Prompt, assistant, and tool content is absent by default. Hosts that have a
+deliberate content policy can opt in with the standard environment switch:
+
+```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+The API works with any OTLP exporter. Configure the host's exporter endpoint
+for Langfuse, Grafana Tempo, Datadog, or another OTLP collector; the Linch
+agent and hook configuration stays the same. See
+[`examples/observability/observability_agent.py`](../../examples/observability/observability_agent.py)
+for a self-contained console-exporter setup.
+
+To correlate host logs with a run, attach `TraceIdFilter` to a handler. It
+prefers an explicit `extra={"trace_id": ...}`, then the active OTel span,
+`record.run_id`, and an optional fallback. `ToolContext.trace_id` exposes the
+same value to tool implementations as a read-only property; tools can pass it
+explicitly with `logger.info("...", extra={"trace_id": ctx.trace_id})`.
 
 ---
 
@@ -264,7 +284,8 @@ async for event in session.run("..."):
 Hooks that hold resources can expose `close()` or `aclose()`; `Agent.close()`
 calls them after sessions, stores, and the filesystem are idle. A close error
 leaves the agent quiescing; calling `close()` again retries only unfinished
-resources. `RunTelemetryHook` uses this seam to flush wrapped observers.
+resources. OpenTelemetry SDK providers are host-owned and should be shut down
+by the host after its agents close.
 
 ---
 

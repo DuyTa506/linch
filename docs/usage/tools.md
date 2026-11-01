@@ -22,7 +22,7 @@ protocol plumbing.
 
 ```python
 from linch import Agent, ToolContext, tool
-from linch.tools.registry import empty_tools, tools_from_defaults
+from linch.tools.registry import empty_tools, workspace_tools
 
 @tool(description="Search the internal knowledge base.", tags=("rag",))
 async def search_kb(query: str, ctx: ToolContext) -> str:
@@ -33,7 +33,7 @@ async def search_kb(query: str, ctx: ToolContext) -> str:
 agent = Agent(..., tools=empty_tools(search_kb), deps=my_app_state)
 
 # SWE tools minus Bash, plus custom
-registry = tools_from_defaults(exclude={"Bash"}, extra=[search_kb])
+registry = workspace_tools(exclude={"Bash"}, extra=[search_kb])
 agent = Agent(..., tools=registry, deps=my_app_state)
 ```
 
@@ -47,8 +47,57 @@ later on this page.
 
 `empty_tools(...)` builds a registry with *only* the tools you pass — the right
 choice for a pure domain agent that should never touch the filesystem or shell.
-`tools_from_defaults(exclude=..., extra=...)` starts from the standard SWE set
+`workspace_tools(exclude=..., extra=...)` starts from the standard SWE set
 (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`) and adds or removes from there.
+`Agent` copies the registry passed to its constructor. Register tools added later
+on `agent.tools` so request discovery sees them; mutating the original registry
+does not change an existing agent.
+
+### Tool search for large catalogs
+
+Agents mount `ToolSearchPlugin(max_tools=30, max_skills=50)` automatically when
+the first session is created. Catalogs at or below those limits keep the normal
+request shape: no `tool_search` tool is added and the provider request is
+unchanged. Above a limit, tools without a truthy duck-typed `always_load`
+attribute are deferred. The `tool_search` description contains deferred names,
+without their schemas, so the initial prompt stays small.
+
+```python
+from linch import Agent, ToolSearchPlugin
+
+agent = Agent(model="gpt-5", provider=provider, tools=registry)
+
+# Opt out before the first session to restore the unfiltered catalog.
+await agent.tool_search.dispose()
+
+# Or choose different thresholds explicitly.
+mount = await agent.use(ToolSearchPlugin(max_tools=100, max_skills=20))
+```
+
+Search with `select:name_a,name_b` for exact names, or with ordinary keywords.
+Keyword matches score tokens over each tool's name and description. A search
+returns the matching schemas and makes those tools available in the next request
+for the rest of the session. Mark a small, essential tool with
+`always_load = True` to keep it in every deferred request. A call to a deferred
+tool is rejected with an instruction to search first; once loaded, the normal
+validation, hooks, and permission checks still apply.
+
+An explicit skill or context tool restriction must include `tool_search` if its
+large catalog needs discovery. Search preserves those restrictions.
+
+When more than 50 model-invokable skills are present, the system reminder keeps
+names and descriptions deferred in the same way. `Skill` remains available and
+loads a selected skill body only after the model invokes it. Loaded tool and
+skill names are kept in the session's durable `linch.tool_search` metadata, so
+they survive resume and later runs. The metadata stores bounded names rather
+than replaying search-result text because result offloading, middleware, and
+compaction can change that text.
+
+The resolver check runs before tool validation, hooks, and permissions. It only
+reads the provider's raw name and input; a nonempty veto becomes a clear tool
+error and does not authorize or execute the deferred tool. If the provider emits
+a deferred terminal tool, the turn-stopping path logs the same search-first
+feedback before asking for the next request.
 
 ### FunctionTool
 
@@ -117,8 +166,8 @@ class MyTool:
 agent = Agent(..., tools=empty_tools(MyTool()))
 
 # SWE tools minus Bash, plus custom
-from linch.tools.registry import tools_from_defaults
-registry = tools_from_defaults(exclude={"Bash"}, extra=[MyTool()])
+from linch.tools.registry import workspace_tools
+registry = workspace_tools(exclude={"Bash"}, extra=[MyTool()])
 agent = Agent(..., tools=registry)
 ```
 
@@ -142,16 +191,23 @@ synchronous `render_output` also requires stable `renderer_id` and
 
 ## The scheduler
 
-The scheduler runs independent read/search tools in parallel, serializes
-write/exec tools, respects `Agent(max_tool_concurrency=...)`, and uses optional
-`ResourceAccess` declarations to avoid read/write conflicts on the same file,
-database, index, or other host-defined resource.
+The scheduler runs independent parallel-safe tools concurrently, respects
+`Agent(max_tool_concurrency=...)`, and uses optional `ResourceAccess`
+declarations to avoid read/write conflicts on the same file, database, index,
+or other host-defined resource. With a plain boolean `parallel=True`, only
+read-scoped tools are admitted; write/exec tools remain serial.
 
-In practice this means: when the model emits several tool calls in one turn,
-read-scoped tools marked `parallel=True` fan out concurrently, while
-write/exec tools take an exclusive lane so two writes never race. The default
-concurrency limit is the CPU count; cap it with `Agent(max_tool_concurrency=...)`
-or the `AGENTKIT_MAX_TOOL_CONCURRENCY` environment variable.
+A tool may instead expose an input-aware `parallel(input) -> bool` callable.
+That callable is the exception for tools whose safety depends on the invocation.
+The built-in `Subagent` tool uses it to return `True` only for a named
+subagent whose resolved tools are all read-scoped; general-purpose, inherited,
+unknown, and background subagents fail closed and remain serial.
+
+In practice, when the model emits several tool calls in one turn, calls admitted
+by their boolean or callable `parallel` declaration can fan out concurrently.
+Resource conflicts still serialize those calls. The default concurrency limit
+is the CPU count; cap it with `Agent(max_tool_concurrency=...)` or the
+`AGENTKIT_MAX_TOOL_CONCURRENCY` environment variable.
 
 `ResourceAccess` is the finer-grained control. Two tools that both declare a
 `read` on `"kb:default"` may overlap; a `read` and a `write` on the same
@@ -161,7 +217,7 @@ the same vector store, for example.
 
 ### Batching strategy
 
-`Agent(tool_batching_strategy=...)` (alias `toolBatchingStrategy`, default
+`Agent(tool_batching_strategy=...)` (default
 `"greedy"`) controls how parallel-safe calls in one turn are grouped into
 batches:
 
@@ -194,8 +250,8 @@ The default is `None` — no timeout, zero overhead, fully backward compatible.
 When set, a timeout converts to an `is_error=True` result rather than raising,
 so a slow tool never takes down its parallel siblings; the model sees an
 actionable message and can react. The typed exception `ToolTimeoutError`
-(`kind="tool_timeout"`, `retryable=True`) is available for observers and
-policies.
+(`kind="tool_timeout"`, `retryable=True`) is available to event consumers and
+policy hooks.
 
 ---
 
@@ -216,8 +272,9 @@ idempotent. Retries use exponential backoff from `base_delay_ms`.
 
 ## Bash execution backend
 
-`Bash` uses `LocalBackend` by default. To run Bash through an injected backend,
-pass `execution_backend=...` to `Agent`. The agent only replaces an existing
+`Bash` uses the shell transport from `LocalExecutionBackend` by default. To
+inject a different execution world, pass a coherent `.shell`/`.fs` backend as
+`execution_backend=...` to `Agent`. The agent only replaces an existing
 `Bash` tool; it does not add shell access to a custom registry that deliberately
 omits `Bash`.
 
@@ -228,22 +285,33 @@ workspace mount, Docker's default network, no environment forwarding, and a
 normal container root filesystem. Its hardening controls are opt-in.
 
 ```python
+from linch import RemoteExecutionBackend
 from linch.tools.execution import DockerBackend
 
 agent = Agent(
     ...,
-    execution_backend=DockerBackend(
-        image="python:3.12-slim",
-        network="none",
-        read_only_root=True,
-        workspace_mount="rw",
-        tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
-        forward_env=(),
-        # Required for durable runs when env/forward_env is non-empty:
-        resume_fingerprint_key=my_host_secret,
+    execution_backend=RemoteExecutionBackend(
+        shell=DockerBackend(
+            image="python:3.12-slim",
+            network="none",
+            read_only_root=True,
+            workspace_mount="rw",
+            tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
+            forward_env=(),
+            # Required for durable runs when env/forward_env is non-empty:
+            resume_fingerprint_key=my_host_secret,
+        ),
+        fs=my_container_filesystem,  # host-supplied transport in the same world
     ),
 )
 ```
+
+`DockerBackend` is a shell transport; it cannot be passed directly as
+`Agent(execution_backend=...)`. The filesystem transport above must access the same
+container workspace and map the effective session cwd consistently. For durable
+runs, the remote world and its filesystem also need stable `resume_policy_id`
+and non-`None`, JSON-safe `resume_policy_config` (plus optional
+`resume_policy_version`). See [Extending](./extending.md).
 
 Use `workspace_mount="ro"` for read-only workspace inspection, `env={...}` for
 explicit container environment variables, `forward_env=(...)` to allowlist host
@@ -266,7 +334,9 @@ custom Bash backend on a durable run must expose
 when it truly has no configuration), and optionally `resume_policy_version`.
 That identity is the host's assertion: include every authority-relevant input
 and bump the version when backend behavior or remote sandbox policy changes;
-otherwise start a new run instead of resuming an old contract.
+otherwise start a new run instead of resuming an old contract. Standalone
+`BashTool(execution=...)` use also fingerprints its effective shell transport;
+it retains the same shell policy identity requirements.
 
 ---
 
@@ -351,6 +421,65 @@ call is not auto-approved and no callback resolves it, the loop emits a
 [Events](./events.md). Resolved allow/deny decisions are persisted into the run
 checkpoint and replayed on resume, so a durable HITL flow does not re-prompt for
 a decision the user already made.
+
+### Per-run principals and role rules
+
+The host authenticates the caller and supplies a frozen `Principal` for each
+run. Its tenant, user, and immutable role set are available to permission rules
+and to tools as the read-only `ctx.principal` property.
+
+```python
+from linch import Agent, Principal, RunOptions, ToolRule
+
+principal = Principal(
+    tenant="acme",
+    user="alice",
+    roles=frozenset({"editor"}),
+)
+agent = Agent(
+    ...,
+    permissions={
+        "mode": "acceptEdits",
+        "rules": [
+            ToolRule("Write", "deny", unless_role="editor"),
+            ToolRule("Bash", "deny", role="contractor"),
+        ],
+    },
+)
+session = await agent.session()
+async for event in session.run("Update the report", RunOptions(principal=principal)):
+    ...
+```
+
+`ToolRule`, `PathRule`, and `BashRule` accept keyword-only `role` and
+`unless_role` conditions. `role="editor"` applies the rule only when that role
+is present; `unless_role="editor"` applies it only when the role is absent.
+If both are supplied, both conditions must hold. Conditions narrow when a rule
+matches; existing first-match ordering, layered deny overrides, and mode defaults
+still apply. Use a `deny` with `unless_role` to require a role. With
+`principal=None`, conditions see an empty role set; rules without role conditions
+retain their existing behavior.
+
+Tools can use the tenant to scope application queries:
+
+```python
+@tool
+async def customer(customer_id: str, ctx: ToolContext) -> dict:
+    if ctx.principal is None:
+        raise ValueError("An authenticated principal is required")
+    return await ctx.deps.customers.get(
+        tenant=ctx.principal.tenant, customer_id=customer_id
+    )
+```
+
+For durable runs, the fingerprinted `RunContract` in run metadata records the
+principal's tenant, user, and sorted roles, alongside role conditions in the
+permission policy. Resume and worker takeover restore the stored principal when
+the resume options omit it. An explicitly different tenant, user, or role set,
+or a changed role rule, fails the contract check before tool execution. Start a
+new run to change identity. Tools that spawn or continue subagents pass the same
+principal to their children. Approval callbacks also receive it as
+`request.principal`; approval routing remains the host's responsibility.
 
 To transform or intercept tool calls and results programmatically (rather than
 just allow/deny), use the `PreToolUse` / `PostToolUse` chokepoints and

@@ -17,7 +17,7 @@ When a tool returns a large payload, the scheduler writes the full result to a
 preview and a path reference. The model pulls back only the slice it needs via
 `read_file`, instead of carrying the entire dump in every subsequent provider
 call. The full original content is never lost — it stays in the backend and on
-`ToolCallEndEvent.tool_result` for observers; only the copy that enters
+`ToolCallEndEvent.tool_result` for event consumers; only the copy that enters
 conversation history is trimmed. For how this hooks into the tool execution
 chokepoint, see [./tools.md](./tools.md).
 
@@ -25,7 +25,7 @@ chokepoint, see [./tools.md](./tools.md).
 
 ## Explicit opt-in
 
-Filesystem tools and large-result offloading are opt-in in Linch 2.0. A bare
+Filesystem tools and large-result offloading are opt-in in Linch 3.0. A bare
 `Agent()` has no virtual filesystem tools, no offload backend, and does not
 trust project-local files. Enable the subsystem explicitly with
 `FeatureFlags(filesystem=True)` and choose a backend or let active sessions
@@ -60,13 +60,15 @@ agent = Agent(
 )
 
 # Ephemeral scratch + persistent /memories/ across sessions
-from linch.filesystem import CompositeFileBackend, SqliteFileBackend, StateFileBackend
+import os
+from linch import CompositeFileBackend, StateFileBackend
+from linch.filesystem.postgres import PostgresFileBackend
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": SqliteFileBackend(".linch/memories.db")},
+        routes={"/memories/": PostgresFileBackend(os.environ["LINCH_POSTGRES_DSN"])},
     ),
 )
 
@@ -85,16 +87,16 @@ The four backends differ only in where they persist and how they scope files:
 - **`DiskFileBackend(root=...)`** — real files under a sandboxed root (default
   `.linch/offload`, gitignored). Persistent and inspectable on disk, so you can
   open offloaded payloads in your editor while debugging.
-- **`SqliteFileBackend(path)`** — persistent across sessions in a SQLite file.
+- **`PostgresFileBackend(dsn)`** — persistent across sessions in Postgres.
   Use it when the model should read back files from earlier runs.
 - **`CompositeFileBackend(default=..., routes=...)`** — routes paths by prefix to
   different backends. The common pattern is ephemeral scratch on `StateFileBackend`
-  with a durable `/memories/` partition on `SqliteFileBackend`, so distilled notes
-  survive while bulk offloads stay cheap. The deep-agent preset wires exactly this
-  `/memories/` partition for you — see [./deep-agent.md](./deep-agent.md).
+  with a durable `/memories/` partition on `PostgresFileBackend`, so distilled notes
+  survive while bulk offloads stay cheap. Supply this
+  `/memories/` partition explicitly to the deep-agent preset — see [./deep-agent.md](./deep-agent.md).
 
-`DiskFileBackend` and `SqliteFileBackend` perform their I/O off the event loop on
-a bounded daemon thread, so persistence never blocks the agent loop.
+`DiskFileBackend` offloads disk I/O onto a bounded daemon thread;
+`PostgresFileBackend` uses asyncpg. Both keep I/O off the agent loop thread.
 
 ---
 

@@ -1,431 +1,107 @@
 # linch
 
-> An embeddable agent harness for context-heavy Python applications.
+Linch 3.0 is a headless Python agent kernel. Applications embed its async agent
+loop, provide tools and permissions, and consume streamed events. The host owns
+the HTTP API and deployment.
 
-**linch** is an async-first, event-driven Python SDK for building agent loops inside your own application.
+Python 3.11+ is required. The current package version is `3.0.0a1`; 3.0 is under
+development and breaks compatibility with 2.x. See the
+[3.0 migration guide](docs/migration-3.0.md).
 
-Linch 2.0 is intentionally an SDK rather than a coding-agent product: a bare
-`Agent` is domain-neutral and has no implicit workspace or shell authority.
-Choose a tool registry or preset explicitly. Upgrading from 1.x? Read the
-[2.0 migration guide](docs/migration-2.0.md).
+## Features
 
-It gives you the runtime pieces that production agents usually need but simple tool-calling wrappers leave to you: streamed events, tool scheduling, context/RAG, tiered memory, virtual filesystem offloading, structured outputs, permissions, retries, provider adapters, cost tracking, evals, MCP, skills, and subagents.
-
-Use linch when you want to build your own domain workflow — not force it into a hosted assistant, a rigid graph DSL, or a black-box multi-agent abstraction.
-
----
-
-## Why linch?
-
-Most agent frameworks start from one of three ideas:
-
-- **agents as chat loops** — simple, but hard to control once tools, context, memory, and side effects grow;
-- **agents as graphs** — explicit and durable, but sometimes too heavy for application-level workflows;
-- **agents as teams** — useful for collaboration patterns, but not always the right abstraction for context-heavy product features.
-
-linch starts from a different idea:
-
-> An agent is a runtime you embed, observe, constrain, and feed with the right context.
-
-That means linch focuses on the boring-but-critical layer between your app and the model:
-
-1. **Context control** — build RAG/context per turn before the model sees it.
-2. **Tool control** — schedule tools with resource awareness, timeout, retry, and permission checks.
-3. **State control** — keep sessions, memory, files, citations, and large outputs manageable.
-4. **Provider control** — run against different model providers without rewriting your workflow.
-
----
-
-## What you can build
-
-linch is designed for application developers building agentic features such as:
-
-- document and report assistants;
-- RAG systems over large internal knowledge bases;
-- coding and software-engineering agents;
-- extraction and synthesis workflows;
-- long-running research assistants;
-- local/offline agent demos;
-- tools that need citations, permissions, filesystem state, or large-result offloading.
-
----
-
-## Core features
-
-| Area | What linch provides |
+| Area | Implementation |
 |---|---|
-| Agent loop | `Agent`, `Session`, async event streaming, loop guards |
-| Tools | Duck-typed tools, runtime registries, parallel scheduling, resource locks, local or Docker-backed Bash execution |
-| Reliability | Per-tool timeout, opt-in retry, structured tool errors, recovery hints |
-| Context | `ContextBuilder`, RAG context injection, context budgets, compaction ladder (micro-compact, reactive recovery, circuit breaker) |
-| Memory | Search/upsert tools, flat and tiered memory stores, persistent memory examples |
-| Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
-| Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
-| Budgets | `RunBudget` token/USD caps shared across the subagent tree, warning + exceeded events, graceful stop |
-| Workflows | Deterministic fleet loops: `wf.agent`/`parallel`/`pipeline`/`phase`, journaled resume, shared budgets |
-| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, llama.cpp, OpenAI-compatible endpoints, pluggable providers |
-| Extensibility | Python hooks, MCP, skills, subagents (fork/continue, background workers, coordinator mode), observer compatibility |
-| Outputs | Structured output schemas, citations, usage/cost events, metadata-rich tool results, run reports |
+| Runtime | `Agent`, `Session`, typed event streams, tool scheduling, context compaction, and run budgets |
+| Plugins | [`agent.use(plugin, config)`](docs/architecture/kernel.md#plugins) mounts scoped plugins with dependency activation and reversible disposal |
+| Profiles | [Versioned domain profiles](docs/usage/profiles.md) compose configuration and pin each run's profile for resume |
+| Tool search | [Deferred tool and skill discovery](docs/usage/tools.md#tool-search-for-large-catalogs) loads schemas when needed above configurable thresholds |
+| Durable runs | Postgres session/run stores, leases with epoch fencing, checkpoints before guarded side effects, and event replay by sequence |
+| Worker fleet | Optional `linch.worker`: PgQueuer dispatch, lease renewal, recovery after worker death or transient database outages, and graceful drain |
+| Reliability | Default bounded response correction, optional tool prerequisites and completion gates, and a serial turn-stopping seam |
+| Permissions | Per-run `Principal`, tool/path/shell rules with role conditions, and durable approval decisions |
+| Retrieval and memory | `RagConnector`, citation grounding checks, scoped file memory, and virtual filesystem backends |
+| Providers | OpenAI Responses/Chat Completions, Anthropic, Gemini/Vertex AI through `google-genai`, DeepSeek, llama.cpp, and compatible endpoints |
+| Extensions | Explicit `linch.ext` packages for workflows, evals, deep agents, reports, loop runners, and scaffolding; hooks, MCP, skills, and subagents |
+| Telemetry | Direct OpenTelemetry traces and metrics; the host configures the SDK and exporter |
+| Lifecycle | [Typed lifecycle catalog and trace IDs](docs/architecture/events.md#typed-lifecycle-catalog) connect hooks, kernel seams, events, and host logs |
 
----
-
-## Architecture
-
-```mermaid
-flowchart LR
-    App[Your application] --> Session[Session]
-    Session --> Loop[Agent loop]
-
-    Loop --> Provider[Model provider]
-    Loop --> Scheduler[Tool scheduler]
-    Loop --> Context[Context builder]
-    Loop --> Memory[Memory]
-    Loop --> FS[Virtual filesystem]
-    Loop --> Permissions[Permission engine]
-
-    Context --> RAG[RAG / retrieval]
-    Scheduler --> Tools[Tools]
-    Tools --> FS
-    Tools --> Citations[Citations & metadata]
-
-    Loop --> Events[Streaming events]
-    Events --> UI[CLI / Web UI / API]
-```
-
-linch keeps the loop small, but makes the surrounding runtime explicit: context, tools, permissions, state, files, memory, and events are all first-class parts of the system.
-
----
+Postgres is the durable backend. InMemory stores are for tests and development.
+Read-scoped tools can run in parallel. An input-aware `parallel` predicate also
+allows read-only subagent calls; write/exec tools with boolean flags stay serial.
 
 ## Install
 
-From [PyPI](https://pypi.org/project/linch/):
+From a checkout:
 
 ```sh
-pip install linch
+pip install -e .
 ```
 
-With optional extras (Anthropic, MCP, Gemini, OpenTelemetry, Postgres):
+Install the extras your application uses:
 
 ```sh
-pip install 'linch[anthropic,mcp,gemini]'
+pip install -e '.[postgres,worker,anthropic,gemini,mcp]'
 ```
 
-For local development:
-
-```sh
-pip install -e '.[dev,mcp,anthropic,gemini]'
-```
-
----
+OpenTelemetry's API is included in core. Install `opentelemetry-sdk` and an
+exporter in the host to collect telemetry.
 
 ## Quickstart
 
-New to Linch? The step-by-step guide is in
-[`docs/usage/quickstart.md`](docs/usage/quickstart.md), including an offline
-smoke test that runs without an API key.
+This example runs without credentials or network access. `ScriptedProvider` is
+an eval extension that supplies a fixed response.
 
 ```python
 import asyncio
-import os
 
 from linch import Agent, InMemorySessionStore
+from linch.ext.evals import ScriptedProvider, TextTurn
 
-agent = Agent(
-    model="gpt-5",
-    openai_api_key=os.environ.get("OPENAI_API_KEY"),
-    session_store=InMemorySessionStore(),
-    permissions={"mode": "skip-dangerous"},
-)
 
-async def main():
-    session = await agent.session()
+async def main() -> None:
+    """Run one offline conversation and print its result."""
+    agent = Agent(
+        model="demo-model",
+        provider=ScriptedProvider([TextTurn(text="Hello from Linch.")]),
+        session_store=InMemorySessionStore(),
+    )
+    try:
+        session = await agent.session()
+        async for event in session.run("Say hello"):
+            if event.type == "result":
+                print(event.final_text)
+    finally:
+        await agent.close()
 
-    async for event in session.run("Explain what an embeddable agent SDK is in one paragraph."):
-        if event.type == "result":
-            print(event.final_text)
 
 asyncio.run(main())
 ```
 
-For a coding/workspace agent, make that authority visible at construction:
-
-```python
-from linch import Agent, workspace_tools
-
-agent = Agent(model="gpt-5", tools=workspace_tools())
-```
-
-Put `OPENAI_API_KEY=...` in `.env` or export it in your shell. Never commit `.env`.
-
----
-
-## Safe local demos
-
-These examples exercise useful local code paths without requiring a live provider call.
-
-```sh
-python3 examples/tools/parallel_search_agent.py
-python3 examples/tools/runtime_tools.py
-python3 examples/context/rag_context_builder.py
-python3 examples/memory/memory_agent.py
-python3 examples/tools/tool_reliability_agent.py
-python3 examples/memory/sqlite_memory_agent.py
-
-# Filesystem offload — fully offline, no API key needed
-python3 examples/tools/filesystem_offload.py
-```
-
----
-
-## Core concepts
-
-### Agent and Session
-
-An `Agent` owns shared configuration: model, provider, tools, permissions, hooks, memory, and session store.
-
-A `Session` represents one conversation or workflow run. One agent can serve many sessions.
-
-### Deep agent preset
-
-`create_deep_agent()` returns an `Agent` with long-horizon orchestration defaults: durable run/session SQLite storage, task planning tools, specialist subagents (researcher, planner, implementer), a persistent `/memories` virtual filesystem partition, and deepened system prompt with planning/verification doctrine.
-
-`coordinator=True` turns the parent into a pure orchestrator — it loses heavy tools (Edit/Write/Bash) and gains `SubagentContinueTool` and `TaskStopTool`. Workers receive full tool access. Background workers (`run_in_background=True` on Subagent) deliver results via `<task-notification>` at the top of the next turn. Fork/continue lets you re-engage any retained worker with its full prior context via `SubagentContinue`.
-
-Background delivery is in-process: a `RunStore` keeps status audit telemetry,
-but active detached tasks and result notifications are not reconstructed after
-a process restart. Use an application-owned durable queue/workflow when that
-delivery guarantee is required.
-
-### Events
-
-linch streams the loop as events instead of hiding execution behind a blocking function call. This makes it easier to build CLIs, web UIs, background workers, and observability integrations.
-
-### Hooks
-
-Hooks are the canonical extension mechanism for the agent loop. Register Python hook objects with `Agent(hooks=[...])` to inspect or control the run at typed chokepoints: agent start/stop, prompt submit, turn start/stop, provider calls, pre/post tool use, final answer, stop, subagent start/stop, and event emission.
-
-Built-in adapters are available when you want a standard extension as a hook:
-`ContextInjectionHook`, `ToolMiddlewareHook`, `RunTelemetryHook`,
-`FinalAnswerVerifierHook`, and `StopPredicateHook`.
-
-```python
-from linch import Agent, HookResult, workspace_tools
-
-class GuardTools:
-    def on_pre_tool_use(self, ctx):
-        if ctx.tool_name == "Bash" and "rm -rf" in str(ctx.input.get("command", "")):
-            return HookResult.block("blocked dangerous command")
-        return None
-
-agent = Agent(
-    model="gpt-5",
-    tools=workspace_tools(),
-    hooks=[GuardTools()],
-    permissions={"mode": "skip-dangerous"},
-)
-```
-
-### Tools and scheduler
-
-Tools are duck-typed Python objects. They can declare schemas, scopes, resources, timeouts, summaries, and execution behavior. The scheduler runs compatible tool calls in parallel while respecting resource constraints and permission rules.
-
-For simple tools, use `@tool`; it creates the same Tool-compatible object that
-the registry and scheduler already understand:
-
-```python
-from linch import Agent, InMemorySessionStore, ToolContext, empty_tools, tool
-
-@tool(description="Look up an internal document.")
-async def search_docs(query: str, ctx: ToolContext) -> str:
-    return await ctx.deps.search(query)
-
-agent = Agent(
-    model="gpt-5",
-    tools=empty_tools(search_docs),
-    deps=my_vector_store,
-    session_store=InMemorySessionStore(),
-)
-```
-
-### ContextBuilder
-
-`ContextBuilder` lets you construct turn-specific context before the model runs. It is implemented as a built-in hook adapter; for new cross-cutting extension work, prefer `Agent(hooks=[...])`.
-
-### Memory
-
-linch includes memory primitives and tools for searching and upserting reusable facts. Memory can be in-memory, sqlite-backed, tiered by working/episodic/semantic buckets, or replaced with your own store.
-
-### Virtual filesystem
-
-Large tool results should not always stay in the model context. linch can offload large outputs to a virtual filesystem and pass references back into the loop.
-
-### Permissions
-
-The permission engine controls dangerous actions at the runtime layer. You can define tool, path, and bash rules instead of relying only on prompts.
-
-### Providers
-
-linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, DeepSeek, Anthropic, Gemini, and llama.cpp. Use `DeepSeekProvider` for the native DeepSeek API, or OpenAI Chat Completions with `base_url` for generic compatible endpoints, and inspect known direct-provider models with `list_provider_models()`.
-
----
-
-## When to use linch
-
-linch is a good fit when you need:
-
-- an agent loop embedded inside your own Python application;
-- streaming events for UI, API, or worker integration;
-- explicit control over tools, permissions, retries, and timeouts;
-- RAG/context construction as a first-class runtime step;
-- memory and filesystem state across longer workflows;
-- provider flexibility without rewriting application logic;
-- a small runtime layer you can build domain-specific workflows on top of.
-
-## When not to use linch
-
-linch may be more than you need if:
-
-- your feature is a single stateless LLM call;
-- you want a no-code agent builder;
-- you want a fully hosted assistant platform;
-- you want every workflow expressed as a static graph from day one;
-- you only need a thin wrapper around one provider's API.
-
----
-
-## Examples
-
-Examples are organized by subsystem under `examples/`.
-
-**`examples/core/`** — agent fundamentals and real-world patterns
-
-| File | What it shows |
-|---|---|
-| `core/tiny_agent.py` | Smallest possible agent |
-| `core/coding_agent.py` | SWE agent — full tool set, BashRule/PathRule safety fence, LoopGuard, multi-turn |
-| `core/policy_aware_execution.py` | Docker-backed Bash execution — permission rules plus opt-in runtime restrictions |
-| `core/reading_agent.py` | Read-only codebase Q&A — no write/edit/bash, custom reviewer persona |
-| `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured output, ContextBuilder injection |
-| `core/custom_permissions.py` | All permission modes and rule types |
-| `core/system_prompts.py` | append, replace, per-session override, persona patterns |
-| `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
-| `core/event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
-| `core/multi_session.py` | One Agent, many users, shared deps |
-| `core/deep_agent_resume.py` | `create_deep_agent()` — 4 demos: planning + /memories + run resume; background worker + notification; fork/continue retained worker; coordinator orchestration |
-| `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
-| `core/budget_capped_agent.py` | `RunBudget` — token cap, 90% warning event, graceful exceeded stop |
-| `core/compaction_ladder_agent.py` | `CompactionLadder` — micro-compact rung, reactive recovery, circuit breaker |
-| `core/workflow_fleet.py` | `agent.run_workflow()` — parallel fan-out, pipeline, shared budget, crash + journal resume |
-| `core/interactive_cli.py` | Interactive REPL |
-
-**`examples/tools/`** — tool patterns and scheduler
-
-| File | What it shows |
-|---|---|
-| `tools/custom_tools.py` | 5 tool patterns: read, write, exec, parallel, with deps |
-| `tools/parallel_search_agent.py` | Scheduler V2: parallel search, resources, concurrency cap |
-| `tools/runtime_tools.py` | Runtime registry add/remove/replace/select and schema export |
-| `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out, `RetryOptions` |
-| `tools/filesystem_offload.py` | Virtual filesystem backends, auto-offload of large results (*offline*) |
-
-**`examples/context/`** — RAG and context hooks
-
-| File | What it shows |
-|---|---|
-| `context/context_injection.py` | ContextInjectionHook patterns: RAG per-turn, budget, selected tools |
-| `context/rag_context_builder.py` | ContextInjectionHook RAG with metadata and budget reporting |
-
-**`examples/memory/`** — memory primitives
-
-| File | What it shows |
-|---|---|
-| `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
-| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
-| `memory/pgvector_memory.py` | Postgres memory example with optional vector-style retrieval |
-
-**`examples/observability/`** — telemetry hooks and tracing
-
-| File | What it shows |
-|---|---|
-| `observability/observability_agent.py` | RunTelemetryHook with LoggingObserver + optional OpenTelemetryObserver |
-| `observability/custom_observer.py` | Custom observer: latency tracking, error counts per tool |
-
-**`examples/providers/`** — provider-specific features
-
-| File | What it shows |
-|---|---|
-| `providers/openai_agent.py` | OpenAI Chat Completions — basic, thinking, tool use, structured output, multi-turn |
-| `providers/anthropic_agent.py` | Anthropic — extended thinking, prompt caching, tool-backed structured output |
-| `providers/deepseek_agent.py` | DeepSeek via OpenAI-compatible and Anthropic-compatible endpoints |
-
-**`examples/integrations/`** — subagents, skills, MCP
-
-| File | What it shows |
-|---|---|
-| `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
-| `integrations/multi_agent_isolation.py` | Context isolation, sequential pipeline, parallel analysts, subagent + filesystem offload (*offline*) |
-
----
-
-## Public API
-
-The supported, semver-governed API is exactly `linch.__all__`. Import supported names
-from the top-level package:
-
-```python
-from linch import (
-    Agent,
-    BashRule,
-    EvalCase,
-    PathRule,
-    ScriptedProvider,
-    ToolRule,
-    run_eval,
-)
-```
-
-This surface includes the core agent/session runtime, provider adapters, typed events,
-tools and extension contracts, workflow/deep-agent/loop primitives, permission rules,
-and the complete deterministic eval harness and built-in scorers. Submodule paths are
-implementation details rather than compatibility promises. See
-[`docs/versioning.md`](docs/versioning.md) for the contract and pinning policy.
-
----
+Expected output: `Hello from Linch.` For a live provider, tools, and durable
+stores, follow the [quickstart guide](docs/usage/quickstart.md). Production
+hosts configure both session and run stores explicitly; the
+[production guide](docs/usage/production.md) covers workers, streaming, resume,
+and shutdown.
 
 ## Documentation
 
-| File | What it covers |
-|---|---|
-| [`docs/usage/`](docs/usage/README.md) | Getting started, install, config, providers, tools, hooks, structured output, RAG, workflows, deep agent |
-| [`docs/architecture.md`](docs/architecture.md) | Internal data flow, module contracts, design invariants |
-| [`docs/contributing.md`](docs/contributing.md) | Dev setup, code rules, test conventions, PR checklist |
-| [`examples/`](examples/) | Runnable examples by subsystem |
+- [Usage index](docs/usage/README.md): setup and examples for each feature.
+- [Architecture index](docs/architecture/README.md): module boundaries, contracts, and invariants.
+- [Migration from 2.x](docs/migration-3.0.md): removed APIs and replacement imports.
+- [Versioning](docs/versioning.md): public API, prereleases, and persisted formats.
+- [Examples](examples/): runnable examples grouped by subsystem.
+- [Contributing](docs/contributing.md): development and review rules.
 
----
+Kernel imports come from `linch.__all__`. Import extensions explicitly, for
+example `from linch.ext.workflow import run_workflow`; they are absent from the
+kernel's top-level exports.
 
 ## Development
 
 ```sh
-pytest
+pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'
+python -m pytest -q
 ruff check . && ruff format --check .
 pyright
 ```
-
-See [`docs/contributing.md`](docs/contributing.md) for the full contributor guide.
-
----
-
-## Name
-
-**linch** blends two ideas:
-
-| | |
-|---|---|
-| **靈** `linh` | In classical Sino-Vietnamese, 靈 carries the meaning of *spirit*, *effortless intelligence*, and *vital agility* — an unseen force that makes a mechanism feel alive. |
-| **cinch** | A saddle harness piece; English slang for *easy, simple, sure*. |
-
-A *linch* is small — a single pin — but it holds the wheel on the axle. That is the SDK's ambition: the smallest harness that makes complex agent orchestration feel like a cinch.
-
-> 靈活簡便，以一馭萬。  
-> *Linh hoạt giản tiện, dĩ nhất ngự vạn.*  
-> *"Agile and simple — govern ten thousand things with one."*

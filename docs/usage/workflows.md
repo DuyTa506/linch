@@ -2,7 +2,7 @@
 
 [← Usage guide](./README.md)
 
-`agent.run_workflow(fn)` runs a plain async Python function that orchestrates subagents — your code owns the directed control flow, while subagents do the model-directed work. The journal makes an unchanged call prefix replayable and resumable. It is not called closed-loop: that term is reserved for a verifier whose feedback actually decides retry or stop.
+`run_workflow(agent, fn)` runs a plain async Python function that orchestrates subagents — your code owns the directed control flow, while subagents do the model-directed work. The journal makes an unchanged call prefix replayable and resumable. It is not called closed-loop: that term is reserved for a verifier whose feedback actually decides retry or stop.
 
 Use a directed workflow when you already know the shape of the orchestration (fan out, verify, aggregate) and want the same `run_id` to replay an unchanged prefix. If instead you want the model itself to decide which subagents to spawn and when, use [coordinator mode](./deep-agent.md) — a workflow trades that flexibility for code-owned planning and resumability.
 
@@ -13,7 +13,9 @@ Use a directed workflow when you already know the shape of the orchestration (fa
 You pass an async function that receives a single `wf` context. Everything the function `await`s on `wf` becomes a step in the run; the function's return value becomes the workflow result.
 
 ```python
-from linch import Agent, RunBudget, SqliteRunStore
+import os
+from linch import Agent, RunBudget, PostgresRunStore
+from linch.ext.workflow import run_workflow
 
 async def review(wf):
     await wf.phase("Find")
@@ -28,8 +30,9 @@ async def review(wf):
     )
     return verdicts
 
-agent = Agent(model="gpt-5", run_store=SqliteRunStore("runs.db"))
-result = await agent.run_workflow(
+agent = Agent(model="gpt-5", run_store=PostgresRunStore(os.environ["LINCH_POSTGRES_DSN"]))
+result = await run_workflow(
+    agent,
     review,
     budget=RunBudget(max_tokens=500_000),   # shared across every wf.agent child
     run_id="review-pr-42",                  # enables journaling + resume
@@ -54,7 +57,7 @@ The keyword arguments to `run_workflow` control budget, journaling, and observat
 
 ## The `wf` context
 
-The `wf` argument is a `linch.workflow.WorkflowContext`. It exposes a small, fixed surface — you compose your orchestration out of these primitives rather than calling the loop directly:
+The `wf` argument is a `linch.ext.workflow.WorkflowContext`. It exposes a small, fixed surface — you compose your orchestration out of these primitives rather than calling the loop directly:
 
 - `await wf.agent(prompt, *, name=None, label=None, tools=None, run_options=None, output_schema=None, final_tool_name=None, timeout_ms=None, retry=None) -> str` — run a subagent (a named definition from the subagent registry, or the built-in general-purpose one) and return its final text. When the child produces `structured_output`, the returned string is compact JSON. A failed child raises `WorkflowError`.
 - `await wf.step(name, fn, *, key=None, timeout_ms=None, retry=None) -> Any` — run *fn* (a zero-argument callable, sync or async) as a journaled step and return its value. This is how deterministic code, a tool call, or any other side-effecting work becomes a replayable node instead of something that re-runs on every resume. See [Journaling your own code](#journaling-your-own-code) below.
@@ -95,7 +98,11 @@ The `WorkflowEvent` kinds you will see on the `on_event` stream are:
 
 Because the journal is keyed by content hash, resume is precise: editing one prompt in the middle of a workflow invalidates only that call and everything after it, while earlier calls still replay from the journal.
 
-The call-key formula itself is versioned and pinned per run at creation (stored in the run's meta), so upgrading the linch SDK never changes how an already-in-flight run's existing calls are keyed — a resumed run keeps replaying its unchanged prefix under whichever formula it started with, rather than silently re-executing it under a newer one.
+Durable workflow runs require `schema_version=3` in their metadata and use the
+current tools-aware call-key formula. Missing, old, or unknown metadata versions
+are rejected; start a new workflow run. Old fingerprint algorithms are not
+replayed. Within current-version runs, unchanged tool filters and policy-bearing
+run options remain part of the call hash.
 
 ---
 
@@ -166,7 +173,7 @@ for failed in (o for o in outcomes if not o.ok):
 `wf.interrupt(key, payload)` parks a workflow at a decision point. The first time through there is no answer, so the run emits an `interrupt_requested` event carrying the payload, is marked `"suspended"` in the run store — **not** failed — and `WorkflowSuspended` is raised out of `run_workflow`:
 
 ```python
-from linch import WorkflowSuspended
+from linch.ext.workflow import WorkflowSuspended
 
 async def flow(wf):
     plan = await wf.agent("draft a migration plan")
@@ -176,7 +183,7 @@ async def flow(wf):
     return await wf.step("apply", lambda: apply_migration(plan))
 
 try:
-    await agent.run_workflow(flow, run_id="migrate-42")
+    await run_workflow(agent, flow, run_id="migrate-42")
 except WorkflowSuspended as suspended:
     show_to_reviewer(suspended.key, suspended.payload)
 ```
@@ -184,7 +191,7 @@ except WorkflowSuspended as suspended:
 Supply the answer by re-invoking the same `run_id` with a `resume` mapping. The journaled prefix replays, the interrupt returns the value, and the run continues:
 
 ```python
-await agent.run_workflow(flow, run_id="migrate-42", resume={"approve-plan": True})
+await run_workflow(agent, flow, run_id="migrate-42", resume={"approve-plan": True})
 ```
 
 The answer is journaled like any other node, so a *later* resume needs no `resume` argument — it replays as `interrupt_replayed`. The value must be JSON-serializable, as must the payload.
