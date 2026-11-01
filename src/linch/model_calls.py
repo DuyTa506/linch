@@ -1240,7 +1240,10 @@ class _AccountedAuxiliaryCaller:
             messages=messages,
             max_output_tokens=max_output_tokens,
             signal=signal,
-            thinking={"type": "disabled"},
+            thinking={"type": "disabled"}
+            if hasattr(self._provider, "capabilities")
+            and self._provider.capabilities(model).can_disable_thinking
+            else None,
         )
         delivery = _AuxiliaryDelivery(self, request, logical_call_id, signal)
         stream = delivery.stream()

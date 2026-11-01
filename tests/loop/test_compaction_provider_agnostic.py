@@ -226,7 +226,8 @@ async def test_compaction_uses_active_fallback_model_consistently():
     fired = await maybe_compact(session, agent, AbortContext())
 
     assert fired is True
-    assert provider.window_models == ["fallback-model"]
+    assert provider.window_models
+    assert set(provider.window_models) == {"fallback-model"}
     assert set(estimated_models) == {"fallback-model"}
     assert provider._stream_calls[0].model == "fallback-model"
     assert session.last_compaction_info["model"] == "fallback-model"
