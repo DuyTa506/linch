@@ -41,6 +41,7 @@ class CatalogChangeBlock:
     text: str
     added_tools: tuple[str, ...] = ()
     removed_tools: tuple[str, ...] = ()
+    tool_definitions: tuple[dict[str, Any], ...] = ()
     type: Literal["catalog_change"] = "catalog_change"
 
 
@@ -420,6 +421,8 @@ class ProviderRequest:
     # consuming and assembling provider deltas but suppresses their raw
     # ``PartialAssistantEvent`` projection for this request.
     stream_partials: bool | None = None
+    # None allows direct adapter requests; False suppresses historical native blocks.
+    _native_catalog_changes: bool | None = None
 
 
 @dataclass(slots=True)
@@ -458,6 +461,7 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
             "text": block.text,
             "added_tools": list(block.added_tools),
             "removed_tools": list(block.removed_tools),
+            "tool_definitions": list(block.tool_definitions),
         }
     if isinstance(block, ToolUseBlock):
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
@@ -508,6 +512,7 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
             text=str(raw.get("text", "")),
             added_tools=tuple(str(name) for name in raw.get("added_tools", ())),
             removed_tools=tuple(str(name) for name in raw.get("removed_tools", ())),
+            tool_definitions=tuple(dict(item) for item in raw.get("tool_definitions", ())),
         )
     if typ == "tool_use":
         return ToolUseBlock(

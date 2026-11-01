@@ -12,6 +12,8 @@ from typing import Any, cast
 from .._version import get_version
 from ..catalog import (
     _snapshot,
+    native_definitions,
+    positional_catalog,
     snapshot_enabled,
     snapshot_for,
     snapshot_skill_listing,
@@ -345,8 +347,26 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         prefix = _snapshot(session, config)
     live_by_name = {str(getattr(tool, "name", "")): tool for tool in tools}
     tool_schemas: list[dict[str, Any]] = []
+    pending = getattr(session, "pending_skill_overlay", None)
+    positional = bool(
+        prefix
+        and prefix["tools"]
+        and getattr(pending, "allowed_tools", None) is None
+        and positional_catalog(session, config, getattr(pending, "model_override", None))
+    )
     source_schemas = (
-        snapshot_tools(prefix, registry.schemas()) if prefix is not None else registry.schemas()
+        snapshot_tools(
+            prefix,
+            registry.schemas(),
+            positional=positional,
+            previous=(
+                native_definitions(session.full_history)
+                if positional or session.session_log._has_native_definitions
+                else None
+            ),
+        )
+        if prefix is not None
+        else registry.schemas()
     )
     for schema in source_schemas:
         tool = live_by_name.get(str(schema.get("name", "")))

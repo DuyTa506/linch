@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -19,9 +20,11 @@ from linch._prompt_cache import (
     mark_last_cacheable_message_content,
     mark_system_cache_breakpoint,
 )
+from linch.catalog import native_definitions
 from linch.errors import (
     AbortError,
     AuthError,
+    ConfigError,
     ContextLengthError,
     ProviderError,
     RateLimitError,
@@ -66,6 +69,7 @@ class AnthropicProviderOptions:
         thinking: Native thinking configuration; ``None`` preserves provider defaults.
         api_mode: Whether to choose native, compatible, or automatic wire behavior.
         effort: Optional provider reasoning effort hint.
+        native_catalog_changes: Opt into positional tool changes on supported Claude models.
 
     Attributes:
         api_mode: ``auto`` uses native mode for the direct Anthropic endpoint
@@ -88,6 +92,7 @@ class AnthropicProviderOptions:
     # keeps unknown proxies on the conservative compatible path.
     api_mode: AnthropicAPIMode = "auto"
     effort: str | None = None
+    native_catalog_changes: bool = False
 
 
 class AnthropicProvider(BaseProvider):
@@ -129,11 +134,14 @@ class AnthropicProvider(BaseProvider):
         Returns:
             Capability flags including whether structured output uses a terminal tool.
         """
-        return full_capabilities(
+        caps = full_capabilities(
             self.context_window(model),
             structured_output_terminal_tool=_effective_api_mode(self._options) == "compatible",
             can_disable_thinking=True,
         )
+        if _native_catalog(model, self._options):
+            caps.catalog_changes = "positional"
+        return caps
 
     async def _get_client(self) -> Any:
         if self._client is not None and loop_changed(self._client_loop):
@@ -318,6 +326,28 @@ class AnthropicProvider(BaseProvider):
 # ── Payload builder ────────────────────────────────────────────────────────
 
 
+def _native_catalog(model: str, opts: AnthropicProviderOptions) -> bool:
+    if not opts.native_catalog_changes:
+        return False
+    base_url = opts.base_url or os.environ.get("ANTHROPIC_BASE_URL")
+    return bool(
+        _effective_api_mode(opts) == "native"
+        and (base_url is None or urlparse(base_url).hostname == "api.anthropic.com")
+        and model
+        in {
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-opus-4-8",
+        }
+    )
+
+
 def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict[str, Any]:
     """Translate a :class:`ProviderRequest` into an Anthropic API payload dict."""
     api_mode = _effective_api_mode(opts)
@@ -336,7 +366,22 @@ def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict
         payload["system"] = system_blocks
 
     # ── Messages ──────────────────────────────────────────────────────────
-    payload["messages"] = _translate_messages(req.messages, req.cache_prompt, req.cache_ttl)
+    positional = req._native_catalog_changes is not False and _native_catalog(req.model, opts)
+    payload["messages"] = _translate_messages(
+        req.messages, req.cache_prompt, req.cache_ttl, req.tools if positional else None
+    )
+    if positional:
+        betas = [
+            beta.strip()
+            for name, value in (opts.default_headers or {}).items()
+            if name.lower() == "anthropic-beta"
+            for beta in value.split(",")
+        ]
+        payload["extra_headers"] = {
+            "anthropic-beta": ",".join(
+                dict.fromkeys(beta for beta in [*betas, "inline-tools-2026-09-15"] if beta)
+            )
+        }
 
     # ── Tools ─────────────────────────────────────────────────────────────
     if req.tools:
@@ -489,6 +534,7 @@ def _translate_messages(
     messages: list[Message],
     cache: bool | None = None,
     ttl: str | None = None,
+    native_tools: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert internal Message objects to Anthropic message dicts."""
     result: list[dict[str, Any]] = []
@@ -496,7 +542,54 @@ def _translate_messages(
         (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"),
         None,
     )
+    prefix = {tool["name"] for tool in native_tools or ()}
+    active = set(prefix)
+    references = (
+        prefix - native_definitions(messages).keys() if native_tools is not None else prefix
+    )
+    pending: list[dict[str, Any]] = []
+    definition_bytes = 0
+
+    def flush() -> None:
+        if pending and result:
+            result.append({"role": "system", "content": list(pending)})
+        pending.clear()
+
     for index, msg in enumerate(messages):
+        if native_tools is not None:
+            if msg.role == "assistant":
+                flush()
+            for block in msg.content:
+                if not isinstance(block, CatalogChangeBlock):
+                    continue
+                definitions = {tool["name"]: tool for tool in block.tool_definitions}
+                for name in block.added_tools:
+                    if name in active:
+                        continue
+                    if name in prefix:
+                        tool = {"type": "tool_reference", "name": name}
+                    elif name in definitions:
+                        definition = _translate_tools([definitions[name]])[0]
+                        definition_bytes += len(json.dumps(definition, ensure_ascii=False).encode())
+                        if definition_bytes > 4_194_304:
+                            raise ConfigError(
+                                "Native tool definitions exceed the 4,194,304-byte limit; "
+                                "start a new session or disable native_catalog_changes."
+                            )
+                        tool = {"type": "tool_definition", "definition": definition}
+                    else:
+                        continue
+                    pending.append({"type": "tool_addition", "tool": tool})
+                    active.add(name)
+                for name in block.removed_tools:
+                    if name in references and name in active:
+                        pending.append(
+                            {
+                                "type": "tool_removal",
+                                "tool": {"type": "tool_reference", "name": name},
+                            }
+                        )
+                        active.remove(name)
         emitted_for_message: list[dict[str, Any]] = []
         if msg.role == "assistant":
             content = _translate_assistant_content(msg.content)
@@ -530,6 +623,7 @@ def _translate_messages(
                     content_types={"text", "image", "tool_result"},
                 )
             result.extend(emitted_for_message)
+    flush()
     return result
 
 

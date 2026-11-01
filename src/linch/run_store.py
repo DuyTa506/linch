@@ -969,6 +969,7 @@ _MODEL_INPUT_REQUEST_FIELDS = frozenset(
         "output_schema",
         "tool_choice",
         "stream_partials",
+        "_native_catalog_changes",
     }
 )
 _MODEL_INPUT_PAYLOAD_FIELDS = _MODEL_INPUT_REQUEST_FIELDS - {"signal"}
@@ -1073,6 +1074,7 @@ def _provider_request_payload(request: ProviderRequest) -> dict[str, Any]:
         "output_schema": _output_schema_to_snapshot(request.output_schema),
         "tool_choice": request.tool_choice,
         "stream_partials": request.stream_partials,
+        "_native_catalog_changes": request._native_catalog_changes,
     }
     safe = _strict_model_json(payload)
     assert isinstance(safe, dict)
@@ -1344,6 +1346,9 @@ def decode_model_input_snapshot(
         output_schema=_decode_output_schema(raw["output_schema"]),
         tool_choice=cast(Any, tool_choice),
         stream_partials=_optional_bool(raw["stream_partials"], "stream_partials"),
+        _native_catalog_changes=_optional_bool(
+            raw["_native_catalog_changes"], "_native_catalog_changes"
+        ),
     )
 
 

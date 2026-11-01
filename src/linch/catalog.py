@@ -10,6 +10,30 @@ from typing import Any
 from .types import CatalogChangeBlock, Message, SystemBlock
 
 
+def native_definitions(messages: Any) -> dict[str, dict[str, Any]]:
+    definitions: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, CatalogChangeBlock):
+                for tool in block.tool_definitions:
+                    definitions.setdefault(str(tool["name"]), tool)
+    return definitions
+
+
+def positional_catalog(session: Any, config: Any, model: str | None = None) -> bool:
+    provider = getattr(session.agent, "provider", None)
+    capabilities = getattr(provider, "capabilities", None)
+    return bool(
+        snapshot_enabled(session, config)
+        and getattr(session, "current_turn_allowed_tools", None) is None
+        and capabilities is not None
+        and capabilities(
+            model or getattr(session, "active_model", None) or session.agent.model
+        ).catalog_changes
+        == "positional"
+    )
+
+
 def _digest(value: Any) -> str:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -158,7 +182,9 @@ async def reset_catalog_notifications(session: Any, config: Any = None) -> bool:
     return True
 
 
-async def sync_catalog(session: Any, config: Any, lease: Any = None) -> bool:
+async def sync_catalog(
+    session: Any, config: Any, lease: Any = None, *, context: Any = None, model: str | None = None
+) -> bool:
     registry = getattr(config, "tools", None)
     if registry is None:
         return False
@@ -199,7 +225,21 @@ async def sync_catalog(session: Any, config: Any, lease: Any = None) -> bool:
                 if getattr(registry.get(name), "is_mcp_tool", False)
                 else f"{name}: {live.get('description', '')}"
             )
-    current["tools"] = snapshot_tools(current, live_schemas)
+    positional = bool(
+        current["tools"]
+        and positional_catalog(session, config, model)
+        and (context is None or context.selected_tools is None)
+    )
+    previous = native_definitions(session.full_history) if positional else None
+    current["tools"] = snapshot_tools(
+        current, live_schemas, positional=positional, previous=previous
+    )
+    prefix_names = {str(tool["name"]) for tool in current["tools"]}
+    definitions = tuple(
+        copy.deepcopy((previous or {}).get(name, live_by_name[name]))
+        for name in added
+        if positional and name not in prefix_names
+    )
     live_skills = _skills(session.agent)
     notified_skills = dict(notified["skills"])
     skill_added = sorted(set(live_skills) - set(notified_skills))
@@ -242,6 +282,7 @@ async def sync_catalog(session: Any, config: Any, lease: Any = None) -> bool:
         ),
         added_tools=tuple(added),
         removed_tools=tuple(removed),
+        tool_definitions=definitions,
     )
     await session.append([Message(role="user", content=[block])])
     await session.update_meta({"linch.prefix": current})
@@ -258,7 +299,11 @@ def snapshot_system(snapshot: dict[str, Any]) -> list[SystemBlock]:
 
 
 def snapshot_tools(
-    snapshot: dict[str, Any], live_schemas: list[dict[str, Any]] | None = None
+    snapshot: dict[str, Any],
+    live_schemas: list[dict[str, Any]] | None = None,
+    *,
+    positional: bool = False,
+    previous: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     preview = copy.deepcopy([item for item in snapshot.get("tools", ()) if isinstance(item, dict)])
     if live_schemas is None:
@@ -268,6 +313,11 @@ def snapshot_tools(
         name = str(live.get("name", ""))
         row = positions.get(name)
         if row is None:
+            prior = (previous or {}).get(name)
+            if (positional and prior is None) or (
+                prior is not None and prior.get("input_schema") == live.get("input_schema")
+            ):
+                continue
             positions[name] = len(preview)
             preview.append(copy.deepcopy(live))
         elif preview[row].get("input_schema") != live.get("input_schema"):

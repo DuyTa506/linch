@@ -76,11 +76,40 @@
 **Files:** `src/linch/types.py`, `catalog.py`, `providers/base.py`, `providers/anthropic.py`, `providers/openai_responses.py`, `openai_responses.py`, and necessary private request/resume/fallback seams in `loop/`.
 **Interface:** Capability `catalog_changes` defaults to `append_only`; provider option `native_catalog_changes=False`; catalog block `tool_definitions=()` round-trips. No unlisted provider wire fields.
 
-- [ ] Implement only behaviors with observed RED evidence from Task 1; resolve contract blockers before dependent implementation.
-- [ ] Preserve phase-2 sync/request behavior when disabled; positional requests use frozen tools, append-only fallback uses `snapshot_tools(snapshot, live_schemas)`.
-- [ ] Keep schema edits, empty prefixes, run/context narrowing, and bypasses on the phase-2 path.
-- [ ] Render exact section 6.3 and 6.4 wire shapes; keep text user-role; preserve active-name order, beta merging, and definition limits.
-- [ ] Run focused tests, full pytest, lint/format, and Pyright; review and commit.
+- [x] Implement only behaviors with observed RED evidence from Task 1; resolve contract blockers before dependent implementation.
+- [x] Preserve phase-2 sync/request behavior when disabled; positional requests use frozen tools, append-only fallback uses `snapshot_tools(snapshot, live_schemas)`.
+- [x] Keep schema edits, empty prefixes, run/context narrowing, and bypasses on the phase-2 path.
+- [x] Render exact section 6.3 and 6.4 wire shapes; keep text user-role; preserve active-name order, beta merging, and definition limits.
+- [x] Run focused tests, full pytest, lint/format, and Pyright; review and commit.
+
+#### Task 2 implementation evidence
+
+- Implemented the corrected section 6 contract with explicit durable request
+  eligibility, native-only context-aware catalog timing, effective per-turn model
+  gating, safe same-call fallback, and full-history schema/contract comparisons.
+- The original 75 RED-first cases now pass with additional UTF-8 byte overflow,
+  case-insensitive beta merge, environment endpoint gating, model-overlay sync,
+  and exact crash/reload/compaction regressions. The durable fixture now explicitly
+  enables exact model-input replay on both agents.
+- Focused final regression command: **159 passed, 3 skipped**. Source review and
+  scoped model-overlay/contract re-review: **PASS**, original Important issue
+  addressed; no outstanding Important/Critical findings.
+- Source growth: **290 net lines**. This exceeds the about-200 estimate because
+  durable eligibility/codec, deferred context selection, frozen same-call fallback,
+  and model-overlay/history/compaction resume integration are necessary for the
+  stated contract. No new dependency, public export, or phase-4 work.
+- Native existing-snapshot context hooks run before the new notice is appended;
+  option-off timing stays unchanged. Anthropic can relocate an unfinished trailing
+  native tool message after abort/new prompt, as mandated by buffering; completed
+  historical messages keep their placement. By-value removal remains text-only
+  while historical by-value provenance is present, including after promotion.
+- Final `pytest -q`: **2 failed, 3228 passed, 408 skipped** in 159.25s. The two
+  remaining failures are unchanged execution timeouts in
+  `tests/execution/test_execution_backend.py::test_bash_tool_backend_selection[False]`
+  and `tests/tools/test_execution_backend.py::test_bash_tool_negative_timeout_runs_command`.
+  No phase-3 failure remains. Ruff check/format pass (**500 files**); Pyright:
+  **0 errors, 5 existing warnings**. Details and earlier RED evidence are in
+  `.superpowers/sdd/2026-11-02-catalog-changes-phase-3/task-2-report.md`.
 
 ### Task 3: Documentation, final review, and gates
 

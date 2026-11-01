@@ -269,8 +269,8 @@ def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:
 
     snapshot = create_model_input_snapshot("run-1", 3, _request())
     assert hashlib.sha256(snapshot.request_json.encode()).hexdigest() == (
-        "afcfb1aabbe427c33c50f4772e51c30c14c58a91e5d3d05439a34a752644b0a8"
+        "12c65276c33ab5a29155a5375b8ff4e5ff4ab68167bad7fdef011b5813dbfdb1"
     )
     assert snapshot.integrity_hash == (
-        "sha256:779cf554f6f848fa02f28ae7425e0fc4ec3628c5c9bf9257f3af89d437000111"
+        "sha256:943f71a52e8d1fcc2bc8ca442e384f8bb2ea5f4e22e7dda7c6a68ca358e5ef7a"
     )
