@@ -379,7 +379,13 @@ class InMemorySessionStore:
             created_at=ts,
             updated_at=ts,
         )
-        self._tasks.setdefault(session_id, {})[task_id] = task
+        bucket = self._tasks.setdefault(session_id, {})
+        for existing in bucket.values():
+            if task_id in existing.blocks:
+                task.blocked_by.append(existing.id)
+            if task_id in existing.blocked_by:
+                task.blocks.append(existing.id)
+        bucket[task_id] = task
         self._sessions[session_id].updated_at = ts
         return deepcopy(task)
 
@@ -451,19 +457,28 @@ class InMemorySessionStore:
                 else:
                     task.metadata[key] = deepcopy(value)
 
-        if patch.add_blocks:
-            for tid in patch.add_blocks:
-                if tid not in task.blocks:
-                    task.blocks.append(tid)
+        bucket = self._tasks[session_id]
         if patch.remove_blocks:
             task.blocks = [tid for tid in task.blocks if tid not in patch.remove_blocks]
-
-        if patch.add_blocked_by:
-            for tid in patch.add_blocked_by:
-                if tid not in task.blocked_by:
-                    task.blocked_by.append(tid)
+            for tid in patch.remove_blocks:
+                if (target := bucket.get(tid)) is not None:
+                    target.blocked_by = [bid for bid in target.blocked_by if bid != task_id]
         if patch.remove_blocked_by:
             task.blocked_by = [tid for tid in task.blocked_by if tid not in patch.remove_blocked_by]
+            for tid in patch.remove_blocked_by:
+                if (source := bucket.get(tid)) is not None:
+                    source.blocks = [bid for bid in source.blocks if bid != task_id]
+
+        for tid in patch.add_blocks or []:
+            if tid not in task.blocks:
+                task.blocks.append(tid)
+            if (target := bucket.get(tid)) is not None and task_id not in target.blocked_by:
+                target.blocked_by.append(task_id)
+        for tid in patch.add_blocked_by or []:
+            if tid not in task.blocked_by:
+                task.blocked_by.append(tid)
+            if (source := bucket.get(tid)) is not None and task_id not in source.blocks:
+                source.blocks.append(task_id)
 
         task.updated_at = now_iso()
         self._sessions[session_id].updated_at = task.updated_at

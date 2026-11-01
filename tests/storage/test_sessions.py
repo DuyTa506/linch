@@ -43,6 +43,88 @@ async def test_set_invoked_skills_missing_session_raises(store_case) -> None:
     assert await store_case.load("missing") is None
 
 
+@pytest.mark.parametrize("add_from_blocker", [True, False])
+async def test_task_dependencies_are_reciprocal(store_case, add_from_blocker: bool) -> None:
+    store = store_case
+    session = await store.create()
+    blocker = await store.create_task(session.id, CreateTaskInput(subject="first", description=""))
+    blocked = await store.create_task(session.id, CreateTaskInput(subject="second", description=""))
+    add_id = blocker.id if add_from_blocker else blocked.id
+    add_patch = (
+        TaskPatch(add_blocks=[blocked.id, blocked.id])
+        if add_from_blocker
+        else TaskPatch(add_blocked_by=[blocker.id, blocker.id])
+    )
+    await store.update_task(session.id, add_id, add_patch)
+    assert (await store.get_task(session.id, blocker.id)).blocks == [blocked.id]
+    assert (await store.get_task(session.id, blocked.id)).blocked_by == [blocker.id]
+    assert [task.id for task in await store.ready_tasks(session.id)] == [blocker.id]
+
+    await store.update_task(session.id, blocker.id, TaskPatch(status="completed"))
+    assert [task.id for task in await store.ready_tasks(session.id)] == [blocked.id]
+    await store.delete_task(session.id, blocker.id)
+    assert (await store.get_task(session.id, blocked.id)).blocked_by == []
+    assert [task.id for task in await store.ready_tasks(session.id)] == [blocked.id]
+
+
+@pytest.mark.parametrize("remove_from_blocker", [True, False])
+async def test_task_dependency_removal_is_reciprocal(store_case, remove_from_blocker: bool) -> None:
+    store = store_case
+    session = await store.create()
+    blocker = await store.create_task(session.id, CreateTaskInput(subject="first", description=""))
+    blocked = await store.create_task(session.id, CreateTaskInput(subject="second", description=""))
+    await store.update_task(session.id, blocker.id, TaskPatch(add_blocks=[blocked.id]))
+    await store.update_task(session.id, blocked.id, TaskPatch(add_blocked_by=[blocker.id]))
+
+    remove_id = blocker.id if remove_from_blocker else blocked.id
+    remove_patch = (
+        TaskPatch(remove_blocks=[blocked.id])
+        if remove_from_blocker
+        else TaskPatch(remove_blocked_by=[blocker.id])
+    )
+    await store.update_task(session.id, remove_id, remove_patch)
+    await store.update_task(session.id, remove_id, remove_patch)
+    assert (await store.get_task(session.id, blocker.id)).blocks == []
+    assert (await store.get_task(session.id, blocked.id)).blocked_by == []
+    assert [task.id for task in await store.ready_tasks(session.id)] == [blocker.id, blocked.id]
+
+
+@pytest.mark.parametrize("blocks_future", [True, False])
+async def test_task_dependency_to_future_task_is_reciprocal(
+    store_case, blocks_future: bool
+) -> None:
+    store = store_case
+    session = await store.create()
+    first = await store.create_task(session.id, CreateTaskInput(subject="first", description=""))
+    patch = TaskPatch(add_blocks=["2"]) if blocks_future else TaskPatch(add_blocked_by=["2"])
+    await store.update_task(session.id, first.id, patch)
+    second = await store.create_task(session.id, CreateTaskInput(subject="second", description=""))
+    blocker, blocked = (first, second) if blocks_future else (second, first)
+    assert (await store.get_task(session.id, blocker.id)).blocks == [blocked.id]
+    assert (await store.get_task(session.id, blocked.id)).blocked_by == [blocker.id]
+    assert [task.id for task in await store.ready_tasks(session.id)] == [blocker.id]
+
+
+@pytest.mark.parametrize("from_blocker", [True, False])
+async def test_task_dependency_add_wins_over_removal_in_same_patch(
+    store_case, from_blocker: bool
+) -> None:
+    store = store_case
+    session = await store.create()
+    blocker = await store.create_task(session.id, CreateTaskInput(subject="first", description=""))
+    blocked = await store.create_task(session.id, CreateTaskInput(subject="second", description=""))
+    task_id = blocker.id if from_blocker else blocked.id
+    patch = (
+        TaskPatch(add_blocks=[blocked.id], remove_blocks=[blocked.id])
+        if from_blocker
+        else TaskPatch(add_blocked_by=[blocker.id], remove_blocked_by=[blocker.id])
+    )
+    await store.update_task(session.id, task_id, patch)
+    assert (await store.get_task(session.id, blocker.id)).blocks == [blocked.id]
+    assert (await store.get_task(session.id, blocked.id)).blocked_by == [blocker.id]
+    assert [task.id for task in await store.ready_tasks(session.id)] == [blocker.id]
+
+
 @pytest.mark.parametrize(
     "boundary", ["create", "create_if_absent", "create_existing", "load", "list", "update_meta"]
 )
