@@ -288,8 +288,14 @@ from `req.tools`, and render as:
 - Skip an addition whose name is active and a removal whose name is not active. This handles
   a block retained through compaction next to the consolidated one. Rendering must be
   deterministic from `messages` and `req.tools`, so sent messages never change.
-- `tool_reference` is used only for names declared in `req.tools`. A name defined earlier by
-  value is re-sent by value.
+- `tool_reference` is used only for names declared in `req.tools`, in additions and removals.
+  The docs do not say a by-value name can be referenced, and an unresolved reference is a 400.
+- A tool defined by value is never removed natively. Its removal is text only, it stays
+  active on the wire, and a call gets the existing unknown-tool error, as in phase 2. If it
+  is restored, the active-name check skips the addition.
+- A by-value tool whose schema later changes takes the phase 2 path and enters `req.tools`.
+  The seeded active set then skips its older addition. That rendering change comes with the
+  accepted miss.
 - Send `inline-tools-2026-09-15` in `anthropic-beta` on every positional request, not only
   those with tool blocks. Merge with betas the adapter already sends.
 - A tool definition is at most the existing translated tool shape. No `cache_control` on it.
@@ -325,6 +331,8 @@ Payload tests only, with a fake transport. Write each failing first.
   between `tool_use` and `tool_result`.
 - Abort, then a new prompt: placement stays valid.
 - Restore uses `tool_reference`. Removal uses `tool_removal`.
+- Removing a by-value tool emits no `tool_removal`, and a call returns the unknown-tool error.
+- Restoring it emits no second definition.
 - Duplicate addition after compaction is skipped.
 - Schema edit takes the phase 2 path.
 - Fallback to an append-only model mid-session: added tool is in `tools`.
