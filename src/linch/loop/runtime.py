@@ -846,15 +846,7 @@ class RunRuntime:
             )
             await _persist_event(self.session, self.run_id, event)
             yield event
-            if self.budget is not None and self.budget.take_warning():
-                warning: Event = BudgetEvent(
-                    kind="warning",
-                    spent_tokens=self.budget.spent_tokens,
-                    spent_usd=self.budget.spent_usd,
-                    max_tokens=self.budget.max_tokens,
-                    max_cost_usd=self.budget.max_cost_usd,
-                )
-                await _persist_event(self.session, self.run_id, warning)
+            async for warning in self._emit_budget_warning():
                 yield warning
 
     async def emit_primary_usage(self, receipt: Any) -> AsyncIterator[Event]:
@@ -871,16 +863,21 @@ class RunRuntime:
         )
         await _persist_event(self.session, self.run_id, event)
         yield event
-        if self.budget is not None and self.budget.take_warning():
-            warning: Event = BudgetEvent(
-                kind="warning",
-                spent_tokens=self.budget.spent_tokens,
-                spent_usd=self.budget.spent_usd,
-                max_tokens=self.budget.max_tokens,
-                max_cost_usd=self.budget.max_cost_usd,
-            )
-            await _persist_event(self.session, self.run_id, warning)
+        async for warning in self._emit_budget_warning():
             yield warning
+
+    async def _emit_budget_warning(self) -> AsyncIterator[Event]:
+        if self.budget is None or not self.budget.take_warning():
+            return
+        warning: Event = BudgetEvent(
+            kind="warning",
+            spent_tokens=self.budget.spent_tokens,
+            spent_usd=self.budget.spent_usd,
+            max_tokens=self.budget.max_tokens,
+            max_cost_usd=self.budget.max_cost_usd,
+        )
+        await _persist_event(self.session, self.run_id, warning)
+        yield warning
 
     async def emit_budget_exhausted(self) -> AsyncIterator[Event]:
         """Emit the legacy budget tail with ledger-owned totals."""
@@ -1201,7 +1198,6 @@ class RunRuntime:
             raise ConfigError("run_store returned an invalid model-input snapshot")
         self.checkpoint.provider_attempt = provider_attempt
         self.checkpoint.model_input_snapshot_id = snapshot.id
-        await self.best_effort_snapshot_cleanup(keep_ids=(snapshot.id,))
         return request
 
     async def bind_active_primary(self, intent: ModelCallIntent) -> None:
@@ -1212,6 +1208,10 @@ class RunRuntime:
             full_history_fingerprint=self.session.session_log._history_fingerprint(),
         )
         await self.save_checkpoint("provider_pending", turn_index=intent.turn_index)
+        if self.checkpoint.model_input_snapshot_id is not None:
+            await self.best_effort_snapshot_cleanup(
+                keep_ids=(self.checkpoint.model_input_snapshot_id,),
+            )
 
     async def load_pending_provider_request(self, signal: Any) -> ProviderRequest:
         if not self.exact_model_input or self.model_input_store is None:
