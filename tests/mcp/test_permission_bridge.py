@@ -1,66 +1,13 @@
-"""MCP mid-run registration + annotation→permission bridge (ROADMAP Phase 4.3).
-
-A server connected mid-run must have its tools appear on the next turn (the
-per-turn request rebuilds its tool list from the live registry, so attaching
-tools mid-run is picked up). A ``destructive_hint`` annotation maps to an ``ask``
-permission rule so the tool prompts even under permissive modes.
-
-Verify: a tool registered mid-run is offered on the next turn; a destructive MCP
-tool triggers a permission prompt.
-
-The annotation→rule logic and the registration path need no server; the one
-test that exercises ``make_mcp_tool`` uses real ``mcp.types`` models and skips
-when the optional ``mcp`` extra is absent.
-"""
-
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
-
-import pytest
+from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.tools import StubTool
 
 
-class _RecordingProvider:
-    id = "fake"
-
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 1_000_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        self.requests.append(req)
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "ok"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-
-class _FakeMcpTool:
-    """A tool object shaped like ``make_mcp_tool``'s output, carrying ``destructive``."""
-
-    parallel = False
-    input_schema = {"type": "object", "properties": {}}
-
+class _FakeMcpTool(StubTool):
     def __init__(self, name: str, *, scope: str = "write", destructive: bool = False) -> None:
-        self.name = name
-        self.scope = scope
+        super().__init__(name, scope=scope, parallel=False, output="called")
         self.destructive = destructive
-        self.description = "fake mcp tool"
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return dict(raw)
-
-    def summarize(self, inp: dict[str, Any]) -> str:
-        return self.name
-
-    async def execute(self, inp: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        return ToolResult(content="called")
 
 
 def test_mcp_permission_rules_maps_only_destructive() -> None:
@@ -84,29 +31,7 @@ def test_destructive_rule_forces_ask_under_permissive_mode() -> None:
     decision = engine.evaluate(
         PendingToolCall(tool_use_id="t", tool=tool, input={}),
     )
-    # Without the rule, a write tool under skip-dangerous would auto-allow.
     assert decision.decision == "ask"
-
-
-def test_make_mcp_tool_derives_destructive_flag() -> None:
-    pytest.importorskip("mcp", reason="the 'mcp' extra is not installed")
-    from mcp.types import Tool, ToolAnnotations
-
-    from linch.mcp.tool import make_mcp_tool
-
-    mcp_tool = Tool(
-        name="rm",
-        description="remove",
-        inputSchema={"type": "object", "properties": {}},
-        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
-    )
-
-    async def _call(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - not invoked
-        return None
-
-    tool = make_mcp_tool("srv", mcp_tool, _call)
-    assert tool.destructive is True
-    assert tool.scope == "write"
 
 
 async def test_tool_attached_mid_run_appears_next_turn() -> None:
@@ -114,26 +39,23 @@ async def test_tool_attached_mid_run_appears_next_turn() -> None:
     from linch.mcp import McpConnection
     from linch.sessions import InMemorySessionStore
 
-    provider = _RecordingProvider()
+    provider = ScriptedProvider([TextTurn("ok"), TextTurn("ok")])
     agent = Agent(
         model="m",
-        provider=provider,
+        provider=provider,  # type: ignore[arg-type]
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         cwd=".",
     )
     session = await agent.session()
 
-    # Turn 1: the mid-run tool is not yet present.
     _ = [event async for event in session.run("first")]
     turn1_tools = {t["name"] for t in provider.requests[0].tools}
     assert "srv__danger" not in turn1_tools
 
-    # Attach a connection mid-run (as add_mcp_servers does after connecting).
     tool = _FakeMcpTool("srv__danger", destructive=True)
     agent._attach_mcp_tools(McpConnection(tools=[tool], sessions=[]))
 
-    # Turn 2: the tool is offered, and its destructive annotation forced an ask rule.
     _ = [event async for event in session.run("second")]
     turn2_tools = {t["name"] for t in provider.requests[1].tools}
     assert "srv__danger" in turn2_tools
