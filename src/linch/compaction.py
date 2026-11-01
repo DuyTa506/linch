@@ -11,6 +11,7 @@ from uuid import uuid4
 from ._telemetry import _TelemetryProvider, trace_compaction
 from ._token_estimation import custom_token_estimate
 from .abort import AbortContext
+from .catalog import snapshot_for, snapshot_skill_listing
 from .errors import ConfigError, ProviderError
 from .events import CompactionEvent
 from .model_calls import (
@@ -25,6 +26,7 @@ from .model_calls import (
 from .providers.limiter import provider_slot
 from .run_store import LeaseLostError, durable_call
 from .types import (
+    CatalogChangeBlock,
     Message,
     ProviderRequest,
     SystemBlock,
@@ -621,8 +623,12 @@ def _source_message_fingerprints(messages: Sequence[Message]) -> list[str]:
     return [_model_call_fingerprint(message_to_dict(message)) for message in messages]
 
 
-def _skill_listing_fingerprint(text: str | None) -> str | None:
+def _skill_listing_fingerprint(text: str | None, *, session: Any = None) -> str | None:
     """Fingerprint the canonical provider-only reminder, including its wrapper."""
+    if session is not None:
+        snapshot = snapshot_for(session)
+        if snapshot is not None:
+            text = snapshot_skill_listing(snapshot)
     if not text:
         return None
     from .skills.system_reminder import wrap_in_system_reminder
@@ -636,8 +642,12 @@ def _skill_context_messages(session: Any, agent: Any) -> list[Message]:
     from .skills.system_reminder import wrap_in_system_reminder
 
     texts = []
-    if getattr(agent, "skill_listing_text", ""):
-        texts.append(wrap_in_system_reminder(agent.skill_listing_text))
+    snapshot = snapshot_for(session)
+    listing = snapshot_skill_listing(snapshot) if snapshot is not None else None
+    if snapshot is None:
+        listing = getattr(agent, "skill_listing_text", "")
+    if listing:
+        texts.append(wrap_in_system_reminder(listing))
     for record in getattr(session, "invoked_skills", ()):
         texts.append(
             wrap_in_system_reminder(
@@ -684,19 +694,27 @@ def _with_recorded_reminders(
     messages: list[Message],
     digests: Sequence[str],
     reminders: dict[str, Message],
+    *,
+    skip_digests: set[str] | frozenset[str] = frozenset(),
 ) -> list[Message]:
     result = list(messages)
     present = {
         block.text
         for message in result
         for block in message.content
-        if isinstance(block, TextBlock)
+        if isinstance(block, (TextBlock, CatalogChangeBlock))
     }
     for digest in digests:
         if digest not in reminders:
             raise ConfigError("paid compaction reminder body is not durably resolvable")
+        if digest in skip_digests:
+            continue
         reminder = reminders[digest]
-        texts = {block.text for block in reminder.content if isinstance(block, TextBlock)}
+        texts = {
+            block.text
+            for block in reminder.content
+            if isinstance(block, (TextBlock, CatalogChangeBlock))
+        }
         if not texts <= present:
             result.append(reminder)
             present.update(texts)
@@ -859,7 +877,14 @@ async def _reconcile_paid_compactions(
             raise ConfigError("paid compaction target or projection identity does not match")
         if record is None:
             await ledger.record_projection(derived)
-        previous = _with_recorded_reminders(target, recipe["reminder_fingerprints"], reminders)
+        frozen_listing = _skill_listing_fingerprint(None, session=session)
+        skip_digests = {frozen_listing} if frozen_listing is not None else set()
+        previous = _with_recorded_reminders(
+            target,
+            recipe["reminder_fingerprints"],
+            reminders,
+            skip_digests=skip_digests,
+        )
         for view in (source, target, previous):
             if view is not None:
                 replay_fingerprints.add(_context_fingerprint([*view, *history[count:]]))

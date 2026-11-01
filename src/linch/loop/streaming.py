@@ -14,6 +14,7 @@ from typing import Any, cast, get_args
 from uuid import uuid4
 
 from .._telemetry import ChatCall, in_span
+from ..catalog import sync_catalog
 from ..compaction import (
     apply_micro_compaction,
     build_compaction_event,
@@ -170,7 +171,7 @@ async def maybe_compact_resilient(
                 logical_call_id=logical_call_id,
                 **(
                     {"_run_config": config}
-                    if config is not None and config._values is not None
+                    if config is not None and getattr(config, "_values", None) is not None
                     else {}
                 ),
             )
@@ -271,13 +272,14 @@ async def _stream_turn_with_recovery(
                 logical_call_id=compaction_logical_call_id,
                 **(
                     {"_run_config": config}
-                    if config is not None and config._values is not None
+                    if config is not None and getattr(config, "_values", None) is not None
                     else {}
                 ),
             )
         if ladder is not None:
             reset_read_tracker_after_compaction(session, agent)
-        _re_inject_skill_context(session, config=config)
+        await _re_inject_skill_context(session, config=config)
+        await sync_catalog(session, config, None)
         # The runner snapshots the final provider view while suspended here.
         yield build_compaction_event(session)
         context_result = await _build_context_result(
