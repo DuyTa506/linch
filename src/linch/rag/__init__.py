@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ..context import ContextBuildResult
+from ..errors import PermissionDeniedError
 from ..events import VerificationEvent
 from ..hooks import ContextInjectionHook
 from ..kernel import Disposable
@@ -63,7 +64,8 @@ class _Retrieval(ContextInjectionHook):
     resume_policy_version = 1
 
     def __init__(self, agent: Agent, connector: RagConnector, k: int, principal: Any) -> None:
-        self.agent, self.connector, self.k, self.principal = agent, connector, k, principal
+        self.agent, self.connector, self.k = agent, connector, k
+        self._registration_principal = principal
         self.runs: dict[tuple[str, str], dict[str, Any]] = {}
         self.resume_policy_config = {
             "k": k,
@@ -89,7 +91,13 @@ class _Retrieval(ContextInjectionHook):
             return ContextBuildResult()
         key = (turn.session.id, turn.session.active_run_id)
         state = self.state(turn.session, key[1])
-        chunks = await self.connector.retrieve(state["query"], k=self.k, principal=self.principal)
+        principal = turn.session._active_principal
+        if self._registration_principal is not None and principal != self._registration_principal:
+            raise PermissionDeniedError(
+                "RAG retrieval requires the active run principal to match the "
+                "registration principal"
+            )
+        chunks = await self.connector.retrieve(state["query"], k=self.k, principal=principal)
         if any(not isinstance(c.id, str) or not re.fullmatch(r"[^\]\r\n]+", c.id) for c in chunks):
             raise ValueError("RAG chunk ids must be nonempty and exclude ], CR and LF")
         blocks = [
@@ -147,7 +155,8 @@ def register_rag_connector(
         agent: Agent whose context and hooks receive the connector.
         connector: Host implementation of the retrieval protocol.
         k: Positive maximum number of chunks requested per turn.
-        principal: Run identity passed through to ``connector.retrieve``.
+        principal: Optional identity that each active run must match. The connector
+            receives the active run identity, never this registration value.
 
     Returns:
         A disposer that removes the connector hook and context service.

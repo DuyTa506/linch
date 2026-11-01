@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from linch.durability import DurabilityOptions, InboxDelivery, JsonValue
+from linch.durability import DurabilityOptions, InboxDelivery, JsonValue, _strict_json
 from linch.errors import ConfigError
 from linch.sessions import InMemorySessionStore
 from linch.sessions.postgres import _SCHEMA, PostgresSessionStore
@@ -57,6 +57,53 @@ def test_inbox_delivery_is_user_only_json_safe_and_detached() -> None:
         InboxDelivery("nested-key", _message("bad"), metadata={"nested": {1: "bad"}})  # type: ignore[dict-item]
     with pytest.raises(ConfigError, match="strictly JSON-serializable"):
         InboxDelivery("tuple", _message("bad"), metadata={"tuple": (1, 2)})  # type: ignore[dict-item]
+
+
+@pytest.mark.parametrize("mappings", [False, True], ids=["lists", "dicts"])
+async def test_inbox_delivery_rejects_excessive_metadata_nesting(
+    inbox_store, mappings: bool
+) -> None:
+    session = await inbox_store.create()
+    value: object = "leaf"
+    for _ in range(1500):
+        value = {"child": value} if mappings else [value]
+
+    with pytest.raises(ConfigError, match="maximum nesting depth"):
+        InboxDelivery(
+            f"deep-{session.id}",
+            _message("bad"),
+            metadata={"payload": value},  # type: ignore[dict-item]
+        )
+
+
+@pytest.mark.parametrize(("depth", "reject"), [(100, False), (101, True)])
+async def test_inbox_delivery_matches_strict_json_depth_boundary(
+    inbox_store, depth, reject
+) -> None:
+    session = await inbox_store.create()
+    payload: object = "leaf"
+    for _ in range(depth):
+        payload = {"child": payload}
+    delivery_payload: object = "leaf"
+    for _ in range(depth - 1):
+        delivery_payload = {"child": delivery_payload}
+
+    if reject:
+        with pytest.raises(ConfigError, match="maximum nesting depth 100"):
+            _strict_json(payload, label="boundary")
+        with pytest.raises(ConfigError, match="maximum nesting depth 100"):
+            InboxDelivery(
+                f"boundary-{depth}-{session.id}",
+                _message("bad"),
+                metadata=delivery_payload,  # type: ignore[arg-type]
+            )
+    else:
+        _strict_json(payload, label="boundary")
+        InboxDelivery(
+            f"boundary-{depth}-{session.id}",
+            _message("good"),
+            metadata=delivery_payload,  # type: ignore[arg-type]
+        )
 
 
 async def test_store_inbox_fifo_dedupe_conflict_and_response_loss(inbox_store) -> None:

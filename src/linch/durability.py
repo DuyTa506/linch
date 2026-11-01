@@ -12,6 +12,8 @@ from linch.types import Message, message_from_dict, message_to_dict
 
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
+_STRICT_JSON_MAX_DEPTH = 100
+
 
 def _strict_json(value: object, *, label: str) -> str:
     """Return a deterministic JSON encoding or reject the value.
@@ -21,7 +23,7 @@ def _strict_json(value: object, *, label: str) -> str:
     non-finite floats and silently discarded non-string mapping keys.
     """
 
-    def validate(item: object, seen: set[int]) -> None:
+    def validate(item: object, seen: set[int], depth: int = 0) -> None:
         if item is None or isinstance(item, bool | int | str):
             return
         if isinstance(item, float):
@@ -35,16 +37,18 @@ def _strict_json(value: object, *, label: str) -> str:
         identity = id(item)
         if identity in seen:
             raise ConfigError(f"{label} must not contain reference cycles")
+        if depth >= _STRICT_JSON_MAX_DEPTH:
+            raise ConfigError(f"{label} exceeds maximum nesting depth {_STRICT_JSON_MAX_DEPTH}")
         seen.add(identity)
         try:
             if isinstance(item, list):
                 for child in item:
-                    validate(child, seen)
+                    validate(child, seen, depth + 1)
             else:
                 for key, child in item.items():
                     if not isinstance(key, str):
                         raise ConfigError(f"{label} must contain only string object keys")
-                    validate(child, seen)
+                    validate(child, seen, depth + 1)
         finally:
             seen.remove(identity)
 

@@ -11,6 +11,19 @@ def _load_script():
     return load_module(path, "live_prompt_cache_benchmark_script")
 
 
+def test_live_prompt_cache_prompt_total_sums_normalized_cache_buckets():
+    mod = _load_script()
+    call = mod.LiveCacheCall(
+        call=1,
+        elapsed_ms=1.0,
+        input_tokens=70,
+        cache_read_tokens=20,
+        cache_creation_tokens=30,
+    )
+
+    assert mod._estimated_prompt_tokens("openai-chat", call) == 120
+
+
 def test_live_prompt_cache_result_renders_json_and_markdown():
     mod = _load_script()
     result = mod.LiveCacheResult(
@@ -53,9 +66,9 @@ def test_live_prompt_cache_result_renders_json_and_markdown():
     assert rendered["results"][0]["mode"] == "direct"
     assert rendered["results"][0]["scenario"] == "baseline"
     assert rendered["results"][0]["totals"]["cache_read_tokens"] == 90
-    assert rendered["results"][0]["estimated_prompt_tokens"] == 200
-    assert rendered["results"][0]["cache_read_ratio"] == 0.45
-    assert rendered["results"][0]["warm_cache_read_ratio"] == 0.9
+    assert rendered["results"][0]["estimated_prompt_tokens"] == 290
+    assert rendered["results"][0]["cache_read_ratio"] == 0.3103
+    assert rendered["results"][0]["warm_cache_read_ratio"] == 0.4737
 
     markdown = mod.render_markdown(
         [result],
@@ -71,7 +84,7 @@ def test_live_prompt_cache_result_renders_json_and_markdown():
     assert "- mode: tool-loop" in markdown
     assert "- scenario: all" in markdown
     assert (
-        "| openai-chat | baseline | direct | 2 | 0 | 0 | 200 | 200 | 90 | 0 | 45.00% | 90.00% |"
+        "| openai-chat | baseline | direct | 2 | 0 | 0 | 290 | 200 | 90 | 0 | 31.03% | 47.37% |"
     ) in markdown
 
 
