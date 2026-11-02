@@ -17,12 +17,18 @@ import asyncio
 import os
 from dataclasses import dataclass
 
-from linch import Agent
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-from linch.sessions import InMemorySessionStore
-from linch.tools.base import Citation, ToolContext, ToolResult
-from linch.tools.registry import ToolRegistry
+from linch import (
+    Agent,
+    AnthropicProvider,
+    AnthropicProviderOptions,
+    Citation,
+    FeatureFlags,
+    InMemorySessionStore,
+    SystemPromptConfig,
+    ToolContext,
+    ToolRegistry,
+    ToolResult,
+)
 
 # ── Deps container ────────────────────────────────────────────────────────────
 #

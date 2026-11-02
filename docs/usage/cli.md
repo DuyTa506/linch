@@ -1,5 +1,7 @@
 # Scaffolding CLI
 
+Use the `linch` CLI to scaffold projects, add tools, and locate installed documentation.
+
 [<- Usage guide](./README.md)
 
 Installing linch registers a `linch` console script that scaffolds agent
@@ -61,14 +63,47 @@ linch add tool web-search
 ```
 
 The stub is a `@tool`-decorated async function ready to implement; the test
-calls `assert_tool_contract` (from `linch.testing`) so the tool's metadata,
+calls `assert_tool_contract` (from `linch`) so the tool's metadata,
 validation, and execution shape are pinned from the first commit. Register the
 tool in `build_agent()` by adding it to `empty_tools(...)` — see
 [Tools](./tools.md).
 
-The command finds the target package by walking up to the nearest
-`pyproject.toml` and locating the package under `src/`; with multiple packages
-it picks the one matching `[project].name`. It never overwrites existing files.
+The command walks upward to the nearest `pyproject.toml` whose
+`[project].dependencies` declares Linch, then locates a Python package under
+`src/`. With multiple packages it picks the one matching `[project].name`, or
+reports an ambiguity. It refuses to overwrite either generated file.
+
+## `linch docs path`
+
+Print the absolute directory containing the installed `docs/` and `examples/` trees:
+
+```bash
+linch docs path
+# /path/to/site-packages/linch/_docs
+grep -rn 'RunBudget' "$(linch docs path)/docs/usage"
+```
+
+The command checks packaged documentation first, then the source checkout for editable
+installs. It works from any directory and needs no network. If documentation is missing,
+reinstall Linch from a wheel with packaged docs or restore the checkout's `docs/` and
+`examples/` directories.
+
+## `linch skill install`
+
+Copy the `build-agent-with-linch` skill into a project so a coding agent can find this
+documentation and build on Linch:
+
+```bash
+linch skill install                    # .claude/skills and .agents/skills
+linch skill install --target linch     # .linch/skills, for a Linch-built coding agent
+linch skill install --force            # replace an installed copy after upgrading
+```
+
+`--target` accepts `claude`, `codex`, and `linch`, and can be repeated. `--dir` selects the
+project. The skill matches the installed Linch version. `linch new` installs it for Claude Code
+and Codex.
+
+---
 
 ## Exit codes
 
@@ -76,7 +111,7 @@ it picks the one matching `[project].name`. It never overwrites existing files.
 |---|---|
 | 0 | Success (also `--help`) |
 | 2 | Usage error: unknown command, missing argument, invalid name |
-| 1 | State error: non-empty target dir, no/ambiguous project, existing file |
+| 1 | State error: non-empty target dir, no/ambiguous project, existing file, missing docs |
 
 ## Related pages
 

@@ -51,10 +51,12 @@ def _is_worker_reconnect_error(error: BaseException) -> bool:
     """Classify listener and store failures that should rebuild the manager."""
     if isinstance(error, FailingListenerError) or _is_transient_store_error(error):
         return True
-    return (
-        type(error).__module__.startswith("asyncpg.")
-        and type(error).__name__ == "InterfaceError"
-        and str(error).endswith("connection has been released back to the pool")
+    if not type(error).__module__.startswith("asyncpg."):
+        return False
+    if type(error).__name__ == "InternalClientError":
+        return str(error).startswith("cannot switch to state")
+    return type(error).__name__ == "InterfaceError" and str(error).endswith(
+        "connection has been released back to the pool"
     )
 
 

@@ -86,7 +86,7 @@ These hold for *every* change, regardless of subsystem:
   (GenAI semantic conventions); hosts configure the SDK and exporter
   (Langfuse, Tempo, Datadog...). No custom observer layer.
 - **Durable state is Postgres; InMemory is for tests and dev** — do not add
-  SQLite code (it is being removed, spec D13).
+  SQLite code.
 - **Multi-tenant safe via per-agent `Context`** — no process-global mutable
   state; each `Agent` owns its own `Context` scope (`linch.Context`) holding its
   service registry, event bus, and effect scope, plus its registries and session

@@ -1,4 +1,4 @@
-"""Redis-backed Mailbox adapter (ROADMAP P8).
+"""Redis-backed Mailbox adapter.
 
 External queue/store backends (Redis, SQS, Postgres, ...) are deployment choices,
 so they live in examples and optional packages — *not* in core. Core ships only
@@ -28,8 +28,7 @@ import asyncio
 import json
 from typing import Any
 
-from linch import MailboxMessage
-from linch.testing import assert_mailbox_contract
+from linch import MailboxMessage, assert_mailbox_contract
 
 _DRAIN_SCRIPT = """
 local values = redis.call('LRANGE', KEYS[1], 0, -1)

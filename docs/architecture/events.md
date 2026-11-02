@@ -1,8 +1,10 @@
 # Event Taxonomy
 
+Use this page to inspect event types and lifecycle dispatch points.
+
 > Part of the [Linch architecture guide](./README.md).
 
-All events are `@dataclass(slots=True)` with a `type: Literal[...]` discriminator. Every cross-cutting concern surfaces through events; callers never poll internal state.
+Event types are `@dataclass(slots=True)` objects with a `type: Literal[...]` discriminator. The diagram summarizes common stream events; journal and transient events have different persistence behavior.
 
 ```mermaid
 graph LR
@@ -12,7 +14,7 @@ graph LR
         UE["UserEvent\ntype=user · message"]
         AE["AssistantEvent\ntype=assistant · message · stop_reason"]
         PAE["PartialAssistantEvent\ntype=partial_assistant · delta"]
-        RE["ResultEvent\ntype=result\nsubtype = success | error | aborted\nfinal_text · structured_output · total_usage"]
+        RE["ResultEvent\ntype=result\nsubtype = success | error | aborted | interrupted\nfinal_text · structured_output · total_usage"]
         ERR["ErrorEvent\ntype=error · error dict"]
     end
 
@@ -86,7 +88,7 @@ run `python scripts/generate_event_catalog.py --check` to detect drift.
 
 `PromptCacheAdvisoryEvent` is emitted (observationally, never mutating the request) when the tool set or model changes between provider calls on the same session and invalidates the cached request prefix — see [prompt caching](../usage/providers.md#the-prompt_cache_advisory-event).
 
-`event_to_dict` and `event_from_dict` in `events.py` provide full round-trip serialization for all event types.
+The event serializer supports event round trips. Tool progress is transient and is not stored in the durable run event log; model-call accounting events are journal-only.
 
 `SystemEvent` and the terminal `ResultEvent` carry the run `trace_id` when a
 run is persisted or streamed. The creation/origin value is retained in
@@ -105,16 +107,14 @@ property, not a fallback for unknown required fields or nested shapes.
 
 ## Design rationale
 
-- **Events are the *only* output channel.** Every cross-cutting concern (assistant
-  text, tool calls, permissions, usage, compaction, budget, subagents) surfaces as an
-  event; callers never poll internal state. This makes the loop observable and lets a
-  UI render progress live without reaching into `Session`.
+- **Events make runs observable.** Assistant text, tool calls, permissions,
+  usage, compaction, budget, and subagent activity can be consumed by a UI.
 - **A `type` literal discriminator + `slots=True`.** The literal makes events
   cheap to switch on and safe to pattern-match; `slots` keeps them light since one run
   can emit thousands.
 - **Full round-trip serialization (`event_to_dict`/`event_from_dict`).** Events are
-  the persisted run log, so they must survive a process restart and reload — which is
-  what makes durable resume and offline run reports possible.
+  serializable for durable logs and offline reports. Not every stream event is
+  persisted, and accounting records are journal-only.
 - **Nesting via `SubagentEvent`, not a flattened stream.** A child's events are wrapped
   rather than merged inline, so a consumer can tell parent activity from worker activity
   and reconstruct the tree.

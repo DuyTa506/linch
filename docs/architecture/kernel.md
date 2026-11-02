@@ -2,13 +2,17 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
-The kernel (`src/linch/kernel/`) is a small, dependency-free "Cordis-lite" layer
+Use this page when you need to understand or extend scoped services, reversible
+effects, typed lifecycle dispatch, plugins, profiles, or the tool pipeline.
+
+The kernel (`src/linch/kernel/`) is a small, dependency-free layer
 that gives Linch three things the rest of the SDK builds on: **reversible
 effects**, a **typed event bus**, and **per-agent `Context` scopes** (a scoped
 IoC container). It is async-first and ships no third-party dependency.
 
 Public names: `linch.Context`, `linch.Disposable`, and `linch.Plugin`.
-`EffectScope`, `EventBus`, and `Next` live under `linch.kernel` for internal use.
+`EffectScope`, `EventBus`, and `Next` are implementation-facing helpers, not
+top-level public names.
 
 Why it exists: extension points (tool wrappers, capability providers, listeners)
 must be **addable and removable** without editing the loop, and N agents must run
@@ -19,7 +23,7 @@ returns a `Disposable`" and "each agent owns a scope" the uniform mechanism.
 
 ## Disposable — reversible effects
 
-`Disposable` (`kernel/effects.py`) wraps an undo function. `await d.dispose()`
+`Disposable` (`src/linch/kernel/effects.py::Disposable`) wraps an undo function. `await d.dispose()`
 (or `await d()`) runs one teardown attempt at a time. Successful teardown is
 final and later calls are no-ops; a failed teardown remains retryable, so a
 later close can finish cleanup. The undo may be a coroutine. Every registration
@@ -45,22 +49,23 @@ remain for a later retry.
 
 ## EventBus — emit / serial / waterfall
 
-`EventBus` (`kernel/events.py`) registers listeners with
+`EventBus` (`src/linch/kernel/events.py::EventBus`) registers listeners with
 `on(name, listener, *, prepend=False) -> Disposable` and dispatches three ways:
 
-Lifecycle producers pass a `linch.kernel.events.LifecyclePoint` constant instead
-of repeating a string. The domain catalog re-exports the same descriptor for
-convenient imports. Each point declares its payload type and one dispatch mode;
-`EventBus` rejects `emit`, `serial`, or `waterfall` calls that do not match that
-mode. Hook points use the `hook` mode and are owned by `HookDispatcher`, which
-preserves user-hook ordering and mutation semantics. Plain string names remain
-available for host-defined events.
+Lifecycle producers pass typed `LifecyclePoint` values from the lifecycle
+catalog instead of repeating a string. The descriptor type is defined in
+`src/linch/kernel/events.py` and re-exported by that catalog. Each
+typed point declares its payload type and one dispatch mode; `EventBus` rejects
+`emit`, `serial`, or `waterfall` calls that do not match that mode. Hook points
+use the `hook` mode and are owned by `HookDispatcher`, which preserves
+user-hook ordering and mutation semantics. Plain string names remain available
+for host-defined events.
 
 | Dispatcher | Semantics |
 |---|---|
 | `emit(name, *args)` | Fire-and-forget. Non-vetoing; each listener is isolated by its own `try/except` so one failure never breaks the others. Coroutine listeners are scheduled. |
 | `serial(name, *args)` | Awaits listeners in order and **bails on the first** non-`None`/non-`False` return (that value is the result). |
-| `waterfall(name, *args, next)` | Folds listeners innermost→outermost. Each listener is `async def listener(*args, next)` and MUST `await next()` to delegate inward; **not** calling `next()` deliberately vetoes/short-circuits. |
+| `waterfall(name, *args, next)` | Runs listeners as an outer-to-inner middleware chain (the first registered listener is outermost). Each listener is `async def listener(*args, next)` and MUST `await next()` to delegate inward; **not** calling `next()` deliberately vetoes/short-circuits. |
 
 Pick the dispatcher that matches intent: `emit` for observation, `serial` for
 "first responder wins", `waterfall` for around-wrappers (timeout, retry, metrics)
@@ -68,20 +73,20 @@ that need to wrap the inner call.
 
 ## Context — per-agent scope
 
-`Context` (`kernel/context.py`) bundles a service registry, an `EventBus`, and an
+`Context` (`src/linch/kernel/context.py::Context`) bundles a service registry, an `EventBus`, and an
 owning `EffectScope`. Each `Agent` owns one; shared services are resolved through
 it rather than through module globals — that is what makes Linch multi-tenant
 safe.
 
 - `register(key, service) -> Disposable` — add a service; dispose to remove it.
-  Registration and removal publish `context/service` with `(context, key)` on
-  the shared bus after the registry changes. Removal awaits every listener;
-  failed notifications remain retryable through the same disposer. With no
-  listeners, no event is dispatched.
+  Outside plugin activation, registration and removal publish `context/service`
+  with `(context, key)` on the shared bus after the registry changes. Removal
+  awaits every listener; failed notifications remain retryable through the same
+  disposer. With no listeners, no event is dispatched.
 - `ctx.<name>` — read a **required** capability as an attribute (e.g.
   `ctx.execution`); `AttributeError` if unresolved. Underscore names raise, to
   avoid recursion.
-- `ctx.get(name, default)` — the same lookup, made **optional**: *default* when
+- `ctx.get(name, default=None)` — the same lookup, made **optional**: *default* when
   unresolved. Both walk up to parent scopes, so a child sees a service its
   parent registered unless it shadows the name.
 - `on(...)` / `effect(...)` — delegate to the bus / scope.
@@ -93,18 +98,20 @@ safe.
   independent and idempotently removable, and an iterator's `aclose()` is
   awaited when present. No producer means the loop does not allocate or dispatch
   an inbox coroutine.
-- `scope(label, isolate_events=False) -> Context` — a **child** sharing the bus but with an isolated
+- `scope(label="scope", *, isolate_events=False) -> Context` — a **child** sharing the bus but with an isolated
   service overlay and its own child `EffectScope`, so per-agent (or per-subagent)
   teardown disposes only that branch. With `isolate_events=True`, listener
   registrations are snapshotted onto an independent bus; filtered parent service
   changes still reach the child. `EventBus.fork()` and `ToolPipeline.fork()` own
   the listener-copy mechanics and preserve registration ordering and ownership.
 
-`Agent` creates one owned child `Context` for its lifetime. When `context=` is
-supplied it is the parent/host scope, which remains alive when the Agent closes;
-hosts may also pass `parent.scope("agent")` when they want an explicit child.
-The Agent registers its pipeline and effective execution world in its owned
-scope. Sessions and child agents resolve capabilities through the scope;
+`Agent` creates one owned per-agent `Context` for its lifetime. When `context=`
+is supplied, that context is the parent/host scope and the Agent's context is
+its child; without one, the Agent creates its own root context. The supplied
+parent remains alive when the Agent closes; hosts may also pass
+`parent.scope("agent")` when they want an explicit child. The Agent registers
+its pipeline and, when configured, its execution world in its owned scope.
+Sessions and child agents resolve capabilities through the scope;
 they do not use process-global services. `await agent.close()` first quiesces
 the agent and then disposes the context. Context teardown is transactional:
 successful registrations are not repeated, while a failed disposer remains
@@ -120,8 +127,8 @@ activation. Removing a requirement withdraws published services before awaiting
 cleanup, and a later reappearance activates a fresh scope. The returned
 `Disposable` unmounts the mount and retries failed teardown on a later dispose
 or `agent.close()`. A synchronous `Context.register` emits its change event
-immediately; activation reconciliation runs asynchronously, while removal waits
-for dependent cleanup.
+immediately for ordinary registrations; activation reconciliation runs
+asynchronously, while removal waits for dependent cleanup.
 
 Only services declared in `provides` may be registered by a plugin, including
 nested scopes. Services are not published to the agent until setup and the
@@ -131,13 +138,13 @@ mount's child services.
 
 ### Domain profiles
 
-`Profile` (`profiles.py`) composes immutable declarative fields and plugin rows
+`Profile` (`src/linch/profiles.py::Profile`) composes immutable declarative fields and plugin rows
 by stable id. `RunOptions(profile=...)` selects the composed definition. Before
 the loop starts, the session enters a run scope: a shallow configuration copy of
 the same Agent shares its provider, stores, and host dependencies, while tools,
 permission configuration, hook registrations, tool pipeline listener lists,
 turn-stopping registrations, and context event listener lists are local to the
-run. `agent.use` mounts selected plugins in that scope. Existing hooks and host
+run. Profile setup mounts selected plugins in that scope. Existing hooks and host
 service objects retain their normal shared ownership. No listener is registered
 unfiltered on the parent agent bus.
 
@@ -145,8 +152,9 @@ The effective tool registry intersects the profile allow/deny names and any
 session tool override. A deny-only permission layer reinforces the restriction;
 host permission rules still decide authorization. Role instructions append to
 the existing system prompt, schemas use `OutputSchema`, and budget limits create
-a fresh `RunBudget`. Cleanup restores the session's original Agent and overrides
-and disposes the scope, including on early iterator close or setup failure.
+a fresh `RunBudget`. Cleanup releases the run-local binding and disposes its
+scope, leaving the session's Agent and explicit overrides unchanged, including
+on early iterator close or setup failure.
 Detached work releases the scope when its last task finishes; retained child
 sessions retain their services until released. Session close notifications and
 task callbacks trigger disposal without requiring Agent shutdown. The parent
@@ -155,7 +163,8 @@ are relayed by the kernel's isolated scope so run-local plugin dependencies
 still activate and deactivate normally.
 
 Direct callers pass the same profile on resume; workers resolve it from their
-supplied `profiles` definitions on queue launch and takeover. `loop/contracts.py` records its id, version, and
+supplied `profiles` definitions on queue launch and takeover.
+`src/linch/loop/contracts.py::_build_run_contract` records its id, version, and
 SHA-256 content hash in `RunContract.payload.run_options.profile`. The existing
 whole-contract compatibility check rejects omission or a changed definition,
 including plugin execution order. `profile=None` adds no contract fields or
@@ -165,25 +174,27 @@ request changes. See [domain profiles](../usage/profiles.md) for the API.
 
 ## What builds on the kernel
 
-- **Reversible registration** — `ToolRegistry.register/replace` return a
+- **Reversible registration** — `src/linch/tools/registry.py::ToolRegistry.register/replace` return a
   `Disposable` (see [Tool Protocol](./tool-protocol.md)).
-- **Open tool pipeline** — `ToolPipeline` (`tools/pipeline.py`) exposes
+- **Open tool pipeline** — `ToolPipeline` (`src/linch/tools/pipeline.py::ToolPipeline`) exposes
   `tools/pre-execute → tools/execute → tools/post-execute`. `tools/execute` is a
-  **waterfall** so wrappers (`tools/wrappers/`: metrics, timeout) wrap the inner
+  **waterfall** so wrappers (`src/linch/tools/wrappers/`: metrics, timeout) wrap the inner
   dispatch. Every `next` handle is single-use: a wrapper must await it exactly
   once, and omitting it intentionally short-circuits. The scheduler routes each
   call through the pipeline only when a listener is attached; otherwise it calls
   `tool.execute` directly, so behavior is byte-identical when unused. Active
   listeners need stable policy identity for durable resume.
   The pipeline runs after canonical input validation and permission evaluation;
-  its listeners must treat `ToolExecution.input`, `tool`, and authorization
-  decisions as immutable. Authorization-sensitive rewrites belong in
+  its listeners must treat `ToolExecution.input`, `tool`, and authority-bearing
+  context fields as immutable. Authorization-sensitive rewrites belong in
   `PreToolUse`, where input is validated and checked again before permission.
-- **Capability seam** — `ExecutionBackend` (`execution/backend.py`) bundles a
-  `shell` and a `fs` (filesystem) transport as one world; `LocalExecutionBackend`
-  is the default provider and `RemoteExecutionBackend` bundles supplied
-  transports. Consumers (e.g. `BashTool`) depend on the seam, not a concrete
-  backend (Definition → Provider → Consumer).
+- **Capability seam** — `ExecutionBackend` (`src/linch/execution/backend.py::ExecutionBackend`)
+  bundles a `shell` and a `fs` (filesystem) transport as one world.
+  `LocalExecutionBackend` supplies a host-local shell and disk filesystem when
+  explicitly constructed; it is not implicitly installed on a bare `Agent`.
+  `RemoteExecutionBackend` bundles supplied transports. Consumers (e.g.
+  `BashTool`) depend on the seam, not a concrete backend (Definition → Provider
+  → Consumer).
 - **Event forward-compat** — unknown persisted events tagged `ignorable` round-
   trip through an `IgnorableEvent` sentinel instead of aborting load (see
   [Event Taxonomy](./events.md)).
@@ -194,7 +205,7 @@ request changes. See [domain profiles](../usage/profiles.md) for the API.
   off; returning a `Disposable` makes reversal uniform and idempotent instead of
   bespoke per registry.
 - **Extend on the bus, don't edit the loop (Open–Closed).** New tool behavior is
-  a listener, not a new branch threaded through `scheduler.py`.
+  a listener, not a new branch threaded through `src/linch/scheduler.py`.
 - **Per-agent scope, not a global.** The `Context` is the multi-tenant mechanism:
   shared state is scoped to an agent tree and disposed with it.
 

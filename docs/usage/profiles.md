@@ -1,5 +1,7 @@
 # Domain profiles
 
+Use `Profile` when runs on one agent need different versioned roles and configuration.
+
 [← Usage guide](./README.md)
 
 Use `Profile` to select a versioned role and configuration for each run on an
@@ -33,10 +35,14 @@ async def answer(profile, question):
     session = await agent.session()
     return [event async for event in session.run(question, RunOptions(profile=profile))]
 
-support_events, billing_events = await asyncio.gather(
-    answer(support, "How do I reset access?"),
-    answer(billing, "Where is my invoice?"),
-)
+async def main():
+    support_events, billing_events = await asyncio.gather(
+        answer(support, "How do I reset access?"),
+        answer(billing, "Where is my invoice?"),
+    )
+    await agent.close()
+
+asyncio.run(main())
 ```
 
 Each conversation needs its own session; a session still admits one active run.

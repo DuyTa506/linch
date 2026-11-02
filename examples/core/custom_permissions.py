@@ -1,7 +1,7 @@
 """Custom permissions — all modes and rule types.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/02_custom_permissions.py
+    OPENAI_API_KEY=sk-... python examples/core/custom_permissions.py
 
 Demonstrates:
   1. mode="skip-dangerous"         — auto-approve everything (development/testing)
@@ -27,11 +27,15 @@ from __future__ import annotations
 import asyncio
 import os
 
-from linch import Agent
-from linch.config import FeatureFlags
-from linch.permissions import BashRule, PathRule, ToolRule
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import workspace_tools
+from linch import (
+    Agent,
+    BashRule,
+    FeatureFlags,
+    InMemorySessionStore,
+    PathRule,
+    ToolRule,
+    workspace_tools,
+)
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"

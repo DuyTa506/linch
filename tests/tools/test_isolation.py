@@ -1,4 +1,4 @@
-"""IsolationBackend protocol + TempDirIsolation (ROADMAP Phase 2.2).
+"""IsolationBackend protocol + TempDirIsolation.
 
 Parallel subagents share one cwd today, so real-disk edits to the same relative
 path collide. The isolation seam gives each branch its own working directory.

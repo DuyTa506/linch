@@ -1,5 +1,7 @@
 # Quickstart
 
+Use this path to run your first offline agent, then add a provider, tools, and persistence.
+
 [<- Usage guide](./README.md)
 
 This path is for a new developer who wants to get a Linch agent running first,
@@ -8,7 +10,7 @@ provider once the event loop shape is clear.
 
 ## 1. Install
 
-From PyPI:
+For a published release:
 
 ```bash
 pip install linch
@@ -33,20 +35,21 @@ This verifies the SDK shape without an API key or network call.
 
 Save as `quickstart_offline.py`:
 
+<!-- linch:offline -->
+
 ```python
 import asyncio
 
 from linch import Agent
-from linch.config import FeatureFlags
+from linch import FeatureFlags
 from linch.ext.evals import ScriptedProvider, TextTurn
-from linch.sessions import InMemorySessionStore
+from linch import InMemorySessionStore
 
 
 agent = Agent(
     model="demo-model",
     provider=ScriptedProvider([TextTurn(text="Hello from Linch.")]),
     session_store=InMemorySessionStore(),
-    permissions={"mode": "skip-dangerous"},
     features=FeatureFlags(skills=False, subagents=False, mcp=False),
     result_offload=None,
 )
@@ -57,6 +60,7 @@ async def main() -> None:
     async for event in session.run("Say hello"):
         if event.type == "result":
             print(event.final_text)
+    await agent.close()
 
 
 asyncio.run(main())
@@ -89,14 +93,13 @@ import asyncio
 import os
 
 from linch import Agent
-from linch.sessions import InMemorySessionStore
+from linch import InMemorySessionStore
 
 
 agent = Agent(
     model="gpt-5",
     openai_api_key=os.environ["OPENAI_API_KEY"],
     session_store=InMemorySessionStore(),
-    permissions={"mode": "skip-dangerous"},
 )
 
 
@@ -105,6 +108,7 @@ async def main() -> None:
     async for event in session.run("Explain Linch in one paragraph."):
         if event.type == "result":
             print(event.final_text)
+    await agent.close()
 
 
 asyncio.run(main())
@@ -120,8 +124,8 @@ Tools are plain Python objects. The `@tool` decorator is the shortest path:
 
 ```python
 from linch import Agent, tool
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
+from linch import InMemorySessionStore
+from linch import empty_tools
 
 
 @tool(description="Return the current status for a service.")
@@ -165,7 +169,6 @@ agent = Agent(
     model="gpt-5",
     session_store=PostgresSessionStore(dsn),
     run_store=PostgresRunStore(dsn),
-    permissions={"mode": "skip-dangerous"},
 )
 # At application shutdown:
 await agent.close()

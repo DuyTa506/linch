@@ -5,6 +5,37 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## 3.0.2 — 2026-11-02
+
+- Add the `build-agent-with-linch` skill, `linch skill install`, and Vietnamese
+  translations of the README and usage guide.
+- Stop tracking internal planning notes.
+
+- Check shipped example imports and run commands against the supported surface.
+  Correct supported imports, Glob inputs and registration in the budget demo,
+  interruption before durable resume, empty subagent tool-list display, and the
+  provider template's capability claims. Examples that need private helpers move
+  to `examples/internals`, which stays out of the wheel.
+
+- Export `ProviderRequest`, `SystemBlock`, `BashTool`, and `DockerBackend` lazily
+  from `linch`. These four additions are an owner-approved exception to the
+  MINOR rule in `docs/versioning.md`, as with `Agent.reload_skills()` in 3.0.1.
+
+- Keep each MCP server's transport and session contexts in one dedicated owner
+  task so stdio and HTTP connections can close safely from any task, including
+  `Agent.close()`. Drain startup failures, cancellation, and concurrent shutdowns.
+
+- Add usage-page use cases, exact API headings with preserved anchors, and
+  source-checked troubleshooting for configuration, tools, authentication, and resume.
+
+- Check imports and Python syntax across shipped docs, document supported optional
+  integration modules, and exercise the marked quickstart without network or extras.
+
+- Add a generated, offline API reference covering supported root and explicit extension exports.
+
+- Ship maintained usage and architecture docs plus examples with the wheel. Add
+  `linch docs path` to locate them, including a source-checkout fallback for editable installs.
+
 ## 3.0.1 — 2026-11-02
 
 This patch release adds `Agent.reload_skills()`, an owner-approved
@@ -148,7 +179,7 @@ Found by the 3.0 release reviews. 3.0 fixes them all; there is no 2.x backport.
   pools use a clean asyncpg reset callback. The hot-path loop also avoids
   duplicate checkpoint serialization traversals. A D15 msgspec checkpoint
   prototype measured below 1% on the scale cases and was dropped. See the
-  [hot-path measurements](docs/superpowers/measurements/2026-10-31-hot-path.md).
+  hot-path measurements.
 
 - Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
 

@@ -57,6 +57,7 @@ from .types import ToolResultBlock, ToolUseBlock
 # conflicts and admitting them in a later batch — non-parallel calls stay hard
 # barriers. Result blocks/hooks remain provider-ordered either way.
 ToolBatchingStrategy = Literal["greedy", "maximal"]
+"""Strategy selecting greedy or maximal compatible tool batches."""
 
 logger = logging.getLogger(__name__)
 

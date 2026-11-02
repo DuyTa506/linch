@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "linch"
-version = "3.0.1"
+version = "3.0.2"
 description = "Production grade agentic harnessing SDK."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,8 +56,35 @@ dev = [
   "pyright>=1.1",
 ]
 
+[tool.hatch.build]
+exclude = [
+  "**/__pycache__",
+  "**/*.pyc",
+  "docs/superpowers",
+  "docs/ROADMAP.md",
+  "examples/internals",
+  "**/.*",
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/linch"]
+only-include = [
+  "src/linch",
+  "docs/usage",
+  "docs/architecture",
+  "docs/architecture.md",
+  "docs/usage.md",
+  "docs/migration-3.0.md",
+  "docs/versioning.md",
+  "examples",
+  "skills",
+]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"docs" = "linch/_docs/docs"
+"examples" = "linch/_docs/examples"
+"skills" = "linch/_skills"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,5 +1,7 @@
 # Skills and Subagents
 
+Use this page to understand skill invocation, subagent execution, and their lifecycle.
+
 > Part of the [Linch architecture guide](./README.md).
 
 **Skills** are loaded from `.linch/skills/*/SKILL.md`; built-in skills
@@ -7,7 +9,7 @@ such as `verify` are also registered unless a disk skill uses the same name.
 Each file has YAML frontmatter (`name`, `description`, `allowed_tools`,
 `model`) and a markdown body. When a skill is invoked, the body is
 injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`.
-Gated by `FeatureFlags(skills=True)`. Linch 2.0's bare `Agent` sets this flag
+Gated by `FeatureFlags(skills=True)`. A bare `Agent` sets this flag
 to `False`, so an SDK embedder does not discover project instructions merely
 because its process is running in a checkout.
 
@@ -24,9 +26,21 @@ provider-view-only reminder and does not append to `full_history`.
 
 **Subagents** are defined in `.linch/agents/*.md`; built-in named agents
 such as `verification` are also registered unless a disk agent uses the same
-name. `subagents/runner.py` creates a child agent with its own tool overlay and
-system prompt. The child's system blocks are computed from its own tool names —
-not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
+name. A fresh child session has a filtered tool overlay. Its system blocks are built
+from the child's tool names, retaining applicable host-provided system instructions,
+and the child role is appended. A fork instead reuses the parent's system blocks and
+conversation view. Gated by `FeatureFlags(subagents=True)`.
+
+The model calls `Subagent` with required string fields `description` (a nonblank
+label) and `prompt` (a nonempty task), and optional `subagent_type` (string)
+and `run_in_background` (boolean). Omit the type for the general-purpose child;
+include all relevant task context because a fresh child has no parent history.
+`run_in_background` defaults to `false`; background execution must be enabled
+on the agent. For example, a foreground call can use:
+
+```json
+{"description": "Review parser tests", "prompt": "Check parser boundary tests and report gaps.", "subagent_type": "verification"}
+```
 
 `reload_subagents()` replaces existing tool registrations in their original slots,
 preserving the order of tools registered afterward, including MCP tools. Reloads
@@ -53,15 +67,15 @@ completion may arrive out of order; result events and provider tool results
 retain the original provider call order. `SubagentContinueTool` and `TaskStopTool`
 keep their existing concurrency declarations.
 
-**MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
+**MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. Agent-owned connections close with `agent.close()`; a host using `connect_mcp_servers()` directly owns the returned connection and closes it with `await connection.close()`. Automatic agent connection is gated by `FeatureFlags(mcp=True)`.
 
 ### Deep agent preset (`ext/deep_agent/`)
 
-`create_deep_agent(model, profile, durable, coordinator, cwd, ...)` is an
+`create_deep_agent(model=..., profile=..., durable=..., coordinator=..., cwd=..., ...)` is an
 explicit factory that assembles a full deep-agent configuration in one call:
 task tools, a specialist subagent roster (researcher, planner, implementer),
-durable stores, a persistent `/memories` filesystem, and a deepened system
-prompt. The default `balanced` profile bounds a run to 64 turns and 1,000,000
+file-memory context, and a deepened system prompt. Durable stores and the
+filesystem backend are supplied by the host. The default `balanced` profile bounds a run to 64 turns and 1,000,000
 tokens while retaining workers; `coordinator` has the same bounds and strips
 heavy tools from the parent. `unbounded` is an explicit escape hatch for a
 host that owns equivalent lifetime and cost controls.
@@ -95,8 +109,8 @@ sequenceDiagram
     end
 ```
 
-- `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends. Explicit release or opt-in `max_idle_sessions` eviction can release an idle child; continuation requires that the child remain live.
-- `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
+- `SubagentTool` retains foreground children when `Agent(retain_subagents=True)`; background children are always retained. Explicit release or opt-in `max_idle_sessions` eviction can release an idle child; continuation requires that the child remain live.
+- `session.workers: dict[str, WorkerHandle]` indexes retained foreground and background workers by `worker_id`.
 - **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task calls `Session.notify()` with a stable delivery ID before recording its `BackgroundWorkerEvent`. The default notification is in-memory; durable inbox mode persists an already-enqueued completion across restart.
 - The loop drains the selected next-turn channel at the top of each new turn, yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
 - `SubagentContinueTool` resolves a worker by exact id or a unique display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`. An ambiguous display name is rejected with the matching worker ids; callers must use the id.
@@ -109,17 +123,20 @@ sequenceDiagram
 
 ### Run budgets (`budget.py`)
 
-`RunBudget` is a plain mutable accumulator capping tokens and/or USD for a run
-**and its whole subagent tree**. Resolution order in `run_loop`:
-`RunOptions.budget` → `session.inherited_budget` (set on child sessions by
-`run_subagent` from the parent's `active_budget`) → `Agent(budget=...)`. The
-loop charges the budget after every provider turn (next to the `UsageEvent`)
-and checks `exceeded` before each turn; exhaustion emits
-`BudgetEvent(kind="exceeded")` → `ErrorEvent(BudgetExceededError)` →
-`ResultEvent(subtype="error")` and stops gracefully — history intact, session
-reusable. A `BudgetEvent(kind="warning")` fires once per budget object at
-`warn_ratio` (default 0.9). Because parent and children charge the *same
-object*, child spending is visible to the parent's next pre-call check.
+`RunBudget` is a mutable accumulator shared across a run and its subagent tree.
+Resolution order is `RunOptions.budget`, then the child session's inherited
+budget, then `Agent(budget=...)`. Primary model calls and auxiliary compaction
+calls charge the same budget using their usage receipts. Before each physical
+model delivery, admission checks the current budget and blocks further calls
+when it is exhausted. A capped budget also blocks new calls after usage becomes
+unknown. Budget warnings fire once per budget object at `warn_ratio` (default
+0.9).
+
+Admission does not reserve the cost of a call: an admitted call, or concurrent
+calls already admitted, can overshoot a limit. An admitted final response may
+succeed even when its charge exhausts the budget. If another delivery is needed,
+the budget fence stops it. See [model-call accounting](../usage/events.md#budget-fences-and-compaction)
+for receipt and recovery details.
 
 ### Workflow engine (`ext/workflow/`)
 
@@ -187,23 +204,20 @@ subagents via `wf.agent` / `wf.step` / `wf.interrupt` / `wf.parallel` /
 
 ## Design rationale
 
-- **A child computes its own system blocks from its own tools — never copies the
-  parent's.** A subagent's prompt must describe the toolset it actually has;
-  inheriting the parent's prompt would mis-describe its capabilities (and a
-  tool-stripped coordinator would leak instructions for tools the child shouldn't
-  use).
+- **A fresh child computes tool-aware system blocks from its own tools.**
+  Host instructions are still included and should account for the child role.
+  Forks deliberately reuse the parent prefix.
 - **Background workers don't block the turn.** Spawning via `asyncio.create_task` and
   returning an ack immediately keeps the parent responsive; results re-enter at a
   *fixed chokepoint* (drained at the top of the next turn) rather than racing into
   mid-turn state — deterministic ordering instead of a callback free-for-all.
-- **`retain=True` makes workers continuable.** Keeping the child session alive turns a
+- **Retention makes workers continuable.** Keeping the child session alive turns a
   one-shot subagent into a long-lived teammate (`continue_subagent` re-drives it with
   its full prior `provider_view`), without forcing every caller to manage session
   lifecycles.
 - **The budget is one shared mutable object across the whole tree.** Children charge
-  the *same* `RunBudget` the parent holds, so a fan-out can't escape the cap and child
-  spend is visible to the parent's next pre-call check — a per-child copy would let the
-  tree overspend silently.
+  the *same* `RunBudget` the parent holds, so their spending is visible to later
+  admission checks. Already admitted concurrent calls can overshoot the limit.
 - **Coordinator mode strips heavy tools on purpose.** Removing `Edit`/`Write`/`Bash`/…
   from the parent forces delegation: the coordinator orchestrates, workers execute.
   That separation is a safety rail, not a limitation.

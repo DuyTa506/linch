@@ -16,12 +16,14 @@ if TYPE_CHECKING:
     from ..permissions import Principal
 
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+"""Recursive JSON-compatible value accepted by tool output contracts."""
 RenderOutput: TypeAlias = Callable[[JsonValue], str]
 
 _STRICT_JSON_MAX_DEPTH = 100
 
 ToolScope = Literal["read", "write", "exec"]
 ResourceMode = Literal["read", "write"]
+"""Read or write access mode for a declared tool resource."""
 
 
 @dataclass(frozen=True, slots=True)

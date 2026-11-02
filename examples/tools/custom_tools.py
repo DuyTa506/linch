@@ -1,7 +1,7 @@
 """Custom tools — five patterns.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/01_custom_tools.py
+    OPENAI_API_KEY=sk-... python examples/tools/custom_tools.py
 
 Demonstrates:
   1. Read-only function tool  — @tool, parallel=True, no side effects
@@ -19,11 +19,16 @@ from __future__ import annotations
 import asyncio
 import os
 
-from linch import Agent, tool
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore
-from linch.tools.base import ToolContext, ToolResult
-from linch.tools.registry import empty_tools
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    SystemPromptConfig,
+    ToolContext,
+    ToolResult,
+    empty_tools,
+    tool,
+)
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"

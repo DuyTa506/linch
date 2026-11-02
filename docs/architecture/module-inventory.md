@@ -1,14 +1,17 @@
 # Module Inventory
 
+> Use this page when locating a source module or extension and checking its
+> responsibility.
+
 > Part of the [Linch architecture guide](./README.md).
 
-This inventory follows the current `src/linch` tree (the contributor guide
-contains the complete tracked `git ls-files src tests` listing). Names in the
-top-level package are public only when they are in `linch.__all__`; submodule
-paths and underscore-prefixed names are implementation details unless a page
-explicitly documents them as an adapter seam. Durable memory is file-backed
-through `context/file_memory.py`, and OpenTelemetry instrumentation is kept in
-the private `_telemetry.py` adapter.
+This inventory follows the current `src/linch` tree. Names in the
+top-level package are public only when they are in `linch.__all__`. Explicit
+`linch.ext.*` extensions and the optional integration modules listed in
+`docs/versioning.md` are supported at those paths; other submodule paths and
+underscore-prefixed names are private implementation details. Durable memory
+is file-backed through `context/file_memory.py`, and OpenTelemetry
+instrumentation is kept in the private `_telemetry.py` adapter.
 
 ## Kernel and run loop
 
@@ -118,6 +121,8 @@ durable.
 |---|---|
 | `tools/base.py` | Duck-typed tool protocol, `ToolContext`, `ToolResult`, output contracts, scopes, resource accesses, citations, and stable idempotency keys. |
 | `tools/function.py` | `FunctionTool` and `tool()` adapter; synchronous functions run in bounded blocking workers. |
+| `tools/execution.py` | Local and Docker shell backends (`LocalBackend`, `DockerBackend`) and `ExecResult`. |
+| `tools/file_tracker.py` | `FileReadTracker` whole-file and line-range read evidence used by tools and hooks. |
 | `tools/registry.py` | `ToolRegistry`, reversible registration, `empty_tools()`, and `workspace_tools()`. |
 | `tools/search.py` | `ToolSearchPlugin` request-catalog deferral, keyword/select search, loaded-tool persistence, and deferred-call guards. |
 | `tools/pipeline.py` | Open `tools/pre-execute` → `execute` → `post-execute` pipeline. |
@@ -131,12 +136,12 @@ durable.
 | `tools/_worker_utils.py` | Shared worker id/display-name resolution. |
 | `tools/isolation.py` | Per-subagent isolation backend and temporary directory support. |
 | `tools/wrappers/` | Optional timeout and metrics execution wrappers. |
-| `permissions/engine.py` | Canonical-input permission decisions, approval callbacks, and durable same-turn decision handling. |
+| `permissions/engine.py` | Canonical-input permission decisions and approval callbacks. |
 | `permissions/rules.py` | `ToolRule`, `PathRule`, and `BashRule`, including role conditions. |
 | `permissions/ruleset.py` | Layered permission rule sets. |
 | `permissions/principal.py` | Immutable `Principal(tenant, user, roles)` identity used by one run and its tool calls. |
 | `context/builder.py` | Async context-builder protocol, context budgets, builder chains, and ephemeral request context. |
-| `context/file_memory.py` | `FileMemoryContextBuilder`, which caches `/memories/MEMORY.md` for one run and injects at most 200 lines. |
+| `context/file_memory.py` | `FileMemoryContextBuilder`, which caches `/memories/MEMORY.md` for one run and caps its memory index at the first 200 content lines. |
 | `rag/__init__.py` | Request-scoped retrieval protocol (`RagConnector`, `RetrievedChunk`), sourced context injection, checkpointed retrieval state, and optional citation grounding on `TurnStopping`. |
 | `filesystem/backend.py` | Virtual `FileBackend`, path normalization, scoped backends, in-memory state, and composite routing. |
 | `filesystem/disk.py` | Disk-backed virtual files. |
@@ -180,7 +185,7 @@ support those rows:
 | `kernel/events.py` | Typed event bus and lifecycle dispatch modes. |
 | `kernel/plugins.py` | Plugin protocol, dependency activation, scope audit, and mount disposal. |
 | `loop_guard/__init__.py` | Loop-guard protocol and decision exports. |
-| `loop_guard/guard.py` | Repeated-call, failure-streak, and max-turn detection. |
+| `loop_guard/guard.py` | Repeated-call and failure-streak detection. Max-turn handling is in the loop terminal path. |
 | `mcp/__init__.py` | Optional MCP adapter exports. |
 | `mcp/client.py` | MCP client session and transport lifecycle. |
 | `mcp/config.py` | MCP server configuration. |
@@ -189,7 +194,7 @@ support those rows:
 | `mcp/result.py` | MCP result normalization. |
 | `mcp/tool.py` | MCP tool adapter. |
 | `permissions/__init__.py` | Permission engine, rule, ruleset, and principal exports. |
-| `permissions/keys.py` | Canonical permission-key construction. |
+| `permissions/keys.py` | Canonical permission-key construction and current-wire decision codecs. |
 | `sessions/__init__.py` | Session-store and session helper exports. |
 | `sessions/fork.py` | Validated portable session forks. |
 | `sessions/tasks.py` | Session task rows and task-id allocation. |
@@ -203,7 +208,7 @@ support those rows:
 
 | Path | Responsibility |
 |---|---|
-| `loop_guard/` | Bounded repeated-call/failure/max-turn detection and checkpointable guard state. |
+| `loop_guard/` | Bounded repeated-call/failure detection and checkpointable guard state. |
 | `execution/` | Unified shell/filesystem execution capability seam and local/remote implementations. |
 | `testing/` | Reusable provider, tool, mailbox, filesystem, and isolation contract checks. |
 
@@ -220,8 +225,8 @@ support those rows:
 | `ext/__init__.py` | Documents the explicit extension namespace without exporting extension names into `linch.__all__`. |
 
 File memory uses `context/file_memory.py` and `FileBackend`; queue dispatch and
-schedules use `linch.worker`. The project-scaffolding CLI is implemented by
-`ext/scaffold/__main__.py` and is tested under `tests/cli`; there is no separate
-`cli/` package in the runtime tree.
+schedules use `linch.worker`. The project-scaffolding CLI is exposed by
+`ext/scaffold/__init__.py`, with `ext/scaffold/__main__.py` as its `python -m`
+shim, and is covered by `tests/ext/scaffold/test_scaffold_cli.py`.
 
 Back to the [architecture index](./README.md).

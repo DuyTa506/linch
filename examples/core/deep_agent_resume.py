@@ -17,6 +17,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from contextlib import aclosing
 from uuid import uuid4
 
 DEEPSEEK_BASE = "https://api.deepseek.com"
@@ -33,8 +34,7 @@ def _api_key() -> str:
 
 
 def _provider():
-    from linch.providers import OpenAIChatCompletionsProvider
-    from linch.providers.openai_chat import OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     return OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=_api_key(), base_url=DEEPSEEK_BASE)
@@ -49,12 +49,12 @@ async def run_durable_planning(work_dir: str) -> None:
     and can be resumed after an interruption."""
     from linch import (
         CompositeFileBackend,
-        PostgresFileBackend,
         PostgresRunStore,
-        PostgresSessionStore,
         StateFileBackend,
     )
     from linch.ext.deep_agent import create_deep_agent
+    from linch.filesystem.postgres import PostgresFileBackend
+    from linch.sessions.postgres import PostgresSessionStore
 
     dsn = os.environ["LINCH_POSTGRES_DSN"]
     session_id = f"demo-planning-{uuid4().hex}"
@@ -76,30 +76,37 @@ async def run_durable_planning(work_dir: str) -> None:
     print("[deep/planning] first run …")
     agent = durable_agent()
     run_id = ""
+    interrupted = False
 
     try:
         session = await agent.session(id=session_id)
-        async for event in session.run(
-            "Use the planner subagent to create a 3-step plan for building "
-            "a Python CLI calculator. Save the plan to /memories/calc-plan.md "
-            "and return a one-sentence summary."
-        ):
-            if event.type == "system":
-                run_id = event.run_id
-                print(f"  run_id={run_id}")
-            elif event.type == "tool_call_start":
-                label = event.input.get("description", "") or event.input.get("name", "")
-                print(f"  → {event.tool_name}({label})")
-            elif event.type == "tool_call_end" and event.is_error:
-                print(f"  ✗ {event.tool_name}: {event.result[:80]}")
-            elif event.type == "result":
-                print(f"  result: {event.final_text}")
-            elif event.type == "error":
-                print(f"  ERROR: {event.error.get('message', '')}")
+        async with aclosing(
+            session.run(
+                "Use the planner subagent to create a 3-step plan for building "
+                "a Python CLI calculator. Save the plan to /memories/calc-plan.md "
+                "and return a one-sentence summary."
+            )
+        ) as events:
+            async for event in events:
+                if event.type == "system":
+                    run_id = event.run_id
+                    print(f"  run_id={run_id}")
+                elif event.type == "tool_call_start":
+                    interrupted = True
+                    label = event.input.get("description", "") or event.input.get("name", "")
+                    print(f"  → {event.tool_name}({label})")
+                    break
+                elif event.type == "tool_call_end" and event.is_error:
+                    print(f"  ✗ {event.tool_name}: {event.result[:80]}")
+                elif event.type == "result":
+                    print(f"  result: {event.final_text}")
+                elif event.type == "error":
+                    print(f"  ERROR: {event.error.get('message', '')}")
     finally:
         await agent.close()
 
-    if not run_id:
+    if not (interrupted and run_id):
+        print("[deep/planning] no resumable interruption recorded")
         return
 
     # Simulate a process restart: fresh agent instance, same explicit Postgres DSN.

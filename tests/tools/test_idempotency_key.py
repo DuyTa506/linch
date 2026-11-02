@@ -1,4 +1,4 @@
-"""ToolContext.idempotency_key (ROADMAP Phase 3.4).
+"""ToolContext.idempotency_key.
 
 Durable tool execution is at-least-once: a side effect that runs before its
 completion record is durable re-runs on resume. Linch supplies a stable

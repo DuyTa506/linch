@@ -1,5 +1,7 @@
 # Minimal production wiring
 
+Use this checklist when embedding Linch in a service with durable runs and shutdown handling.
+
 This page is the short version of embedding Linch inside a long-running async
 service: persistence, streaming, human-in-the-loop, resume after a restart,
 graceful shutdown, and blast-radius controls. Each section links to the page
@@ -9,36 +11,40 @@ Linch is a **library**. Your service owns the process and HTTP lifecycle;
 Linch owns agent execution. The optional `linch.worker` runtime dispatches
 runs and recurring work across a worker fleet.
 
-For a local database, follow the [Docker Postgres setup](./quickstart.md#5-keep-state-when-the-process-restarts).
+For a local database, follow the
+[Docker Postgres setup](./quickstart.md#5-keep-state-when-the-process-restarts).
 The host reads `LINCH_POSTGRES_DSN` and passes it to each store; the SDK does not
 read this variable automatically.
 
 ## 1. Build the agent once, reuse it
 
-An `Agent` holds configuration and its own registries — construct it at startup
-and share it across requests/tenants. There is no process-global mutable state,
-so independent `Agent` instances run concurrently in one process (multi-tenant
-safe).
+An `Agent` holds configuration, registries, context, and live sessions —
+construct it at startup and share it across requests that use that configuration.
+Use separate agents when tenants need different provider, tool, or policy
+configuration; per-run identity and dependencies can remain request-scoped.
 
 ```python
-import os
 from linch import Agent, PostgresRunStore
 from linch.sessions.postgres import PostgresSessionStore
 
-dsn = os.environ["LINCH_POSTGRES_DSN"]
+dsn = "<Postgres DSN>"
 
 agent = Agent(
-    model="claude-opus-4-8",
+    model="gpt-5",                         # the default provider is OpenAI
     session_store=PostgresSessionStore(dsn),  # conversation state
-    run_store=PostgresRunStore(dsn),              # checkpoints for resume
+    run_store=PostgresRunStore(dsn),         # checkpoints and run events
     cwd="var/workspace",
 )
 ```
 
-- `session_store` persists conversation state; `run_store` persists per-run
-  checkpoints (required for resume). In-memory variants (`InMemorySessionStore`,
-  `InMemoryRunStore`) are for tests. Postgres-backed stores ship under the
-  `[postgres]` extra.
+- `session_store` persists conversation history; `run_store` persists per-run
+  checkpoints and events (required for durable resume). The built-in durable
+  adapters are Postgres; `InMemorySessionStore` and `InMemoryRunStore` are for
+  tests and development. Install the Postgres adapters with the `[postgres]`
+  extra.
+- A virtual filesystem is disabled by default. If offloaded results or files
+  must survive across sessions or processes, enable the filesystem feature and
+  use `PostgresFileBackend` from [Filesystem](./filesystem.md).
 - See [Agent & session](./agent.md).
 - For Postgres run persistence, optional worker leases, and stream reconnect by
   sequence, see [Run stores](./run-stores.md).
@@ -59,53 +65,66 @@ async for event in session.run(user_prompt):
 ```
 
 See [Events](./events.md). For a compact post-run health surface (slow/failing
-tools, context pressure, cost, recovery counters) build a
+tools, context pressure, cost, and recovery counters), build a
 [`RunReport`](./events.md).
 
 ## 3. Human-in-the-loop, durably
 
-When a tool needs approval the stream yields a `PermissionRequestEvent` and the
-run pauses with a checkpoint already written. Persist the decision through your
-own UI, then resume — the decision replays and the tool is not re-prompted.
+When a tool needs approval Linch yields a `PermissionRequestEvent` before it
+invokes the configured `can_use_tool` callback. The event is a notification, not
+a response channel: after the consumer receives it, continuing the iterator
+invokes the callback, which must resolve before tool execution. Have the callback
+await your UI or policy service. With no callback, an ask is denied. Resolved
+allow/deny decisions are checkpointed and replayed after an interrupted run
+resumes. For durable runs, give the callback a stable
+`resume_policy_id` (and, when needed, `resume_policy_version`) so the run
+contract can be verified after a restart.
 
 ```python
 from linch import PermissionRequestEvent
 
 async for event in session.run(prompt):
     if isinstance(event, PermissionRequestEvent):
-        run_id = session.active_run_id     # capture before the loop ends
-        # ... ask a human out-of-band, store allow/deny against run_id ...
+        # Notify the UI; can_use_tool owns the eventual allow/deny response.
+        await publish_approval(event.requests, session_id=session.id,
+                               run_id=session.active_run_id)
 ```
 
-Permissions and durable decisions: [Hooks](./hooks.md) and the permissions
-section of [Agent & session](./agent.md).
+Permissions and durable decisions: [Tools](./tools.md#permissions) and the
+permissions section of [Agent & session](./agent.md).
 
 ## 4. Resume after a restart
 
-With a `run_store`, a run interrupted by a deploy or crash resumes from its last
-checkpoint after its version-3 run contract is verified. Permission decisions and
-durably recorded tool completions replay; a side effect that happened before
-its completion record became durable may execute again. Tool integrations must
-use `ctx.idempotency_key` to reconcile this at-least-once boundary.
+With a `run_store`, a nonterminal run interrupted by a deploy or crash resumes
+from its last checkpoint after its current run contract is verified. Rebuild the
+agent with the same durable stores and approval policy, then reattach the
+original session by ID. Persisted permission decisions and tool completions
+replay; an external side effect that happened before its completion record became
+durable may execute again. Tool integrations must use `ctx.idempotency_key` to
+reconcile this at-least-once boundary. A tool whose start event is durable but
+whose end event is not is not rerun automatically: the model receives an error
+result saying the execution was interrupted.
 
 ```python
+session = await agent.session(id=session_id)  # reattach the original session
 async for event in session.resume(run_id):
     await publish(event)
 ```
 
-Resume requires current wire-3 state and a verified execution contract.
-Pre-3.0, missing-version, unknown-version, and contractless runs are rejected;
-start a new run. Built-in Postgres stores reject incompatible
-existing schemas without upgrading them; use fresh databases. See the
-[3.0 migration guide](../migration-3.0.md).
+Resume requires current wire-version-3 state, a checkpoint, and a matching
+execution contract. Terminal runs, runs without checkpoints, and pre-3.0,
+missing-version, unknown-version, or contractless state are rejected; start a
+new run. Built-in Postgres stores reject incompatible existing schemas without
+upgrading them; use fresh databases. See the [3.0 migration guide](../migration-3.0.md).
 
 ## 5. Shut down without leaking work
 
-On shutdown, `await agent.close()` cancels background workers/tools and closes
-hooks. Hosts own OpenTelemetry providers: flush and shut them down after their
-agents have closed. To stop a single in-flight run, call
-`session.abort()` — a cooperative tool sees `ctx.signal` and the run ends with an
-`aborted` result.
+On shutdown, `await agent.close()` quiesces sessions, aborts and drains their
+owned workers/tools, then closes stores, providers, filesystem backends, and
+hooks that expose cleanup. Hosts own OpenTelemetry providers: flush and shut
+them down after their agents have closed. To stop a single in-flight run, call
+`session.abort()`; cooperative provider calls and tools observe the run's abort
+signal, and the run emits an `aborted` result after it unwinds.
 
 ```python
 try:
@@ -119,10 +138,18 @@ finally:
 These are mechanisms; you supply the policy.
 
 - **Budget** — `RunOptions(budget=RunBudget(max_tokens=..., max_cost_usd=...))`
-  caps a run and every subagent it spawns. See [Agent & session](./agent.md).
-- **Loop guard** — on by default; stops runaway tool/failure streaks.
-- **Permissions** — path/bash/tool rules; default-deny where it matters.
-- **Timeouts & retries** — `tool_timeout_ms`, `tool_retry` per tool.
+  blocks subsequent provider calls when the run or its shared subagent budget is
+  exhausted. An already admitted call can still consume its reported usage. See
+  [Agent & session](./agent.md).
+- **Loop guard** — enabled by default (`max_identical_tool_calls=3`,
+  `max_consecutive_failures=3`); it stops repeated identical tool calls or
+  consecutive all-failed tool batches.
+- **Permissions** — use `ToolRule`, `PathRule`, and `BashRule` with the
+  appropriate permission mode; unresolved asks are denied unless a
+  `can_use_tool` callback resolves them.
+- **Timeouts & retries** — `tool_timeout_ms` sets the agent default; a tool can
+  override it with `execution_timeout_ms`. `tool_retry` retries read tools and
+  only explicitly retryable write/exec tools; aborts are never retried.
 - **Provider concurrency** — `Agent(max_provider_concurrency=N)`, or your own
   `Limiter` for per-model quotas or a token bucket. This is the proactive
   counterpart to retry: retry reacts to a 429, a limiter avoids earning one. It
@@ -148,9 +175,9 @@ never imports PgQueuer; worker names are absent from `linch.__all__`.
 The topology is **API processes → one Postgres → N worker processes**. API
 processes call `enqueue_run`; they do not run the model loop. Postgres holds
 sessions, pending runs, checkpoints, sequenced events, schedule definitions and
-PgQueuer jobs. All stores and PgQueuer share the host's asyncpg pool within each
-process; each process creates its own pool. Reserve at least one pool connection
-per worker for LISTEN and enough additional connections for queries and runs.
+PgQueuer jobs. The stores and queue manager reuse the host's asyncpg pool within
+each process; each process creates its own pool. Reserve one pool connection per
+worker process for LISTEN and enough additional connections for queries and runs.
 
 ```python
 from linch import Agent, Principal, Profile, empty_tools
@@ -179,19 +206,18 @@ The factory is async and returns a **fresh agent per job**. The host chooses the
 tenant, provider, tools, policy and dependencies; reuse exactly `job.run_store`
 and `job.session_store`. The worker owns these adapters for its whole lifetime,
 verifies their schemas before dequeueing, and supplies the same borrowed `job.pool`
-to every factory. Per-job adapters add churn; unverified per-job pool handles
-also repeat schema initialization and advisory locking. Agent teardown preserves
-these shared adapters and leaves the host pool open. The host closes its real
-pool after workers have drained.
-For a dedicated stateless Linch pool, use `asyncpg.create_pool(..., reset=reset_connection)` with `async def reset_connection(conn): pass`.
-asyncpg retains internal transaction cleanup; Worker closes its LISTEN connection when its manager ends.
-This callback is unsafe for pools shared with application code that changes session state or registers listeners.
+to every factory. Per-job adapters add churn and repeat schema initialization.
+Agent teardown preserves these shared adapters and leaves the host pool open; the
+host closes its real pool after workers have drained. If a pool is shared with
+other application code, preserve that application's connection-reset and listener
+requirements.
 
 A worker reconnects after transient database or listener failure, with local
 exponential jitter capped at two seconds. Each retry rebuilds the manager and
 restores LISTEN on one fresh connection borrowed for serialized queue SQL;
-run/session writes use the remaining host pool. The previous cycle fully drains before its connection is
-closed, so delayed failure buffers cannot reconnect and hold a nonterminal job.
+run/session writes use the remaining host pool. The previous cycle fully drains
+before its connection is closed, so delayed failure buffers cannot reconnect and
+hold a nonterminal job.
 The existing stale-job recovery then reclaims interrupted work. Authentication,
 schema, and configuration failures still propagate. Startup and connection
 acquisition are bounded to two seconds per attempt.
@@ -239,24 +265,20 @@ all workers. `0` means unlimited; the default is one `default` run queue with
 unlimited concurrency. Queues must be registered on a worker to execute.
 These limits cap runs; use host limiters for provider request/token quotas.
 
-**Capacity.** On the tested shared six-core / 12-logical-CPU host, four-turn
-simulated runs achieved about **20 runs/s with one worker, 31 with four, and 25
-with eight** (RTT 1 ms, pool 16/process, one reader). Stable / first-bad offered
-rate brackets were **20–24, 32–40, and 24–32 runs/s**; four/eight-worker efficiency
-was **38.8% / 15.7%** relative to one worker. These single-sample shared-host
-brackets do not establish a capacity improvement over the earlier campaign;
-size database writes and pools on the deployment host, without assuming linear scaling.
-See the [fleet measurements](../superpowers/measurements/2026-10-31-fleet-coordination.md).
-Use direct/session pooling for Worker LISTEN; transaction pooling needs a separate
-notification connection. [Earlier PgBouncer measurements](../superpowers/measurements/2026-10-31-scale-gate.md) also required `statement_cache_size=0` with PgBouncer 1.16.
+**Capacity.** Size the database and pools from a deployment-specific benchmark;
+the SDK does not promise linear worker scaling. Use direct/session pooling for
+the worker's LISTEN connection; transaction pooling needs a separate notification
+connection. Batch `enqueue_runs` for bursts, bound enqueuer concurrency, and
+measure with the consumers and tools used in production.
 
-The queue only dispatches. A job separately claims the D1 run lease using the
+The queue only dispatches. A job separately claims the run lease using the
 worker ID. Renewal starts immediately, then repeats every **lease TTL / 3**.
 Transient renewal failures retry within the last confirmed TTL; a hung renewal
 is bounded by that same deadline. Successful claim/renew replies start a fresh
 TTL budget, so waiting for a pool slot does not consume a newly acquired lease.
-`LeaseLostError` or expiry without a successful renewal cancels the run task without aborting its signal or writing a terminal
-status. Session work is quiesced before lease release. Completed, failed and
+`LeaseLostError` or expiry without a successful renewal cancels the run task
+without aborting its signal or writing a terminal status. Session work is
+quiesced before lease release. Completed, failed and
 aborted runs are acknowledged without invocation; every nonterminal exit,
 including cancellation and ownership loss, is retried from its checkpoint.
 Queue-callback cancellation stops the run task while shielding cleanup and the
@@ -275,7 +297,7 @@ inspection rather than discarded.
 PgQueuer 1.6 retries by queue job ID: it resets status to `queued`, increments
 attempts and clears `queue_manager_id` without checking the old queue owner. A
 stale worker's retry can therefore requeue a job another worker has re-picked.
-The D1 run lease still excludes concurrent execution of that run; retry claims
+The run lease still excludes concurrent execution of that run; retry claims
 that meet a live owner back off again. Queue ownership alone does not fence run
 writes. The worker acknowledges only a persisted terminal run.
 
@@ -286,12 +308,10 @@ delays; this is not a wall-clock recovery deadline from process death. The
 new worker claims the expired lease and resumes the checkpoint, verifying the
 stored execution contract. Choose a stall timeout at least as long as the lease
 TTL, with margin for scheduling/DB delays. Durable tool receipts replay; external
-tool effects still need `ctx.idempotency_key` reconciliation. The Postgres test
-kills worker A at `provider_pending`, recovers on B with a queue limit of one,
-and checks that A's retained epoch cannot append events or change status.
-PgQueuer acknowledges task cancellation, so a hard process kill is required to
-exercise actual orphan recovery. `worker.stop()` stops picking and drains active
-jobs; let `run()` return before closing the host pool.
+tool effects still need `ctx.idempotency_key` reconciliation. PgQueuer acknowledges
+task cancellation, so a hard process kill is required to exercise actual orphan
+recovery. `worker.stop()` stops picking and drains active jobs; let `run()` return
+before closing the host pool.
 
 ### Recurring work on the queue
 
@@ -329,28 +349,12 @@ includes enqueue, worker and polling-reader modes without a live model key.
 
 ### Enqueue / NOTIFY measurement
 
-Measured 2026-10-31 with Python 3.11.14, PgQueuer 1.6.0 and local Postgres 16.2
-via Unix socket. Each result is the median of three 3,072-run samples with a
-warm 33-connection pool, one separate active LISTEN receiver, short prompts
-and no consumers. Time includes run-row
-writes, queue inserts, transaction commit and PgQueuer's NOTIFY trigger; it does
-not isolate the NOTIFY lock from database/network/client work. Batches contain
-32 runs and use one transaction and one queue insert per batch.
-
-| Concurrent enqueuers | Single runs/s | Batch runs/s (32) |
-|---:|---:|---:|
-| 1 | 1,103.0 | 8,199.2 |
-| 8 | 2,471.7 | 17,700.4 |
-| 32 | 2,375.0 | 18,788.8 |
-
-Reproduce with `PYTHONPATH=src python examples/worker/benchmark_enqueue.py`
-and `AGENT_KIT_TEST_PG_DSN` (or `LINCH_POSTGRES_DSN`). The script creates and
-removes an isolated schema. Single-submit throughput stopped improving beyond
-eight enqueuers on this host. Postgres NOTIFY serializes commit work through a
-global lock; batch enqueue amortizes commits and notifications. Prefer batches
-for bursts, bound enqueuer concurrency, and remeasure with your workload and
-consumers. For stream readers, polling `run_events` by sequence avoids adding
-per-event NOTIFY traffic to that shared commit path.
+Measure enqueue latency and throughput on the deployment host. `enqueue_runs`
+batches run rows and queue inserts in one transaction, reducing commit and
+notification overhead; bound enqueuer concurrency for bursts. PgQueuer
+notifications wake dispatch but are hints, not the source of truth. Stream
+readers should poll persisted `run_events` by run ID and sequence when they need
+reliable replay.
 
 ## Optional dependencies are opt-in
 

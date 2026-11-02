@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from linch import Agent
-from linch.errors import ToolExecutionError
-from linch.permissions import BashRule, PathRule
-from linch.sessions import InMemorySessionStore
-from linch.tools.execution import DockerBackend
-from linch.tools.registry import workspace_tools
+from linch import (
+    Agent,
+    BashRule,
+    DockerBackend,
+    InMemorySessionStore,
+    PathRule,
+    ToolExecutionError,
+    workspace_tools,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 

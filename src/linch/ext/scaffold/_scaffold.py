@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import keyword
 import re
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -11,6 +12,13 @@ from . import _templates
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$")
 _RESERVED_PROJECT_NAMES = {"linch", "src", "test", "tests"}
+_SKILL_NAME = "build-agent-with-linch"
+SKILL_TARGETS = {
+    "claude": Path(".claude/skills"),
+    "codex": Path(".agents/skills"),
+    "linch": Path(".linch/skills"),
+}
+_DEFAULT_SKILL_TARGETS = ("claude", "codex")
 
 
 class ScaffoldError(Exception):
@@ -74,7 +82,48 @@ def scaffold_project(name: str, parent: Path) -> list[Path]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.substitute(subs), encoding="utf-8")
         created.append(path)
+    created.extend(install_skill(target))
     return created
+
+
+def install_skill(
+    project: Path, targets: list[str] | None = None, *, force: bool = False
+) -> list[Path]:
+    """Copy the packaged coding-agent skill into a project.
+
+    Args:
+        project: Project directory that receives the skill.
+        targets: Keys of ``SKILL_TARGETS``; defaults to Claude Code and Codex.
+        force: Whether to replace copies that already exist.
+
+    Returns:
+        The installed skill directories.
+
+    Raises:
+        ScaffoldError: The packaged skill is missing, or a copy exists and
+            ``force`` is false.
+    """
+    package_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        package_root / "_skills" / _SKILL_NAME,
+        package_root.parents[1] / "skills" / _SKILL_NAME,
+    ]
+    source = next((path for path in candidates if (path / "SKILL.md").is_file()), None)
+    if source is None:
+        raise ScaffoldError(f"packaged skill not found at {candidates[0]}")
+    destinations = [
+        project / SKILL_TARGETS[target] / _SKILL_NAME
+        for target in dict.fromkeys(targets or _DEFAULT_SKILL_TARGETS)
+    ]
+    existing = [path for path in destinations if path.exists()]
+    if existing and not force:
+        raise ScaffoldError(f"{existing[0]} already exists; pass --force to replace it")
+    for path in destinations:
+        if path.exists():
+            shutil.rmtree(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, path, ignore=shutil.ignore_patterns("__pycache__"))
+    return destinations
 
 
 def add_tool(name: str, start: Path) -> list[Path]:

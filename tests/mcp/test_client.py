@@ -210,3 +210,79 @@ async def test_tool_name_collisions_fail_closed_and_clean_up(monkeypatch):
 
     assert session.aexit_calls == 1
     assert transport.aexit_calls == 1
+
+
+@pytest.mark.parametrize("http", [False, True])
+async def test_cancelling_initialization_releases_resources(monkeypatch, http):
+    started = asyncio.Event()
+
+    class InitializingSession(FakeSession):
+        async def initialize(self):
+            started.set()
+            await asyncio.Event().wait()
+
+    transport = FakeTransport()
+    session = InitializingSession()
+    http_client = _patch_http(monkeypatch, transport, session) if http else None
+    if not http:
+        monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
+        monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+    config = _http_cfg() if http else _stdio_cfg()
+    connecting = asyncio.create_task(mcp_client.connect_mcp_servers({"srv": config}))
+    await started.wait()
+    connecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connecting
+    assert session.aexit_calls == transport.aexit_calls == 1
+    if http_client is not None:
+        assert http_client.aexit_calls == 1
+
+
+async def test_http_closes_contexts_rather_than_their_entered_values(monkeypatch):
+    client_context = _Resource(result=object())
+    session = ToolSession([])
+    session_context = _Resource(result=session)
+    transport = FakeTransport()
+    monkeypatch.setattr(mcp_client, "create_mcp_http_client", lambda *a: client_context)
+    monkeypatch.setattr(mcp_client, "streamable_http_client", lambda *a, **k: transport)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a: session_context)
+
+    connection = await mcp_client.connect_mcp_servers({"srv": _http_cfg()})
+    await connection.close()
+
+    assert session_context.aexit_calls == transport.aexit_calls == client_context.aexit_calls == 1
+    assert session.aexit_calls == 0
+
+
+async def test_concurrent_close_and_cancelled_waiters_drain_every_server(monkeypatch):
+    closing = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowClosingSession(ToolSession):
+        async def __aexit__(self, *exc):
+            closing.set()
+            await release.wait()
+            await super().__aexit__(*exc)
+
+    sessions = [ToolSession([]), SlowClosingSession([])]
+    transports = [FakeTransport(), FakeTransport()]
+    session_iter, transport_iter = iter(sessions), iter(transports)
+    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: next(transport_iter))
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a: next(session_iter))
+    connection = await mcp_client.connect_mcp_servers({"one": _stdio_cfg(), "two": _stdio_cfg()})
+    first = asyncio.create_task(connection.close())
+    await closing.wait()
+    second = asyncio.create_task(connection.close())
+    try:
+        await asyncio.sleep(0)
+        assert not second.done(), "every closer must wait until cleanup finishes"
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+    finally:
+        release.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1] is None
+    assert all(resource.aexit_calls == 1 for resource in [*sessions, *transports])
+    await connection.close()

@@ -10,8 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from linch.providers import BaseProvider, ProviderCapabilities
-from linch.types import ProviderRequest, TextBlock, Usage
+from linch import BaseProvider, ProviderCapabilities, ProviderRequest, TextBlock, Usage
 
 
 class TemplateProvider(BaseProvider):
@@ -28,9 +27,9 @@ class TemplateProvider(BaseProvider):
     def capabilities(self, model: str) -> ProviderCapabilities:
         return ProviderCapabilities(
             context_window=self.context_window(model),
-            parallel_tool_calls=True,
+            parallel_tool_calls=False,
             structured_output=False,
-            tool_choice=True,
+            tool_choice=False,
             prompt_cache=False,
         )
 

@@ -1,4 +1,4 @@
-"""Opt-in output-truncation recovery (ROADMAP P6).
+"""Opt-in output-truncation recovery.
 
 A text response cut off by the output-token limit (``stop_reason ==
 "max_tokens"``) is, by default, returned as the final answer. With

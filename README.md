@@ -1,5 +1,7 @@
 # linch
 
+[Tiếng Việt](README.vi.md) · [Tài liệu tiếng Việt](docs/vi/usage/README.md)
+
 Linch 3.0 is a headless Python agent kernel. Applications embed its async agent
 loop, provide tools and permissions, and consume streamed events. The host owns
 the HTTP API and deployment.
@@ -95,6 +97,18 @@ and shutdown.
 Kernel imports come from `linch.__all__`. Import extensions explicitly, for
 example `from linch.ext.workflow import run_workflow`; they are absent from the
 kernel's top-level exports.
+
+## Build with a coding agent
+
+Give Claude Code, Codex, or another coding agent the `build-agent-with-linch` skill. It tells the
+agent where the installed docs are and how to build and test on Linch.
+
+```sh
+npx skills add DuyTa506/linch   # from GitHub
+linch skill install             # offline, matches the installed Linch version
+```
+
+`linch new` includes the skill. See the [CLI guide](docs/usage/cli.md).
 
 ## Development
 

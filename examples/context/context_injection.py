@@ -9,12 +9,20 @@ import asyncio
 import os
 from pathlib import Path
 
-from linch import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
-from linch.hooks import ContextInjectionHook
-from linch.sessions import InMemorySessionStore
-from linch.tools import ToolContext, ToolResult
-from linch.tools.registry import empty_tools
-from linch.types import Message, SystemBlock, TextBlock
+from linch import (
+    Agent,
+    ContextBudget,
+    ContextBuildResult,
+    ContextBuildTurn,
+    ContextInjectionHook,
+    InMemorySessionStore,
+    Message,
+    SystemBlock,
+    TextBlock,
+    ToolContext,
+    ToolResult,
+    empty_tools,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

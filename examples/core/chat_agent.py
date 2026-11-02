@@ -39,8 +39,7 @@ class _PolicyContextBuilder:
     )
 
     async def build(self, turn):
-        from linch.context import ContextBuildResult
-        from linch.types import Message, TextBlock
+        from linch import ContextBuildResult, Message, TextBlock
 
         # Inject only when it looks like a customer question (simple heuristic).
         last = _last_user_text(turn.messages)
@@ -58,7 +57,7 @@ class _PolicyContextBuilder:
 
 
 def _last_user_text(messages) -> str:
-    from linch.types import TextBlock
+    from linch import TextBlock
 
     for msg in reversed(messages):
         if msg.role == "user":
@@ -72,14 +71,17 @@ def _last_user_text(messages) -> str:
 
 
 def _make_agent():
-    from linch import Agent
-    from linch.config import FeatureFlags, SystemPromptConfig
-    from linch.hooks import ContextInjectionHook
-    from linch.providers import OpenAIChatCompletionsProvider
-    from linch.providers.openai_chat import OpenAIChatProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-    from linch.types import OutputSchema
+    from linch import (
+        Agent,
+        ContextInjectionHook,
+        FeatureFlags,
+        InMemorySessionStore,
+        OpenAIChatCompletionsProvider,
+        OpenAIChatProviderOptions,
+        OutputSchema,
+        SystemPromptConfig,
+        empty_tools,
+    )
 
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAPI_KEY")
@@ -120,9 +122,8 @@ def _make_agent():
             ),
         ),
         # Structured output: every reply is {answer, topic}.
-        # Because AnthropicProvider has structured_output=False, this works via
-        # text-parse (the model writes JSON, the loop parses it).
-        # For OpenAI providers with structured_output=True it is enforced natively.
+        # Provider support decides whether the schema is enforced natively or
+        # parsed from text; see docs/usage/structured-output.md.
         output_schema=OutputSchema(
             name="support_reply",
             schema={

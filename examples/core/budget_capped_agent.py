@@ -11,11 +11,8 @@ so no API key is needed.
 
 import asyncio
 
-from linch import Agent, RunBudget
+from linch import Agent, InMemorySessionStore, RunBudget, RunOptions, Usage, workspace_tools
 from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-from linch.session import RunOptions
-from linch.sessions import InMemorySessionStore
-from linch.types import Usage
 
 
 async def main() -> None:
@@ -26,17 +23,17 @@ async def main() -> None:
         turns=[
             ToolUseTurn(
                 tool_name="Glob",
-                tool_input={"pattern": "*.md"},
+                tool_input={"glob_pattern": "*.md", "target_directory": "."},
                 usage=Usage(input_tokens=4_000),
             ),
             ToolUseTurn(
                 tool_name="Glob",
-                tool_input={"pattern": "*.py"},
+                tool_input={"glob_pattern": "*.py", "target_directory": "."},
                 usage=Usage(input_tokens=4_000),
             ),
             ToolUseTurn(
                 tool_name="Glob",
-                tool_input={"pattern": "*.txt"},
+                tool_input={"glob_pattern": "*.txt", "target_directory": "."},
                 usage=Usage(input_tokens=4_000),
             ),
             TextTurn(text="never reached"),
@@ -46,6 +43,7 @@ async def main() -> None:
     agent = Agent(
         model="gpt-5",
         provider=provider,
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
     )

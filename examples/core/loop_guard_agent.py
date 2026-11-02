@@ -1,7 +1,7 @@
 """loop_guard_agent.py — demonstrate the loop guard catching a repeated-call loop.
 
 Run with:
-    python examples/loop_guard_agent.py
+    python examples/core/loop_guard_agent.py
 
 The script uses a fake provider that always calls the same tool with the same
 input.  Without a loop guard the agent would loop until max_turns is hit.
@@ -38,7 +38,7 @@ class LoopingProvider:
         return 128_000
 
     async def stream(self, req):
-        from linch.types import Usage
+        from linch import Usage
 
         # If tools were stripped (force_final turn), return a text response.
         if not req.tools:
@@ -94,7 +94,7 @@ class SearchDocsTool:
         return []
 
     async def execute(self, input, ctx):
-        from linch.tools import ToolResult
+        from linch import ToolResult
 
         return ToolResult(content="No results found.", summary="SearchDocs")
 
@@ -103,11 +103,16 @@ class SearchDocsTool:
 
 
 async def main() -> None:
-    from linch import Agent, LoopGuard
-    from linch.config import FeatureFlags
-    from linch.events import ErrorEvent, LoopGuardEvent, ResultEvent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import (
+        Agent,
+        ErrorEvent,
+        FeatureFlags,
+        InMemorySessionStore,
+        LoopGuard,
+        LoopGuardEvent,
+        ResultEvent,
+        empty_tools,
+    )
 
     print("=== Loop Guard Demo ===\n")
 

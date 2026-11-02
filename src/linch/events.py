@@ -928,6 +928,7 @@ Event: TypeAlias = (
     | ReliabilityEvent
     | IgnorableEvent
 )
+"""Union of supported normalized event payloads emitted by a run."""
 
 
 def is_system_event(e: Event) -> bool:

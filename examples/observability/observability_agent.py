@@ -28,10 +28,7 @@ async def main() -> None:
         print("Install opentelemetry-sdk to run this example (the Linch core uses the API only).")
         return
 
-    from linch import Agent, Context
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, Context, FeatureFlags, InMemorySessionStore, empty_tools
 
     tracer_provider = TracerProvider()
     tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))

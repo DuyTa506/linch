@@ -1,5 +1,7 @@
 # Using Linch
 
+Use this guide to choose the Linch subsystem and example for your application.
+
 This is the practical guide to building with Linch — installing it, wiring an
 agent, and using each subsystem. If you are new to the SDK, start with
 [Quickstart](./quickstart.md); then come back here for the subsystem map.
@@ -7,8 +9,7 @@ agent, and using each subsystem. If you are new to the SDK, start with
 For the *why* behind the design (data flow, the turn pipeline, module
 boundaries) see the [architecture index](../architecture/README.md).
 
-If you are upgrading to Linch 3.0, read the
-[Linch 3.0 migration guide](../migration-3.0.md) first. Linch is an SDK: a
+Linch is an SDK: a bare `Agent` has a domain-neutral prompt and no tools. A
 coding workspace and its trust policy are explicit choices at the call site.
 
 ---
@@ -23,10 +24,12 @@ pip install -e /path/to/linch
 pip install -e "/path/to/linch[mcp,anthropic,gemini,postgres,worker]"
 ```
 
-Once published, `pip install linch` will work directly. Extras are opt-in:
+For a published release, use `pip install linch`. Extras are opt-in:
 `anthropic`, `gemini`, `postgres`, `worker`, and `mcp` each pull in only the
 dependencies that feature needs. OpenTelemetry's API is part of the core install; hosts add
 the SDK and an exporter when they want to collect traces or metrics.
+
+Run `linch docs path` to locate the bundled documentation and examples.
 
 ---
 
@@ -34,23 +37,23 @@ the SDK and an exporter when they want to collect traces or metrics.
 
 ```python
 import asyncio
-from linch import Agent
-from linch.sessions import InMemorySessionStore
-
-agent = Agent(
-    model="gpt-5",                              # or any supported model
-    session_store=InMemorySessionStore(),
-    permissions={"mode": "skip-dangerous"},     # allow tools without prompting
-)
+from linch import Agent, InMemorySessionStore
 
 async def main():
-    session = await agent.session()
-    async for event in session.run("What day is it?"):
-        if event.type == "result":
-            print(event.final_text)
+    agent = Agent(model="gpt-5", session_store=InMemorySessionStore())
+    try:
+        session = await agent.session()
+        async for event in session.run("Say hello in one sentence."):
+            if event.type == "result":
+                print(event.final_text)
+    finally:
+        await agent.close()
 
 asyncio.run(main())
 ```
+
+This example uses the default OpenAI Responses provider and requires
+`OPENAI_API_KEY`. For an offline example, see [Quickstart](./quickstart.md).
 
 ---
 
@@ -58,19 +61,19 @@ asyncio.run(main())
 
 ```
 Agent ──── long-lived config (model, tools, permissions, system prompt, hooks, deps)
-  └── Session ── conversation state (messages, run_deps, live workers)
+  └── Session ── conversation state (history, run_deps, live workers)
         └── session.run(prompt) ── AsyncIterator[Event]
 ```
 
 - **`Agent`** is created once per model/configuration and reused across many
-  conversations. It is immutable config plus a few subsystem handles (provider,
-  tool registry, permission engine, stores).
+  conversations. It owns the provider, tool registry, permission engine, stores,
+  and plugin registrations.
 - **`Session`** is one conversation thread. A user in a web app gets their own
   session but shares the same `Agent`. State that belongs to a conversation
   (history, live background workers, per-run deps) lives here.
 - **`session.run(prompt)`** returns an async iterator of typed
-  [events](./events.md) — stream them to your UI as they arrive. The last event
-  is always a `ResultEvent`.
+  [events](./events.md) — stream them to your UI as they arrive. Consume the stream
+  through its `ResultEvent` to receive the run status and final output.
 
 One `Agent`, many `Session`s is the canonical web-app shape — see
 [`examples/core/multi_session.py`](../../examples/core/multi_session.py).
@@ -81,6 +84,8 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 
 | Page | What it covers |
 |---|---|
+| [API reference](./api-reference.md) | Exact supported imports, signatures, and source summaries |
+| [Troubleshooting](./troubleshooting.md) | Exact source errors, causes, and fixes for setup, tools, authentication, and resume |
 | [Quickstart](./quickstart.md) | New-developer path: install, offline smoke test, live provider, first tool, persistence |
 | [Scaffolding CLI](./cli.md) | `linch new` / `linch add tool` — generate a runnable, offline-testable project you own |
 | [Production wiring](./production.md) | Minimal checklist to embed Linch in a service: persistence, streaming, HITL, resume, shutdown, blast radius |
@@ -91,18 +96,18 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Plugins and `agent.use`](../architecture/kernel.md#plugins) | Reversible plugin mounts, dependency activation, scoped services, and teardown |
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./events.md) | Event stream, cost fields, run reports, long-run eval scorers |
-| [Model-call accounting](./events.md#model-call-accounting) | Cumulative primary/compaction usage, budget fences, receipts, and unknown-usage handling |
+| [Model-call accounting](./events.md#modelcallevent--model-call-accounting) | Cumulative primary/compaction usage, budget fences, receipts, and unknown-usage handling |
 | [Lifecycle catalog and trace IDs](./events.md#opentelemetry-traces-and-metrics) | Typed lifecycle points, generated producer/consumer catalog, and run/tool trace correlation |
 | [Evals and benchmarks](./evals.md) | `EvalSuite`, `run_eval_benchmark`, and `scripts/eval_benchmark.py` for CI/provider comparison |
 | [Tools](./tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions, per-run principals and roles |
-| [Tool search](./tools.md#tool-search-for-large-catalogs) | Deferred tool/skill schemas for large catalogs through `ToolSearchPlugin` |
+| [Tool search](./tools.md#toolsearchplugin--large-catalogs) | Deferred tool schemas and skill listings for large catalogs through `ToolSearchPlugin` |
 | [Principal/RBAC](./tools.md#per-run-principals-and-role-rules) | Per-run tenant/user/role identity and role-conditioned permission rules |
 | [Structured output](./structured-output.md) | `OutputSchema`, final-tool capture, schema repair |
-| [Canonical tool output](./tools.md#custom-tools) | JSON Schema validated `ToolOutput`, renderers, citations, attachments, and durable result metadata |
+| [Canonical tool output](./tools.md#tool-and-tool--custom-tools) | JSON Schema validated `ToolOutput`, renderers, citations, attachments, and durable result metadata |
 | [Hooks](./hooks.md) | The canonical extension mechanism: chokepoints, `HookResult`, built-in adapters |
 | [Tool cache](./tool-cache.md) | Opt-in per-run memoization of read-scope tool calls (`tool_cache=`) |
 | [Context & memory](./context-and-memory.md) | `RagConnector` retrieval and grounding, per-turn context, scoped file memory, and the optional mem0 recipe |
-| [RAG and grounding](./context-and-memory.md#sourced-retrieval-and-grounding) | Sourced chunks, `[doc:<id>]` citations, and final-answer grounding checks |
+| [RAG and grounding](./context-and-memory.md#ragconnector-and-register_grounding_check) | Sourced chunks, `[doc:<id>]` citations, and final-answer grounding checks |
 | [Virtual filesystem](./filesystem.md) | Large-result offloading and the `ls`/`read_file`/`write_file`/`edit_file` tools |
 | [Workflows](./workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
 | [Outer loop runner](./loop-runner.md) | `LoopSpec` + `LoopRunner.run_once()` for cron, CI, webhooks, and manual recurring work |

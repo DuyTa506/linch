@@ -1,16 +1,11 @@
 # Coordination
 
-> **A note on "harness."** In the agent literature, *harness* means everything
-> around the model — `Agent = Model + Harness` — i.e. the tools, memory, context
-> engineering, verification, persistence, and the loop itself. By that
-> definition the **whole linch SDK is the harness**. This page is *not* "the
-> harness"; it is one optional capability *within* it.
+Use mailbox coordination when agents need to exchange peer messages across turns.
 
-`linch.coordination` retains the in-process mailbox capability for peer
-messages. Core stays single-conversation and user-driven.
+`linch.coordination` provides an opt-in in-process mailbox for peer messages.
+The host decides what peer messages mean.
 
-The mailbox is an opt-in primitive; the host supplies the policy for interpreting
-peer messages. Durable recurring work uses `linch.worker` and PgQueuer; see
+Durable recurring work uses `linch.worker` and PgQueuer; see
 [Scale out](./production.md#scale-out).
 
 > Mailbox names are re-exported from the top-level package. The
@@ -41,15 +36,18 @@ Two mechanisms:
 
 **Message bus.** A session with a `mailbox_address` receives its inbox at the top of
 each turn (through the same next-turn notification seam). One agent addresses a peer with
-`send_message(to=..., content=..., type=...)`; the peer picks it up on its next
-run as a `<peer-message>` `UserEvent`. Spawned workers use a unique mailbox address
-when the agent has a mailbox: the worker ID exposed by the Subagent tool, or the
-child session ID for direct runner calls. Display names are labels only.
+`send_message(to=..., content=..., type=...)`; the peer receives it at the next
+eligible turn boundary, during the current `session.run()` if another turn remains
+or during a later run, as a `<peer-message>` `UserEvent`. Spawned workers use a
+unique mailbox address when the agent has a mailbox: the worker ID exposed by the
+Subagent tool, or the child session ID for direct runner calls. Display names are
+labels only.
 
 ```python
 lead = await agent.session();   lead.mailbox_address = "lead"
 worker = await agent.session(); worker.mailbox_address = "alice"
-# lead's turn calls send_message(to="alice", ...) → alice drains it next run
+# lead's turn calls send_message(to="alice", ...) → alice receives it at the next
+# eligible turn boundary, in this run or a later one
 ```
 
 **Request/response protocol.** A `Correlator` is a pending→resolved state machine
@@ -70,20 +68,24 @@ assert c.is_resolved("req-001")                      # requester checks on a lat
 ```
 
 `InMemoryMailbox` is the only built-in mailbox. Messages live for the current
-process (one agent, many workers), without restart survival or cross-process
-delivery. Mailbox functionality moves to `linch.ext` in WP10. Hosts needing
+Python process and agents, sessions, and workers can share the mailbox object;
+messages have no restart survival or cross-process delivery. Hosts needing
 external infrastructure can implement the `Mailbox` protocol — see
 [Extending](./extending.md).
 
-Host adapters supporting durable inbox mode use the optional `ClaimableMailbox` lease protocol instead
-of destructive drain: claim → enqueue by `mailbox:<message-id>` → commit the inbox/live log →
-acknowledge. A crash before acknowledgement permits reclaim; a crash after enqueue is
-deduplicated by the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
+When `DurabilityOptions(durable_inbox=True)` is enabled, a mailbox implementing
+`ClaimableMailbox` uses leases instead of destructive drain: claim → enqueue by
+`mailbox:<message-id>` → commit the inbox/live log → acknowledge. A crash before
+acknowledgement permits reclaim; a crash after enqueue is deduplicated by the
+session inbox receipt. The session store must provide the durable inbox methods
+as well. Without durable inbox mode, delivery uses `send()` and destructive
+`drain()`.
 
 The generic Context inbox seam distinguishes uncommitted `Message` values from
 already history-committed `Event` values. Register producers on the agent's
-context through a plugin-owned `ctx.inbox(...)`; the loop consumes them in
-registration order at the same next-turn boundary as notifications.
+context through a plugin-owned `ctx.inbox(...)`; the loop consumes them at the
+same next-turn boundary as notifications, preserving registration order within
+each context.
 
 **When to reach for it:** long-lived teammates that negotiate (plan approval,
 graceful shutdown) or self-organize. For one-shot delegation, plain

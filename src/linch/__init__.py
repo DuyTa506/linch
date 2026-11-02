@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ._version import get_version
 
 __version__ = get_version()
+"""Installed package version, with the local project version as a fallback."""
 
 if TYPE_CHECKING:
     # Eager imports for static analysis and IDE autocomplete only. This block is
@@ -286,6 +287,8 @@ if TYPE_CHECKING:
         ToolResult,
         tool,
     )
+    from .tools.builtin import BashTool
+    from .tools.execution import DockerBackend
     from .tools.isolation import IsolationBackend, TempDirIsolation
     from .tools.pipeline import ToolExecution, ToolPipeline
     from .tools.registry import empty_tools, workspace_tools
@@ -298,8 +301,10 @@ if TYPE_CHECKING:
         ModelId,
         OutputSchema,
         PermissionMode,
+        ProviderRequest,
         RedactedThinkingBlock,
         StopReason,
+        SystemBlock,
         TextBlock,
         ThinkingBlock,
         ToolChoice,
@@ -562,6 +567,8 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "assert_tool_contract",
     ),
     ".tools.search": ("ToolSearchPlugin",),
+    ".tools.builtin": ("BashTool",),
+    ".tools.execution": ("DockerBackend",),
     ".tools": (
         "AskUserHandler",
         "AskUserOption",
@@ -596,6 +603,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ModelId",
         "OutputSchema",
         "PermissionMode",
+        "ProviderRequest",
         "RedactedThinkingBlock",
         "StopReason",
         "TextBlock",
@@ -604,6 +612,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ToolResultBlock",
         "ToolUseBlock",
         "Usage",
+        "SystemBlock",
     ),
     ".verification": (
         "ScorerVerifier",
@@ -761,6 +770,8 @@ __all__ = [
     "FunctionTool",
     "JsonValue",
     "GeneratedSubagentDefinition",
+    "BashTool",
+    "DockerBackend",
     "McpHttpServerConfig",
     "McpServerConfig",
     "McpStdioServerConfig",
@@ -771,6 +782,7 @@ __all__ = [
     "OpenAIReasoning",
     "PartialAssistantEvent",
     "PermissionMode",
+    "ProviderRequest",
     "PermissionDeniedError",
     "PermissionRequestEvent",
     "PromptCacheAdvisoryEvent",
@@ -791,6 +803,7 @@ __all__ = [
     "SystemEvent",
     "Session",
     "SessionLog",
+    "SystemBlock",
     "TextBlock",
     "Tool",
     "ToolAttachment",
