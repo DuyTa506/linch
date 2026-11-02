@@ -183,9 +183,7 @@ async def test_isolation_keeps_filesystem_bash_and_execution_in_one_world(tmp_pa
 
     assert not result.errored
     assert result.final_text == "done"
-    assert (
-        provider.requests[2].messages[-1].content[0].content == "child\n[Exited 0]"
-    )
+    assert provider.requests[2].messages[-1].content[0].content == "child\n[Exited 0]"
     assert observed and observed[0][0] != str(tmp_path)
     assert Path(observed[0][1]).resolve() == Path(observed[0][0]).resolve()
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "parent"
