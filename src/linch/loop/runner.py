@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
-from .. import lifecycle
+from .. import _version, lifecycle
 from .._telemetry import start_run_span, store_call, trace_run
 from .._tracing import span_trace_id, trace_id_for
 from .._wire import UnsupportedWireVersionError
@@ -177,7 +177,10 @@ async def run_loop(
                     id=run_id,
                     meta=run_meta_with_contract(
                         _build_run_contract(session, prompt, opts),
-                        meta={"trace_id": span_trace_id(run_span) or trace_id_for(run_id)},
+                        meta={
+                            "trace_id": span_trace_id(run_span) or trace_id_for(run_id),
+                            "runtime_version": _version.get_version(),
+                        },
                     ),
                     initial_checkpoint=RunCheckpoint(
                         phase="started",
