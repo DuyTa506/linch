@@ -740,6 +740,7 @@ class RunRuntime:
             )
         )
         if resume_checkpoint is not None:
+            session.file_read_tracker.restore(resume_checkpoint.extension_state.get("linch.reads"))
             session._extensions = dict(resume_checkpoint.extension_state.get("linch.session", {}))
             if _loop_guard_is_active(runtime.guard):
                 restored = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
@@ -1195,6 +1196,7 @@ class RunRuntime:
         self.checkpoint.pending_alignment = _alignment_queue_to_dicts(self.session)
         if not isinstance(self.checkpoint.extension_state, dict):
             raise ConfigError("RunCheckpoint.extension_state must be a dict")
+        self.checkpoint.extension_state["linch.reads"] = self.session.file_read_tracker.snapshot()
         if self.session._extensions:
             self.checkpoint.extension_state["linch.session"] = json.loads(
                 json.dumps(self.session._extensions, allow_nan=False)
