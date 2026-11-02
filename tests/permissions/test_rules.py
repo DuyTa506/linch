@@ -115,6 +115,16 @@ def test_skill_tool_rule_matches_the_skill_tool_normalization() -> None:
     assert match_tool_rule(rule, "Skill", {"skill": "/deploy-prod"})
 
 
+def test_mcp_server_tool_rule_matches_only_its_literal_prefix() -> None:
+    rule = ToolRule("mcp__ops_prod__*", "deny")
+
+    assert match_tool_rule(rule, "mcp__ops_prod__deploy", {})
+    assert not match_tool_rule(rule, "mcp__ops_prod_evil__deploy", {})
+    assert not match_tool_rule(ToolRule("Bash*", "deny"), "Bash", {})
+    assert not match_tool_rule(ToolRule("mcp____*", "deny"), "mcp____deploy", {})
+    assert not match_tool_rule(ToolRule("mcp__*__*", "deny"), "mcp__ops__deploy", {})
+
+
 def _bash_call(command: str) -> PendingToolCall:
     return PendingToolCall(
         tool_use_id="bash-test",

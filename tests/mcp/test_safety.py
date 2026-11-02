@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,18 +14,24 @@ async def _unused_call(name: str, args: dict, signal: object) -> object:
 
 
 @pytest.mark.parametrize(
-    ("annotations", "scope", "parallel", "destructive"),
+    ("trust_annotations", "annotations", "scope", "parallel", "destructive"),
     [
-        (None, "exec", False, True),
-        ({}, "exec", False, True),
-        ({"readOnlyHint": False}, "exec", False, True),
-        ({"destructiveHint": False}, "exec", False, False),
-        ({"readOnlyHint": True}, "read", True, False),
-        ({"readOnlyHint": True, "destructiveHint": True}, "read", True, False),
+        (False, None, "exec", False, False),
+        (False, {"readOnlyHint": True, "destructiveHint": True}, "exec", False, False),
+        (True, None, "exec", False, False),
+        (True, {"readOnlyHint": False}, "exec", False, False),
+        (True, {"destructiveHint": True}, "exec", False, True),
+        (True, {"destructiveHint": False}, "exec", False, False),
+        (True, {"readOnlyHint": True}, "read", True, False),
+        (True, {"readOnlyHint": True, "destructiveHint": True}, "read", True, False),
     ],
 )
-def test_annotations_apply_mcp_documented_destructive_default_true(
-    annotations, scope: str, parallel: bool, destructive: bool
+def test_annotations_require_host_trust(
+    trust_annotations: bool,
+    annotations,
+    scope: str,
+    parallel: bool,
+    destructive: bool,
 ) -> None:
     from mcp.types import Tool, ToolAnnotations
 
@@ -38,12 +45,22 @@ def test_annotations_apply_mcp_documented_destructive_default_true(
             annotations=None if annotations is None else ToolAnnotations(**annotations),
         ),
         _unused_call,
+        trust_annotations=trust_annotations,
     )
     assert (tool.scope, tool.parallel, tool.destructive) == (scope, parallel, destructive)
 
 
-@pytest.mark.parametrize("annotations", [None, {"destructiveHint": False}])
-def test_accept_edits_asks_for_real_mcp_exec_tool(annotations) -> None:
+@pytest.mark.parametrize(
+    ("trust_annotations", "annotations", "decision"),
+    [
+        (False, None, "allow"),
+        (False, {"destructiveHint": True}, "allow"),
+        (True, {"destructiveHint": True}, "ask"),
+    ],
+)
+def test_skip_dangerous_uses_host_annotation_decision(
+    trust_annotations: bool, annotations, decision: str
+) -> None:
     from mcp.types import Tool, ToolAnnotations
 
     from linch.mcp import mcp_permission_rules
@@ -58,9 +75,62 @@ def test_accept_edits_asks_for_real_mcp_exec_tool(annotations) -> None:
             annotations=None if annotations is None else ToolAnnotations(**annotations),
         ),
         _unused_call,
+        trust_annotations=trust_annotations,
     )
+    engine = PermissionEngine(mode="skip-dangerous", rules=mcp_permission_rules([tool]))
+    assert (
+        engine.evaluate(PendingToolCall(tool_use_id="t", tool=tool, input={})).decision == decision
+    )
+
+
+def test_accept_edits_asks_for_unannotated_mcp_exec_tool() -> None:
+    from mcp.types import Tool
+
+    from linch.mcp import mcp_permission_rules
+    from linch.mcp.tool import make_mcp_tool
+    from linch.permissions.engine import PendingToolCall, PermissionEngine
+
+    tool: Any = make_mcp_tool("srv", Tool(name="shell_exec", inputSchema={}), _unused_call)
     engine = PermissionEngine(mode="acceptEdits", rules=mcp_permission_rules([tool]))
     assert engine.evaluate(PendingToolCall(tool_use_id="t", tool=tool, input={})).decision == "ask"
+
+
+async def test_large_mcp_text_spills_under_call_context(tmp_path) -> None:
+    from mcp.types import CallToolResult, TextContent, Tool
+
+    from linch.mcp.tool import make_mcp_tool
+    from linch.tools.base import ToolContext
+
+    async def call(name: str, args: dict, signal: object) -> object:
+        return CallToolResult(content=[TextContent(type="text", text="x" * 30001)])
+
+    tool: Any = make_mcp_tool("srv", Tool(name="dump", inputSchema={}), call)
+    result = await tool.execute(
+        {}, ToolContext(cwd=str(tmp_path), session_id="s", run_id="r", session_store=None)
+    )
+    path = result.metadata["output_path"]
+    assert result.truncated is True
+    assert result.content.endswith(f"[output_path: {path}]")
+    assert Path(path).read_bytes() == b"x" * 30001
+
+
+async def test_large_mcp_text_falls_back_to_cap_when_spill_fails(tmp_path) -> None:
+    from mcp.types import CallToolResult, TextContent, Tool
+
+    from linch.mcp.tool import make_mcp_tool
+    from linch.tools.base import ToolContext
+
+    (tmp_path / ".linch").write_text("occupied")
+
+    async def call(name: str, args: dict, signal: object) -> object:
+        return CallToolResult(content=[TextContent(type="text", text="x" * 30001)])
+
+    tool: Any = make_mcp_tool("srv", Tool(name="dump", inputSchema={}), call)
+    result = await tool.execute(
+        {}, ToolContext(cwd=str(tmp_path), session_id="s", run_id="r", session_store=None)
+    )
+    assert result.metadata == {}
+    assert result.content == "x" * 30000 + "\n… (output capped at 30000 chars)"
 
 
 @pytest.mark.parametrize("size", [30000, 30001, 90000])
@@ -326,3 +396,24 @@ async def test_repeated_caller_cancellation_does_not_interrupt_call_cleanup() ->
         await asyncio.wait_for(task, 1)
     assert cleanup_finished.is_set()
     assert signal.wait_finished.is_set()
+
+
+async def test_spilled_result_is_not_offloaded_again(tmp_path) -> None:
+    from mcp.types import CallToolResult, TextContent
+
+    from linch.filesystem import OffloadConfig, StateFileBackend
+    from linch.filesystem.offload import maybe_offload
+    from linch.mcp.result import map_mcp_result
+
+    result = map_mcp_result(
+        CallToolResult(content=[TextContent(type="text", text="x" * 40000)]), cwd=str(tmp_path)
+    )
+    content = result.content
+    await maybe_offload(
+        result,
+        tool_name="mcp__srv__dump",
+        call_id="c",
+        backend=StateFileBackend(),
+        config=OffloadConfig(threshold_tokens=1),
+    )
+    assert result.content == content

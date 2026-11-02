@@ -3,10 +3,11 @@ from __future__ import annotations
 from mcp.types import CallToolResult, TextContent
 
 from ..tools._limits import OUTPUT_CAP
+from ..tools._output import BoundedOutput
 from ..tools.base import ToolResult
 
 
-def map_mcp_result(result: CallToolResult) -> ToolResult:
+def map_mcp_result(result: CallToolResult, *, cwd: str | None = None) -> ToolResult:
     is_error = result.is_error or False
     content_blocks: list[dict[str, object]] = []
 
@@ -49,13 +50,24 @@ def map_mcp_result(result: CallToolResult) -> ToolResult:
             text_parts.append(f"[{b.get('type', 'block')}]")
 
     text = "\n".join(text_parts)
-    if len(text) > OUTPUT_CAP:
+    metadata: dict[str, str] = {}
+    truncated = len(text) > OUTPUT_CAP
+    if truncated and cwd is not None:
+        output = BoundedOutput(cwd, "mcp")
+        output.append(text.encode())
+        output.finish()
+        if output.path is not None:
+            text = output.snapshot() + f"\n[output_path: {output.path}]"
+            metadata["output_path"] = output.path
+    if truncated and not metadata:
         text = text[:OUTPUT_CAP] + f"\n… (output capped at {OUTPUT_CAP} chars)"
 
     return ToolResult(
         content=text,
         summary=summary,
         is_error=is_error,
+        metadata=metadata,
+        truncated=truncated,
     )
 
 

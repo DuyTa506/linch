@@ -42,7 +42,7 @@ def test_tool_input_schema_reaches_the_model_intact() -> None:
     assert tool.input_schema == schema  # type: ignore[attr-defined]
 
 
-def test_tool_annotations_map_to_scope_and_destructive() -> None:
+def test_tool_annotations_map_to_scope_and_destructive_when_trusted() -> None:
     from mcp.types import Tool, ToolAnnotations
 
     from linch.mcp.tool import make_mcp_tool
@@ -55,6 +55,7 @@ def test_tool_annotations_map_to_scope_and_destructive() -> None:
             annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
         ),
         _unused_call_tool,
+        trust_annotations=True,
     )
     dangerous = make_mcp_tool(
         "srv",
@@ -64,6 +65,7 @@ def test_tool_annotations_map_to_scope_and_destructive() -> None:
             annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
         ),
         _unused_call_tool,
+        trust_annotations=True,
     )
 
     assert read_only.scope == "read"  # type: ignore[attr-defined]

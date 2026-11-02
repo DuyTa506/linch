@@ -507,17 +507,41 @@ chữ thường. Ví dụ server `ops.prod` với tool `get.status` trở thành
 `mcp__ops_prod__get_status`. Tên va chạm sau khi chuẩn hóa sẽ gây ra
 `ConfigError`.
 
-Chú thích của server ảnh hưởng đến scheduling và permission:
-chỉ `readOnlyHint: true` mới cấp scope read và khả năng parallel; mọi tool khác
-có scope exec và chạy tuần tự. Tool không read-only mặc định là destructive, theo
-mặc định của MCP schema, trừ khi server đặt rõ `destructiveHint: false`. Tool
-destructive thêm ask rule, kể cả trong mode `acceptEdits` và `skip-dangerous`.
-Tool exec vẫn hỏi trong `acceptEdits` dù `destructiveHint` là false. Approval
-dùng `can_use_tool`, vì vậy một ask không có callback sẽ bị từ chối.
+Permission rule có thể nhắm tới một server đã chuẩn hóa bằng
+`ToolRule("mcp__ops_prod__*", "deny")`; dấu `*` cuối khớp với toàn bộ tiền tố
+literal `mcp__ops_prod__`. Không có dạng glob nào khác được hỗ trợ; rule
+`ToolRule("*", ...)` hiện có vẫn khớp mọi tool.
 
-Hint chỉ là lời khai của server, không được kiểm chứng. Server không trung thực
-có thể gắn nhãn read-only cho tool có ghi dữ liệu để được tự động duyệt và chạy
-parallel. Chỉ kết nối server mà bạn tin tưởng phần chú thích của nó.
+Chú thích của server bị bỏ qua theo mặc định: mọi tool có scope exec, chạy tuần
+tự và không destructive. Chỉ đặt `trust_annotations=True` trong cấu hình server
+khi host đứng ra bảo chứng cho lời khai của server đó. Khi bật trust, chỉ
+`readOnlyHint: true` mới cấp scope read và khả năng parallel; các tool khác có
+scope exec và chạy tuần tự, còn `destructive` chỉ là true khi server ghi rõ
+`destructiveHint: true`. Tool read-only không bao giờ là destructive. Tool không
+có chú thích không thêm ask rule nên có thể chạy trong `skip-dangerous`; trong
+`acceptEdits`, tool exec vẫn hỏi. Tool destructive rõ ràng từ server đã được host
+trust sẽ thêm ask rule kể cả trong `skip-dangerous`.
+
+Hint chỉ là lời khai của server, không được kiểm chứng. `trust_annotations` và
+`skip-dangerous` là quyết định của host; host chịu trách nhiệm về server mình
+tin tưởng và hậu quả của việc cho phép lời gọi nguy hiểm. Server không trung
+thực có thể gắn nhãn read-only cho tool có ghi dữ liệu để được tự động duyệt và
+chạy parallel. Approval dùng `can_use_tool`, vì vậy một ask không có callback sẽ
+bị từ chối.
+
+Kết quả MCP bao gồm text của embedded resource; nội dung resource nhị phân vẫn
+bị bỏ qua. Khi không spill, kết quả text tổng hợp, kể cả các dấu phân cách, bị
+giới hạn ở 30.000 ký tự, dùng cùng giới hạn output với Grep. Khi có call context,
+text lớn hơn được lưu dưới `ctx.cwd/.linch/output/`; kết quả trả về preview head/
+tail có giới hạn và nêu đường dẫn chứa toàn bộ text. Nếu không thể ghi spill thì
+trả về text đã cắt.
+
+Nếu kết nối MCP bị mất, lời gọi thất bại trả về lỗi và không bao giờ được retry.
+Connection owner reconnect với năm lần exponential backoff, bắt đầu từ 0,5 giây
+và tối đa 30 giây; sau đó tool báo server không khả dụng cho tới khi host tạo
+connection mới (hoặc Agent mới với server được cấu hình). Tên tool được giữ
+nguyên, tool biến mất sau reconnect trả về lỗi, và catalog không tự xây lại.
+Subprocess stdio luôn được reap trên mọi đường dọn dẹp.
 
 ---
 
