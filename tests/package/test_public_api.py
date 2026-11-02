@@ -108,6 +108,25 @@ assert 'linch.run_stores.postgres' in sys.modules
     _assert_script_ok(script)
 
 
+def test_owner_approved_core_exports_are_lazy() -> None:
+    script = f"""
+import sys
+sys.path.insert(0, {str(ROOT / "src")!r})
+import linch
+assert {{"ProviderRequest", "SystemBlock", "BashTool", "DockerBackend"}} <= set(linch.__all__)
+assert {{"linch.types", "linch.tools.builtin", "linch.tools.execution"}}.isdisjoint(sys.modules)
+from linch import BashTool, DockerBackend, ProviderRequest, SystemBlock
+from linch.types import ProviderRequest as DefProviderRequest, SystemBlock as DefSystemBlock
+from linch.tools.builtin import BashTool as DefBashTool
+from linch.tools.execution import DockerBackend as DefDockerBackend
+assert ProviderRequest is DefProviderRequest
+assert SystemBlock is DefSystemBlock
+assert BashTool is DefBashTool
+assert DockerBackend is DefDockerBackend
+"""
+    _assert_script_ok(script)
+
+
 def test_extension_names_are_explicit() -> None:
     evals = importlib.import_module("linch.ext.evals")
     permissions = importlib.import_module("linch.permissions")

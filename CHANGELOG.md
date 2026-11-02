@@ -7,6 +7,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Export `ProviderRequest`, `SystemBlock`, `BashTool`, and `DockerBackend` lazily
+  from `linch`. These four additions are an owner-approved exception to the
+  MINOR rule in `docs/versioning.md`, as with `Agent.reload_skills()` in 3.0.1.
+
 - Keep each MCP server's transport and session contexts in one dedicated owner
   task so stdio and HTTP connections can close safely from any task, including
   `Agent.close()`. Drain startup failures, cancellation, and concurrent shutdowns.
