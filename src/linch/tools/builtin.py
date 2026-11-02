@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import os
 import re
 import shutil
 from pathlib import Path
 from typing import Any, cast
 
+from linch._blocking import run_blocking
 from linch.errors import ToolExecutionError
 from linch.filesystem.disk import _atomic_write
 
@@ -40,6 +42,29 @@ def resolve_under(cwd: str, path_str: str) -> Path:
     return target
 
 
+def _file_stamp(path: Path) -> tuple[int, int]:
+    info = path.stat()
+    return info.st_mtime_ns, info.st_size
+
+
+async def _run_mutation(tool: Any, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+    task = asyncio.create_task(run_blocking(tool._execute, input, ctx))
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+        except BaseException:
+            if cancelled is None:
+                raise
+    if cancelled is not None:
+        if not task.cancelled():
+            task.exception()
+        raise cancelled
+    return task.result()
+
+
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
@@ -61,6 +86,11 @@ class ReadTool:
     }
     scope: ToolScope = "read"
     parallel: bool = True
+
+    def __init__(self, *, max_read_bytes: int = 10 * 1024 * 1024) -> None:
+        if type(max_read_bytes) is not int or max_read_bytes <= 0:
+            raise ValueError("max_read_bytes must be a positive integer")
+        self.max_read_bytes = max_read_bytes
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         """Validate a read path and optional line window.
@@ -86,6 +116,13 @@ class ReadTool:
         return result
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        result, (path, stamp, bounds) = await run_blocking(self._execute, input, ctx)
+        if ctx.file_read_tracker is not None and bounds is not None:
+            ctx.file_read_tracker.set_stamp(path, stamp, reset=True)
+            ctx.file_read_tracker.mark_read(path, *bounds)
+        return result
+
+    def _execute(self, input: dict[str, object], ctx: ToolContext) -> tuple[ToolResult, Any]:
         """Read and number selected lines from a workspace file.
 
         Args:
@@ -101,7 +138,19 @@ class ReadTool:
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
         try:
-            text = path.read_bytes().decode("utf-8")
+            if path.stat().st_size > self.max_read_bytes:
+                raise ToolExecutionError("File exceeds max_read_bytes; use Grep to narrow results.")
+            with path.open("rb") as file:
+                info = os.fstat(file.fileno())
+                stamp = (info.st_mtime_ns, info.st_size)
+                data = file.read(self.max_read_bytes + 1)
+            if len(data) > self.max_read_bytes:
+                raise ToolExecutionError("File exceeds max_read_bytes; use Grep to narrow results.")
+            if _file_stamp(path) != stamp:
+                raise ToolExecutionError("File changed while reading; Read this file again.")
+            if _is_binary(data):
+                raise ToolExecutionError("Binary files cannot be read as text.")
+            text = data.decode("utf-8")
         except Exception as exc:
             raise ToolExecutionError(str(exc)) from exc
 
@@ -111,15 +160,14 @@ class ReadTool:
         limit = _to_int(input.get("limit"), 2000) or 2000
         start_index = min(offset - 1, len(lines))
         end_index = min(start_index + limit, len(lines)) if limit > 0 else len(lines)
+        full = start_index == 0 and end_index == len(lines)
+        bounds: tuple[int, ...] | None = () if full else (start_index + 1, end_index)
+        if start_index >= end_index:
+            bounds = None
         lines = lines[start_index:end_index]
-        if ctx.file_read_tracker is not None and start_index < end_index:
-            if start_index == 0 and end_index == len(text.split("\n")):
-                ctx.file_read_tracker.mark_read(str(path))
-            else:
-                ctx.file_read_tracker.mark_read(str(path), start_index + 1, end_index)
         numbered = [f"{idx + offset}\t{line}" for idx, line in enumerate(lines)]
         text = "\n".join(numbered) if numbered else "<file is empty>"
-        return ToolResult(content=text, summary=f"Read {path}")
+        return ToolResult(content=text, summary=f"Read {path}"), (str(path), stamp, bounds)
 
     def summarize(self, input: dict[str, object]) -> str:
         """Summarize a read call.
@@ -192,6 +240,9 @@ class WriteTool:
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        return await _run_mutation(self, input, ctx)
+
+    def _execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
         """Write content to a workspace file, creating parent directories.
 
         Args:
@@ -206,8 +257,16 @@ class WriteTool:
         """
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
+        if path.exists() and ctx.file_read_tracker is not None:
+            if not ctx.file_read_tracker.has_read(
+                str(path)
+            ) or not ctx.file_read_tracker.is_current(str(path), _file_stamp(path)):
+                return ToolResult(content="Read this file again before writing it.", is_error=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, str(input["content"]))
+        if ctx.file_read_tracker is not None:
+            ctx.file_read_tracker.mark_read(str(path))
+            ctx.file_read_tracker.set_stamp(str(path), _file_stamp(path))
         return ToolResult(content=f"Wrote {path}", summary=f"Wrote {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
@@ -288,6 +347,9 @@ class EditTool:
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        return await _run_mutation(self, input, ctx)
+
+    def _execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
         """Apply an exact replacement after read-before-write checks.
 
         Args:
@@ -302,6 +364,10 @@ class EditTool:
         """
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
+        if ctx.file_read_tracker is not None and (
+            not path.exists() or not ctx.file_read_tracker.is_current(str(path), _file_stamp(path))
+        ):
+            return ToolResult(content="Read this file again before editing it.", is_error=True)
         text = path.read_bytes().decode("utf-8")
         old = str(input["old_string"])
         replace_all = bool(input.get("replace_all", False))
@@ -360,6 +426,7 @@ class EditTool:
         _atomic_write(path, new_text)
         if ctx.file_read_tracker is not None:
             ctx.file_read_tracker.invalidate_ranges(str(path))
+            ctx.file_read_tracker.set_stamp(str(path), _file_stamp(path))
         return ToolResult(content=f"Edited {path}", summary=f"Edited {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
