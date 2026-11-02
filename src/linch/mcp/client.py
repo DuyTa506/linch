@@ -189,7 +189,8 @@ async def connect_mcp_servers(
             await owner.wait_ready()
             session = opened[-1].session
             result = await session.list_tools()
-            mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
+            call_tool = _make_call_tool(session, getattr(config, "timeout_s", 300))
+            mcp_tools = [make_mcp_tool(name, t, call_tool) for t in result.tools]
             for tool in mcp_tools:
                 tool_name = str(getattr(tool, "name", ""))
                 if tool_name in tool_names:
@@ -271,11 +272,28 @@ async def _start_session(opened: _OpenSession, read: Any, write: Any) -> _OpenSe
         raise
 
 
-def _make_call_tool(session: ClientSession):
+def _make_call_tool(session: ClientSession, timeout_s: float = 300):
+    async def _drain(*tasks: asyncio.Task[Any]) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _call(name: str, args: dict, signal: object) -> object:
         from ..abort import throw_if_aborted
 
         throw_if_aborted(cast(Any, signal))
-        return await session.call_tool(name, args or {})
+        if signal is None:
+            return await session.call_tool(name, args or {}, read_timeout_seconds=timeout_s)
+        call = asyncio.create_task(
+            session.call_tool(name, args or {}, read_timeout_seconds=timeout_s)
+        )
+        aborted = asyncio.create_task(cast(Any, signal).wait())
+        try:
+            await asyncio.wait((call, aborted), return_when=asyncio.FIRST_COMPLETED)
+            throw_if_aborted(cast(Any, signal))
+            return await call
+        finally:
+            await _wait_for_cleanup(asyncio.create_task(_drain(call, aborted)))
 
     return _call

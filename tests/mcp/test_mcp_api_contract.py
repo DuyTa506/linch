@@ -69,7 +69,7 @@ def test_tool_annotations_map_to_scope_and_destructive() -> None:
     assert read_only.scope == "read"  # type: ignore[attr-defined]
     assert read_only.parallel is True  # type: ignore[attr-defined]
     assert read_only.destructive is False  # type: ignore[attr-defined]
-    assert dangerous.scope == "write"  # type: ignore[attr-defined]
+    assert dangerous.scope == "exec"  # type: ignore[attr-defined]
     assert dangerous.destructive is True  # type: ignore[attr-defined]
 
 

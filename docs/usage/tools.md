@@ -505,11 +505,30 @@ For example, server `ops.prod` with tool `get.status` becomes
 `mcp__ops_prod__get_status`. Names that collide after normalization raise
 `ConfigError`.
 
-Server annotations affect scheduling and permissions: `readOnlyHint` gives a
-tool read scope and parallel safety; other tools have write scope.
-`destructiveHint` adds an ask rule, including in `acceptEdits` and
-`skip-dangerous` modes. Approval still uses `can_use_tool`, so an ask without a
-callback is denied.
+Server annotations affect scheduling and permissions: only `readOnlyHint: true`
+gives a tool read scope and parallel safety; all other tools have exec scope and
+run serially. Non-read-only tools are destructive by default, following the MCP
+schema's documented default, unless the server explicitly sets
+`destructiveHint: false`. Destructive tools add an ask rule, including in
+`acceptEdits` and `skip-dangerous` modes. Exec tools still ask in `acceptEdits`
+even when `destructiveHint` is false. Approval uses `can_use_tool`, so an ask
+without a callback is denied.
+
+Hints are server claims, not verified guarantees. A dishonest server can label a
+mutating tool read-only and gain automatic approval, parallel execution, and
+read-tool treatment. Only connect servers whose annotation claims you trust.
+
+Both `McpStdioServerConfig` and `McpHttpServerConfig` accept `timeout_s` (default
+300 seconds), passed to the SDK's per-tool-call request read timeout. The timeout
+starts after the request is written and returns a tool error result when it
+expires. Abort signals cancel an in-flight call and raise `AbortError`; the SDK
+sends a cancellation notification and the client awaits its cleanup. A wedged
+transport can delay SDK cancellation cleanup up to five seconds. Cancellation
+does not guarantee that a server stops or rolls back remote side effects.
+
+MCP results include embedded resource text; binary resource content stays omitted.
+The combined text result, including separators, is capped at 30,000 characters,
+using the same shared output limit as Grep.
 
 ---
 

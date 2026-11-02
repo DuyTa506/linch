@@ -63,14 +63,12 @@ def make_mcp_tool(
     """
     name = build_mcp_tool_name(server_name, mcp_tool.name)
     annotations = getattr(mcp_tool, "annotations", None)
-    read_only = getattr(annotations, "read_only_hint", False) if annotations is not None else False
-    is_destructive = (
-        bool(getattr(annotations, "destructive_hint", False)) if annotations is not None else False
-    )
+    read_only = getattr(annotations, "read_only_hint", None) is True
+    is_destructive = not read_only and getattr(annotations, "destructive_hint", None) is not False
 
     class _McpTool:
         is_mcp_tool = True
-        scope = "read" if read_only else "write"
+        scope = "read" if read_only else "exec"
         parallel = read_only
         # Surfaced for the annotation→permission bridge (mcp_permission_rules):
         # a server's destructive_hint maps to an "ask" permission tier.

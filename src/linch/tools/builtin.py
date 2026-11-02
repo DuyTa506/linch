@@ -10,6 +10,7 @@ from typing import Any, cast
 from linch.errors import ToolExecutionError
 from linch.filesystem.disk import _atomic_write
 
+from ._limits import OUTPUT_CAP
 from .base import ResourceAccess, ToolContext, ToolResult, ToolScope, require_str
 
 
@@ -493,7 +494,6 @@ class BashTool:
 
 _RG_PATH = shutil.which("rg")
 
-_OUTPUT_CAP = 30000
 _DEFAULT_HEAD_LIMIT = 250
 _VCS_IGNORE_DIRS = {".git", ".hg", ".svn"}
 
@@ -978,8 +978,8 @@ class GrepTool:
         limited = "\n".join(lines[:head_limit])
         if len(lines) > head_limit:
             limited += f"\n… (truncated to {head_limit} of {len(lines)} lines)"
-        if len(limited) > _OUTPUT_CAP:
-            limited = limited[:_OUTPUT_CAP] + f"\n… (output capped at {_OUTPUT_CAP} chars)"
+        if len(limited) > OUTPUT_CAP:
+            limited = limited[:OUTPUT_CAP] + f"\n… (output capped at {OUTPUT_CAP} chars)"
         return ToolResult(
             content=limited,
             summary=f"Grep matched {min(len(lines), head_limit)} line(s)",
