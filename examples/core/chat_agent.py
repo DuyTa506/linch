@@ -122,9 +122,8 @@ def _make_agent():
             ),
         ),
         # Structured output: every reply is {answer, topic}.
-        # Because AnthropicProvider has structured_output=False, this works via
-        # text-parse (the model writes JSON, the loop parses it).
-        # For OpenAI providers with structured_output=True it is enforced natively.
+        # Provider support decides whether the schema is enforced natively or
+        # parsed from text; see docs/usage/structured-output.md.
         output_schema=OutputSchema(
             name="support_reply",
             schema={

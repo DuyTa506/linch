@@ -64,9 +64,9 @@ mailbox drains, no dropped concurrent sends, and custom tool
 metadata/validation/execution/resource shape.
 
 Copyable starter files live in
-[`examples/extensions/`](../../examples/extensions/): provider, virtual
-filesystem backend, tool package, and hook package templates. They are
-kept importable and smoke-tested so they track the public protocols.
+[`examples/extensions/`](../../examples/extensions/): provider and tool package
+templates. They are kept importable and smoke-tested so they track the public
+protocols.
 
 ---
 

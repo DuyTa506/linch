@@ -101,7 +101,9 @@ agent with the same durable stores and approval policy, then reattach the
 original session by ID. Persisted permission decisions and tool completions
 replay; an external side effect that happened before its completion record became
 durable may execute again. Tool integrations must use `ctx.idempotency_key` to
-reconcile this at-least-once boundary.
+reconcile this at-least-once boundary. A tool whose start event is durable but
+whose end event is not is not rerun automatically: the model receives an error
+result saying the execution was interrupted.
 
 ```python
 session = await agent.session(id=session_id)  # reattach the original session

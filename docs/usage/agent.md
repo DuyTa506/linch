@@ -409,7 +409,7 @@ agent = Agent(
     model="gpt-5",
     compaction_ladder=CompactionLadder(
         micro=True,                 # rung 1: LLM-free tool-result elision
-        keep_recent_turns=10,       # never elide results in the last N turns
+        keep_recent_turns=10,       # keep the last N assistant messages and all that follow
         max_forced_compactions=3,   # per-run circuit breaker on LLM compaction
     ),
 )

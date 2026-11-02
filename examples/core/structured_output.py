@@ -150,7 +150,7 @@ async def demo_per_run_schema(agent: Agent) -> None:
 
 # ── 3. final_tool_name — terminal tool (provider-agnostic) ───────────────────
 #
-# Instead of relying on response_format (OpenAI-only), register a tool whose
+# Instead of relying on provider response_format support, register a tool whose
 # input_schema IS your output schema. Set final_tool_name to its name.
 # The loop intercepts the call, sets ResultEvent.structured_output = tool_input,
 # and returns without executing the tool. Works with ANY provider (Anthropic too).
