@@ -137,6 +137,11 @@ async def maybe_offload(
     if not config.enabled or result.is_error or tool_name in config.skip_tools:
         return result
 
+    if result.truncated and (
+        result.metadata.get("stdout_path") or result.metadata.get("stderr_path")
+    ):
+        return result
+
     threshold = config.threshold_tokens
     if threshold is None:
         # threshold was not resolved at Agent init (e.g. a bare OffloadConfig

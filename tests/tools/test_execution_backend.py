@@ -76,9 +76,8 @@ async def test_local_backend_timeout_kills_and_flags(tmp_path) -> None:
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_local_backend_abort_interrupts_running_command(tmp_path) -> None:
-    """session.abort() must interrupt a running LocalBackend command (raises AbortError)."""
+    """Aborting local execution preserves its partial output and marks the result."""
     from linch.abort import AbortContext
-    from linch.errors import AbortError
     from linch.tools.execution import LocalBackend
 
     backend = LocalBackend()
@@ -89,8 +88,8 @@ async def test_local_backend_abort_interrupts_running_command(tmp_path) -> None:
     await asyncio.sleep(0.05)
     signal.abort()
 
-    with pytest.raises(AbortError):
-        await asyncio.wait_for(task, timeout=2.0)
+    result = await asyncio.wait_for(task, timeout=4.0)
+    assert result.aborted and not result.timed_out
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -156,16 +155,15 @@ def _docker_rm_args(calls: list[list[str]]) -> list[str]:
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_bash_tool_timeout_raises_tool_execution_error(tmp_path) -> None:
-    from linch.errors import ToolExecutionError
+async def test_bash_tool_timeout_returns_error_result(tmp_path) -> None:
     from linch.tools.builtin import BashTool
 
     tool = BashTool()
     ctx = _make_ctx(tmp_path)
     # 1 ms timeout — forces timed_out=True path
     validated = tool.validate({"command": "sleep 60", "timeout_ms": 1})
-    with pytest.raises(ToolExecutionError, match="timed out"):
-        await tool.execute(validated, ctx)
+    result = await tool.execute(validated, ctx)
+    assert result.is_error and "timed out" in result.content
 
 
 @pytest.mark.asyncio(loop_scope="module")

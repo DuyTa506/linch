@@ -531,6 +531,52 @@ The subprocess/shell half of an execution world.
 
 Usage: [extending](extending.md).
 
+### `linch.ShellProcess`
+
+Kind: Class.
+
+```python
+from linch import ShellProcess
+```
+
+```text
+Not instantiable (Protocol); implement its documented methods and attributes.
+```
+
+Optional live shell handle; timed waits do not terminate the command.
+
+Usage: [extending](extending.md).
+
+### `linch.ShellRead`
+
+Kind: Class.
+
+```python
+from linch import ShellRead
+```
+
+```text
+ShellRead(stdout: str = '', stderr: str = '', lossy: bool = False)
+```
+
+New stdout/stderr since the previous read; lossy marks dropped bytes.
+
+### `linch.ShellStarter`
+
+Kind: Class.
+
+```python
+from linch import ShellStarter
+```
+
+```text
+Not instantiable (Protocol); implement its documented methods and attributes.
+```
+
+Optional shell capability, independent of the run-only backend contract.
+
+Usage: [extending](extending.md).
+
 ### `linch.DurabilityOptions`
 
 Kind: Class.
@@ -2470,7 +2516,7 @@ from linch import ToolContext
 ```
 
 ```text
-ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, _run_config: Any = None, _principal: Principal | None = None)
+ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, tool_timeout_s: float | None = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, _run_config: Any = None, _principal: Principal | None = None)
 ```
 
 Provide runtime capabilities to a tool invocation.
@@ -2538,8 +2584,6 @@ Inherited initializer: Exception.__init__(self, /, *args, **kwargs)
 ```
 
 A tool failed while executing an otherwise valid tool call.
-
-Usage: [tools](tools.md).
 
 ### `linch.ToolTimeoutError`
 

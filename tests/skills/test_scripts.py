@@ -48,7 +48,7 @@ async def test_author_quoted_skill_directory_with_spaces_runs_through_bash(
     result = await bash.execute(bash.validate({"command": command}), ctx)
 
     assert result.is_error is False
-    assert result.content.strip() == "skill script ran"
+    assert result.content.splitlines() == ["skill script ran", "", "[Exited 0]"]
     assert marker.read_text() == "executed"
 
 
@@ -105,5 +105,5 @@ async def test_outside_workspace_skill_script_obeys_bash_approval(
         assert not marker.exists()
     else:
         assert end.is_error is False
-        assert end.result.strip() == "skill script ran"
+        assert end.result.splitlines() == ["skill script ran", "", "[Exited 0]"]
         assert marker.read_text() == "executed"

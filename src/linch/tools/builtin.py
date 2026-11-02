@@ -522,24 +522,46 @@ class BashTool:
         Returns:
             Tool result containing stdout and stderr.
 
-        Raises:
-            ToolExecutionError: If the command times out.
         """
 
         timeout_s = _to_float(input.get("timeout_ms"), 120000.0) / 1000.0
+        if ctx.tool_timeout_s is not None:
+            timeout_s = min(timeout_s, max(ctx.tool_timeout_s - 1, ctx.tool_timeout_s / 2))
         result = await self._backend.run(
             str(input["command"]),
             cwd=ctx.cwd,
             timeout_s=timeout_s,
             signal=ctx.signal,
         )
-        if result.timed_out:
-            raise ToolExecutionError("command timed out")
+        status = (
+            f"command timed out (exit {result.returncode})"
+            if result.timed_out
+            else f"command aborted (exit {result.returncode})"
+            if result.aborted
+            else f"Exited {result.returncode}"
+        )
+        if result.signal is not None:
+            status += f" (signal {result.signal})"
+        paths = {
+            key: value
+            for key, value in (
+                ("stdout_path", result.stdout_path),
+                ("stderr_path", result.stderr_path),
+            )
+            if value
+        }
         content = result.stdout + (("\n[stderr]\n" + result.stderr) if result.stderr else "")
+        content += f"\n[{status}]"
+        if result.truncated:
+            content += "\n[output truncated]"
+        for key, path in paths.items():
+            content += f"\n[{key}: {path}]"
         return ToolResult(
             content=content,
-            summary=f"Exited {result.returncode}",
-            is_error=result.returncode != 0,
+            summary=status,
+            is_error=result.returncode != 0 or result.timed_out or result.aborted,
+            truncated=result.truncated,
+            metadata=paths,
         )
 
     def summarize(self, input: dict[str, object]) -> str:

@@ -98,6 +98,7 @@ class ToolContext:
     run_id: str
     session_store: Any
     signal: Any = None
+    tool_timeout_s: float | None = None
     file_read_tracker: Any = None
     emit: Callable[[str, dict[str, Any] | None], None] | None = None
     """Runtime-owned progress sink.
