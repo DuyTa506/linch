@@ -1,5 +1,7 @@
 # Implementing your own seam
 
+Use this page when you need to implement and inject your own runtime seam.
+
 Linch ships **mechanisms**, not policy. Every subsystem is a duck-typed protocol you
 can re-implement and inject — no base class to inherit, just match the attributes and
 methods. This page is the "implement your own" reference for the seams added in the

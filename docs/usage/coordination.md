@@ -1,5 +1,7 @@
 # Coordination
 
+Use mailbox coordination when agents need to exchange peer messages across turns.
+
 > **A note on "harness."** In the agent literature, *harness* means everything
 > around the model — `Agent = Model + Harness` — i.e. the tools, memory, context
 > engineering, verification, persistence, and the loop itself. By that

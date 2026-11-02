@@ -37,7 +37,7 @@ unresolved = [
     (
         "linch.tools.execution.DockerBackend",
         "docs/usage/tools.md",
-        289,
+        301,
         "from linch.tools.execution import DockerBackend",
     ),
     ("linch.hooks.AgentStartContext", "docs/migration-3.0.md", 250, HOOK_CONTEXT_IMPORT),

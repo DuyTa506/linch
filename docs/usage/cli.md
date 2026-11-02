@@ -1,5 +1,7 @@
 # Scaffolding CLI
 
+Use the `linch` CLI to scaffold projects, add tools, and locate installed documentation.
+
 [<- Usage guide](./README.md)
 
 Installing linch registers a `linch` console script that scaffolds agent

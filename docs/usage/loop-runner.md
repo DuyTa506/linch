@@ -1,5 +1,7 @@
 # Outer loop runner
 
+Use `LoopRunner` when your host needs to trigger recurring agent work.
+
 [← Usage guide](./README.md)
 
 `LoopRunner` is the SDK-native outer-loop primitive for recurring agent work. It is

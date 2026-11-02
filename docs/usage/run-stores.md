@@ -1,5 +1,7 @@
 # Durable run stores
 
+Use run stores when checkpoints and ordered run events must survive a restart.
+
 A `RunStore` persists run checkpoints, status, and an ordered event log. Session
 history is stored separately by the session store. Pass both stores to `Agent`
 when conversation history and resumable runs must survive a restart.

@@ -1,10 +1,14 @@
 # Evals And Benchmarks
 
+Use eval suites to compare agent behavior across providers, prompts, and runtime settings.
+
 Linch evals are deterministic harness runs over normal `Agent` instances. Use
 them to compare providers, prompts, recovery settings, memory setups, or runtime
 changes without building a separate test runner.
 
-## Library API
+<a id="library-api"></a>
+
+## `run_eval_benchmark` and `EvalSuite`
 
 ```python
 import asyncio

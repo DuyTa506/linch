@@ -1,5 +1,7 @@
 # Quickstart
 
+Use this path to run your first offline agent, then add a provider, tools, and persistence.
+
 [<- Usage guide](./README.md)
 
 This path is for a new developer who wants to get a Linch agent running first,

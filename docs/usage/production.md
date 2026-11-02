@@ -1,5 +1,7 @@
 # Minimal production wiring
 
+Use this checklist when embedding Linch in a service with durable runs and shutdown handling.
+
 This page is the short version of embedding Linch inside a long-running async
 service: persistence, streaming, human-in-the-loop, resume after a restart,
 graceful shutdown, and blast-radius controls. Each section links to the page

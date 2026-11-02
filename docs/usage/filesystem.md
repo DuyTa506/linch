@@ -1,5 +1,7 @@
 # Virtual filesystem and large-result offloading
 
+Use the virtual filesystem to offload large tool results and expose file operations.
+
 [← Usage guide](./README.md)
 
 Variable-length tool results — RAG passages, web search dumps, large file

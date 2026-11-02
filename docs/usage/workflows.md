@@ -1,5 +1,7 @@
 # Directed workflows (replayable fleet orchestration)
 
+Use `run_workflow` when your code should direct and replay a known orchestration sequence.
+
 [← Usage guide](./README.md)
 
 `run_workflow(agent, fn)` runs a plain async Python function that orchestrates subagents — your code owns the directed control flow, while subagents do the model-directed work. The journal makes an unchanged call prefix replayable and resumable. It is not called closed-loop: that term is reserved for a verifier whose feedback actually decides retry or stop.
@@ -55,7 +57,9 @@ The keyword arguments to `run_workflow` control budget, journaling, and observat
 
 ---
 
-## The `wf` context
+<a id="the-wf-context"></a>
+
+## `WorkflowContext`
 
 The `wf` argument is a `linch.ext.workflow.WorkflowContext`. It exposes a small, fixed surface — you compose your orchestration out of these primitives rather than calling the loop directly:
 
@@ -77,7 +81,9 @@ A few practical notes:
 
 ---
 
-## Journal and resume
+<a id="journal-and-resume"></a>
+
+## `WorkflowJournal` — journal and resume
 
 With `run_id` and a `run_store`, each `wf.agent` call's result is persisted as a `WorkflowEvent(kind="agent_end")` in the run's event log. Re-invoking `run_workflow` with the same `run_id` replays the unchanged call prefix from that journal — `kind="agent_replayed"` events fire instead of provider calls. Calls are keyed by a content hash of `(subagent_type, prompt, tools, run_options)` plus an occurrence counter, so identical parallel calls replay safely. Editing a prompt, structured-output option, or tool filter invalidates that call rather than reusing a result produced under a different tool policy.
 

@@ -1,4 +1,6 @@
-# Agent & session
+# Agent & Session
+
+Use this page to configure an `Agent` and manage each `Session` lifecycle.
 
 [← Usage guide](./README.md)
 
@@ -16,7 +18,9 @@ spending is capped (budgets).
 - Versioned per-run roles and configuration use `RunOptions(profile=...)`;
   see [domain profiles](./profiles.md) for layering and durable resume.
 
-## Tool and response reliability
+<a id="tool-and-response-reliability"></a>
+
+## `ReliabilityPolicy` — Tool and response reliability
 
 `Agent` uses `ReliabilityPolicy()` by default for every provider. An empty
 `end_turn`, a whole-text `<tool_call>...</tool_call>` envelope, or malformed
@@ -177,7 +181,9 @@ another provider call drops restored entries silently.
 
 ---
 
-## Session store
+<a id="session-store"></a>
+
+## `SessionStore`
 
 The session store persists the message snapshots needed by the session's single
 append-only `SessionLog`: `provider_view` (model-visible) and `full_history`
@@ -252,7 +258,9 @@ the SDK verifies integrity but encryption and access control belong to the host.
 
 ---
 
-## Feature flags
+<a id="feature-flags"></a>
+
+## `FeatureFlags`
 
 `FeatureFlags` turns off subsystems you don't use so they never connect during
 `session()`. This trims startup work and the system prompt.
@@ -295,7 +303,9 @@ disables offloading even if you pass a backend.
 
 ---
 
-## System prompt control
+<a id="system-prompt-control"></a>
+
+## `SystemPromptConfig`
 
 By default Linch ships a domain-neutral identity prompt. It mentions only the
 tools actually registered on the agent. You can append to it, replace it
@@ -339,7 +349,9 @@ compose cleanly with subsystem prompt blocks (filesystem, skills, …).
 
 ---
 
-## Compaction
+<a id="compaction"></a>
+
+## `DefaultCompaction` and `DetailedCompaction`
 
 When the projected context approaches the provider's window, the compaction
 strategy summarizes old messages to free space. It is transparent to the
@@ -380,7 +392,9 @@ transform logic has no automatic deterministic paid-replay guarantee. The
 standalone `summarize_with_provider(...)` helper remains available with its
 existing direct-provider behavior; it is not a durable run receipt by itself.
 
-### Compaction ladder
+<a id="compaction-ladder"></a>
+
+### `CompactionLadder`
 
 `CompactionLadder` adds cheap, LLM-free recovery rungs before and around
 summarization. It is opt-in — the default (`compaction_ladder=None`) keeps one
@@ -414,7 +428,9 @@ agent = Agent(
 
 ---
 
-## Truncation recovery
+<a id="truncation-recovery"></a>
+
+## `TruncationRecovery`
 
 When a model's text response is cut off because it hit the output-token limit
 (normalized to `stop_reason == "max_tokens"`), the default loop returns that
@@ -445,7 +461,9 @@ run `RunBudget`.
 
 ---
 
-## Run budgets
+<a id="run-budgets"></a>
+
+## `RunBudget`
 
 `RunBudget` caps total spending — tokens, USD, or both — for a run **and every
 subagent it spawns**. Child sessions inherit the parent's budget object by

@@ -1,5 +1,7 @@
 # Structured output
 
+Use `OutputSchema` when an agent must return a final answer matching a JSON Schema.
+
 [← Usage guide](./README.md)
 
 When you need the agent's final answer as a typed object rather than free text,

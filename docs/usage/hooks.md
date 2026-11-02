@@ -1,5 +1,7 @@
 # Hooks
 
+Use hooks to observe or change agent behavior at typed lifecycle chokepoints.
+
 [← Usage guide](./README.md)
 
 Hooks are the **canonical extension mechanism** for the Linch runtime. A hook is

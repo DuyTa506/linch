@@ -1,5 +1,7 @@
 # Providers
 
+Use this page to choose and configure a model provider and inspect its capabilities.
+
 [← Usage guide](./README.md)
 
 Linch is provider-agnostic: the agent loop, tools, events, and memory are
@@ -291,7 +293,9 @@ catalog.
 
 ---
 
-## Inspecting the model catalog
+<a id="inspecting-the-model-catalog"></a>
+
+## `list_provider_models` and `get_provider_model_info`
 
 Known direct-provider models can be inspected without constructing a live
 client — useful for building a model picker UI, validating config at startup, or
@@ -332,7 +336,9 @@ pricing table — see [Events](./events.md#cost-fields) for how to do that.
 
 ---
 
-## Capability flags
+<a id="capability-flags"></a>
+
+## `ProviderCapabilities`
 
 Each catalog record exposes a `ProviderCapabilities` object declaring which
 features the provider supports. Before every provider call, Linch downgrades the

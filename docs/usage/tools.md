@@ -1,5 +1,7 @@
 # Tools
 
+Use tools to give an agent explicit actions, validation, permissions, and execution controls.
+
 [← Usage guide](./README.md)
 
 Tools are how an agent acts on the world: search a knowledge base, read a file,
@@ -12,7 +14,9 @@ rules that govern whether a tool may run at all.
 
 ---
 
-## Custom tools
+<a id="custom-tools"></a>
+
+## `tool` and `Tool` — custom tools
 
 Use `@tool` for the common case. It wraps a sync or async function in a normal
 Linch tool object, infers a minimal JSON schema from the function signature,
@@ -53,7 +57,9 @@ choice for a pure domain agent that should never touch the filesystem or shell.
 on `agent.tools` so request discovery sees them; mutating the original registry
 does not change an existing agent.
 
-### Tool search for large catalogs
+<a id="tool-search-for-large-catalogs"></a>
+
+### `ToolSearchPlugin` — large catalogs
 
 Agents mount `ToolSearchPlugin(max_tools=30, max_skills=50)` automatically when
 the first session is created. Catalogs at or below those limits keep the normal
@@ -121,7 +127,9 @@ customer_tool = FunctionTool(
 )
 ```
 
-### Class-based tools
+<a id="class-based-tools"></a>
+
+### `ToolContext` and `ToolResult` — class-based tools
 
 Class-based duck-typed tools remain supported and are the right fit when you
 need custom validation, resource declarations, or richer execution behavior.
@@ -215,7 +223,9 @@ resource are serialized. Use it when distinct tools share an underlying
 resource the scope alone cannot express — a search tool and a re-index tool on
 the same vector store, for example.
 
-### Batching strategy
+<a id="batching-strategy"></a>
+
+### `ToolBatchingStrategy`
 
 `Agent(tool_batching_strategy=...)` (default
 `"greedy"`) controls how parallel-safe calls in one turn are grouped into
@@ -270,7 +280,9 @@ idempotent. Retries use exponential backoff from `base_delay_ms`.
 
 ---
 
-## Bash execution backend
+<a id="bash-execution-backend"></a>
+
+## `ExecutionBackend` — Bash execution
 
 `Bash` uses the shell transport from `LocalExecutionBackend` by default. To
 inject a different execution world, pass a coherent `.shell`/`.fs` backend as

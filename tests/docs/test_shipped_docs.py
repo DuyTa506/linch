@@ -29,6 +29,17 @@ LAYOUT = (
 )
 
 
+def test_root_pytest_exposes_packaging_option() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--run-packaging" in result.stdout
+
+
 def test_wheel_shipped_layout() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     actual = config["tool"]["hatch"]["build"]["targets"]["wheel"]
@@ -126,6 +137,63 @@ def test_shipped_relative_links_resolve(shipped_files, shipped_markdown) -> None
             if target not in files | directories:
                 errors.append(f"{page.relative_to(ROOT)}: {link}")
     assert not errors, "Links outside shipped documentation:\n" + "\n".join(errors)
+
+
+def markdown_anchors(text: str) -> set[str]:
+    """Read GitHub-style heading slugs and explicit anchors without a renderer."""
+    text = re.sub(r"(?ms)^(`{3,}|~{3,}).*?^\1[^\n]*$", "", text)
+    anchors = set(re.findall(r"(?:id|name)=[\"']([^\"']+)[\"']", text))
+    counts: dict[str, int] = {}
+    for title in re.findall(r"(?m)^ {0,3}#{1,6} (.+?)(?: +#+)?$", text):
+        # Angle brackets inside code (e.g. `linch new <name>`) are text, not HTML.
+        code = re.findall(r"`([^`]+)`", title)
+        for index, value in enumerate(code):
+            title = title.replace(f"`{value}`", f"LINCHCODE{index}", 1)
+        title = re.sub(r"<[^>]*>", "", title)
+        for index, value in enumerate(code):
+            title = title.replace(f"LINCHCODE{index}", value)
+        slug = re.sub(r"[^\w\- ]", "", title.lower()).replace(" ", "-")
+        count = counts.get(slug, 0)
+        counts[slug] = count + 1
+        anchors.add(f"{slug}-{count}" if count else slug)
+    return anchors
+
+
+def broken_fragments(page: Path) -> list[str]:
+    errors = []
+    for link in relative_links(page.read_text(encoding="utf-8")):
+        url = urlsplit(link)
+        if url.scheme or url.netloc or not url.fragment:
+            continue
+        target = (page.parent / unquote(url.path)).resolve() if url.path else page
+        if target.suffix == ".md" and target.is_file():
+            if unquote(url.fragment) not in markdown_anchors(target.read_text(encoding="utf-8")):
+                errors.append(link)
+    return errors
+
+
+def test_shipped_relative_fragments_resolve(shipped_markdown) -> None:
+    errors = [
+        f"{page.relative_to(ROOT)}: {link}"
+        for page in shipped_markdown
+        for link in broken_fragments(page)
+    ]
+    assert not errors, "Missing Markdown anchors:\n" + "\n".join(errors)
+
+
+def test_fragment_check_detects_renamed_headings_and_accepts_aliases(tmp_path) -> None:
+    page = tmp_path / "page.md"
+    page.write_text("# Renamed\n[a](#old)\n[b](./page.md#old)\n")
+    assert broken_fragments(page) == ["#old", "./page.md#old"]
+    page.write_text(page.read_text() + '<a id="old"></a>\n')
+    assert not broken_fragments(page)
+
+
+def test_markdown_anchors_preserve_code_and_duplicate_slugs() -> None:
+    assert markdown_anchors(
+        '# `linch new <name>`\n## `linch.Tool`\n## `linch.tool`\n<a name="old"></a>\n'
+        "```python\n# Not a heading\n```\n"
+    ) == {"linch-new-name", "linchtool", "linchtool-1", "old"}
 
 
 @pytest.mark.packaging
