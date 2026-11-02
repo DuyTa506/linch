@@ -1109,7 +1109,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             async for event in max_turn_events:
                 yield event
     except _TerminalCleanupError as exc:
-        raise exc.error from exc
+        raise exc.error from None
     except AbortError:
         try:
             async with aclosing(
@@ -1118,7 +1118,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 async for event in abort_events:
                     yield event
         except _TerminalCleanupError as exc:
-            raise exc.error from exc
+            raise exc.error from None
     except Exception as exc:
         if isinstance(exc, LeaseLostError):
             _runtime.lease_lost = exc
@@ -1129,7 +1129,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 async for event in error_events:
                     yield event
         except _TerminalCleanupError as cleanup:
-            raise cleanup.error from cleanup
+            raise cleanup.error from None
     finally:
         await _runtime.unbind_run()
         try:

@@ -161,6 +161,9 @@ trình con. Stdin shell đóng; kết quả timeout/abort giữ đầu ra đã t
 ID gồm `p` và tám chữ số hex thường của UUID4, không tồn tại qua resume hoặc
 cleanup. Registry giữ tối đa 128 ID đã kết thúc gần nhất; đường dẫn spill tồn tại
 đến cleanup. `max_processes` và `max_runtime_ms` thuộc fingerprint bền vững.
+`run_in_background` khi đã đạt `max_processes` bị từ chối trước khi spawn; lệnh
+foreground chạy quá timeout khi đã đạt giới hạn sẽ bị kill. `kill` của `BashProcess`
+trên tiến trình đã kết thúc giữ nguyên trạng thái thoát của tiến trình đó.
 Bash chạy nền cần registry được quản lý và `ShellStarter`. Chỉ đúng `BashProcess`
 tích hợp bỏ qua lần duyệt thứ hai. Timeout và giới hạn phải là số nguyên dương,
 không nhận boolean hay giá trị không hữu hạn; timeout hợp lệ giới hạn ở 1.800.000 ms.

@@ -8,21 +8,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .._blocking import settle
 from .base import ToolContext, ToolResult, ToolScope, require_str
 from .builtin import _to_int
-
-
-async def _settle(task: asyncio.Task[Any]) -> Any:
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
 
 
 @dataclass(slots=True)
@@ -57,7 +45,7 @@ class _Process:
                 self.timed_out = self.aborted = False
                 return
             if pending:
-                await _settle(asyncio.create_task(self.stop()))
+                await settle(asyncio.create_task(self.stop()))
 
 
 @dataclass(slots=True)
@@ -77,7 +65,7 @@ class ProcessRegistry:
             return
         if self._closing is None or self._closing.done():
             self._closing = asyncio.create_task(self._close())
-        await _settle(self._closing)
+        await settle(self._closing)
 
     async def _close(self) -> None:
         for entry in self.entries:
@@ -136,19 +124,24 @@ class ProcessRegistry:
             await self._retire(entry, await entry.handle.wait(0))
         self._trim_history()
         running = len(self.entries)
+        if input.get("run_in_background") and running >= tool.max_processes:
+            return ToolResult(
+                content=f"Process limit reached ({running}); stop one with BashProcess first.",
+                is_error=True,
+            )
         handle = await tool._backend.start(str(input["command"]), cwd=ctx.cwd)
         entry = _Process(handle)
         self.entries.append(entry)
         self.cleaned = False
         if self.closed or self.run_id != ctx.run_id:
-            await _settle(asyncio.create_task(self._close()))
+            await settle(asyncio.create_task(self._close()))
             return ToolResult(content="Process run has ended.", is_error=True)
         entry.timer = asyncio.create_task(entry.limit(tool.max_runtime_ms / 1000, ctx.signal))
         try:
             result = await handle.wait(0 if input.get("run_in_background") else timeout)
             alive = getattr(handle, "_group_alive", None)
             if running >= tool.max_processes and (result is None if alive is None else alive):
-                await _settle(asyncio.create_task(entry.stop()))
+                await settle(asyncio.create_task(entry.stop()))
                 result = await handle.wait(None)
                 await self._retire(entry, result)
                 return tool._render(replace(result, timed_out=True))
@@ -163,7 +156,7 @@ class ProcessRegistry:
             self.ids[id] = entry
             return await _render(entry, id, 0)
         except BaseException:
-            await _settle(asyncio.create_task(handle.kill()))
+            await settle(asyncio.create_task(handle.kill()))
             raise
 
 
@@ -228,13 +221,17 @@ class BashProcessTool:
         ):
             return ToolResult(content=f"Process {id} is gone; start a new command.", is_error=True)
         entry = registry.ids[id]
+        running = False
         if input["action"] == "kill":
-            await _settle(asyncio.create_task(entry.stop()))
+            alive = getattr(entry.handle, "_group_alive", None)
+            finished = await entry.handle.wait(0)
+            running = finished is None if alive is None else finished is None or alive
+            await settle(asyncio.create_task(entry.stop()))
         timeout = _to_int(input.get("wait_ms"), 1000) / 1000 if input["action"] == "wait" else 0
         if ctx.tool_timeout_s is not None:
             timeout = min(timeout, max(ctx.tool_timeout_s - 1, ctx.tool_timeout_s / 2))
         result = await _render(entry, id, timeout, input["action"] == "wait")
-        if input["action"] == "kill":
+        if running:
             result.is_error = False
         await registry._retire(entry, await entry.handle.wait(0))
         registry._trim_history()

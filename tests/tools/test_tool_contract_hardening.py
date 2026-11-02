@@ -132,3 +132,44 @@ async def test_process_ids_are_unique_eight_hex_digits() -> None:
         assert first_id != second_id
     finally:
         await registry.close()
+
+
+async def test_read_rejects_nul_beyond_the_sniff_window(tmp_path) -> None:
+    from linch.tools.base import ToolContext
+    from linch.tools.builtin import ReadTool
+
+    (tmp_path / "mixed.log").write_bytes(b"a" * 9000 + b"\x00tail")
+    tool = ReadTool()
+    ctx = ToolContext(str(tmp_path), "s", "r", None)
+    with pytest.raises(Exception, match="Binary files"):
+        await tool.execute(tool.validate({"file_path": "mixed.log"}), ctx)
+
+
+async def test_edit_refuses_a_file_changed_after_its_freshness_check(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from linch.tools import FileReadTracker
+    from linch.tools.base import ToolContext
+    from linch.tools.builtin import EditTool, ReadTool
+
+    target = tmp_path / "f.txt"
+    target.write_text("old\nkeep\n")
+    ctx = ToolContext(str(tmp_path), "s", "r", None, None, FileReadTracker())
+    read = ReadTool()
+    await read.execute(read.validate({"file_path": "f.txt"}), ctx)
+
+    original = Path.read_bytes
+
+    def racing_read(self: Path) -> bytes:
+        data = original(self)
+        if self == target:
+            target.write_text("old\nexternal change\n")
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", racing_read)
+    edit = EditTool()
+    result = await edit.execute(
+        edit.validate({"file_path": "f.txt", "old_string": "old", "new_string": "new"}), ctx
+    )
+    assert result.is_error and "Read this file again" in result.content
+    assert target.read_text() == "old\nexternal change\n"

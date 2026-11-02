@@ -137,3 +137,57 @@ async def test_run_blocking_fallback_timer_handles_missing_selector_wake(monkeyp
 
     result = await asyncio.wait_for(run_blocking(lambda: 42), timeout=0.2)
     assert result == 42
+
+
+async def test_settle_finishes_work_before_reraising_cancellation():
+    from linch._blocking import settle
+
+    release = asyncio.Event()
+    finished = []
+
+    async def work() -> None:
+        await release.wait()
+        finished.append(True)
+
+    waiter = asyncio.create_task(settle(asyncio.create_task(work())))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert finished == [True]
+
+
+async def test_settle_returns_result_and_raises_failure():
+    from linch._blocking import settle
+
+    async def ok() -> int:
+        return 7
+
+    async def bad() -> None:
+        raise ValueError("boom")
+
+    assert await settle(asyncio.create_task(ok())) == 7
+    with pytest.raises(ValueError, match="boom"):
+        await settle(asyncio.create_task(bad()))
+
+
+async def test_settle_prefers_cancellation_over_a_late_failure(caplog):
+    from linch._blocking import settle
+
+    release = asyncio.Event()
+
+    async def bad() -> None:
+        await release.wait()
+        raise ValueError("boom")
+
+    waiter = asyncio.create_task(settle(asyncio.create_task(bad())))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert "boom" in caplog.text

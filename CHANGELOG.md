@@ -16,6 +16,12 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   `OPENAI_BASE_URL` apply, and the `/models` path matches the chat base URL.
 - Concurrent `create_run` calls with one id and session raise the documented
   duplicate-id `ValueError` or adopt the pending row instead of `SessionBusyError`.
+- `Read` rejects NUL bytes anywhere in a file, not only in its first 8 KB.
+- `Edit` refuses to write when the file changed after its freshness check.
+- `BashProcess` `kill` no longer reports a process that already failed as a success.
+- `run_in_background` at `max_processes` is refused before spawning a process.
+- Terminal cleanup failures no longer form a cycle in the exception cause chain.
+- MCP text above the 64 MiB spill ceiling skips spill work and goes to the plain cap.
 - `Agent(tools=...)` raises `ConfigError` for any non-`None` value other than a
   `ToolRegistry`.
 - Local and DeepSeek adapters declare their own capabilities, context windows,

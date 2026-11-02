@@ -81,8 +81,13 @@ async def test_terminal_status_follows_process_cleanup(outcome, cleanup_fails):
         assert not any(item in {"completed", "aborted", "failed"} for item in order)
         release.set()
         if cleanup_fails:
-            with pytest.raises(ExceptionGroup, match="Process cleanup failed"):
+            with pytest.raises(ExceptionGroup, match="Process cleanup failed") as caught:
                 await task
+            seen, cause = set(), caught.value
+            while cause is not None:
+                assert id(cause) not in seen, "exception cause chain has a cycle"
+                seen.add(id(cause))
+                cause = cause.__cause__
             assert session._active is (cleanup_fails is True)
             record = await store.load_run(run_id)
             assert record is not None and record.status == "running"

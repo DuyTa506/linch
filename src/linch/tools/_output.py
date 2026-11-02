@@ -9,7 +9,10 @@ import uuid
 from pathlib import Path
 from typing import BinaryIO
 
+from .._blocking import settle
 from ._limits import OUTPUT_CAP
+
+SPILL_LIMIT = 64 * 1024 * 1024
 
 
 class BoundedOutput:
@@ -46,11 +49,11 @@ class BoundedOutput:
 
     async def append_async(self, chunk: bytes) -> None:
         previous, before = self._retain(chunk)
-        if self._total > OUTPUT_CAP and (self._total <= 64 * 1024 * 1024 or self._file):
+        if self._total > OUTPUT_CAP and (self._total <= SPILL_LIMIT or self._file):
             await _thread(self._spill, chunk, previous, before)
 
     def _spill(self, chunk: bytes, previous: bytes, before: int) -> None:
-        if self._total > 64 * 1024 * 1024:
+        if self._total > SPILL_LIMIT:
             self._discard()
             return
         try:
@@ -142,14 +145,4 @@ class BoundedOutput:
 
 async def _thread(func, *args):
     # A cancelled pump must not close its file while a worker is still writing.
-    task = asyncio.create_task(asyncio.to_thread(func, *args))
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
+    return await settle(asyncio.create_task(asyncio.to_thread(func, *args)))

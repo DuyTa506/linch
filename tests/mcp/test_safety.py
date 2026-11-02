@@ -114,6 +114,24 @@ async def test_large_mcp_text_spills_under_call_context(tmp_path) -> None:
     assert Path(path).read_bytes() == b"x" * 30001
 
 
+async def test_mcp_text_over_spill_ceiling_skips_spill_work(tmp_path, monkeypatch) -> None:
+    from mcp.types import CallToolResult, TextContent
+
+    from linch.mcp import result as module
+    from linch.tools._limits import OUTPUT_CAP
+    from linch.tools._output import SPILL_LIMIT
+
+    def unexpected(*args: object) -> None:
+        raise AssertionError("spill must not start above its ceiling")
+
+    monkeypatch.setattr(module, "BoundedOutput", unexpected)
+    mapped = await module.map_mcp_result(
+        CallToolResult(content=[TextContent(type="text", text="x" * (SPILL_LIMIT + 1))]),
+        cwd=str(tmp_path),
+    )
+    assert len(mapped.content) < OUTPUT_CAP + 100
+
+
 async def test_large_mcp_text_falls_back_to_cap_when_spill_fails(tmp_path) -> None:
     from mcp.types import CallToolResult, TextContent, Tool
 

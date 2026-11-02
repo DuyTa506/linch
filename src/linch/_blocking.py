@@ -14,11 +14,14 @@ before it fires.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 # Cap on concurrently-offloaded blocking calls per event loop.  Mirrors the
 # default thread-pool sizing intent without sharing a global pool across loops.
@@ -123,3 +126,34 @@ async def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         if permit_owned:
             sem.release()
         raise
+
+
+async def settle(task: asyncio.Task[T]) -> T:
+    """Await ``task`` to completion even if the awaiter is cancelled meanwhile.
+
+    Args:
+        task: Work that must finish before control returns, such as a kill or a
+            file mutation that cannot be abandoned halfway.
+
+    Returns:
+        The task's result.
+
+    Raises:
+        asyncio.CancelledError: If the awaiter was cancelled while waiting; a
+            task failure at that point is logged, because cancellation wins.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if not task.cancelled():
+                cancelled = exc
+        except Exception:
+            if cancelled is None:
+                raise
+    if cancelled is None:
+        return task.result()
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Settled task failed after cancellation: %r", task.exception())
+    raise cancelled

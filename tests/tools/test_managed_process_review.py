@@ -12,7 +12,7 @@ import pytest
 
 from tests.support.agents import make_agent
 from tests.support.providers import ScriptedProvider, TextTurn
-from tests.tools.test_managed_processes import context, launch
+from tests.tools.test_managed_processes import context, launch, process
 
 
 @pytest.mark.parametrize("worker", [False, True])
@@ -669,3 +669,86 @@ async def test_successful_stop_retires_stale_group_for_timer_and_user(tmp_path, 
         await BashProcessTool().execute({"action": "kill", "id": "p1234abcd"}, ctx)
     assert not registry.entries and registry.ids["p1234abcd"] is entry
     await registry.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
+async def test_kill_keeps_the_failure_of_an_already_finished_process(tmp_path):
+    ctx, registry = await context(tmp_path)
+    try:
+        started = await launch(ctx, "sleep .2; exit 3")
+        id = started.metadata["process_id"]
+        await registry.ids[id].handle.wait(None)
+        result = await process(ctx, "kill", id=id)
+        assert result.is_error
+    finally:
+        await registry.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
+async def test_kill_of_a_running_process_is_not_an_error(tmp_path):
+    ctx, registry = await context(tmp_path)
+    try:
+        id = (await launch(ctx, "sleep 30")).metadata["process_id"]
+        assert not (await process(ctx, "kill", id=id)).is_error
+    finally:
+        await registry.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /proc")
+async def test_kill_still_stops_a_group_outliving_its_leader(tmp_path):
+    ctx, registry = await context(tmp_path)
+    try:
+        started = await launch(ctx, "sleep 30 & echo $! > child.pid; sleep .2")
+        id = started.metadata["process_id"]
+        await registry.ids[id].handle.wait(None)
+        pid = int((tmp_path / "child.pid").read_text())
+        result = await process(ctx, "kill", id=id)
+        assert not result.is_error
+        for _ in range(100):
+            stat = Path(f"/proc/{pid}/stat")
+            if not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("group child survived kill")
+    finally:
+        await registry.close()
+
+
+async def test_background_at_capacity_is_refused_before_spawning(tmp_path):
+    from linch.tools.base import ToolContext
+    from linch.tools.execution import ExecResult, ShellRead
+    from linch.tools.processes import ProcessRegistry
+
+    class Handle:
+        async def wait(self, timeout):
+            return None if timeout == 0 else ExecResult("", "", 0, False)
+
+        def read(self):
+            return ShellRead("", "", False, None, None)
+
+        async def kill(self):
+            pass
+
+    class Backend:
+        starts = 0
+
+        async def start(self, command, *, cwd):
+            Backend.starts += 1
+            return Handle()
+
+    class Tool:
+        _backend = Backend()
+        max_processes = 1
+        max_runtime_ms = 10000
+
+    registry = ProcessRegistry("r")
+    ctx = ToolContext(str(tmp_path), "s", "r", None)
+    command = {"command": "x", "run_in_background": True}
+    try:
+        await registry.run(Tool(), command, ctx, 0)
+        refused = await registry.run(Tool(), command, ctx, 0)
+        assert refused.is_error and "BashProcess" in refused.content
+        assert Backend.starts == 1
+    finally:
+        await registry.close()
