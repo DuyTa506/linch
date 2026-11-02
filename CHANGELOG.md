@@ -5,9 +5,9 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
-## Unreleased
+## 3.0.1 — 2026-11-02
 
-Planned as 3.0.1. This patch release adds `Agent.reload_skills()`, an owner-approved
+This patch release adds `Agent.reload_skills()`, an owner-approved
 exception to the MINOR rule in `docs/versioning.md`.
 
 - Freeze each ordinary session's system blocks and ordered tool schemas in durable
