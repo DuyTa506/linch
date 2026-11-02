@@ -180,7 +180,10 @@ class BashProcessTool:
         timeout = _to_int(input.get("wait_ms"), 1000) / 1000 if input["action"] == "wait" else 0
         if ctx.tool_timeout_s is not None:
             timeout = min(timeout, max(ctx.tool_timeout_s - 1, ctx.tool_timeout_s / 2))
-        return await _render(entry, id, timeout, input["action"] == "wait")
+        result = await _render(entry, id, timeout, input["action"] == "wait")
+        if input["action"] == "kill":
+            result.is_error = False
+        return result
 
     def summarize(self, input: dict[str, object]) -> str:
         return f"BashProcess {input['action']} {input['id']}"
