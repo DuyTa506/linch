@@ -7,6 +7,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Add the `build-agent-with-linch` skill, `linch skill install`, and Vietnamese
+  translations of the README and usage guide.
+- Stop tracking internal planning notes.
+
 - Check shipped example imports and run commands against the supported surface.
   Correct supported imports, Glob inputs and registration in the budget demo,
   interruption before durable resume, empty subagent tool-list display, and the

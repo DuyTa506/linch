@@ -103,9 +103,14 @@ def install_skill(
         ScaffoldError: The packaged skill is missing, or a copy exists and
             ``force`` is false.
     """
-    source = Path(__file__).resolve().parents[2] / "_skills" / _SKILL_NAME
-    if not (source / "SKILL.md").is_file():
-        raise ScaffoldError(f"packaged skill not found at {source}")
+    package_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        package_root / "_skills" / _SKILL_NAME,
+        package_root.parents[1] / "skills" / _SKILL_NAME,
+    ]
+    source = next((path for path in candidates if (path / "SKILL.md").is_file()), None)
+    if source is None:
+        raise ScaffoldError(f"packaged skill not found at {candidates[0]}")
     destinations = [
         project / SKILL_TARGETS[target] / _SKILL_NAME
         for target in dict.fromkeys(targets or _DEFAULT_SKILL_TARGETS)

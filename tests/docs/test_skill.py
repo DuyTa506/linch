@@ -10,7 +10,7 @@ from linch.ext.scaffold import main
 from linch.skills.loader import load_skills_from_dir
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILL = ROOT / "src/linch/_skills/build-agent-with-linch"
+SKILL = ROOT / "skills/build-agent-with-linch"
 
 
 def test_skill_loads_through_linch(tmp_path) -> None:

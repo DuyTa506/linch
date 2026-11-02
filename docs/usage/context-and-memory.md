@@ -140,8 +140,8 @@ model knows where memory belongs:
 > one-line-per-file index. Use the file tools to read and maintain memories;
 > update or delete stale facts.
 
-The index is cached by run, so it stays stable across turns and can remain in a
-cacheable request prefix. The builder does not write memory. A model can update
+The index is cached by run, so it stays stable across turns. The builder does not
+write memory. A model can update
 the index and fact files with `write_file` and `edit_file` through the ordinary
 filesystem tools. Hosts that need to remove a fact file can call the backend's
 `delete` operation. A direct host backend call is outside the model tool path,

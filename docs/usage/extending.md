@@ -168,7 +168,7 @@ class Limiter(Protocol):
     def release(self, *, model: str) -> None: ...
 ```
 
-A plain concurrency cap is six lines:
+A plain concurrency cap is short:
 
 ```python
 import asyncio
