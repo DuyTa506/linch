@@ -1,5 +1,7 @@
 # Skills
 
+Use skills when the model should invoke reusable prompt workflows during a run.
+
 [← Usage guide](./README.md)
 
 Skills are prompt workflows exposed to the model through the `Skill` tool. Each skill is a named, reusable prompt that the model can invoke mid-run with arguments — think of them as slash-commands the agent can call on itself.

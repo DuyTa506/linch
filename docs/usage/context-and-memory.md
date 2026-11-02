@@ -1,5 +1,7 @@
 # Context and memory
 
+Use context builders and file memory to supply retrieved data and remembered facts to runs.
+
 [← Usage guide](./README.md)
 
 Linch keeps request context and durable memory on the same extension seam. A
@@ -10,7 +12,9 @@ when a run starts.
 
 ---
 
-## Sourced retrieval and grounding
+<a id="sourced-retrieval-and-grounding"></a>
+
+## `RagConnector` and `register_grounding_check`
 
 A `RagConnector` implements async `retrieve(query, *, k, principal=None)` and
 returns `RetrievedChunk(id, source, text, score, metadata)` values. Install it
@@ -68,7 +72,9 @@ removes their hooks, listener and run state.
 
 ---
 
-## Per-turn context building (RAG)
+<a id="per-turn-context-building-rag"></a>
+
+## `ContextBuilder` and `ContextInjectionHook`
 
 A `ContextBuilder` is a duck-typed object with an async `build(turn)` method.
 It receives the current messages, `turn.deps`, model, tools, and turn index, and
@@ -105,7 +111,9 @@ backends there rather than using module globals.
 
 ---
 
-## File memory
+<a id="file-memory"></a>
+
+## `FileMemoryContextBuilder`
 
 File memory is the built-in durable memory path in Linch 3.0. It has one public
 entry point, `FileMemoryContextBuilder`, which is attached through

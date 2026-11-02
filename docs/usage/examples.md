@@ -1,5 +1,7 @@
 # Examples
 
+Use this index to find runnable examples for the subsystem you are integrating.
+
 [← Usage guide](./README.md)
 
 Runnable example code lives in the `examples/` directory, organized by subsystem. Local demos (marked *local*) run without a live API key, so you can explore the mechanics offline before wiring up a provider.

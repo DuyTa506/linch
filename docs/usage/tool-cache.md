@@ -1,5 +1,7 @@
 # Tool cache
 
+Use `ToolCacheConfig` to memoize read tool calls whose data stays stable within a run.
+
 `ToolCacheHook` memoizes **read-scope** tool calls **within a single run** so the
 model doesn't pay to re-run an identical lookup it already made. It is an
 *efficiency* layer built on the hook system — not a safety one (it does not stop
@@ -9,7 +11,9 @@ It is **off by default**. Caching only suits tools whose data is stable enough
 within a run (search/grep over a fixed corpus), so you name which tools are
 cacheable rather than the SDK guessing.
 
-## Enable
+<a id="enable"></a>
+
+## `ToolCacheConfig`
 
 ```python
 from linch import Agent, ToolCacheConfig

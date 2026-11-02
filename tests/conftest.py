@@ -15,6 +15,12 @@ from tests.support.stores import pg_dsn  # noqa: F401
 _PG_SCHEMA = pytest.StashKey[tuple[str, str]]()
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-packaging", action="store_true", help="build and install docs artifacts"
+    )
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:
     dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
     if not dsn or find_spec("asyncpg") is None:

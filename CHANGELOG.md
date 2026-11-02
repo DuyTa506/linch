@@ -7,6 +7,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Add usage-page use cases, exact API headings with preserved anchors, and
+  source-checked troubleshooting for configuration, tools, authentication, and resume.
+
 - Check imports and Python syntax across shipped docs, document supported optional
   integration modules, and exercise the marked quickstart without network or extras.
 

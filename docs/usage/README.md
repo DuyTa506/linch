@@ -1,5 +1,7 @@
 # Using Linch
 
+Use this guide to choose the Linch subsystem and example for your application.
+
 This is the practical guide to building with Linch — installing it, wiring an
 agent, and using each subsystem. If you are new to the SDK, start with
 [Quickstart](./quickstart.md); then come back here for the subsystem map.
@@ -82,6 +84,7 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | Page | What it covers |
 |---|---|
 | [API reference](./api-reference.md) | Exact supported imports, signatures, and source summaries |
+| [Troubleshooting](./troubleshooting.md) | Exact source errors, causes, and fixes for setup, tools, authentication, and resume |
 | [Quickstart](./quickstart.md) | New-developer path: install, offline smoke test, live provider, first tool, persistence |
 | [Scaffolding CLI](./cli.md) | `linch new` / `linch add tool` — generate a runnable, offline-testable project you own |
 | [Production wiring](./production.md) | Minimal checklist to embed Linch in a service: persistence, streaming, HITL, resume, shutdown, blast radius |

@@ -42,12 +42,6 @@ def shipped_markdown(shipped_files: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(path for path in shipped_files if path.suffix == ".md")
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--run-packaging", action="store_true", help="build and install docs artifacts"
-    )
-
-
 def pytest_configure(config):
     config.addinivalue_line("markers", "packaging: opt-in distribution build/install checks")
 

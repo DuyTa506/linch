@@ -1,5 +1,7 @@
 # Deep agent preset
 
+Use `create_deep_agent` when you want a model to coordinate subagents and workspace tools.
+
 [← Usage guide](./README.md)
 
 `create_deep_agent()` is an explicit opt-in factory that wires up a
@@ -133,7 +135,9 @@ Continuing a worker resumes it with its entire prior context, so you can have a 
 
 ---
 
-## Generate a project subagent
+<a id="generate-a-project-subagent"></a>
+
+## `generate_subagent_definition`
 
 Use `create_subagent_definition()` to turn a natural-language request into a normal disk-backed project subagent. The SDK writes `.linch/agents/<name>.md`, validates it with the same loader used at runtime, and reloads the `Agent` by default so the new subagent appears in the `Subagent` tool catalog immediately.
 

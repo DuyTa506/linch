@@ -1681,6 +1681,8 @@ Inherited initializer: Exception.__init__(self, /, *args, **kwargs)
 
 Authentication or authorization failed while contacting a provider.
 
+Usage: [troubleshooting](troubleshooting.md).
+
 ### `linch.ConfigError`
 
 Kind: Class.
@@ -1914,6 +1916,8 @@ OpenAIOptions(api_key: str | None = None, base_url: str | None = None, default_h
 ```
 
 Connection options for the OpenAI Responses API client.
+
+Usage: [troubleshooting](troubleshooting.md).
 
 ### `linch.OpenAIReasoning`
 
@@ -3055,6 +3059,8 @@ RunContractMismatchError(comparison: RunContractComparison) -> None
 
 Raised when resume inputs differ from the inputs of the original run.
 
+Usage: [troubleshooting](troubleshooting.md).
+
 ### `linch.RunLease`
 
 Kind: Class.
@@ -3788,6 +3794,8 @@ def ensure_run_contract_compatible(stored: RunContract | None, requested: RunCon
 ```
 
 Validate resume inputs and return their compatibility comparison.
+
+Usage: [troubleshooting](troubleshooting.md).
 
 ### `linch.get_version`
 
@@ -4640,6 +4648,8 @@ WorkflowJournal() -> None
 ```
 
 In-memory result cache keyed by ``(call_key, occurrence)``.
+
+Usage: [workflows](workflows.md).
 
 ### `linch.ext.workflow.WorkflowSuspended`
 

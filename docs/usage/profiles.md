@@ -1,5 +1,7 @@
 # Domain profiles
 
+Use `Profile` when runs on one agent need different versioned roles and configuration.
+
 [← Usage guide](./README.md)
 
 Use `Profile` to select a versioned role and configuration for each run on an

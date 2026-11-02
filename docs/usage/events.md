@@ -1,5 +1,7 @@
 # Events
 
+Use events to stream agent progress, inspect results, and account for model usage.
+
 [← Usage guide](./README.md)
 
 Everything the agent loop tells you arrives as a typed **event**.
@@ -92,7 +94,9 @@ The same event stream is mirrored to hooks at the `on_event_emit` chokepoint, so
 anything you can do in this loop you can also do in a reusable hook — see
 [Hooks](./hooks.md).
 
-## Model-call accounting
+<a id="model-call-accounting"></a>
+
+## `ModelCallEvent` — model-call accounting
 
 In a normal run, Linch accounts for every physical provider delivery that reaches a normalized
 `message_end` with valid `Usage`, including the auxiliary provider delivery
@@ -393,7 +397,9 @@ comparisons, and CI exit codes, see [Evals and benchmarks](./evals.md).
 
 ---
 
-## Trace context across host jobs
+<a id="trace-context-across-host-jobs"></a>
+
+## `TraceIdFilter` — trace context across host jobs
 
 `invoke_agent` uses the caller's current span as its parent. Foreground and
 background subagents inherit that context through their tool tasks. A run's
