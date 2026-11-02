@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import threading
+from typing import Any
 
 import pytest
 
+from linch.config import FeatureFlags
+from linch.errors import ConfigError
 from tests.support.agents import make_agent
 from tests.support.providers import ScriptedProvider, TextTurn
 from tests.support.tools import StubTool
@@ -183,3 +187,63 @@ async def test_reload_subagents_replaces_tools_without_moving_their_slots(tmp_pa
         "Updated research workflow."
     )
     assert agent._catalog_revision == old_revision + 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reloads_apply_the_scan_that_started_last(tmp_path) -> None:
+    agent = make_agent(
+        ScriptedProvider([]),
+        cwd=str(tmp_path),
+        config_dir=".linch",
+        features=FeatureFlags(skills=True, subagents=False, mcp=False),
+    )
+    first_entered, release_first = asyncio.Event(), asyncio.Event()
+    scans = 0
+
+    async def scan() -> tuple[list[Any], str | None]:
+        nonlocal scans
+        scans += 1
+        current = scans
+        if current == 1:
+            first_entered.set()
+            await release_first.wait()
+        return [], f"scan {current}"
+
+    agent._scan_skills = scan  # type: ignore[method-assign]
+    first = asyncio.create_task(agent.reload_skills())
+    await first_entered.wait()
+    second = asyncio.create_task(agent.reload_skills())
+    await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.gather(first, second)
+
+    assert agent.skill_listing_text == "scan 2"
+
+
+@pytest.mark.asyncio
+async def test_registered_skill_tool_must_share_agent_skills(tmp_path) -> None:
+    from linch.tools.skill import SkillTool
+
+    agent = make_agent(
+        ScriptedProvider([]),
+        cwd=str(tmp_path),
+        config_dir=".linch",
+        features=FeatureFlags(skills=True, subagents=False, mcp=False),
+    )
+    agent.tools.register(
+        SkillTool(skills={}, session_registry={}, get_session_model=lambda _sid: "m")
+    )
+
+    with pytest.raises(ConfigError, match="agent.skills"):
+        agent._apply_skills([], None)
+
+
+def test_snapshot_with_unnamed_tool_is_rejected() -> None:
+    from types import SimpleNamespace
+
+    from linch.catalog import snapshot_for
+
+    catalog = {"tools": {}, "skills": {}, "subagents": None}
+    raw = {"version": 1, "system": [], "tools": [{}], "base": catalog, "notified": catalog}
+
+    assert snapshot_for(SimpleNamespace(meta={"linch.prefix": raw})) is None

@@ -1082,6 +1082,7 @@ class Agent:
         # running loop so N agents never share loop-bound state.
         self._provider_prepared: bool = False
         self._prepare_lock: asyncio.Lock | None = None
+        self._skill_reload_lock: asyncio.Lock | None = None
 
         # Transactional lifecycle state. Locks/tasks are created lazily inside a
         # running loop so constructing an Agent never binds it to an event loop.
@@ -1391,6 +1392,8 @@ class Agent:
         if self._skill_tool is None:
             current = self.tools.get("Skill")
             if isinstance(current, SkillTool):
+                if current._skills is not self.skills:
+                    raise ConfigError("A registered Skill tool must use agent.skills")
                 self._skill_tool = current
             elif loaded:
                 self._skill_tool = SkillTool(
@@ -1427,9 +1430,12 @@ class Agent:
             return
         if self._skills_connect is not None and not self._skills_loaded:
             await self._skills_connect
-        loaded, listing = await self._scan_skills()
-        self._apply_skills(loaded, listing)
-        self._catalog_revision += 1
+        if self._skill_reload_lock is None:
+            self._skill_reload_lock = asyncio.Lock()
+        async with self._skill_reload_lock:
+            loaded, listing = await self._scan_skills()
+            self._apply_skills(loaded, listing)
+            self._catalog_revision += 1
 
     async def connect_subagents(self) -> None:
         """Load configured subagent definitions and register subagent tools once."""

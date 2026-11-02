@@ -341,7 +341,9 @@ Payload tests only, with a fake transport. Write each failing first.
 - Limit: over 4 MB raises `ConfigError`.
 - Beta header present on every positional request, including those without a tool block.
 - Responses: item position after a round-trip, `allowed_tools` for removal, forced choice kept.
-- Durable resume after a native addition passes contract validation.
+- Durable resume after a native addition passes contract validation. Known limit: a tool added
+  natively is outside the run contract, on either model, because it can arrive after the contract
+  was stored. A scope or renderer change to such a tool across a resume is therefore not detected.
 - MCP addition: text states the name only, definition travels only in the tool block.
 
 ### 6.6 Phase 4, deferred
