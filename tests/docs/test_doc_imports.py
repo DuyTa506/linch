@@ -15,40 +15,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 OFFLINE_MARKER = "<!-- linch:offline -->"
 
-# Temporary owner-decision work list: these core names are not root exports.
-# Keep the original import lines until the public-surface decision is made.
-HOOK_CONTEXT_IMPORT = """from linch.hooks import (
-    AgentStartContext,
-    AgentStopContext,
-    ProviderCallStartContext,
-    ProviderCallStopContext,
-    ToolUseStartContext,
-    ToolUseStopContext,
-    TurnStartContext,
-    TurnStopContext,
-)"""
-unresolved = [
-    (
-        "linch.tools.builtin.BashTool",
-        "docs/migration-3.0.md",
-        21,
-        "from linch.tools.builtin import BashTool",
-    ),
-    (
-        "linch.tools.execution.DockerBackend",
-        "docs/usage/tools.md",
-        301,
-        "from linch.tools.execution import DockerBackend",
-    ),
-    ("linch.hooks.AgentStartContext", "docs/migration-3.0.md", 250, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.AgentStopContext", "docs/migration-3.0.md", 251, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.ProviderCallStartContext", "docs/migration-3.0.md", 252, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.ProviderCallStopContext", "docs/migration-3.0.md", 253, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.ToolUseStartContext", "docs/migration-3.0.md", 254, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.ToolUseStopContext", "docs/migration-3.0.md", 255, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.TurnStartContext", "docs/migration-3.0.md", 256, HOOK_CONTEXT_IMPORT),
-    ("linch.hooks.TurnStopContext", "docs/migration-3.0.md", 257, HOOK_CONTEXT_IMPORT),
-]
+# Resolved imports must not keep exceptions that could hide future regressions.
+unresolved: list[tuple[str, str, int, str]] = []
 
 
 @dataclass(frozen=True, slots=True)
