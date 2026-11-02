@@ -35,7 +35,7 @@ the SDK and an exporter when they want to collect traces or metrics.
 ```python
 import asyncio
 from linch import Agent
-from linch.sessions import InMemorySessionStore
+from linch import InMemorySessionStore
 
 agent = Agent(
     model="gpt-5",                              # or any supported model

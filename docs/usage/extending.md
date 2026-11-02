@@ -368,7 +368,7 @@ cover ordered, cache-aware prompt assembly, and a third would duplicate them.
    the whole prefix warm.
 
    ```python
-   from linch.config import SystemPromptConfig, SystemPromptSection
+   from linch import SystemPromptConfig, SystemPromptSection
 
    agent = Agent(
        ...,

@@ -29,8 +29,8 @@ import pickle
 import statistics
 import time
 
-from linch.session_log import SessionLog
-from linch.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from linch import SessionLog
+from linch import Message, TextBlock, ToolResultBlock, ToolUseBlock
 
 
 def make_turn(turn: int) -> list[Message]:

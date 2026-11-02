@@ -22,7 +22,7 @@ protocol plumbing.
 
 ```python
 from linch import Agent, ToolContext, tool
-from linch.tools.registry import empty_tools, workspace_tools
+from linch import empty_tools, workspace_tools
 
 @tool(description="Search the internal knowledge base.", tags=("rag",))
 async def search_kb(query: str, ctx: ToolContext) -> str:
@@ -130,7 +130,7 @@ you want to reject bad input *before* execution, declare which resources the
 tool touches, or return a `ToolResult` with provenance metadata.
 
 ```python
-from linch.tools.base import ResourceAccess, ToolContext, ToolResult
+from linch import ResourceAccess, ToolContext, ToolResult
 
 class MyTool:
     name = "search_kb"
@@ -166,7 +166,7 @@ class MyTool:
 agent = Agent(..., tools=empty_tools(MyTool()))
 
 # SWE tools minus Bash, plus custom
-from linch.tools.registry import workspace_tools
+from linch import workspace_tools
 registry = workspace_tools(exclude={"Bash"}, extra=[MyTool()])
 agent = Agent(..., tools=registry)
 ```
@@ -385,7 +385,7 @@ order; a matching `deny` blocks the call, and anything not auto-approved either
 prompts via `can_use_tool` or pauses the loop with a `PermissionRequestEvent`.
 
 ```python
-from linch.permissions import ToolRule, PathRule, BashRule
+from linch import ToolRule, PathRule, BashRule
 
 agent = Agent(
     ...,

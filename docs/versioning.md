@@ -15,9 +15,19 @@ from linch import Agent, ModelCallEvent, RunBudget, ToolContext, tool
 ```
 
 Extensions use explicit `linch.ext.*` imports and are absent from `linch.__all__`.
+The optional integrations below also support imports from these exact modules;
+install their extra before using them. Names exported by `linch.__all__` still
+use top-level imports, including when an integration also exposes them.
+
+| Supported module | Required extra | Integration |
+|---|---|---|
+| `linch.sessions.postgres` | `postgres` | Durable session store |
+| `linch.filesystem.postgres` | `postgres` | Durable file backend |
+| `linch.worker` | `worker` | Worker runtime, dispatch, and scheduling |
+
 Other submodule paths and underscore-prefixed names are private implementation
 details and may change without a public compatibility guarantee.
-`tests/test_public_api.py` checks that every declared export resolves, exports
+`tests/package/test_public_api.py` checks that every declared export resolves, exports
 are unique, and undeclared public attributes do not leak onto the package.
 
 Requirements of public duck-typed protocols are part of the contract too.

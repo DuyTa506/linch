@@ -142,8 +142,7 @@ with no matching `tool_result`). You don't have to do anything for this.
 
 ## Built-in adapters
 
-Common extension patterns ship as adapters. Import them from `linch.hooks` (the
-core ones are also re-exported from `linch`).
+Common extension patterns ship as adapters. Import them from `linch`.
 
 | Adapter | Wraps | Replaces |
 |---|---|---|
@@ -156,7 +155,7 @@ core ones are also re-exported from `linch`).
 | `RedactionHook(config)` | host-supplied regex scrubbing of tool results, the final answer, and (opt-in) the prompt | add to `hooks=[...]` |
 
 ```python
-from linch.hooks import (
+from linch import (
     ContextInjectionHook,
     FinalAnswerVerifierHook,
     StopPredicateHook,

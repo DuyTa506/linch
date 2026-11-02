@@ -7,6 +7,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Check imports and Python syntax across shipped docs, document supported optional
+  integration modules, and exercise the marked quickstart without network or extras.
+
 - Add a generated, offline API reference covering supported root and explicit extension exports.
 
 - Ship maintained usage and architecture docs plus examples with the wheel. Add

@@ -48,13 +48,13 @@ Linch ships several providers. Pick one based on the API you're targeting.
 ```python
 import os
 from linch import Agent
-from linch.sessions import InMemorySessionStore
+from linch import InMemorySessionStore
 
 # ── OpenAI Responses API (o1, o3, gpt-5 — reasoning-native models) ──────────
 # Stateful: sends previous_response_id so only new messages travel the wire.
 # Supports native reasoning effort/summary levels and encrypted reasoning tokens.
-from linch.providers.openai_responses import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
-from linch.openai_responses import OpenAIReasoning
+from linch import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
+from linch import OpenAIReasoning
 
 agent = Agent(
     model="gpt-5",
@@ -72,8 +72,8 @@ agent = Agent(
 # Works with any OpenAI-compatible endpoint (Azure, Groq, Together, …).
 # Thinking events emitted when model streams reasoning_content (e.g. DeepSeek).
 # Set include_partial_messages=True to receive PartialAssistantEvent for streaming.
-from linch.providers import OpenAIChatCompletionsProvider
-from linch.providers.openai_chat import OpenAIChatProviderOptions
+from linch import OpenAIChatCompletionsProvider
+from linch import OpenAIChatProviderOptions
 
 agent = Agent(
     model="gpt-5-nano-2025-08-07",
@@ -88,7 +88,7 @@ agent = Agent(
 # Current Claude models use adaptive thinking + effort, prompt caching, tool
 # use, and native output_config.format JSON schema.
 # include_partial_messages=True streams ThinkingBlock deltas as kind="thinking" events.
-from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+from linch import AnthropicProvider, AnthropicProviderOptions
 
 agent = Agent(
     model="claude-sonnet-4-6",
@@ -115,7 +115,7 @@ provider = AnthropicProvider(
 # ── Google Gemini ────────────────────────────────────────────────────────────
 # Requires: pip install "linch[gemini]" (uses google-genai)
 # Supports text, tool use, structured output, and large context windows.
-from linch.providers import GeminiProvider, GeminiProviderOptions
+from linch import GeminiProvider, GeminiProviderOptions
 
 agent = Agent(
     model="gemini-2.5-pro",
@@ -155,7 +155,7 @@ provider = GeminiProvider(
 # toggle and uses JSON-object mode for OutputSchema.
 # With thinking enabled, DeepSeek accepts automatic/none tool selection only:
 # disable thinking before using a required or named tool_choice.
-from linch.providers import DeepSeekProvider, DeepSeekProviderOptions
+from linch import DeepSeekProvider, DeepSeekProviderOptions
 
 agent = Agent(
     model="deepseek-v4-flash",
@@ -176,7 +176,7 @@ agent = Agent(
 # Streaming remains enabled via stream=True; the provider avoids OpenAI's
 # stream_options field and uses llama.cpp's response_format schema shape.
 # Context window is auto-detected from /v1/props or /props when available.
-from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
+from linch import LlamaCppProvider, LlamaCppProviderOptions
 
 agent = Agent(
     model=os.environ["LLAMACPP_MODEL"],
@@ -194,7 +194,7 @@ agent = Agent(
 # ── vLLM server ──────────────────────────────────────────────────────────────
 # Uses vLLM's OpenAI-compatible /v1/chat/completions route.
 # Server-specific request fields can be passed through extra_body.
-from linch.providers import VLLMProvider, VLLMProviderOptions
+from linch import VLLMProvider, VLLMProviderOptions
 
 agent = Agent(
     model=os.environ["VLLM_MODEL"],
@@ -216,7 +216,7 @@ agent = Agent(
 # usage (input/output, plus cached_tokens when enable_cache_report is set). Set
 # include_stream_options=False for servers that reject that OpenAI field.
 # SGLang sampling/cache-report controls are exposed through extra_body.
-from linch.providers import SGLangProvider, SGLangProviderOptions
+from linch import SGLangProvider, SGLangProviderOptions
 
 agent = Agent(
     model=os.environ["SGLANG_MODEL"],

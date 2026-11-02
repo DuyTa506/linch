@@ -61,7 +61,7 @@ linch add tool web-search
 ```
 
 The stub is a `@tool`-decorated async function ready to implement; the test
-calls `assert_tool_contract` (from `linch.testing`) so the tool's metadata,
+calls `assert_tool_contract` (from `linch`) so the tool's metadata,
 validation, and execution shape are pinned from the first commit. Register the
 tool in `build_agent()` by adding it to `empty_tools(...)` — see
 [Tools](./tools.md).

@@ -17,7 +17,7 @@ Define the shape you want with `OutputSchema` and pass it as
 `Agent(output_schema=...)` (or per run via `RunOptions(output_schema=...)`):
 
 ```python
-from linch.types import OutputSchema
+from linch import OutputSchema
 
 schema = OutputSchema(
     name="invoice",
@@ -99,7 +99,7 @@ OpenAI-compatible endpoints don't implement it** — DeepSeek rejects it with
 DeepSeek and similar, pass `json_mode=True`:
 
 ```python
-from linch.providers.openai_chat import (
+from linch import (
     OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
 )
