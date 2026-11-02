@@ -53,8 +53,8 @@ async def test_catalog_bypass_preserves_live_request_bytes(bypass: str) -> None:
         "version": 1,
         "system": [{"text": "stale prefix", "cacheable": True}],
         "tools": [{"name": "stale", "description": "stale", "input_schema": {}}],
-        "skills": {},
-        "notified": {"tools": {}, "subagents": None},
+        "base": {"tools": {}, "skills": {}, "subagents": None},
+        "notified": {"tools": {}, "skills": {}, "subagents": None},
     }
     await session.update_meta({"linch.prefix": poisoned})
 

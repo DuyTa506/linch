@@ -316,6 +316,8 @@ def run_scenario(args: argparse.Namespace, scenario: str) -> dict[str, Any]:
         cached, total = cached_tokens(args.provider, body)
     except urllib.error.HTTPError as exc:
         return {"scenario": scenario, "error": exc.code, "detail": exc.read().decode()[:500]}
+    except OSError as exc:
+        return {"scenario": scenario, "error": type(exc).__name__, "detail": str(exc)[:500]}
     share = round(cached / total, 3) if total else 0.0
     return {
         "scenario": scenario,

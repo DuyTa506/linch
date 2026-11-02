@@ -46,6 +46,10 @@ def snapshot_for(session: Any) -> dict[str, Any] | None:
     if not isinstance(raw.get("system"), list) or not isinstance(raw.get("tools"), list):
         return None
     if any(
+        not isinstance(tool, dict) or not isinstance(tool.get("name"), str) for tool in raw["tools"]
+    ):
+        return None
+    if any(
         not isinstance(catalog, dict)
         or set(catalog) != {"tools", "skills", "subagents"}
         or not isinstance(catalog["tools"], dict)
