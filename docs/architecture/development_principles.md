@@ -2,20 +2,25 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
+Use this page when reviewing a kernel extension, provider adapter, durable-state
+change, or other runtime contribution.
+
 Linch is an async-first SDK. Keep the core small, provider-neutral, and safe to
 embed alongside other agents in one process. These principles are the review
 checklist for new extension points and runtime changes.
 
 ## Scope and ownership
 
-- Every `Agent` owns one per-agent `Context`; shared services are scoped there,
-  never stored in mutable process globals. A supplied context is also disposed
-  by that Agent; pass a child scope when a host must retain the parent.
+- Every `Agent` owns one per-agent `Context`; when a host context is supplied,
+  that context remains the host-owned parent and the Agent owns a child scope.
+  Shared services stay scoped there, never in mutable process globals; pass an
+  explicit child scope when the host wants its own boundary.
 - A `Session` owns one append-only `SessionLog`. Its `provider_view` and
   `full_history` are deep-copied, read-only projections; per-request context is
   ephemeral and remains outside the log.
-- Durable persistence ends at the session snapshot boundary. In-memory log
-  entries and projection bookkeeping are not a second durable journal.
+- `SessionLog` entries and projection bookkeeping are in-memory only. Durable
+  session messages and optional provider-view snapshots belong to the session
+  store; the in-memory log is not a second durable journal.
 
 ## Extension and effects
 
@@ -26,7 +31,7 @@ checklist for new extension points and runtime changes.
 - Middleware `next` handles are single-use. A wrapper must await `next()` once
   to delegate, or deliberately short-circuit without calling it.
 - Optional paths preserve the direct path when unused, including the tool
-  pipeline and observability hooks.
+  pipeline and hook dispatch.
 
 ## Compatibility and durability
 
@@ -37,8 +42,9 @@ checklist for new extension points and runtime changes.
   Opaque custom providers fail closed instead of guessing identity.
 - Pipeline listeners run after permission and cannot rewrite authorization-
   sensitive input; use the pre-tool hook for a transform that is revalidated.
-- In the 3.0 transition, remove compatibility shims and pre-3.0 readers;
-  reject old state and start new runs. Execution backends must provide one
+- Persisted envelopes require the exact current wire/schema version; missing,
+  pre-3.0, and unknown versions are rejected, so start a new run and use a fresh
+  database when the version gate fails. Execution backends must provide one
   coherent `.shell` and `.fs` world; shell-only values are rejected.
 
 ## Async and security

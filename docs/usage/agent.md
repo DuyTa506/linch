@@ -88,8 +88,9 @@ other = await agent.session(id="user-42")        # resume/attach by id
 `session.run(prompt)` appends the user message, drives the
 [turn loop](../architecture.md), and yields [events](./events.md). Call it again
 on the same `Session` to continue the thread — history persists in the session
-store. When you are done, `await agent.close()` cancels any live background
-workers, flushes stores, and closes hooks that expose `close`/`aclose`.
+store. When you are done, `await agent.close()` drains active sessions and
+background work, then closes stores, the provider, and hooks that expose
+`close`/`aclose`.
 
 Each Agent also owns one per-agent `Context` scope. It contains the agent's
 service registrations, event bus, tool pipeline, and effective execution world;
@@ -187,8 +188,9 @@ another provider call drops restored entries silently.
 
 The session store persists the message snapshots needed by the session's single
 append-only `SessionLog`: `provider_view` (model-visible) and `full_history`
-(audit). Both are deep-copied, read-only projections. Grow history with
-`await session.append(...)` — it writes to the session store *and* the log,
+(audit). Both are detached deep-copy projections; mutating them does not change
+the session. Grow history with `await session.append([message])`, passing an
+ordered list of `Message` objects. It writes to the session store *and* the log,
 so the messages survive a reload. `session.session_log.append(...)` updates
 only the in-memory log and is not a durable session mutation. Record
 compaction with `session.session_log.record_projection(...)`. Per-request context-builder output
@@ -233,7 +235,7 @@ agent behavior:
 
 ```python
 import os
-from linch import Agent, DurabilityOptions, PostgresRunStore
+from linch import Agent, DurabilityOptions, Message, PostgresRunStore, TextBlock
 from linch.sessions.postgres import PostgresSessionStore
 
 dsn = os.environ["LINCH_POSTGRES_DSN"]
@@ -245,6 +247,8 @@ agent = Agent(
     durability=DurabilityOptions.strict_v1(),
 )
 
+session = await agent.session(id="customer-42")
+message = Message(role="user", content=[TextBlock(text="New webhook received")])
 await session.notify(message, delivery_id="webhook:123")
 ```
 
@@ -274,7 +278,7 @@ configuration. Opt in only for a trusted project or use an explicit preset:
 from linch import Agent, FeatureFlags, workspace_tools
 
 agent = Agent(
-    ...,
+    model="gpt-5",
     tools=workspace_tools(),
     features=FeatureFlags(
         skills=True,
@@ -289,7 +293,7 @@ agent = Agent(
 from linch import FeatureFlags
 
 agent = Agent(
-    ...,
+    model="gpt-5",
     features=FeatureFlags(skills=False, subagents=False, mcp=False),
     # also: filesystem=False to disable the virtual filesystem subsystem
 )
@@ -308,19 +312,19 @@ disables offloading even if you pass a backend.
 ## `SystemPromptConfig`
 
 By default Linch ships a domain-neutral identity prompt. It mentions only the
-tools actually registered on the agent. You can append to it, replace it
-wholesale, or compose reusable sections. Coding doctrine belongs in an
-explicit workspace preset or application-owned prompt.
+tools actually registered on the agent. You can append instructions, omit the
+built-in identity and protocol blocks, or compose reusable sections. Coding
+doctrine belongs in an explicit workspace preset or application-owned prompt.
 
 ```python
 from linch import SystemPromptConfig, SystemPromptSection
 
 # 1. Append instructions to the built-in Linch prompt
-agent = Agent(..., system_prompt="Always reply in formal English.")
+agent = Agent(model="gpt-5", system_prompt="Always reply in formal English.")
 
-# 2. Replace the entire SWE identity with your own
+# 2. Replace the built-in identity and protocol with your own
 agent = Agent(
-    ...,
+    model="gpt-5",
     system_prompt_config=SystemPromptConfig(
         replace_defaults=True,
         append="You are a financial analyst. Only discuss stocks and bonds.",
@@ -329,7 +333,7 @@ agent = Agent(
 
 # 3. Add reusable prompt sections without replacing the defaults
 agent = Agent(
-    ...,
+    model="gpt-5",
     system_prompt_config=SystemPromptConfig(
         sections=[
             SystemPromptSection(
@@ -343,9 +347,10 @@ agent = Agent(
 ```
 
 Use the plain `system_prompt=` string for the common "add a line or two" case.
-Reach for `SystemPromptConfig` when you need to drop the SWE identity entirely
-(`replace_defaults=True`) or attach named, placement-controlled sections that
-compose cleanly with subsystem prompt blocks (filesystem, skills, …).
+Reach for `SystemPromptConfig` when you need to omit the built-in identity and
+protocol (`replace_defaults=True`) or attach named, placement-controlled sections.
+Tool-contributed sections, environment metadata, and caller additions still
+render when defaults are replaced.
 
 ---
 
@@ -384,13 +389,10 @@ existing session store before that recipe is written. A changed source,
 strategy configuration, listing wrapper, or run contract fails closed rather
 than applying a stale summary.
 
-The public `CompactionStrategy` protocol remains unchanged. A custom strategy
-receives an accounted provider facade for calls made through Linch, including
+A custom strategy receives an accounted provider facade for calls made through Linch, including
 the run's cancellation and provider-slot/limiter guarantees. Opaque network
 calls outside that facade are not observable, and arbitrary multi-call or
-transform logic has no automatic deterministic paid-replay guarantee. The
-standalone `summarize_with_provider(...)` helper remains available with its
-existing direct-provider behavior; it is not a durable run receipt by itself.
+transform logic has no automatic deterministic paid-replay guarantee.
 
 <a id="compaction-ladder"></a>
 
@@ -416,15 +418,15 @@ agent = Agent(
 - **Micro-compact (rung 1)** — old `ToolResultBlock` contents are replaced with
   a short placeholder via copy-on-write: no LLM call, `tool_use_id` pairing
   preserved, `full_history` untouched. Runs proactively when the projection
-  crosses ~80% of the window, and reactively (once per turn) when the provider
-  raises `ContextLengthError`. Emits `CompactionEvent(strategy="micro")`.
+  plus reserved output reaches 80% of the window, and reactively (once per
+  turn) when the provider raises `ContextLengthError`. Emits `CompactionEvent(strategy="micro")`.
 - **Forced compaction (rung 2)** — the configured strategy summarizes as usual,
   but capped at `max_forced_compactions` per run; after that the
   `ContextLengthError` surfaces instead of looping forever.
 - The proactive "did we free enough?" check uses the agent's `token_estimator`.
-  The default heuristic counts only text blocks, so pass an estimator that also
-  counts tool-result content to get the most out of micro-compaction. The
-  reactive rung shrinks the real payload, so it helps regardless.
+  The default heuristic counts text, tool inputs and results, and metadata,
+  with a fixed estimate for images. Supply a model-aware estimator if you need
+  a different estimate. The reactive rung shrinks the real payload.
 
 ---
 
@@ -465,9 +467,10 @@ run `RunBudget`.
 
 ## `RunBudget`
 
-`RunBudget` caps total spending — tokens, USD, or both — for a run **and every
-subagent it spawns**. Child sessions inherit the parent's budget object by
-reference, so one cap covers the whole agent tree.
+`RunBudget` limits spending — tokens, USD, or both — for a run **and its
+subagents** by blocking subsequent calls once a limit is reached. Child
+sessions inherit the parent's budget object by reference, so one cap covers the
+whole agent tree.
 
 ```python
 from linch import Agent, RunBudget
@@ -480,7 +483,7 @@ async for event in session.run("do the task", RunOptions(budget=budget)):
     if event.type == "budget" and event.kind == "warning":
         print(f"90% spent: {event.spent_tokens} tokens")
     elif event.type == "budget" and event.kind == "exceeded":
-        print("budget exhausted — run stops with an error result")
+        print("budget exhausted — another provider call was blocked")
 
 print(budget.spent_tokens, budget.remaining_tokens, budget.exceeded)
 ```
@@ -490,9 +493,11 @@ Behavior:
 - The loop settles each physical provider delivery before it continues. This
   includes the auxiliary compaction delivery, so its usage is charged before
   the summary is applied and admission is checked again before the next
-  primary turn. When exceeded it emits `BudgetEvent(kind="exceeded")`, an
-  `ErrorEvent` named `BudgetExceededError`, and a `ResultEvent(subtype="error")`
-  — the session history stays intact and the session remains usable.
+  primary turn. When an exhausted budget blocks admission, the loop emits
+  `BudgetEvent(kind="exceeded")`, an `ErrorEvent` named `BudgetExceededError`,
+  and a `ResultEvent(subtype="error")`. A final answer from an already admitted
+  call can still succeed even if its usage exhausts the budget; a later call is
+  blocked. Session history stays intact and the session remains usable.
 - `BudgetEvent(kind="warning")` fires once per budget object when spending first
   reaches `warn_ratio` (default 0.9) of any limit. Shared budgets warn once
   across the whole tree, not once per run.
@@ -533,10 +538,10 @@ agent = Agent(model="gpt-5.5", provider=provider, max_provider_concurrency=8)
 This bounds **provider calls, not `run()` calls** — the distinction matters
 because one `run()` fans out into many calls: every turn of the loop, every
 same-model retry, every model-fallback swap, every compaction summarization, and
-every subagent it spawns. A semaphore your host wraps around `agent.run()` caps
-none of those; this does.
+every subagent it spawns. A host semaphore around a session run limits
+concurrent runs, while this limits the provider calls within them.
 
-The cap is per-`Agent`, so two agents in one process keep separate budgets. The
+The concurrency cap is per-`Agent`, so two agents have separate gates. The
 gate is held around the provider call itself and released across retry backoff,
 so a call waiting to retry re-queues instead of sitting on a slot. When unset
 there is no gate at all and no added cost.

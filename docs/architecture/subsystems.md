@@ -1,5 +1,8 @@
 # Subsystems
 
+> Use this page when you need a subsystem contract, execution boundary, or
+> cross-cutting invariant.
+
 > Part of the [Linch architecture guide](./README.md).
 
 This page describes the current Linch 3.0 runtime. The kernel is headless and
@@ -9,10 +12,11 @@ transport, tenant services, and the OpenTelemetry SDK.
 ## 3.1 Kernel and scoped services
 
 `linch.kernel` is a small dependency-free service and effect kernel. An
-`Agent` owns a child `Context` scope containing its service registry, event bus,
-and reversible effects. `Disposable` handles undo one registration and are
-idempotent. The same primitives are used by tool registration, hooks,
-turn-stopping listeners, and optional adapters.
+`Agent` owns its per-agent `Context` scope containing its service registry,
+event bus, and reversible effects. When a host `Context` is supplied, that
+scope is a child and the host parent remains host-owned. `Disposable` handles
+undo one registration and are idempotent. The same primitives are used by tool
+registration, hooks, turn-stopping listeners, and optional adapters.
 
 The kernel has no process-global mutable registry. A host can create several
 agents in one process; each agent has its own tools, hooks, sessions, permission
@@ -33,7 +37,8 @@ append-only source for two read projections:
 
 Per-request context from `ContextInjectionHook` and RAG builders is merged into
 the `ProviderRequest` only. It is not appended to either projection. Grow the
-history through `await session.append(...)`; a direct
+history through `await session.append([...])`; the method accepts an ordered
+`list[Message]`. A direct
 `SessionLog.append(...)` is an in-memory mutation and is lost on reload.
 Compaction uses `session.session_log.record_projection(...)`, keeping the
 projection change in the log while preserving the audit history.
@@ -155,7 +160,7 @@ that sequence; a missing notification never means that an event is missing.
 
 Current persisted envelopes use wire version 3. Missing, pre-3.0, unknown, or
 contractless run data is rejected. `storage/_pg.py` coordinates Postgres
-schema verification under advisory locks and does not perform legacy upgrades.
+schema verification under advisory locks.
 
 ## 3.4 Worker dispatch and PgQueuer recovery
 
@@ -270,8 +275,9 @@ correction turns. It executes no tools from a rejected native response.
 reliability state and policy configuration are part of durable resume state.
 
 The loop also has an enabled-by-default, opt-out `LoopGuard` on `Agent`: it tracks
-repeated tool-call signatures, consecutive failure batches, and max turns. Its
-force-final path injects a reminder and removes tools from one final request.
+repeated tool-call signatures and consecutive failure batches. The separate
+`max_turns` run bound is enforced by the loop. The guard's force-final path
+injects a reminder and removes tools from one final request.
 
 ## 3.7 Permission evaluation and `Principal`
 
@@ -314,11 +320,11 @@ as a `ContextBuildEvent`; the session log is untouched. Builders perform async
 I/O and can receive the per-run `deps` object.
 
 `FileMemoryContextBuilder` is the current file-memory path. When mounted by a
-`ContextInjectionHook`, it reads `/memories/MEMORY.md` once per run, retains at
-most 200 lines, and injects a stable instruction plus the index. The model
-uses the existing virtual filesystem tools to read, write, and edit one fact
-per file. Backends also expose deletion to host code, but `filesystem_tools()`
-registers no delete tool.
+`ContextInjectionHook`, it reads `/memories/MEMORY.md` once per run, keeps the
+first 200 content lines, and injects a stable instruction plus the index. The
+model uses the existing virtual filesystem tools to read, write, and edit one
+fact per file. Backends also expose deletion to host code, but
+`filesystem_tools()` registers no delete tool.
 
 RAG is a small request-scoped protocol in `rag/__init__.py`:
 
@@ -366,8 +372,8 @@ imported from `linch.filesystem.postgres`.
 above its resolved threshold, the scheduler writes the full content to the
 virtual backend and puts a preview plus path hint in the model-facing result.
 The full `ToolResult` remains on `ToolCallEndEvent.tool_result`. The default
-threshold is 10% of the provider context window when the filesystem feature is
-enabled; `preview_lines` defaults to 10. A backend write failure leaves the
+offload configuration derives its threshold as 10% of the provider context
+window; `preview_lines` defaults to 10. A backend write failure leaves the
 original result unchanged.
 
 Use a Postgres-backed composite filesystem when memory or offload files must

@@ -2,17 +2,18 @@
 
 Use this page when you need to implement and inject your own runtime seam.
 
-Linch ships **mechanisms**, not policy. Every subsystem is a duck-typed protocol you
-can re-implement and inject — no base class to inherit, just match the attributes and
-methods. This page is the "implement your own" reference for the seams added in the
-roadmap, mirroring the patterns already documented for
+Linch exposes runtime seams you can implement and inject. Most use duck-typed
+protocols: match their attributes and methods. Built-in providers instead subclass
+`BaseProvider`, an abstract base class; custom providers can also satisfy the runtime
+interface structurally. This page complements the patterns documented for
 [`ExecutionBackend`](./tools.md#bash-execution-backend),
 [`Tool`](./tools.md#custom-tools), [`FileBackend` and `ContextBuilder`](./context-and-memory.md),
 providers, and [hooks](./hooks.md).
 
 A protocol is satisfied structurally: implement the listed methods with matching
 signatures and pass your object where the built-in adapter would go. The runtime
-probes optional methods with `getattr`/`hasattr`, so adding extra methods is harmless.
+probes optional methods with `getattr`/`hasattr`; implement optional capabilities
+according to their documented semantics.
 
 Import supported extension contracts and policy primitives from the top-level package.
 For example, custom permission policies can construct their ordered rules without
@@ -55,7 +56,8 @@ async def test_my_tool_contract():
     )
 ```
 
-The helpers expect a factory that returns a fresh, empty adapter. They exercise
+The backend, isolation, and mailbox helpers expect a factory that returns a
+fresh, empty adapter; `assert_tool_contract` takes a tool instance. They exercise
 the same behavioral guarantees Linch's built-in adapters rely on: file backend
 CRUD/list/edit semantics, distinct writable isolation workspaces, destructive
 mailbox drains, no dropped concurrent sends, and custom tool
@@ -100,9 +102,9 @@ class GitWorktreeIsolation:
             await _remove_worktree(cwd)
 ```
 
-Inject it on the subagent path (see [deep-agent](./deep-agent.md)). Honor the contract:
-`acquire` must return a usable, writable directory; `release` must be idempotent so a
-double-release (abort + normal completion) cannot raise.
+Inject it on the subagent path (see [deep-agent](./deep-agent.md)). `acquire` must
+return a usable, writable directory. Making `release` idempotent is recommended
+so repeated cleanup is safe; the protocol and contract helper do not require it.
 
 ---
 
@@ -114,23 +116,21 @@ protocol for a durable or cross-process inbox in host-owned infrastructure;
 mailbox adapters are outside the core SDK.
 
 ```python
-from dataclasses import dataclass, field
-from typing import Protocol
+from linch import Mailbox, MailboxMessage
 
-@dataclass(slots=True)
-class MailboxMessage:
-    sender: str
-    recipient: str
-    content: str
-    type: str = "message"
-    request_id: str | None = None      # set on a request…
-    in_reply_to: str | None = None     # …echoed on its response (see Correlator)
-    id: str = field(default_factory=...)
-
-class Mailbox(Protocol):
-    async def send(self, message: MailboxMessage) -> None: ...
-    async def drain(self, recipient: str) -> list[MailboxMessage]: ...
+message = MailboxMessage(
+    sender="planner",
+    recipient="worker",
+    content="Inspect the request handler.",
+)
+await mailbox.send(message)
+messages = await mailbox.drain("worker")
 ```
+
+`Mailbox` defines `async send(message) -> None` and
+`async drain(recipient: str) -> list[MailboxMessage]`. `MailboxMessage` generates
+an `id`; its optional fields default to `type="message"`, `request_id=None`,
+and `in_reply_to=None`.
 
 Two invariants your implementation **must** hold:
 
@@ -217,11 +217,13 @@ budget across several agents — that is a deliberate choice, not an accident.
 
 ---
 
-## Reversible registration — every registration returns a `Disposable`
+<a id="reversible-registration--every-registration-returns-a-disposable"></a>
 
-Anything that mutates a registry hands you back a `linch.Disposable` — a single
-undo handle — so a host can add a capability for the scope of a task and remove
-exactly it afterward, without tracking names.
+## Reversible registration — register and replace return a `Disposable`
+
+`ToolRegistry.register()` and `replace()` return a `linch.Disposable` undo
+handle, so a host can add a tool for the scope of a task and remove that
+registration afterward. `unregister()` instead returns the removed tool or `None`.
 
 ```python
 from linch import Disposable  # only needed for a type annotation
@@ -284,9 +286,8 @@ disposer = agent.tool_pipeline.on_execute(metrics_wrapper(my_sink))  # -> Dispos
 `on_pre_execute(listener)` and `on_post_execute(listener)` register the other
 two seams; all three return a `Disposable`. Points to know:
 
-- **Zero-overhead when unused.** With no `tools/execute` listener attached the
-  scheduler calls `tool.execute` directly — behavior is byte-identical to before
-  the pipeline existed.
+- **Zero-overhead when unused.** With no listeners in any of the three phases, the
+  scheduler calls `tool.execute` directly.
 - **The payload is read-only for authorization.** `ToolExecution` carries
   `tool_name`, `tool_use_id`, `input`, `ctx`, `tool`, plus `signal`/`metadata`
   extension fields. The pipeline runs *after* canonical validation and
@@ -302,9 +303,8 @@ two seams; all three return a `Disposable`. Points to know:
 
 ## `ExecutionBackend` — one shell + filesystem world
 
-Shell (subprocess) and filesystem used to be unrelated worlds. `ExecutionBackend`
-bundles them so a consumer swaps one object and both move together — a duck-typed
-protocol, no base class:
+`ExecutionBackend` bundles shell execution and filesystem access. Swapping one
+object changes both together. It is a duck-typed protocol, with no base class:
 
 ```python
 from typing import Any, Protocol, runtime_checkable
@@ -320,7 +320,8 @@ class ExecutionBackend(Protocol):
     fs: "FileBackend"     # the filesystem half (see FileBackend on the tools page)
 ```
 
-`LocalExecutionBackend` is the default (local subprocess + on-disk files);
+`LocalExecutionBackend` provides local subprocesses and on-disk files; a bare
+`Agent` does not implicitly receive this execution authority.
 `RemoteExecutionBackend(shell=..., fs=...)` bundles transports you supply (e.g. a
 sandbox). `BashTool` sources its shell from the backend and the filesystem tools
 read its `fs`, so pointing an agent at a sandbox is one argument:
@@ -328,7 +329,8 @@ read its `fs`, so pointing an agent at a sandbox is one argument:
 ```python
 from linch import Agent, LocalExecutionBackend
 
-agent = Agent(..., cwd=".", execution_backend=LocalExecutionBackend(cwd="."))
+cwd = "."
+agent = Agent(..., cwd=cwd, execution_backend=LocalExecutionBackend(cwd=cwd))
 ```
 
 Construct the local world with `cwd=Agent.cwd` so shell and filesystem share one
@@ -344,6 +346,8 @@ close leaves the second on closed transports. To share one world, register it on
 a `Context` and let each agent inherit it:
 
 ```python
+from linch import Context, RemoteExecutionBackend
+
 host = Context(label="host")
 host.register("execution", RemoteExecutionBackend(shell=..., fs=...))
 
@@ -360,14 +364,14 @@ scope. This is also how a subagent picks up its parent's world
 
 ## System-prompt assembly — ordered static prefix + dynamic blocks
 
-There is deliberately **no** `SystemPromptBuilder` protocol: two existing seams already
-cover ordered, cache-aware prompt assembly, and a third would duplicate them.
+System-prompt assembly uses two seams for static sections and dynamic context:
 
 1. **Static, ordered sections** — `SystemPromptConfig.sections` is a list of
-   `SystemPromptSection(name, text, cacheable=True)`. Sections render in order after the
-   base prompt. `cacheable=False` marks a section as the end of the cached prefix (it is
-   re-sent uncached every turn); leave it `True` for stable text so prompt caching keeps
-   the whole prefix warm.
+   `SystemPromptSection(name, text, cacheable=True)`. Placement defaults to
+   `"before_defaults"`; `"after_defaults"` and `"after_env"` are also supported.
+   Sections retain declaration order within each placement. For Anthropic, the
+   last cacheable system block sets the breakpoint: `cacheable=False` alone
+   does not exclude a section if a later block is cacheable.
 
    ```python
    from linch import SystemPromptConfig, SystemPromptSection
@@ -377,8 +381,7 @@ cover ordered, cache-aware prompt assembly, and a third would duplicate them.
        system_prompt_config=SystemPromptConfig(
            append="You are a research analyst.",
            sections=[
-               SystemPromptSection(name="policy", text=POLICY_TEXT),          # cached
-               SystemPromptSection(name="tenant", text=tenant_blurb, cacheable=False),
+               SystemPromptSection(name="policy", text="Cite sources for factual claims."),
            ],
        ),
    )
@@ -386,11 +389,11 @@ cover ordered, cache-aware prompt assembly, and a third would duplicate them.
 
 2. **Per-turn dynamic blocks** — a `ContextBuilder` can emit ephemeral *system* blocks
    computed fresh each turn (RAG snippets, recalled memory, live state). These append to
-   the provider request only and default to `cacheable=False`. This is the seam for
+   the provider request only and are forced to `cacheable=False`. This is the seam for
    anything that changes turn to turn — see [Context & memory](./context-and-memory.md).
 
-Volatile per-turn facts (today's date, recalled memory) are injected as **user**
-messages, not the system prompt, so the system prefix stays cacheable. Reach for a
+The date is generated for each user message. Recalled memory and other context
+can be injected through dynamic system blocks. Reach for a
 `ContextBuilder` when you need computed-per-turn content; reach for `sections` when you
 need ordered static blocks with explicit cache boundaries.
 
@@ -400,9 +403,12 @@ need ordered static blocks with explicit cache boundaries.
 
 File memory intentionally has no extraction hook or memory-store contract. Use
 the public `FileMemoryContextBuilder` with `ContextInjectionHook`, and keep the
-run's `ScopedFileBackend` in `RunOptions(deps=...)`. The model maintains
-`/memories/MEMORY.md` and one fact file per line with the existing filesystem
-tools; application policy can update or delete stale files through the backend.
+run's `ScopedFileBackend` in `RunOptions(deps={"filesystem": scoped_backend})`.
+The builder reads `/memories/MEMORY.md` once per run and includes its first
+200 lines; it does not write memory. The model can maintain the file through
+filesystem tools, and application policy can update or delete stale content
+through the backend. Keep `MEMORY.md` as a one-entry-per-file index; this is
+prompt guidance rather than a format enforced by the builder.
 For semantic recall, adapt the recipe in
 [`examples/memory/mem0_recall.py`](../../examples/memory/mem0_recall.py) with a
 fake async client in unit tests.

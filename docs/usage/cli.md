@@ -68,9 +68,10 @@ validation, and execution shape are pinned from the first commit. Register the
 tool in `build_agent()` by adding it to `empty_tools(...)` — see
 [Tools](./tools.md).
 
-The command finds the target package by walking up to the nearest
-`pyproject.toml` and locating the package under `src/`; with multiple packages
-it picks the one matching `[project].name`. It never overwrites existing files.
+The command walks upward to the nearest `pyproject.toml` whose
+`[project].dependencies` declares Linch, then locates a Python package under
+`src/`. With multiple packages it picks the one matching `[project].name`, or
+reports an ambiguity. It refuses to overwrite either generated file.
 
 ## `linch docs path`
 

@@ -1,9 +1,11 @@
 # System Prompt Layers
 
+Use this page to understand prompt assembly and session prefix behavior.
+
 > Part of the [Linch architecture guide](./README.md).
 
 `Agent._build_system_blocks(tool_names)` assembles the system prompt from
-ordered layers. A bare Linch 2.0 `Agent` has a neutral identity and an empty
+ordered layers. A bare `Agent` has a neutral identity and an empty
 tool registry; it does not silently become a coding agent or trust the
 workspace it happens to run in. Pass an explicit registry such as
 `workspace_tools()` (or your own tools) to add capabilities. When a trusted
@@ -17,16 +19,16 @@ changing the built-in prompt text:
 flowchart TD
     L0["Layer 0 — before_defaults sections\nSystemPromptConfig.sections"]
     L1["Layer 1 — Custom blocks\nSystemPromptConfig.blocks\nprepended before identity"]
-    L2["Layer 2 — Identity block\nYou are Linch…\nomitted when replace_defaults=True"]
+    L2["Layer 2 — Identity block\nYou are an AI assistant…\nomitted when replace_defaults=True"]
     L3["Layer 3 — Protocol block\ntool-use instructions\nomitted when replace_defaults=True\nor no tools present\nclauses conditional on registered tool families"]
-    LFS["Layer 3b — Filesystem block\nadded when ls/read_file/write_file/edit_file are registered\nexplains virtual filesystem and offload recovery\npresent in either prompt mode when tools are active"]
+    LFS["Filesystem block\nadded when any filesystem tool is registered\nexplains virtual filesystem and offload recovery\npresent in either prompt mode when tools are active"]
     L4["Layer 4 — after_defaults sections\nSystemPromptConfig.sections"]
     L5["Layer 5 — Environment block\nalways present"]
     LS["Layer 5b — Skill listing\ncacheable session snapshot only"]
     L6["Layer 6 — after_env sections\nSystemPromptConfig.sections"]
     L7["Layer 7 — Append block\nSystemPromptConfig.append\nor Agent(system_prompt=...)"]
 
-    L0 --> L1 --> L2 --> L3 --> LFS --> L4 --> L5 --> LS --> L6 --> L7
+    L0 --> L1 --> L2 --> L3 --> L4 --> LFS --> L5 --> LS --> L6 --> L7
 ```
 
 ## Session prefix and catalog changes

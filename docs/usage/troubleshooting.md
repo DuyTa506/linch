@@ -24,9 +24,20 @@ See [agent configuration](./agent.md) and [permission rules](./tools.md#permissi
 
 ## `ToolRegistry`, `assert_tool_contract`, and `ToolOutput`
 
-Registration checks the duck-typed tool shape before adding it. The separate
-`assert_tool_contract` helper raises `AssertionError` when its checks fail;
-its execution-result check currently covers legacy `ToolResult` tools.
+Registration checks the duck-typed tool shape before adding it: a non-empty name,
+a valid `scope`, a dictionary `input_schema`, and callable `validate`, `execute`,
+and `summarize` methods are all required. `Agent(tools=...)` expects a
+`ToolRegistry`, not a plain list. For a minimal registry:
+
+```python
+from linch import Agent, empty_tools
+
+agent = Agent(model="your-model", tools=empty_tools())
+```
+
+The separate `assert_tool_contract` helper is asynchronous, so tests must
+`await` it. It raises `AssertionError` when its checks fail; its
+execution-result check currently covers legacy `ToolResult` tools only.
 
 | Kind | Message | Source | Cause | Fix |
 |---|---|---|---|---|

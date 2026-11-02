@@ -2,9 +2,10 @@
 
 Use eval suites to compare agent behavior across providers, prompts, and runtime settings.
 
-Linch evals are deterministic harness runs over normal `Agent` instances. Use
+Linch evals run normal `Agent` instances through a small scoring harness. Use
 them to compare providers, prompts, recovery settings, memory setups, or runtime
-changes without building a separate test runner.
+changes without building a separate test runner; use `ScriptedProvider` for
+deterministic offline tests.
 
 <a id="library-api"></a>
 
@@ -15,6 +16,7 @@ import asyncio
 
 from linch import (
     Agent,
+    FeatureFlags,
     InMemorySessionStore,
     empty_tools,
 )
@@ -32,10 +34,11 @@ from linch.ext.evals import (
 def agent_for(*answers: str) -> Agent:
     return Agent(
         model="scripted-eval",
-        provider=ScriptedProvider([TextTurn(answer) for answer in answers]),
+        provider=ScriptedProvider([TextTurn(text=answer) for answer in answers]),
         tools=empty_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
+        features=FeatureFlags(skills=False, subagents=False, mcp=False, filesystem=False),
     )
 
 
@@ -49,14 +52,16 @@ async def main() -> None:
         scorers=[text_contains("{expected}")],
     )
 
-    result = await run_eval_benchmark(
-        suite,
-        [
-            EvalBenchmarkTarget("candidate-a", agent_for("Paris", "Berlin")),
-            EvalBenchmarkTarget("candidate-b", agent_for("Paris", "Paris")),
-        ],
-    )
-    print(result.to_markdown())
+    targets = [
+        EvalBenchmarkTarget("candidate-a", agent_for("Paris", "Berlin")),
+        EvalBenchmarkTarget("candidate-b", agent_for("Paris", "Paris")),
+    ]
+    try:
+        result = await run_eval_benchmark(suite, targets)
+        print(result.to_markdown())
+    finally:
+        for target in targets:
+            await target.agent.close()
 
 
 asyncio.run(main())
@@ -64,6 +69,81 @@ asyncio.run(main())
 
 `run_eval_benchmark()` creates one `EvalResult` per target and records elapsed
 wall time. Each eval case still gets a fresh Linch session through `run_eval()`.
+Cases run sequentially for each target, and `run_eval()` releases each case's
+session before starting the next one. A case passes when the run records no
+error and every scorer that returns a non-`None` value returns `True`; a
+`None` scorer result is treated as unknown. The `run_completed` scorer returns
+`True` only for a successful `ResultEvent` and `None` when no result event is
+available.
+
+## Scripted turns, tool calls, and child agents
+
+`ScriptedProvider` consumes exactly one turn from its list for each
+`provider.stream()` call. `TextTurn` emits one text response. `ToolUseTurn`
+emits one tool-use response with its `tool_name`, `tool_input`, and optional
+`tool_id`; it does not itself provide the follow-up text after an ordinary tool
+call. The loop executes that tool and normally asks the provider for another
+turn, so include another scripted turn. Terminal/final-tool paths can stop
+without a follow-up call. If a provider call needs a turn after the list is
+exhausted, `ScriptedProvider.stream()` raises `RuntimeError` with a message that
+reports how many turns were consumed and how many were configured.
+
+The provider's cursor belongs to the provider object, not to a session. A
+foreground child run uses the same provider object as its parent because the
+child session is owned by the same `Agent`. Therefore parent and child consume
+one shared sequence. In this sequence:
+
+1. The parent consumes the `ToolUseTurn` and calls `Subagent`.
+2. The child consumes the next `TextTurn` and returns its text as the tool
+   result.
+3. The parent resumes and consumes the final `TextTurn`.
+
+This small offline example exercises that ordering; its only enabled optional
+feature is subagents:
+
+```python
+import asyncio
+
+from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+
+
+async def main() -> None:
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(
+                tool_name="Subagent",
+                tool_input={"description": "helper", "prompt": "Return the child marker."},
+            ),
+            TextTurn(text="child marker"),
+            TextTurn(text="parent marker"),
+        ]
+    )
+    agent = Agent(
+        model="scripted-eval",
+        provider=provider,
+        tools=empty_tools(),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        features=FeatureFlags(skills=False, subagents=True, mcp=False, filesystem=False),
+    )
+    try:
+        session = await agent.session()
+        events = [event async for event in session.run("Delegate this task.")]
+        result = next(event for event in events if event.type == "result")
+        assert result.final_text == "parent marker"
+        print(result.final_text)
+    finally:
+        await agent.close()
+
+
+asyncio.run(main())
+```
+
+It prints `parent marker` without credentials or network access. If a child is
+run in the background or multiple runs share a provider concurrently, the
+interleaving is scheduling-dependent; give each run its own provider when the
+turn sequence must be independently reproducible.
 
 ## CLI
 

@@ -32,12 +32,19 @@ agent = Agent(...)
 (all read-scope), or `None`/`False` (off).
 
 ```python
-@dataclass
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
 class ToolCacheConfig:
     allow: set[str] | None = None   # None = every read-scope tool
     deny: frozenset[str] = frozenset()
     max_entries: int = 256          # per-run LRU cap
+    max_value_bytes: int = 100_000   # maximum cached result size
 ```
+
+`ToolCacheHook` requires `max_entries >= 1` and `max_value_bytes >= 0`.
+Results larger than `max_value_bytes` are not cached.
 
 ## How it works
 
@@ -48,7 +55,7 @@ The hook sits at two chokepoints (see [hooks.md](./hooks.md)):
   cached result is served.
 - **`PostToolUse`** — a successful result for a cacheable miss is stored.
 
-The cache key is `tool_name` + the canonical JSON of the input, so only
+The cache key is `tool_name` + the sorted JSON of the input seen by the cache hook, so only
 **identical** calls hit (`{"query": "a"}` and `{"query": "b"}` never collide).
 
 ## Correctness guarantees
@@ -57,9 +64,12 @@ The cache key is `tool_name` + the canonical JSON of the input, so only
   them in `allow` — re-running a write can be intentional, and serving a stale
   result for a side-effecting tool would be a bug.
 - **Writes invalidate reads.** When any `write`/`exec` tool runs, the run's
-  cached reads are cleared, so a `Read → Write → Read` of the same data
-  re-executes the second read instead of serving the pre-write value.
-- **Errors are never cached** — a failed call can still be retried.
+  cached reads are cleared before dispatch and again at completion, including
+  background completion through `PostToolUse`. A `Read → Write → Read` after the
+  write completes re-executes the second read. Concurrent reads can still see
+  stale values until an in-flight write completes.
+- **Errors are never cached.** Automatic retries require `RetryOptions`;
+  caching does not enable retries.
 - **Per-run.** The cache is keyed by `run_id` and dropped when the run ends. It
   is in-memory and **not checkpointed**: after a durable resume it is simply
   cold (a cache miss), never wrong.

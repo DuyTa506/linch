@@ -2,22 +2,34 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
-Every provider implements `BaseProvider` (three methods):
+Built-in providers subclass `BaseProvider`, which defines two abstract methods
+and a concrete `capabilities()` default. Custom providers can satisfy the runtime
+interface structurally; the runtime does not require `isinstance(provider, BaseProvider)`:
 
 ```python
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+
+from linch import ProviderCapabilities, ProviderRequest
+
+
 class BaseProvider(ABC):
     id: str
 
+    @abstractmethod
     def context_window(self, model: str) -> int: ...
 
-    async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]: ...
+    @abstractmethod
+    def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]: ...
 
     def capabilities(self, model: str) -> ProviderCapabilities:
-        # Default derives context_window only; override to declare full support
+        # Uses ProviderCapabilities defaults; override unsupported features.
         return ProviderCapabilities(context_window=self.context_window(model))
 ```
 
-`stream()` yields **normalized dicts** — never raw API objects. Required keys by event type:
+`stream()` returns an async iterator; a concrete implementation can use
+`async def stream(...)` with `yield` to implement an async generator. It yields
+**normalized dicts** — never raw API objects. Required keys by event type:
 
 | `type` value | Required additional keys |
 |---|---|
@@ -32,18 +44,43 @@ class BaseProvider(ABC):
 
 The loop assembles these — it never imports any provider's raw types. Adding a new provider means implementing this dict contract only.
 
-The vocabulary is a strict boundary in Linch 2.0: an adapter must emit the
+The event vocabulary is a strict boundary: an adapter must emit the
 declared `type` and required fields with the documented normalized shapes.
 Malformed events are provider errors; the loop does not silently accept raw
 SDK objects, infer missing tool IDs, or turn unknown event shapes into a
 successful assistant response. `redacted_thinking` is the one intentionally
 opaque content marker; its optional payload is converted to the normalized
-redacted-thinking block. Keep compatibility shims inside the adapter.
+redacted-thinking block. Normalize vendor event formats inside the adapter.
+
+A stream must start with exactly one `message_start` and finish with one
+`message_end`, with no events after it. Tool IDs and names must be nonempty;
+every started tool call must end before `message_end`.
 
 `message_end.usage` must be an actual `linch.Usage` instance, not a mapping or a
-provider SDK object. Stop reasons and tool calls must agree: `"tool_use"` requires at
-least one completed tool call, while every other stop reason forbids completed tool calls
-in that message. The accepted stop-reason vocabulary is the public `StopReason` literal.
+provider SDK object, with nonnegative integer token buckets. Stop reasons and
+tool calls must agree: `"tool_use"` requires at least one completed tool call,
+while every other stop reason forbids completed tool calls in that message.
+The accepted stop-reason vocabulary is the public `StopReason` literal.
+
+## Constructing a provider request
+
+Custom adapters receive the public `ProviderRequest` type. Its required fields
+are `model`, `system`, `tools`, and `messages`; optional controls have defaults:
+
+```python
+from linch import Message, ProviderRequest, SystemBlock, TextBlock
+
+request = ProviderRequest(
+    model="my-model",
+    system=[SystemBlock(text="Answer concisely.")],
+    tools=[],
+    messages=[Message(role="user", content=[TextBlock(text="Hello")])],
+    max_output_tokens=256,
+)
+
+async for event in provider.stream(request):
+    print(event)
+```
 
 ## Optional lifecycle hooks
 
@@ -68,13 +105,15 @@ Conformance is exercised network-free by `assert_provider_contract` from
 ```python
 from linch import assert_provider_contract
 
-assert_provider_contract(lambda: MyProvider(), model="my-model")
+await assert_provider_contract(lambda: MyProvider(), model="my-model")
 ```
 
 It checks the provider id, a positive context window, the capability shape
 (including `caps.context_window == context_window(model)`), that `prepare()` is
 callable when present, and that closing twice is idempotent. A provider must not
-advertise a capability its request builder ignores.
+advertise a capability its request builder ignores. This helper checks provider
+shape and lifecycle only; it does not consume `stream()` or validate its events.
+Test event sequences separately against the normalized contract above.
 
 ## Native catalog rendering
 
@@ -83,11 +122,15 @@ defaulting to `"append_only"`, including in `full_capabilities`.
 `AnthropicProviderOptions.native_catalog_changes` and
 `OpenAIResponsesProviderOptions.native_catalog_changes` both default to `False`.
 **Native behavior is UNVERIFIED against live endpoints**; coverage uses fake
-transports. Disabled options preserve phase-2 payload bytes, including historical
-catalog blocks carrying definitions. Exact model and endpoint gates are listed in
+transports. Eligibility gates describe the implementation, not a guarantee of
+endpoint support. Bedrock, Google Cloud, and unsupported configurations use
+append-only rendering. Disabled options use append-only rendering, including
+historical catalog blocks carrying definitions. Exact model and endpoint gates
+are listed in
 [provider usage](../usage/providers.md#native-catalog-changes-opt-in).
 
-Eligibility uses the effective per-turn model, including skill overrides, and
+When session catalog snapshots are configured, eligibility uses the effective
+per-turn model, including skill overrides, and
 requires a nonempty snapshot tool prefix without run/context tool narrowing or a
 snapshot bypass. A private request decision survives exact model-input replay;
 forced-final requests that strip tools also suppress historical native definitions.
@@ -124,9 +167,9 @@ receive system/developer roles:
   `{"type": "allowed_tools", "mode": "auto", "tools": [...]}` in stable name order.
   Forced and `"none"` choices remain unchanged.
 
-Schema edits take the phase-2 replacement path; the adapters do not invent native
+Schema edits replace the offered tool definitions; the adapters do not invent native
 redefinition semantics. Compaction retains the prefix, resets notification digests,
-and uses existing synchronization to consolidate changes. Audit history retains
+and synchronizes the consolidated catalog. Audit history retains
 native provenance for schema comparisons and durable contract validation even when
 the compacted provider view no longer contains the original notice.
 
@@ -147,10 +190,13 @@ the compacted provider view no longer contains the original notice.
   is true only when that result is represented by a synthetic final tool call.
   Native JSON-schema and JSON-object providers finish through normal response
   parsing, avoiding accidental tool-name collisions.
-- **Capability default is conservative.** The base `capabilities()` derives only the
-  context window; a provider must opt in to advertising parallel tool calls / structured
-  output / caching. A provider that forgets to override under-promises (safe) rather than
-  over-promising (broken calls).
+- **Capability defaults must match the adapter.** The base `capabilities()` derives
+  the context window and uses `ProviderCapabilities` defaults:
+  `parallel_tool_calls=True`, `structured_output=True`, `tool_choice=True`,
+  `structured_output_terminal_tool=False`, `prompt_cache=False`,
+  `can_disable_thinking=False`, and `catalog_changes="append_only"`. Override
+  unsupported capabilities explicitly, and enable caching or terminal-tool output
+  only when the adapter implements them.
 
 ---
 

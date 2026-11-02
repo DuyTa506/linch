@@ -5,7 +5,9 @@
 For normal application tools, prefer the `@tool` helper. It wraps a sync or
 async Python function in a regular Tool-compatible object, infers a minimal JSON
 schema, injects `ToolContext` when the function asks for `ctx`, and converts
-plain return values into `ToolResult`.
+plain return values into `ToolResult` when no `output_schema` is declared.
+With `output_schema`, it accepts raw JSON, `ToolOutput`, or `ToolOutputError`
+instead.
 
 ```python
 from linch import ToolContext, tool
@@ -16,10 +18,24 @@ async def search_kb(query: str, ctx: ToolContext) -> str:
 ```
 
 The runtime still consumes the same **duck-typed** protocol — no base class, no
-`isinstance` check anywhere in the core. `FunctionTool` implements this shape,
+`isinstance(tool, Tool)` gate. `FunctionTool` implements this shape,
 and advanced tools can implement it directly:
 
 ```python
+from collections.abc import Callable, Iterable
+from typing import Literal
+
+from linch import (
+    JsonValue,
+    ResourceAccess,
+    SystemPromptSection,
+    ToolContext,
+    ToolOutput,
+    ToolOutputError,
+    ToolResult,
+)
+
+
 class MyTool:
     name: str                                      # unique registry key
     description: str                               # shown to the model
@@ -27,18 +43,22 @@ class MyTool:
     scope: Literal["read", "write", "exec"]
     parallel: bool | Callable[[dict], bool]         # concurrency declaration
 
-    # Optional Phase-11 reliability attributes (all duck-typed via getattr)
+    # Optional attributes (all duck-typed via getattr)
     execution_timeout_ms: float                    # per-tool timeout; 0 = opt-out
     retryable: bool                                # opt write/exec tool into retry
     always_load: bool                              # keep in deferred catalogs when truthy
 
     def validate(self, raw: dict) -> dict: ...
-    def resources(self, input: dict) -> list[ResourceAccess]: ...
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult: ...
+    def resources(self, input: dict) -> list[ResourceAccess]: ...  # optional
+    async def execute(
+        self, input: dict, ctx: ToolContext
+    ) -> ToolResult | ToolOutput | ToolOutputError | JsonValue: ...
     def summarize(self, input: dict) -> str: ...   # one-line for logs
 
     # Optional prompt guidance while this tool is active.
-    system_prompt_sections: Iterable[SystemPromptSection] | Callable[[], Iterable[SystemPromptSection]]
+    system_prompt_sections: (
+        Iterable[SystemPromptSection] | Callable[[], Iterable[SystemPromptSection]]
+    )
 ```
 
 Tools may opt into Canonical Tool Output V2 by declaring `output_schema`. A V2
@@ -88,18 +108,18 @@ validation, hooks, and permissions. A shared parent `Context` may share its
 event bus across agents, so listeners filter on the supplied session (the
 default tool-search listener checks the owning agent) before returning a veto.
 
-Approval callbacks cannot return Linch 1.x's `updatedInput` rewrite. Input
-mutation belongs in `PreToolUse`, where it is revalidated and permission
+Approval callbacks cannot rewrite input. Mutation belongs in `PreToolUse`, where it is revalidated and permission
 checked; this prevents approving one path or command and executing another.
 
-`BashTool` delegates command execution to a backend. `LocalBackend` preserves
+`BashTool` delegates command execution to a backend. `LocalBackend` supplies
 the default local subprocess behavior with timeout cleanup; `DockerBackend`
 uses `docker run --rm` when the Docker daemon is available. Passing
 `Agent(execution_backend=...)` replaces an existing `Bash` tool only, so a
 restricted registry that omits `Bash` does not gain shell access.
 
-`Agent` requires an `ExecutionBackend` exposing both `.shell` and `.fs`, so shell and
-filesystem operations share one coherent execution world.
+`execution_backend` is optional; a bare agent has no execution world. When
+supplied, it must expose both `.shell` and `.fs`, so shell and filesystem
+operations share one coherent execution world.
 `LocalExecutionBackend` supplies that pair locally; `RemoteExecutionBackend`
 bundles host-supplied transports. Confinement metadata is declarative: a remote
 backend is described as sandboxed only when the embedder supplies non-empty
@@ -119,6 +139,9 @@ network, no environment forwarding, and no read-only root filesystem. Opt-in
 controls such as `network="none"`, `workspace_mount="ro"`,
 `read_only_root=True`, `tmpfs=(...)`, `env={...}`, `forward_env=(...)`, and
 `user="1000:1000"` restrict approved Bash commands inside the container.
+
+For MCP configuration, tool naming, and a local stdio example, see
+[MCP tools](../usage/tools.md#mcp-tools).
 
 ### ToolRegistry
 
@@ -208,8 +231,8 @@ trust-gated by `FeatureFlags` and are not ambient bare-agent defaults.
 
 ## Design rationale
 
-- **Duck-typed protocol, no base class.** There is no `isinstance` check anywhere in
-  the core, so a tool is anything with the right attributes/methods — an MCP wrapper, a
+- **Duck-typed protocol, no base class.** There is no `isinstance(tool, Tool)` gate,
+  so a tool is anything with the right attributes/methods — an MCP wrapper, a
   `@tool` function, or a hand-written class all drop in identically. Inheritance would
   couple every tool to an SDK type and complicate the MCP/function adapters.
 - **`@tool` for the 90% case, raw protocol for the rest.** Most tools are a plain

@@ -1,5 +1,8 @@
 # System Overview
 
+> Use this page when you need the high-level runtime topology, host boundary,
+> and durable data flow.
+
 > Part of the [Linch architecture guide](./README.md).
 
 Linch 3.0 is a headless, async agent kernel. It is embedded in a host service;
@@ -67,10 +70,12 @@ flowchart LR
 
 ## Boundaries and invariants
 
-- `Agent` is configuration and scoped services. `Session` is conversation and
-  run state. `SessionLog` is the append-only source for the session-owned
-  `provider_view` and `full_history` projections; request-scoped context is
-  assembled into `ProviderRequest` and is not appended to the log.
+- `Agent` is configuration and scoped services. It owns its per-agent
+  `Context`; when a host `Context` is supplied, the agent's scope is a child
+  and the host parent remains host-owned. `Session` is
+  conversation and run state. `SessionLog` is the append-only source for the
+  session-owned `provider_view` and `full_history` projections; request-scoped
+  context is assembled into `ProviderRequest` and is not appended to the log.
 - The run loop is async. Provider and store adapters are async protocols, and
   blocking synchronous tool functions are moved off the event loop by the
   `FunctionTool` adapter.
@@ -87,7 +92,7 @@ flowchart LR
   wakeups, not the source of truth.
 - Durable database state is Postgres. `InMemorySessionStore` and
   `InMemoryRunStore` are process-local implementations for tests and
-  development. Linch 3.0 does not add SQLite stores or legacy readers.
+  development.
 - OpenTelemetry is the observability API. Without a host-configured SDK, the
   API is a no-op. Tracers and meters are resolved through the agent's
   `Context`, so hosts and tests can provide scoped providers without mutable

@@ -4,11 +4,11 @@ Use context builders and file memory to supply retrieved data and remembered fac
 
 [← Usage guide](./README.md)
 
-Linch keeps request context and durable memory on the same extension seam. A
+Linch keeps request context and file memory on the same extension seam. A
 `ContextBuilder` can add ephemeral RAG or live application data to a provider
-request. File memory uses the virtual filesystem: the model reads and writes
+request. File memory uses the virtual filesystem: the model can read and write
 facts with the existing filesystem tools, while a small index is loaded once
-when a run starts.
+per run.
 
 ---
 
@@ -28,13 +28,15 @@ run_principal = Principal("acme", "user-42", {"reader"})
 retrieval = register_rag_connector(agent, connector, k=5, principal=run_principal)
 grounding = register_grounding_check(agent)
 session = await agent.session()
-events = session.run("question", RunOptions(principal=run_principal))
+async for event in session.run("question", RunOptions(principal=run_principal)):
+    pass
 # Later: await grounding.dispose(); await retrieval.dispose()
 ```
 
-Only one connector may be active per agent. `k` must be a positive integer.
-Chunk ids must be nonempty strings without `]`, carriage returns or newlines.
-Each request renders `[doc:<id>]`, source and text into ephemeral system blocks.
+Only one connector may be registered in an agent context. `k` must be a positive
+integer. Chunk ids must be nonempty strings without `]`, carriage returns or
+newlines. Each request renders `[doc:<id>]`, source and text into ephemeral
+system blocks.
 Retrieval uses the submitted user query across correction retries and durable
 resume; an alignment prompt replaces that query. The active principal from
 `RunOptions` is passed through unchanged. If registration supplies `principal`,
@@ -48,11 +50,12 @@ forced finals, and recursively checks string values in terminal-tool inputs.
 It verifies citation membership, not whether the cited text supports a claim.
 Empty retrieval cannot ground an answer. Retrieval errors fail visibly.
 
-An ungrounded answer receives short correction feedback, then fails after
-`agent.reliability.max_correction_turns` corrections. This is a separate per-run
-counter from built-in reliability corrections; each mechanism can consume its
-own bound. `reliability=None` allows zero grounding corrections. Query, latest retrieved
-ids and counter survive checkpoints. `required=False` disables interventions;
+An ungrounded answer receives short correction feedback, then fails after the
+grounding correction bound from `agent.reliability.max_correction_turns`. This is
+a separate per-run counter from built-in reliability corrections; each mechanism
+can consume its own bound. `reliability=None` allows zero grounding corrections.
+When durable checkpoints are enabled, the retrieval query, latest ids and
+grounding counter are checkpointed. `required=False` disables interventions;
 without an active connector grounding is a no-op.
 
 Retrieved bodies and chunk metadata stay outside the session log and stored
@@ -115,9 +118,8 @@ backends there rather than using module globals.
 
 ## `FileMemoryContextBuilder`
 
-File memory is the built-in durable memory path in Linch 3.0. It has one public
-entry point, `FileMemoryContextBuilder`, which is attached through
-`ContextInjectionHook`:
+Attach `FileMemoryContextBuilder` through `ContextInjectionHook` to load the
+run's `/memories/MEMORY.md` index:
 
 ```python
 from linch import Agent, ContextInjectionHook, FeatureFlags, FileMemoryContextBuilder
@@ -139,19 +141,21 @@ model knows where memory belongs:
 > update or delete stale facts.
 
 The index is cached by run, so it stays stable across turns and can remain in a
-cacheable request prefix. The model updates memory with `write_file` and
-`edit_file` through the ordinary filesystem tools, removing stale entries from
-the index as it edits it. Hosts that need to remove a fact file can call the
-backend's `delete` operation. A direct host backend call is outside the model
-tool path, so it is not automatically serialized, permission-checked, or
-logged; use the existing file tools when those guarantees are required.
+cacheable request prefix. The builder does not write memory. A model can update
+the index and fact files with `write_file` and `edit_file` through the ordinary
+filesystem tools. Hosts that need to remove a fact file can call the backend's
+`delete` operation. A direct host backend call is outside the model tool path,
+so it is not automatically serialized, permission-checked, or logged; use the
+existing file tools when those guarantees are required. The backend determines
+whether files are in-memory or durable across sessions and process restarts.
 
 ### Per-run isolation
 
 Hosts create a scoped backend for each run and pass it in `RunOptions(deps=...)`.
-`ScopedFileBackend` normalizes every model-supplied path under its root;
-absolute paths, `..`, duplicate separators, and odd path segments cannot escape
-the scope. Listing returns scope-relative paths.
+`ScopedFileBackend` maps every model-supplied path under its root. It rejects
+`..` and null bytes, normalizes separators and `.` segments, and treats an
+absolute model path as rooted inside the scope. Listing returns scope-relative
+paths.
 
 ```python
 from linch import RunOptions, ScopedFileBackend, StateFileBackend
@@ -195,15 +199,15 @@ filesystem backend owns fact-file size and persistence policy.
 Semantic recall is an example recipe, not a core store or extra. The
 `examples/memory/mem0_recall.py` recipe uses only Linch's public context and
 hook APIs. Its context builder searches a mem0 `AsyncMemory`-like client with
-the latest user text and `filters={"user_id": ...}` from `run.deps`; its
-terminal-turn hook calls `add(...)` after the run. A fake client with matching
-async `search` and `add` methods is enough to test the recipe without
+the latest user text and `filters={"user_id": ...}` from run dependencies; its
+agent-stop hook calls `add(...)` only after a successful run. A fake client with
+matching async `search` and `add` methods is enough to test the recipe without
 installing mem0.
 
 Use file memory for explicit, inspectable facts and opt into mem0 when semantic
-similarity is worth an external LLM-backed write on each `add` call. Keep the
-mem0 client and its user identity in run dependencies so one tenant cannot
-search another tenant's memories.
+recall is worth an external memory service. Keep the mem0 client and its user
+identity in run dependencies so one tenant cannot search another tenant's
+memories.
 
 ---
 

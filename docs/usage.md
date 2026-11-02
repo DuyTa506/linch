@@ -1,8 +1,6 @@
 # Using Linch in Your Project
 
-> This guide has moved. It is now split by topic under
-> [**`docs/usage/`**](./usage/README.md) so you can jump straight to what you
-> need instead of scrolling one long file.
+Use this index to find the usage guide for a Linch subsystem.
 
 Start with the [quickstart](./usage/quickstart.md) if you are new to Linch, then
 use the [usage guide index](./usage/README.md) or jump directly to a topic:
@@ -13,7 +11,7 @@ use the [usage guide index](./usage/README.md) or jump directly to a topic:
 | [Agent & session](./usage/agent.md) | Session stores, feature flags, system prompt, compaction, run budgets |
 | [Plugins](./architecture/kernel.md#plugins) | Mount with `agent.use`, dependency activation, reversible disposal |
 | [Domain profiles](./usage/profiles.md) | Layered domain configuration, per-run selection, and version-pinned resume |
-| [Tool search](./usage/tools.md#tool-search-for-large-catalogs) | Deferred tool schemas and skill listings for large catalogs |
+| [Tool search](./usage/tools.md#toolsearchplugin--large-catalogs) | Deferred tool schemas and skill listings for large catalogs |
 | [Durable runs](./usage/run-stores.md) | Postgres checkpoints, leases, and replay by sequence |
 | [Worker fleet](./usage/production.md#scale-out) | PgQueuer dispatch, recovery, and graceful drain |
 | [Lifecycle and trace IDs](./architecture/events.md#typed-lifecycle-catalog) | Typed dispatch catalog and host trace correlation |

@@ -10,15 +10,19 @@ not a daemon and it does not own webhooks, cron, or process lifetime. A host cal
 host-owned wrappers for cron, webhook, fixed-interval, and CI-gate triggers live in
 [`examples/recipes/runner_recipes.py`](../../examples/recipes/runner_recipes.py).
 
-Each tick creates a fresh session, runs the agent once, writes a `RunReport`, and
-persists loop state through files under `domains/<loop_id>/`.
+With the default `FileLoopArtifactStore`, each tick creates a fresh session, runs
+the agent once, writes a `RunReport`, and persists loop state through files under
+`domains/<loop_id>/`. A custom `LoopArtifactStore` can replace that filesystem
+layout.
 
 ```
 domains/<loop_id>/
   README.md
   LOG.md
-  artifacts/runs/<run_id>.md
-  artifacts/runs/<run_id>.json
+  artifacts/
+    .next_iteration
+    runs/<run_id>.md
+    runs/<run_id>.json
 ```
 
 Fresh sessions are deliberate: recurring work should not depend on hidden
@@ -50,6 +54,9 @@ result = await runner.run_once(
 print(result.run_id, result.status, result.done)
 print(result.artifact_paths)
 ```
+
+Close the agent when the host shuts down, after its runners and sessions are no
+longer needed.
 
 There is a live runnable version at
 [`examples/recipes/loop_runner.py`](../../examples/recipes/loop_runner.py). It
@@ -106,7 +113,7 @@ result = await runner.run_once(spec)
 
 If `verify` raises or returns `False`, the tick result is marked
 `verification_failed`, `done` stays `False`, and the failure is appended to
-`LOG.md`.
+`LOG.md` by the default file-backed artifact store.
 
 ---
 
@@ -133,8 +140,10 @@ async def tick_from_webhook(body: str, delivery_id: str) -> None:
     )
 ```
 
-The runner always has an in-process per-loop lock. If two calls for the same
-`LoopSpec.id` overlap in one process, the second raises `ConfigError`.
+The same `LoopRunner` instance has an in-process per-loop lock. If two calls for
+the same `LoopSpec.id` overlap on that runner, the second raises `ConfigError`.
+The lock is not process-global and is not shared by separate `LoopRunner`
+instances.
 
 For cron, CI workers, webhook handlers, or multiple app processes, add a durable
 lease store:

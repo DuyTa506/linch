@@ -1,6 +1,6 @@
 # Linch Architecture
 
-> This guide has moved. It is now split by topic under [**`docs/architecture/`**](./architecture/README.md) so you can jump straight to a subsystem instead of scrolling one long file.
+Use this index to find Linch subsystem contracts, data flow, and invariants.
 
 Start at the [architecture index](./architecture/README.md), or go directly to a section:
 
@@ -9,7 +9,7 @@ Start at the [architecture index](./architecture/README.md), or go directly to a
 | 1. [System Overview](./architecture/overview.md) | System overview, layering, and the top-level data-flow diagram |
 | 2. [Turn Lifecycle](./architecture/turn-lifecycle.md) | What happens on each turn: request assembly → provider stream → tools → repeat |
 | 3. [Subsystems](./architecture/subsystems.md) | The subsystems in depth: loop, providers, tools, permissions, memory, filesystem, more |
-| 4. [Event Taxonomy](./architecture/events.md) | The event taxonomy — every event type the loop emits |
+| 4. [Event Taxonomy](./architecture/events.md) | Stream events, persistence boundaries, and lifecycle dispatch points |
 | 5. [Key Data Types](./architecture/data-types.md) | Key data types: messages, blocks, requests, results, usage |
 | 6. [Module Inventory](./architecture/module-inventory.md) | Module-by-module inventory of the source tree |
 | 7. [Provider Contract](./architecture/provider-contract.md) | The provider contract: context_window / stream / capabilities |
@@ -23,7 +23,7 @@ Start at the [architecture index](./architecture/README.md), or go directly to a
 | [Tool search](./architecture/tool-protocol.md#deferred-tool-search) | Deferred schemas and persistent discovery state |
 | [Lifecycle catalog and trace IDs](./architecture/events.md#typed-lifecycle-catalog) | Typed dispatch modes, producers/consumers, and trace correlation |
 | [Principal/RBAC](./usage/tools.md#per-run-principals-and-role-rules) | Per-run identity, role-conditioned permissions, and resume checks |
-| [RAG and grounding](./usage/context-and-memory.md#sourced-retrieval-and-grounding) | Sourced retrieval and citation checks on the finalization seam |
+| [RAG and grounding](./usage/context-and-memory.md#ragconnector-and-register_grounding_check) | Sourced retrieval and citation checks on the finalization seam |
 | [Worker fleet](./usage/production.md#scale-out) | PgQueuer dispatch and leased durable execution |
 | [Explicit extensions](./architecture/overview.md#extensions) | The `linch.ext` boundary |
 

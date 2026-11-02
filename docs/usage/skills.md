@@ -24,15 +24,15 @@ Skill({"skill": "verify", "args": "focus on billing workflow"})
 
 `verify` asks the model to plan and run evidence-based checks for completed work, then end with `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`. It is domain-agnostic: use it for software changes, data workflows, documents, configuration, or other concrete deliverables.
 
-The terminal `VERDICT:` line is the contract — it gives the host application (or a parent agent) a single, parseable signal of whether the work checked out. The optional `args` string narrows the focus of the verification without changing that contract.
+The prompt requests a terminal `VERDICT:` line, which a host or parent agent can parse; Linch does not enforce the model's compliance. The optional `args` string narrows the verification focus.
 
 ---
 
 ## Project skills
 
-Project skills live at `.linch/skills/<name>/SKILL.md`. A project skill named `verify` overrides the built-in.
+By default, project skills live at `<cwd>/.linch/skills/<directory>/SKILL.md`. `Agent(config_dir=...)` changes the configuration directory; a relative value resolves against the agent's `cwd`, and an absolute path is used directly. Discovery scans that directory's `skills/` children, not a home or global skills directory. A valid disk skill named `verify` overrides the built-in, case-insensitively.
 
-Each skill is a `SKILL.md` file: YAML frontmatter (name, description, argument handling) plus a markdown body that becomes the injected prompt. Dropping a directory under `.linch/skills/` is enough to make the skill discoverable through the `Skill` tool — no code changes required. Because a project `verify` overrides the built-in, you can specialize the verification workflow for your domain while keeping the same invocation and `VERDICT:` contract.
+Each file starts with YAML frontmatter and a markdown body. `description` is required; `name` defaults to the directory name. Optional fields include `arguments`, `argument_hint`, `when_to_use`, `allowed_tools`, `model`, `version`, and `disable_model_invocation`. The tool returns the substituted body to the model and records it for later context reinjection. Invalid definitions and symlinked skill directories are skipped. A skill with `disable_model_invocation: true` cannot be invoked by the model. A project override supplies its own instructions, so preserve the verdict format in its body if your host relies on it.
 
 ---
 

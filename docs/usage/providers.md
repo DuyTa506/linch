@@ -4,11 +4,11 @@ Use this page to choose and configure a model provider and inspect its capabilit
 
 [← Usage guide](./README.md)
 
-Linch is provider-agnostic: the agent loop, tools, events, and memory are
-identical no matter which model backend you target. A **provider** is the thin
-adapter that turns Linch's `ProviderRequest` into a specific API call and
-streams the response back as typed events. You pick one based on the API you are
-talking to.
+Linch shares agent-loop, tool, event, and memory abstractions across providers.
+Adapters differ in capabilities, caching, reasoning controls, wire formats, and
+endpoint requirements. A **provider** turns Linch's `ProviderRequest` into an
+API call and streams normalized events back to the loop. Choose an adapter for
+the API you are using.
 
 ---
 
@@ -18,7 +18,7 @@ talking to.
 |---|---|
 | OpenAI reasoning-native models (`o1`, `o3`, `gpt-5`) with effort/summary controls and stateful `previous_response_id` | `OpenAIResponsesProvider` |
 | Standard OpenAI Chat Completions (`gpt-4o`, `gpt-5-nano`) | `OpenAIChatCompletionsProvider` |
-| Any OpenAI-compatible endpoint (Azure, Groq, Together) | `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` |
+| Endpoints implementing supported OpenAI Chat shapes (including compatible Azure, Groq, Together deployments) | `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` |
 | DeepSeek native API — thinking controls, tool-loop reasoning, JSON-object output | `DeepSeekProvider` |
 | Anthropic Claude — adaptive thinking, prompt caching, signed thinking blocks | `AnthropicProvider` |
 | Google Gemini — large context windows, Google tool semantics | `GeminiProvider` (`[gemini]` extra) |
@@ -28,18 +28,20 @@ talking to.
 
 The two axes that matter most:
 
-- **Stateful vs stateless.** The OpenAI Responses API is *stateful*: Linch sends
-  `previous_response_id` so only new messages travel the wire each turn, and the
-  server retains reasoning state. Every other path is *stateless*: the full
-  message array is resent on every turn.
+- **Conversation chaining.** OpenAI Responses uses `previous_response_id`
+  automatically by default when available, sending the new conversation suffix.
+  Instructions and tools are still sent. Chaining can be disabled through
+  `OpenAIReasoning(previous_response_id="disabled")`. Chat-style adapters send
+  conversation history with each request; other caching and state mechanisms
+  depend on the adapter and endpoint.
 - **Thinking / reasoning round-tripping.** Reasoning models emit intermediate
   "thinking" content (Anthropic thinking blocks, OpenAI reasoning summaries, or
   `reasoning_content` from OpenAI-compatible models like DeepSeek). Linch
-  preserves and re-sends these signals automatically so multi-turn tool loops do
-  not break — see [Reading thinking events](#reading-thinking-events).
+  preserves reasoning metadata for subsequent tool turns — see
+  [Reading thinking events](#reading-thinking-events).
 
 For the data flow behind the provider interface (`context_window`, `stream`,
-`capabilities`), see [`../architecture.md`](../architecture.md).
+`capabilities`), see [Provider contract](../architecture/provider-contract.md).
 
 ---
 
@@ -53,7 +55,7 @@ from linch import Agent
 from linch import InMemorySessionStore
 
 # ── OpenAI Responses API (o1, o3, gpt-5 — reasoning-native models) ──────────
-# Stateful: sends previous_response_id so only new messages travel the wire.
+# Chaining sends a conversation suffix when available; instructions/tools remain.
 # Supports native reasoning effort/summary levels and encrypted reasoning tokens.
 from linch import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from linch import OpenAIReasoning
@@ -69,9 +71,9 @@ agent = Agent(
     session_store=InMemorySessionStore(),
 )
 
-# ── OpenAI Chat Completions (gpt-4o, gpt-5-nano, any OpenAI-compatible) ─────
+# ── OpenAI Chat Completions (gpt-4o, gpt-5-nano, compatible endpoints) ─────
 # Stateless: full message array resent every turn.
-# Works with any OpenAI-compatible endpoint (Azure, Groq, Together, …).
+# Requires an endpoint implementing the supported Chat Completions shapes.
 # Thinking events emitted when model streams reasoning_content (e.g. DeepSeek).
 # Set include_partial_messages=True to receive PartialAssistantEvent for streaming.
 from linch import OpenAIChatCompletionsProvider
@@ -87,8 +89,8 @@ agent = Agent(
 )
 
 # ── Anthropic Claude ─────────────────────────────────────────────────────────
-# Current Claude models use adaptive thinking + effort, prompt caching, tool
-# use, and native output_config.format JSON schema.
+# This example configures adaptive thinking and effort. Support for these
+# controls and native output_config.format depends on the selected model/API.
 # include_partial_messages=True streams ThinkingBlock deltas as kind="thinking" events.
 from linch import AnthropicProvider, AnthropicProviderOptions
 
@@ -151,10 +153,9 @@ provider = GeminiProvider(
 # Agent teardown closes the provider; standalone callers should await provider.aclose().
 
 # ── DeepSeek native endpoint ────────────────────────────────────────────────
-# deepseek-v4-flash / deepseek-v4-pro are reasoning models that emit
-# reasoning_content — Linch round-trips it automatically so multi-turn tool
-# loops work without 400 errors. DeepSeekProvider sends its documented thinking
-# toggle and uses JSON-object mode for OutputSchema.
+# DeepSeekProvider preserves reasoning_content for subsequent tool turns,
+# sends a thinking toggle, and uses JSON-object mode for OutputSchema.
+# Model availability and thinking behavior depend on the deployment.
 # With thinking enabled, DeepSeek accepts automatic/none tool selection only:
 # disable thinking before using a required or named tool_choice.
 from linch import DeepSeekProvider, DeepSeekProviderOptions
@@ -175,8 +176,9 @@ agent = Agent(
 
 # ── llama.cpp server ─────────────────────────────────────────────────────────
 # Uses llama.cpp's OpenAI-compatible /v1/chat/completions route.
-# Streaming remains enabled via stream=True; the provider avoids OpenAI's
-# stream_options field and uses llama.cpp's response_format schema shape.
+# Streaming uses stream=True and includes stream_options by default. Set
+# include_stream_options=False for older servers that reject that field.
+# The provider uses llama.cpp's response_format schema shape.
 # Context window is auto-detected from /v1/props or /props when available.
 from linch import LlamaCppProvider, LlamaCppProviderOptions
 
@@ -280,8 +282,8 @@ llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
 Use `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` when
 a service implements the OpenAI Chat Completions protocol. This is the
-recommended path for Azure, Groq, Together, and similar OpenAI-compatible
-endpoints. Use `DeepSeekProvider` for
+path for Azure, Groq, Together, and similar deployments when they implement
+the adapter's supported request and response shapes. Use `DeepSeekProvider` for
 the native DeepSeek API, where it owns DeepSeek-specific thinking and
 JSON-object semantics.
 
@@ -343,7 +345,7 @@ pricing table — see [Events](./events.md#cost-fields) for how to do that.
 Each catalog record exposes a `ProviderCapabilities` object declaring which
 features the provider supports. Before every provider call, Linch downgrades the
 `ProviderRequest` to match these capabilities — for example it strips
-`output_schema` when the provider has no native structured output, and clears
+`output_schema` when the provider declares no structured-output support, and clears
 prompt-cache hints for providers that don't cache. You rarely touch this
 directly, but it explains why the same `Agent` config behaves correctly across
 backends.
@@ -373,7 +375,8 @@ schema-repair retries work — live in
 `OpenAIResponsesProviderOptions(native_catalog_changes=True)` enable positional
 catalog changes on supported models. **Both options default to `False` and are
 UNVERIFIED against live Anthropic and OpenAI endpoints.** Payload tests use fake
-transports. With the option off, provider payloads retain phase-2 behavior.
+transports. Eligibility gates reflect adapter implementation, not guaranteed
+endpoint support. With the option off, providers use append-only rendering.
 
 For example, pass `native_catalog_changes=True` alongside `api_key` in either
 provider's options, then use a supported model. The provider reports
@@ -390,14 +393,12 @@ capability otherwise defaults to `"append_only"`.
   `api_mode="native"` does not enable proxies. Bedrock and Google Cloud remain
   append-only. Every positional request includes `inline-tools-2026-09-15`.
 - Responses requires a GPT model name identifying version 5.4 or later, including
-  dated/variant suffixes. Unknown names and `gpt-5.3` stay append-only. This is a
-  conservative bound from `tool_search` documentation, rather than a published
-  `additional_tools` model list.
+  dated/variant suffixes. Unknown names and `gpt-5.3` stay append-only.
 
-Each ordinary session freezes its system prefix and initial tool definitions in
-persisted metadata. Native additions travel in durable conversation blocks while
-that tool prefix stays fixed. Notification text remains in user-role messages,
-including MCP name-only notices; it never gains system/developer authority.
+When session catalog snapshots are configured, the session freezes its system
+prefix and initial tool definitions in persisted metadata. Native additions
+travel in durable conversation blocks while that tool prefix stays fixed.
+Notification text remains in user-role messages, including MCP name-only notices; it never gains system/developer authority.
 Anthropic sends tool-only system messages containing `tool_addition` definitions
 or declared-prefix references and `tool_removal` references. Responses sends
 `additional_tools` items at their log positions and maintains an active-name
@@ -405,7 +406,7 @@ or declared-prefix references and `tool_removal` references. Responses sends
 preserved.
 
 On Anthropic, removing a tool introduced by value is text-only: its wire
-availability remains, and invoking it returns the existing unknown-tool error.
+availability remains, and invoking it returns an unknown-tool error.
 Restoring it does not resend its definition. Retained historical by-value
 provenance keeps this rule even after a schema promotion. Duplicate additions
 are suppressed after compaction. Anthropic rejects more than 4,194,304 aggregate
@@ -413,16 +414,16 @@ UTF-8 bytes of translated inline definitions locally with `ConfigError`; start a
 new session or disable the option if this limit is reached.
 
 Input-schema edits, an empty initial tool prefix, run-level `allowed_tools`, and
-context tool narrowing use the phase-2 path, accepting a cache miss when tool
+context tool narrowing use append-only rendering, accepting a cache miss when tool
 schemas change. Profile overlays, session tool overrides, effective system-block
-overrides, and active request catalogs keep their existing snapshot bypasses.
+overrides, and active request catalogs bypass the snapshot.
 Switching to an append-only fallback includes previously added native definitions
 in its tool list. A new session adopts the current catalog into its own prefix;
 compaction keeps existing prefix bytes and consolidates notices.
 
 For an enabled native run with an existing snapshot, catalog synchronization waits
 until context selection is known. Context hooks can therefore run before the new
-notice is appended. Initial snapshot creation and option-off ordering are unchanged.
+notice is appended.
 See the [provider contract](../architecture/provider-contract.md#native-catalog-rendering)
 for wire placement and replay details.
 
@@ -437,14 +438,16 @@ differs:
 |---|---|---|
 | `anthropic` | Explicit `cache_control` breakpoints | Marks the last static system block **and** the last user message — caches `tools → system → conversation`, the prefix growing each turn |
 | `llamacpp` | Explicit `cache_prompt` | Sends `cache_prompt: true` in the request body |
-| `sglang` | RadixAttention (automatic) | `enable_cache_report: true` so the server streams cached-token counts |
-| `openai-chat`, `openai-responses` | Automatic prefix cache | Nothing — sets `stream_options.include_usage` so usage (incl. cached tokens) is returned |
-| `vllm` | Automatic prefix cache (APC) | Nothing (inherits the OpenAI-chat path) |
-| `gemini` | **Implicit** cache (Gemini 2.5) | Nothing — Google caches automatically; Linch only reads the counts back. There is no explicit cache-control knob for Gemini |
+| `sglang` | Server-managed cache | `enable_cache_report: true` requests cached-token reporting; availability depends on server configuration |
+| `openai-chat` | Automatic prefix cache | Requests usage with `stream_options.include_usage`; reads cached-token details when returned |
+| `deepseek` | Server-managed cache | Requests stream usage and normalizes returned cache counts through the OpenAI-chat path |
+| `openai-responses` | Automatic prefix cache | Reads cached-token details from response usage |
+| `vllm` | Server-configured automatic prefix cache (APC) | Uses the OpenAI-chat usage path; cache availability depends on server configuration |
+| `gemini` | Provider-managed implicit cache | Reads cached-token counts when the response supplies them; this adapter sends no explicit cache-control setting |
 
 Regardless of mechanism, a cache **hit** is surfaced uniformly as
 `Usage.cache_read_tokens`, which rolls up into `RunReport`'s cache-read ratio —
-that is the observable proof the cache is working.
+these reported counts show observed cache reuse.
 
 For a live check of the provider's current prompt-cache behavior, run:
 
@@ -508,21 +511,19 @@ live benchmark script (`scripts/benchmark_live_prompt_cache.py`) for that.
 
 ### Keeping the cached prefix stable (what produces hits)
 
-A hit requires the **leading bytes of the request to be identical** to a prior
-call. Linch is built for this: the system prompt is materialized once per agent
-(date/`cwd` frozen at construction), tools keep a stable insertion order, and
-per-turn dynamic content (memory recall, ephemeral notes) is appended **after**
-the static prefix as `cacheable=False` blocks, so it sits outside the cached
-region. Two host-controlled actions deliberately break the prefix and cost you a
-re-cache:
+Cache reuse depends on the provider's prefix-matching rules and a stable request
+prefix. Linch reuses stable system text until prompt or tool inputs change,
+resolves `cwd` at construction, and generates the date for each user message.
+Dynamic context is appended after static system blocks with `cacheable=False`.
+Two host-controlled actions can reduce cache reuse:
 
 - **Compaction** rewrites the message history into a summary, so the message
-  prefix changes from that point (the `tools + system` cache still survives).
-  This is occasional and intentional.
+  prefix changes from that point. Reuse of the unchanged tools and system
+  prefix depends on the provider.
 - **Per-turn tool selection** — a `ContextBuilder` that returns a different
-  `selected_tools` set each turn changes the tools array, which is *first* in the
-  cached prefix, so it invalidates the whole cache every turn. Keep the tool set
-  stable across turns if you rely on caching.
+  `selected_tools` set each turn changes the offered tool schemas and can
+  invalidate the cached prefix. Keep the tool set stable across turns if you
+  rely on caching.
 
 Two guarantees back this up. First, per-turn context `system_blocks` are always
 forced to `cacheable=False` on the wire request — a `ContextBuilder` cannot move
@@ -550,8 +551,8 @@ Checklist for reliable hits:
 - **Stable tools** (don't rotate `selected_tools`).
 - **Static system prompt**.
 - **RAG/ephemeral content after the static prefix**.
-- For Anthropic, use a prompt large enough to meet the minimum cacheable token size.
-- Optionally use `Agent(cache_ttl="1h")` for a longer breakpoint TTL.
+- Use `Agent(cache_ttl="5m")` or `Agent(cache_ttl="1h")` for the supported
+  Anthropic breakpoint TTL values.
 
 ---
 
@@ -586,4 +587,4 @@ yourself. For the full taxonomy of events this stream produces, see
 - [Events](./events.md) — the event types `partial_assistant`/`usage`/`result` carry.
 - [Structured output](./structured-output.md) — how `output_schema` is applied per provider.
 - [Hooks](./hooks.md) — observe provider calls and the live event stream.
-- [`../architecture.md`](../architecture.md) — the `BaseProvider` interface and request pipeline.
+- [Provider contract](../architecture/provider-contract.md) — the `BaseProvider` interface and request pipeline.
