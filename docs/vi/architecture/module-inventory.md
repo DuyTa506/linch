@@ -124,6 +124,9 @@ cơ sở dữ liệu/bộ lắng nghe tạm thời, thử lại các lỗi hạ 
 | `tools/base.py` | Protocol tool theo duck typing, `ToolContext`, `ToolResult`, hợp đồng đầu ra, phạm vi, truy cập tài nguyên, trích dẫn và khóa lũy đẳng ổn định. |
 | `tools/function.py` | `FunctionTool` và adapter `tool()`; các hàm đồng bộ chạy trong các worker xử lý tác vụ chặn có giới hạn. |
 | `tools/execution.py` | Các backend shell cục bộ và Docker (`LocalBackend`, `DockerBackend`) cùng `ExecResult`. |
+| `tools/_limits.py` | Giới hạn đầu ra dùng chung cho shell, Grep và MCP. |
+| `tools/_output.py` | Thu đầu/cuối có giới hạn, spill tối đa 64 MiB và cursor UTF-8. |
+| `tools/processes.py` | Registry tiến trình theo run, thời gian chạy tối đa, dọn dẹp và `BashProcess`. |
 | `tools/file_tracker.py` | Bằng chứng đọc toàn bộ tệp và phạm vi dòng của `FileReadTracker` mà tool và hook sử dụng. |
 | `tools/registry.py` | `ToolRegistry`, đăng ký có thể hoàn tác, `empty_tools()` và `workspace_tools()`. |
 | `tools/search.py` | Trì hoãn danh mục yêu cầu của `ToolSearchPlugin`, tìm kiếm theo từ khóa/lựa chọn, lưu bền vững tool đã nạp và bộ bảo vệ lời gọi trì hoãn. |
@@ -168,7 +171,7 @@ hỗ trợ các hàng trên:
 |---|---|
 | `context/__init__.py` | Xuất các thành phần bộ dựng ngữ cảnh và bộ nhớ tệp. |
 | `execution/__init__.py` | Xuất khả năng thực thi thống nhất. |
-| `execution/backend.py` | `ExecutionBackend`, các protocol truyền tải shell/hệ thống tệp và siêu dữ liệu bảo mật. |
+| `execution/backend.py` | `ExecutionBackend`, `ShellBackend`, `ShellStarter`/`ShellProcess` tùy chọn và metadata bảo mật. |
 | `execution/local.py` | Backend thực thi shell/hệ thống tệp cục bộ trên host. |
 | `execution/remote.py` | Backend thực thi từ xa với định danh chính sách hỗ trợ resume. |
 | `filesystem/__init__.py` | Xuất protocol, backend và tool hệ thống tệp. |

@@ -72,6 +72,20 @@ endpoint and credentials: `OpenAIOptions(api_key=..., base_url=...)` and
 `AnthropicProviderOptions(api_key=..., base_url=...)` forward those options to
 their clients. See [provider configuration](./providers.md).
 
+## `SessionBusyError` and run admission
+
+`SessionBusyError` exposes `session_id` and the existing `run_id`. A run in
+`pending`, `running`, `waiting_permission`, or `suspended` owns the session.
+Queue the new prompt or report busy. After an in-process task is cancelled,
+resume that run or reconcile external effects and call
+`run_store.mark_failed(run_id, error={"message": ...})`; there is no crash reaper.
+For disconnect handling, signal `session.abort()` and continue consuming through
+the final `ResultEvent` to persist an aborted status.
+
+| Kind | Message | Source | Cause | Fix |
+|---|---|---|---|---|
+| Literal | `Cannot install run admission index: duplicate nonterminal runs exist for a session; resume or mark_failed those runs before restarting.` | `src/linch/run_stores/postgres.py` | A compatible version-3 database contains overlapping nonterminal runs when the admission index is installed. | Reconcile those runs with the old deployment before upgrading; the new store cannot finish initialization until duplicates are resolved. |
+
 ## `RunContractMismatchError` and resume `ConfigError`
 
 | Kind | Message | Source | Cause | Fix |
@@ -84,4 +98,10 @@ input, output settings, run options, budget, and policies. Changing only a store
 fingerprint cannot repair incompatibility: the comparison also recomputes it
 from the payload. The direct helper raises `RunContractMismatchError`; the session
 resume path wraps it in `ConfigError`. Missing or old persisted wire versions
-are a separate failure family. See [durable run stores](./run-stores.md).
+are a separate failure family. Package-version-only and top-level
+tool-description-only edits do not invalidate an otherwise matching contract.
+For 3.1.0, drain all active runs before deploying: Local/Docker policy versions
+are now `2`, and Bash schemas changed. Those changes still reject older
+contracts despite the unchanged wire generation. See
+[production upgrade guidance](./production.md#4-resume-after-a-restart) and
+[durable run stores](./run-stores.md).

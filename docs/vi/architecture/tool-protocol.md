@@ -114,7 +114,7 @@ Callback phê duyệt không thể viết lại đầu vào. Việc sửa đổi
 quyền; điều này ngăn việc phê duyệt một đường dẫn hoặc lệnh nhưng lại thực thi một đường dẫn hoặc lệnh khác.
 
 `BashTool` giao việc thực thi lệnh cho một backend. `LocalBackend` cung cấp
-hành vi subprocess cục bộ mặc định kèm dọn dẹp khi hết thời gian chờ; `DockerBackend`
+hành vi subprocess cục bộ mặc định với đầu ra có giới hạn; `DockerBackend`
 dùng `docker run --rm` khi Docker daemon khả dụng. Truyền
 `Agent(execution_backend=...)` chỉ thay thế tool `Bash` đã có, vì vậy một
 registry bị giới hạn không chứa `Bash` sẽ không được cấp thêm quyền truy cập shell.
@@ -137,10 +137,45 @@ Quyền và backend thực thi là các lớp riêng biệt. `ToolRule`, `PathRu
 và `BashRule` quyết định một lệnh gọi tool có được phép chạy hay không. Nếu một lệnh gọi Bash được
 phê duyệt, backend đã cấu hình quyết định ranh giới runtime. Các giá trị mặc định của `DockerBackend`
 là: mount workspace có quyền ghi, mạng mặc định của Docker,
-không chuyển tiếp biến môi trường và không dùng hệ thống tệp gốc chỉ đọc. Các tùy chọn
-chủ động bật như `network="none"`, `workspace_mount="ro"`,
+không chuyển tiếp biến môi trường và không dùng hệ thống tệp gốc chỉ đọc. Các giới hạn
+tài nguyên mặc định là `memory="2g"`, `cpus=2`, `pids_limit=512`,
+`cap_drop=("ALL",)` và `no_new_privileges=True`; `None` tắt từng giới hạn.
+Các tùy chọn chủ động bật như `network="none"`, `workspace_mount="ro"`,
 `read_only_root=True`, `tmpfs=(...)`, `env={...}`, `forward_env=(...)` và
 `user="1000:1000"` giới hạn các lệnh Bash đã được phê duyệt bên trong container.
+
+Shell Local và Docker còn triển khai capability tùy chọn `ShellStarter.start`,
+trả về `ShellProcess` có `read`, `wait` có thời hạn và `kill`. `wait` trả về `None`
+khi tiến trình vẫn chạy. Triển khai `ShellBackend` chỉ có `run` không cần thêm
+phương thức. Trong run của session, Bash dùng handle trực tiếp nếu có:
+`timeout_ms` trả đầu ra hiện tại và ID tiến trình thay vì kill; `run_in_background`
+trả ngay. `BashProcess` wait/status/kill thao tác trên lệnh đã được phê duyệt và
+chạy tuần tự. Registry do run sở hữu giới hạn tiến trình sống (mặc định bốn), áp
+thời gian chạy tối đa (mặc định 30 phút), kill các nhóm tiến trình đã theo dõi và
+xóa spill shell khi run kết thúc. Lỗi dọn dẹp giữ session đang hoạt động để host
+thử đóng lại; việc xóa container Docker chỉ là best effort. Khi hết dung lượng,
+lệnh mới còn chạy bị kill
+lúc lời gọi trả về. Handle không bền vững; kill cứng worker có thể để lại tiến
+trình con. Stdin shell đóng; kết quả timeout/abort giữ đầu ra đã thu được.
+
+Mỗi stream shell giữ 4.000 byte đầu và 26.000 byte cuối. Phần vượt giới hạn có
+thể được ghi vào file riêng mode 0600 dưới `cwd/.linch/output/`; lỗi spill hoặc
+stream vượt 64 MiB làm bỏ file spill và giữ đầu ra có giới hạn. `ExecResult`
+ghi trạng thái cắt ngắn, đường dẫn spill, nguyên nhân abort/timeout và signal;
+metadata kết quả tool chứa đường dẫn để đọc trong run. Text MCP dùng chung bộ
+thu spill có giới hạn; host quản lý thời gian lưu file spill MCP.
+
+`LocalBackend` chỉ kế thừa PATH, HOME, TERM, LANG, LC_ALL, LC_CTYPE, USER,
+SHELL và TMPDIR. Host truyền giá trị khác qua `env`/`forward_env`; định danh bền
+vững dùng `resume_fingerprint_key` ổn định của host để băm có khóa các giá trị đó.
+Allowlist giúp kiểm soát môi trường, không phải ranh giới bảo mật. Phiên bản chính
+sách Local/Docker là `2`; cấu hình chính sách vẫn thuộc định danh resume.
+Metadata giới hạn container mô tả cấu hình và không được Linch tự xác minh.
+
+Tool MCP mặc định bỏ qua annotation của server và là tool `exec` tuần tự. Với
+`trust_annotations=True`, tool tự khai chỉ đọc có scope `read` và chạy song song;
+chỉ destructive hint tường minh trên tool không chỉ đọc mới thêm quy tắc hỏi
+cho thao tác phá hủy. Host bảo chứng các khai báo và chịu rủi ro annotation sai.
 
 Về cấu hình MCP, cách đặt tên tool và ví dụ stdio cục bộ, xem
 [Tool MCP](../usage/tools.md#tool-mcp).

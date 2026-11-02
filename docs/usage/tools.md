@@ -300,16 +300,17 @@ The input requires a nonempty string `command`. Optional integer `timeout_ms`
 defaults to `120000`; nonpositive values reset to that default, and values above
 `1800000` are capped. Execution uses `ctx.cwd`. The result contains stdout,
 followed by `[stderr]` and stderr when present, plus exit status, signal,
-truncation, and spill-path details. A nonzero exit or timeout returns
-`is_error=True`; timeouts preserve the backend's available partial output.
-Local and Docker execution also return partial output on abort. See
-[Extending](./extending.md) for
-output bounds and environment policy.
+truncation, and spill-path details. A completed command with a nonzero exit, or
+termination marked `timed_out` or `aborted`, returns `is_error=True`. Local and
+Docker preserve available partial output on timeout and abort. A managed return
+deadline can instead yield a normal still-running result with `is_error=False`.
+See [Extending](./extending.md) for output bounds and environment policy.
 
 With Local and Docker backends, `timeout_ms` is when the Bash call returns,
 not a kill deadline: an unfinished command returns its output and a process id
-such as `p1`. Set `run_in_background=True` to return immediately. Follow up with
-`BashProcess` (`BashProcessTool` when constructing a custom registry):
+such as `p1`. Set `run_in_background=True` to return immediately; a command
+that has already exited can return its completed result without an id. Follow up
+with `BashProcess` (`BashProcessTool` when constructing a custom registry):
 
 ```python
 # Model-facing tool inputs, within the same run:
@@ -325,16 +326,19 @@ Bash and BashProcess clamp waits below the scheduler deadline to preserve output
 The default cap is four running processes per run; an overflow command is killed
 when its Bash wait expires. `max_runtime_ms` is an independent hard deadline,
 defaulting to 30 minutes. Do not pipe long commands through `tail`: it delays
-visible output. A third-party backend exposing only `run` retains killing timeout
-behavior. Direct Bash calls without a running Session retain that behavior too.
+visible output. A third-party backend exposing only `run` receives `timeout_s`
+and uses its own timeout behavior, without managed process ids. Direct Bash calls
+without a running Session also use `run`; Local and Docker then kill on timeout.
 
-All tracked process groups, including background children left by a foreground
-shell, stop before the run releases its session or delivers its final result;
-spill files are removed then. Child sessions have independent registries. Process
+At run end, cleanup kills tracked process groups, including background children
+left by a foreground shell, and removes their spill files before releasing the
+session or delivering its final result. If cleanup fails, the session remains
+active; retry session close. Child sessions have independent registries. Process
 ids are ephemeral and are gone after restart; resume needs a new command. Graceful
-worker shutdown closes sessions and kills processes, but a worker killed with
+worker shutdown closes sessions and cleans up processes, but a worker killed with
 SIGKILL can leave them alive. Docker uses one `docker run` handle per command,
-with container removal on kill, rather than a persistent session container.
+rather than a persistent session container. Container removal on kill is best
+effort; the host may need to reconcile containers after a removal failure.
 BashProcess is serialized, never tool-cached, and needs no second approval because
 Bash already approved the command; explicit deny rules still apply. The changed
 Bash/BashProcess schemas reject resume of older tool contracts: drain old runs.
@@ -573,19 +577,20 @@ execution, and read-tool treatment. Approval uses `can_use_tool`, so an ask
 without a callback is denied.
 
 Both `McpStdioServerConfig` and `McpHttpServerConfig` accept `timeout_s` (default
-300 seconds), passed to the SDK's per-tool-call request read timeout. The timeout
-starts after the request is written and returns a tool error result when it
-expires. Abort signals cancel an in-flight call and raise `AbortError`; the SDK
-sends a cancellation notification and the client awaits its cleanup. A wedged
-transport can delay SDK cancellation cleanup up to five seconds. Cancellation
-does not guarantee that a server stops or rolls back remote side effects.
+300 seconds), passed to the SDK's per-tool-call request read timeout. A timeout
+returns a tool error result. Abort signals cancel an in-flight call and raise
+`AbortError`; Linch awaits the cancelled call's cleanup. Cancellation does not
+guarantee that a server stops or rolls back remote side effects.
 
 MCP results include embedded resource text; binary resource content stays omitted.
-Without a spill, the combined text result, including separators, is capped at
-30,000 characters, using the same shared output limit as Grep. With a call
-context, larger text is stored below `ctx.cwd/.linch/output/`; the result gives
-a bounded head/tail preview and names the path containing the full text. If the
-spill cannot be written, the capped text is returned.
+Without a spill, Linch retains up to 30,000 characters of the combined text,
+including separators, then adds a truncation marker when needed. This uses the
+same shared output limit as Grep. With a call context, larger text can spill
+below `ctx.cwd/.linch/output/`; the result gives a bounded head/tail preview and
+names the path containing the full text. The shared spill policy retains 4,000
+head bytes and 26,000 tail bytes, adds an omission marker, and abandons the file
+on write failure or above 64 MiB. If no spill remains, the character-capped text
+is returned. See [output policy](./extending.md#local-shell-environment-and-output).
 
 If an MCP connection is lost, the failed call returns an error and is never
 retried. The connection owner reconnects with five exponential-backoff attempts

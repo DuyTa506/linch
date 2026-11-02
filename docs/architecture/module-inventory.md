@@ -122,6 +122,9 @@ durable.
 | `tools/base.py` | Duck-typed tool protocol, `ToolContext`, `ToolResult`, output contracts, scopes, resource accesses, citations, and stable idempotency keys. |
 | `tools/function.py` | `FunctionTool` and `tool()` adapter; synchronous functions run in bounded blocking workers. |
 | `tools/execution.py` | Local and Docker shell backends (`LocalBackend`, `DockerBackend`) and `ExecResult`. |
+| `tools/_limits.py` | Shared shell, Grep, and MCP output cap. |
+| `tools/_output.py` | Bounded head/tail collection, best-effort spill up to 64 MiB, and UTF-8 cursors. |
+| `tools/processes.py` | Run-owned process registry, hard runtime timers, cleanup, and `BashProcess`. |
 | `tools/file_tracker.py` | `FileReadTracker` whole-file and line-range read evidence used by tools and hooks. |
 | `tools/registry.py` | `ToolRegistry`, reversible registration, `empty_tools()`, and `workspace_tools()`. |
 | `tools/search.py` | `ToolSearchPlugin` request-catalog deferral, keyword/select search, loaded-tool persistence, and deferred-call guards. |
@@ -166,7 +169,7 @@ support those rows:
 |---|---|
 | `context/__init__.py` | Context-builder and file-memory exports. |
 | `execution/__init__.py` | Unified execution capability exports. |
-| `execution/backend.py` | `ExecutionBackend`, shell/filesystem transport protocols, and security metadata. |
+| `execution/backend.py` | `ExecutionBackend`, `ShellBackend`, optional `ShellStarter`/`ShellProcess`, and security metadata. |
 | `execution/local.py` | Host-local shell/filesystem execution backend. |
 | `execution/remote.py` | Remote execution backend with resumable policy identity. |
 | `filesystem/__init__.py` | Filesystem protocol, backend, and tool exports. |

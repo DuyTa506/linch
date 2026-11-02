@@ -276,6 +276,47 @@ await first.close()                 # the shared world stays open
 Môi trường được kế thừa là môi trường mượn: đóng một agent chỉ giải phóng phạm vi con của chính nó. Đây cũng là cách subagent nhận môi trường của agent cha
 (`ctx.get("execution")`), trừ khi bạn cấp môi trường riêng cho nó.
 
+### Môi trường và đầu ra shell cục bộ
+
+`LocalBackend` mặc định chỉ chuyển tiếp `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`,
+`LC_CTYPE`, `USER`, `SHELL` và `TMPDIR`. Dùng
+`LocalBackend(env={...}, forward_env=(...))` để thêm giá trị; giá trị `env` tường
+minh ghi đè giá trị được chuyển tiếp. Cách này giúp tránh
+vô tình truyền thông tin xác thực, không phải ranh giới bảo mật. Run bền vững có
+`env` hoặc `forward_env` không rỗng cần `resume_fingerprint_key` do host giữ, dài
+ít nhất 16 byte; giá trị tham gia danh tính resume qua HMAC có khóa như Docker.
+Tên trong allowlist mặc định thuộc danh tính policy; giá trị môi trường mặc định
+vẫn là trạng thái của host. Đặt tường minh các giá trị cần chặn resume khi thay đổi.
+
+Lệnh Local và Docker nhận EOF trên stdin, không hỗ trợ nhập tương tác. Sau khi
+shell thoát, bộ đọc pipe chờ lấy nốt dữ liệu tối đa 0,25 giây rồi đóng, kể cả khi
+tiến trình con vẫn giữ pipe mở. Tiến trình con có thể sống lâu hơn shell foreground;
+run được quản lý theo dõi nhóm tiến trình để dọn dẹp.
+
+Mỗi luồng stdout/stderr giữ 4.000 byte đầu và 26.000 byte cuối. Luồng quá lớn được
+ghi toàn bộ vào `{cwd}/.linch/output/<id>-<stream>.log`, tạo độc quyền với mode
+`0600`; thư mục có `.gitignore` chứa `*`. Việc ghi spill là best effort: lỗi ghi
+hoặc luồng vượt 64 MiB khiến tệp spill bị loại bỏ và chỉ giữ dữ liệu có giới hạn
+trong bộ nhớ. Preview thêm dấu báo phần bị lược bỏ nên độ dài hiển thị có thể vượt
+giới hạn byte giữ lại. Dọn dẹp run xóa các tệp spill shell được theo dõi; hãy đọc
+chúng trong cùng run. Nếu dọn dẹp thất bại, hãy thử đóng Session lại.
+
+### Handle tiến trình trực tiếp tùy chọn
+
+`ShellStarter` là khả năng tùy chọn bên cạnh `ShellBackend` chỉ có `run`.
+`start(command, cwd=...)` trả về `ShellProcess`; `read()` trả stdout/stderr mới
+và đánh dấu byte bị mất bằng `ShellRead.lossy`, `wait(timeout_s)` trả `None` khi
+tiến trình còn chạy, còn `kill()` hủy nhóm tiến trình. Local và Docker triển khai
+khả năng này. Backend bên thứ ba chỉ có `run()` vẫn được hỗ trợ với hành vi timeout
+của chính nó.
+
+Bash trả đầu ra từng phần hiện có khi timeout hoặc abort. Nó thường dành một giây
+trước hạn scheduler để dọn dẹp (nửa thời hạn nếu thời hạn dưới hai giây). Tiến trình
+không dừng theo SIGTERM có thể khiến lời gọi hoàn tất sau hạn đó, trong khi chờ
+hết khoảng ba giây trước khi gửi SIGKILL. Kết quả vẫn giữ nguyên nguyên nhân
+timeout/abort ban đầu. Xem [tiến trình Bash được quản lý](./tools.md#executionbackend--thực-thi-bash)
+để biết giới hạn và vòng đời.
+
 ---
 
 ## Lắp ghép system prompt — phần đầu tĩnh có thứ tự + các khối động

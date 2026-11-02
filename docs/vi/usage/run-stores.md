@@ -63,8 +63,12 @@ pool thuộc sở hữu đó để lần thử sau có thể khởi tạo lại;
 
 Cơ sở dữ liệu PostgreSQL mới nhận schema phiên bản 3 hiện tại. Các cơ sở dữ liệu
 hiện có mà metadata schema Linch bị thiếu, cũ, không xác định hoặc không nhất quán
-với cấu trúc bắt buộc sẽ bị từ chối mà không bị thay đổi; các adapter không
-nâng cấp schema. Checkpoint/hợp đồng/event của run, biên nhận inbox,
+với cấu trúc bắt buộc sẽ bị từ chối mà không bị thay đổi; schema không tương thích
+không được nâng cấp. Với schema phiên bản 3 tương thích, quá trình khởi tạo cài
+unique index có điều kiện để giới hạn tiếp nhận run. Nhiều run chưa kết thúc của
+cùng session khiến khởi tạo thất bại với `ConfigError`; dùng bản triển khai cũ để
+resume hoặc đối soát và đánh dấu thất bại các run đó trước khi nâng cấp store/worker. Việc cài index
+này không yêu cầu cơ sở dữ liệu mới. Checkpoint/hợp đồng/event của run, biên nhận inbox,
 ảnh chụp khung nhìn provider và ảnh chụp đầu vào mô hình sử dụng phiên bản định dạng truyền 3.
 
 ## Quy ước của kho lưu trữ
@@ -74,6 +78,14 @@ Các protocol dưới đây là quy ước triển khai. Những thao tác thay 
 bản sao tách biệt: việc thay đổi bản ghi, message, tác vụ, checkpoint, event
 hoặc metadata lồng nhau được trả về không được làm thay đổi trạng thái đã lưu. Các triển khai kho lưu trữ
 cũng phải sao chép tách biệt các đồ thị đối tượng đầu vào có thể thay đổi trước khi giữ lại chúng.
+
+Cả hai run store tích hợp sẵn chỉ nhận một run chưa kết thúc cho mỗi session.
+Run thứ hai phát sinh `SessionBusyError` có `session_id` và `run_id` hiện có.
+`pending`, `running`, `waiting_permission` và `suspended` đều chặn tiếp nhận;
+trạng thái kết thúc giải phóng session. Host xếp hàng prompt mới hoặc báo bận.
+Hủy task trong process giữ hàng bền vững chưa kết thúc: hãy resume hoặc đối soát
+và đánh dấu thất bại. Dùng `session.abort()` rồi tiêu thụ kết quả cuối khi muốn
+abort kết thúc run. Xem [cấu hình production](./production.md).
 
 ### Các giá trị của run
 

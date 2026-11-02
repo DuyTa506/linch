@@ -126,14 +126,27 @@ run sau sự cố: một hàng chưa kết thúc vẫn chặn run mới. Ứng d
 `SessionBusyError.run_id` trên session gốc, hoặc đối soát các tác động bên ngoài
 và gọi `run_store.mark_failed(run_id, error={"message": ...})` nếu bỏ run đó.
 Hủy task cũng tính là gián đoạn, kể cả khi client ngắt kết nối làm hủy handler
-stream. Để kết thúc run khi client ngắt và giải phóng session ngay, hãy gọi
-`session.abort()` rồi để stream chạy hết.
+stream. Để kết thúc run khi client ngắt và giải phóng session, hãy gọi
+`session.abort()` rồi tiếp tục tiêu thụ tới `ResultEvent` cuối cùng; hủy iterator
+không tương đương với abort kết thúc run.
 
 Resume yêu cầu trạng thái wire-version-3 hiện tại, một checkpoint và
 hợp đồng thực thi khớp nhau. Các run đã kết thúc, run không có checkpoint và trạng thái trước 3.0,
 thiếu phiên bản, có phiên bản không xác định hoặc không có hợp đồng đều bị từ chối; hãy bắt đầu
 một run mới. Các store Postgres tích hợp sẵn từ chối schema hiện có không tương thích mà không
-nâng cấp chúng; hãy dùng cơ sở dữ liệu mới. Xem [hướng dẫn chuyển đổi sang 3.0](../../migration-3.0.md).
+nâng cấp chúng; hãy dùng cơ sở dữ liệu mới cho schema không tương thích. Schema
+phiên bản 3 tương thích vẫn dùng lại được, kể cả việc cài index tiếp nhận run.
+Xem [Run store](./run-stores.md) và
+[hướng dẫn chuyển đổi sang 3.0](../../migration-3.0.md).
+
+Chỉ thay phiên bản package hoặc mô tả cấp cao nhất của tool vẫn cho phép resume
+nếu phần còn lại của hợp đồng khớp nhau. Schema đầu vào/đầu ra, scope, mức đồng thời,
+quyền và chính sách backend thực thi vẫn thuộc định danh. Khi nâng lên 3.1.0, hãy
+ngừng nhận run mới và chờ tất cả run đang hoạt động kết thúc trước khi triển khai:
+phiên bản chính sách Local/Docker đổi thành `2`, và schema Bash đã đổi. Việc wire
+version 3 không đổi không cho phép resume các hợp đồng cũ đó. Hoàn tất hoặc chủ
+động bỏ các run suspended và bị gián đoạn trong quá trình này; không để chúng
+cho worker phiên bản mới.
 
 ## 5. Tắt dịch vụ mà không để sót công việc
 
@@ -253,7 +266,7 @@ chạy SQL schema. Giữ cơ sở dữ liệu, role và search path của nó �
 hoặc thay đổi schema, hãy tạo pool/worker mới để xác minh lại. Một unique index
 có điều kiện thực thi giới hạn nhận run trên toàn cụm. Việc cài index thất bại
 với `ConfigError` nếu session hiện có chứa nhiều run chưa kết thúc; hãy kiểm tra
-và đối soát các hàng đó trước khi khởi động store/worker đã nâng cấp.
+và đối soát các hàng đó bằng bản triển khai cũ trước khi khởi động store/worker đã nâng cấp.
 
 `enqueue_run` tạo một run `pending` và job của nó trong một giao dịch với
 `dedupe_key="run:<run_id>"`. Run ID do bên gọi cung cấp khiến các lần gửi lặp lại
@@ -288,8 +301,8 @@ Các giới hạn này giới hạn run; dùng limiter của ứng dụng chủ 
 `Worker(max_concurrent_runs=32)` còn giới hạn số task hàng đợi đồng thời trong
 mỗi process worker, độc lập với giới hạn hàng đợi trên toàn cụm. PgQueuer yêu cầu
 ít nhất hai task khi batch size của worker bằng một; boolean và giá trị không
-phải số nguyên bị từ chối. Mặc định 32 dựa trên điểm gãy benchmark WP18 M4 và
-không được đo lại cho thay đổi này. Callback lịch cũng dùng năng lực task hàng đợi.
+phải số nguyên bị từ chối. Điều chỉnh giới hạn theo năng lực đã đo của bản triển khai.
+Callback lịch cũng dùng năng lực task hàng đợi.
 
 **Năng lực xử lý.** Xác định quy mô cơ sở dữ liệu và pool từ benchmark riêng cho cách triển khai;
 SDK không cam kết khả năng mở rộng worker tuyến tính. Dùng kết nối trực tiếp/pool theo session cho

@@ -253,7 +253,7 @@ def test_clean_wheel_install_outside_checkout(tmp_path, shipped_files) -> None:
         }
     assert actual == {str(path.relative_to(ROOT)) for path in shipped_files}
     with tarfile.open(next(dist.glob("*.tar.gz"))) as archive:
-        sdist_files = {str(Path(name).relative_to("linch-3.0.1")) for name in archive.getnames()}
+        sdist_files = {str(Path(name).relative_to("linch-3.1.0")) for name in archive.getnames()}
     assert not set(private) & sdist_files
     assert {str(path.relative_to(ROOT)) for path in shipped_files} <= sdist_files
     clean = tmp_path / "clean"
