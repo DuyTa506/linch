@@ -252,12 +252,12 @@ _SERVER = "\n".join(
         'schema={"type":"object","properties":{"command":{"type":"string"},"hang":{"type":"boolean"},"marker":{"type":"string"}},"required":["marker"]}',
         "async def list_tools(_ctx, _params):",
         ' ann=types.ToolAnnotations(readOnlyHint=True) if os.getenv("ANNOTATED") else None',
-        ' return types.ListToolsResult(tools=[types.Tool(name="terminal", inputSchema=schema, annotations=ann)])',
+        ' return types.ListToolsResult(tools=[types.Tool(name="terminal", inputSchema=schema, annotations=ann)])',  # noqa: E501
         "async def call_tool(_ctx, params):",
         " args=params.arguments",
         ' Path(args["marker"]).write_text("entered")',
         ' if args.get("hang"): await anyio.sleep(30)',
-        ' return types.CallToolResult(content=[types.TextContent(text="ran:" + str(args.get("command", "")))])',
+        ' return types.CallToolResult(content=[types.TextContent(text="ran:" + str(args.get("command", "")))])',  # noqa: E501
         "async def main():",
         ' server=Server("fixture",on_list_tools=list_tools,on_call_tool=call_tool)',
         " async with stdio_server() as (reader,writer):",

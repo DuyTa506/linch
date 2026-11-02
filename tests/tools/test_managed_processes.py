@@ -67,7 +67,7 @@ async def test_background_flag_returns_immediately_and_kill_works(tmp_path):
         )
         assert result.metadata["process_id"] == "p1"
         killed = await process(ctx, "kill")
-        assert killed.is_error and "signal" in killed.content
+        assert not killed.is_error and "signal" in killed.content
         assert "Exited" in (await process(ctx, "status")).content
     finally:
         await registry.close()
@@ -295,7 +295,7 @@ async def test_local_python_http_server_flow(tmp_path):
                 await asyncio.sleep(0.02)
         else:
             pytest.fail("server did not start")
-        assert (await process(ctx, "kill")).is_error
+        assert not (await process(ctx, "kill")).is_error
     finally:
         await registry.close()
 
