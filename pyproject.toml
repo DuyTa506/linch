@@ -56,8 +56,32 @@ dev = [
   "pyright>=1.1",
 ]
 
+[tool.hatch.build]
+exclude = [
+  "**/__pycache__",
+  "**/*.pyc",
+  "docs/superpowers",
+  "docs/ROADMAP.md",
+  "**/.*",
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/linch"]
+only-include = [
+  "src/linch",
+  "docs/usage",
+  "docs/architecture",
+  "docs/architecture.md",
+  "docs/usage.md",
+  "docs/migration-3.0.md",
+  "docs/versioning.md",
+  "examples",
+]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"docs" = "linch/_docs/docs"
+"examples" = "linch/_docs/examples"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

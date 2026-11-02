@@ -5,6 +5,11 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+- Ship maintained usage and architecture docs plus examples with the wheel. Add
+  `linch docs path` to locate them, including a source-checkout fallback for editable installs.
+
 ## 3.0.1 — 2026-11-02
 
 This patch release adds `Agent.reload_skills()`, an owner-approved

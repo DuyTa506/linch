@@ -67,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tool_parser.add_argument("--dir", default=".", help="project directory (default: cwd)")
     tool_parser.set_defaults(handler=_cmd_add_tool)
 
+    docs_parser = subparsers.add_parser("docs", help="locate installed documentation")
+    docs_subparsers = docs_parser.add_subparsers(dest="docs_command", required=True)
+    path_parser = docs_subparsers.add_parser("path", help="print the docs and examples root")
+    path_parser.set_defaults(handler=_cmd_docs_path)
+
     return parser
 
 
@@ -98,3 +103,22 @@ def _print_created(paths: list[Path]) -> None:
         except ValueError:
             display = path
         print(f"created {display}")
+
+
+def _cmd_docs_path(args: argparse.Namespace) -> int:
+    source = Path(__file__).resolve()
+    candidates = [source.parents[2] / "_docs"]
+    candidates.extend(
+        parent
+        for parent in source.parents
+        if source == parent / "src/linch/ext/scaffold/__init__.py"
+        and (parent / "pyproject.toml").is_file()
+    )
+    for root in candidates:
+        if (root / "docs/usage/quickstart.md").is_file() and (root / "examples").is_dir():
+            print(root)
+            return 0
+    raise ScaffoldError(
+        "docs not found: reinstall linch from a wheel with packaged docs, "
+        "or use an editable checkout containing docs/ and examples/"
+    )

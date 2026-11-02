@@ -70,13 +70,28 @@ The command finds the target package by walking up to the nearest
 `pyproject.toml` and locating the package under `src/`; with multiple packages
 it picks the one matching `[project].name`. It never overwrites existing files.
 
+## `linch docs path`
+
+Print the absolute directory containing the installed `docs/` and `examples/` trees:
+
+```bash
+linch docs path
+# /path/to/site-packages/linch/_docs
+rg 'RunBudget' "$(linch docs path)/docs/usage"
+```
+
+The command checks packaged documentation first, then the source checkout for editable
+installs. It works from any directory and needs no network. If documentation is missing,
+reinstall Linch from a wheel with packaged docs or restore the checkout's `docs/` and
+`examples/` directories.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success (also `--help`) |
 | 2 | Usage error: unknown command, missing argument, invalid name |
-| 1 | State error: non-empty target dir, no/ambiguous project, existing file |
+| 1 | State error: non-empty target dir, no/ambiguous project, existing file, missing docs |
 
 ## Related pages
 
