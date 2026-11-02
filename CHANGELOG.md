@@ -7,6 +7,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Add a generated, offline API reference covering supported root and explicit extension exports.
+
 - Ship maintained usage and architecture docs plus examples with the wheel. Add
   `linch docs path` to locate them, including a source-checkout fallback for editable installs.
 

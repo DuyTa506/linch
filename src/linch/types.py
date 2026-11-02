@@ -13,8 +13,11 @@ StopReason: TypeAlias = Literal[
     "lease_lost",
     "interrupted",
 ]
+"""Normalized reasons a provider response stopped generating."""
 PermissionMode: TypeAlias = Literal["default", "acceptEdits", "skip-dangerous"]
+"""Supported permission evaluation modes for agent tool calls."""
 ModelId: TypeAlias = str
+"""Provider model identifier represented as a string."""
 
 
 @dataclass(slots=True)
@@ -147,6 +150,7 @@ ContentBlock: TypeAlias = (
     | RedactedThinkingBlock
     | ImageBlock
 )
+"""Union of supported normalized message content blocks."""
 
 
 def is_text_block(block: ContentBlock) -> TypeGuard[TextBlock]:
@@ -370,6 +374,7 @@ class OutputSchema:
 
 # Tool-choice type: string shorthand or explicit {"type": "tool", "name": ...}
 ToolChoice: TypeAlias = Literal["auto", "none", "required"] | dict[str, str]
+"""Automatic, disabled, required, or named provider tool selection."""
 
 
 @dataclass(slots=True)

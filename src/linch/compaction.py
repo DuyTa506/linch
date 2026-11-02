@@ -264,6 +264,7 @@ GENERAL_SUMMARY_PROMPT = (
     "- Open questions and current task state\n"
     "Keep it factual and dense. Omit greetings, restated goals, and meta commentary."
 )
+"""Default instructions for summarizing compacted conversation history."""
 
 _DETAILED_SUMMARY_PROMPT = (
     "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"

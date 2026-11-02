@@ -48,6 +48,7 @@ class McpHttpServerConfig:
 
 
 McpServerConfig = McpStdioServerConfig | McpHttpServerConfig
+"""Supported stdio and HTTP MCP server configuration variants."""
 
 
 def mcp_server_type(config: McpServerConfig) -> str:

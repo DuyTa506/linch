@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ._version import get_version
 
 __version__ = get_version()
+"""Installed package version, with the local project version as a fallback."""
 
 if TYPE_CHECKING:
     # Eager imports for static analysis and IDE autocomplete only. This block is
