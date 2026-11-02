@@ -50,6 +50,8 @@ def make_mcp_tool(
     server_name: str,
     mcp_tool: McpToolDef,
     call_tool: McpCallTool,
+    *,
+    trust_annotations: bool = False,
 ) -> object:
     """Wrap one MCP tool definition in Linch's duck-typed tool protocol.
 
@@ -62,15 +64,13 @@ def make_mcp_tool(
         A Linch-compatible tool object whose scope and permissions reflect MCP hints.
     """
     name = build_mcp_tool_name(server_name, mcp_tool.name)
-    annotations = getattr(mcp_tool, "annotations", None)
-    read_only = getattr(annotations, "read_only_hint", False) if annotations is not None else False
-    is_destructive = (
-        bool(getattr(annotations, "destructive_hint", False)) if annotations is not None else False
-    )
+    annotations = getattr(mcp_tool, "annotations", None) if trust_annotations else None
+    read_only = getattr(annotations, "read_only_hint", None) is True
+    is_destructive = not read_only and getattr(annotations, "destructive_hint", None) is True
 
     class _McpTool:
         is_mcp_tool = True
-        scope = "read" if read_only else "write"
+        scope = "read" if read_only else "exec"
         parallel = read_only
         # Surfaced for the annotation→permission bridge (mcp_permission_rules):
         # a server's destructive_hint maps to an "ask" permission tier.
@@ -95,7 +95,7 @@ def make_mcp_tool(
             throw_if_aborted(ctx.signal)
             try:
                 result: CallToolResult = await call_tool(mcp_tool.name, input, ctx.signal)
-                return map_mcp_result(result)
+                return await map_mcp_result(result, cwd=ctx.cwd)
             except AbortError:
                 raise
             except Exception as exc:

@@ -360,6 +360,49 @@ An inherited world is borrowed: closing one agent disposes only its own child
 scope. This is also how a subagent picks up its parent's world
 (`ctx.get("execution")`) unless you give it its own.
 
+### Local shell environment and output
+
+`LocalBackend` forwards only `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`,
+`LC_CTYPE`, `USER`, `SHELL`, and `TMPDIR` by default. Configure
+`LocalBackend(env={...}, forward_env=(...))` for additional values; explicit
+`env` entries override forwarded values. This is
+credential hygiene, not a security boundary. Durable runs with non-empty `env`
+or `forward_env` require a caller-owned `resume_fingerprint_key` of at least
+16 bytes; values enter resume identity through keyed HMACs, as with Docker.
+Default allowlist names enter the policy identity; their ambient values remain
+host state. Pin relevant defaults explicitly when a resume must reject changes.
+
+Local and Docker commands receive EOF on stdin; they do not support interactive
+input. After the shell exits, pipe readers drain for up to 0.25 seconds, then
+close even if a child still holds a pipe open. A child can outlive its foreground
+shell; managed runs track its process group for cleanup.
+
+Each stdout/stderr stream retains the first 4,000 and last 26,000 bytes.
+Oversized streams spill in full to `{cwd}/.linch/output/<id>-<stream>.log`,
+created exclusively with mode `0600`; the directory gets a `.gitignore` containing
+`*`. Spill is best effort: a write failure or a stream exceeding 64 MiB discards
+the spill file and continues with bounded memory. The preview adds an omission
+marker, so its rendered length can exceed the retained-byte limit. Managed-run
+cleanup removes tracked shell spill files; read them during the same run. If
+cleanup fails, retry session close.
+
+### Optional live process handles
+
+`ShellStarter` is an optional capability alongside the run-only `ShellBackend`.
+Its `start(command, cwd=...)` returns a `ShellProcess`; `read()` returns new
+stdout/stderr and marks lost bytes with `ShellRead.lossy`, `wait(timeout_s)`
+returns `None` while the process is running, and `kill()` terminates its process
+group. Local and Docker implement this capability. A third-party backend with
+only `run()` remains supported, with its own timeout behavior.
+
+Bash reports available partial output on timeout and abort. It normally reserves
+one second from the scheduler's deadline for cleanup (half the deadline when it
+is under two seconds). A process resisting SIGTERM can extend completion beyond
+that deadline while the owned three-second grace period finishes before SIGKILL.
+The original timeout/abort cause remains the result. See
+[managed Bash processes](./tools.md#executionbackend--bash-execution) for limits
+and lifetime rules.
+
 ---
 
 ## System-prompt assembly — ordered static prefix + dynamic blocks

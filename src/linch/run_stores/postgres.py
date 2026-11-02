@@ -13,6 +13,7 @@ from contextlib import nullcontext
 from typing import Any, NoReturn
 from uuid import uuid4
 
+from ..errors import ConfigError
 from ..events import Event, _stored_event_from_dict
 from ..run_store import (
     RUN_CONTRACT_META_KEY,
@@ -22,6 +23,7 @@ from ..run_store import (
     RunLease,
     RunLeaseConflictError,
     RunRecord,
+    SessionBusyError,
     StoredRunEvent,
     _append_run_error,
     _json_safe,
@@ -55,6 +57,9 @@ CREATE TABLE IF NOT EXISTS runs (
     lease_expires_at DOUBLE PRECISION,
     last_event_seq BIGINT NOT NULL DEFAULT 0
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active_per_session_idx ON runs (session_id)
+    WHERE status IN ('pending', 'running', 'waiting_permission', 'suspended');
 
 CREATE TABLE IF NOT EXISTS run_events (
     run_id TEXT NOT NULL,
@@ -154,16 +159,55 @@ class PostgresRunStore:
         self._init_lock = asyncio.Lock()
 
     async def _ensure(self) -> Any:
-        return await ensure_pool(
-            self,
-            _SCHEMA,
-            _import_asyncpg,
-            schema_key="runs",
-            tables=("runs", "run_events", "model_input_snapshots"),
-            required_columns={"runs": ("last_event_seq",)},
-            advisory_lock_key=_SCHEMA_LOCK_KEY,
-            allow_missing_pool_on_error=True,
-        )
+        try:
+            return await ensure_pool(
+                self,
+                _SCHEMA,
+                _import_asyncpg,
+                schema_key="runs",
+                tables=("runs", "run_events", "model_input_snapshots"),
+                required_columns={"runs": ("last_event_seq",)},
+                advisory_lock_key=_SCHEMA_LOCK_KEY,
+                allow_missing_pool_on_error=True,
+            )
+        except _import_asyncpg().UniqueViolationError as exc:
+            if exc.constraint_name != "runs_one_active_per_session_idx":
+                raise
+            raise ConfigError(
+                "Cannot install run admission index: duplicate nonterminal runs exist for a "
+                "session; resume or mark_failed those runs before restarting."
+            ) from exc
+
+    async def _admit(
+        self,
+        conn: Any,
+        sql: str,
+        *args: object,
+        session_id: str | None = None,
+        run_id: str | None = None,
+    ) -> Any:
+        transactional = conn.is_in_transaction()
+        for attempt in range(3):
+            try:
+                async with conn.transaction() if transactional else nullcontext():
+                    return await conn.fetchrow(sql, *args)
+            except _import_asyncpg().UniqueViolationError as exc:
+                if exc.constraint_name != "runs_one_active_per_session_idx":
+                    raise
+                owner = await conn.fetchrow(
+                    "SELECT id, session_id FROM runs WHERE session_id = COALESCE($1::text, "
+                    "(SELECT session_id FROM runs WHERE id = $2)) AND "
+                    "status IN ('pending', 'running', 'waiting_permission', 'suspended')",
+                    session_id,
+                    run_id,
+                )
+                if owner is not None:
+                    raise SessionBusyError(str(owner["session_id"]), str(owner["id"])) from exc
+                if transactional or attempt == 2:
+                    raise RuntimeError(
+                        "Run admission conflict: the conflicting nonterminal run is not visible"
+                    ) from exc
+                # The competing run finished after rejection; admission can retry.
 
     async def create_run(
         self,
@@ -205,7 +249,8 @@ class PostgresRunStore:
         async with pool.acquire() as conn:
             if lease is None:
                 ts = now_iso()
-                row = await conn.fetchrow(
+                row = await self._admit(
+                    conn,
                     """
                     INSERT INTO runs
                         (id, session_id, status, created_at, updated_at, checkpoint, meta)
@@ -218,6 +263,7 @@ class PostgresRunStore:
                     ts,
                     json.dumps(safe_meta, allow_nan=False),
                     payload,
+                    session_id=session_id,
                 )
                 if row is not None:
                     return _row_record(row)
@@ -302,7 +348,8 @@ class PostgresRunStore:
 
         safe_meta = _safe_meta(meta)
         ts = now_iso()
-        row = await conn.fetchrow(
+        row = await self._admit(
+            conn,
             """
             INSERT INTO runs
                 (id, session_id, status, created_at, updated_at, checkpoint, meta)
@@ -314,6 +361,7 @@ class PostgresRunStore:
             session_id,
             ts,
             json.dumps(safe_meta, allow_nan=False),
+            session_id=session_id,
         )
         if row is not None:
             return _row_record(row)
@@ -476,7 +524,7 @@ class PostgresRunStore:
             (await self._ensure()).acquire() if connection is None else nullcontext(connection)
         )
         async with manager as conn:
-            row = await conn.fetchrow(sql, *args)
+            row = await self._admit(conn, sql, *args, run_id=run_id)
             if row is None:
                 await self._classify_write_failure(conn, run_id, lease)
         return row, [int(seq) for seq in row["allocated_seqs"]]

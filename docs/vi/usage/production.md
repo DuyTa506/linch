@@ -69,6 +69,14 @@ Xem [Event](./events.md). Để có thông tin tổng quan ngắn gọn về tì
 tool chậm/lỗi, áp lực context, chi phí và bộ đếm khôi phục), hãy tạo một
 [`RunReport`](./events.md).
 
+Khi dùng run store, mỗi session chỉ được có một run chưa kết thúc trên các
+process. Run mới bị từ chối bằng `SessionBusyError` công khai; `run_id` của lỗi
+xác định run hiện có và `session_id` xác định session. Các trạng thái `pending`,
+`running`, `waiting_permission` và `suspended` đều giữ session bận. Run hoàn tất,
+thất bại hoặc bị hủy sẽ giải phóng session. Ứng dụng chủ phải xếp hàng các prompt
+đến sau hoặc báo bận cho bên gọi; mặc định Linch từ chối các run chồng lấn.
+Subagent tạo session riêng nên có thể chạy khi session cha đang bận.
+
 ## 3. Cho con người tham gia với trạng thái bền vững
 
 Khi một tool cần phê duyệt, Linch yield một `PermissionRequestEvent` trước khi
@@ -112,11 +120,33 @@ async for event in session.resume(run_id):
     await publish(event)
 ```
 
+Worker khôi phục sau sự cố qua cơ chế PgQueuer phân phối lại job bị đình trệ và
+resume checkpoint như mô tả bên dưới. Thực thi trong process không có bộ thu hồi
+run sau sự cố: một hàng chưa kết thúc vẫn chặn run mới. Ứng dụng chủ nên resume
+`SessionBusyError.run_id` trên session gốc, hoặc đối soát các tác động bên ngoài
+và gọi `run_store.mark_failed(run_id, error={"message": ...})` nếu bỏ run đó.
+Hủy task cũng tính là gián đoạn, kể cả khi client ngắt kết nối làm hủy handler
+stream. Để kết thúc run khi client ngắt và giải phóng session, hãy gọi
+`session.abort()` rồi tiếp tục tiêu thụ tới `ResultEvent` cuối cùng; hủy iterator
+không tương đương với abort kết thúc run.
+
 Resume yêu cầu trạng thái wire-version-3 hiện tại, một checkpoint và
 hợp đồng thực thi khớp nhau. Các run đã kết thúc, run không có checkpoint và trạng thái trước 3.0,
 thiếu phiên bản, có phiên bản không xác định hoặc không có hợp đồng đều bị từ chối; hãy bắt đầu
 một run mới. Các store Postgres tích hợp sẵn từ chối schema hiện có không tương thích mà không
-nâng cấp chúng; hãy dùng cơ sở dữ liệu mới. Xem [hướng dẫn chuyển đổi sang 3.0](../../migration-3.0.md).
+nâng cấp chúng; hãy dùng cơ sở dữ liệu mới cho schema không tương thích. Schema
+phiên bản 3 tương thích vẫn dùng lại được, kể cả việc cài index tiếp nhận run.
+Xem [Run store](./run-stores.md) và
+[hướng dẫn chuyển đổi sang 3.0](../../migration-3.0.md).
+
+Chỉ thay phiên bản package hoặc mô tả cấp cao nhất của tool vẫn cho phép resume
+nếu phần còn lại của hợp đồng khớp nhau. Schema đầu vào/đầu ra, scope, mức đồng thời,
+quyền và chính sách backend thực thi vẫn thuộc định danh. Khi nâng lên 3.1.0, hãy
+ngừng nhận run mới và chờ tất cả run đang hoạt động kết thúc trước khi triển khai:
+phiên bản chính sách Local/Docker đổi thành `2`, và schema Bash đã đổi. Việc wire
+version 3 không đổi không cho phép resume các hợp đồng cũ đó. Hoàn tất hoặc chủ
+động bỏ các run suspended và bị gián đoạn trong quá trình này; không để chúng
+cho worker phiên bản mới.
 
 ## 5. Tắt dịch vụ mà không để sót công việc
 
@@ -199,7 +229,8 @@ async def agent_factory(job: WorkerJob) -> Agent:
     )
 
 worker = Worker(pool, agent_factory, queues={"provider-a": 8, "premium": 4},
-                profiles=(support,), lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
+                profiles=(support,), max_concurrent_runs=32,
+                lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
 await worker.run()
 ```
 
@@ -232,16 +263,18 @@ nhiều lần, trước khi truyền việc hủy ra ngoài. Các job đang ho�
 Pool được mượn lưu cache kết quả xác minh schema thành công cho cơ sở dữ liệu
 và search path cố định của nó. Các store bổ sung trên `job.pool` tái sử dụng kết quả xác minh đó mà không
 chạy SQL schema. Giữ cơ sở dữ liệu, role và search path của nó ổn định; sau khi thay đổi chúng
-hoặc thay đổi schema, hãy tạo pool/worker mới để xác minh lại. Tuần tự hóa các
-run khác nhau nhắm đến cùng một session tại ranh giới API; lease của run không
-tuần tự hóa các run khác nhau trong một session.
+hoặc thay đổi schema, hãy tạo pool/worker mới để xác minh lại. Một unique index
+có điều kiện thực thi giới hạn nhận run trên toàn cụm. Việc cài index thất bại
+với `ConfigError` nếu session hiện có chứa nhiều run chưa kết thúc; hãy kiểm tra
+và đối soát các hàng đó bằng bản triển khai cũ trước khi khởi động store/worker đã nâng cấp.
 
 `enqueue_run` tạo một run `pending` và job của nó trong một giao dịch với
 `dedupe_key="run:<run_id>"`. Run ID do bên gọi cung cấp khiến các lần gửi lặp lại
 luôn là thao tác không làm gì, kể cả sau khi job trong hàng đợi đã được xác nhận. Việc tái sử dụng một ID
 với session khác bị từ chối; prompt và metadata của lần gửi đầu tiên
 được giữ lại. `enqueue_runs(pool, [RunRequest(...)])` gộp các thao tác chèn vào hàng đợi trong một
-giao dịch. JSON của job bao gồm ID run/session, prompt, hàng đợi tùy chọn và
+giao dịch. Nếu bị từ chối vì session bận, toàn bộ lô bị rollback, bao gồm các
+hàng run và job trong hàng đợi. JSON của job bao gồm ID run/session, prompt, hàng đợi tùy chọn và
 W3C `traceparent` của bên gọi. Worker khôi phục nó trước khi thực thi, để
 span `invoke_agent` của kernel tham gia trace của bên gọi.
 
@@ -265,6 +298,11 @@ Mỗi hàng đợi run có tên là một entrypoint PgQueuer với
 tất cả worker. `0` nghĩa là không giới hạn; mặc định là một hàng đợi run `default` với
 mức đồng thời không giới hạn. Hàng đợi phải được đăng ký trên một worker để thực thi.
 Các giới hạn này giới hạn run; dùng limiter của ứng dụng chủ cho hạn mức request/token của provider.
+`Worker(max_concurrent_runs=32)` còn giới hạn số task hàng đợi đồng thời trong
+mỗi process worker, độc lập với giới hạn hàng đợi trên toàn cụm. PgQueuer yêu cầu
+ít nhất hai task khi batch size của worker bằng một; boolean và giá trị không
+phải số nguyên bị từ chối. Điều chỉnh giới hạn theo năng lực đã đo của bản triển khai.
+Callback lịch cũng dùng năng lực task hàng đợi.
 
 **Năng lực xử lý.** Xác định quy mô cơ sở dữ liệu và pool từ benchmark riêng cho cách triển khai;
 SDK không cam kết khả năng mở rộng worker tuyến tính. Dùng kết nối trực tiếp/pool theo session cho

@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 from ._json import walk_json
 from ._telemetry import store_call
 from ._wire import WIRE_VERSION, require_wire_version
-from .errors import ConfigError
+from .errors import ConfigError, LinchError
 from .events import (
     IGNORABLE_MAX_DEPTH,
     Event,
@@ -249,6 +249,16 @@ class RunLease:
     epoch: int
     expires_at: float
     ttl_s: float
+
+
+class SessionBusyError(LinchError):
+    """Another nonterminal run owns this session; resume or fail ``run_id``."""
+
+    kind = "session_busy"
+
+    def __init__(self, session_id: str, run_id: str) -> None:
+        self.session_id, self.run_id = session_id, run_id
+        super().__init__(f"Session {session_id!r} is busy with run {run_id!r}")
 
 
 class RunLeaseConflictError(RuntimeError):
@@ -1992,6 +2002,16 @@ class InMemoryRunStore:
         # caller's immutable RunLease is the only holder authority.
         self._lease_state: dict[str, tuple[str | None, float | None, int]] = {}
 
+    def _admit(self, session_id: str, run_id: str, status: str = "running") -> None:
+        if status in ("pending", "running", "waiting_permission", "suspended"):
+            for row in self._runs.values():
+                if (
+                    row.session_id == session_id
+                    and row.id != run_id
+                    and row.status in ("pending", "running", "waiting_permission", "suspended")
+                ):
+                    raise SessionBusyError(session_id, row.id)
+
     async def create_run(
         self,
         session_id: str,
@@ -2042,6 +2062,7 @@ class InMemoryRunStore:
             merged_meta.update(incoming_meta)
             if stored_contract is not None:
                 merged_meta[RUN_CONTRACT_META_KEY] = stored_contract
+            self._admit(session_id, rid)
             existing.meta = merged_meta
             existing.status = "running"
             existing.checkpoint = checkpoint
@@ -2049,6 +2070,7 @@ class InMemoryRunStore:
             return _copy_record(existing)
         if lease is not None:
             raise _lease_lost(rid, lease.epoch)
+        self._admit(session_id, rid)
         ts = now_iso()
         record = RunRecord(
             id=rid,
@@ -2187,6 +2209,7 @@ class InMemoryRunStore:
 
         self._check_lease(run_id, lease)
         rec = self._runs[run_id]
+        self._admit(rec.session_id, run_id, status)
         rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
         rec.updated_at = now_iso()
@@ -2221,6 +2244,7 @@ class InMemoryRunStore:
 
         self._check_lease(run_id, lease)
         rec = self._runs[run_id]
+        self._admit(rec.session_id, run_id, status)
         checkpoint_copy = _copy_checkpoint(checkpoint)
         event_copies = [_copy_event(event) for event in events]
         bucket = self._events.setdefault(run_id, [])

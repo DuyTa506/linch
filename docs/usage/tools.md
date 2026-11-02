@@ -52,7 +52,7 @@ later on this page.
 `empty_tools(...)` builds a registry with *only* the tools you pass — the right
 choice for a pure domain agent that should never touch the filesystem or shell.
 `workspace_tools(exclude=..., extra=...)` starts from the standard SWE set
-(`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `TaskCreate`, `TaskList`,
+(`Read`, `Write`, `Edit`, `Bash`, `BashProcess`, `Glob`, `Grep`, `TaskCreate`, `TaskList`,
 `TaskGet`, `TaskUpdate`) and adds or removes from there.
 `Agent` copies the registry passed to its constructor. Register tools added later
 on `agent.tools` so request discovery sees them; mutating the original registry
@@ -186,7 +186,8 @@ and `resources()` (optional) declares the resources the call reads or writes so
 the scheduler can avoid conflicts. The `ToolResult` carries the compact
 `content` the model sees plus optional richer fields (`summary`, `metadata`,
 `citations`, `attachments`) that host apps can use for provenance and rendering
-without bloating the model's context.
+without bloating the model's context. `ToolContext.tool_timeout_s` is keyword-only;
+the sixth positional argument remains `file_read_tracker`.
 
 For a canonical JSON contract, pass `output_schema=` to `@tool`. The function
 then returns a raw JSON value, `ToolOutput`, or `ToolOutputError`; returning
@@ -284,7 +285,7 @@ idempotent. Retries use exponential backoff from `base_delay_ms`.
 
 ## `ExecutionBackend` — Bash execution
 
-`BashTool(*, execution: Any = None)` is an exec-scoped, non-parallel tool. Direct
+`BashTool(*, execution=None, max_processes=4, max_runtime_ms=1_800_000)` is an exec-scoped, non-parallel tool. Direct
 construction defaults to `LocalBackend`; a supplied `execution` object must
 expose `.shell`.
 
@@ -297,10 +298,55 @@ agent = Agent(model="gpt-5", provider=provider, tools=empty_tools(bash))
 ```
 
 The input requires a nonempty string `command`. Optional integer `timeout_ms`
-defaults to `120000`; nonpositive values reset to that default, and values above
-`1800000` are capped. Execution uses `ctx.cwd`. The result contains stdout,
-followed by `[stderr]` and stderr when present. A nonzero exit sets
-`is_error=True`; a timeout raises `ToolExecutionError`.
+defaults to `120000` and must be a positive integer; booleans, nonpositive and
+non-finite values are rejected. Valid values above `1800000` are capped. Execution uses `ctx.cwd`. The result contains stdout,
+followed by `[stderr]` and stderr when present, plus exit status, signal,
+truncation, and spill-path details. A completed command with a nonzero exit, or
+termination marked `timed_out` or `aborted`, returns `is_error=True`. Local and
+Docker preserve available partial output on timeout and abort. A managed return
+deadline can instead yield a normal still-running result with `is_error=False`.
+See [Extending](./extending.md) for output bounds and environment policy.
+
+With Local and Docker backends, `timeout_ms` is when the Bash call returns,
+not a kill deadline: an unfinished command returns its output and a process id
+such as `p1234abcd` (`p` followed by eight lowercase UUID4 hex digits). Set `run_in_background=True` to return immediately; a command
+that has already exited can return its completed result without an id. Follow up
+with `BashProcess` (`BashProcessTool` when constructing a custom registry):
+
+```python
+# Model-facing tool inputs, within the same run:
+{"command": "python -m http.server 8000", "run_in_background": True}
+{"action": "wait", "id": "p1234abcd", "wait_ms": 1000}
+{"action": "status", "id": "p1234abcd"}
+{"action": "kill", "id": "p1234abcd"}
+```
+
+`wait` returns only output produced since the previous read, then the exit status
+or a still-running message. Three quiet reads suggest stopping the process.
+Bash and BashProcess clamp waits below the scheduler deadline to preserve output.
+The default cap is four running processes per run; an overflow command is killed
+when its Bash wait expires. `max_runtime_ms` is an independent hard deadline,
+defaulting to 30 minutes. Both limits must be positive integers and are part of
+the durable fingerprint. Background Bash requires a managed registry and a
+shell implementing `ShellStarter`; otherwise it is rejected. Do not pipe long commands through `tail`: it delays
+visible output. A third-party backend exposing only `run` receives `timeout_s`
+and uses its own timeout behavior, without managed process ids. Direct Bash calls
+without a running Session also use `run`; Local and Docker then kill on timeout.
+
+At run end, cleanup kills tracked process groups, including background children
+left by a foreground shell, and removes their spill files before releasing the
+session or delivering its final result. If cleanup fails, the session remains
+active; retry session close. Child sessions have independent registries. Process
+ids are ephemeral and are gone after resume or cleanup; resume needs a new command.
+At most the 128 most recent finished IDs remain available until cleanup, as do
+spill paths. Graceful
+worker shutdown closes sessions and cleans up processes, but a worker killed with
+SIGKILL can leave them alive. Docker uses one `docker run` handle per command,
+rather than a persistent session container. Container removal on kill is best
+effort; the host may need to reconcile containers after a removal failure.
+The built-in BashProcess identity is serialized, never tool-cached, and needs no second approval because
+Bash already approved the command; explicit deny rules still apply. The changed
+Bash/BashProcess schemas reject resume of older tool contracts: drain old runs.
 
 To inject a different execution world, pass a coherent `.shell`/`.fs` backend as
 `execution_backend=...` to `Agent`. The agent only replaces an existing
@@ -311,7 +357,11 @@ omits `Bash`.
 allowed to run. An execution backend only changes where and how an approved
 command runs. `DockerBackend` defaults to a writable
 workspace mount, Docker's default network, no environment forwarding, and a
-normal container root filesystem. Its hardening controls are opt-in.
+normal container root filesystem. It limits memory to `"2g"`, CPUs to `2`, and
+processes to `512`; it drops all capabilities and enables no-new-privileges.
+Configure these with `memory`, `cpus`, `pids_limit`, `cap_drop`, and
+`no_new_privileges`; `None` disables each control. Network, mount, root filesystem,
+and user restrictions are opt-in.
 
 ```python
 from linch import Agent, DockerBackend, RemoteExecutionBackend
@@ -349,7 +399,11 @@ environment variables, and `user="1000:1000"` for non-root container execution.
 (no Docker SDK dependency). An explicit `docker_path` bypasses that lookup.
 Both backends route timeout and abort through the same path, so
 `session.abort()` interrupts an in-flight command rather than leaking a runaway
-process. The backend is purely about *where and how* an approved command runs —
+process. Both also expose optional `start(command, cwd=...)` process handles with
+incremental `read()`, `wait(timeout_s)`, and `kill()` methods. Output remains
+bounded and oversized streams spill inside the workspace. Docker handle cleanup
+stops the CLI process group before attempting to remove the named container.
+The backend is purely about *where and how* an approved command runs —
 **whether** it runs is decided by [permissions](#permissions).
 
 For a strict durable deployment, use an explicit trusted `docker_path` and pin
@@ -503,13 +557,59 @@ MCP names have the form `mcp__SERVER__TOOL`. Each character outside
 `[a-zA-Z0-9_-]` in the server or tool name becomes `_`; case is preserved.
 For example, server `ops.prod` with tool `get.status` becomes
 `mcp__ops_prod__get_status`. Names that collide after normalization raise
-`ConfigError`.
+`ConfigError`. Normalized server names cannot contain `__`, begin with `_`,
+or end with `_`.
 
-Server annotations affect scheduling and permissions: `readOnlyHint` gives a
-tool read scope and parallel safety; other tools have write scope.
-`destructiveHint` adds an ask rule, including in `acceptEdits` and
-`skip-dangerous` modes. Approval still uses `can_use_tool`, so an ask without a
-callback is denied.
+Permission rules can target one normalized server with
+`ToolRule("mcp__ops_prod__*", "deny")`; the trailing `*` matches the whole
+literal `mcp__ops_prod__` prefix and matches exactly one server. No other glob form is supported; the existing
+`ToolRule("*", ...)` rule still matches every tool.
+
+Server annotations are ignored by default: every tool has exec scope, runs
+serially, and is non-destructive. Set `trust_annotations=True` on the server
+config only when the host vouches for that server's claims. With trust enabled,
+only `readOnlyHint: true` gives a tool read scope and parallel safety; other
+tools have exec scope and run serially, and `destructive` is true only when
+`destructiveHint: true` is explicit. A read-only tool is never destructive. An
+unannotated tool adds no ask rule, so it can run in `skip-dangerous`; in
+`acceptEdits`, exec tools still ask. A trusted explicit destructive tool adds an
+ask rule even in `skip-dangerous`.
+
+Hints are server claims, not verified guarantees. `trust_annotations` and
+`skip-dangerous` are host decisions, and the host is responsible for the server
+it trusts and for the consequences of allowing dangerous calls. A dishonest
+server can label a mutating tool read-only and gain automatic approval, parallel
+execution, and read-tool treatment. Approval uses `can_use_tool`, so an ask
+without a callback is denied.
+
+Both `McpStdioServerConfig` and `McpHttpServerConfig` accept `timeout_s` (default
+300 seconds), a finite positive number passed to the SDK's per-tool-call request read timeout. A timeout
+returns a tool error result. Abort signals cancel an in-flight call and raise
+`AbortError`; Linch awaits the cancelled call's cleanup. Cancellation does not
+guarantee that a server stops or rolls back remote side effects.
+
+MCP results include embedded resource text; binary resource content stays omitted.
+Without a spill, Linch retains up to 30,000 characters of the combined text,
+including separators, then adds a truncation marker when needed. This uses the
+same shared output limit as Grep. With a call context, larger text can spill
+below `ctx.cwd/.linch/output/`; the result gives a bounded head/tail preview and
+names the path containing the full text. The shared spill policy retains 4,000
+head bytes and 26,000 tail bytes, adds an omission marker, and abandons the file
+on write failure or above 64 MiB. Spill I/O is offloaded asynchronously; files
+have mode `0600`, existing `.gitignore` files are not overwritten, and symlink
+directories refuse spill. If no spill remains, the character-capped text
+is returned. See [output policy](./extending.md#local-shell-environment-and-output).
+
+If an MCP connection is lost, the failed call returns an error and is never
+retried. The connection owner reconnects with five exponential-backoff attempts
+starting at 0.5 seconds and capped at 30 seconds, with a 30-second timeout per
+connection attempt; after that, tools report the
+server unavailable until the host creates a fresh connection (or a new Agent for
+configured servers). Tool names stay stable, a vanished tool returns an error,
+and the catalog and annotations are not re-listed; a server changing tools
+requires a new session. Each resource cleanup has a five-second
+deadline; cleanup remains in the connection owner task and proceeds to the next
+resource if a deadline expires. Deadlines rely on cancellation-cooperative cleanup.
 
 ---
 

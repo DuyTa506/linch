@@ -116,6 +116,9 @@ if TYPE_CHECKING:
         LocalExecutionBackend,
         RemoteExecutionBackend,
         ShellBackend,
+        ShellProcess,
+        ShellRead,
+        ShellStarter,
     )
     from .filesystem import (
         CompositeFileBackend,
@@ -225,6 +228,7 @@ if TYPE_CHECKING:
         RunLeaseStore,
         RunRecord,
         RunStore,
+        SessionBusyError,
         StoredRunEvent,
         build_run_contract,
         compare_run_contract,
@@ -291,6 +295,7 @@ if TYPE_CHECKING:
     from .tools.execution import DockerBackend
     from .tools.isolation import IsolationBackend, TempDirIsolation
     from .tools.pipeline import ToolExecution, ToolPipeline
+    from .tools.processes import BashProcessTool
     from .tools.registry import empty_tools, workspace_tools
     from .tools.search import ToolSearchPlugin
     from .tools.wrappers import metrics_wrapper, timeout_wrapper
@@ -374,6 +379,9 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "LocalExecutionBackend",
         "RemoteExecutionBackend",
         "ShellBackend",
+        "ShellProcess",
+        "ShellRead",
+        "ShellStarter",
     ),
     ".events": (
         "AssistantEvent",
@@ -524,6 +532,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "RunEventBatchStore",
         "RunLease",
         "RunLeaseConflictError",
+        "SessionBusyError",
         "RunLeaseStore",
         "RunRecord",
         "RunStore",
@@ -568,6 +577,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".tools.search": ("ToolSearchPlugin",),
     ".tools.builtin": ("BashTool",),
+    ".tools.processes": ("BashProcessTool",),
     ".tools.execution": ("DockerBackend",),
     ".tools": (
         "AskUserHandler",
@@ -685,6 +695,9 @@ __all__ = [
     "LocalExecutionBackend",
     "RemoteExecutionBackend",
     "ShellBackend",
+    "ShellProcess",
+    "ShellRead",
+    "ShellStarter",
     "DurabilityOptions",
     "InboxDelivery",
     "RunBudget",
@@ -771,6 +784,7 @@ __all__ = [
     "JsonValue",
     "GeneratedSubagentDefinition",
     "BashTool",
+    "BashProcessTool",
     "DockerBackend",
     "McpHttpServerConfig",
     "McpServerConfig",
@@ -858,6 +872,7 @@ __all__ = [
     "RunLease",
     "RunLeaseStore",
     "RunLeaseConflictError",
+    "SessionBusyError",
     "LeaseLostError",
     "PostgresRunStore",
     "RunRecord",

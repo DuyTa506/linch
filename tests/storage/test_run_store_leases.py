@@ -271,7 +271,7 @@ async def test_repeated_claim_write_release_clears_holder_local_state(lease_stor
     prefix = f"lease-cycle-{id(first)}-{time.monotonic_ns()}"
     for index in range(1000):
         run_id = f"{prefix}-{index}"
-        await first.create_run("session-1", id=run_id)
+        await first.create_run(f"session-{index}", id=run_id)
         lease = await first.claim(run_id, "cycle-owner", 30.0)
         await first.save_checkpoint(run_id, _checkpoint(str(index)), lease=lease)
         await first.release(lease)

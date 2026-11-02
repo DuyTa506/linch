@@ -7,7 +7,7 @@ their shell and filesystem from it, so swapping local↔sandbox is one change.
 
 from __future__ import annotations
 
-from .backend import ExecutionBackend, ShellBackend
+from .backend import ExecutionBackend, ShellBackend, ShellProcess, ShellRead, ShellStarter
 from .local import LocalExecutionBackend
 from .remote import RemoteExecutionBackend
 
@@ -16,4 +16,7 @@ __all__ = [
     "LocalExecutionBackend",
     "RemoteExecutionBackend",
     "ShellBackend",
+    "ShellProcess",
+    "ShellRead",
+    "ShellStarter",
 ]

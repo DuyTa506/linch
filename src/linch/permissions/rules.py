@@ -196,7 +196,19 @@ def match_tool_rule(rule: ToolRule, call_name: str, call_input: dict[str, Any]) 
         Whether the rule applies to the call.
     """
     if rule.tool != "*" and rule.tool != call_name:
-        return False
+        prefix = rule.tool[:-1]
+        server = prefix.removeprefix("mcp__").removesuffix("__")
+        if (
+            not rule.tool.startswith("mcp__")
+            or not rule.tool.endswith("__*")
+            or not server
+            or "__" in server
+            or server.startswith("_")
+            or server.endswith("_")
+            or re.fullmatch(r"[a-zA-Z0-9_-]+", server) is None
+            or not call_name.startswith(prefix)
+        ):
+            return False
     if rule.arg is None:
         return True
     if call_name != "Skill":

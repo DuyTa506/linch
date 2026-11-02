@@ -13,6 +13,7 @@ class FileReadTracker:
 
         self._files: set[str] = set()
         self._ranges: dict[str, list[tuple[int, int]]] = {}
+        self._stamps: dict[str, tuple[int, int]] = {}
 
     def add(self, path: str) -> None:
         """Record a path as read.
@@ -67,6 +68,7 @@ class FileReadTracker:
 
         self._files.clear()
         self._ranges.clear()
+        self._stamps.clear()
 
     def has_read(self, path: str) -> bool:
         """Return whether a whole file has been recorded as read.
@@ -130,3 +132,33 @@ class FileReadTracker:
         """
 
         return path in self._files
+
+    def is_current(self, path: str, stamp: tuple[int, int]) -> bool:
+        return self._stamps.get(path) == stamp
+
+    def set_stamp(self, path: str, stamp: tuple[int, int], *, reset: bool = False) -> None:
+        if reset and not self.is_current(path, stamp):
+            self._files.discard(path)
+            self.invalidate_ranges(path)
+        self._stamps[path] = stamp
+
+    def snapshot(self) -> dict[str, object]:
+        return {"files": self.files(), "stamps": {p: list(s) for p, s in self._stamps.items()}}
+
+    def restore(self, snapshot: object) -> None:
+        self.clear()
+        if not isinstance(snapshot, dict):
+            return
+        files, stamps = snapshot.get("files"), snapshot.get("stamps")
+        if isinstance(files, list):
+            self._files.update(path for path in files if isinstance(path, str))
+        if isinstance(stamps, dict):
+            for path, stamp in stamps.items():
+                if (
+                    isinstance(path, str)
+                    and isinstance(stamp, (list, tuple))
+                    and len(stamp) == 2
+                    and all(type(value) is int for value in stamp)
+                    and stamp[1] >= 0
+                ):
+                    self._stamps[path] = (stamp[0], stamp[1])

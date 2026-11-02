@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
-from .._version import get_version
 from ..catalog import (
     _snapshot,
     native_definitions,
@@ -373,11 +372,19 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         output_schema = getattr(tool, "output_schema", None)
         tool_schemas.append(
             {
-                **schema,
+                **{key: value for key, value in schema.items() if key != "description"},
                 # Scope is a security property even though providers do not
                 # receive it.  A write->read downgrade must invalidate resume.
                 "scope": getattr(tool, "scope", None),
                 "parallel": bool(getattr(tool, "parallel", True)),
+                **(
+                    {
+                        "max_processes": getattr(tool, "max_processes", None),
+                        "max_runtime_ms": getattr(tool, "max_runtime_ms", None),
+                    }
+                    if getattr(tool, "name", None) == "Bash"
+                    else {}
+                ),
                 **(
                     {
                         "output_schema": output_schema,
@@ -425,7 +432,6 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     )
 
     policies: dict[str, Any] = {
-        "runtime_version": get_version(),
         "model_call_accounting": _accounting_contract(),
         "compaction_skill_listing_fingerprint": _skill_listing_fingerprint(
             frozen_listing,

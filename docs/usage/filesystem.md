@@ -25,6 +25,12 @@ for event consumers; only the model-facing copy is trimmed. If the backend write
 fails, the original result remains inline and unchanged. For how this hooks into
 the tool execution chokepoint, see [./tools.md](./tools.md).
 
+Bash and MCP results already marked as truncated with a `stdout_path`,
+`stderr_path`, or `output_path` in their metadata are not offloaded again. Their
+existing spill remains the read-back source; automatic offloading does not copy
+it into the virtual filesystem. Shell spill files belong to the managed run;
+its cleanup removes them. If cleanup fails, retry session close. See [shell output policy](./extending.md#local-shell-environment-and-output).
+
 ---
 
 ## Explicit opt-in
@@ -147,6 +153,35 @@ the model can read just the relevant slice of a huge offloaded payload rather
 than pulling the whole thing back into context. `write_file` and `edit_file`
 also give the model a backend-scoped scratchpad for intermediate work that
 would otherwise bloat the conversation.
+
+---
+
+## Workspace `Read`, `Write`, and `Edit`
+
+The coding preset's uppercase workspace tools operate on local files under
+`ctx.cwd`; they are distinct from the virtual `read_file`, `write_file`, and
+`edit_file` tools above. Workspace paths that escape `cwd` are rejected.
+
+`ReadTool(max_read_bytes=10 * 1024 * 1024)` reads UTF-8 text, rejects binary files,
+and checks the whole file's size before reading it. Files over the default
+10 MiB cap fail with a suggestion to use `Grep`. The optional one-based `offset`
+and `limit` select returned lines (default 2,000); they do not bypass the byte
+cap or make the disk read windowed. A negative `limit` returns all remaining
+lines; zero uses the default. File I/O for these three tools runs off the event
+loop.
+
+When `ToolContext.file_read_tracker` is present, overwriting an existing file
+with `Write` requires a prior whole-file read and a current `(mtime_ns, size)`
+stamp. A partial read is insufficient; creating a new file needs no prior read.
+`Edit` requires a current stamp and read coverage for each match being changed.
+An external change, including a modification through Bash, returns an error
+asking for another `Read`. Successful writes and edits update the stamp; edits
+invalidate windowed read coverage. The stamp is a freshness check, not a lock
+against concurrent writers.
+
+Read stamps and whole-file read evidence survive durable resume. Partial line
+coverage does not; missing stamps require another read. A file changed since
+its last read is rejected after resume too.
 
 ---
 

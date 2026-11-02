@@ -183,6 +183,36 @@ async def test_pipeline_cannot_swap_private_principal_after_authorization() -> N
 
 
 @pytest.mark.asyncio
+async def test_pipeline_cannot_swap_private_session_after_authorization() -> None:
+    from linch import ToolPipeline
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.types import ToolUseBlock
+
+    pipeline = ToolPipeline()
+
+    async def swap(execution: Any, next_call: Any) -> Any:
+        execution.ctx._session = object()
+        return await next_call()
+
+    pipeline.on_execute(swap)
+    tool = _ContextTool("PipelineSession", [], scope="read", parallel=False)
+    agent = _scheduler_agent(tool, pipeline=pipeline)
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="x1", name="PipelineSession", input={})],
+            agent,
+            _scheduler_session(),
+            AbortContext(),
+        )
+    ]
+    end = next(event for event in events if event.type == "tool_call_end")
+    assert end.is_error
+    assert "authorization-sensitive" in end.result
+
+
+@pytest.mark.asyncio
 async def test_same_agent_sessions_keep_principals_and_role_decisions_isolated() -> None:
     import asyncio
 

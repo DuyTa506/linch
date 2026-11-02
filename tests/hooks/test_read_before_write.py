@@ -105,7 +105,7 @@ async def test_edit_requires_prior_read(tmp_path: Any, virtual: bool) -> None:
         ),
     )
     assert end.is_error
-    assert end.result == "Error: You must Read this file before editing it."
+    assert "Read" in end.result and "before editing" in end.result
     assert target.read_text(encoding="utf-8") == "hello"
 
 
@@ -165,7 +165,7 @@ async def test_virtual_edit_file_opt_out_keeps_existing_behavior(tmp_path: Any) 
     assert await backend.read("/note.txt") == "beta"
 
 
-async def test_cached_read_still_marks_file_as_read(tmp_path: Any) -> None:
+async def test_cached_read_without_stamp_requires_actual_read(tmp_path: Any) -> None:
     from linch import ToolCacheConfig
 
     target = tmp_path / "a.txt"
@@ -201,8 +201,9 @@ async def test_cached_read_still_marks_file_as_read(tmp_path: Any) -> None:
     events = await _collect(await agent.session())
     end = _tool_end(events, "Edit")
 
-    assert not end.is_error
-    assert target.read_text(encoding="utf-8") == "bye"
+    assert end.is_error
+    assert "Read" in end.result
+    assert target.read_text(encoding="utf-8") == "hello"
 
 
 # ── Fixed-finding regression tests ──────────────────────────────────────────
@@ -291,7 +292,7 @@ async def test_overwrite_requires_prior_read(tmp_path: Any, virtual: bool) -> No
     assert target.read_text(encoding="utf-8") == "hello"
 
 
-async def test_workspace_write_overwrite_allowed_by_default(tmp_path: Any) -> None:
+async def test_workspace_write_overwrite_requires_read_by_default(tmp_path: Any) -> None:
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
     end = await _run_tool_sequence(
@@ -302,8 +303,9 @@ async def test_workspace_write_overwrite_allowed_by_default(tmp_path: Any) -> No
             tool_input={"file_path": "a.txt", "content": "regenerated"},
         ),
     )
-    assert not end.is_error
-    assert target.read_text(encoding="utf-8") == "regenerated"
+    assert end.is_error
+    assert "Read" in end.result
+    assert target.read_text(encoding="utf-8") == "hello"
 
 
 async def test_workspace_write_then_edit_allowed(tmp_path: Any) -> None:
@@ -380,3 +382,42 @@ async def test_unrelated_hook_named_rbw_does_not_suppress_default(tmp_path: Any)
 
     agent = _agent(ScriptedProvider([TextTurn("done")]), tmp_path, hooks=[Impostor()])
     assert any(isinstance(hook, ReadBeforeWriteHook) for hook in agent.hooks)
+
+
+async def test_cached_full_read_cannot_promote_newer_partial_read(tmp_path: Any) -> None:
+    from linch import ToolCacheConfig
+
+    target = tmp_path / "a.txt"
+    target.write_text("old one\nold two\n", encoding="utf-8")
+    changed = "external one\nexternal two\n"
+
+    class ChangeAfterFirstRead:
+        seen = False
+
+        def on_post_tool_use(self, ctx: Any) -> None:
+            if ctx.tool_name == "Read" and not self.seen:
+                self.seen = True
+                target.write_text(changed, encoding="utf-8")
+
+    provider = _provider(
+        ToolUseTurn("Read", {"file_path": "a.txt"}, tool_id="r1"),
+        ToolUseTurn("Read", {"file_path": "a.txt", "offset": 2, "limit": 1}, tool_id="r2"),
+        ToolUseTurn("Read", {"file_path": "a.txt"}, tool_id="r3"),
+        ToolUseTurn("Write", {"file_path": "a.txt", "content": "unsafe overwrite"}, tool_id="w1"),
+    )
+    agent = _agent(provider, tmp_path, tool_cache=ToolCacheConfig())
+    agent.hooks.append(ChangeAfterFirstRead())
+    events = await _collect(await agent.session())
+    reads = [
+        event.result
+        for event in events
+        if event.type == "tool_call_end" and event.tool_name == "Read"
+    ]
+    assert reads == [
+        "1\told one\n2\told two\n3\t",
+        "2\texternal two",
+        "1\told one\n2\told two\n3\t",
+    ]
+    assert _tool_end(events, "Write").is_error
+    assert target.read_text(encoding="utf-8") == changed
+    await agent.close()

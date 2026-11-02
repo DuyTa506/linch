@@ -62,8 +62,12 @@ can initialize again; a borrowed pool remains the host's responsibility.
 
 Fresh PostgreSQL databases receive the current version-3 schema. Existing
 databases whose Linch schema metadata is missing, old, unknown, or inconsistent
-with the required shape are rejected without alteration; the adapters do not
-perform schema upgrades. Run checkpoints/contracts/events, inbox receipts,
+with the required shape are rejected without alteration; incompatible schemas
+are not upgraded. On a compatible version-3 schema, initialization installs the
+partial unique run-admission index. Duplicate nonterminal runs for one session
+make initialization fail with `ConfigError`; use the old deployment to resume
+or reconcile and mark failed those runs before upgrading stores/workers. A fresh
+database is not required for this index installation. Run checkpoints/contracts/events, inbox receipts,
 provider-view snapshots, and model-input snapshots use wire version 3.
 
 ## Store contracts
@@ -73,6 +77,19 @@ are durable before they return. Values returned by either built-in store are
 detached copies: mutating a returned record, message, task, checkpoint, event,
 or nested metadata must not mutate stored state. Store implementations must
 also detach mutable input graphs before retaining them.
+
+Both built-in run stores admit only one nonterminal run per session. A second
+run raises `SessionBusyError` with `session_id` and the existing `run_id`.
+`pending`, `running`, `waiting_permission`, and `suspended` all block admission;
+a terminal status frees it. Hosts queue new prompts or report busy. Cancelling
+an in-process task preserves the durable nonterminal row: resume it or reconcile
+and mark it failed. Use `session.abort()` and consume the final result when an
+abort should end the run. See [production wiring](./production.md).
+
+If a Postgres admission conflict disappears before it can be read, admission
+tries up to three times outside a caller-owned transaction, or once inside one.
+An unresolved conflict raises a chained error; retry the transaction or reconcile
+the competing run.
 
 ### Run values
 
@@ -712,7 +729,8 @@ a run-store lease cannot roll back an already completed external effect.
 
 ## Failure semantics
 
-Run-store and session-store writes are not silently retried by the store.
+Apart from the bounded admission retry described above, run-store and
+session-store writes are not silently retried by the store.
 Encoding failures, validation failures, and stale-lease failures are
 fail-closed: the target durable state remains unchanged. A transient database
 failure during an active durable run interrupts the attempt before terminal

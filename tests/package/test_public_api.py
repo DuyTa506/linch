@@ -312,3 +312,24 @@ def test_rag_names_are_public() -> None:
             register_rag_connector,
         )
     )
+
+
+def test_session_busy_error_is_public_and_carries_recovery_identity() -> None:
+    assert "SessionBusyError" in linch.__all__
+    error = linch.SessionBusyError("session", "active-run")
+    assert isinstance(error, linch.LinchError)
+    assert error.run_id == "active-run" and error.session_id == "session"
+    assert "active-run" in str(error)
+
+
+def test_optional_shell_process_capability_is_public() -> None:
+    from linch import ShellProcess, ShellRead, ShellStarter
+
+    assert {"ShellProcess", "ShellRead", "ShellStarter"} <= set(linch.__all__)
+    assert callable(ShellRead) and hasattr(ShellProcess, "wait") and hasattr(ShellStarter, "start")
+
+
+def test_bash_process_tool_is_public_and_in_workspace_preset() -> None:
+    assert "BashProcessTool" in linch.__all__
+    tool = linch.workspace_tools().get("BashProcess")
+    assert isinstance(tool, linch.BashProcessTool)

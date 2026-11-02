@@ -91,7 +91,17 @@ model-input snapshots, permission decisions, session/provider-view snapshots,
 events, and workflow run metadata require the exact current version. Missing,
 pre-3.0, and unknown versions are rejected; start a new run. Built-in Postgres
 stores create complete version-3 schemas and reject incompatible existing
-databases without upgrading them; use fresh databases.
+databases without upgrading them; use fresh databases for incompatible schemas.
+Compatible version-3 schemas can receive the run-admission index during
+initialization; duplicate nonterminal runs must be reconciled first. See
+[Run stores](usage/run-stores.md).
+
+Package versions are recorded for audit, not compared as resume identity.
+Top-level tool descriptions are also excluded from the run fingerprint; tool
+names, input/output schemas, scope, concurrency, and policy identities remain
+significant. Drain all active runs before upgrading to 3.1.0 because the
+Local/Docker backend policy versions changed to `2` and Bash schemas changed.
+An unchanged wire generation alone does not make those contracts resumable.
 
 Checkpoint wire fields are required, including nullable and extension-state
 fields. A valid current version does not waive contract fingerprints,

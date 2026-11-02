@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
-from .. import lifecycle
+from .. import _version, lifecycle
 from .._telemetry import start_run_span, store_call, trace_run
 from .._tracing import span_trace_id, trace_id_for
 from .._wire import UnsupportedWireVersionError
@@ -114,6 +114,7 @@ from .terminals import (
     _gate_retry_tail,
     _max_turns_tail,
     _stop_when_tail,
+    _TerminalCleanupError,
 )
 from .tool_batch import ToolBatchContext, run_tool_batch
 
@@ -177,7 +178,10 @@ async def run_loop(
                     id=run_id,
                     meta=run_meta_with_contract(
                         _build_run_contract(session, prompt, opts),
-                        meta={"trace_id": span_trace_id(run_span) or trace_id_for(run_id)},
+                        meta={
+                            "trace_id": span_trace_id(run_span) or trace_id_for(run_id),
+                            "runtime_version": _version.get_version(),
+                        },
                     ),
                     initial_checkpoint=RunCheckpoint(
                         phase="started",
@@ -1104,25 +1108,28 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ) as max_turn_events:
             async for event in max_turn_events:
                 yield event
+    except _TerminalCleanupError as exc:
+        raise exc.error from exc
     except AbortError:
-        async with aclosing(
-            _runtime.emit_abort_terminal(close_active_spans=_close_active_spans)
-        ) as abort_events:
-            async for event in abort_events:
-                yield event
-    except LeaseLostError as exc:
-        _runtime.lease_lost = exc
-        async with aclosing(
-            _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
-        ) as error_events:
-            async for event in error_events:
-                yield event
+        try:
+            async with aclosing(
+                _runtime.emit_abort_terminal(close_active_spans=_close_active_spans)
+            ) as abort_events:
+                async for event in abort_events:
+                    yield event
+        except _TerminalCleanupError as exc:
+            raise exc.error from exc
     except Exception as exc:
-        async with aclosing(
-            _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
-        ) as error_events:
-            async for event in error_events:
-                yield event
+        if isinstance(exc, LeaseLostError):
+            _runtime.lease_lost = exc
+        try:
+            async with aclosing(
+                _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
+            ) as error_events:
+                async for event in error_events:
+                    yield event
+        except _TerminalCleanupError as cleanup:
+            raise cleanup.error from cleanup
     finally:
         await _runtime.unbind_run()
         try:

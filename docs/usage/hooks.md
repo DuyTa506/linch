@@ -192,10 +192,12 @@ Notes:
   read or written this session — a successful `read_file`/`write_file` marks it.
   Workspace `Edit` is *not* covered here: the builtin `Edit` tool enforces its
   own read-before-edit gate (single source of truth, keeps its "You must Read…"
-  message), so this flag governs only the virtual gate. Whole-file overwrites
-  (`Write`/`write_file`) are allowed by default — that is their purpose — but a
-  host can opt into overwrite-gating of *existing* files via
-  `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed (`offset`/`limit`)
+  message), so this flag governs only the virtual gate. Workspace `Write`
+  independently requires a prior whole-file read and a current file stamp before
+  overwriting an existing file when a file-read tracker is present. Virtual
+  `write_file` permits overwrites by default; a host can gate existing-file
+  overwrites via `ReadBeforeWriteConfig(overwrite_tools=...)`.
+  A windowed (`offset`/`limit`)
   read does not unlock edits to the unseen parts of a file. A bare Linch 3.0
   `Agent` has no filesystem tools, no offload backend, and no read-before-write
   hook unless the embedder opts into them.

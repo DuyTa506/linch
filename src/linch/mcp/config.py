@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
+
+
+def _validate_timeout(timeout_s: float) -> None:
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
+        raise TypeError("timeout_s must be a finite positive number")
+    if timeout_s <= 0 or (isinstance(timeout_s, float) and not math.isfinite(timeout_s)):
+        raise ValueError("timeout_s must be a finite positive number")
 
 
 @dataclass(slots=True)
@@ -13,18 +21,25 @@ class McpStdioServerConfig:
         command: Executable used to launch the MCP server.
         args: Command-line arguments passed to the executable.
         env: Optional environment mapping supplied to the subprocess.
+        timeout_s: Per-tool-call SDK request read timeout in seconds (default 300).
 
     Attributes:
         type: Optional stdio transport marker.
         command: Server executable.
         args: Server command-line arguments.
         env: Optional subprocess environment.
+        timeout_s: Per-tool-call request read timeout in seconds.
     """
 
     type: Literal["stdio"] | None = None
     command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] | None = None
+    timeout_s: float = 300
+    trust_annotations: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_timeout(self.timeout_s)
 
 
 @dataclass(slots=True)
@@ -35,16 +50,23 @@ class McpHttpServerConfig:
         type: HTTP transport marker, fixed to ``"http"``.
         url: Streamable HTTP endpoint for the MCP server.
         headers: Optional HTTP headers sent with the connection.
+        timeout_s: Per-tool-call SDK request read timeout in seconds (default 300).
 
     Attributes:
         type: The HTTP transport marker.
         url: Streamable HTTP endpoint.
         headers: Optional connection headers.
+        timeout_s: Per-tool-call request read timeout in seconds.
     """
 
     type: Literal["http"] = "http"
     url: str = ""
     headers: dict[str, str] | None = None
+    timeout_s: float = 300
+    trust_annotations: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_timeout(self.timeout_s)
 
 
 McpServerConfig = McpStdioServerConfig | McpHttpServerConfig

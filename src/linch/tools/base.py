@@ -98,6 +98,7 @@ class ToolContext:
     run_id: str
     session_store: Any
     signal: Any = None
+    tool_timeout_s: float | None = field(default=None, kw_only=True)
     file_read_tracker: Any = None
     emit: Callable[[str, dict[str, Any] | None], None] | None = None
     """Runtime-owned progress sink.
@@ -135,6 +136,7 @@ class ToolContext:
     default path. Kept last for positional-constructor compatibility."""
 
     _trace_id: str | None = field(init=False, default=None, repr=False)
+    _session: Any = field(default=None, repr=False, kw_only=True)
     _run_config: Any = field(default=None, repr=False, kw_only=True)
     """Private originating configuration captured before detached execution."""
     _principal: Principal | None = field(default=None, kw_only=True, repr=False)

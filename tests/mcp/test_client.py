@@ -286,3 +286,48 @@ async def test_concurrent_close_and_cancelled_waiters_drain_every_server(monkeyp
     assert results[1] is None
     assert all(resource.aexit_calls == 1 for resource in [*sessions, *transports])
     await connection.close()
+
+
+@pytest.mark.parametrize("http", [False, True])
+@pytest.mark.parametrize("timeout_s", [None, 0.125])
+async def test_configured_request_timeout_reaches_each_transport(monkeypatch, http, timeout_s):
+    from mcp.types import CallToolResult, TextContent
+
+    from linch.mcp.config import McpHttpServerConfig, McpStdioServerConfig
+    from linch.tools.base import ToolContext
+
+    class TimeoutSession(ToolSession):
+        async def call_tool(self, name, args, *, read_timeout_seconds=None):
+            return CallToolResult(content=[TextContent(text=f"timeout:{read_timeout_seconds}")])
+
+    kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
+    config = (
+        McpHttpServerConfig(url="https://example.test/mcp", **kwargs)
+        if http
+        else McpStdioServerConfig(command="echo", **kwargs)
+    )
+    session = TimeoutSession(["test"])
+    transport = FakeTransport()
+    if http:
+        _patch_http(monkeypatch, transport, session)
+    else:
+        monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
+        monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+    connection = await mcp_client.connect_mcp_servers({"srv": config})
+    try:
+        result = await connection.tools[0].execute(
+            {}, ToolContext(cwd=".", session_id="s", run_id="r", session_store=None)
+        )
+        assert result.content == ("timeout:300" if timeout_s is None else "timeout:0.125")
+    finally:
+        await connection.close()
+
+
+@pytest.mark.parametrize("name", ["ops__prod", "_ops", "ops_", "ops..prod", ".ops", "ops."])
+async def test_ambiguous_normalized_server_name_rejected_before_connect(monkeypatch, name):
+    def unexpected_connect(*args, **kwargs):
+        pytest.fail("invalid names must be rejected before connecting")
+
+    monkeypatch.setattr(mcp_client, "_SessionOwner", unexpected_connect)
+    with pytest.raises(mcp_client.ConfigError, match="server name"):
+        await mcp_client.connect_mcp_servers({"valid": _stdio_cfg(), name: _stdio_cfg()})

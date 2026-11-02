@@ -34,6 +34,28 @@ By default, project skills live at `<cwd>/.linch/skills/<directory>/SKILL.md`. `
 
 Each file starts with YAML frontmatter and a markdown body. `description` is required; `name` defaults to the directory name. Optional fields include `arguments`, `argument_hint`, `when_to_use`, `allowed_tools`, `model`, `version`, and `disable_model_invocation`. The tool returns the substituted body to the model and records it for later context reinjection. Invalid definitions and symlinked skill directories are skipped. A skill with `disable_model_invocation: true` cannot be invoked by the model. A project override supplies its own instructions, so preserve the verdict format in its body if your host relies on it.
 
+## Bundled scripts
+
+Use `${SKILL_DIR}` in a skill body to refer to that skill's directory (`Skill.dir`).
+`${LINCH_SKILL_DIR}` also expands to the same directory. For example, a skill can
+instruct the model to run this command through `Bash`:
+
+```bash
+python "${SKILL_DIR}/scripts/x.py"
+```
+
+The skill author must quote paths that may contain spaces, as in this example.
+Substitution preserves the author's quotes; it does not add shell quoting,
+execute commands, or expand placeholders recursively in substituted values.
+Scripts run through the normal `Bash` tool and its permission checks, including
+when the skill directory is outside the workspace. Substitution grants no
+execution permission or workspace access; configure Bash rules and approval
+callbacks as described in [Permissions](./tools.md#permissions).
+
+The skill directory must be visible at the substituted path to the execution
+backend. For example, a Docker backend needs a mount exposing that directory at
+the same path; a host-only directory is not automatically available in a container.
+
 ---
 
 ## Reloading skills

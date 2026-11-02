@@ -528,6 +528,7 @@ async def _execute_one(
         run_id=execution_run_id,
         session_store=session.store,
         signal=signal,
+        tool_timeout_s=result_timeout_ms / 1000 if result_timeout_ms is not None else None,
         file_read_tracker=getattr(session, "file_read_tracker", None),
         emit=_report_progress,
         deps=_captured_call_deps(call, session),
@@ -538,6 +539,7 @@ async def _execute_one(
         idempotency_key=f"{execution_run_id}:{call.id}",
         _principal=call.principal,
         _run_config=call._run_config,
+        _session=session,
     )
     try:
         return await _execute_tool_attempts(
@@ -595,6 +597,7 @@ def _dispatch_execute(
             "execution",
             "idempotency_key",
             "principal",
+            "_session",
             "_run_config",
         )
     }
@@ -1192,7 +1195,7 @@ def _strip_background_hints(
     stripped: list[ToolUseBlock] = []
     for b in blocks:
         inp = b.input
-        if isinstance(inp, dict) and inp.get("run_in_background"):
+        if isinstance(inp, dict) and inp.get("run_in_background") and b.name != "Bash":
             bg_ids[b.id] = f"bgtool_{uuid4().hex[:8]}"
             stripped.append(
                 replace(b, input={k: v for k, v in inp.items() if k != "run_in_background"})

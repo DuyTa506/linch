@@ -123,7 +123,7 @@ class ReadBeforeWriteHook:
         """
 
         kind = self.config.read_tools.get(ctx.tool_name)
-        if kind is None:
+        if kind is None or (ctx.tool_name == "Read" and kind == "workspace"):
             return None
         result = ctx.result
         if result is None or getattr(result, "is_error", False):

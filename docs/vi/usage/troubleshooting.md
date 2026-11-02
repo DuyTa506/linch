@@ -78,6 +78,20 @@ phụ thuộc vào provider/SDK, nên không có thông báo Linch cố định 
 `AnthropicProviderOptions(api_key=..., base_url=...)` chuyển tiếp các tùy chọn
 đó cho client tương ứng. Xem [cấu hình provider](./providers.md).
 
+## `SessionBusyError` và tiếp nhận run
+
+`SessionBusyError` cung cấp `session_id` và `run_id` hiện có. Run ở trạng thái
+`pending`, `running`, `waiting_permission` hoặc `suspended` sở hữu session.
+Hãy xếp hàng prompt mới hoặc báo bận. Sau khi task trong process bị hủy, resume
+run đó hoặc đối soát tác động bên ngoài rồi gọi
+`run_store.mark_failed(run_id, error={"message": ...})`; không có bộ thu hồi run sau sự cố.
+Khi client ngắt kết nối, phát tín hiệu `session.abort()` rồi tiếp tục tiêu thụ tới
+`ResultEvent` cuối cùng để lưu trạng thái aborted.
+
+| Loại | Thông báo | Mã nguồn | Nguyên nhân | Cách khắc phục |
+|---|---|---|---|---|
+| Nguyên văn | `Cannot install run admission index: duplicate nonterminal runs exist for a session; resume or mark_failed those runs before restarting.` | `src/linch/run_stores/postgres.py` | Cơ sở dữ liệu phiên bản 3 tương thích chứa các run chưa kết thúc chồng lấn khi cài index tiếp nhận. | Đối soát các run bằng bản triển khai cũ trước khi nâng cấp; store mới không thể khởi tạo xong cho tới khi xử lý các hàng trùng lặp. |
+
 ## `RunContractMismatchError` và `ConfigError` khi resume
 
 | Loại | Thông báo | Mã nguồn | Nguyên nhân | Cách khắc phục |
@@ -91,4 +105,10 @@ sách. Chỉ thay đổi dấu vân tay đã lưu không thể sửa sự không
 so sánh còn tính lại dấu vân tay từ nội dung dữ liệu. Hàm hỗ trợ khi được gọi
 trực tiếp phát sinh `RunContractMismatchError`; luồng resume session bọc lỗi
 này trong `ConfigError`. Phiên bản định dạng truyền dữ liệu đã lưu bị thiếu
-hoặc cũ là một nhóm lỗi riêng. Xem [kho lưu trữ run bền vững](./run-stores.md).
+hoặc cũ là một nhóm lỗi riêng. Chỉ thay phiên bản package hoặc mô tả cấp cao nhất
+của tool không làm mất hiệu lực hợp đồng còn lại đang khớp. Với 3.1.0, hãy chờ
+tất cả run đang hoạt động kết thúc trước triển khai: phiên bản chính sách
+Local/Docker là `2`, và schema Bash đã đổi. Các thay đổi đó vẫn từ chối hợp đồng
+cũ dù wire generation không đổi. Xem
+[hướng dẫn nâng cấp production](./production.md#4-resume-sau-khi-khởi-động-lại) và
+[kho lưu trữ run bền vững](./run-stores.md).

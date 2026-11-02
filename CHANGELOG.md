@@ -5,6 +5,75 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## 3.1.0 — 2026-11-02
+
+This MINOR release adds execution capabilities with the behavior changes below.
+Review host policy and drain all active runs before upgrading.
+
+- Managed process IDs are ephemeral UUID-derived handles; finished handles are bounded to 128. Cleanup precedes durable terminal status and failures preserve admission for retry. Execution limits participate in resume identity.
+- Shell and MCP spills use asynchronous, symlink-safe mode-0600 files. MCP reconnect has bounded attempts and connection timeouts; changed tool lists require a new session.
+- Postgres admission bounds retries when a conflicting run disappears before it can be read.
+
+
+- **Managed shell processes.** With a live-process backend and available process
+  capacity, Bash `timeout_ms` returns output and a process ID while the command
+  keeps running; follow it with `BashProcess` wait/status/kill. Explicit
+  `run_in_background` returns immediately. At capacity, a still-running command
+  is killed when the call returns, with partial output as an error. Without live
+  handles, Bash delegates timeout handling to the backend's `run` method;
+  Local/Docker kill on timeout. The default is four running processes and a
+  30-minute hard runtime limit. Handles are run-owned and process-local: run
+  completion cleans up process groups and shell spill files. Cleanup failures
+  keep the session active for a close retry; Docker removal is best effort. A
+  restart loses handles, and a hard worker kill can leave children behind. Backends implementing only `run` remain
+  supported as-is; `ShellStarter`/`ShellProcess` is an optional capability.
+- **Local shell environment.** `LocalBackend` now forwards only PATH, HOME, TERM,
+  LANG, LC_ALL, LC_CTYPE, USER, SHELL, and TMPDIR by default. Pass other values
+  explicitly through `env` or `forward_env`. When either is non-empty, durable
+  runs need a stable secret `resume_fingerprint_key` to key environment-value fingerprints.
+  This environment hygiene does not sandbox local commands. Shell stdin is
+  closed, and timeout/abort cleanup preserves bounded partial output.
+- **MCP trust and permissions.** Server annotations are ignored by default;
+  tools have `exec` scope, run serially, and ask in `default` and `acceptEdits`
+  modes. Hosts can explicitly allow a server with
+  `ToolRule("mcp__server__*", "allow")`, or vouch for its annotations with
+  `trust_annotations=True` to allow declared read-only tools to run as parallel
+  reads. Hints remain server claims; trusted false claims can grant unsafe
+  read authority. Calls observe abort and a per-call timeout configured on the
+  server (300 seconds by default). Lost connections trigger bounded reconnect
+  attempts; the failed call is never replayed, and removed tools report errors.
+- **Run cancellation and admission.** A second nonterminal run on a session
+  raises `SessionBusyError` with the existing run ID; `suspended` runs also
+  block admission. Hosts must queue prompts or report busy. Cancelling an
+  in-process task leaves its durable session busy until the host resumes that
+  run or reconciles side effects and calls `mark_failed`. On client disconnect,
+  use `session.abort()` and continue consuming through the final result.
+  Postgres installs a partial unique admission index on compatible version-3
+  schemas; reconcile duplicate nonterminal runs with the old deployment before
+  upgrading, or initialization fails.
+  Workers default to 32 concurrent queue tasks per process (minimum two).
+- **Docker defaults.** Commands now receive `memory="2g"`, `cpus=2`,
+  `pids_limit=512`, `cap_drop=("ALL",)`, and `no_new_privileges=True`. Review
+  workloads and set individual controls to `None` when disabling them is intended.
+- **File freshness.** With a file-read tracker, overwriting an existing file
+  with workspace `Write` requires a prior whole-file read and a current
+  modification-time/size stamp. `Edit` also rejects externally changed files;
+  re-read before retrying. `Read` rejects binary files and files above its
+  default 10 MiB limit; use Grep to narrow oversized inputs.
+- **Bounded output and skills.** Shell output retains a bounded head/tail;
+  oversized shell and MCP text can spill under `.linch/output/` for inspection.
+  Spilling is best effort and discards files above 64 MiB. MCP embedded text
+  resources retain their text. Skill bodies substitute `${SKILL_DIR}` for
+  bundled scripts run through Bash and its normal permissions; quote paths and
+  ensure the directory is visible to the execution backend.
+- **Upgrade and resume.** Drain to zero active runs before installing 3.1.0:
+  Local/Docker backend policy versions are now `2`, and Bash tool schemas have
+  changed. Package-version-only and top-level tool-description-only changes
+  no longer invalidate otherwise matching resume contracts. Wire version 3,
+  tool names/input and output schemas/scope/concurrency, permission policy,
+  and execution backend identity still gate resume. Compatible version-3
+  databases can be reused; this release does not require a fresh database.
+
 ## 3.0.2 — 2026-11-02
 
 - Add the `build-agent-with-linch` skill, `linch skill install`, and Vietnamese

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
+from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -19,6 +20,12 @@ from .naming import normalize_name_for_mcp
 from .tool import make_mcp_tool
 
 VERSION = "0.1.0"
+_RECONNECT_INITIAL_DELAY = 0.5
+_RECONNECT_MAX_DELAY = 30.0
+_RECONNECT_ATTEMPTS = 5
+_RECONNECT_ATTEMPT_TIMEOUT_S = 30.0
+_CLEANUP_TIMEOUT_S = 5.0
+_CONNECTION_CLOSED = -32000
 
 
 @dataclass(slots=True)
@@ -31,6 +38,7 @@ class _OpenSession:
     # HTTP only: mcp closes the httpx client only when it created it itself, so
     # the one we build to carry `headers` is ours to release.
     http_client: Any = None
+    lost: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def aclose(self) -> None:
         """Release everything entered so far, newest first, swallowing failures.
@@ -43,9 +51,36 @@ class _OpenSession:
             if resource is None:
                 continue
             try:
-                await resource.__aexit__(None, None, None)
+                async with asyncio.timeout(_CLEANUP_TIMEOUT_S):
+                    await resource.__aexit__(None, None, None)
             except (Exception, asyncio.CancelledError):
                 pass
+
+
+class _LossAwareRead:
+    def __init__(self, stream: Any, lost: asyncio.Event) -> None:
+        self._stream = stream
+        self._lost = lost
+
+    def __aiter__(self) -> _LossAwareRead:
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return await self._stream.__anext__()
+        except BaseException:
+            self._lost.set()
+            raise
+
+    async def __aenter__(self) -> _LossAwareRead:
+        await self._stream.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: object) -> object:
+        return await self._stream.__aexit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
 
 
 async def _wait_for_cleanup(task: asyncio.Task[None]) -> None:
@@ -67,8 +102,12 @@ class _SessionOwner:
     def __init__(self, name: str, config: McpServerConfig) -> None:
         self._ready = asyncio.Event()
         self._close_requested = asyncio.Event()
+        self._lost = asyncio.Event()
         self._started = False
         self._error: BaseException | None = None
+        self._unavailable = False
+        self._reconnecting = False
+        self._timeout_s = getattr(config, "timeout_s", 300)
         self.session: Any = None
         self._task = asyncio.create_task(self._run(name, config), name=f"mcp:{name}")
 
@@ -78,20 +117,69 @@ class _SessionOwner:
             self._started = True
             if self._close_requested.is_set():
                 return
-            try:
-                opened = await _connect_one(name, config)
-                self.session = opened.session
-                self._ready.set()
-                await self._close_requested.wait()
-            finally:
-                if opened is not None:
-                    await opened.aclose()
-        except BaseException as exc:
-            self._error = exc
-        finally:
-            # On startup failure, readiness means all partial resources have
-            # already been released, and the connecting task can raise safely.
+            opened = await _connect_one(name, config)
+            self.session = opened.session
+            self._lost = opened.lost
             self._ready.set()
+            while not self._close_requested.is_set():
+                await self._lost.wait()
+                self._lost.clear()
+                if self._close_requested.is_set():
+                    break
+                self.session = None
+                await opened.aclose()
+                opened = None
+                self._reconnecting = True
+                for attempt in range(_RECONNECT_ATTEMPTS):
+                    delay = min(_RECONNECT_MAX_DELAY, _RECONNECT_INITIAL_DELAY * 2**attempt)
+                    try:
+                        await asyncio.wait_for(self._close_requested.wait(), delay)
+                        return
+                    except TimeoutError:
+                        pass
+                    try:
+                        async with asyncio.timeout(_RECONNECT_ATTEMPT_TIMEOUT_S):
+                            opened = await _connect_one(name, config)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        continue
+                    self.session = opened.session
+                    self._lost = opened.lost
+                    self._reconnecting = False
+                    break
+                else:
+                    self._unavailable = True
+                    return
+        except BaseException as exc:
+            if not self._close_requested.is_set():
+                self._error = exc
+        finally:
+            self.session = None
+            self._reconnecting = False
+            if opened is not None:
+                await opened.aclose()
+            self._ready.set()
+
+    @property
+    def unavailable(self) -> bool:
+        return self._unavailable
+
+    def _mark_lost(self, session: Any) -> None:
+        if self.session is session:
+            self.session = None
+            self._lost.set()
+
+    async def call_tool(self, name: str, args: dict, signal: object) -> object:
+        session = self.session
+        if session is None:
+            raise RuntimeError("MCP server unavailable")
+        try:
+            return await _make_call_tool(session, self._timeout_s)(name, args, signal)
+        except Exception as exc:
+            if _is_connection_loss(exc):
+                self._mark_lost(session)
+            raise
 
     async def wait_ready(self) -> None:
         await self._ready.wait()
@@ -101,10 +189,12 @@ class _SessionOwner:
     async def aclose(self) -> None:
         if not self._close_requested.is_set():
             self._close_requested.set()
-            if self._started and not self._ready.is_set():
-                # An incomplete handshake cannot wait for the normal close
-                # event. Cancel once; further waiter cancellations never reach
-                # the owner while it unwinds transport/session contexts.
+            self._lost.set()
+            if (
+                self._started
+                and not self._task.done()
+                and (not self._ready.is_set() or self._reconnecting)
+            ):
                 self._task.cancel()
         await _wait_for_cleanup(self._task)
 
@@ -170,6 +260,10 @@ async def connect_mcp_servers(
         if name.strip() == "":
             raise ConfigError("MCP server name must be non-empty")
         key = normalize_name_for_mcp(name)
+        if "__" in key or key.startswith("_") or key.endswith("_"):
+            raise ConfigError(
+                f"MCP server name is ambiguous after normalization: '{name}' -> '{key}'"
+            )
         if key in normalized:
             raise ConfigError(f"MCP server names collide after normalization: '{name}' -> '{key}'")
         normalized.add(key)
@@ -189,7 +283,16 @@ async def connect_mcp_servers(
             await owner.wait_ready()
             session = opened[-1].session
             result = await session.list_tools()
-            mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
+            call_tool = opened[-1].call_tool
+            mcp_tools = [
+                make_mcp_tool(
+                    name,
+                    t,
+                    call_tool,
+                    trust_annotations=getattr(config, "trust_annotations", False),
+                )
+                for t in result.tools
+            ]
             for tool in mcp_tools:
                 tool_name = str(getattr(tool, "name", ""))
                 if tool_name in tool_names:
@@ -208,6 +311,16 @@ async def connect_mcp_servers(
             raise ConfigError(f"Failed to connect MCP server(s): {'; '.join(failures)}") from exc
 
     return McpConnection(tools=tools, sessions=opened)
+
+
+def _is_connection_loss(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return False
+    if getattr(exc, "code", None) == _CONNECTION_CLOSED:
+        return True
+    return isinstance(
+        exc, (ConnectionError, OSError, BrokenResourceError, ClosedResourceError, EndOfStream)
+    )
 
 
 async def _connect_one(name: str, config: McpServerConfig) -> _OpenSession:
@@ -261,7 +374,7 @@ async def _start_session(opened: _OpenSession, read: Any, write: Any) -> _OpenSe
         The same `_OpenSession`, with `session` set to the live session.
     """
     try:
-        session_ctx = ClientSession(read, write)
+        session_ctx = ClientSession(cast(Any, _LossAwareRead(read, opened.lost)), write)
         opened.session = await session_ctx.__aenter__()
         opened.session_context = session_ctx
         await opened.session.initialize()
@@ -271,11 +384,28 @@ async def _start_session(opened: _OpenSession, read: Any, write: Any) -> _OpenSe
         raise
 
 
-def _make_call_tool(session: ClientSession):
+def _make_call_tool(session: ClientSession, timeout_s: float = 300):
+    async def _drain(*tasks: asyncio.Task[Any]) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _call(name: str, args: dict, signal: object) -> object:
         from ..abort import throw_if_aborted
 
         throw_if_aborted(cast(Any, signal))
-        return await session.call_tool(name, args or {})
+        if signal is None:
+            return await session.call_tool(name, args or {}, read_timeout_seconds=timeout_s)
+        call = asyncio.create_task(
+            session.call_tool(name, args or {}, read_timeout_seconds=timeout_s)
+        )
+        aborted = asyncio.create_task(cast(Any, signal).wait())
+        try:
+            await asyncio.wait((call, aborted), return_when=asyncio.FIRST_COMPLETED)
+            throw_if_aborted(cast(Any, signal))
+            return await call
+        finally:
+            await _wait_for_cleanup(asyncio.create_task(_drain(call, aborted)))
 
     return _call

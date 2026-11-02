@@ -531,6 +531,54 @@ The subprocess/shell half of an execution world.
 
 Usage: [extending](extending.md).
 
+### `linch.ShellProcess`
+
+Kind: Class.
+
+```python
+from linch import ShellProcess
+```
+
+```text
+Not instantiable (Protocol); implement its documented methods and attributes.
+```
+
+Optional live shell handle; timed waits do not terminate the command.
+
+Usage: [extending](extending.md).
+
+### `linch.ShellRead`
+
+Kind: Class.
+
+```python
+from linch import ShellRead
+```
+
+```text
+ShellRead(stdout: str = '', stderr: str = '', lossy: bool = False, stdout_path: str | None = None, stderr_path: str | None = None)
+```
+
+New stdout/stderr since the previous read; lossy marks dropped bytes.
+
+Usage: [extending](extending.md).
+
+### `linch.ShellStarter`
+
+Kind: Class.
+
+```python
+from linch import ShellStarter
+```
+
+```text
+Not instantiable (Protocol); implement its documented methods and attributes.
+```
+
+Optional shell capability, independent of the run-only backend contract.
+
+Usage: [extending](extending.md).
+
 ### `linch.DurabilityOptions`
 
 Kind: Class.
@@ -1836,12 +1884,28 @@ from linch import BashTool
 ```
 
 ```text
-BashTool(*, execution: Any=None) -> None
+BashTool(*, execution: Any=None, max_processes: int=4, max_runtime_ms: int=1800000) -> None
 ```
 
 Run a shell command through the configured execution backend.
 
 Usage: [extending](extending.md).
+
+### `linch.BashProcessTool`
+
+Kind: Class.
+
+```python
+from linch import BashProcessTool
+```
+
+```text
+BashProcessTool()
+```
+
+Inspect or stop a command already approved through Bash.
+
+Usage: [tools](tools.md).
 
 ### `linch.DockerBackend`
 
@@ -1852,7 +1916,7 @@ from linch import DockerBackend
 ```
 
 ```text
-DockerBackend(*, image: str='python:3.12-slim', docker_path: str | None=None, network: str | None=None, workspace_mount: Literal['rw', 'ro']='rw', read_only_root: bool=False, tmpfs: tuple[str, ...]=(), env: dict[str, str] | None=None, forward_env: tuple[str, ...]=(), user: str | None=None, resume_fingerprint_key: bytes | None=None) -> None
+DockerBackend(*, image: str='python:3.12-slim', docker_path: str | None=None, network: str | None=None, workspace_mount: Literal['rw', 'ro']='rw', read_only_root: bool=False, tmpfs: tuple[str, ...]=(), env: dict[str, str] | None=None, forward_env: tuple[str, ...]=(), user: str | None=None, memory: str | None='2g', cpus: float | None=2, pids_limit: int | None=512, cap_drop: tuple[str, ...] | None=('ALL',), no_new_privileges: bool | None=True, resume_fingerprint_key: bytes | None=None) -> None
 ```
 
 Runs commands inside a Docker container via ``docker run --rm``.
@@ -1868,10 +1932,12 @@ from linch import McpHttpServerConfig
 ```
 
 ```text
-McpHttpServerConfig(type: Literal['http'] = 'http', url: str = '', headers: dict[str, str] | None = None)
+McpHttpServerConfig(type: Literal['http'] = 'http', url: str = '', headers: dict[str, str] | None = None, timeout_s: float = 300, trust_annotations: bool = False)
 ```
 
 Configure an MCP server reached through streamable HTTP.
+
+Usage: [tools](tools.md).
 
 ### `linch.McpServerConfig`
 
@@ -1896,7 +1962,7 @@ from linch import McpStdioServerConfig
 ```
 
 ```text
-McpStdioServerConfig(type: Literal['stdio'] | None = None, command: str = '', args: list[str] = <factory>, env: dict[str, str] | None = None)
+McpStdioServerConfig(type: Literal['stdio'] | None = None, command: str = '', args: list[str] = <factory>, env: dict[str, str] | None = None, timeout_s: float = 300, trust_annotations: bool = False)
 ```
 
 Configure an MCP server launched through a stdio subprocess.
@@ -2302,7 +2368,7 @@ from linch import Session
 ```
 
 ```text
-Session(id: str, created_at: str, meta: dict[str, object], agent: Agent, store: SessionStore, session_log: SessionLog = <factory>, _extensions: dict[str, Any] = <factory>, _active: bool = False, _closed: bool = False, _lifecycle_state: str = _OPEN, _close_task: asyncio.Task[None] | None = None, _idle: asyncio.Event = <factory>, _telemetry_run: Any = None, active_run_id: str | None = None, _active_principal: Principal | None = None, _run_bindings: dict[str, Any] = <factory>, _config_seed: Any = None, _active_gen: Any = None, _active_inner: Any = None, _active_started: bool = False, _event_journal: Any = None, _model_call_ledger: Any = None, _last_seq: int = 0, _seq_cacheable: bool = True, _last_prompt_cache_model: str | None = None, _last_prompt_cache_tool_sig: Any = None, _catalog_generation: int | None = None, _catalog_revision_seen: int | None = None, alignment_queue: list[AlignmentEntry] = <factory>, interrupt_requested: bool = False, last_usage: Usage | None = None, last_compaction_info: dict[str, Any] | None = None, active_budget: Any = None, inherited_budget: Any = None, compaction_retry_used_this_turn: bool = False, active_model: str | None = None, fallback_index: int = 0, pending_skill_overlay: SkillOverlay | None = None, current_turn_allowed_tools: list[str] | None = None, current_turn_permission_decisions: dict[str, dict] = <factory>, invoked_skills: list[InvokedSkillRecord] = <factory>, skills_loaded_emitted: bool = False, tools_override: ToolRegistry | None = None, system_blocks_override: Any = None, file_read_tracker: FileReadTracker = <factory>, _abort_controller: AbortContext = <factory>, run_deps: Any = None, filesystem: Any = None, workers: dict[str, Any] = <factory>, pending_child_events: list[Event] = <factory>, pending_notifications: list[Message] = <factory>, background_tasks: list[Any] = <factory>, mailbox_address: str | None = None, cwd_override: str | None = None)
+Session(id: str, created_at: str, meta: dict[str, object], agent: Agent, store: SessionStore, session_log: SessionLog = <factory>, _extensions: dict[str, Any] = <factory>, _active: bool = False, _closed: bool = False, _lifecycle_state: str = _OPEN, _close_task: asyncio.Task[None] | None = None, _idle: asyncio.Event = <factory>, _telemetry_run: Any = None, active_run_id: str | None = None, _active_principal: Principal | None = None, _run_bindings: dict[str, Any] = <factory>, _config_seed: Any = None, _active_gen: Any = None, _active_inner: Any = None, _active_started: bool = False, _event_journal: Any = None, _model_call_ledger: Any = None, _last_seq: int = 0, _seq_cacheable: bool = True, _last_prompt_cache_model: str | None = None, _last_prompt_cache_tool_sig: Any = None, _catalog_generation: int | None = None, _catalog_revision_seen: int | None = None, alignment_queue: list[AlignmentEntry] = <factory>, interrupt_requested: bool = False, last_usage: Usage | None = None, last_compaction_info: dict[str, Any] | None = None, active_budget: Any = None, inherited_budget: Any = None, compaction_retry_used_this_turn: bool = False, active_model: str | None = None, fallback_index: int = 0, pending_skill_overlay: SkillOverlay | None = None, current_turn_allowed_tools: list[str] | None = None, current_turn_permission_decisions: dict[str, dict] = <factory>, invoked_skills: list[InvokedSkillRecord] = <factory>, skills_loaded_emitted: bool = False, tools_override: ToolRegistry | None = None, system_blocks_override: Any = None, file_read_tracker: FileReadTracker = <factory>, _abort_controller: AbortContext = <factory>, run_deps: Any = None, filesystem: Any = None, workers: dict[str, Any] = <factory>, pending_child_events: list[Event] = <factory>, pending_notifications: list[Message] = <factory>, _processes: Any = None, background_tasks: list[Any] = <factory>, mailbox_address: str | None = None, cwd_override: str | None = None)
 ```
 
 Hold one conversation and its durable append-only message log.
@@ -2468,7 +2534,7 @@ from linch import ToolContext
 ```
 
 ```text
-ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, _run_config: Any = None, _principal: Principal | None = None)
+ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, tool_timeout_s: float | None = None, _session: Any = None, _run_config: Any = None, _principal: Principal | None = None)
 ```
 
 Provide runtime capabilities to a tool invocation.
@@ -2536,8 +2602,6 @@ Inherited initializer: Exception.__init__(self, /, *args, **kwargs)
 ```
 
 A tool failed while executing an otherwise valid tool call.
-
-Usage: [tools](tools.md).
 
 ### `linch.ToolTimeoutError`
 
@@ -3184,6 +3248,22 @@ Inherited initializer: RuntimeError.__init__(self, /, *args, **kwargs)
 Raised when a run has an unexpired lease owned by another worker.
 
 Usage: [run-stores](run-stores.md).
+
+### `linch.SessionBusyError`
+
+Kind: Class.
+
+```python
+from linch import SessionBusyError
+```
+
+```text
+SessionBusyError(session_id: str, run_id: str) -> None
+```
+
+Another nonterminal run owns this session; resume or fail ``run_id``.
+
+Usage: [production](production.md).
 
 ### `linch.LeaseLostError`
 

@@ -6,7 +6,7 @@
 
 > Thuộc [hướng dẫn kiến trúc Linch](./README.md).
 
-Trang này mô tả runtime Linch 3.0 hiện tại. Kernel không có giao diện và
+Trang này mô tả runtime Linch 3.1 hiện tại. Kernel không có giao diện và
 không phụ thuộc provider; host cung cấp vòng đời tiến trình, lớp truyền tải
 HTTP hoặc RPC, các dịch vụ tenant và OpenTelemetry SDK.
 
@@ -112,6 +112,26 @@ cho kiểm thử và phát triển. `PostgresRunStore` nằm trong `run_stores/p
 và dùng extra Postgres. Nó quản lý ba bảng liên quan:
 `runs` (trạng thái, checkpoint, các cột lease và số thứ tự event cuối cùng),
 `run_events` (duy nhất theo `(run_id, seq)`) và `model_input_snapshots`.
+
+Unique index có điều kiện trên `runs(session_id)` chỉ nhận một run chưa kết thúc:
+`pending`, `running`, `waiting_permission` và `suspended` đều chặn run mới bằng
+`SessionBusyError`. Store trong bộ nhớ áp dụng cùng quy tắc. Khởi tạo cài index
+trên schema phiên bản 3 tương thích và từ chối các hàng chưa kết thúc trùng lặp;
+host đối soát chúng bằng bản triển khai cũ trước khi nâng cấp. Mức đồng thời task
+hàng đợi worker mặc định là 32 mỗi process (tối thiểu hai), độc lập với giới hạn
+hàng đợi toàn cụm. Hủy task giữ hàng chưa kết thúc để resume; `session.abort()`
+rồi tiêu thụ kết quả cuối ghi nhận run aborted và giải phóng quyền tiếp nhận.
+Thực thi trong process không có bộ thu hồi run bị gián đoạn.
+
+Nhóm tiến trình và file spill của run được cleanup trước khi ghi trạng thái kết
+thúc bền vững (`completed`, `aborted` hoặc `failed`). Lỗi cleanup được báo ra,
+giữ admission chưa kết thúc và giữ `_active` để thử lại. `waiting_permission`
+và `suspended` vẫn có thể resume.
+
+Định danh resume loại phiên bản package và mô tả cấp cao nhất của tool, nhưng
+wire generation, schema, scope/mức đồng thời và chính sách thực thi vẫn quan
+trọng. Phiên bản chính sách backend `2` và thay đổi schema Bash trong 3.1.0 yêu
+cầu chờ mọi run đang hoạt động kết thúc trước triển khai, kể cả run suspended.
 
 ```mermaid
 stateDiagram-v2

@@ -425,3 +425,188 @@ async def test_policy_adapter_requires_host_stable_identity(kind: str) -> None:
     agent = _agent(run_store=InMemoryRunStore(), session_store=InMemorySessionStore(), hooks=[hook])
     with pytest.raises(ConfigError, match=message):
         _ = [event async for event in (await agent.session()).run("go")]
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["frozen_prefix", "tools_override", "system_blocks_override", "request_catalog"],
+)
+async def test_bash_description_edit_does_not_block_resume(path: str, monkeypatch: Any) -> None:
+    """A model-facing description edit is replay-irrelevant on every catalog path."""
+    from linch.catalog import snapshot_enabled, snapshot_for, sync_catalog
+    from linch.profiles import _base_run_config
+    from linch.tools.builtin import BashTool
+    from linch.tools.search import ToolSearchPlugin
+    from linch.types import SystemBlock
+
+    run_store = InMemoryRunStore()
+    session_store = InMemorySessionStore()
+
+    async def prepare(agent: Any, *, session_id: str, seed_prefix: bool = False) -> Any:
+        if path == "request_catalog":
+            await agent.tool_search.dispose()
+            await agent.use(ToolSearchPlugin(max_tools=0))
+        session = await agent.session(id=session_id)
+        if path == "tools_override":
+            session.tools_override = workspace_tools()
+        elif path == "system_blocks_override":
+            session.system_blocks_override = [SystemBlock(text="explicit system")]
+        config = _base_run_config(session)
+        if path == "frozen_prefix":
+            assert snapshot_enabled(session, config)
+            if seed_prefix:
+                await sync_catalog(session, config, None)
+            assert snapshot_for(session) is not None
+        elif path != "frozen_prefix":
+            assert not snapshot_enabled(session, config)
+            assert snapshot_for(session) is None
+        return session
+
+    first_agent = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=workspace_tools(),
+    )
+    first_session = await prepare(first_agent, session_id="s1", seed_prefix=True)
+    iterator = first_session.run("go").__aiter__()
+    run_id = None
+    while True:
+        event = await iterator.__anext__()
+        if event.type == "system":
+            run_id = event.run_id
+        elif event.type == "user":
+            assert run_id is not None
+            break
+    await iterator.aclose()
+    assert run_id is not None
+    stored_before = await run_store.load_run(run_id)
+    assert stored_before is not None and stored_before.checkpoint is not None, stored_before
+
+    monkeypatch.setattr(BashTool, "description", "Changed wording after the run started.")
+    resumed_agent = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=workspace_tools(),
+    )
+    resumed_session = await prepare(resumed_agent, session_id="s1")
+    events = [event async for event in resumed_session.resume(run_id)]
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success", [
+        getattr(event, "error", event) for event in events if event.type == "error"
+    ]
+
+
+async def test_runtime_version_is_audit_metadata_only(monkeypatch: Any) -> None:
+    import linch._version as version_module
+    from linch.run_store import run_contract_from_meta
+
+    monkeypatch.setattr(version_module, "get_version", lambda: "3.0.2")
+    run_store = InMemoryRunStore()
+    session_store = InMemorySessionStore()
+    first = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=workspace_tools(),
+    )
+    run_id = await _interrupt_after_first_event(await first.session(id="version"))
+    original = await run_store.load_run(run_id)
+    assert original is not None
+    assert original.meta["runtime_version"] == "3.0.2"
+    assert "runtime_version" not in run_contract_from_meta(original.meta).payload["policies"]
+
+    monkeypatch.setattr(version_module, "get_version", lambda: "3.0.3")
+    resumed_provider = ScriptedProvider([TextTurn("resumed"), TextTurn("new run")])
+    resumed = make_agent(
+        resumed_provider,
+        run_store=run_store,
+        session_store=session_store,
+        tools=workspace_tools(),
+    )
+    resumed_session = await resumed.session(id="version")
+    events = [event async for event in resumed_session.resume(run_id)]
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert len(resumed_provider.requests) == 1
+    after_resume = await run_store.load_run(run_id)
+    assert after_resume is not None
+    assert after_resume.meta["runtime_version"] == "3.0.2"
+
+    fresh = await resumed.session(id="new-version")
+    new_run_id = None
+    new_events = []
+    async for event in fresh.run("new"):
+        new_events.append(event)
+        if event.type == "system":
+            new_run_id = event.run_id
+    assert new_events[-1].type == "result"
+    assert new_events[-1].subtype == "success"
+    assert new_run_id is not None
+    new_record = await run_store.load_run(new_run_id)
+    assert new_record is not None
+    assert new_record.meta["runtime_version"] == "3.0.3"
+
+
+@pytest.mark.parametrize(
+    ("change", "path"),
+    [
+        ("name", r"tools\[0\]\.name"),
+        ("input_schema", r"tools\[0\]\.input_schema"),
+        ("scope", r"tools\[0\]\.scope"),
+        ("parallel", r"tools\[0\]\.parallel"),
+        ("output_schema", r"tools\[0\]\.output_schema"),
+        ("input_description", r"tools\[0\]\.input_schema.*description"),
+        ("output_description", r"tools\[0\]\.output_schema.*description"),
+    ],
+)
+async def test_live_tool_contract_changes_reject_resume(change: str, path: str) -> None:
+    from tests.support.tools import StubTool, tool_registry
+
+    first_tool = StubTool("probe", scope="exec", parallel=False)
+    first_tool.input_schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string", "description": "old input"}},
+    }
+    first_tool.output_schema = {"type": "string", "description": "old output"}
+    first_registry = tool_registry(first_tool)
+    run_store = InMemoryRunStore()
+    session_store = InMemorySessionStore()
+    first = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=first_registry,
+    )
+    first_session = await first.session(id="tool-contract")
+    first_session.tools_override = first_registry
+    run_id = await _interrupt_after_first_event(first_session)
+
+    changed_tool = StubTool("probe", scope="exec", parallel=False)
+    changed_tool.input_schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string", "description": "old input"}},
+    }
+    changed_tool.output_schema = {"type": "string", "description": "old output"}
+    if change == "name":
+        changed_tool.name = "renamed"
+    elif change == "input_schema":
+        changed_tool.input_schema = {"type": "object", "properties": {"value": {"type": "integer"}}}
+    elif change == "scope":
+        changed_tool.scope = "read"
+    elif change == "parallel":
+        changed_tool.parallel = True
+    elif change == "output_schema":
+        changed_tool.output_schema = {"type": "integer"}
+    elif change == "input_description":
+        changed_tool.input_schema["properties"]["value"]["description"] = "new input"
+    else:
+        changed_tool.output_schema["description"] = "new output"
+    changed_registry = tool_registry(changed_tool)
+    changed = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=changed_registry,
+    )
+    resumed_session = await changed.session(id="tool-contract")
+    resumed_session.tools_override = changed_registry
+    with pytest.raises(ConfigError, match=path):
+        _ = [event async for event in resumed_session.resume(run_id)]

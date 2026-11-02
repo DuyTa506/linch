@@ -466,6 +466,7 @@ async def test_runtime_failed_status_does_not_flush_newer_event_buffer() -> None
 async def test_runtime_checkpoint_does_not_borrow_newer_event_buffer() -> None:
     from linch import Context
     from linch.loop.runtime import RunRuntime
+    from linch.tools.file_tracker import FileReadTracker
 
     store = InMemoryRunStore()
     record = await store.create_run("s1", id="r1")
@@ -480,6 +481,7 @@ async def test_runtime_checkpoint_does_not_borrow_newer_event_buffer() -> None:
     session = SimpleNamespace(
         _event_journal=new_buffer,
         _extensions={},
+        file_read_tracker=FileReadTracker(),
         active_model=None,
         fallback_index=0,
         pending_skill_overlay=None,

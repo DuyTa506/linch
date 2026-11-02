@@ -115,6 +115,16 @@ def test_skill_tool_rule_matches_the_skill_tool_normalization() -> None:
     assert match_tool_rule(rule, "Skill", {"skill": "/deploy-prod"})
 
 
+def test_mcp_server_tool_rule_matches_only_its_literal_prefix() -> None:
+    rule = ToolRule("mcp__ops_prod__*", "deny")
+
+    assert match_tool_rule(rule, "mcp__ops_prod__deploy", {})
+    assert not match_tool_rule(rule, "mcp__ops_prod_evil__deploy", {})
+    assert not match_tool_rule(ToolRule("Bash*", "deny"), "Bash", {})
+    assert not match_tool_rule(ToolRule("mcp____*", "deny"), "mcp____deploy", {})
+    assert not match_tool_rule(ToolRule("mcp__*__*", "deny"), "mcp__ops__deploy", {})
+
+
 def _bash_call(command: str) -> PendingToolCall:
     return PendingToolCall(
         tool_use_id="bash-test",
@@ -263,3 +273,14 @@ def test_unparsed_bash_floor_honors_inapplicable_role_guards(
         .decision
         == "allow"
     )
+
+
+@pytest.mark.parametrize("server", ["ops__prod", "_ops", "ops_"])
+def test_mcp_wildcard_rejects_ambiguous_server_names(server: str) -> None:
+    assert not match_tool_rule(ToolRule(f"mcp__{server}__*", "allow"), f"mcp__{server}__run", {})
+
+
+def test_mcp_wildcard_accepts_double_underscores_in_tool_name() -> None:
+    rule = ToolRule("mcp__ops__*", "allow")
+    assert match_tool_rule(rule, "mcp__ops__deploy__prod", {})
+    assert not match_tool_rule(rule, "mcp__other__deploy__prod", {})

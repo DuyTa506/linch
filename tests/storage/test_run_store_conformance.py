@@ -241,7 +241,7 @@ async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
     assert [row.seq for row in rows] == list(range(1, 33))
 
     other_run_id = f"conformance-concurrent-other-{uuid4()}"
-    await store.create_run("session-1", id=other_run_id)
+    await store.create_run("session-2", id=other_run_id)
     assert await store.append_event(other_run_id, _event("independent")) == 1
 
 
@@ -603,3 +603,101 @@ async def test_invalid_initial_checkpoint_cannot_partially_adopt_pending(store_c
         await store.create_run("s", id=rid, meta={"new": "metadata"}, initial_checkpoint=invalid)
     assert await store.load_run(rid) == before
     assert await store.load_events(rid) == []
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "waiting_permission", "suspended"])
+async def test_active_run_rejects_another_run_for_same_session(store_case, status):
+    from linch import SessionBusyError
+
+    session_id, run_id = str(uuid4()), str(uuid4())
+    await store_case.store.create_run(session_id, id=run_id)
+    await store_case.store.save_checkpoint(run_id, _checkpoint(), status=status)
+    with pytest.raises(SessionBusyError) as busy:
+        await store_case.peer.create_run(session_id, id="rejected-" + run_id)
+    assert busy.value.run_id == run_id
+    assert busy.value.session_id == session_id
+    assert await store_case.store.load_run("rejected-" + run_id) is None
+
+
+async def test_concurrent_new_runs_admit_exactly_one_per_session(store_case):
+    import asyncio
+
+    from linch import SessionBusyError
+
+    session_id = str(uuid4())
+    results = await asyncio.gather(
+        store_case.store.create_run(session_id),
+        store_case.peer.create_run(session_id),
+        return_exceptions=True,
+    )
+    (winner,) = [result for result in results if not isinstance(result, BaseException)]
+    (rejected,) = [result for result in results if isinstance(result, SessionBusyError)]
+    assert rejected.run_id == winner.id
+
+
+@pytest.mark.parametrize("terminal", ["completed", "failed", "aborted"])
+async def test_terminal_run_frees_session_and_reactivation_is_atomic(store_case, terminal):
+    from linch import SessionBusyError
+
+    session_id, old_id, new_id = str(uuid4()), str(uuid4()), str(uuid4())
+    store = store_case.store
+    await store.create_run(session_id, id=old_id)
+    await store.save_checkpoint(old_id, _checkpoint("terminal"), status=terminal)
+    await store_case.peer.create_run(session_id, id=new_id)
+    before = await store.load_run(old_id)
+    for with_events in (False, True):
+        with pytest.raises(SessionBusyError) as busy:
+            if with_events:
+                await store.save_checkpoint_with_events(old_id, _checkpoint(), [_event("no")])
+            else:
+                await store.save_checkpoint(old_id, _checkpoint())
+        assert busy.value.run_id == new_id
+        assert await store.load_run(old_id) == before
+        assert await store.load_events(old_id) == []
+
+
+async def test_two_session_handles_reject_concurrent_start_before_provider_or_session_write():
+    import asyncio
+
+    from linch import InMemoryRunStore, RunOptions, SessionBusyError
+    from linch.sessions import InMemorySessionStore
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class GatedProvider(ScriptedProvider):
+        calls = 0
+
+        async def stream(self, request, **kwargs):
+            self.calls += 1
+            entered.set()
+            await release.wait()
+            async for event in super().stream(request, **kwargs):
+                yield event
+
+    provider = GatedProvider([TextTurn("done")])
+    runs, sessions = InMemoryRunStore(), InMemorySessionStore()
+    agents = [make_agent(provider, run_store=runs, session_store=sessions) for _ in range(2)]
+    first, second = [await agent.session(id="shared-session") for agent in agents]
+
+    async def consume():
+        return [event async for event in first.run("first", RunOptions(run_id="winner"))]
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        before = list(second.full_history)
+        with pytest.raises(SessionBusyError) as busy:
+            _ = [event async for event in second.run("rejected")]
+        assert busy.value.run_id == "winner"
+        assert list(second.full_history) == before
+        assert provider.calls == 1
+        assert (await runs.load_run("winner")).status == "running"
+        release.set()
+        assert (await asyncio.wait_for(task, 2))[-1].final_text == "done"
+    finally:
+        release.set()
+        await task
+        for agent in agents:
+            await agent.close()

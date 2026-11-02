@@ -54,7 +54,7 @@ của trang này.
 `empty_tools(...)` tạo một registry chỉ chứa các tool bạn truyền vào — đây là
 lựa chọn phù hợp cho agent miền nghiệp vụ thuần, không bao giờ được chạm vào hệ
 thống tệp hoặc shell. `workspace_tools(exclude=..., extra=...)` bắt đầu từ bộ
-SWE chuẩn (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `TaskCreate`,
+SWE chuẩn (`Read`, `Write`, `Edit`, `Bash`, `BashProcess`, `Glob`, `Grep`, `TaskCreate`,
 `TaskList`, `TaskGet`, `TaskUpdate`) rồi thêm hoặc bớt tool.
 `Agent` sao chép registry được truyền vào constructor. Hãy đăng ký các tool thêm
 về sau trên `agent.tools` để cơ chế discovery của request nhìn thấy chúng; việc
@@ -190,7 +190,8 @@ input của model (raise để từ chối), `execute()` thực hiện công vi�
 scheduler tránh xung đột. `ToolResult` mang `content` gọn mà model nhìn thấy,
 cùng các trường phong phú tùy chọn (`summary`, `metadata`, `citations`,
 `attachments`) để app host dùng cho provenance và kết xuất mà không làm phình
-context của model.
+context của model. `ToolContext.tool_timeout_s` chỉ nhận keyword; đối số vị trí
+thứ sáu vẫn là `file_read_tracker`.
 
 Để có JSON contract chuẩn, truyền `output_schema=` vào `@tool`. Khi đó function
 trả về giá trị JSON thô, `ToolOutput` hoặc `ToolOutputError`; trả về
@@ -285,7 +286,7 @@ nó thực sự idempotent. Retry dùng exponential backoff bắt đầu từ
 
 ## `ExecutionBackend` — thực thi Bash
 
-`BashTool(*, execution: Any = None)` là tool scope exec, không parallel. Khởi
+`BashTool(*, execution=None, max_processes=4, max_runtime_ms=1_800_000)` là tool scope exec, không parallel. Khởi
 tạo trực tiếp dùng mặc định `LocalBackend`; object `execution` được truyền vào
 phải cung cấp `.shell`.
 
@@ -298,10 +299,53 @@ agent = Agent(model="gpt-5", provider=provider, tools=empty_tools(bash))
 ```
 
 Đầu vào yêu cầu một chuỗi `command` không rỗng. Số nguyên `timeout_ms` tùy chọn có
-mặc định `120000`; giá trị không dương được đặt lại về mặc định, còn giá trị
-trên `1800000` bị giới hạn. Thực thi dùng `ctx.cwd`. Kết quả chứa stdout,
-tiếp theo là `[stderr]` và stderr nếu có. Exit khác 0 đặt `is_error=True`; timeout
-raise `ToolExecutionError`.
+mặc định `120000` và phải là số nguyên dương; boolean, giá trị không dương
+và không hữu hạn bị từ chối. Giá trị hợp lệ trên `1800000` bị giới hạn. Thực thi dùng `ctx.cwd`. Kết quả chứa stdout,
+tiếp theo là `[stderr]` và stderr nếu có, cùng trạng thái thoát, signal, dấu
+cắt bớt và đường dẫn spill. Lệnh đã kết thúc với exit khác 0, hoặc bị dừng với dấu
+`timed_out` hay `aborted`, trả `is_error=True`. Local và Docker giữ đầu ra từng
+phần hiện có khi timeout và abort. Hạn trả về của tiến trình được quản lý có thể
+trả kết quả còn chạy bình thường với `is_error=False`. Xem [Mở rộng](./extending.md)
+về giới hạn đầu ra và policy môi trường.
+
+Với backend Local và Docker, Bash hỗ trợ tiến trình được quản lý. `timeout_ms` là thời điểm lời gọi trả về, không phải hạn buộc
+hủy: lệnh chưa xong trả về đầu ra và mã như `p1234abcd` (`p` và tám chữ số hex thường của UUID4). Đặt
+`run_in_background=True` để trả về ngay; lệnh đã kết thúc có thể trả kết quả hoàn
+tất mà không có mã tiến trình. Dùng `BashProcess` tiếp trong cùng lượt chạy (`BashProcessTool` khi tự tạo danh sách công cụ):
+
+```python
+# Model-facing tool inputs, within the same run:
+{"command": "python -m http.server 8000", "run_in_background": True}
+{"action": "wait", "id": "p1234abcd", "wait_ms": 1000}
+{"action": "status", "id": "p1234abcd"}
+{"action": "kill", "id": "p1234abcd"}
+```
+
+`wait` trả về đầu ra mới kể từ lần đọc trước, rồi trạng thái thoát hoặc thông báo
+còn chạy. Sau ba lần đọc không có đầu ra, công cụ gợi ý dừng tiến trình. Thời gian
+chờ được giới hạn dưới hạn scheduler để giữ đầu ra. Mỗi lượt chạy có tối đa bốn
+tiến trình đang chạy; lệnh vượt giới hạn bị hủy khi thời gian chờ Bash hết.
+`max_runtime_ms` là hạn buộc hủy riêng, mặc định 30 phút. Cả hai giới hạn phải là số nguyên dương và thuộc fingerprint
+bền vững. Bash chạy nền cần registry được quản lý và shell hỗ trợ `ShellStarter`;
+nếu không sẽ bị từ chối. Không chuyển đầu ra lệnh
+chạy lâu qua `tail`, vì sẽ làm chậm đầu ra thấy được. Backend bên thứ ba chỉ có
+`run` nhận `timeout_s` và dùng hành vi timeout của chính nó, không có mã tiến trình
+được quản lý. Lời gọi Bash trực tiếp không có Session đang chạy cũng dùng `run`;
+Local và Docker khi đó hủy lệnh khi hết hạn.
+
+Khi lượt chạy kết thúc, bước dọn dẹp hủy các nhóm tiến trình được theo dõi, kể cả
+tiến trình con còn sống sau lệnh foreground, và xóa tệp spill trước khi Session
+nhận lượt mới hay trả kết quả cuối. Nếu dọn dẹp thất bại, Session vẫn hoạt động;
+hãy thử đóng Session lại. Session con có registry riêng. Registry không bền vững:
+sau resume hoặc cleanup, mã cũ không còn; hãy chạy lệnh mới. Registry giữ tối đa
+128 ID đã kết thúc gần nhất, và đường dẫn spill còn đọc được đến cleanup. Worker dừng bình thường sẽ
+đóng Session và dọn tiến trình; SIGKILL có thể để tiến trình sống tiếp. Docker dùng
+một handle `docker run` cho mỗi lệnh, không dùng container cố định cho Session.
+Việc xóa container khi hủy là best effort; host có thể cần đối soát container khi
+xóa thất bại. Chỉ đúng BashProcess tích hợp chạy tuần tự, không được cache và
+không yêu cầu duyệt lại lệnh đã được Bash duyệt; quy tắc deny tường minh vẫn áp
+dụng. Schema Bash/BashProcess mới sẽ chặn resume hợp đồng công cụ cũ: cần hoàn tất
+các lượt cũ trước khi nâng cấp.
 
 Để inject một môi trường thực thi khác, truyền backend `.shell`/`.fs` nhất quán làm
 `execution_backend=...` cho `Agent`. Agent chỉ thay thế tool `Bash` hiện có; nó
@@ -311,7 +355,10 @@ không thêm quyền truy cập shell vào registry tùy chỉnh vốn cố ý b
 chạy hay không. Execution backend chỉ thay đổi nơi và cách lệnh đã được duyệt
 chạy. `DockerBackend` mặc định dùng workspace mount có quyền ghi, network mặc
 định của Docker, không forward environment và root filesystem bình thường của
-container. Các control hardening của nó là opt-in.
+container. Nó mặc định giới hạn bộ nhớ ở `"2g"`, CPU ở `2`, số tiến trình ở `512`,
+loại bỏ mọi capability và bật no-new-privileges. Cấu hình qua `memory`, `cpus`,
+`pids_limit`, `cap_drop` và `no_new_privileges`; `None` tắt từng control. Giới hạn
+network, mount, root filesystem và user cần được bật tường minh.
 
 ```python
 from linch import Agent, DockerBackend, RemoteExecutionBackend
@@ -350,6 +397,10 @@ Khi bỏ qua `docker_path`, `DockerBackend` dùng `shutil.which("docker")` (khô
 cần dependency Docker SDK). `docker_path` tường minh bỏ qua việc tra cứu đó.
 Cả hai backend đều route timeout và abort qua cùng một đường đi, vì vậy
 `session.abort()` ngắt lệnh đang chạy thay vì để rò rỉ process chạy mãi.
+Cả hai cũng cung cấp handle tiến trình tùy chọn qua `start(command, cwd=...)`, với
+`read()` lấy đầu ra mới, `wait(timeout_s)` và `kill()`. Đầu ra có giới hạn và luồng
+quá lớn được ghi spill trong workspace. Dọn handle Docker dừng nhóm tiến trình
+CLI trước khi thử xóa container có tên tương ứng.
 Backend chỉ nói về *nơi* và *cách* một lệnh đã được duyệt chạy — **có** chạy hay
 không được quyết định bởi [permission](#quyền-hạn).
 
@@ -505,13 +556,58 @@ Tên MCP có dạng `mcp__SERVER__TOOL`. Mỗi ký tự bên ngoài
 `[a-zA-Z0-9_-]` trong tên server hoặc tool trở thành `_`; giữ nguyên chữ hoa
 chữ thường. Ví dụ server `ops.prod` với tool `get.status` trở thành
 `mcp__ops_prod__get_status`. Tên va chạm sau khi chuẩn hóa sẽ gây ra
-`ConfigError`.
+`ConfigError`. Tên server sau chuẩn hóa không được chứa `__`, bắt đầu hoặc
+kết thúc bằng `_`.
 
-Chú thích của server ảnh hưởng đến scheduling và permission:
-`readOnlyHint` cấp scope read và khả năng parallel; các tool khác có scope
-write. `destructiveHint` thêm ask rule, kể cả trong mode `acceptEdits` và
-`skip-dangerous`. Approval vẫn dùng `can_use_tool`, vì vậy một ask không có
-callback sẽ bị từ chối.
+Permission rule có thể nhắm tới một server đã chuẩn hóa bằng
+`ToolRule("mcp__ops_prod__*", "deny")`; dấu `*` cuối khớp với toàn bộ tiền tố
+literal `mcp__ops_prod__` và khớp đúng một server. Không có dạng glob nào khác được hỗ trợ; rule
+`ToolRule("*", ...)` hiện có vẫn khớp mọi tool.
+
+Chú thích của server bị bỏ qua theo mặc định: mọi tool có scope exec, chạy tuần
+tự và không destructive. Chỉ đặt `trust_annotations=True` trong cấu hình server
+khi host đứng ra bảo chứng cho lời khai của server đó. Khi bật trust, chỉ
+`readOnlyHint: true` mới cấp scope read và khả năng parallel; các tool khác có
+scope exec và chạy tuần tự, còn `destructive` chỉ là true khi server ghi rõ
+`destructiveHint: true`. Tool read-only không bao giờ là destructive. Tool không
+có chú thích không thêm ask rule nên có thể chạy trong `skip-dangerous`; trong
+`acceptEdits`, tool exec vẫn hỏi. Tool destructive rõ ràng từ server đã được host
+trust sẽ thêm ask rule kể cả trong `skip-dangerous`.
+
+Hint chỉ là lời khai của server, không được kiểm chứng. `trust_annotations` và
+`skip-dangerous` là quyết định của host; host chịu trách nhiệm về server mình
+tin tưởng và hậu quả của việc cho phép lời gọi nguy hiểm. Server không trung
+thực có thể gắn nhãn read-only cho tool có ghi dữ liệu để được tự động duyệt và
+chạy parallel. Approval dùng `can_use_tool`, vì vậy một ask không có callback sẽ
+bị từ chối.
+
+Cả `McpStdioServerConfig` và `McpHttpServerConfig` nhận `timeout_s` (mặc định
+300 giây), phải là số dương hữu hạn và được truyền làm thời hạn đọc request gọi tool của SDK. Timeout trả về
+kết quả tool lỗi. Tín hiệu abort hủy lời gọi đang chạy và phát sinh `AbortError`;
+Linch chờ dọn dẹp lời gọi đã hủy. Việc hủy không bảo đảm server dừng hoặc hoàn tác
+các tác động từ xa.
+
+Kết quả MCP bao gồm text của embedded resource; nội dung resource nhị phân vẫn
+bị bỏ qua. Khi không spill, Linch giữ tối đa 30.000 ký tự text tổng hợp, kể cả dấu
+phân cách, rồi thêm dấu báo cắt bớt nếu cần. Đây là giới hạn output dùng chung với
+Grep. Khi có call context, text lớn hơn có thể được ghi dưới
+`ctx.cwd/.linch/output/`; kết quả trả preview head/tail có giới hạn và nêu đường
+dẫn chứa toàn bộ text. Policy spill dùng chung giữ 4.000 byte đầu và 26.000 byte
+cuối, thêm dấu báo phần bị lược bỏ và loại tệp khi lỗi ghi hoặc vượt 64 MiB.
+I/O spill được chuyển bất đồng bộ; file có mode `0600`, không ghi đè `.gitignore`
+hiện có và từ chối thư mục symlink. Nếu
+không còn spill, kết quả trả text đã giới hạn theo ký tự. Xem
+[policy đầu ra](./extending.md#môi-trường-và-đầu-ra-shell-cục-bộ).
+
+Nếu kết nối MCP bị mất, lời gọi thất bại trả về lỗi và không bao giờ được retry.
+Connection owner reconnect với năm lần exponential backoff, bắt đầu từ 0,5 giây
+và tối đa 30 giây, mỗi lần kết nối có timeout 30 giây; sau đó tool báo server không khả dụng cho tới khi host tạo
+connection mới (hoặc Agent mới với server được cấu hình). Tên tool được giữ
+nguyên, tool biến mất sau reconnect trả về lỗi; catalog và annotation không
+được liệt kê lại, nên server thay đổi tool cần session mới.
+Mỗi lần dọn dẹp tài nguyên có giới hạn năm giây trong task sở hữu kết nối;
+nếu hết thời gian, việc dọn dẹp tiếp tục với tài nguyên tiếp theo. Giới hạn
+này phụ thuộc vào việc tài nguyên hỗ trợ hủy.
 
 ---
 

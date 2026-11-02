@@ -5,7 +5,7 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
-This page describes the current Linch 3.0 runtime. The kernel is headless and
+This page describes the current Linch 3.1 runtime. The kernel is headless and
 provider-agnostic; a host supplies the process lifecycle, HTTP or RPC
 transport, tenant services, and the OpenTelemetry SDK.
 
@@ -112,6 +112,26 @@ tests and development. `PostgresRunStore` is in `run_stores/postgres.py` and
 uses the Postgres extra. It owns three relevant tables:
 `runs` (status, checkpoint, lease columns, and last event sequence),
 `run_events` (unique `(run_id, seq)`), and `model_input_snapshots`.
+
+A partial unique index on `runs(session_id)` admits one nonterminal run:
+`pending`, `running`, `waiting_permission`, and `suspended` all block another
+run with `SessionBusyError`. The in-memory store enforces the same rule.
+Initialization installs this index on compatible version-3 schemas and rejects
+duplicate nonterminal rows; hosts reconcile them with the old deployment before
+upgrading. Worker queue-task concurrency defaults to 32 per process (minimum two),
+independently of fleet queue limits. Task cancellation preserves a nonterminal
+row for resume; `session.abort()` followed by consuming the final result records
+an aborted run and frees admission. In-process interruptions have no reaper.
+
+Run-owned process groups and shell spill files are cleaned before a durable
+terminal status (`completed`, `aborted`, or `failed`) is recorded. Cleanup
+failure is surfaced, leaving admission nonterminal and `_active` retained for
+retry. `waiting_permission` and `suspended` remain resumable.
+
+Resume identity excludes the package version and top-level tool descriptions,
+while wire generation, schemas, scope/concurrency, and execution policy remain
+significant. The 3.1.0 backend policy version `2` and Bash schema changes require
+a drain to zero active runs before deployment, including suspended runs.
 
 ```mermaid
 stateDiagram-v2
