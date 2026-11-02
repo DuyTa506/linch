@@ -12,7 +12,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from ._scaffold import ScaffoldError, add_tool, scaffold_project
+from ._scaffold import (
+    SKILL_TARGETS,
+    ScaffoldError,
+    add_tool,
+    install_skill,
+    scaffold_project,
+)
 
 __all__ = ["main"]
 
@@ -72,6 +78,21 @@ def _build_parser() -> argparse.ArgumentParser:
     path_parser = docs_subparsers.add_parser("path", help="print the docs and examples root")
     path_parser.set_defaults(handler=_cmd_docs_path)
 
+    skill_parser = subparsers.add_parser("skill", help="install the coding-agent skill")
+    skill_subparsers = skill_parser.add_subparsers(dest="skill_command", required=True)
+    install_parser = skill_subparsers.add_parser(
+        "install", help="copy build-agent-with-linch into a project"
+    )
+    install_parser.add_argument(
+        "--target",
+        action="append",
+        choices=sorted(SKILL_TARGETS),
+        help="coding agent to install for, repeatable (default: claude and codex)",
+    )
+    install_parser.add_argument("--dir", default=".", help="project directory (default: cwd)")
+    install_parser.add_argument("--force", action="store_true", help="replace an installed copy")
+    install_parser.set_defaults(handler=_cmd_skill_install)
+
     return parser
 
 
@@ -103,6 +124,12 @@ def _print_created(paths: list[Path]) -> None:
         except ValueError:
             display = path
         print(f"created {display}")
+
+
+def _cmd_skill_install(args: argparse.Namespace) -> int:
+    for path in install_skill(Path(args.dir), args.target, force=args.force):
+        print(path)
+    return 0
 
 
 def _cmd_docs_path(args: argparse.Namespace) -> int:

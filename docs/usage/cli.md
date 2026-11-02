@@ -80,13 +80,30 @@ Print the absolute directory containing the installed `docs/` and `examples/` tr
 ```bash
 linch docs path
 # /path/to/site-packages/linch/_docs
-rg 'RunBudget' "$(linch docs path)/docs/usage"
+grep -rn 'RunBudget' "$(linch docs path)/docs/usage"
 ```
 
 The command checks packaged documentation first, then the source checkout for editable
 installs. It works from any directory and needs no network. If documentation is missing,
 reinstall Linch from a wheel with packaged docs or restore the checkout's `docs/` and
 `examples/` directories.
+
+## `linch skill install`
+
+Copy the `build-agent-with-linch` skill into a project so a coding agent can find this
+documentation and build on Linch:
+
+```bash
+linch skill install                    # .claude/skills and .agents/skills
+linch skill install --target linch     # .linch/skills, for a Linch-built coding agent
+linch skill install --force            # replace an installed copy after upgrading
+```
+
+`--target` accepts `claude`, `codex`, and `linch`, and can be repeated. `--dir` selects the
+project. The skill matches the installed Linch version. `linch new` installs it for Claude Code
+and Codex.
+
+---
 
 ## Exit codes
 
