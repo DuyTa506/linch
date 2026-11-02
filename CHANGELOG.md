@@ -175,7 +175,7 @@ Found by the 3.0 release reviews. 3.0 fixes them all; there is no 2.x backport.
   pools use a clean asyncpg reset callback. The hot-path loop also avoids
   duplicate checkpoint serialization traversals. A D15 msgspec checkpoint
   prototype measured below 1% on the scale cases and was dropped. See the
-  [hot-path measurements](docs/superpowers/measurements/2026-10-31-hot-path.md).
+  hot-path measurements.
 
 - Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
 

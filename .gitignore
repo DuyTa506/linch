@@ -18,3 +18,6 @@ learn-claude-code/
 
 # Local agent execution/review artifacts
 .superpowers/
+
+# Internal planning notes, never committed
+docs/superpowers/
