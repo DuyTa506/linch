@@ -94,7 +94,7 @@ provider không có chúng vẫn giữ hành vi hiện tại — không phương
 - **`async def prepare(self) -> None`** — các lời gọi được gộp và được await một lần trước
   run đầu tiên, dành cho bước khởi động bất đồng bộ một lần không được chạy trong quá trình
   khởi tạo đối tượng. llama.cpp thăm dò `/v1/props` hoặc `/props`; vLLM và SGLang
-  mặc định thăm dò `/v1/models` qua `run_blocking`. Cửa sổ ngữ cảnh được cache;
+  mặc định thăm dò `/v1/models` qua chính async client dùng cho chat. Cửa sổ ngữ cảnh được cache;
   `context_window(model)` chỉ tra cứu cấu hình/cache và không thực hiện I/O mạng.
   Khi thăm dò thất bại, adapter dùng giá trị dự phòng riêng.
 - **`async def aclose(self) -> None`** — đóng HTTP transport do provider sở hữu.
@@ -136,7 +136,9 @@ vẫn đọc cùng luồng từ máy chủ, không chọn transport không strea
 
 Tùy chọn vLLM và SGLang mặc định là `context_window=None`,
 `auto_context_window=True` và `context_window_timeout=2.0`. Bước `prepare()` bất
-đồng bộ thăm dò một lần qua helper nội bộ `providers/_context_probe.py`, cache
+đồng bộ thăm dò một lần qua helper nội bộ `providers/_context_probe.py`, dùng
+client chat để thông tin xác thực, base path và redirect khớp nhau, và không chạy
+khi cả `base_url` lẫn `OPENAI_BASE_URL` đều không chọn server. Bước này cache
 `max_model_len` là số nguyên dương từ `/v1/models` theo đúng ID mô hình.
 Giá trị thiếu, null, không dương hay không hợp lệ bị bỏ qua. ID không khớp và
 thăm dò thất bại dùng `128_000`. `context_window` tường minh bỏ qua thăm dò;

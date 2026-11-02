@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from linch._blocking import run_blocking
 from linch.providers._context_probe import probe_context_windows, probed_context_window
 from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
@@ -102,18 +101,16 @@ class VLLMProvider(_ChatCompletionsProvider):
         return probed_context_window(self._context_window_cache, model)
 
     async def prepare(self) -> None:
-        """Probe vLLM's model catalog off the event loop once when enabled."""
+        """Probe vLLM's model catalog once when enabled."""
         opts = self._vllm_options
         if self._context_window_cache is not None:
             return
         if opts.context_window is not None or not opts.auto_context_window:
             self._context_window_cache = {}
             return
-        self._context_window_cache = await run_blocking(
-            probe_context_windows,
-            opts.base_url,
-            api_key=opts.api_key,
-            default_headers=opts.default_headers,
+        self._context_window_cache = await probe_context_windows(
+            self._get_client,
+            base_url=opts.base_url,
             timeout=opts.context_window_timeout,
         )
 

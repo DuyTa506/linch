@@ -75,7 +75,7 @@ instrumentation is kept in the private `_telemetry.py` adapter.
 |---|---|
 | `providers/base.py` | `BaseProvider`, `ProviderCapabilities`, thinking configuration, and normalized provider protocol. |
 | `providers/openai_chat.py` | OpenAI Chat Completions semantics and private shared chat transport, serialization, and stream mechanics; concrete adapters own capabilities, context, reasoning, and usage. |
-| `providers/_context_probe.py` | Private `/v1/models` context probe shared by vLLM/SGLang preparation; reads positive `max_model_len` values by exact model id. |
+| `providers/_context_probe.py` | Private `/v1/models` context probe shared by vLLM/SGLang preparation, sent through the chat client; reads positive `max_model_len` values by exact model id. |
 | `providers/openai_responses.py` | OpenAI Responses API, including stateful response ids and native reasoning options. |
 | `providers/anthropic.py` | Anthropic streaming, prompt caching, and thinking options. |
 | `providers/gemini.py` | Gemini/Vertex AI adapter using the optional `google-genai` SDK; SDK objects stay inside the adapter. |

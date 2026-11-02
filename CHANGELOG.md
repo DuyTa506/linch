@@ -11,6 +11,11 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 - vLLM and SGLang apply `max_model_len` to any model alias when the server lists
   exactly one model, so a served alias still gets the real context window.
+- The vLLM and SGLang context probe runs through the chat client, so credentials
+  are not carried across cross-origin redirects, `OPENAI_API_KEY` and
+  `OPENAI_BASE_URL` apply, and the `/models` path matches the chat base URL.
+- Concurrent `create_run` calls with one id and session raise the documented
+  duplicate-id `ValueError` or adopt the pending row instead of `SessionBusyError`.
 - `Agent(tools=...)` rejects anything but a `ToolRegistry` with a clear error.
 - Local and DeepSeek adapters declare their own capabilities, context windows,
   reasoning, and usage semantics instead of inheriting OpenAI model assumptions.

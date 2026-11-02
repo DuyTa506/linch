@@ -92,7 +92,7 @@ provider that omits them keeps its current behavior — neither is required on
 - **`async def prepare(self) -> None`** — coalesced and awaited once before the
   first run, for one-time async warm-up that must not run on the construction
   path. llama.cpp probes `/v1/props` or `/props`; vLLM and SGLang probe
-  `/v1/models` by default through `run_blocking`. Context windows are cached;
+  `/v1/models` by default through the same async client that serves chat. Context windows are cached;
   `context_window(model)` is a pure configured/cached lookup with no network I/O.
   Probe failure uses the adapter's fallback.
 - **`async def aclose(self) -> None`** — closes an owned HTTP transport.
@@ -135,9 +135,10 @@ select a non-streaming transport.
 
 vLLM and SGLang options default to `context_window=None`,
 `auto_context_window=True`, and `context_window_timeout=2.0`. One asynchronous
-`prepare()` probe uses the shared private `providers/_context_probe.py` helper
-to cache positive integer `max_model_len` values from `/v1/models` by exact model
-id. Missing, null, nonpositive, or otherwise invalid values are ignored. Unknown
+`prepare()` probe uses the shared private `providers/_context_probe.py` helper,
+through the chat client so credentials, base path, and redirects match, and never
+runs when neither `base_url` nor `OPENAI_BASE_URL` selects a server. It caches
+positive integer `max_model_len` values from `/v1/models` by exact model id. Missing, null, nonpositive, or otherwise invalid values are ignored. Unknown
 ids and failed probes fall back to `128_000`. An explicit `context_window` skips
 the probe; `auto_context_window=False` also disables discovery. New options are
 appended after the original positional fields.
