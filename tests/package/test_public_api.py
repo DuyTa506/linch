@@ -327,3 +327,9 @@ def test_optional_shell_process_capability_is_public() -> None:
 
     assert {"ShellProcess", "ShellRead", "ShellStarter"} <= set(linch.__all__)
     assert callable(ShellRead) and hasattr(ShellProcess, "wait") and hasattr(ShellStarter, "start")
+
+
+def test_bash_process_tool_is_public_and_in_workspace_preset() -> None:
+    assert "BashProcessTool" in linch.__all__
+    tool = linch.workspace_tools().get("BashProcess")
+    assert isinstance(tool, linch.BashProcessTool)

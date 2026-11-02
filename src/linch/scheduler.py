@@ -539,6 +539,7 @@ async def _execute_one(
         idempotency_key=f"{execution_run_id}:{call.id}",
         _principal=call.principal,
         _run_config=call._run_config,
+        _session=session,
     )
     try:
         return await _execute_tool_attempts(
@@ -1193,7 +1194,7 @@ def _strip_background_hints(
     stripped: list[ToolUseBlock] = []
     for b in blocks:
         inp = b.input
-        if isinstance(inp, dict) and inp.get("run_in_background"):
+        if isinstance(inp, dict) and inp.get("run_in_background") and b.name != "Bash":
             bg_ids[b.id] = f"bgtool_{uuid4().hex[:8]}"
             stripped.append(
                 replace(b, input={k: v for k, v in inp.items() if k != "run_in_background"})

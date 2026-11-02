@@ -833,8 +833,14 @@ class Agent:
         if self.execution_backend is not None:
             from .tools.builtin import BashTool
 
-            if self.tools.get("Bash") is not None:
-                self.tools.replace(BashTool(execution=self.execution_backend))
+            if (bash := self.tools.get("Bash")) is not None:
+                self.tools.replace(
+                    BashTool(
+                        execution=self.execution_backend,
+                        max_processes=getattr(bash, "max_processes", 4),
+                        max_runtime_ms=getattr(bash, "max_runtime_ms", 1800000),
+                    )
+                )
         self.permission_engine = PermissionEngine(
             mode=permissions_config.mode,
             rules=permissions_config.rules,
@@ -1039,7 +1045,14 @@ class Agent:
         if self.execution_backend is not None and worker_tools.get("Bash") is not None:
             from .tools.builtin import BashTool
 
-            worker_tools.replace(BashTool(execution=self.execution_backend))
+            bash = worker_tools.get("Bash")
+            worker_tools.replace(
+                BashTool(
+                    execution=self.execution_backend,
+                    max_processes=getattr(bash, "max_processes", 4),
+                    max_runtime_ms=getattr(bash, "max_runtime_ms", 1800000),
+                )
+            )
         for tool in self.tools.list():
             if worker_tools.get(tool.name) is None:
                 worker_tools.register(tool)
