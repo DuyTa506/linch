@@ -2983,7 +2983,7 @@ from linch import OpenAIChatCompletionsProvider
 OpenAIChatCompletionsProvider(options: OpenAIChatProviderOptions | None=None) -> None
 ```
 
-Stream normalized events from OpenAI Chat Completions-compatible APIs.
+Stream normalized events from OpenAI Chat Completions APIs.
 
 Usage: [deep-agent](deep-agent.md).
 
@@ -3106,7 +3106,7 @@ from linch import SGLangProviderOptions
 ```
 
 ```text
-SGLangProviderOptions(api_key: str | None = None, base_url: str | None = None, default_headers: dict[str, str] | None = None, context_window: int = 128000, json_mode: bool = False, parallel_tool_calls: bool | None = None, include_stream_options: bool = True, sampling_params: dict[str, Any] | None = None, enable_cache_report: bool | None = None, extra_body: dict[str, Any] | None = None)
+SGLangProviderOptions(api_key: str | None = None, base_url: str | None = None, default_headers: dict[str, str] | None = None, context_window: int | None = None, json_mode: bool = False, parallel_tool_calls: bool | None = None, include_stream_options: bool = True, sampling_params: dict[str, Any] | None = None, enable_cache_report: bool | None = None, extra_body: dict[str, Any] | None = None, auto_context_window: bool = True, context_window_timeout: float = 2.0, chat_template_kwargs: dict[str, Any] | None = None, disable_thinking_kwargs: dict[str, Any] | None = None)
 ```
 
 Configure the SGLang OpenAI-compatible endpoint.
@@ -3386,7 +3386,7 @@ from linch import VLLMProviderOptions
 ```
 
 ```text
-VLLMProviderOptions(api_key: str | None = None, base_url: str | None = None, default_headers: dict[str, str] | None = None, context_window: int = 128000, json_mode: bool = False, parallel_tool_calls: bool | None = None, extra_body: dict[str, Any] | None = None)
+VLLMProviderOptions(api_key: str | None = None, base_url: str | None = None, default_headers: dict[str, str] | None = None, context_window: int | None = None, json_mode: bool = False, parallel_tool_calls: bool | None = None, extra_body: dict[str, Any] | None = None, auto_context_window: bool = True, context_window_timeout: float = 2.0, chat_template_kwargs: dict[str, Any] | None = None, disable_thinking_kwargs: dict[str, Any] | None = None)
 ```
 
 Configure the vLLM OpenAI-compatible endpoint.

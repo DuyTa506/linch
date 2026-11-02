@@ -76,7 +76,8 @@ khác và tên bắt đầu bằng dấu gạch dưới là chi tiết triển k
 | Đường dẫn | Trách nhiệm |
 |---|---|
 | `providers/base.py` | `BaseProvider`, `ProviderCapabilities`, cấu hình suy nghĩ và protocol provider đã chuẩn hóa. |
-| `providers/openai_chat.py` | OpenAI Chat Completions và các endpoint tương thích OpenAI. |
+| `providers/openai_chat.py` | Ngữ nghĩa OpenAI Chat Completions cùng transport, tuần tự hóa và cơ chế streaming chat dùng chung nội bộ; từng adapter chịu trách nhiệm về khả năng, ngữ cảnh, suy luận và usage. |
+| `providers/_context_probe.py` | Thăm dò `/v1/models` nội bộ dùng chung khi chuẩn bị vLLM/SGLang; đọc `max_model_len` dương theo đúng ID mô hình. |
 | `providers/openai_responses.py` | OpenAI Responses API, bao gồm id phản hồi có trạng thái và các tùy chọn suy luận gốc. |
 | `providers/anthropic.py` | Streaming, bộ nhớ đệm prompt và các tùy chọn suy nghĩ của Anthropic. |
 | `providers/gemini.py` | Adapter Gemini/Vertex AI dùng SDK `google-genai` tùy chọn; các đối tượng SDK nằm trong adapter. |

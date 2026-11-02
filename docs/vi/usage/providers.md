@@ -208,7 +208,7 @@ agent = Agent(
         VLLMProviderOptions(
             api_key=os.environ.get("VLLM_API_KEY", "EMPTY"),
             base_url=os.environ["VLLM_BASE_URL"],
-            context_window=128_000,
+            # Context is probed from /v1/models during provider preparation.
             extra_body={"top_k": 40},
         )
     ),
@@ -219,9 +219,10 @@ agent = Agent(
 # ── SGLang server ────────────────────────────────────────────────────────────
 # Uses SGLang's OpenAI-compatible chat completions endpoint.
 # The provider sends OpenAI stream_options by default so SGLang streams token
-# usage (input/output, plus cached_tokens when enable_cache_report is set). Set
+# usage (input/output, plus cache details when the server reports them). Set
 # include_stream_options=False for servers that reject that OpenAI field.
-# SGLang sampling/cache-report controls are exposed through extra_body.
+# Launch SGLang with --enable-cache-report to report cache usage.
+# sampling_params are flattened into extra_body; explicit extra_body wins.
 from linch import SGLangProvider, SGLangProviderOptions
 
 agent = Agent(
@@ -230,9 +231,8 @@ agent = Agent(
         SGLangProviderOptions(
             api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
             base_url=os.environ["SGLANG_BASE_URL"],
-            context_window=128_000,
+            # Context is probed from /v1/models during provider preparation.
             sampling_params={"top_p": 0.9},
-            enable_cache_report=True,
             extra_body={"custom": "value"},
         )
     ),
@@ -290,10 +290,68 @@ API gốc của DeepSeek, nơi provider này xử lý ngữ nghĩa thinking và
 JSON-object riêng của DeepSeek.
 
 Tên mô hình và cửa sổ ngữ cảnh của llama.cpp, vLLM và SGLang thuộc cấu hình
-triển khai. `LlamaCppProvider` có thể tự phát hiện `n_ctx` từ máy chủ khi
-có thông tin; vLLM và SGLang mặc định dùng `128_000` và cho phép bạn đặt
-`context_window` tường minh. Các provider này không có trong danh mục
-tĩnh.
+triển khai. `LlamaCppProvider` có thể tự phát hiện `n_ctx` từ máy chủ.
+vLLM và SGLang mặc định thăm dò `/v1/models` trong bước chuẩn bị bất đồng bộ,
+đọc `max_model_len` là số nguyên dương theo đúng ID mô hình. Giá trị dự phòng là
+`128_000` khi không khớp ID, giá trị thiếu/không hợp lệ hoặc thăm dò thất bại.
+Các provider này không có trong danh mục tĩnh và không kế thừa khả năng hay cửa sổ
+ngữ cảnh của OpenAI, kể cả khi tên mô hình giống nhau.
+
+### Cấu hình máy chủ cục bộ
+
+vLLM và SGLang mặc định dùng `context_window=None`, `auto_context_window=True`
+và `context_window_timeout=2.0`. `prepare()` thăm dò một lần ngoài event loop;
+`context_window(model)` chỉ tra cứu cấu hình/cache, không thực hiện yêu cầu mạng.
+Đặt cửa sổ ngữ cảnh tường minh sẽ bỏ qua thăm dò:
+
+```python
+# Default discovery (also available on SGLangProviderOptions).
+options = VLLMProviderOptions(base_url="http://localhost:8000/v1")
+# Override the deployment capacity and skip discovery.
+options = VLLMProviderOptions(context_window=32_768)
+# Skip discovery and use the 128_000 fallback.
+options = VLLMProviderOptions(auto_context_window=False)
+```
+
+Khai báo khả năng mô tả adapter; chúng không bảo đảm máy chủ đã bật parser cần
+thiết hoặc mô hình/template hỗ trợ tool hay suy luận. Cấu hình trên máy chủ:
+
+| Máy chủ | Gọi tool | Suy luận | Báo cáo cache / metrics |
+|---|---|---|---|
+| vLLM | `--enable-auto-tool-choice --tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-prompt-tokens-details` |
+| SGLang | `--tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-cache-report`; `--enable-metrics` cho metrics máy chủ |
+| llama.cpp | `--jinja` cùng template tool phù hợp | Tùy mô hình/template | Request `cache_prompt`; số đọc quan sát được ở `timings.cache_n` |
+
+Xem [tùy chọn máy chủ vLLM](https://docs.vllm.ai/en/stable/cli/serve/),
+[tham số máy chủ SGLang](https://docs.sglang.io/docs/advanced_features/server_arguments)
+và [hướng dẫn máy chủ llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+Với vLLM, có thể truyền `extra_body={"cache_salt": "tenant-id"}` để tách cache tiền
+tố theo tenant nếu máy chủ hỗ trợ; cách này dùng cơ chế chuyển tiếp hiện có.
+
+vLLM và SGLang nhận `chat_template_kwargs` và `disable_thinking_kwargs`.
+`can_disable_thinking` chỉ là true khi đã cấu hình `disable_thinking_kwargs`
+(khác `None`). Request có `thinking={"type": "disabled"}` gộp các thiết lập đó vào
+kwargs của template. Chọn khóa theo đúng mô hình/template đang dùng:
+
+```python
+# Qwen3 template example, for either VLLMProviderOptions or SGLangProviderOptions.
+options = VLLMProviderOptions(
+    chat_template_kwargs={"enable_thinking": True},
+    disable_thinking_kwargs={"enable_thinking": False},
+)
+```
+
+Qwen3 và Granite 4 dùng `enable_thinking`; Granite 3.2 dùng `thinking`. Linch không
+đoán khóa. Kiểm tra template triển khai và
+[hướng dẫn suy luận vLLM](https://docs.vllm.ai/en/stable/features/reasoning_outputs/).
+Các điều khiển thinking hiện có của llama.cpp không đổi.
+
+SGLang `sampling_params={"top_k": 50}` tạo phần thân phẳng
+`extra_body={"top_k": 50}`, không tạo đối tượng `sampling_params` lồng nhau.
+Các trường `extra_body` tường minh được ưu tiên khi xung đột. Xem
+[API tương thích OpenAI của SGLang](https://docs.sglang.io/docs/basic_usage/openai_api_completions).
+Trường tùy chọn `enable_cache_report` được giữ để tương thích nhưng không ảnh hưởng
+request gửi đi, kể cả khi là `True`; hãy dùng cờ khởi chạy máy chủ ở trên.
 
 ---
 
@@ -433,23 +491,47 @@ Xem [hợp đồng provider](../architecture/provider-contract.md#kết-xuất-d
 
 ## Lưu cache prompt
 
-Mọi provider trực tiếp đều báo `prompt_cache=True`, nhưng cơ chế trên API
-khác nhau:
+Khả năng cache và báo cáo phụ thuộc vào provider và máy chủ. vLLM và SGLang
+khai báo `prompt_cache=True` cho cache tiền tố tự động phía máy chủ, không có
+điều khiển cache theo request; llama.cpp khai báo khả năng này cho trường request
+`cache_prompt` thực sự được gửi. Các cơ chế khác nhau:
 
 | Provider | Cơ chế | Linch gửi/đọc gì |
 |---|---|---|
 | `anthropic` | Các điểm ngắt `cache_control` tường minh | Đánh dấu khối system tĩnh cuối cùng **và** thông điệp user cuối cùng — lưu cache `tools → system → conversation`, với tiền tố dài thêm sau mỗi lượt |
 | `llamacpp` | `cache_prompt` tường minh | Gửi `cache_prompt: true` trong phần thân request |
-| `sglang` | Cache do máy chủ quản lý | `enable_cache_report: true` yêu cầu báo cáo token được cache; khả năng này phụ thuộc cấu hình máy chủ |
+| `sglang` | Cache tiền tố tự động phía máy chủ | Đọc chi tiết cache trả về; khởi chạy với `--enable-cache-report`; không có công tắc cache theo request |
 | `openai-chat` | Cache tiền tố tự động | Yêu cầu thông tin usage qua `stream_options.include_usage`; đọc chi tiết token được cache khi được trả về |
-| `deepseek` | Cache do máy chủ quản lý | Yêu cầu thông tin usage trong luồng streaming và chuẩn hóa số liệu cache trả về qua cơ chế OpenAI-chat |
+| `deepseek` | Cache do máy chủ quản lý | Yêu cầu usage trong luồng streaming và chuẩn hóa số liệu cache DeepSeek trong adapter riêng |
 | `openai-responses` | Cache tiền tố tự động | Đọc chi tiết token được cache từ usage của response |
-| `vllm` | Cache tiền tố tự động (APC) được cấu hình trên máy chủ | Dùng cơ chế usage của OpenAI-chat; khả năng dùng cache phụ thuộc cấu hình máy chủ |
+| `vllm` | Cache tiền tố tự động (APC) phía máy chủ | Đọc `prompt_tokens_details.cached_tokens` và `created_cache_tokens`; khởi chạy với `--enable-prompt-tokens-details`; không có công tắc cache theo request |
 | `gemini` | Cache ngầm do provider quản lý | Đọc số token được cache khi response cung cấp; adapter này không gửi thiết lập điều khiển cache tường minh |
 
 Bất kể cơ chế nào, cache **hit** đều được biểu diễn thống nhất qua
 `Usage.cache_read_tokens`, rồi được tổng hợp vào tỷ lệ đọc cache của `RunReport` —
 các số liệu được báo cáo này phản ánh việc tái sử dụng cache đã quan sát được.
+
+Khi thiếu `usage.prompt_tokens_details`, vLLM và SGLang ghi log mức WARNING một
+lần cho mỗi instance provider, lần lượt nêu cờ `--enable-prompt-tokens-details`
+và `--enable-cache-report`. Số không đi kèm cảnh báo này có nghĩa là chưa biết mức
+tái sử dụng cache, không xác nhận cache miss; có chi tiết với `cached_tokens=0`
+là cache miss hợp lệ. Đặt tùy chọn tương thích SGLang `enable_cache_report=True`
+không thể bật báo cáo trên máy chủ hay chặn cảnh báo. vLLM ánh xạ
+`created_cache_tokens` sang `Usage.cache_creation_tokens` và tính
+`input_tokens=max(prompt_tokens-cache_read_tokens-cache_creation_tokens, 0)`.
+llama.cpp tiếp tục đọc cache hit quan sát được từ `timings.cache_n`.
+
+### Tinh chỉnh từ usage quan sát được
+
+So sánh `Usage.cache_read_tokens` và thuộc tính span OpenTelemetry hiện có
+`gen_ai.usage.cache_read.input_tokens` giữa các request có tiền tố ổn định.
+Phần tóm tắt của `RunReport` cung cấp
+`report.summary["prompt_cache"]["cache_read_ratio"]`, bằng số token đọc cache
+chia cho `input_tokens + cache_read_tokens + cache_creation_tokens` (bằng không
+khi mẫu số rỗng). Đặt tool và nội dung system tĩnh trước, nội dung động sau.
+Kiểm tra lý do `tool_set_changed` và `model_changed` của `prompt_cache_advisory`
+khi mức tái sử dụng giảm; đây là các quan sát hiện có, không phải điều khiển cache
+máy chủ. Schema `Usage` và định dạng lưu trữ không đổi.
 
 Để kiểm tra trực tiếp hành vi cache prompt hiện tại của provider, chạy:
 
@@ -560,7 +642,9 @@ Danh sách kiểm tra để có cache hit ổn định:
 
 ## Đọc các event thinking
 
-Bất kỳ provider nào phát ra `reasoning_content` (DeepSeek và các mô hình suy luận
+vLLM ưu tiên `delta.reasoning` trong luồng, rồi dùng `reasoning_content` nếu thiếu;
+lịch sử assistant vẫn dùng `reasoning_content`. Các adapter chat khác đọc
+`reasoning_content` tường minh. Bất kỳ provider nào phát ra `reasoning_content` (DeepSeek và các mô hình suy luận
 khác tương thích OpenAI) hoặc các khối thinking của Anthropic đều streaming nội dung
 suy luận trung gian dưới dạng event `partial_assistant` với `delta["kind"] == "thinking"`. Điều này
 đòi hỏi đặt `include_partial_messages=True` trên `Agent`. Phân biệt thinking

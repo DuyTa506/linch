@@ -5,6 +5,45 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## 3.1.1 — 2026-11-02
+
+### Fixed
+
+- vLLM and SGLang apply `max_model_len` to any model alias when the server lists
+  exactly one model, so a served alias still gets the real context window.
+- `Agent(tools=...)` rejects anything but a `ToolRegistry` with a clear error.
+- Local and DeepSeek adapters declare their own capabilities, context windows,
+  reasoning, and usage semantics instead of inheriting OpenAI model assumptions.
+- vLLM streams prefer `reasoning` with a `reasoning_content` fallback and preserve
+  `reasoning_content` in assistant history. Cache-creation tokens populate the
+  existing usage bucket without double-counting prompt tokens; llama.cpp retains
+  `timings.cache_n` cache-read accounting.
+- vLLM and SGLang warn once per provider instance when prompt-cache details are
+  missing, naming the required server launch flag. Zero with that warning means
+  unknown reuse, not a confirmed miss.
+- SGLang no longer sends `enable_cache_report` as a request field; the options
+  field remains accepted but reporting requires the server's `--enable-cache-report`.
+  `sampling_params` fields are flattened into `extra_body`, with explicit
+  `extra_body` values taking precedence.
+- vLLM and SGLang use configured model-specific template kwargs for disabled
+  thinking and advertise that control only when `disable_thinking_kwargs` is set.
+
+### Changed
+
+- DeepSeek, llama.cpp, vLLM, and SGLang are no longer subclasses of
+  `OpenAIChatCompletionsProvider`. A private base shares transport, serialization,
+  and stream mechanics only; OpenAI keeps its own known-model defaults.
+- vLLM and SGLang now probe `/v1/models` by default during asynchronous preparation
+  for per-model context capacity. Explicit `context_window` skips discovery;
+  `auto_context_window=False` opts out. Failed or unmatched probes fall back to
+  128,000 tokens, and synchronous context lookups never access the network.
+- New option fields follow the original positional fields, preserving existing
+  positional construction. Public exports, usage schema, and persisted formats
+  are unchanged. `stream_partials=False` still consumes the same upstream stream;
+  this release adds no non-streaming transport.
+- English and Vietnamese provider guides document launch flags, cache reporting,
+  context discovery, template controls, and existing cache-tuning observations.
+
 ## 3.1.0 — 2026-11-02
 
 This MINOR release adds execution capabilities with the behavior changes below.

@@ -29,6 +29,25 @@ def test_vllm_capabilities_and_provider_id() -> None:
     assert caps.prompt_cache is True
 
 
+def test_vllm_reasoning_and_thinking_options_are_explicit() -> None:
+    options = VLLMProviderOptions(
+        chat_template_kwargs={"thinking": True},
+        disable_thinking_kwargs={"thinking": False},
+    )
+    provider = VLLMProvider(options)
+
+    assert provider.capabilities("served-model").can_disable_thinking is True
+    req = ProviderRequest(
+        model="served-model",
+        system=[],
+        tools=[],
+        messages=[],
+        thinking={"type": "disabled"},
+    )
+    payload = _build_vllm_payload(req, options)
+    assert payload["extra_body"]["chat_template_kwargs"] == {"thinking": False}
+
+
 def test_vllm_payload_includes_openai_compatible_controls() -> None:
     schema = OutputSchema(name="answer", schema={"type": "object"}, strict=True)
     req = ProviderRequest(
@@ -112,6 +131,108 @@ async def test_vllm_stream_reuses_openai_compatible_parser() -> None:
         output_tokens=5,
         cache_read_tokens=2,
     )
+
+
+async def test_vllm_stream_prefers_reasoning_and_reports_created_cache_tokens(caplog) -> None:
+    chunks = [
+        _chunk(
+            delta=SimpleNamespace(
+                content=None,
+                reasoning="new reasoning",
+                reasoning_content="old reasoning",
+                tool_calls=[],
+            ),
+            usage=SimpleNamespace(
+                prompt_tokens=5,
+                completion_tokens=1,
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=2,
+                    created_cache_tokens=4,
+                ),
+            ),
+        )
+    ]
+    provider = VLLMProvider()
+    provider._client = OpenAICompatibleFakeClient(chunks)
+    with caplog.at_level("WARNING"):
+        events = [
+            event
+            async for event in provider.stream(
+                ProviderRequest(model="served-model", system=[], tools=[], messages=[])
+            )
+        ]
+
+    assert {"type": "thinking_delta", "text": "new reasoning"} in events
+    assert {"type": "thinking_delta", "text": "old reasoning"} not in events
+    assert events[-1]["usage"] == Usage(
+        input_tokens=0,
+        output_tokens=1,
+        cache_read_tokens=2,
+        cache_creation_tokens=4,
+    )
+    assert not caplog.records
+
+
+async def test_vllm_reasoning_falls_back_to_old_field_without_partial_projection() -> None:
+    chunks = [
+        _chunk(
+            delta=SimpleNamespace(
+                content=None,
+                reasoning="",
+                reasoning_content="legacy reasoning",
+                tool_calls=[],
+            ),
+        )
+    ]
+    provider = VLLMProvider()
+    provider._client = OpenAICompatibleFakeClient(chunks)
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(
+                model="served-model",
+                system=[],
+                tools=[],
+                messages=[],
+                stream_partials=False,
+            )
+        )
+    ]
+
+    assert {"type": "thinking_delta", "text": "legacy reasoning"} in events
+
+
+def test_vllm_payload_never_guesses_thinking_key() -> None:
+    req = ProviderRequest(model="m", system=[], tools=[], messages=[])
+    payload = _build_vllm_payload(req, VLLMProviderOptions())
+    assert "chat_template_kwargs" not in payload.get("extra_body", {})
+
+
+def test_vllm_legacy_positional_options_keep_wire_fields() -> None:
+    options = VLLMProviderOptions(
+        None,
+        "https://server/v1",
+        {"X-Test": "yes"},
+        65_536,
+        True,
+        False,
+        {"top_k": 17},
+    )
+    payload = _build_vllm_payload(
+        ProviderRequest(
+            model="m",
+            system=[],
+            tools=[],
+            messages=[],
+            output_schema=OutputSchema(name="answer", schema={"type": "object"}),
+        ),
+        options,
+    )
+
+    assert payload["stream"] is True
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["parallel_tool_calls"] is False
+    assert payload["extra_body"] == {"top_k": 17}
 
 
 async def test_vllm_stream_maps_aborted_create_failure_to_abort_error() -> None:

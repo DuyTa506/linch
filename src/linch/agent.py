@@ -829,6 +829,8 @@ class Agent:
         # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
         # no shell/filesystem authority; applications opt in with their own
         # registry or ``workspace_tools()``/a higher-level preset.
+        if tools is not None and not isinstance(tools, ToolRegistry):
+            raise ConfigError("tools must be a ToolRegistry; build one with empty_tools(...)")
         self.tools = tools.copy() if tools is not None else ToolRegistry()
         if self.execution_backend is not None:
             from .tools.builtin import BashTool

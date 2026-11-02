@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from abc import abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
@@ -78,17 +79,15 @@ class OpenAIChatProviderOptions:
     json_mode: bool = False
 
 
-class OpenAIChatCompletionsProvider(BaseProvider):
-    """Stream normalized events from OpenAI Chat Completions-compatible APIs.
+class _ChatCompletionsProvider(BaseProvider):
+    """Transport and normalization mechanics shared by chat-completions adapters.
 
     Args:
         options: Optional client credentials, endpoint, and wire behavior.
     """
 
-    id = "openai-chat"
-
     def __init__(self, options: OpenAIChatProviderOptions | None = None) -> None:
-        """Create an OpenAI Chat Completions provider.
+        """Create a chat-completions transport.
 
         Args:
             options: Client credentials, endpoint, and wire behavior.
@@ -96,34 +95,6 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         self._options = options or OpenAIChatProviderOptions()
         self._client: Any | None = None
         self._client_loop: Any | None = None
-
-    def context_window(self, model: ModelId) -> int:
-        """Return the configured or known context capacity for a model.
-
-        Args:
-            model: OpenAI or compatible model identifier.
-
-        Returns:
-            The explicit override or known capacity, with the adapter fallback
-            for unknown models.
-        """
-        if self._options.context_window is not None:
-            return self._options.context_window
-        return _KNOWN_CONTEXT.get(model, 128_000)
-
-    def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        """Return capabilities advertised for a model.
-
-        Args:
-            model: OpenAI or compatible model identifier.
-
-        Returns:
-            Schema, cache, tool-choice, and parallel-call capabilities.
-        """
-        return full_capabilities(
-            self.context_window(model),
-            parallel_tool_calls=self._options.parallel_tool_calls is not False,
-        )
 
     async def _get_client(self) -> Any:
         if self._client is not None and loop_changed(self._client_loop):
@@ -179,6 +150,14 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         """
         return None
 
+    @abstractmethod
+    def _reasoning_text(self, delta: Any) -> str | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _usage_from_chunk(self, chunk_usage: Any) -> Usage:
+        raise NotImplementedError
+
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         """Yield normalized events for one Chat Completions request.
 
@@ -213,13 +192,7 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 # empty-choices gate, otherwise every streamed turn reports zero.
                 cu = getattr(chunk, "usage", None)
                 if cu is not None:
-                    prompt_tokens = int(getattr(cu, "prompt_tokens", 0) or 0)
-                    cache_read_tokens = openai_cached_tokens(cu)
-                    usage = Usage(
-                        input_tokens=max(0, prompt_tokens - cache_read_tokens),
-                        output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
-                        cache_read_tokens=cache_read_tokens,
-                    )
+                    usage = self._usage_from_chunk(cu)
                 chunk_cache = self._chunk_cache_read_tokens(chunk)
                 if chunk_cache is not None:
                     extra_cache_read = chunk_cache
@@ -227,8 +200,9 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 if not choices:
                     continue
                 delta = choices[0].delta
-                if getattr(delta, "reasoning_content", None):
-                    yield {"type": "thinking_delta", "text": str(delta.reasoning_content)}
+                reasoning_text = self._reasoning_text(delta)
+                if reasoning_text:
+                    yield {"type": "thinking_delta", "text": reasoning_text}
                 if getattr(delta, "content", None):
                     yield {"type": "text_delta", "text": str(delta.content)}
                 for tc in getattr(delta, "tool_calls", None) or []:
@@ -300,6 +274,61 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 cache_read_tokens=cache_read_tokens,
             )
         yield {"type": "message_end", "stop_reason": stop_reason, "usage": usage}
+
+
+class OpenAIChatCompletionsProvider(_ChatCompletionsProvider):
+    """Stream normalized events from OpenAI Chat Completions APIs.
+
+    Args:
+        options: Optional client credentials, endpoint, and wire behavior.
+    """
+
+    id = "openai-chat"
+
+    def context_window(self, model: ModelId) -> int:
+        """Return the configured or known context capacity for a model.
+
+        Args:
+            model: OpenAI model identifier.
+
+        Returns:
+            The explicit override or known capacity, with the adapter fallback
+            for unknown models.
+        """
+        if self._options.context_window is not None:
+            return self._options.context_window
+        return _KNOWN_CONTEXT.get(model, 128_000)
+
+    def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        """Return capabilities advertised for an OpenAI Chat model.
+
+        Args:
+            model: OpenAI model identifier.
+
+        Returns:
+            Schema, cache, tool-choice, and parallel-call capabilities.
+        """
+        return full_capabilities(
+            self.context_window(model),
+            parallel_tool_calls=self._options.parallel_tool_calls is not False,
+        )
+
+    def _reasoning_text(self, delta: Any) -> str | None:
+        value = getattr(delta, "reasoning_content", None)
+        return str(value) if value else None
+
+    def _usage_from_chunk(self, chunk_usage: Any) -> Usage:
+        return _normalize_openai_usage(chunk_usage)
+
+
+def _normalize_openai_usage(chunk_usage: Any) -> Usage:
+    prompt_tokens = int(getattr(chunk_usage, "prompt_tokens", 0) or 0)
+    cache_read_tokens = openai_cached_tokens(chunk_usage)
+    return Usage(
+        input_tokens=max(0, prompt_tokens - cache_read_tokens),
+        output_tokens=int(getattr(chunk_usage, "completion_tokens", 0) or 0),
+        cache_read_tokens=cache_read_tokens,
+    )
 
 
 def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dict[str, Any]:

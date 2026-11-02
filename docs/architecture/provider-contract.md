@@ -91,10 +91,10 @@ provider that omits them keeps its current behavior — neither is required on
 
 - **`async def prepare(self) -> None`** — coalesced and awaited once before the
   first run, for one-time async warm-up that must not run on the construction
-  path. The llama.cpp provider uses it to probe `/props` off the event loop and
-  cache the discovered context window; its `context_window()` stays a pure
-  cached/configured lookup and never performs network I/O. Probe failure falls
-  back to the configured value.
+  path. llama.cpp probes `/v1/props` or `/props`; vLLM and SGLang probe
+  `/v1/models` by default through `run_blocking`. Context windows are cached;
+  `context_window(model)` is a pure configured/cached lookup with no network I/O.
+  Probe failure uses the adapter's fallback.
 - **`async def aclose(self) -> None`** — closes an owned HTTP transport.
   Implemented by the Anthropic and OpenAI Responses providers so agent teardown
   releases sockets deterministically. Must be idempotent.
@@ -114,6 +114,83 @@ callable when present, and that closing twice is idempotent. A provider must not
 advertise a capability its request builder ignores. This helper checks provider
 shape and lifecycle only; it does not consume `stream()` or validate its events.
 Test event sequences separately against the normalized contract above.
+
+## Chat adapter ownership and local servers
+
+`OpenAIChatCompletionsProvider`, `DeepSeekProvider`, `LlamaCppProvider`,
+`VLLMProvider`, and `SGLangProvider` independently implement the public provider
+contract. The latter four are not subclasses of the public OpenAI provider.
+The private `_ChatCompletionsProvider` in `providers/openai_chat.py` shares only
+transport, message serialization, and stream mechanics. Its abstract
+`_reasoning_text` and `_usage_from_chunk` hooks require each adapter to normalize
+its own response semantics. Each concrete adapter declares capabilities and
+context behavior explicitly; local model names never inherit OpenAI catalog
+windows or capability assumptions. OpenAI retains its own known-model defaults.
+
+vLLM reads streamed `delta.reasoning` first, then `delta.reasoning_content`;
+assistant history continues to serialize `reasoning_content`. Other chat adapters
+explicitly read `reasoning_content`. Turning off partial delivery
+(`stream_partials=False`) still consumes the same upstream stream; it does not
+select a non-streaming transport.
+
+vLLM and SGLang options default to `context_window=None`,
+`auto_context_window=True`, and `context_window_timeout=2.0`. One asynchronous
+`prepare()` probe uses the shared private `providers/_context_probe.py` helper
+to cache positive integer `max_model_len` values from `/v1/models` by exact model
+id. Missing, null, nonpositive, or otherwise invalid values are ignored. Unknown
+ids and failed probes fall back to `128_000`. An explicit `context_window` skips
+the probe; `auto_context_window=False` also disables discovery. New options are
+appended after the original positional fields.
+
+vLLM and SGLang support model-specific `chat_template_kwargs` and
+`disable_thinking_kwargs`. They declare `can_disable_thinking=True` only when
+the latter is not `None`; disabled-thinking requests merge these configured kwargs
+into template settings. Linch guesses no model key: for example configure
+`disable_thinking_kwargs={"enable_thinking": False}` for a Qwen3 template;
+Granite 4 also uses `enable_thinking`, while Granite 3.2 uses `thinking`.
+See the [vLLM reasoning guide](https://docs.vllm.ai/en/stable/features/reasoning_outputs/)
+and [configuration examples](../usage/providers.md#local-server-configuration).
+llama.cpp's existing thinking controls are unchanged.
+
+Capabilities describe adapter behavior and do not guarantee model support or
+required server launch settings. Tools require both a suitable model/template
+and the server configuration:
+
+| Server | Tools | Reasoning | Cache reporting / metrics |
+|---|---|---|---|
+| vLLM | `--enable-auto-tool-choice --tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-prompt-tokens-details` |
+| SGLang | `--tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-cache-report`; `--enable-metrics` for server metrics |
+| llama.cpp | `--jinja` with a suitable tool template | Model/template-specific | Request `cache_prompt`; observed reads in `timings.cache_n` |
+
+References: [vLLM CLI](https://docs.vllm.ai/en/stable/cli/serve/),
+[SGLang arguments](https://docs.sglang.io/docs/advanced_features/server_arguments),
+[llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+vLLM can receive optional per-tenant `cache_salt` through existing `extra_body`
+pass-through, for example `extra_body={"cache_salt": "tenant-id"}`.
+
+vLLM/SGLang `prompt_cache=True` declares server-automatic prefix caching, with no
+request-level cache control. llama.cpp's declaration corresponds to the actual
+`cache_prompt` request field. SGLang's `enable_cache_report` options field remains
+accepted but is never sent, even if `True`; reporting requires the server flag.
+SGLang sampling fields are flat: `sampling_params={"top_k": 50}` becomes
+`extra_body={"top_k": 50}`, with explicit `extra_body` values winning conflicts.
+
+If `usage.prompt_tokens_details` is absent, vLLM/SGLang log a WARNING once per
+provider instance naming `--enable-prompt-tokens-details`/`--enable-cache-report`.
+Zero with this warning means unknown reuse; present `cached_tokens=0` details
+mean a valid miss. vLLM maps details `cached_tokens` to `Usage.cache_read_tokens`
+and `created_cache_tokens` to `Usage.cache_creation_tokens`, with
+`input_tokens=max(prompt_tokens-cache_read_tokens-cache_creation_tokens, 0)`.
+llama.cpp retains `timings.cache_n` cache-read accounting. No `Usage` or persisted
+schema changes are involved.
+
+For tuning, use `Usage.cache_read_tokens`, the existing span attribute
+`gen_ai.usage.cache_read.input_tokens`, and
+`report.summary["prompt_cache"]["cache_read_ratio"]` on `RunReport`. The ratio is
+read / (input + read + creation), or zero for an empty denominator. Keep static
+tools/system content first and dynamic content later, and inspect
+`prompt_cache_advisory` reasons `tool_set_changed` and `model_changed` when reuse
+drops. See [prompt caching](../usage/providers.md#prompt-caching).
 
 ## Native catalog rendering
 
