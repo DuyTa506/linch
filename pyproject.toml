@@ -76,6 +76,7 @@ only-include = [
   "docs/migration-3.0.md",
   "docs/versioning.md",
   "examples",
+  "skills",
 ]
 dev-mode-dirs = ["src"]
 
@@ -83,6 +84,7 @@ dev-mode-dirs = ["src"]
 "src" = ""
 "docs" = "linch/_docs/docs"
 "examples" = "linch/_docs/examples"
+"skills" = "linch/_skills"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -26,6 +26,7 @@ LAYOUT = (
     "docs/migration-3.0.md",
     "docs/versioning.md",
     "examples",
+    "skills",
 )
 
 
@@ -48,6 +49,7 @@ def test_wheel_shipped_layout() -> None:
     assert actual["sources"] == {
         "src": "",
         "docs": "linch/_docs/docs",
+        "skills": "linch/_skills",
         "examples": "linch/_docs/examples",
     }
 
