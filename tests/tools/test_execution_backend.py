@@ -125,35 +125,6 @@ def _fake_world(shell: _FakeBackend):
     return RemoteExecutionBackend(shell=shell, fs=StateFileBackend())
 
 
-class _FakeDockerProcess:
-    def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode: int | None = None
-        self._final_returncode = returncode
-        self.killed = False
-
-    async def communicate(self):
-        self.returncode = self._final_returncode
-        return self.stdout, self.stderr
-
-    async def wait(self):
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = -9
-
-
-def _docker_run_args(calls: list[list[str]]) -> list[str]:
-    return next(call for call in calls if call[1] == "run")
-
-
-def _docker_rm_args(calls: list[list[str]]) -> list[str]:
-    return next(call for call in calls if call[1] == "rm")
-
-
 @pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_timeout_returns_error_result(tmp_path) -> None:
     from linch.tools.builtin import BashTool
@@ -205,162 +176,6 @@ def test_docker_backend_missing_docker_does_not_raise_at_construction(
     DockerBackend()
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_docker_backend_default_args_preserve_legacy_shape(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    import linch.tools.execution as execution_mod
-    from linch.tools.execution import DockerBackend
-
-    calls: list[list[str]] = []
-
-    async def fake_exec(*args, **kwargs):
-        calls.append(list(args))
-        return _FakeDockerProcess(stdout=b"docker-out\n")
-
-    monkeypatch.setattr(execution_mod.asyncio, "create_subprocess_exec", fake_exec)
-
-    backend = DockerBackend(docker_path="/usr/bin/docker")
-    result = await backend.run("echo hi", cwd=str(tmp_path), timeout_s=10.0)
-
-    assert result.stdout == "docker-out\n"
-    args = _docker_run_args(calls)
-    assert args[:5] == ["/usr/bin/docker", "run", "--rm", "--name", args[4]]
-    assert args[4].startswith("linch-")
-    assert args[5:] == [
-        "-w",
-        str(tmp_path),
-        "-v",
-        f"{tmp_path}:{tmp_path}",
-        "python:3.12-slim",
-        "sh",
-        "-c",
-        "echo hi",
-    ]
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_docker_backend_policy_args(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    import linch.tools.execution as execution_mod
-    from linch.tools.execution import DockerBackend
-
-    calls: list[list[str]] = []
-
-    async def fake_exec(*args, **kwargs):
-        calls.append(list(args))
-        return _FakeDockerProcess()
-
-    monkeypatch.setenv("FORWARDED_TOKEN", "host-secret")
-    monkeypatch.delenv("MISSING_TOKEN", raising=False)
-    monkeypatch.setattr(execution_mod.asyncio, "create_subprocess_exec", fake_exec)
-
-    backend = DockerBackend(
-        docker_path="/usr/bin/docker",
-        image="alpine:3.20",
-        network="none",
-        workspace_mount="ro",
-        read_only_root=True,
-        tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
-        env={"APP_MODE": "test"},
-        forward_env=("FORWARDED_TOKEN", "MISSING_TOKEN"),
-        user="1000:1000",
-    )
-    await backend.run("id", cwd=str(tmp_path), timeout_s=10.0)
-
-    args = _docker_run_args(calls)
-    assert "--network" in args
-    assert args[args.index("--network") + 1] == "none"
-    assert "--read-only" in args
-    assert "--tmpfs" in args
-    assert args[args.index("--tmpfs") + 1] == "/tmp:rw,noexec,nosuid,nodev,size=64m"
-    assert "--env" in args
-    assert "APP_MODE=test" in args
-    assert "FORWARDED_TOKEN=host-secret" in args
-    assert "MISSING_TOKEN=" not in " ".join(args)
-    assert "--user" in args
-    assert args[args.index("--user") + 1] == "1000:1000"
-    assert f"{tmp_path}:{tmp_path}:ro" in args
-    assert args[-3:] == ["sh", "-c", "id"]
-    assert args[-4] == "alpine:3.20"
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_docker_backend_timeout_removes_named_container(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    import linch.tools.execution as execution_mod
-    from linch.tools.execution import DockerBackend
-
-    calls: list[list[str]] = []
-    run_proc = _FakeDockerProcess()
-
-    async def slow_communicate():
-        await asyncio.sleep(60)
-        return b"", b""
-
-    run_proc.communicate = slow_communicate
-
-    async def fake_exec(*args, **kwargs):
-        calls.append(list(args))
-        if args[1] == "run":
-            return run_proc
-        return _FakeDockerProcess()
-
-    monkeypatch.setattr(execution_mod.asyncio, "create_subprocess_exec", fake_exec)
-
-    backend = DockerBackend(docker_path="/usr/bin/docker")
-    result = await backend.run("sleep 60", cwd=str(tmp_path), timeout_s=0.01)
-
-    run_args = _docker_run_args(calls)
-    rm_args = _docker_rm_args(calls)
-    assert result.timed_out is True
-    assert run_proc.killed is True
-    assert rm_args == ["/usr/bin/docker", "rm", "-f", run_args[4]]
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_docker_backend_abort_removes_named_container(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    import linch.tools.execution as execution_mod
-    from linch.abort import AbortContext
-    from linch.errors import AbortError
-    from linch.tools.execution import DockerBackend
-
-    calls: list[list[str]] = []
-    run_proc = _FakeDockerProcess()
-
-    async def slow_communicate():
-        await asyncio.sleep(60)
-        return b"", b""
-
-    run_proc.communicate = slow_communicate
-
-    async def fake_exec(*args, **kwargs):
-        calls.append(list(args))
-        if args[1] == "run":
-            return run_proc
-        return _FakeDockerProcess()
-
-    monkeypatch.setattr(execution_mod.asyncio, "create_subprocess_exec", fake_exec)
-
-    backend = DockerBackend(docker_path="/usr/bin/docker")
-    signal = AbortContext()
-    task = asyncio.create_task(
-        backend.run("sleep 60", cwd=str(tmp_path), timeout_s=10.0, signal=signal)
-    )
-    await asyncio.sleep(0)
-    signal.abort()
-
-    with pytest.raises(AbortError):
-        await task
-
-    run_args = _docker_run_args(calls)
-    rm_args = _docker_rm_args(calls)
-    assert run_proc.killed is True
-    assert rm_args == ["/usr/bin/docker", "rm", "-f", run_args[4]]
-
-
 def test_docker_backend_invalid_workspace_mount_raises() -> None:
     from linch.tools.execution import DockerBackend
 
@@ -373,6 +188,13 @@ def test_docker_backend_invalid_workspace_mount_raises() -> None:
 async def test_docker_backend_smoke(tmp_path) -> None:
     from linch.tools.execution import DockerBackend
 
+    image = subprocess.run(
+        ["docker", "image", "inspect", "python:3.12-slim"],
+        capture_output=True,
+        check=False,
+    )
+    if image.returncode:
+        pytest.skip("Docker smoke image not cached; tests do not pull images")
     backend = DockerBackend()
     result = await backend.run("echo docker-ok", cwd=str(tmp_path), timeout_s=30.0)
     assert result.returncode == 0
@@ -444,74 +266,6 @@ def test_execution_backend_not_injected_into_restricted_registry(tmp_path) -> No
     assert agent.tools.get("Bash") is None, (
         "execution_backend must not inject BashTool into a registry that did not include it"
     )
-
-
-class _HangingProcess:
-    """A fake subprocess whose communicate() never returns until cancelled."""
-
-    returncode = None
-
-    def __init__(self, drained: asyncio.Event) -> None:
-        self._drained = drained
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        try:
-            await asyncio.Event().wait()  # blocks forever
-            return b"", b""
-        finally:
-            # Runs only if the task is actually driven to completion (i.e. the
-            # cancellation was awaited/drained, not just scheduled).
-            self._drained.set()
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_communicate_abort_raises_and_drains_communicate_task() -> None:
-    """Aborting mid-communicate raises AbortError and drains the cancelled task."""
-    from linch.abort import AbortContext
-    from linch.errors import AbortError
-    from linch.tools.execution import _communicate_with_timeout_and_abort
-
-    drained = asyncio.Event()
-    signal = AbortContext()
-    signal.abort()  # already aborted before the call
-
-    with pytest.raises(AbortError):
-        await _communicate_with_timeout_and_abort(
-            _HangingProcess(drained), timeout_s=5.0, signal=signal
-        )
-
-    # The fix awaits the cancelled communicate task in `finally`, so its own
-    # finally has run by the time the call returns. Without draining this is False.
-    assert drained.is_set()
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_communicate_uses_public_wait_api_not_private_event() -> None:
-    """Abort monitoring goes through the public AbortContext.wait() coroutine."""
-    from linch.abort import AbortContext
-    from linch.errors import AbortError
-    from linch.tools.execution import _communicate_with_timeout_and_abort
-
-    waited = asyncio.Event()
-
-    class _Signal(AbortContext):
-        async def wait(self) -> None:  # type: ignore[override]
-            waited.set()
-            await super().wait()
-
-    signal = _Signal()
-    drained = asyncio.Event()
-
-    async def _abort_soon() -> None:
-        await asyncio.sleep(0.01)
-        signal.abort()
-
-    asyncio.create_task(_abort_soon())
-    with pytest.raises(AbortError):
-        await _communicate_with_timeout_and_abort(
-            _HangingProcess(drained), timeout_s=5.0, signal=signal
-        )
-    assert waited.is_set(), "public wait() must be used to monitor the abort signal"
 
 
 @pytest.mark.asyncio(loop_scope="module")

@@ -1898,7 +1898,7 @@ from linch import DockerBackend
 ```
 
 ```text
-DockerBackend(*, image: str='python:3.12-slim', docker_path: str | None=None, network: str | None=None, workspace_mount: Literal['rw', 'ro']='rw', read_only_root: bool=False, tmpfs: tuple[str, ...]=(), env: dict[str, str] | None=None, forward_env: tuple[str, ...]=(), user: str | None=None, resume_fingerprint_key: bytes | None=None) -> None
+DockerBackend(*, image: str='python:3.12-slim', docker_path: str | None=None, network: str | None=None, workspace_mount: Literal['rw', 'ro']='rw', read_only_root: bool=False, tmpfs: tuple[str, ...]=(), env: dict[str, str] | None=None, forward_env: tuple[str, ...]=(), user: str | None=None, memory: str | None='2g', cpus: float | None=2, pids_limit: int | None=512, cap_drop: tuple[str, ...] | None=('ALL',), no_new_privileges: bool | None=True, resume_fingerprint_key: bytes | None=None) -> None
 ```
 
 Runs commands inside a Docker container via ``docker run --rm``.
