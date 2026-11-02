@@ -33,13 +33,15 @@ This verifies the SDK shape without an API key or network call.
 
 Save as `quickstart_offline.py`:
 
+<!-- linch:offline -->
+
 ```python
 import asyncio
 
 from linch import Agent
-from linch.config import FeatureFlags
+from linch import FeatureFlags
 from linch.ext.evals import ScriptedProvider, TextTurn
-from linch.sessions import InMemorySessionStore
+from linch import InMemorySessionStore
 
 
 agent = Agent(
@@ -89,7 +91,7 @@ import asyncio
 import os
 
 from linch import Agent
-from linch.sessions import InMemorySessionStore
+from linch import InMemorySessionStore
 
 
 agent = Agent(
@@ -120,8 +122,8 @@ Tools are plain Python objects. The `@tool` decorator is the shortest path:
 
 ```python
 from linch import Agent, tool
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
+from linch import InMemorySessionStore
+from linch import empty_tools
 
 
 @tool(description="Return the current status for a service.")

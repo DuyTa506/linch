@@ -43,7 +43,7 @@ from linch import FeatureFlags
 agent = Agent(..., features=FeatureFlags(filesystem=True))
 
 # Persist offloaded files under .linch/offload (inspectable, gitignored)
-from linch.filesystem import DiskFileBackend, OffloadConfig
+from linch import DiskFileBackend, OffloadConfig
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
@@ -55,8 +55,8 @@ agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
     result_offload=OffloadConfig(threshold_tokens=5_000),   # hard override
-    # or:
-    result_offload=OffloadConfig(threshold_fraction=0.05),  # 5 % of context
+    # Or replace the value above with OffloadConfig(threshold_fraction=0.05)
+    # for 5 % of context.
 )
 
 # Ephemeral scratch + persistent /memories/ across sessions

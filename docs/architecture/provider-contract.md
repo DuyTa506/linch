@@ -63,10 +63,10 @@ provider that omits them keeps its current behavior — neither is required on
   releases sockets deterministically. Must be idempotent.
 
 Conformance is exercised network-free by `assert_provider_contract` from
-`linch.testing`:
+`linch`:
 
 ```python
-from linch.testing import assert_provider_contract
+from linch import assert_provider_contract
 
 assert_provider_contract(lambda: MyProvider(), model="my-model")
 ```

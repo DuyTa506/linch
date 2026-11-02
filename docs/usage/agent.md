@@ -278,7 +278,7 @@ agent = Agent(
 ```
 
 ```python
-from linch.config import FeatureFlags
+from linch import FeatureFlags
 
 agent = Agent(
     ...,
@@ -303,7 +303,7 @@ wholesale, or compose reusable sections. Coding doctrine belongs in an
 explicit workspace preset or application-owned prompt.
 
 ```python
-from linch.config import SystemPromptConfig, SystemPromptSection
+from linch import SystemPromptConfig, SystemPromptSection
 
 # 1. Append instructions to the built-in Linch prompt
 agent = Agent(..., system_prompt="Always reply in formal English.")
@@ -453,7 +453,7 @@ reference, so one cap covers the whole agent tree.
 
 ```python
 from linch import Agent, RunBudget
-from linch.session import RunOptions
+from linch import RunOptions
 
 budget = RunBudget(max_tokens=500_000)          # and/or max_cost_usd=2.0
 

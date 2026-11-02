@@ -22,7 +22,7 @@ from linch import (
 )
 from linch.ext.deep_agent import create_deep_agent
 from linch.filesystem.postgres import PostgresFileBackend
-from linch.providers import OpenAIChatCompletionsProvider
+from linch import OpenAIChatCompletionsProvider
 from linch.sessions.postgres import PostgresSessionStore
 
 dsn = os.environ["LINCH_POSTGRES_DSN"]
