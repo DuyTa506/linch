@@ -359,6 +359,8 @@ AskUserPlugin()
 
 Provide the opt-in ``AskUser`` tool through the plugin lifecycle.
 
+Usage: [examples](examples.md).
+
 ### `linch.ToolSearchPlugin`
 
 Kind: Class.
@@ -558,6 +560,8 @@ InboxDelivery(delivery_id: str, message: Message, source: str = 'host', metadata
 ```
 
 A stable, deduplicated message destined for a session's next turn.
+
+Usage: [run-stores](run-stores.md).
 
 ### `linch.RunBudget`
 
@@ -991,6 +995,8 @@ ModelInputSnapshot(id: str, run_id: str, provider_attempt: int, codec_version: i
 
 Immutable encoded provider request captured immediately before dispatch.
 
+Usage: [run-stores](run-stores.md).
+
 ### `linch.ModelInputSnapshotError`
 
 Kind: Class.
@@ -1005,6 +1011,8 @@ Inherited initializer: ValueError.__init__(self, /, *args, **kwargs)
 
 Raised when an exact model-input snapshot cannot be trusted or decoded.
 
+Usage: [run-stores](run-stores.md).
+
 ### `linch.ModelInputSnapshotStore`
 
 Kind: Class.
@@ -1018,6 +1026,8 @@ Not instantiable (Protocol); implement its documented methods and attributes.
 ```
 
 Optional capability for persisting exact pending provider requests.
+
+Usage: [run-stores](run-stores.md).
 
 ### `linch.SystemPromptConfig`
 
@@ -1233,7 +1243,7 @@ HookResult(action: HookAction = 'continue', reason: str = '', feedback: str = ''
 
 Represent a hook decision and optional context mutations.
 
-Usage: [examples](examples.md).
+Usage: [hooks](hooks.md).
 
 ### `linch.HookContext`
 
@@ -1493,7 +1503,7 @@ FinalAnswerVerifierHook(verifiers: Any, *, max_retries: int=2) -> None
 
 Adapt final-answer verifiers to the pre-final-answer hook.
 
-Usage: [hooks](hooks.md).
+Usage: [examples](examples.md).
 
 ### `linch.StopPredicateHook`
 
@@ -1817,6 +1827,38 @@ GeneratedSubagentDefinition(name: str, description: str, body: str, tools: list[
 
 Hold a generated subagent's prompt and optional tool allowlist.
 
+### `linch.BashTool`
+
+Kind: Class.
+
+```python
+from linch import BashTool
+```
+
+```text
+BashTool(*, execution: Any=None) -> None
+```
+
+Run a shell command through the configured execution backend.
+
+Usage: [extending](extending.md).
+
+### `linch.DockerBackend`
+
+Kind: Class.
+
+```python
+from linch import DockerBackend
+```
+
+```text
+DockerBackend(*, image: str='python:3.12-slim', docker_path: str | None=None, network: str | None=None, workspace_mount: Literal['rw', 'ro']='rw', read_only_root: bool=False, tmpfs: tuple[str, ...]=(), env: dict[str, str] | None=None, forward_env: tuple[str, ...]=(), user: str | None=None, resume_fingerprint_key: bytes | None=None) -> None
+```
+
+Runs commands inside a Docker container via ``docker run --rm``.
+
+Usage: [extending](extending.md).
+
 ### `linch.McpHttpServerConfig`
 
 Kind: Class.
@@ -1859,6 +1901,8 @@ McpStdioServerConfig(type: Literal['stdio'] | None = None, command: str = '', ar
 
 Configure an MCP server launched through a stdio subprocess.
 
+Usage: [tools](tools.md).
+
 ### `linch.MiddlewareContext`
 
 Kind: Class.
@@ -1887,7 +1931,7 @@ Message(role: Literal['user', 'assistant'], content: list[ContentBlock], provide
 
 Represent one user or assistant message.
 
-Usage: [context-and-memory](context-and-memory.md).
+Usage: [agent](agent.md).
 
 ### `linch.ModelId`
 
@@ -1964,6 +2008,22 @@ PermissionMode: TypeAlias = Literal['default', 'acceptEdits', 'skip-dangerous']
 ```
 
 Supported permission evaluation modes for agent tool calls.
+
+### `linch.ProviderRequest`
+
+Kind: Class.
+
+```python
+from linch import ProviderRequest
+```
+
+```text
+ProviderRequest(model: str, system: list[SystemBlock], tools: list[dict[str, Any]], messages: list[Message], signal: Any = None, max_output_tokens: int | None = None, temperature: float | None = None, stop_sequences: list[str] | None = None, max_retries: int = 5, reasoning: dict[str, Any] | None = None, cache_prompt: bool | None = None, cache_ttl: Literal['5m', '1h'] | None = None, thinking: dict[str, Any] | None = None, effort: Literal['low', 'medium', 'high', 'xhigh', 'max'] | None = None, output_schema: OutputSchema | None = None, tool_choice: ToolChoice | None = None, stream_partials: bool | None = None, _native_catalog_changes: bool | None = None)
+```
+
+Collect the normalized inputs for one provider call.
+
+Usage: [providers](providers.md).
 
 ### `linch.PermissionDeniedError`
 
@@ -2215,7 +2275,7 @@ SubagentEvent(parent_session_id: str, subagent_run_id: str, subagent_type: str, 
 
 Wrap an event emitted by a subagent run.
 
-Usage: [examples](examples.md).
+Usage: [workflows](workflows.md).
 
 ### `linch.SystemEvent`
 
@@ -2265,6 +2325,20 @@ Append-only log projecting the provider view and full history.
 
 Usage: [agent](agent.md).
 
+### `linch.SystemBlock`
+
+Kind: Class.
+
+```python
+from linch import SystemBlock
+```
+
+```text
+SystemBlock(text: str, cacheable: bool = False, type: Literal['text'] = 'text')
+```
+
+Represent one system-prompt block.
+
 ### `linch.TextBlock`
 
 Kind: Class.
@@ -2279,7 +2353,7 @@ TextBlock(text: str, type: Literal['text'] = 'text')
 
 Represent plain text in a model message.
 
-Usage: [context-and-memory](context-and-memory.md).
+Usage: [agent](agent.md).
 
 ### `linch.Tool`
 
@@ -2463,6 +2537,8 @@ Inherited initializer: Exception.__init__(self, /, *args, **kwargs)
 
 A tool failed while executing an otherwise valid tool call.
 
+Usage: [tools](tools.md).
+
 ### `linch.ToolTimeoutError`
 
 Kind: Class.
@@ -2493,7 +2569,7 @@ ToolRegistry() -> None
 
 Own named tool registrations and reversible replacements.
 
-Usage: [tools](tools.md).
+Usage: [extending](extending.md).
 
 ### `linch.ToolResultBlock`
 
@@ -2525,7 +2601,7 @@ ToolResult(content: str, summary: str = '', is_error: bool = False, metadata: di
 
 Represent the legacy text projection of a tool invocation.
 
-Usage: [events](events.md).
+Usage: [deep-agent](deep-agent.md).
 
 ### `linch.ToolUseBlock`
 
@@ -2540,6 +2616,8 @@ ToolUseBlock(id: str, name: str, input: dict[str, Any], type: Literal['tool_use'
 ```
 
 Represent a model request to invoke a tool.
+
+Usage: [run-stores](run-stores.md).
 
 ### `linch.tool`
 
@@ -2937,7 +3015,7 @@ RetryOptions(max_attempts: int = 5, base_delay_ms: int = 1000, max_delay_ms: int
 
 Configure attempt limits and exponential backoff for provider retries.
 
-Usage: [examples](examples.md).
+Usage: [tool-cache](tool-cache.md).
 
 ### `linch.SGLangProvider`
 
@@ -3059,7 +3137,7 @@ RunContractMismatchError(comparison: RunContractComparison) -> None
 
 Raised when resume inputs differ from the inputs of the original run.
 
-Usage: [troubleshooting](troubleshooting.md).
+Usage: [run-stores](run-stores.md).
 
 ### `linch.RunLease`
 
@@ -3090,8 +3168,6 @@ Not instantiable (Protocol); implement its documented methods and attributes.
 ```
 
 Optional capability for claiming and fencing ownership of a run.
-
-Usage: [run-stores](run-stores.md).
 
 ### `linch.RunLeaseConflictError`
 
@@ -3187,6 +3263,8 @@ Not instantiable (Protocol); implement its documented methods and attributes.
 
 Define optional exactly-once insertion for next-turn messages.
 
+Usage: [run-stores](run-stores.md).
+
 ### `linch.StoredRunEvent`
 
 Kind: Class.
@@ -3200,6 +3278,8 @@ StoredRunEvent(seq: int, appended_at: str, event: Event)
 ```
 
 Represent one ordered event persisted in a run's event log.
+
+Usage: [run-stores](run-stores.md).
 
 ### `linch.VLLMProvider`
 
@@ -3345,6 +3425,8 @@ def create_model_input_snapshot(run_id: str, provider_attempt: int, request: Pro
 
 Strictly encode a provider request while excluding its live signal.
 
+Usage: [run-stores](run-stores.md).
+
 ### `linch.decode_model_input_snapshot`
 
 Kind: Function.
@@ -3358,6 +3440,8 @@ def decode_model_input_snapshot(snapshot: ModelInputSnapshot, *, signal: Any=Non
 ```
 
 Verify and decode a snapshot, rebinding only the caller's live signal.
+
+Usage: [run-stores](run-stores.md).
 
 ### `linch.create_subagent_definition`
 
@@ -3707,7 +3791,7 @@ Not instantiable (Protocol); implement its documented methods and attributes.
 
 Define a duck-typed gate for validating a would-be-final answer.
 
-Usage: [examples](examples.md).
+Usage: [structured-output](structured-output.md).
 
 ### `linch.evaluate_verifiers`
 
@@ -4007,7 +4091,7 @@ ToolRule(tool: str, decision: RuleDecision, arg: str | None=None, *, role: str |
 
 Match a tool call by name and optionally by a Skill argument.
 
-Usage: [extending](extending.md).
+Usage: [examples](examples.md).
 
 ### `linch.InMemorySessionStore`
 
@@ -4069,6 +4153,8 @@ SessionRecord(id: str, created_at: str, updated_at: str, meta: dict[str, object]
 
 Describe the durable metadata for one conversation session.
 
+Usage: [run-stores](run-stores.md).
+
 ### `linch.StoredMessage`
 
 Kind: Class.
@@ -4083,6 +4169,8 @@ StoredMessage(seq: int, appended_at: str, message: Message)
 
 Pair one persisted message with its session sequence and timestamp.
 
+Usage: [run-stores](run-stores.md).
+
 ### `linch.ProviderViewSnapshot`
 
 Kind: Class.
@@ -4096,6 +4184,8 @@ ProviderViewSnapshot(provider_view: list[Message], covers_seq: int, projection_i
 ```
 
 A durable compacted ``provider_view`` and the message watermark it covers.
+
+Usage: [run-stores](run-stores.md).
 
 ### `linch.ProviderViewSnapshotStore`
 
@@ -4426,6 +4516,8 @@ ToolUseTurn(tool_name: str, tool_input: dict[str, Any], tool_id: str = 'scripted
 ```
 
 Provider turn that emits one tool-use block.
+
+Usage: [evals](evals.md).
 
 ### `linch.ext.evals.text_contains`
 

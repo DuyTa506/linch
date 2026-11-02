@@ -38,7 +38,7 @@ async for event in session.run("hello"):
             pass
         case "usage":     # primary or auxiliary token counts
             pass
-        case "budget":    # RunBudget warning (90%) or exhaustion
+        case "budget":    # RunBudget warning or exhaustion
             pass
         case "result":    # .subtype: "success", "error", "aborted", "interrupted"
             pass
@@ -52,9 +52,9 @@ async for event in session.run("hello"):
 
 A few lifecycle rules worth internalizing:
 
-- **`system` is first, `result` is always last.** Every successful or failed run
-  terminates with exactly one `ResultEvent`. Treat it as the signal to stop
-  consuming and read the outcome.
+- **A normally consumed new run starts with `system` and ends with `result`.**
+  Read the outcome from the terminal `ResultEvent`. A resumed stream can start
+  later in the run, and closing a stream early stops consumption.
 - **`partial_assistant` only appears when `include_partial_messages=True`.**
   These are the streaming text/thinking deltas (see
   [Providers → Reading thinking events](./providers.md#reading-thinking-events)).
@@ -65,15 +65,16 @@ A few lifecycle rules worth internalizing:
   even when the model only saw a truncated/offloaded preview.
 - **`tool_call_end.tool_output` carries Canonical Tool Output V2** for tools
   declaring `output_schema`: the validated JSON value or structured error and
-  JSON-reference attachments remain available beside the legacy projections.
+  JSON-reference attachments remain available beside the result projections.
 - **`tool_progress` is observational only.** A tool may call
   `ctx.report_progress("scanning", {"completed": 3})`; Linch emits a
   `ToolProgressEvent` for consumers, but never appends it to provider history,
   the durable run event log, or changes the final `ToolResult`. Progress is
   best-effort and may be ignored by consumers.
-- **`permission_request` pauses the loop** when running in `mode="default"`; the
-  loop resumes once you respond. With `mode="skip-dangerous"` you never see it.
-- **`budget` fires on a `RunBudget`** — once as a warning at 90%, then on
+- **`permission_request` identifies calls requiring a permission decision.**
+  After emitting it, Linch resolves the batch through the configured
+  `can_use_tool` callback. Without a callback, an ask is denied.
+- **`budget` fires on a `RunBudget`** — once as a warning at `warn_ratio` (default 90%), then on
   exhaustion. See [Agent](./agent.md) for configuring `RunBudget`.
 
 Check `event.subtype` on the terminal `ResultEvent` and read `event.final_text`
@@ -82,7 +83,8 @@ Check `event.subtype` on the terminal `ResultEvent` and read `event.final_text`
 ```python
 async for event in session.run("hello"):
     ...
-# ResultEvent is always the last event. Check `event.subtype` and
+# In a normally consumed stream, the terminal ResultEvent is last. Check
+# `event.subtype` and
 # `event.final_text` (or `event.structured_output` when using an OutputSchema).
 ```
 
@@ -90,9 +92,10 @@ async for event in session.run("hello"):
 `"interrupted"` — branch on it to decide whether to surface the answer, an
 error, or a cancellation/interruption.
 
-The same event stream is mirrored to hooks at the `on_event_emit` chokepoint, so
-anything you can do in this loop you can also do in a reusable hook — see
-[Hooks](./hooks.md).
+Stream events are passed to `on_event_emit` hooks. For nonterminal events,
+the hook runs when the consumer requests the next event; the terminal event is
+dispatched before it is yielded. Closing early can leave the most recently
+yielded nonterminal event undispatched. See [Hooks](./hooks.md).
 
 <a id="model-call-accounting"></a>
 
@@ -135,9 +138,7 @@ if event.type == "usage" and event.source == "compaction":
     print(event.usage, event.call_id, event.logical_call_id, event.model)
 ```
 
-The existing `UsageEvent` ordering and legacy fields remain compatible; the
-accounting metadata is additive. Its `usage` is
-the physical delivery's usage and `cumulative` is the run's cumulative known
+`UsageEvent.usage` is the physical delivery's usage and `cumulative` is the run's cumulative known
 usage across primary and auxiliary deliveries. `ResultEvent.total_usage` and
 `RunReport` use the same cumulative lower-bound total. When a dispatched call
 is cancelled, fails, or ends before valid final usage, the total is not
@@ -147,8 +148,7 @@ invented as zero: the terminal result sets `usage_complete=False`.
 
 ## Cost fields
 
-Usage and result events include optional USD cost fields when the model exists
-in `linch.pricing`'s table:
+Usage and result events include optional USD cost fields for priced models:
 
 ```python
 async for event in session.run("Summarize this thread."):
@@ -163,16 +163,9 @@ running known total so far (`cumulative_cost_usd`); the terminal `result` event
 reports the run total (`total_cost_usd`). The cumulative token count includes a
 compaction delivery before the main turn that follows it.
 
-**Unknown model IDs report `None`** for every cost field rather than charging a
-synthetic price — this is deliberate so a private or self-hosted model never
-shows a misleading number. Known token usage is retained, but the aggregate
-cost is partial and a USD cap cannot enforce an unknown price. To attribute cost
-for such models, pass a custom table:
-
-```python
-# linch.pricing.cost_usd(usage, model, table=...) with a custom table
-# for private or self-hosted models.
-```
+An unpriced delivery has `cost_usd=None`. Cumulative and terminal costs can be
+partial sums when only some deliveries have known prices. Known token usage is
+retained, but a USD cap cannot enforce an unknown price.
 
 This matters for budgets too: with an unpriced model, only the token limit of a
 `RunBudget` can bind for that delivery (the cost limit cannot trip on an
@@ -257,20 +250,15 @@ ordered `HookDispatcher`; tool pipeline points are waterfalls, while
 
 ## Backpressure
 
-`session.run(prompt)` returns a plain `AsyncIterator[Event]` — an async generator
-that `yield`s each event and **suspends at the yield until you pull the next one**.
-The chain (`run_loop` → `session.run`) is generators all the way down; there is no
-unbounded internal queue draining events away from your consumer.
-
-The practical guarantee: **a slow consumer throttles the whole producer.** While
-you are not pulling, provider streaming and tool execution do not race ahead — the
-loop is parked at the last `yield`. So you can safely do slow per-event work
-(write to a socket, render a UI frame, persist to a DB) without the run buffering
-unboundedly in memory:
+`session.run(prompt)` returns an `AsyncIterator[Event]`. Pulling events drives
+the foreground generator, which suspends at each yield. An already-started tool
+task can continue while the consumer is paused; its progress queue holds at
+most one pending update per call and coalesces newer updates. Background tasks
+also run independently. Consume events promptly when timely progress matters:
 
 ```python
 async for event in session.run(prompt):
-    await slow_websocket.send(serialize(event))  # backpressure flows upstream
+    await slow_websocket.send(serialize(event))
 ```
 
 Consequences to design for:
@@ -285,11 +273,12 @@ Consequences to design for:
   raises `ConfigError` — fan out with separate sessions (or subagents) instead.
 - **Background work is the explicit exception.** A `run_in_background=True` tool or
   subagent detaches onto its own task and delivers completion as a drained
-  `<task-notification>` on a later in-process turn — that path intentionally does
-  *not* block the foreground stream. With a `RunStore`, status is best-effort
-  audit telemetry on the origin run; the result notification and active task are
-  not reconstructed after restart. See [Tools](./tools.md) and
-  [deep-agent](./deep-agent.md).
+  `<task-notification>` on a later turn without blocking the foreground stream.
+  The active task is process-local and is not reconstructed after restart.
+  Notifications are in memory by default; durable inbox mode can preserve a
+  completion already enqueued in a durable session store across restart. With a
+  `RunStore`, status is best-effort audit telemetry on the origin run. See
+  [Tools](./tools.md) and [deep-agent](./deep-agent.md).
 
 ---
 
@@ -403,7 +392,7 @@ comparisons, and CI exit codes, see [Evals and benchmarks](./evals.md).
 
 `invoke_agent` uses the caller's current span as its parent. Foreground and
 background subagents inherit that context through their tool tasks. A run's
-trace identifier is the OTel trace ID; `linch.run_id` remains its durable run ID.
+trace identifier is the active OTel trace ID when available, otherwise the run ID; `linch.run_id` remains its durable run ID.
 When a host dispatches work to another process, carry W3C `traceparent` in the
 job payload using OTel propagation:
 

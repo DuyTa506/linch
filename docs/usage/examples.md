@@ -4,7 +4,7 @@ Use this index to find runnable examples for the subsystem you are integrating.
 
 [← Usage guide](./README.md)
 
-Runnable example code lives in the `examples/` directory, organized by subsystem. Local demos (marked *local*) run without a live API key, so you can explore the mechanics offline before wiring up a provider.
+Runnable example code lives in the `examples/` directory, organized by subsystem. Local demos (marked *local*) run without a live API key, so you can explore the mechanics offline before wiring up a provider. Some examples also expose offline factories or helpers while their script's `main()` uses a live provider.
 
 ---
 
@@ -12,20 +12,22 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `core/minimal_agent.py` | Smallest possible agent |
-| `core/coding_agent.py` | Full SWE agent — workspace_tools, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/tiny_agent.py` | Minimal bare `Agent` + session loop; add `workspace_tools()` explicitly when the app needs file or shell access |
+| `core/coding_agent.py` | SWE agent with `workspace_tools`, `BashRule`/`PathRule` safety fences, `LoopGuard`, and multi-turn context |
 | `core/policy_aware_execution.py` | Docker-backed Bash execution with permission rules and opt-in runtime restrictions |
-| `core/reading_agent.py` | Read-only codebase Q&A — exclude Write/Edit/Bash, PathRule, custom reviewer persona |
-| `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured JSON output via ContextBuilder injection |
-| `core/custom_permissions.py` | All permission modes and rule types |
-| `core/system_prompts.py` | append, replace, per-session override, persona patterns |
-| `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
-| `core/event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
-| `core/multi_session.py` | Web-app pattern: one Agent, many users, shared deps |
-| `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
-| `core/interactive_cli.py` | Interactive REPL |
-| `core/governance_redaction.py` | `RedactionHook` — host-supplied regex rules scrub tool results and the final answer (policy-free governance seam) |
-| `core/deep_agent_resume.py` | `create_deep_agent` — 4 demos: planning + /memories, background worker + notification, fork/continue, coordinator mode |
+| `core/reading_agent.py` | Read-only codebase Q&A: exclude Write/Edit/Bash, fence paths with `PathRule`, and use a reviewer persona |
+| `core/chat_agent.py` | Tool-free customer-support chat with `ContextBuilder` policy injection, `OutputSchema` JSON replies, and multi-turn context |
+| `core/custom_permissions.py` | Permission modes, `ToolRule`/`PathRule`/`BashRule`, and synchronous, asynchronous, and interactive approval callbacks |
+| `core/system_prompts.py` | Appending, replacing defaults, custom system blocks, per-session overrides, and persona patterns |
+| `core/structured_output.py` | Agent-wide and per-run `OutputSchema`, terminal `final_tool_name`, nested schemas, and parse-error handling |
+| `core/multi_session.py` | Web-app pattern: one `Agent`, many users, persistent sessions, per-session dependencies, and metadata |
+| `core/loop_guard_agent.py` *local* | Repeated-call loop detection, forced final answers, and the `max_turns` fallback |
+| `core/interactive_cli.py` | Interactive terminal REPL with clean agent shutdown |
+| `core/governance_redaction.py` *local* | Host-supplied regex rules scrub tool results and the final answer through `RedactionHook` |
+| `core/ask_user_agent.py` | `AskUserPlugin`, fail-closed responses, timeout handling, and blocking CLI handlers (factory is offline-testable) |
+| `core/budget_capped_agent.py` *local* | Shared `RunBudget` token caps and budget warning/error events with scripted usage turns |
+| `core/compaction_ladder_agent.py` *local* | Micro-compaction before forced LLM summarization when a provider reports `ContextLengthError` |
+| `core/workflow_fleet.py` | Deterministic workflow fan-out, pipeline stages, shared budgets, and Postgres journal replay after a failure |
 
 ---
 
@@ -33,12 +35,10 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `tools/custom_tools.py` | 5 tool patterns: read, write, exec, parallel, with deps |
-| `tools/parallel_search_agent.py` | Scheduler V2: parallel search, resources, concurrency cap |
-| `tools/runtime_tools.py` | Runtime registry add/remove/replace/select and schema export |
-| `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out (`execution_timeout_ms=0`), `RetryOptions` |
-| `tools/rag_tools.py` | RAG tool suite: hybrid_search, keyword_search, graph_search, web_search |
-| `tools/filesystem_offload.py` | Virtual filesystem backends, auto-offload of large results (*runs offline*) |
+| `tools/custom_tools.py` | Five tool patterns: read, write, exec, dependency injection, and a validation-heavy class-shaped tool |
+| `tools/runtime_tools.py` *local* | Runtime registry add/remove/replace/select, resource metadata, and schema export; the optional agent call is live |
+| `tools/rag_tools.py` | Injected RAG clients for hybrid, keyword, graph, and web search tools |
+| `tools/tool_middleware.py` *local* | Middleware that rewrites validated input, blocks sensitive calls, and redacts tool output |
 
 ---
 
@@ -46,8 +46,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `context/context_injection.py` | ContextInjectionHook patterns: RAG per-turn, budget, selected tools |
-| `context/rag_context_builder.py` | ContextInjectionHook RAG with metadata and budget reporting |
+| `context/context_injection.py` *local* | ContextInjectionHook patterns: RAG per-turn, budget, selected tools |
 
 ---
 
@@ -55,7 +54,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `memory/mem0_recall.py` | Optional mem0 recipe: run-scoped semantic recall and terminal-turn writes using public context and hook APIs |
+| `memory/mem0_recall.py` | mem0-compatible context and terminal hooks for run-scoped recall and successful-turn writes; the host supplies the async memory client |
 
 ---
 
@@ -81,37 +80,52 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
-| `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
-| `integrations/redis_mailbox.py` | External `Mailbox` adapter backed by Redis lists (atomic drain), kept honest with `assert_mailbox_contract`. Adapters live outside core; runs offline with a fake client |
+| `integrations/redis_mailbox.py` *local* | External `Mailbox` adapter over Redis-list semantics, atomic drain, correlation fields, and `assert_mailbox_contract` with a fake client |
+| `integrations/skills_usage.py` *local* | Project skill creation, skill loading/invocation, and lifecycle events with a fake provider |
 
 ## `extensions/` — *templates*
 
 | File | What it shows |
 |------|---------------|
 | `extensions/provider_template.py` | Minimal `BaseProvider` adapter with normalized streaming events |
-| `extensions/filesystem_backend_template.py` | Virtual `FileBackend` path operations |
-| `extensions/tool_package_template.py` | `@tool` first, with an advanced class-shaped tool plus registry factory |
-| `extensions/hook_package_template.py` | Hook object with dispatcher method names and `HookResult` actions |
+| `extensions/tool_package_template.py` | `@tool` first, with an advanced class-shaped tool and registry factory |
 
 ## `recipes/` — *local demo available*
 
 | File | What it shows |
 |------|---------------|
-| `recipes/research_desk.py` | A **non-coding** agent (literature analyst): domain tools (`search_library`/`read_article`/`record_citation`), `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and a closed-loop `Verifier` that bounces an uncited answer — proof the SDK isn't coding-shaped. Built via a factory so it runs offline under a `ScriptedProvider` |
-| `recipes/loop_runner.py` | `LoopSpec` + `LoopRunner.run_once()` as the SDK-native outer-loop primitive. Loads project `.env` (`API_KEY`/`BASE_URL`/`model`, or explicit provider keys), writes `domains/<loop_id>/README.md`, `LOG.md`, and per-run report artifacts |
-| `recipes/runner_recipes.py` | Host-owned lifecycle wrappers over `LoopRunner.run_once()` — cron, webhook, fixed-interval, and CI-gate triggers. Runs offline under a fake provider |
-| `recipes/ralph_loop.py` | The **Ralph loop** for long-horizon work: an outer loop where each pass gets a *fresh* `session` (no compaction — discard and restart), reads the same spec, and carries state only through the virtual filesystem (`StateFileBackend`), looping until a done-predicate. A harness pattern composed from existing seams; `max_iterations` bounds the spend |
+| `recipes/research_desk.py` | Non-coding literature analyst with domain tools, `ctx.deps` corpus/citation ledger, `OutputSchema`, and a `FinalAnswerVerifierHook` retry for uncited answers; its factory is offline-testable and `main()` is live |
+| `recipes/loop_runner.py` | `LoopSpec` + `LoopRunner.run_once()` for host-triggered recurring work, project `.env` loading, and `domains/<loop_id>/` artifacts |
+| `recipes/runner_recipes.py` *local* | Host-owned cron, webhook, fixed-interval, and CI-gate wrappers over `LoopRunner.run_once()` with a fake provider |
+| `recipes/ralph_loop.py` | Long-horizon harness where every iteration gets a fresh session and carries state only through `StateFileBackend` until a done predicate; `max_iterations` bounds spend |
 
 ## `coordination/` — *local demos available*
 
-The optional [coordination layer](./coordination.md) — advancing the loop from a
-clock or a peer. Both are built via a factory so they run offline under a
-`ScriptedProvider` (smoke-tested in `tests/test_example_coordination.py`).
+The optional [coordination layer](./coordination.md) provides peer messaging and
+request/response correlation. The example's factory and mailbox handshake are
+smoke-tested offline with a `ScriptedProvider` in
+`tests/examples/test_example_coordination.py`; its `main()` uses a live provider.
 
 | File | What it shows |
 |------|---------------|
 | `coordination/team_mailbox.py` | A two-agent team over a shared `InMemoryMailbox`: one peer addresses another with `send_message` and it drains into the recipient's next turn, plus a `Correlator` request/response handshake (plan approval) |
+
+---
+
+## `rag/` — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `rag/keyword_connector.py` *local* | Dependency-free `RetrievedChunk` connector that ranks an in-memory corpus by keyword overlap |
+
+---
+
+## `worker/`
+
+| File | What it shows |
+|------|---------------|
+| `worker/minimal.py` | PgQueuer-backed worker fleet with a scripted provider, Postgres run store, enqueue/worker/event modes, and no model API key |
+| `worker/benchmark_enqueue.py` | Postgres enqueue throughput benchmark with isolated schema and commit-time `NOTIFY` coverage |
 
 ---
 

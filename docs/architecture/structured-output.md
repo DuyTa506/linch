@@ -1,5 +1,7 @@
 # Structured Output Paths
 
+Use this page to understand how final text and terminal tools produce structured results.
+
 > Part of the [Linch architecture guide](./README.md).
 
 Two independent mechanisms surface the same field: `ResultEvent.structured_output: dict | None`.
@@ -18,32 +20,31 @@ flowchart LR
         direction TB
         B1["Model calls final_tool_name\nstop_reason = tool_use"]
         B2["loop/ intercepts ToolUseBlock\nbefore scheduler — tool is NOT executed"]
-        B3["ResultEvent.structured_output = block.input"]
+        B3["Validate input against configured schema\nResultEvent.structured_output = input | None"]
         B1 --> B2 --> B3
     end
 ```
 
 `jsonschema` is a core dependency; configured schemas are always validated.
 
-Path B is more reliable for complex schemas and works across all providers without `response_format` support.
-
 ## Design rationale
 
-- **Two paths because providers disagree.** Some endpoints enforce a JSON schema
-  natively (`response_format` / `text.format`), others don't. Path A uses native
-  enforcement when available; Path B (force the model to call a named tool and read
-  its `input`) works everywhere, including providers with no structured-output
-  support — so the SDK never depends on a capability a given model lacks.
-- **Both converge on one field.** Whichever path runs, the result lands in
-  `ResultEvent.structured_output`, so callers write one extraction path regardless of
-  provider — the mechanism is an implementation detail, not part of the contract.
-- **The final tool is intercepted, never executed.** Path B recognizes
-  `final_tool_name` before the scheduler runs, so the "tool" is a pure output channel
-  with no side effect — it can't accidentally do work, and the loop terminates on it.
-- **Repair is a retry, not a hard failure.** When Path A's text fails validation, the
-  error is re-injected as a system-reminder and the loop runs another turn (up to
-  `structured_output_retries`), because a malformed-JSON turn is usually recoverable
-  by telling the model what was wrong — cheaper than failing the whole run.
+- **Two capture paths.** The final-text path parses a JSON object and validates it
+  against the configured schema. Providers that support structured output can
+  constrain their responses; other providers may require prompting for JSON.
+- **Terminal tool capture.** An explicit `final_tool_name`, or a provider's
+  `structured_output_terminal_tool` capability with a schema, selects the terminal
+  tool path. Its input is validated against the schema when one is configured.
+  A validation error sets `structured_error` and leaves `structured_output` empty.
+- **The final tool is intercepted.** The loop captures the named tool call before
+  scheduling rather than executing it. It pairs tool calls with results in the
+  session history.
+- **Repair retries.** With `structured_output_retries` greater than zero, parse or
+  validation errors can prompt another turn. When retries are exhausted, the
+  result retains the structured error unless a hook changes the outcome. A
+  structured error alone does not force an error result subtype: callers must
+  inspect `structured_error` and `structured_output` even on success. Retries
+  are subject to run limits.
 
 ---
 

@@ -35,10 +35,14 @@ async def answer(profile, question):
     session = await agent.session()
     return [event async for event in session.run(question, RunOptions(profile=profile))]
 
-support_events, billing_events = await asyncio.gather(
-    answer(support, "How do I reset access?"),
-    answer(billing, "Where is my invoice?"),
-)
+async def main():
+    support_events, billing_events = await asyncio.gather(
+        answer(support, "How do I reset access?"),
+        answer(billing, "Where is my invoice?"),
+    )
+    await agent.close()
+
+asyncio.run(main())
 ```
 
 Each conversation needs its own session; a session still admits one active run.

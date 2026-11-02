@@ -1,5 +1,7 @@
 # Migrating from Linch 2.x to 3.0
 
+Read this page when upgrading a Linch 2.x application to Linch 3.0.
+
 Linch 3.0 is a headless agent kernel. Python 3.11+ is required. There are no
 compatibility shims or readers for pre-3.0 persisted data. Start new runs and
 use fresh Postgres schemas; built-in stores reject incompatible existing
@@ -7,18 +9,18 @@ schemas rather than upgrading them.
 
 Kernel exports are listed in `linch.__all__`. Extensions are imported
 explicitly from `linch.ext.*` and are absent from the kernel's top-level API.
-The tables below group the 2.x removals and replacements by area.
+The tables below list the application-facing changes by area.
 
 ## Agent, sessions, and tools
 
 | Removed or changed in 3.0 | Replacement |
 |---|---|
-| Python 3.10; scaffold TOML fallback readers | Python 3.11+ and valid TOML |
+| Python 3.10 | Python 3.11+ |
 | `AgentOptions` | Configure `Agent(...)`; `from linch import Agent` |
 | Domain configuration selected only at Agent construction | `Profile` layers selected with `RunOptions(profile=...)`; pass the pinned id/version/definition again on resume or takeover; see [profiles](usage/profiles.md) |
 | `Agent.openai` provider property | `agent.provider`; the separate `Agent(openai=...)` configuration argument remains |
 | `Agent(execution_backend=...)` with only shell support | A coherent `.shell`/`.fs` backend; `from linch import LocalExecutionBackend, RemoteExecutionBackend` |
-| `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch.tools.builtin import BashTool` |
+| `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch import BashTool` |
 | `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
 | `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |
 | `permissions["canUseTool"]` and `.canUseTool` | `permissions["can_use_tool"]` and `.can_use_tool` |
@@ -26,20 +28,28 @@ The tables below group the 2.x removals and replacements by area.
 | AskUser response `ok` / `confirmed` keys | `accepted`, or `answers`-only response inference |
 | Callback, hook, and pipeline `policy_id` / `policy_version` attributes | `resume_policy_id` / `resume_policy_version` |
 | `Session(provider_view=..., full_history=...)` | `session_log=SessionLog.seed(historical=..., visible=...)`; `from linch import Session, SessionLog` |
-| `SessionLog.derive_messages()` | Read `session.provider_view`; append with `await session.append(...)` |
+| `SessionLog.derive_messages()` | Read `session.provider_view`; append a list with `await session.append([message, ...])` |
 | Mutation of `provider_view` / `full_history` | Detached sequence snapshots; append messages or record a logged projection |
-| `AgentMiddleware` and obsolete middleware dispatch/outcome helpers | Duck-typed hooks through `ToolMiddlewareHook`; `from linch import ToolMiddlewareHook` |
+| `AgentMiddleware` | Duck-typed hooks through `ToolMiddlewareHook`; `from linch import ToolMiddlewareHook` |
 | Built-in `Read`/`Write`/`Edit`/`Glob` argument aliases (`path`, `old`, `new`, `pattern`) | Canonical `file_path`, `old_string`, `new_string`, `glob_pattern`, and `target_directory` keys |
 | Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
 | `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
 | Ambiguous worker display names for `SubagentContinue` or `TaskStop` | Pass the unique `worker_id`; unique display names remain accepted |
 | `Agent(mailbox=...)` | Mount the plugin: `await agent.use(MailboxPlugin(), mailbox)`; `from linch import MailboxPlugin` |
 | `Agent(ask_user=...)` | Mount the plugin: `await agent.use(AskUserPlugin(), handler)`; `from linch import AskUserPlugin` |
-| Large tool or skill catalogs | `ToolSearchPlugin` is mounted by default; use `await agent.tool_search.dispose()` to restore the unfiltered catalog, or mount `ToolSearchPlugin(max_tools=..., max_skills=...)` explicitly |
-| `Agent(tools=registry)` sharing later caller mutations | Each agent copies `registry` at construction; register later tools on `agent.tools` to keep agent registrations isolated |
-| `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and discovery codecs/capability gates | Removed; unknown content-block types and tool-result fields are rejected |
+| Large tool or skill catalogs | `ToolSearchPlugin` is mounted when the first session is created; use `await agent.tool_search.dispose()` to restore the unfiltered catalog, or mount `ToolSearchPlugin(max_tools=..., max_skills=...)` explicitly |
+| `Agent(tools=registry)` sharing later caller mutations | Each agent makes a shallow registry copy at construction (the tool instances are shared); register later tools on `agent.tools` to keep agent registrations isolated |
+| `Agent(tools=[...])` | `Agent(tools=empty_tools(...))`; `empty_tools` creates a `ToolRegistry` containing only the supplied tools; import `Agent`, `BashTool`, and `empty_tools` from `linch` |
 | Missing-`jsonschema` validation bypass | `jsonschema` is core; configured output schemas are always validated |
 | Persisted skill fields `substitutedBody` and `invokedAt` | Canonical `substituted_body` and `invoked_at`; malformed records are rejected |
+
+For example, replace a 2.x tool list with an explicit registry:
+
+```python
+from linch import Agent, BashTool, empty_tools
+
+agent = Agent(model="gpt-5", tools=empty_tools(BashTool()))
+```
 
 Constructor aliases now use these exact spellings:
 
@@ -66,8 +76,8 @@ become `session_id`, `run_id`, `turn_index`, `tool_use_id`, and `tool_name`.
 
 ## Explicit extension imports
 
-Old package names in the first column are relative to the former top-level
-`linch` package; only the replacement imports are available in 3.0.
+Only the replacement imports in the table are available in 3.0; update the
+old names in the first column at their call sites.
 
 | Old package or root exports | Replacement import |
 |---|---|
@@ -76,7 +86,7 @@ Old package names in the first column are relative to the former top-level
 | `evals`; root harness exports | `from linch.ext.evals import EvalCase, CaseResult, EvalResult, run_eval` |
 | Root eval suite/benchmark exports | `from linch.ext.evals import EvalSuite, EvalBenchmarkTarget, EvalTargetResult, EvalBenchmarkResult, load_eval_suite, load_scripted_turns, run_eval_benchmark` |
 | Root scripted-provider exports | `from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn` |
-| Root eval scorers (except removed `memory_recalled`) | `from linch.ext.evals import text_contains, tool_called, schema_valid, cost_under, context_selected_tool, context_not_trimmed, context_metadata_contains, recovery_succeeded, run_completed` |
+| Root eval scorers | `from linch.ext.evals import text_contains, tool_called, schema_valid, cost_under, context_selected_tool, context_not_trimmed, context_metadata_contains, recovery_succeeded, run_completed` |
 | `text_contains` scorer fields `text` / `contains` | `substring` (omitted field defaults to `{expected}`) |
 | `deep_agent`; root preset/profile/prompt exports | `from linch.ext.deep_agent import create_deep_agent, DeepAgentProfile, DEEP_AGENT_PROFILES, DEEP_AGENT_SYSTEM_PROMPT, DEEP_AGENT_SUBAGENTS` |
 | `reports`; root report helpers | `from linch.ext.reports import RunReport, build_run_report, load_run_report` |
@@ -111,20 +121,17 @@ the SDK does not discover DSNs from the environment.
 | `SqliteSessionStore` | `from linch.sessions.postgres import PostgresSessionStore`; `from linch import InMemorySessionStore` for tests/dev |
 | `SqliteFileBackend` | `from linch.filesystem.postgres import PostgresFileBackend`; `from linch import StateFileBackend` for ephemeral files |
 | `SqliteMailbox` | `from linch import InMemoryMailbox, Mailbox`; durable mailbox adapters are host-owned |
-| `SqliteMemoryStore` | File memory below; SQLite durability is removed |
-| Automatic SQLite/Postgres schema upgrades | Fresh Postgres schemas and new runs; all SQLite stores and `storage/_executor.py` are removed |
+| Incompatible persisted schemas or state | Start with a current Postgres schema and new runs; built-in stores reject incompatible state |
 | `RunOptions.allow_legacy_resume` and contractless resume | A current execution contract and wire generation 3; `from linch import RunOptions` |
 | Silent resume of terminal runs or runs without checkpoints | Raises `RunNotResumableError` with `run_id` and `status`; `from linch import RunNotResumableError` |
 | Cursorless assistant-boundary tool recovery | A valid `tool_batch_event_after_seq` cursor is required |
-| Old receipt snapshots, loop-guard shapes, checkpoint field defaults, and missing contract fingerprints | Current complete checkpoints, journal watermarks, bounded BLAKE2b guard digests, and verified contracts |
 | `scripts/run_report.py --runs-db` | `--dsn` or host script environment `LINCH_POSTGRES_DSN`; `load_report` / `render_report` now take a Postgres DSN |
 
 All persisted envelopes share generation **3** (`linch.RUN_SCHEMA_VERSION`):
 checkpoints, run contracts, model-call intents/receipts/journals, exact model
 input, permission decisions, session/provider-view snapshots, events, and
-workflow metadata. Missing, pre-3.0, and unknown versions are rejected. Workflow
-journals no longer read old call-key algorithms or `fingerprint_version`
-branches. Unknown required events fail; only valid unknown envelopes marked
+workflow metadata. Missing, pre-3.0, and unknown versions are rejected. Unknown
+required events fail; only valid unknown envelopes marked
 `ignorable: true` round-trip as `IgnorableEvent`.
 
 Custom store implementations must follow these changed contracts:
@@ -172,7 +179,6 @@ from linch.worker import Worker, enqueue_run, register_schedule_tools
 | `Agent(schedule_store=...)` | Hosts register worker schedule tools explicitly |
 | `render_schedule_message` | Schedule fires dispatch separate runs |
 | `cron_matches`, `next_cron_time`, `validate_cron` | Worker cron definitions use `croniter`; no core scheduling helpers |
-| `assert_schedule_store_contract` | Removed with the scheduling protocol |
 
 Worker factories must reuse both `job.session_store` and `job.run_store`.
 These adapters are initialized once per worker. `enqueue_run` provides
@@ -181,9 +187,9 @@ See [Scale out](usage/production.md#scale-out).
 
 ## File memory
 
-The former `memory` package is removed. Use filesystem files: an index at
-`/memories/MEMORY.md`, bounded to 200 lines, and one file per fact. Scope the
-backend with `ScopedFileBackend` in `RunOptions(deps=...)`.
+Use filesystem files for explicit memory: an index at `/memories/MEMORY.md`,
+bounded to 200 lines, and one file per fact. Scope the backend with
+`ScopedFileBackend` in `RunOptions(deps=...)`.
 
 ```python
 from linch import (
@@ -200,69 +206,51 @@ from linch import (
 | `MemoryStore`, `PostgresMemoryStore`, `TieredMemoryStore` | A scoped `FileBackend`; production may use `PostgresFileBackend` |
 | `InMemoryKeywordMemoryStore` | `StateFileBackend` for test/dev memory files |
 | `MemoryContextBuilder` | `ContextInjectionHook(FileMemoryContextBuilder())` |
-| `MemorySearchTool`, `MemoryUpsertTool` | Existing filesystem tools read/write fact files |
+| `MemorySearchTool`, `MemoryUpsertTool` | Filesystem tools read/write fact files |
 | `MemoryItem` | One fact per file |
-| `MemorySearchResult` | Host-owned semantic retrieval result types |
-| `MemoryExtractor`, `MemoryExtractionContext`, `MemoryExtractionHook`, `ConsolidationGate` | Application hooks/file-memory policy; semantic recall is an optional host recipe |
-| `format_memory_context`, `latest_user_text`, `resolve_memory_store` | Removed with the package; compose context through public hooks |
 | `assert_memory_store_contract` | `assert_file_backend_contract` |
-| `memory_recalled` eval scorer | Host scorer for file-memory or semantic-recall signals |
-| `RunReport.long_run` memory-search, recalled-id, and tier-count metrics | Host-owned file-memory/recall reporting |
 
 See [Context and memory](usage/context-and-memory.md) for the optional mem0
 recipe. File-memory index loading happens at most once per run.
 
 ## OpenTelemetry
 
-The custom `observability` package and `[otel]` extra are removed.
-`opentelemetry-api` is a core dependency. Hosts install/configure
-`opentelemetry-sdk` and an exporter; `Agent(context=...)` accepts scoped tracer
-and meter services.
+OpenTelemetry API instrumentation is part of the core dependency set. Hosts
+install/configure `opentelemetry-sdk` and an exporter; `Agent(context=...)`
+accepts scoped tracer and meter services.
 
 | Removed API | Replacement |
 |---|---|
 | `RunObserver`, `BaseObserver`, `observers=` | OTel for telemetry; native hooks for behavior |
 | `ObserverDispatcher`, `normalize_observers` | SDK span processors/exporters |
-| `LoggingObserver` | `from opentelemetry.sdk.trace.export import ConsoleSpanExporter` |
-| `SpanCollector` | `from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter` |
+| `LoggingObserver` | Configure the host OTel SDK's `ConsoleSpanExporter` |
+| `SpanCollector` | Configure the host OTel SDK's `InMemorySpanExporter` |
 | `OpenTelemetryObserver`, `RunTelemetryHook` | Direct runtime OTel instrumentation; remove the hook |
 | `RunInfo`, `RunResultInfo` | `invoke_agent` span attributes or agent lifecycle hooks |
 | `TurnInfo` | Step spans or turn hooks |
 | `ProviderCallInfo`, `ProviderCallResult` | `chat` spans or provider-call hooks |
 | `ToolInfo`, `ToolResultInfo` | `execute_tool` spans or tool hooks |
-| `Span` | `from opentelemetry.sdk.trace import ReadableSpan` |
+| `Span` | Use the host OTel SDK's `ReadableSpan` type |
 | No run trace correlation on boundary events, tools, or logs | `SystemEvent.trace_id`, `ResultEvent.trace_id`, read-only `ToolContext.trace_id`, and opt-in `TraceIdFilter` |
 | `examples/observability/custom_observer.py` | `examples/observability/observability_agent.py` |
 
 Content capture requires `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`.
 No host SDK means the API is a no-op. See [Events and telemetry](usage/events.md).
 
-Kernel lifecycle dispatch sites now use the internal typed catalog in
-`linch.lifecycle`; the bus rejects a mode mismatch while user-facing hook
-methods and their ordering remain unchanged. See the generated catalog in
+Kernel lifecycle dispatch sites use a generated typed catalog; the bus rejects
+a mode mismatch while user-facing hook methods keep their ordering. See the
+generated catalog in
 [architecture/events.md](architecture/events.md#typed-lifecycle-catalog).
 
-Behavioral hook contexts remain available independently of telemetry:
-
-```python
-from linch import AfterProviderCallContext, BeforeProviderCallContext
-from linch.hooks import (
-    AgentStartContext,
-    AgentStopContext,
-    ProviderCallStartContext,
-    ProviderCallStopContext,
-    ToolUseStartContext,
-    ToolUseStopContext,
-    TurnStartContext,
-    TurnStopContext,
-)
-```
+Behavioral hook contexts remain available independently of telemetry. Register
+hooks with `Agent(hooks=[...])`; use the supported top-level hook contexts and
+`HookResult`.
 
 ## Gemini
 
 The `gemini` extra now installs `google-genai` in place of
-`google-generativeai`. Replace direct SDK imports of `google.generativeai`
-with `google.genai` in host integrations. Linch's provider imports remain:
+`google-generativeai`. Update host integrations to the `genai.Client` API and
+the current SDK types. Linch's provider imports remain:
 
 ```python
 from linch import GeminiProvider, GeminiProviderOptions
@@ -271,8 +259,8 @@ from linch import GeminiProvider, GeminiProviderOptions
 `GeminiProviderOptions.project` selects Vertex AI; `location` and application
 default credentials apply there. `default_generation_config` accepts native
 `GenerateContentConfig` fields, including `thinking_config`. Signed model parts
-are retained for replay. No options fields were removed: `api_key`, `project`,
-`location`, and `default_generation_config` remain.
+are retained for replay. The current options are `api_key`, `project`,
+`location`, and `default_generation_config`.
 
 For host code using SDK objects directly:
 
@@ -290,8 +278,9 @@ and authorizes tools. See [Providers](usage/providers.md).
 
 `Agent` defaults to `ReliabilityPolicy()` for bounded invalid-response
 corrections; pass `reliability=None` to opt out. `ToolPrerequisite` and
-`CompletionGate` use successful foreground calls in the current run. Whole-text
-`<tool_call>` envelopes request a native resend and never execute tools.
+`CompletionGate` use successful foreground calls in the current run. With the
+default policy, whole-text `<tool_call>` envelopes request a native resend and
+never execute tools.
 Reliability policy is part of the resume contract; changing it requires a new
 run. The extension seam is the serial-veto turn-stopping event.
 
@@ -341,7 +330,7 @@ reach final usage, even if they reuse one logical operation. A compaction
 response can be rejected because it is empty, non-text, tool-using, oversized,
 or otherwise unusable; valid final usage is still charged.
 
-The existing `UsageEvent` remains compatible. Auxiliary compaction usage adds
+`UsageEvent` reports primary usage. Auxiliary compaction usage adds
 `source="compaction"`, `call_id`, `logical_call_id`, and `model`. The public
 `ModelCallEvent` / `is_model_call_event` pair exposes the typed journal envelope
 for store and journal observers; ordinary primary delivery records remain
@@ -362,7 +351,10 @@ that exhausts a token or USD cap prevents the main turn from starting.
 For a capped run, unknown usage is a strict fence: Linch stops before another
 model call rather than claiming that the configured cap is enforced. A
 pre-dispatch cancellation or admission denial is not billed; a dispatched call
-without valid final usage is not silently treated as free.
+without valid final usage is not silently treated as free. A cap is checked at
+admission, not reserved in advance, so a delivery already admitted can settle
+at or above the configured cap; equality exhausts the cap for the next
+admission.
 
 The same live `RunBudget` object shares receipt ownership and charged delivery
 IDs across the in-process agent/subagent tree. A resume may adopt a checkpoint
@@ -373,33 +365,31 @@ billing, and reservations against concurrent admissions are not promised.
 
 ### Durable compaction replay
 
-`DefaultCompaction` and `DetailedCompaction` retain their existing strategy
+`DefaultCompaction` and `DetailedCompaction` use their configured strategy
 semantics and prompts. In a durable run, an accepted summary carries a bounded
 receipt-backed result and an ordered hash-only source recipe. Required invoked
-skill bodies are flushed through the existing session store before the recipe
+skill bodies are flushed through the configured session store before the recipe
 is written. On resume, a matching source, strategy configuration, run
 contract, and canonical skill-listing wrapper allow Linch to apply the stored
 summary without another provider call or duplicate charge.
 
 Linch fails closed when the source order, durable history boundary, receipt,
 skill body, listing wrapper, or contract does not match. A provider-view cache
-is verification material, not source authority. Old in-flight accounting state
-also fails closed; start a new run rather than asking Linch to guess whether an
-interrupted delivery was billed.
+is verification material, not source authority.
 
 ### Custom and standalone compaction
 
-The public `CompactionStrategy` protocol is unchanged. A custom strategy that
-uses the provider facade receives accounting, run cancellation, and one
+A custom strategy implementing the public `CompactionStrategy` protocol and
+using the provider facade receives accounting, run cancellation, and one
 provider-slot/limiter acquisition per physical stream. Opaque network calls
 outside that facade are not observable by the SDK. Arbitrary multi-call or
 transform behavior has no automatic deterministic paid-result replay guarantee;
 provide an explicit deterministic result/commit seam if the host needs one.
 
-The standalone `summarize_with_provider(...)` helper remains available with
-its existing direct-provider behavior. Calling it outside the normal run does
-not create a durable run receipt or add usage to a `RunBudget` unless the host
-integrates that accounting itself.
+The standalone `summarize_with_provider(...)` helper streams directly through
+the supplied provider. Calling it outside the normal run does not create a
+durable run receipt or add usage to a `RunBudget` unless the host integrates
+that accounting itself.
 
 ### Pricing and compatibility limits
 
@@ -415,20 +405,8 @@ details.
 
 ## Internal cleanup for adapter maintainers
 
-- The unused `PermissionDecision.updated_input` field, pre-3.0 permission
-  readers, and null wire marker are removed. Live approval rewrites and
-  persisted non-null input rewrites remain rejected.
-- Checkpoint readers require every current field, including empty extension
-  state and nullable values. Malformed failure history is replaced instead of
-  preserving scalar or invalid error entries. Valid accounting receipts are
-  required; aggregate usage cannot replace them.
-- The unaccounted `stream_turn` entry point is removed; parser tests use
-  `_stream_turn`, while runtime calls use the required-ledger accounted path.
-- The unused private `add_usage` and `make_pool` helpers are removed; use
-  `Usage.add` and the shared Postgres pool lifecycle, respectively.
-- Compaction retries share `_stream_turn_with_recovery`. Strict JSON traversal,
-  custom token estimation, permission-key canonicalization, Postgres pool
-  lifecycle, client close, and claim validation are consolidated without
-  changing their caller-specific validation or accounting policies.
-- The obsolete `glob.glob` TypeError retry and scaffold TOML fallbacks are
-  removed on Python 3.11+.
+Adapter code must target the current wire-generation-3 contracts. Persisted
+state that fails generation, checkpoint, receipt, or execution-contract
+validation is rejected. Custom stores must implement the public atomic
+checkpoint/event and lease contracts above. Do not add compatibility readers or
+aliases.

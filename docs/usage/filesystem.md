@@ -4,35 +4,37 @@ Use the virtual filesystem to offload large tool results and expose file operati
 
 [← Usage guide](./README.md)
 
-Variable-length tool results — RAG passages, web search dumps, large file
-reads — are the single biggest cause of context-window blowup. Linch's virtual
-filesystem subsystem solves this automatically: oversized tool results are
-written to a `FileBackend` and replaced in the conversation with a short preview
-plus a path the model can read back on demand.
+Large tool results — RAG passages, web search dumps, large file reads — can
+consume context quickly. When enabled, Linch's virtual filesystem can write
+eligible oversized results to a `FileBackend` and replace them in the
+conversation with a short preview plus a path the model can read back on demand.
 
 ---
 
 ## Why offloading exists
 
-When a tool returns a large payload, the scheduler writes the full result to a
-`FileBackend` and replaces what the model sees in `provider_view` with a short
-preview and a path reference. The model pulls back only the slice it needs via
-`read_file`, instead of carrying the entire dump in every subsequent provider
-call. The full original content is never lost — it stays in the backend and on
-`ToolCallEndEvent.tool_result` for event consumers; only the copy that enters
-conversation history is trimmed. For how this hooks into the tool execution
-chokepoint, see [./tools.md](./tools.md).
+When an eligible tool returns an oversized string result, the scheduler writes
+the full result to a `FileBackend` and replaces what the model sees in
+`provider_view` with a short preview and a path reference. Eligibility requires
+a successful (non-error) result whose content is a string, whose tool is not in
+`skip_tools`, and whose estimated size exceeds the configured threshold. The
+model pulls back only the slice it needs via `read_file`, instead of carrying the
+entire dump in every subsequent provider call. After a successful offload, the
+full original content stays in the backend and on `ToolCallEndEvent.tool_result`
+for event consumers; only the model-facing copy is trimmed. If the backend write
+fails, the original result remains inline and unchanged. For how this hooks into
+the tool execution chokepoint, see [./tools.md](./tools.md).
 
 ---
 
 ## Explicit opt-in
 
-Filesystem tools and large-result offloading are opt-in in Linch 3.0. A bare
-`Agent()` has no virtual filesystem tools, no offload backend, and does not
-trust project-local files. Enable the subsystem explicitly with
-`FeatureFlags(filesystem=True)` and choose a backend or let active sessions
-use an ephemeral `StateFileBackend`. This keeps SDK embedding from acquiring
-filesystem authority merely because it runs inside a checkout.
+Filesystem tools and large-result offloading are opt-in. With the default
+`FeatureFlags`, an agent has no virtual filesystem tools or offload backend.
+Enable the subsystem explicitly with `FeatureFlags(filesystem=True)` and choose
+a backend, or let active sessions use an agent-created `StateFileBackend`.
+Supplying an explicit `filesystem=` backend (or an execution world's `fs`)
+selects that backend.
 
 When active, the default threshold is derived automatically from the model's
 context window (`threshold_fraction=0.1` → 10 % of the context window). A 128
@@ -40,12 +42,19 @@ k-token model offloads results above ~12 800 tokens; a 200 k model above ~20
 000 tokens.
 
 ```python
+from linch import (
+    Agent,
+    CompositeFileBackend,
+    DiskFileBackend,
+    FeatureFlags,
+    OffloadConfig,
+    StateFileBackend,
+)
+
 # Explicit — ephemeral session backend, threshold = 10 % of context window
-from linch import FeatureFlags
 agent = Agent(..., features=FeatureFlags(filesystem=True))
 
 # Persist offloaded files under .linch/offload (inspectable, gitignored)
-from linch import DiskFileBackend, OffloadConfig
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
@@ -61,10 +70,10 @@ agent = Agent(
     # for 5 % of context.
 )
 
-# Ephemeral scratch + persistent /memories/ across sessions
+# In-memory scratch + persistent /memories/ across sessions
 import os
-from linch import CompositeFileBackend, StateFileBackend
 from linch.filesystem.postgres import PostgresFileBackend
+# Install the optional driver first: pip install 'linch[postgres]'
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
@@ -74,31 +83,48 @@ agent = Agent(
     ),
 )
 
-# Disable entirely
-agent = Agent(..., result_offload=None)
-# or: features=FeatureFlags(filesystem=False)
+# Disable automatic offloading but keep explicit filesystem tools
+agent = Agent(
+    ...,
+    features=FeatureFlags(filesystem=True),
+    filesystem=StateFileBackend(),
+    result_offload=None,
+)
+
+# Disable the entire filesystem subsystem
+agent = Agent(..., features=FeatureFlags(filesystem=False))
 ```
 
 ### Choosing a backend
 
-The four backends differ only in where they persist and how they scope files:
+The storage backends below differ in where they persist and how they scope files:
 
-- **`StateFileBackend`** (active-session default) — in-memory and per-session. Zero setup, but
-  files vanish when the session ends. Right for ordinary offloading where the
-  model only needs to read payloads back within the same run.
+- **`StateFileBackend`** (agent-created active-session default) — in-memory and
+  per-session. Zero setup; files are in-memory, not persisted, and a new session
+  receives a fresh default backend. Right for ordinary offloading where the model
+  only needs to read payloads back within the same run.
 - **`DiskFileBackend(root=...)`** — real files under a sandboxed root (default
   `.linch/offload`, gitignored). Persistent and inspectable on disk, so you can
   open offloaded payloads in your editor while debugging.
 - **`PostgresFileBackend(dsn)`** — persistent across sessions in Postgres.
   Use it when the model should read back files from earlier runs.
 - **`CompositeFileBackend(default=..., routes=...)`** — routes paths by prefix to
-  different backends. The common pattern is ephemeral scratch on `StateFileBackend`
+  different backends. The common pattern is in-memory scratch on `StateFileBackend`
   with a durable `/memories/` partition on `PostgresFileBackend`, so distilled notes
   survive while bulk offloads stay cheap. Supply this
   `/memories/` partition explicitly to the deep-agent preset — see [./deep-agent.md](./deep-agent.md).
 
-`DiskFileBackend` offloads disk I/O onto a bounded daemon thread;
-`PostgresFileBackend` uses asyncpg. Both keep I/O off the agent loop thread.
+When no backend is supplied, the agent creates a fresh `StateFileBackend` for
+each session. Any explicit backend instance, including the `CompositeFileBackend`
+example above and its `StateFileBackend` default, is shared across sessions by
+design.
+
+`DiskFileBackend` runs file I/O on a bounded daemon thread; constructing it
+resolves and creates its root directory. `PostgresFileBackend` uses asyncpg and
+imports it when constructed; install the `linch[postgres]` extra first, while
+pool and schema work remain lazy. Both keep backend I/O off the agent loop
+thread. Automatic offloading performs no write until an eligible result exceeds
+the threshold.
 
 ---
 
@@ -119,14 +145,16 @@ system-prompt block added automatically, so you don't have to teach it the
 read-back pattern. `read_file`'s `offset`/`limit` line windowing matters here:
 the model can read just the relevant slice of a huge offloaded payload rather
 than pulling the whole thing back into context. `write_file` and `edit_file`
-also give the model a durable scratchpad for intermediate work that would
-otherwise bloat the conversation.
+also give the model a backend-scoped scratchpad for intermediate work that
+would otherwise bloat the conversation.
 
 ---
 
 ## `OffloadConfig` options
 
 ```python
+from linch import OffloadConfig
+
 OffloadConfig(
     enabled=True,               # master switch
     threshold_tokens=None,      # None = derive from context window (recommended)
@@ -137,19 +165,24 @@ OffloadConfig(
 )
 ```
 
-`threshold_tokens` is resolved once at `Agent.__init__` time from
-`int(context_window * threshold_fraction)`. Pass an explicit integer to override
-(e.g. `threshold_tokens=5_000`). The filesystem tools listed in `skip_tools` are
-always excluded from offloading, so reading a large file back does not
-recursively re-offload it. Lower `threshold_fraction` (or set a small
-`threshold_tokens`) when you want aggressive trimming on a tight context window;
-raise it when most results are small and you'd rather avoid the read-back
-round-trip.
+When `threshold_tokens` is `None`, the agent derives it as
+`max(1_000, int(context_window * threshold_fraction))`. The derived value is
+refreshed after a successful `provider.prepare()` and after the provider is
+replaced. If `context_window()` cannot be resolved, automatic offloading is
+skipped unless you supply an explicit integer threshold (for example,
+`threshold_tokens=5_000`). The default `skip_tools` is replaceable: it is a
+`frozenset` containing the filesystem tool names, but you can pass another
+`frozenset` to change which tool results are skipped. Lower
+`threshold_fraction` (or set a small `threshold_tokens`) when you want aggressive
+trimming on a tight context window; raise it when most results are small and
+you'd rather avoid the read-back round-trip.
 
-Set `result_offload=None` or `features=FeatureFlags(filesystem=False)` to turn
-the subsystem off entirely. With the default bare-agent flags it is already
-inactive; enabling it is an explicit trust decision. When active, the config
-carries zero offload I/O until a result actually exceeds the threshold.
+Set `result_offload=None` to turn off automatic offloading. This does not disable
+filesystem tools when `features=FeatureFlags(filesystem=True)` and an explicit
+`filesystem` backend (or execution-world `fs`) is present. Set
+`features=FeatureFlags(filesystem=False)` to disable the entire subsystem. With
+the default flags it is already inactive; enabling it is an explicit trust
+decision.
 
 ---
 
@@ -158,4 +191,4 @@ carries zero offload I/O until a result actually exceeds the threshold.
 - [./tools.md](./tools.md) — automatic offloading of large tool results
 - [./deep-agent.md](./deep-agent.md) — the persistent `/memories/` partition
 - [./context-and-memory.md](./context-and-memory.md) — keeping the context window lean
-- [../architecture.md](../architecture.md) — where the filesystem sits in the loop
+- [../architecture/subsystems.md#39-virtual-filesystem-and-result-offload](../architecture/subsystems.md#39-virtual-filesystem-and-result-offload) — where the filesystem sits in the loop

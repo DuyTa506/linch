@@ -2,6 +2,10 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
+Use this page when you need to trace one `Session.run()`/`resume()` turn from
+startup and context assembly through provider output, tool execution, and
+terminal result handling.
+
 One complete agent turn — from receiving the prompt to deciding whether to continue looping.
 
 ```mermaid
@@ -20,8 +24,8 @@ sequenceDiagram
     RL-->>Caller: UserEvent
 
     loop Each turn
-        RL->>SK: inject skill context (if skill active)
-        Note over RL: sync_catalog persists prefix or tail reminders<br/>after completed tool batches; native existing-snapshot sync<br/>waits for context selection
+        RL->>SK: re-inject retained skill context after compaction/recovery (if needed)
+        Note over RL: at the turn boundary sync_catalog compares the live catalog;<br/>native existing-snapshot sync waits for context selection
         RL->>CB: build_context(session, turn_index)
         CB-->>RL: ContextBuildResult
         RL-->>Caller: ContextBuildEvent
@@ -47,9 +51,9 @@ sequenceDiagram
 
             SC-->>Caller: ToolCallStartEvent x N
             SC-->>Caller: ToolProgressEvent (optional, stream-only)
-            Note over SC: when FeatureFlags(filesystem=True) enables it,<br/>maybe_offload() writes results over the configured threshold<br/>to FileBackend and replaces provider-facing content with a preview
-            SC-->>Caller: ToolCallEndEvent x N (result=preview, tool_result=full)
-            SC-->>RL: result_blocks (previews only enter provider_view)
+            Note over SC: with filesystem enabled and a configured backend/offload,<br/>maybe_offload() writes results over the threshold to FileBackend<br/>and replaces provider-facing content with a preview
+            SC-->>Caller: ToolCallEndEvent x N (preview when offloaded; tool_result=full)
+            SC-->>RL: provider-facing result_blocks (offload preview when applicable)
 
             RL->>LG: evaluate_loop_guard(state, tool_blocks, result_blocks)
 
@@ -107,9 +111,10 @@ preserves the canonical `PreToolUse` validation and permission ordering.
 ## Design rationale
 
 - **The model decides when to stop, not a step counter.** The loop continues while
-  the response contains tool calls and stops on a text-only (`end_turn`) response.
-  This lets a task take as many or as few turns as it needs; `max_turns` and the
-  loop guard are safety bounds, not the primary control.
+  the response contains tool calls and stops on a text-only (`end_turn`) response
+  or an accepted terminal-tool answer. This lets a task take as many or as few
+  turns as it needs; `max_turns` and the loop guard are safety bounds, not the
+  primary control.
 - **The security gate has a canonical order.** The scheduler resolves and validates the
   model proposal, enforces that the tool was offered in this request, runs `PreToolUse`,
   validates the transformed input again, and only then evaluates rules or asks the caller
