@@ -12,7 +12,10 @@ _EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "core"
 
 
 def _load(name: str):
-    return load_module(_EXAMPLES / f"{name}.py", f"core_example_{name}")
+    path = _EXAMPLES / f"{name}.py"
+    if not path.exists():
+        path = _EXAMPLES.parent / "internals" / f"{name}.py"
+    return load_module(path, f"core_example_{name}")
 
 
 _ASK = {

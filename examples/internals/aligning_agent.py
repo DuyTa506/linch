@@ -1,8 +1,8 @@
 """Alignment & interrupt — redirect (or stop) a run that is already in flight.
 
 Run:
-    OPENAI_API_KEY=sk-...    python examples/core/aligning_agent.py
-    DEEPSEEK_API_KEY=sk-...  python examples/core/aligning_agent.py
+    OPENAI_API_KEY=sk-...    python examples/internals/aligning_agent.py
+    DEEPSEEK_API_KEY=sk-...  python examples/internals/aligning_agent.py
 
 While a run is streaming you can inject new guidance without starting a new run:
 

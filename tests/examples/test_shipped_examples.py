@@ -29,9 +29,7 @@ async def test_budget_example_executes_valid_glob_calls(monkeypatch, tmp_path):
 
 
 async def test_subagent_loader_displays_explicit_empty_tools(capsys):
-    module = load_module(
-        ROOT / "examples/integrations/subagent_coordinator.py", "coordinator_example"
-    )
+    module = load_module(ROOT / "examples/internals/subagent_coordinator.py", "coordinator_example")
     await module.demo_loader()
     line = next(line for line in capsys.readouterr().out.splitlines() if "[summariser]" in line)
     assert line.endswith("tools=[]")

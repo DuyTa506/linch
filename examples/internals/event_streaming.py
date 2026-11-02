@@ -1,7 +1,7 @@
 """Event streaming — consume, filter, and forward events.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/core/event_streaming.py
+    OPENAI_API_KEY=sk-... python examples/internals/event_streaming.py
 
 Demonstrates:
   1. All event types — print every event to understand the stream

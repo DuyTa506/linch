@@ -29,7 +29,7 @@ Patterns in this file
 3. Live demo: parallel analysts — independent children run concurrently.
 
 Run:
-    python3 examples/integrations/multi_agent_isolation.py
+    python3 examples/internals/multi_agent_isolation.py
 """
 
 from __future__ import annotations

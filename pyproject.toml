@@ -62,6 +62,7 @@ exclude = [
   "**/*.pyc",
   "docs/superpowers",
   "docs/ROADMAP.md",
+  "examples/internals",
   "**/.*",
 ]
 

@@ -23,8 +23,8 @@ Backends shown:
                            everything else to ephemeral state.
 
 Run:
-    python examples/tools/filesystem_offload.py
-    ANTHROPIC_API_KEY=sk-... python examples/tools/filesystem_offload.py
+    python examples/internals/filesystem_offload.py
+    ANTHROPIC_API_KEY=sk-... python examples/internals/filesystem_offload.py
 """
 
 from __future__ import annotations
