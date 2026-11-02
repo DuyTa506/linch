@@ -127,3 +127,4 @@ Safety and verification:
   VERDICT: PASS|FAIL|PARTIAL response. If FAIL, fix the issue and re-verify.
 - Keep final answers concise: completed work, verification performed, remaining
   risks or blockers."""
+"""Default operating instructions for a deep agent."""

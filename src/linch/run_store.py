@@ -48,6 +48,7 @@ from .types import (
 # existing top-level ``RUN_SCHEMA_VERSION`` export; the private module owns the
 # one actual version constant shared by every persisted envelope.
 SCHEMA_VERSION = WIRE_VERSION
+"""Required persisted run wire generation shared by current durable records."""
 
 # Run contracts share the common wire generation with checkpoints. Checkpoints
 # describe where execution stopped; contracts bind the execution inputs that

@@ -160,3 +160,4 @@ DEEP_AGENT_SUBAGENTS = [
     IMPLEMENTER_AGENT,
     VERIFICATION_AGENT,
 ]
+"""Built-in researcher, implementer, planner, and verification subagent definitions."""

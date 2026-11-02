@@ -73,6 +73,7 @@ DEEP_AGENT_PROFILES: dict[str, DeepAgentProfile] = {
         enable_background_subagents=True,
     ),
 }
+"""Named built-in profiles configuring deep-agent capabilities."""
 
 
 def _resolve_profile(profile: str | DeepAgentProfile) -> DeepAgentProfile:
