@@ -24,7 +24,8 @@ import sys
 
 marker = pathlib.Path(sys.argv[1])
 pid_marker = pathlib.Path(sys.argv[2])
-pid_marker.write_text(str(os.getpid()))
+with pid_marker.open("a") as f:
+    f.write(f"{os.getpid()}\n")
 
 def send(value):
     print(json.dumps(value), flush=True)
@@ -120,6 +121,7 @@ for line in sys.stdin:
 
 
 @pytest.mark.timeout(15)
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX PID checks")
 async def test_stdio_lost_call_is_not_replayed_and_reconnects(tmp_path: Path) -> None:
     marker = tmp_path / "calls"
     pid_marker = tmp_path / "pid"
@@ -148,13 +150,15 @@ async def test_stdio_lost_call_is_not_replayed_and_reconnects(tmp_path: Path) ->
         assert tool.name == "mcp__local__echo"
     finally:
         await connection.close()
-    pid = int(pid_marker.read_text())
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        pass
-    else:
-        pytest.fail("stdio MCP process was not reaped")
+    pids = [int(line) for line in pid_marker.read_text().splitlines()]
+    assert len(pids) >= 2
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            pytest.fail(f"stdio MCP process {pid} was not reaped")
 
 
 @pytest.mark.timeout(15)
@@ -503,3 +507,99 @@ async def test_fresh_owner_recovers_after_exhaustion(monkeypatch) -> None:
         assert await replacement.call_tool("echo", {}, None) == "fresh"
     finally:
         await replacement.aclose()
+
+
+async def test_hanging_reconnect_attempts_time_out_and_become_unavailable(monkeypatch) -> None:
+    initial = _CallSession(ConnectionError("closed"))
+    started = asyncio.Event()
+    attempts = 0
+    deadlines = []
+    original_timeout = asyncio.timeout
+
+    async def connect(name: str, config: object):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return _opened(initial)
+        started.set()
+        await asyncio.Event().wait()
+
+    def immediate_timeout(delay):
+        deadlines.append(delay)
+        return original_timeout(0)
+
+    monkeypatch.setattr(mcp_client, "_connect_one", connect)
+    monkeypatch.setattr(mcp_client, "_RECONNECT_INITIAL_DELAY", 0)
+    monkeypatch.setattr(mcp_client.asyncio, "timeout", immediate_timeout)
+    owner = mcp_client._SessionOwner("srv", SimpleNamespace())
+    await owner.wait_ready()
+    try:
+        with pytest.raises(ConnectionError):
+            await owner.call_tool("echo", {}, None)
+        await started.wait()
+        assert deadlines, "reconnect handshake must have a deadline"
+        await owner._task
+        assert owner.unavailable
+        assert attempts == 6
+        assert deadlines.count(mcp_client._RECONNECT_ATTEMPT_TIMEOUT_S) == 5
+        assert initial.calls == 1
+    finally:
+        await owner.aclose()
+
+
+async def test_hanging_partial_startup_cleanup_is_bounded_in_owner_task(monkeypatch) -> None:
+    initial = _CallSession(ConnectionError("closed"))
+    cleanup_started = asyncio.Event()
+    deadlines = []
+    exits = []
+    attempts = 0
+    original_timeout = asyncio.timeout
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def initialize(self):
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *exc):
+            exits.append(("session", asyncio.current_task()))
+            cleanup_started.set()
+            await asyncio.Event().wait()
+
+    class Transport:
+        async def __aexit__(self, *exc):
+            exits.append(("transport", asyncio.current_task()))
+
+    async def connect(name: str, config: object):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return _opened(initial)
+        return await mcp_client._start_session(
+            mcp_client._OpenSession(transport=Transport()), object(), object()
+        )
+
+    def immediate_timeout(delay):
+        deadlines.append(delay)
+        return original_timeout(0)
+
+    monkeypatch.setattr(mcp_client, "_connect_one", connect)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *args: Session())
+    monkeypatch.setattr(mcp_client, "_RECONNECT_INITIAL_DELAY", 0)
+    monkeypatch.setattr(mcp_client.asyncio, "timeout", immediate_timeout)
+    owner = mcp_client._SessionOwner("srv", SimpleNamespace())
+    await owner.wait_ready()
+    try:
+        with pytest.raises(ConnectionError):
+            await owner.call_tool("echo", {}, None)
+        await cleanup_started.wait()
+        assert len(deadlines) > 1, "partial session cleanup must have a deadline"
+        await owner._task
+        assert owner.unavailable
+        assert attempts == 6
+        assert [kind for kind, _ in exits] == ["session", "transport"] * 5
+        assert all(task is owner._task for _, task in exits)
+        assert initial.calls == 1
+    finally:
+        await owner.aclose()

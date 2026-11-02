@@ -76,7 +76,7 @@ def test_tool_annotations_map_to_scope_and_destructive_when_trusted() -> None:
 
 
 @pytest.mark.parametrize("case", ["ok", "error", "image"])
-def test_call_tool_result_mapping(case: str) -> None:
+async def test_call_tool_result_mapping(case: str) -> None:
     from mcp.types import CallToolResult, ImageContent, TextContent
 
     from linch.mcp.result import map_mcp_result
@@ -87,7 +87,7 @@ def test_call_tool_result_mapping(case: str) -> None:
         if case == "image"
         else [TextContent(type="text", text="boom" if failed else "hello")]
     )
-    result = map_mcp_result(CallToolResult(content=content, isError=failed))
+    result = await map_mcp_result(CallToolResult(content=content, isError=failed))
     assert result.content == ("[image]" if case == "image" else "boom" if failed else "hello")
     assert result.is_error is failed
     if failed:

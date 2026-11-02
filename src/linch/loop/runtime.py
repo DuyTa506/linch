@@ -82,7 +82,7 @@ from .dispatch import (
 )
 from .reliability import ReliabilityRuntime
 from .request import build_user_message
-from .terminals import _budget_exhausted_tail
+from .terminals import _budget_exhausted_tail, _close_terminal_processes
 from .turn_stopping import TurnStoppingDispatcher
 
 
@@ -963,6 +963,7 @@ class RunRuntime:
     ) -> AsyncGenerator[Event, None]:
         """Persist and project the abort terminal while preserving event order."""
         await cancel_background_workers(self.session)
+        await _close_terminal_processes(self.session)
         duration_ms = int((time.time() - self.started) * 1000)
         original = AbortError("run aborted")
         self.terminal_result = self.build_run_result("aborted", "error", duration_ms=duration_ms)
@@ -1002,6 +1003,7 @@ class RunRuntime:
         self, error: dict[str, object] | None, *, original: Exception | None = None
     ) -> Exception | None:
         """Commit a failed status and its complete pending event prefix together."""
+        await _close_terminal_processes(self.session)
         store = self.agent.run_store
         if self.run_record is None or store is None:
             return None

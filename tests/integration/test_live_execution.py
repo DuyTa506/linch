@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.acceptance.test_execution_parity import _case, _run
+from tests.acceptance.test_execution_parity import _case, _ends, _run
 
 KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 pytestmark = pytest.mark.skipif(not KEY, reason="DEEPSEEK_API_KEY not set")
@@ -27,3 +27,9 @@ async def test_real_model_completes_execution_task(case: str, tmp_path: Path) ->
     assert events[-1].subtype == "success"
     if case == "edit":
         assert "a+b" in (tmp_path / "calc.py").read_text().replace(" ", "")
+    elif case == "long":
+        assert any("1 passed" in event.result for event in events if event.type == "tool_call_end")
+    elif case == "stdin":
+        assert any(
+            "recovered" in event.result and not event.is_error for event in _ends(events, "Bash")
+        )

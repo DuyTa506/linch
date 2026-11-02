@@ -321,3 +321,13 @@ async def test_configured_request_timeout_reaches_each_transport(monkeypatch, ht
         assert result.content == ("timeout:300" if timeout_s is None else "timeout:0.125")
     finally:
         await connection.close()
+
+
+@pytest.mark.parametrize("name", ["ops__prod", "_ops", "ops_", "ops..prod", ".ops", "ops."])
+async def test_ambiguous_normalized_server_name_rejected_before_connect(monkeypatch, name):
+    def unexpected_connect(*args, **kwargs):
+        pytest.fail("invalid names must be rejected before connecting")
+
+    monkeypatch.setattr(mcp_client, "_SessionOwner", unexpected_connect)
+    with pytest.raises(mcp_client.ConfigError, match="server name"):
+        await mcp_client.connect_mcp_servers({"valid": _stdio_cfg(), name: _stdio_cfg()})

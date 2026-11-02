@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
+
+
+def _validate_timeout(timeout_s: float) -> None:
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
+        raise TypeError("timeout_s must be a finite positive number")
+    if timeout_s <= 0 or (isinstance(timeout_s, float) and not math.isfinite(timeout_s)):
+        raise ValueError("timeout_s must be a finite positive number")
 
 
 @dataclass(slots=True)
@@ -30,6 +38,9 @@ class McpStdioServerConfig:
     timeout_s: float = 300
     trust_annotations: bool = False
 
+    def __post_init__(self) -> None:
+        _validate_timeout(self.timeout_s)
+
 
 @dataclass(slots=True)
 class McpHttpServerConfig:
@@ -53,6 +64,9 @@ class McpHttpServerConfig:
     headers: dict[str, str] | None = None
     timeout_s: float = 300
     trust_annotations: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_timeout(self.timeout_s)
 
 
 McpServerConfig = McpStdioServerConfig | McpHttpServerConfig

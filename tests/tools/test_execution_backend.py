@@ -138,17 +138,13 @@ async def test_bash_tool_timeout_returns_error_result(tmp_path) -> None:
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_bash_tool_negative_timeout_runs_command(tmp_path) -> None:
-    """A negative timeout_ms must be floored to a positive value so the command runs."""
+async def test_bash_tool_negative_timeout_is_rejected(tmp_path) -> None:
+    """A non-positive timeout_ms is invalid rather than silently defaulted."""
     from linch.tools.builtin import BashTool
 
     tool = BashTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"command": "echo ran", "timeout_ms": -1})
-    assert validated["timeout_ms"] > 0
-    result = await tool.execute(validated, ctx)
-    assert result.is_error is False
-    assert "ran" in result.content
+    with pytest.raises(ValueError, match="timeout_ms"):
+        tool.validate({"command": "echo ran", "timeout_ms": -1})
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -282,3 +278,33 @@ async def test_abort_context_wait_unblocks_on_abort() -> None:
     asyncio.create_task(_abort_soon())
     await asyncio.wait_for(signal.wait(), timeout=1.0)
     assert signal.aborted
+
+
+async def test_bash_timeout_clamps_large_positive_integer(tmp_path):
+    from linch.tools.builtin import BashTool
+
+    class Backend(_FakeBackend):
+        async def run(self, command, *, cwd, timeout_s, signal=None):
+            self.timeout_s = timeout_s
+            return await super().run(command, cwd=cwd, timeout_s=timeout_s, signal=signal)
+
+    backend = Backend()
+    tool = BashTool(execution=_fake_world(backend))
+    normalized = tool.validate({"command": "x", "timeout_ms": 1800001})
+    assert normalized["timeout_ms"] == 1800000
+    await tool.execute({"command": "x", "timeout_ms": 1800001}, _make_ctx(tmp_path))
+    assert backend.timeout_s == 1800
+
+
+async def test_background_rejected_for_run_only_backend_with_registry(tmp_path):
+    from types import SimpleNamespace
+
+    from linch.tools.builtin import BashTool
+    from linch.tools.processes import ProcessRegistry
+
+    backend = _FakeBackend()
+    tool = BashTool(execution=_fake_world(backend))
+    ctx = _make_ctx(tmp_path)
+    ctx._session = SimpleNamespace(_processes=ProcessRegistry("r"))
+    result = await tool.execute({"command": "x", "run_in_background": True}, ctx)
+    assert result.is_error and not backend.calls

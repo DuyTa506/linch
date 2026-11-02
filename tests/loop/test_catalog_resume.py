@@ -58,6 +58,23 @@ async def test_contract_uses_the_same_frozen_prefix_before_and_after_snapshot() 
 
 
 @pytest.mark.asyncio
+async def test_contract_fingerprints_bash_process_limits() -> None:
+    from linch import BashTool, RunOptions
+    from linch.loop.contracts import _build_run_contract
+    from tests.support.tools import tool_registry
+
+    supplied = BashTool(max_processes=1, max_runtime_ms=70)
+    agent = make_agent(ScriptedProvider([]), tools=tool_registry(supplied))
+    session = await agent.session(id="contract-limits")
+    before = _build_run_contract(session, "go", RunOptions())
+
+    supplied.max_processes = 2
+    after = _build_run_contract(session, "go", RunOptions())
+
+    assert before.fingerprint != after.fingerprint
+
+
+@pytest.mark.asyncio
 async def test_contract_previews_catalog_changes_for_a_new_run() -> None:
     """A new run contract matches the snapshot after its first catalog sync."""
     from linch.catalog import sync_catalog
@@ -556,3 +573,17 @@ async def test_resume_contract_survives_in_turn_reload_compaction_and_crash(tmp_
     snapshot = resumed.meta["linch.prefix"]
     assert snapshot_system(snapshot) == provider.requests[0].system
     assert snapshot_tools(snapshot) == provider.requests[0].tools
+
+
+async def test_contract_fingerprints_bash_max_runtime_independently() -> None:
+    from linch import BashTool, RunOptions
+    from linch.loop.contracts import _build_run_contract
+    from tests.support.tools import tool_registry
+
+    tool = BashTool(max_processes=1, max_runtime_ms=70)
+    agent = make_agent(ScriptedProvider([]), tools=tool_registry(tool))
+    session = await agent.session(id="contract-runtime")
+    before = _build_run_contract(session, "go", RunOptions())
+    tool.max_runtime_ms = 71
+    after = _build_run_contract(session, "go", RunOptions())
+    assert before.fingerprint != after.fingerprint

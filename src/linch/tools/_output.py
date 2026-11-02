@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import os
 import uuid
@@ -22,37 +23,75 @@ class BoundedOutput:
         self.path: str | None = None
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._finished = False
+        self._dropped = False
+        self._drop_reported = False
 
     @property
     def truncated(self) -> bool:
-        return self._total > OUTPUT_CAP
+        return self._total > OUTPUT_CAP or self._dropped
 
-    def append(self, chunk: bytes) -> None:
+    def _retain(self, chunk: bytes) -> tuple[bytes, int]:
         previous = self._head + self._tail
+        before = self._total
         self._total += len(chunk)
-        if self.truncated and self._total <= 64 * 1024 * 1024:
-            try:
-                if self._file is None and self._total - len(chunk) <= OUTPUT_CAP:
-                    self._directory.mkdir(parents=True, exist_ok=True)
-                    (self._directory / ".gitignore").write_text("*\n")
-                    path = self._directory / f"{uuid.uuid4().hex}-{self._stream}.log"
-                    self._file = os.fdopen(
-                        os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
-                        "wb",
-                        buffering=0,
-                    )
-                    self.path = str(path)
-                    if self._file.write(previous) != len(previous):
-                        raise OSError("incomplete spill write")
-                if self._file is not None and self._file.write(chunk) != len(chunk):
-                    self._discard()
-            except OSError:
-                self._discard()
-        elif self._total > 64 * 1024 * 1024:
-            self._discard()
-        needed = 4000 - len(self._head)
+        needed = max(0, 4000 - len(self._head))
         self._head += chunk[:needed]
         self._tail = (self._tail + chunk[max(needed, len(chunk) - 26000) :])[-26000:]
+        return previous, before
+
+    def append(self, chunk: bytes) -> None:
+        previous, before = self._retain(chunk)
+        if self._total > OUTPUT_CAP:
+            self._spill(chunk, previous, before)
+
+    async def append_async(self, chunk: bytes) -> None:
+        previous, before = self._retain(chunk)
+        if self._total > OUTPUT_CAP and (self._total <= 64 * 1024 * 1024 or self._file):
+            await _thread(self._spill, chunk, previous, before)
+
+    def _spill(self, chunk: bytes, previous: bytes, before: int) -> None:
+        if self._total > 64 * 1024 * 1024:
+            self._discard()
+            return
+        try:
+            if self._file is None and before <= OUTPUT_CAP:
+                parent = self._directory.parent
+                if parent.is_symlink() or self._directory.is_symlink():
+                    return
+                self._directory.mkdir(parents=True, exist_ok=True)
+                if parent.is_symlink() or self._directory.is_symlink():
+                    return
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    fd = os.open(self._directory / ".gitignore", flags, 0o600)
+                except FileExistsError:
+                    pass
+                else:
+                    try:
+                        os.write(fd, b"*\n")
+                    finally:
+                        os.close(fd)
+                path = self._directory / f"{uuid.uuid4().hex}-{self._stream}.log"
+                self._file = os.fdopen(os.open(path, flags, 0o600), "wb", buffering=0)
+                self.path = str(path)
+                if self._file.write(previous) != len(previous):
+                    raise OSError("incomplete spill write")
+            if self._file is not None and self._file.write(chunk) != len(chunk):
+                self._discard()
+        except OSError:
+            self._discard()
+
+    async def finish_async(self) -> None:
+        if self._file is not None:
+            await _thread(self.finish)
+        else:
+            self.finish()
+
+    async def discard_async(self) -> None:
+        await _thread(self._discard)
+
+    def drop(self) -> None:
+        self._dropped = True
 
     def _discard(self) -> None:
         self.finish()
@@ -74,14 +113,16 @@ class BoundedOutput:
         self._finished = True
 
     def snapshot(self) -> str:
-        if self.truncated:
+        if self._total > OUTPUT_CAP:
             omitted = self._total - len(self._head) - len(self._tail)
             return (
                 self._head.decode("utf-8", errors="replace")
                 + f"\n… ({omitted} bytes omitted)\n"
                 + self._tail.decode("utf-8", errors="replace")
+                + ("\n[output truncated]" if self._dropped else "")
             )
-        return (self._head + self._tail).decode("utf-8", errors="replace")
+        text = (self._head + self._tail).decode("utf-8", errors="replace")
+        return text + "\n[output truncated]" if self._dropped else text
 
     def read(self) -> tuple[str, bool]:
         gap = max(len(self._head), self._total - len(self._tail))
@@ -92,4 +133,23 @@ class BoundedOutput:
             self._decoder.reset()
         data = self._tail[max(0, self._cursor - gap) :]
         self._cursor = self._total
-        return text + self._decoder.decode(data, final=self._finished), lossy
+        text += self._decoder.decode(data, final=self._finished)
+        if self._dropped and not self._drop_reported:
+            self._drop_reported = True
+            return text + "\n[output truncated]", True
+        return text, lossy
+
+
+async def _thread(func, *args):
+    # A cancelled pump must not close its file while a worker is still writing.
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result

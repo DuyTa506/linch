@@ -78,7 +78,8 @@ Chuỗi được kết xuất nguyên trạng; các giá trị khác dùng JSON 
 kênh tiếp nhận tiến độ theo cơ chế best-effort. Tool báo cáo tiến độ tạm thời bằng
 `ctx.report_progress(message, data=None)`. Tiến độ trở thành một `ToolProgressEvent` chỉ dành cho
 bên tiếp nhận trực tiếp; nó không phải lịch sử provider, kết quả tool hay event
-run được lưu bền vững.
+run được lưu bền vững. `tool_timeout_s` chỉ nhận keyword; đối số vị trí thứ
+sáu vẫn là `file_read_tracker`.
 
 `deps` được truyền từ `Agent(deps=...)` hoặc ghi đè theo từng run bằng `RunOptions(deps=...)`. Dùng nó để truyền trạng thái ứng dụng vào tool mà không cần biến toàn cục.
 
@@ -157,13 +158,21 @@ thử đóng lại; việc xóa container Docker chỉ là best effort. Khi hế
 lệnh mới còn chạy bị kill
 lúc lời gọi trả về. Handle không bền vững; kill cứng worker có thể để lại tiến
 trình con. Stdin shell đóng; kết quả timeout/abort giữ đầu ra đã thu được.
+ID gồm `p` và tám chữ số hex thường của UUID4, không tồn tại qua resume hoặc
+cleanup. Registry giữ tối đa 128 ID đã kết thúc gần nhất; đường dẫn spill tồn tại
+đến cleanup. `max_processes` và `max_runtime_ms` thuộc fingerprint bền vững.
+Bash chạy nền cần registry được quản lý và `ShellStarter`. Chỉ đúng `BashProcess`
+tích hợp bỏ qua lần duyệt thứ hai. Timeout và giới hạn phải là số nguyên dương,
+không nhận boolean hay giá trị không hữu hạn; timeout hợp lệ giới hạn ở 1.800.000 ms.
 
 Mỗi stream shell giữ 4.000 byte đầu và 26.000 byte cuối. Phần vượt giới hạn có
 thể được ghi vào file riêng mode 0600 dưới `cwd/.linch/output/`; lỗi spill hoặc
 stream vượt 64 MiB làm bỏ file spill và giữ đầu ra có giới hạn. `ExecResult`
 ghi trạng thái cắt ngắn, đường dẫn spill, nguyên nhân abort/timeout và signal;
 metadata kết quả tool chứa đường dẫn để đọc trong run. Text MCP dùng chung bộ
-thu spill có giới hạn; host quản lý thời gian lưu file spill MCP.
+thu spill có giới hạn; host quản lý thời gian lưu file spill MCP. I/O spill được chuyển bất đồng bộ sau khi vượt giới hạn byte của shell hoặc
+ngưỡng 30.000 ký tự của MCP. Không ghi đè `.gitignore` hiện có
+và từ chối spill qua thư mục symlink.
 
 `LocalBackend` chỉ kế thừa PATH, HOME, TERM, LANG, LC_ALL, LC_CTYPE, USER,
 SHELL và TMPDIR. Host truyền giá trị khác qua `env`/`forward_env`; định danh bền
@@ -176,6 +185,13 @@ Tool MCP mặc định bỏ qua annotation của server và là tool `exec` tu�
 `trust_annotations=True`, tool tự khai chỉ đọc có scope `read` và chạy song song;
 chỉ destructive hint tường minh trên tool không chỉ đọc mới thêm quy tắc hỏi
 cho thao tác phá hủy. Host bảo chứng các khai báo và chịu rủi ro annotation sai.
+Tên server sau chuẩn hóa từ chối `__`, `_` đầu hoặc cuối bằng `ConfigError`;
+wildcard chọn đúng một server. `timeout_s` mỗi call phải dương và hữu hạn.
+Reconnect thử năm lần với backoff lũy thừa từ 0,5 đến tối đa 30 giây, mỗi lần
+kết nối có timeout 30 giây. Cleanup từng tài nguyên có hạn năm giây trong task
+sở hữu kết nối và tiếp tục với tài nguyên kế tiếp khi hết hạn; giới hạn phụ thuộc
+vào việc tài nguyên hỗ trợ hủy. Danh sách tool và annotation không được liệt kê
+lại sau reconnect; server thay đổi cần session mới.
 
 Về cấu hình MCP, cách đặt tên tool và ví dụ stdio cục bộ, xem
 [Tool MCP](../usage/tools.md#tool-mcp).

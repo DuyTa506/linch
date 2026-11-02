@@ -86,6 +86,11 @@ an in-process task preserves the durable nonterminal row: resume it or reconcile
 and mark it failed. Use `session.abort()` and consume the final result when an
 abort should end the run. See [production wiring](./production.md).
 
+If a Postgres admission conflict disappears before it can be read, admission
+tries up to three times outside a caller-owned transaction, or once inside one.
+An unresolved conflict raises a chained error; retry the transaction or reconcile
+the competing run.
+
 ### Run values
 
 `RunRecord` contains:
@@ -724,7 +729,8 @@ a run-store lease cannot roll back an already completed external effect.
 
 ## Failure semantics
 
-Run-store and session-store writes are not silently retried by the store.
+Apart from the bounded admission retry described above, run-store and
+session-store writes are not silently retried by the store.
 Encoding failures, validation failures, and stale-lease failures are
 fail-closed: the target durable state remains unchanged. A transient database
 failure during an active durable run interrupts the attempt before terminal

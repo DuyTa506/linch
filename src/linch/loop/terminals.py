@@ -108,10 +108,28 @@ def _last_assistant_text(session: Session) -> str | None:
     return None
 
 
+class _TerminalCleanupError(Exception):
+    """Prevent terminal cleanup failures from becoming failed run terminals."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__(str(error))
+
+
+async def _close_terminal_processes(session: Session) -> None:
+    registry = getattr(session, "_processes", None)
+    if registry is not None:
+        try:
+            await registry.close()
+        except Exception as exc:
+            raise _TerminalCleanupError(exc) from exc
+
+
 async def _complete_with_pending_events(
     session: Session, run_id: str, checkpoint: Any, *, lease: Any = None
 ) -> None:
     """Write through a successful terminal and its pending result together."""
+    await _close_terminal_processes(session)
     store = session.agent.run_store
     assert store is not None
     buf = session._event_journal

@@ -273,3 +273,14 @@ def test_unparsed_bash_floor_honors_inapplicable_role_guards(
         .decision
         == "allow"
     )
+
+
+@pytest.mark.parametrize("server", ["ops__prod", "_ops", "ops_"])
+def test_mcp_wildcard_rejects_ambiguous_server_names(server: str) -> None:
+    assert not match_tool_rule(ToolRule(f"mcp__{server}__*", "allow"), f"mcp__{server}__run", {})
+
+
+def test_mcp_wildcard_accepts_double_underscores_in_tool_name() -> None:
+    rule = ToolRule("mcp__ops__*", "allow")
+    assert match_tool_rule(rule, "mcp__ops__deploy__prod", {})
+    assert not match_tool_rule(rule, "mcp__other__deploy__prod", {})

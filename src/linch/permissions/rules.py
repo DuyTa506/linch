@@ -202,6 +202,9 @@ def match_tool_rule(rule: ToolRule, call_name: str, call_input: dict[str, Any]) 
             not rule.tool.startswith("mcp__")
             or not rule.tool.endswith("__*")
             or not server
+            or "__" in server
+            or server.startswith("_")
+            or server.endswith("_")
             or re.fullmatch(r"[a-zA-Z0-9_-]+", server) is None
             or not call_name.startswith(prefix)
         ):

@@ -53,7 +53,25 @@ async def _run(
 ) -> list[Any]:
     agent = _agent(root, model, turns, prompt, tools, **opts)
     try:
-        return [e async for e in (await agent.session()).run(prompt)]
+        events = []
+        provider = agent.provider
+        async for event in (await agent.session()).run(prompt):
+            events.append(event)
+            if event.type != "tool_call_end" or not isinstance(provider, ScriptedProvider):
+                continue
+            for turn in provider._turns[provider._index :]:
+                if not isinstance(turn, ToolUseTurn):
+                    continue
+                if turn.tool_input.get("id") == "<process-id>" and event.tool_name == "Bash":
+                    process_id = event.tool_result.metadata.get("process_id")
+                    if process_id:
+                        turn.tool_input["id"] = process_id
+                if (
+                    turn.tool_input.get("command") == "<skill-command>"
+                    and event.tool_name == "Skill"
+                ):
+                    turn.tool_input["command"] = event.tool_result.content.partition("\n\n")[2]
+        return events
     finally:
         await agent.close()
 
@@ -112,7 +130,7 @@ def _case(case: str, root: Path) -> tuple[list[Any], str, Any]:
         return (
             _turns(
                 ("Bash", {"command": cmd, "timeout_ms": 20}),
-                ("BashProcess", {"action": "wait", "id": "p1", "wait_ms": 1000}),
+                ("BashProcess", {"action": "wait", "id": "<process-id>", "wait_ms": 1000}),
                 ("text", "done"),
             ),
             "Run slow pytest, then wait with BashProcess.",
@@ -120,17 +138,27 @@ def _case(case: str, root: Path) -> tuple[list[Any], str, Any]:
         )
     if case == "server":
         port = _port()
+        probe = (
+            "import time, urllib.request\n"
+            "deadline = time.monotonic() + 5\n"
+            "while True:\n"
+            " try:\n"
+            f"  response = urllib.request.urlopen('http://127.0.0.1:{port}/', timeout=1)\n"
+            "  print(response.status); break\n"
+            " except OSError:\n"
+            "  if time.monotonic() >= deadline: raise\n"
+        )
         return (
             _turns(
                 (
                     "Bash",
                     {"command": f"{py} -m http.server {port} --bind 127.0.0.1", "timeout_ms": 500},
                 ),
-                ("Bash", {"command": f"curl -fsS http://127.0.0.1:{port}/"}),
-                ("BashProcess", {"action": "kill", "id": "p1"}),
+                ("Bash", {"command": f"{py} -c {shlex.quote(probe)}"}),
+                ("BashProcess", {"action": "kill", "id": "<process-id>"}),
                 ("text", "stopped"),
             ),
-            "Start the HTTP server, curl it, then stop its process.",
+            "Start the HTTP server, request it, then stop its process.",
             None,
         )
     if case in ("spill", "flood"):
@@ -161,7 +189,7 @@ def _case(case: str, root: Path) -> tuple[list[Any], str, Any]:
         )
         tools = workspace_tools()
         tools.register(SkillTool({"demo": skill}))
-        command = f'{py} "{directory}/scripts/x.py"'
+        command = "<skill-command>"
         return (
             _turns(("Skill", {"skill": "demo"}), ("Bash", {"command": command}), ("text", "ran")),
             "Invoke demo and run its script through SKILL_DIR.",
@@ -197,11 +225,11 @@ def _check(case: str, events: list[Any], root: Path) -> None:
         assert "a+b" in (root / "calc.py").read_text()
     elif case == "long":
         first, wait = _ends(events, "Bash")[0], _ends(events, "BashProcess")[0]
-        assert first.tool_result.metadata.get("process_id") == "p1"
+        assert first.tool_result.metadata.get("process_id")
         assert not wait.is_error and "1 passed" in wait.result
     elif case == "server":
         bash = _ends(events, "Bash")
-        assert not bash[1].is_error and "Exited 0" in bash[1].result
+        assert not bash[1].is_error and "200" in bash[1].result
         assert not _ends(events, "BashProcess")[0].is_error
     elif case == "spill":
         bash = _ends(events, "Bash")[0]

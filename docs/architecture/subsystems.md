@@ -123,6 +123,11 @@ independently of fleet queue limits. Task cancellation preserves a nonterminal
 row for resume; `session.abort()` followed by consuming the final result records
 an aborted run and frees admission. In-process interruptions have no reaper.
 
+Run-owned process groups and shell spill files are cleaned before a durable
+terminal status (`completed`, `aborted`, or `failed`) is recorded. Cleanup
+failure is surfaced, leaving admission nonterminal and `_active` retained for
+retry. `waiting_permission` and `suspended` remain resumable.
+
 Resume identity excludes the package version and top-level tool descriptions,
 while wire generation, schemas, scope/concurrency, and execution policy remain
 significant. The 3.1.0 backend policy version `2` and Bash schema changes require

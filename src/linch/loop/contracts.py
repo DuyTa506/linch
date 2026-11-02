@@ -379,6 +379,14 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
                 "parallel": bool(getattr(tool, "parallel", True)),
                 **(
                     {
+                        "max_processes": getattr(tool, "max_processes", None),
+                        "max_runtime_ms": getattr(tool, "max_runtime_ms", None),
+                    }
+                    if getattr(tool, "name", None) == "Bash"
+                    else {}
+                ),
+                **(
+                    {
                         "output_schema": output_schema,
                         "renderer_id": getattr(tool, "renderer_id", None),
                         "renderer_version": getattr(tool, "renderer_version", None),

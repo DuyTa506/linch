@@ -122,7 +122,21 @@ CanUseTool = Callable[[CanUseToolRequest], Any]
 
 
 _TASK_TOOL_NAMES = frozenset({"TaskCreate", "TaskList", "TaskGet", "TaskUpdate"})
-_PROCESS_TOOL_NAMES = frozenset({"BashProcess"})
+
+
+def _is_builtin_process_tool(tool: Any) -> bool:
+    """Return whether ``tool`` is Linch's process-control tool.
+
+    Permission defaults are capability checks, so a user tool that happens to
+    use the reserved display name must not inherit the built-in allowlist.
+    Import lazily to keep the permissions package independent of tools during
+    module initialization.
+    """
+    try:
+        from ..tools.processes import BashProcessTool
+    except ImportError:
+        return False
+    return type(tool) is BashProcessTool
 
 
 class PermissionEngine:
@@ -357,7 +371,7 @@ def evaluate_rule_list(
 
 
 def _mode_default(tool: Any, mode: str) -> PermissionDecision:
-    if tool.scope == "read" or tool.name in _TASK_TOOL_NAMES | _PROCESS_TOOL_NAMES:
+    if tool.scope == "read" or tool.name in _TASK_TOOL_NAMES or _is_builtin_process_tool(tool):
         return PermissionDecision(decision="allow")
     if mode == "skip-dangerous":
         return PermissionDecision(decision="allow")

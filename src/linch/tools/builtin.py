@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import math
 import os
 import re
 import shutil
@@ -494,14 +495,19 @@ class BashTool:
 
         from .execution import LocalBackend
 
-        if max_processes < 1 or max_runtime_ms < 1:
+        if (
+            type(max_processes) is not int
+            or type(max_runtime_ms) is not int
+            or max_processes < 1
+            or max_runtime_ms < 1
+        ):
             raise ValueError("process limits must be positive")
         self.max_processes, self.max_runtime_ms = max_processes, max_runtime_ms
         # An ExecutionBackend (capability seam) sources the shell half.
         self._backend: Any = execution.shell if execution is not None else LocalBackend()
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
-        """Validate a shell command and clamp its timeout.
+        """Validate a shell command and its bounded timeout.
 
         Args:
             raw: Provider-supplied command request.
@@ -513,9 +519,9 @@ class BashTool:
             ValueError: If the command is missing or empty.
         """
 
-        timeout = _to_int(raw.get("timeout_ms", 120000), 120000)
-        if timeout <= 0:
-            timeout = 120000
+        timeout = raw.get("timeout_ms", 120000)
+        if type(timeout) is not int or timeout <= 0:
+            raise ValueError("timeout_ms must be a positive integer")
         return {
             "command": require_str(raw, "command"),
             "timeout_ms": min(timeout, 1800000),
@@ -534,10 +540,25 @@ class BashTool:
 
         """
 
-        timeout_s = _to_float(input.get("timeout_ms"), 120000.0) / 1000.0
+        timeout_ms = input.get("timeout_ms", 120000)
+        if type(timeout_ms) is not int or timeout_ms <= 0:
+            raise ValueError("timeout_ms must be a positive integer")
+        timeout_s = min(timeout_ms, 1800000) / 1000.0
         if ctx.tool_timeout_s is not None:
-            timeout_s = min(timeout_s, max(ctx.tool_timeout_s - 1, ctx.tool_timeout_s / 2))
+            limit = ctx.tool_timeout_s
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+                raise ValueError("tool timeout must be a finite positive number")
+            if not math.isfinite(limit) or limit <= 0:
+                raise ValueError("tool timeout must be a finite positive number")
+            timeout_s = min(timeout_s, max(limit - 1, limit / 2))
         registry = getattr(ctx._session, "_processes", None)
+        if input.get("run_in_background") and (
+            registry is None or not callable(getattr(self._backend, "start", None))
+        ):
+            return ToolResult(
+                content="run_in_background requires the managed process path.",
+                is_error=True,
+            )
         if registry is not None and callable(getattr(self._backend, "start", None)):
             return await registry.run(self, input, ctx, timeout_s)
         result = await self._backend.run(

@@ -114,6 +114,7 @@ from .terminals import (
     _gate_retry_tail,
     _max_turns_tail,
     _stop_when_tail,
+    _TerminalCleanupError,
 )
 from .tool_batch import ToolBatchContext, run_tool_batch
 
@@ -1107,25 +1108,28 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ) as max_turn_events:
             async for event in max_turn_events:
                 yield event
+    except _TerminalCleanupError as exc:
+        raise exc.error from exc
     except AbortError:
-        async with aclosing(
-            _runtime.emit_abort_terminal(close_active_spans=_close_active_spans)
-        ) as abort_events:
-            async for event in abort_events:
-                yield event
-    except LeaseLostError as exc:
-        _runtime.lease_lost = exc
-        async with aclosing(
-            _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
-        ) as error_events:
-            async for event in error_events:
-                yield event
+        try:
+            async with aclosing(
+                _runtime.emit_abort_terminal(close_active_spans=_close_active_spans)
+            ) as abort_events:
+                async for event in abort_events:
+                    yield event
+        except _TerminalCleanupError as exc:
+            raise exc.error from exc
     except Exception as exc:
-        async with aclosing(
-            _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
-        ) as error_events:
-            async for event in error_events:
-                yield event
+        if isinstance(exc, LeaseLostError):
+            _runtime.lease_lost = exc
+        try:
+            async with aclosing(
+                _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
+            ) as error_events:
+                async for event in error_events:
+                    yield event
+        except _TerminalCleanupError as cleanup:
+            raise cleanup.error from cleanup
     finally:
         await _runtime.unbind_run()
         try:

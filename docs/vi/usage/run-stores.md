@@ -87,6 +87,11 @@ Hủy task trong process giữ hàng bền vững chưa kết thúc: hãy resume
 và đánh dấu thất bại. Dùng `session.abort()` rồi tiêu thụ kết quả cuối khi muốn
 abort kết thúc run. Xem [cấu hình production](./production.md).
 
+Nếu run xung đột trong admission Postgres biến mất trước khi đọc được, admission
+thử tối đa ba lần ngoài transaction do caller quản lý, hoặc một lần trong đó.
+Xung đột chưa giải quyết gây lỗi kèm nguyên nhân; thử lại transaction hoặc đối
+soát run cạnh tranh.
+
 ### Các giá trị của run
 
 `RunRecord` chứa:
@@ -724,7 +729,8 @@ lease của kho lưu trữ run không thể hoàn tác tác động bên ngoài 
 
 ## Ngữ nghĩa khi xảy ra lỗi
 
-Kho lưu trữ không âm thầm thử lại các lệnh ghi của kho lưu trữ run và session.
+Ngoài lần thử lại admission có giới hạn đã mô tả ở trên, kho lưu trữ không âm
+thầm thử lại các lệnh ghi của run và session.
 Lỗi mã hóa, lỗi xác thực và lỗi lease cũ đều
 tuân theo nguyên tắc fail-closed: trạng thái bền vững đích giữ nguyên. Lỗi cơ sở dữ liệu tạm thời
 trong run bền vững đang hoạt động làm gián đoạn lần thử trước khi lưu trạng thái kết thúc,

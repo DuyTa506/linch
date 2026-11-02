@@ -2534,7 +2534,7 @@ from linch import ToolContext
 ```
 
 ```text
-ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, tool_timeout_s: float | None = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, _session: Any = None, _run_config: Any = None, _principal: Principal | None = None)
+ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, tool_timeout_s: float | None = None, _session: Any = None, _run_config: Any = None, _principal: Principal | None = None)
 ```
 
 Provide runtime capabilities to a tool invocation.

@@ -597,6 +597,7 @@ def _dispatch_execute(
             "execution",
             "idempotency_key",
             "principal",
+            "_session",
             "_run_config",
         )
     }

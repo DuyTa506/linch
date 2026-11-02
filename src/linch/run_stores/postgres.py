@@ -186,9 +186,10 @@ class PostgresRunStore:
         session_id: str | None = None,
         run_id: str | None = None,
     ) -> Any:
-        while True:
+        transactional = conn.is_in_transaction()
+        for attempt in range(3):
             try:
-                async with conn.transaction() if conn.is_in_transaction() else nullcontext():
+                async with conn.transaction() if transactional else nullcontext():
                     return await conn.fetchrow(sql, *args)
             except _import_asyncpg().UniqueViolationError as exc:
                 if exc.constraint_name != "runs_one_active_per_session_idx":
@@ -202,6 +203,10 @@ class PostgresRunStore:
                 )
                 if owner is not None:
                     raise SessionBusyError(str(owner["session_id"]), str(owner["id"])) from exc
+                if transactional or attempt == 2:
+                    raise RuntimeError(
+                        "Run admission conflict: the conflicting nonterminal run is not visible"
+                    ) from exc
                 # The competing run finished after rejection; admission can retry.
 
     async def create_run(

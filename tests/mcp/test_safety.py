@@ -134,12 +134,12 @@ async def test_large_mcp_text_falls_back_to_cap_when_spill_fails(tmp_path) -> No
 
 
 @pytest.mark.parametrize("size", [30000, 30001, 90000])
-def test_result_text_is_bounded_at_thirty_thousand_characters(size: int) -> None:
+async def test_result_text_is_bounded_at_thirty_thousand_characters(size: int) -> None:
     from mcp.types import CallToolResult, TextContent
 
     from linch.mcp.result import map_mcp_result
 
-    result = map_mcp_result(
+    result = await map_mcp_result(
         CallToolResult(content=[TextContent(type="text", text="x" * size)], isError=True)
     )
     marker = "" if size == 30000 else "\n… (output capped at 30000 chars)"
@@ -147,12 +147,12 @@ def test_result_text_is_bounded_at_thirty_thousand_characters(size: int) -> None
     assert result.is_error is True
 
 
-def test_result_cap_includes_combined_blocks_and_separators() -> None:
+async def test_result_cap_includes_combined_blocks_and_separators() -> None:
     from mcp.types import CallToolResult, TextContent
 
     from linch.mcp.result import map_mcp_result
 
-    result = map_mcp_result(
+    result = await map_mcp_result(
         CallToolResult(
             content=[
                 TextContent(type="text", text="a" * 15000),
@@ -164,7 +164,7 @@ def test_result_cap_includes_combined_blocks_and_separators() -> None:
 
 
 @pytest.mark.parametrize("binary", [False, True])
-def test_embedded_resources_expose_text_but_omit_binary(binary: bool) -> None:
+async def test_embedded_resources_expose_text_but_omit_binary(binary: bool) -> None:
     from mcp.types import (
         BlobResourceContents,
         CallToolResult,
@@ -179,18 +179,18 @@ def test_embedded_resources_expose_text_but_omit_binary(binary: bool) -> None:
         if binary
         else TextResourceContents(uri="file:///data", text="resource text")
     )
-    result = map_mcp_result(
+    result = await map_mcp_result(
         CallToolResult(content=[EmbeddedResource(type="resource", resource=resource)])
     )
     assert result.content == ("[resource content omitted]" if binary else "resource text")
 
 
-def test_embedded_resource_text_shares_result_cap() -> None:
+async def test_embedded_resource_text_shares_result_cap() -> None:
     from mcp.types import CallToolResult, EmbeddedResource, TextContent, TextResourceContents
 
     from linch.mcp.result import map_mcp_result
 
-    result = map_mcp_result(
+    result = await map_mcp_result(
         CallToolResult(
             content=[
                 TextContent(type="text", text="prefix"),
@@ -405,7 +405,7 @@ async def test_spilled_result_is_not_offloaded_again(tmp_path) -> None:
     from linch.filesystem.offload import maybe_offload
     from linch.mcp.result import map_mcp_result
 
-    result = map_mcp_result(
+    result = await map_mcp_result(
         CallToolResult(content=[TextContent(type="text", text="x" * 40000)]), cwd=str(tmp_path)
     )
     content = result.content
@@ -417,3 +417,53 @@ async def test_spilled_result_is_not_offloaded_again(tmp_path) -> None:
         config=OffloadConfig(threshold_tokens=1),
     )
     assert result.content == content
+
+
+async def test_non_ascii_result_below_character_cap_does_not_spill(tmp_path):
+    from mcp.types import CallToolResult, TextContent
+
+    from linch.mcp.result import map_mcp_result
+
+    text = "😀" * 10000
+    result = await map_mcp_result(
+        CallToolResult(content=[TextContent(type="text", text=text)]), cwd=str(tmp_path)
+    )
+    assert not result.truncated and result.content == text and not result.metadata
+    assert not (tmp_path / ".linch").exists()
+
+
+async def test_cancelled_spill_closes_and_removes_unreturned_file(tmp_path, monkeypatch):
+    import threading
+
+    from mcp.types import CallToolResult, TextContent
+
+    from linch.mcp.result import map_mcp_result
+    from linch.tools._output import BoundedOutput
+
+    entered, release = threading.Event(), threading.Event()
+    original = BoundedOutput._spill
+    captured = []
+
+    def blocked(self, *args):
+        original(self, *args)
+        captured.append((self, self._file, self.path))
+        entered.set()
+        release.wait()
+
+    monkeypatch.setattr(BoundedOutput, "_spill", blocked)
+    task = asyncio.create_task(
+        map_mcp_result(
+            CallToolResult(content=[TextContent(type="text", text="x" * 30001)]), cwd=str(tmp_path)
+        )
+    )
+    try:
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        _, file, path = captured[0]
+        assert file.closed and not Path(path).exists()
+    finally:
+        release.set()

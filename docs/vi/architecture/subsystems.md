@@ -123,6 +123,11 @@ hàng đợi toàn cụm. Hủy task giữ hàng chưa kết thúc để resume;
 rồi tiêu thụ kết quả cuối ghi nhận run aborted và giải phóng quyền tiếp nhận.
 Thực thi trong process không có bộ thu hồi run bị gián đoạn.
 
+Nhóm tiến trình và file spill của run được cleanup trước khi ghi trạng thái kết
+thúc bền vững (`completed`, `aborted` hoặc `failed`). Lỗi cleanup được báo ra,
+giữ admission chưa kết thúc và giữ `_active` để thử lại. `waiting_permission`
+và `suspended` vẫn có thể resume.
+
 Định danh resume loại phiên bản package và mô tả cấp cao nhất của tool, nhưng
 wire generation, schema, scope/mức đồng thời và chính sách thực thi vẫn quan
 trọng. Phiên bản chính sách backend `2` và thay đổi schema Bash trong 3.1.0 yêu

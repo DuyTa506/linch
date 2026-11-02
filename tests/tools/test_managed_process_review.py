@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,7 @@ from tests.tools.test_managed_processes import context, launch
 
 
 @pytest.mark.parametrize("worker", [False, True])
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_backend_rebind_preserves_bash_limits_through_agent(tmp_path, worker):
     from linch import BashTool, LocalExecutionBackend, empty_tools
 
@@ -36,9 +39,9 @@ async def test_backend_rebind_preserves_bash_limits_through_agent(tmp_path, work
             yielded = await effective.execute(
                 effective.validate({"command": "sleep 30", "timeout_ms": 10}), ctx
             )
-            assert yielded.metadata["process_id"] == "p1"
-            result = await processes.ids["p1"].handle.wait(0.5)
-            assert result is not None and processes.ids["p1"].timed_out
+            process_id = yielded.metadata["process_id"]
+            result = await processes.ids[process_id].handle.wait(0.5)
+            assert result is not None and processes.ids[process_id].timed_out
         finally:
             await processes.close()
     finally:
@@ -173,6 +176,7 @@ async def test_failed_cleanup_retains_admission_until_forced_retry(
         await agent.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /proc")
 async def test_foreground_live_group_consumes_process_cap(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
@@ -189,6 +193,7 @@ async def test_foreground_live_group_consumes_process_cap(tmp_path):
         await registry.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /proc")
 async def test_completed_foreground_overflow_group_is_killed(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
@@ -252,6 +257,7 @@ async def test_late_failed_start_cleanup_can_be_retried_after_prior_success(tmp_
     assert not handle.running
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_start_cap_fallback_supports_handles_without_private_group_probe(tmp_path):
     from linch import BashTool
     from linch.tools.execution import LocalBackend
@@ -277,7 +283,8 @@ async def test_start_cap_fallback_supports_handles_without_private_group_probe(t
     tool = BashTool(execution=SimpleNamespace(shell=Backend()), max_processes=1)
     try:
         first = await tool.execute(tool.validate({"command": "sleep 30", "timeout_ms": 20}), ctx)
-        assert first.metadata["process_id"] == "p1"
+        first_id = first.metadata["process_id"]
+        assert first_id in registry.ids
         overflow = await tool.execute(tool.validate({"command": "sleep 30", "timeout_ms": 20}), ctx)
         assert overflow.is_error and "timed out" in overflow.content
     finally:
@@ -392,3 +399,273 @@ async def test_delayed_start_failure_reaches_overlapping_force_close(
             session._close_task.cancel()
             await asyncio.gather(session._close_task, return_exceptions=True)
         await agent.close()
+
+
+async def test_limit_does_not_kill_reaped_handle():
+    from linch.tools.execution import ExecResult
+    from linch.tools.processes import _Process
+
+    class Handle:
+        killed = False
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False)
+
+        async def kill(self):
+            self.killed = True
+
+    handle = Handle()
+    await _Process(handle).limit(0, None)
+    assert not handle.killed
+
+
+async def test_finished_history_is_bounded_and_spills_removed(tmp_path):
+    from linch.tools.base import ToolContext
+    from linch.tools.execution import ExecResult, ShellRead
+    from linch.tools.processes import ProcessRegistry
+
+    class Handle:
+        _group_alive = False
+
+        def __init__(self, index):
+            self.path = tmp_path / str(index)
+            self.path.write_text("spill")
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False, stdout_path=str(self.path))
+
+        async def kill(self):
+            pass
+
+        def read(self):
+            return ShellRead()
+
+    class Backend:
+        count = 0
+
+        async def start(self, command, *, cwd):
+            self.count += 1
+            return Handle(self.count)
+
+    class Tool:
+        _backend = Backend()
+        max_processes = 1
+        max_runtime_ms = 10000
+
+    registry = ProcessRegistry("r")
+    ctx = ToolContext(str(tmp_path), "s", "r", None)
+    for _ in range(300):
+        await registry.run(Tool(), {"command": "x"}, ctx, 0)
+    assert len(registry.entries) <= 128
+    await registry.close()
+    assert not list(tmp_path.iterdir())
+
+
+async def test_recent_finished_ids_are_retained_and_old_ids_evicted(tmp_path):
+    from linch.tools.base import ToolContext
+    from linch.tools.execution import ExecResult, ShellRead
+    from linch.tools.processes import ProcessRegistry
+
+    class Handle:
+        _group_alive = False
+        calls = 0
+
+        async def wait(self, timeout):
+            self.calls += 1
+            return None if self.calls <= 2 else ExecResult("", "", 0, False)
+
+        async def kill(self):
+            pass
+
+        def read(self):
+            return ShellRead()
+
+    class Backend:
+        async def start(self, command, *, cwd):
+            return Handle()
+
+    class Tool:
+        _backend = Backend()
+        max_processes = 1000
+        max_runtime_ms = 10000
+
+    registry = ProcessRegistry("r")
+    ctx = ToolContext(str(tmp_path), "s", "r", None)
+    ids = []
+    for _ in range(140):
+        result = await registry.run(Tool(), {"command": "x", "run_in_background": True}, ctx, 0)
+        ids.append(result.metadata["process_id"])
+    await registry._retire(registry.entries[-1], await registry.entries[-1].handle.wait(0))
+    registry._trim_history()
+    assert ids[0] not in registry.ids and ids[-1] in registry.ids
+    assert len(registry.ids) <= 128
+    await registry.close()
+
+
+@pytest.mark.parametrize("trigger", ["timeout", "abort"])
+async def test_limit_does_not_kill_exited_local_leader_with_pending_readers(trigger):
+    from linch.tools.execution import ExecResult, ShellRead, _LocalProcess
+    from linch.tools.processes import _Process, _render
+
+    class Local(_LocalProcess):
+        def __init__(self):
+            self.proc = SimpleNamespace(returncode=0)
+            self.killed = False
+            self.readers_done = False
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False) if self.readers_done else None
+
+        async def kill(self):
+            self.killed = True
+
+        def read(self):
+            return ShellRead()
+
+    handle = Local()
+    entry = _Process(handle)
+    signal = asyncio.Event()
+    signal.set()
+    await entry.limit(0 if trigger == "timeout" else 1, None if trigger == "timeout" else signal)
+    assert not handle.killed and not entry.stopped
+    assert not entry.timed_out and not entry.aborted
+    handle.readers_done = True
+    assert not (await _render(entry, "p1234abcd", 0)).is_error
+
+
+async def test_capacity_kills_retire_stopped_groups_despite_stale_probe(tmp_path):
+    from linch.tools.base import ToolContext
+    from linch.tools.execution import ExecResult, ShellRead
+    from linch.tools.processes import ProcessRegistry
+
+    class Handle:
+        _group_alive = True
+        stopped = False
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False) if self.stopped else None
+
+        async def kill(self):
+            self.stopped = True
+
+        def read(self):
+            return ShellRead()
+
+    class Backend:
+        async def start(self, command, *, cwd):
+            return Handle()
+
+    class Tool:
+        _backend = Backend()
+        max_processes = 1
+        max_runtime_ms = 10000
+
+        @staticmethod
+        def _render(result):
+            from linch.tools.builtin import BashTool
+
+            return BashTool._render(result)
+
+    registry = ProcessRegistry("r")
+    ctx = ToolContext(str(tmp_path), "s", "r", None)
+    try:
+        await registry.run(Tool(), {"command": "x"}, ctx, 0)
+        for _ in range(150):
+            await registry.run(Tool(), {"command": "x"}, ctx, 0)
+        assert len(registry.entries) == 1
+    finally:
+        await registry.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
+def test_group_signal_permission_error_is_not_reported_as_success(monkeypatch):
+    from linch.tools.execution import _kill_process_group
+
+    def denied(*args):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("linch.tools.execution.os.killpg", denied)
+    with pytest.raises(PermissionError):
+        _kill_process_group(SimpleNamespace(pid=123, returncode=0))
+
+
+async def test_live_group_with_exited_leader_remains_owned(tmp_path):
+    from linch.tools.execution import ExecResult
+    from linch.tools.processes import ProcessRegistry, _Process
+
+    class Handle:
+        _group_alive = True
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False)
+
+        async def kill(self):
+            pass
+
+    entry = _Process(Handle())
+    registry = ProcessRegistry("r", entries=[entry])
+    assert not await registry._retire(entry, await entry.handle.wait(0))
+    assert registry.entries == [entry]
+    await registry.close()
+
+
+async def test_failed_kill_keeps_entry_for_retry(tmp_path):
+    from linch.tools.execution import ExecResult
+    from linch.tools.processes import ProcessRegistry, _Process
+
+    class Handle:
+        _group_alive = True
+        fail = True
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False)
+
+        async def kill(self):
+            if self.fail:
+                raise PermissionError("denied")
+
+    handle = Handle()
+    entry = _Process(handle)
+    registry = ProcessRegistry("r", entries=[entry])
+    with pytest.raises(PermissionError):
+        await entry.stop()
+    assert not entry.stopped
+    assert not await registry._retire(entry, await handle.wait(0))
+    with pytest.raises(ExceptionGroup):
+        await registry.close()
+    handle.fail = False
+    await registry.close()
+    assert registry.cleaned
+
+
+@pytest.mark.parametrize("method", ["timer", "user"])
+async def test_successful_stop_retires_stale_group_for_timer_and_user(tmp_path, method):
+    from linch.tools.base import ToolContext
+    from linch.tools.execution import ExecResult, ShellRead
+    from linch.tools.processes import BashProcessTool, ProcessRegistry, _Process
+
+    class Handle:
+        _group_alive = True
+        stopped = False
+
+        async def wait(self, timeout):
+            return ExecResult("", "", 0, False) if self.stopped else None
+
+        async def kill(self):
+            self.stopped = True
+
+        def read(self):
+            return ShellRead()
+
+    entry = _Process(Handle())
+    registry = ProcessRegistry("r", entries=[entry], ids={"p1234abcd": entry})
+    if method == "timer":
+        await entry.limit(0, None)
+        await registry._retire(entry, await entry.handle.wait(0))
+    else:
+        ctx = ToolContext(
+            str(tmp_path), "s", "r", None, _session=SimpleNamespace(_processes=registry)
+        )
+        await BashProcessTool().execute({"action": "kill", "id": "p1234abcd"}, ctx)
+    assert not registry.entries and registry.ids["p1234abcd"] is entry
+    await registry.close()

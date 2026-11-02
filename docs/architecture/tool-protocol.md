@@ -76,7 +76,8 @@ synchronous renderer must declare stable `renderer_id` and `renderer_version`.
 best-effort progress sink. Tools report transient progress with
 `ctx.report_progress(message, data=None)`. Progress becomes a `ToolProgressEvent` for the
 live consumer only; it is not provider history, a tool result, or a durable run
-event.
+event. `tool_timeout_s` is keyword-only; the sixth positional argument remains
+`file_read_tracker`.
 
 `deps` is threaded from `Agent(deps=...)` or overridden per-run with `RunOptions(deps=...)`. Use it to inject app state into tools without globals.
 
@@ -155,13 +156,22 @@ run ends. Cleanup failures keep the session active so the host can retry close;
 Docker container removal is best effort. Capacity exhaustion kills a still-running
 new command when its call returns. Handles are not durable; a hard worker kill can leave children
 behind. Shell stdin is closed, and timeout/abort results retain partial output.
+IDs are `p` plus eight lowercase UUID4 hex digits, ephemeral across resume and
+cleanup. At most the 128 most recent finished IDs remain; spill paths remain
+available until cleanup. `max_processes` and `max_runtime_ms` enter the durable
+fingerprint. Background Bash requires both a managed registry and `ShellStarter`.
+Only the built-in `BashProcess` identity bypasses a second approval. Timeouts
+and limits must be positive integers, excluding booleans and non-finite values;
+valid timeouts are capped at 1,800,000 ms.
 
 Output retains 4,000 head bytes and 26,000 tail bytes per shell stream. Overflow
 can spill to a private mode-0600 file under `cwd/.linch/output/`; spill failures
 and streams over 64 MiB discard the spill and keep bounded output. `ExecResult`
 records truncation, spill paths, abort/timeout cause, and signal; tool results
 expose those paths in metadata for inspection during the run. MCP text shares
-the bounded spill collector; hosts own retention of MCP spill files.
+the bounded spill collector; hosts own retention of MCP spill files. Spill I/O is asynchronously offloaded after the shell byte cap or the MCP
+30,000-character threshold is exceeded. Existing `.gitignore` files
+are not overwritten, and symlink directories refuse spill.
 
 `LocalBackend` inherits only PATH, HOME, TERM, LANG, LC_ALL, LC_CTYPE, USER,
 SHELL, and TMPDIR. Hosts pass additional values with `env`/`forward_env`; durable
@@ -175,6 +185,14 @@ MCP tools ignore server annotations by default and are serial `exec` tools.
 With `trust_annotations=True`, a claimed read-only tool is a parallel `read`;
 only an explicit destructive hint on a non-read tool adds the destructive ask
 rule. Hosts vouch for those claims and retain the risk of false annotations.
+Normalized server names reject `__` and leading or trailing `_` with `ConfigError`;
+a wildcard matches exactly one server. Per-call `timeout_s` is finite and positive.
+Reconnect attempts five times with exponential backoff from 0.5 seconds to a
+30-second cap; each connect has a 30-second timeout. Resource cleanup remains
+in the connection owner task and has a five-second deadline per resource; it
+proceeds to the next resource if a deadline expires. Deadlines rely on
+cancellation-cooperative cleanup. Tool lists and annotations are not re-listed
+after reconnect; a changed server requires a new session.
 
 For MCP configuration, tool naming, and a local stdio example, see
 [MCP tools](../usage/tools.md#mcp-tools).

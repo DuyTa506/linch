@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import sys
 from types import SimpleNamespace
@@ -34,28 +35,33 @@ async def launch(ctx, command, **options):
     return await tool.execute(tool.validate({"command": command, "timeout_ms": 25}), ctx)
 
 
-async def process(ctx, action="wait", id="p1", wait_ms=1000):
+async def process(ctx, action="wait", id=None, wait_ms=1000):
     from linch import BashProcessTool
 
+    if id is None:
+        id = next(iter(ctx._session._processes.ids), "stale-process-id")
     tool = BashProcessTool()
     return await tool.execute(tool.validate({"id": id, "action": action, "wait_ms": wait_ms}), ctx)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_yield_then_wait_returns_only_new_output(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
         first = await launch(
             ctx, python("print('first'); import time; time.sleep(.15); print('last')")
         )
-        assert not first.is_error and first.metadata["process_id"] == "p1"
+        assert not first.is_error
+        process_id = first.metadata["process_id"]
         assert "first" in first.content
-        final = await process(ctx)
+        final = await process(ctx, id=process_id)
         assert "last" in final.content and "first" not in final.content
         assert "Exited 0" in final.content and not final.is_error
     finally:
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_background_flag_returns_immediately_and_kill_works(tmp_path):
     from linch import BashTool
 
@@ -65,49 +71,53 @@ async def test_background_flag_returns_immediately_and_kill_works(tmp_path):
         result = await tool.execute(
             tool.validate({"command": "sleep 30", "run_in_background": True}), ctx
         )
-        assert result.metadata["process_id"] == "p1"
-        killed = await process(ctx, "kill")
+        process_id = result.metadata["process_id"]
+        killed = await process(ctx, "kill", id=process_id)
         assert not killed.is_error and "signal" in killed.content
-        assert "Exited" in (await process(ctx, "status")).content
+        assert "Exited" in (await process(ctx, "status", id=process_id)).content
     finally:
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_cap_kills_overflow_but_completed_slots_can_be_reused(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
-        assert (await launch(ctx, "sleep 30", max_processes=1)).metadata["process_id"] == "p1"
+        first_id = (await launch(ctx, "sleep 30", max_processes=1)).metadata["process_id"]
         overflow = await launch(ctx, "sleep 30", max_processes=1)
         assert overflow.is_error and "timed out" in overflow.content
-        await process(ctx, "kill")
+        await process(ctx, "kill", id=first_id)
         again = await launch(ctx, "sleep .1", max_processes=1)
-        assert again.metadata["process_id"] == "p2"
+        assert again.metadata["process_id"] != first_id
     finally:
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_hard_limit_stops_yielded_process(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
-        await launch(ctx, "sleep 30", max_runtime_ms=70)
-        final = await process(ctx)
+        process_id = (await launch(ctx, "sleep 30", max_runtime_ms=70)).metadata["process_id"]
+        final = await process(ctx, id=process_id)
         assert final.is_error and "timed out" in final.content
     finally:
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_quiet_waits_suggest_stopping_and_clamp_timeout(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
-        await launch(ctx, "sleep 30")
+        process_id = (await launch(ctx, "sleep 30")).metadata["process_id"]
         ctx.tool_timeout_s = 0.1
         for _ in range(3):
-            result = await asyncio.wait_for(process(ctx, wait_ms=999999), 0.2)
+            result = await asyncio.wait_for(process(ctx, id=process_id, wait_ms=999999), 0.2)
         assert "stop" in result.content.lower()
     finally:
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_missing_and_previous_run_ids_are_gone(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
@@ -119,6 +129,7 @@ async def test_missing_and_previous_run_ids_are_gone(tmp_path):
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_run_end_cleans_spills_before_result_and_reuse(tmp_path):
     from linch import BashProcessTool, BashTool, ResultEvent, empty_tools
 
@@ -149,6 +160,7 @@ async def test_run_end_cleans_spills_before_result_and_reuse(tmp_path):
         await agent.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_closed_registry_rejects_old_detached_start(tmp_path):
     ctx, registry = await context(tmp_path)
     await registry.close()
@@ -157,6 +169,7 @@ async def test_closed_registry_rejects_old_detached_start(tmp_path):
     assert not (tmp_path / "should-not-exist").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_abort_interrupts_yield_wait_and_preserves_partial_output(tmp_path):
     from linch.abort import AbortContext
 
@@ -172,6 +185,7 @@ async def test_abort_interrupts_yield_wait_and_preserves_partial_output(tmp_path
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_running_spill_keeps_paths_and_truncation(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
@@ -183,15 +197,29 @@ async def test_running_spill_keeps_paths_and_truncation(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "skip-dangerous"])
-async def test_process_control_is_allowed_without_prompt_and_not_cached(tmp_path, mode):
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
+async def test_process_control_is_allowed_without_prompt_and_not_cached(
+    tmp_path, mode, monkeypatch
+):
+    import linch.tools.processes as processes_module
     from linch import BashProcessTool, BashTool, ToolCacheConfig, empty_tools
+
+    monkeypatch.setattr(
+        processes_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex="00000001000000000000000000000000"),
+    )
 
     provider = ScriptedProvider(
         [
             ToolUseTurn("Bash", {"command": "sleep .15", "timeout_ms": 20}, tool_id="b"),
-            ToolUseTurn("BashProcess", {"id": "p1", "action": "wait", "wait_ms": 0}, tool_id="w1"),
             ToolUseTurn(
-                "BashProcess", {"id": "p1", "action": "wait", "wait_ms": 1000}, tool_id="w2"
+                "BashProcess", {"id": "p00000001", "action": "wait", "wait_ms": 0}, tool_id="w1"
+            ),
+            ToolUseTurn(
+                "BashProcess",
+                {"id": "p00000001", "action": "wait", "wait_ms": 1000},
+                tool_id="w2",
             ),
             TextTurn("done"),
         ]
@@ -220,6 +248,7 @@ async def test_process_control_is_allowed_without_prompt_and_not_cached(tmp_path
         await agent.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /proc")
 async def test_foreground_children_and_spills_are_removed_at_run_end(tmp_path):
     from linch import BashTool, empty_tools
 
@@ -239,6 +268,7 @@ async def test_foreground_children_and_spills_are_removed_at_run_end(tmp_path):
         await agent.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_cancelled_cleanup_finishes_killing_before_releasing_admission(tmp_path):
     from linch import BashTool, empty_tools
 
@@ -268,6 +298,7 @@ async def _consume(session):
     return [e async for e in session.run("go")]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_local_python_http_server_flow(tmp_path):
     import socket
     import urllib.request
@@ -283,7 +314,7 @@ async def test_local_python_http_server_flow(tmp_path):
         server = await launch(
             ctx, f"{shlex.quote(sys.executable)} -u -m http.server {port} --bind 127.0.0.1"
         )
-        assert server.metadata["process_id"] == "p1"
+        process_id = server.metadata["process_id"]
         for _ in range(30):
             try:
                 response = await asyncio.to_thread(
@@ -295,11 +326,12 @@ async def test_local_python_http_server_flow(tmp_path):
                 await asyncio.sleep(0.02)
         else:
             pytest.fail("server did not start")
-        assert not (await process(ctx, "kill")).is_error
+        assert not (await process(ctx, "kill", id=process_id)).is_error
     finally:
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_child_run_has_its_own_process_ids_and_cap(tmp_path):
     from linch import BashProcessTool, BashTool, empty_tools
     from linch.subagents.default_agent import DEFAULT_AGENT
@@ -309,9 +341,13 @@ async def test_child_run_has_its_own_process_ids_and_cap(tmp_path):
 
     provider = ScriptedProvider(
         [
-            ToolUseTurn("BashProcess", {"action": "status", "id": "p1"}, tool_id="status"),
+            ToolUseTurn(
+                "BashProcess", {"action": "status", "id": "stale-process-id"}, tool_id="status"
+            ),
             ToolUseTurn("Bash", {"command": "sleep 30", "timeout_ms": 25}, tool_id="start"),
-            ToolUseTurn("BashProcess", {"action": "kill", "id": "p1"}, tool_id="kill"),
+            ToolUseTurn(
+                "BashProcess", {"action": "kill", "id": "stale-process-id"}, tool_id="kill"
+            ),
             TextTurn("done"),
         ]
     )
@@ -336,9 +372,11 @@ async def test_child_run_has_its_own_process_ids_and_cap(tmp_path):
         )
         child = agent._sessions[result.child_session_id]
         assert child._processes is not parent._processes
-        assert "p1" in child._processes.ids
-        assert not child._processes.ids["p1"].timed_out
-        assert await parent._processes.ids["p1"].handle.wait(0) is None
+        child_process_id = next(iter(child._processes.ids))
+        assert child_process_id.startswith("p") and len(child_process_id) == 9
+        assert not child._processes.ids[child_process_id].timed_out
+        parent_process_id = next(iter(parent._processes.ids))
+        assert await parent._processes.ids[parent_process_id].handle.wait(0) is None
         tool_results = [
             b.content for m in child.provider_view for b in m.content if b.type == "tool_result"
         ]
@@ -347,6 +385,7 @@ async def test_child_run_has_its_own_process_ids_and_cap(tmp_path):
         await agent.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_late_start_after_cleanup_is_killed_and_spill_removed(tmp_path):
     from linch import BashTool
     from linch.tools.execution import LocalBackend
@@ -415,6 +454,7 @@ async def test_managed_process_schema_changes_block_resume(tmp_path, tool_name):
         await current.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_run_only_backend_retains_killing_timeout(tmp_path):
     from linch import BashTool
     from linch.tools.execution import LocalBackend
@@ -435,28 +475,37 @@ async def test_run_only_backend_retains_killing_timeout(tmp_path):
         await registry.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_only_quiet_wait_actions_count_toward_stopping_hint(tmp_path):
     ctx, registry = await context(tmp_path)
     try:
-        await launch(ctx, "sleep 30")
+        process_id = (await launch(ctx, "sleep 30")).metadata["process_id"]
         for _ in range(4):
-            await process(ctx, "status")
+            await process(ctx, "status", id=process_id)
         for _ in range(2):
-            assert "consider stopping" not in (await process(ctx, wait_ms=0)).content
-        assert "consider stopping" in (await process(ctx, wait_ms=0)).content
+            assert "consider stopping" not in (await process(ctx, id=process_id, wait_ms=0)).content
+        assert "consider stopping" in (await process(ctx, id=process_id, wait_ms=0)).content
     finally:
         await registry.close()
 
 
-async def test_bash_uses_managed_background_with_generic_background_enabled(tmp_path):
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
+async def test_bash_uses_managed_background_with_generic_background_enabled(tmp_path, monkeypatch):
+    import linch.tools.processes as processes_module
     from linch import BashProcessTool, BashTool, empty_tools
+
+    monkeypatch.setattr(
+        processes_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex="00000001000000000000000000000000"),
+    )
 
     provider = ScriptedProvider(
         [
             ToolUseTurn(
                 "Bash", {"command": "sleep 30", "run_in_background": True}, tool_id="start"
             ),
-            ToolUseTurn("BashProcess", {"id": "p1", "action": "kill"}, tool_id="kill"),
+            ToolUseTurn("BashProcess", {"id": "p00000001", "action": "kill"}, tool_id="kill"),
             TextTurn("done"),
         ]
     )
@@ -470,7 +519,8 @@ async def test_bash_uses_managed_background_with_generic_background_enabled(tmp_
     try:
         events = [e async for e in (await agent.session()).run("go")]
         results = [e for e in events if e.type == "tool_call_end"]
-        assert "Process p1 still running" in results[0].result
+        process_id = results[0].tool_result.metadata["process_id"]
+        assert f"Process {process_id} still running" in results[0].result
         assert "gone" not in results[1].result
     finally:
         await agent.close()

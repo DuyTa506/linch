@@ -23,6 +23,8 @@ VERSION = "0.1.0"
 _RECONNECT_INITIAL_DELAY = 0.5
 _RECONNECT_MAX_DELAY = 30.0
 _RECONNECT_ATTEMPTS = 5
+_RECONNECT_ATTEMPT_TIMEOUT_S = 30.0
+_CLEANUP_TIMEOUT_S = 5.0
 _CONNECTION_CLOSED = -32000
 
 
@@ -49,7 +51,8 @@ class _OpenSession:
             if resource is None:
                 continue
             try:
-                await resource.__aexit__(None, None, None)
+                async with asyncio.timeout(_CLEANUP_TIMEOUT_S):
+                    await resource.__aexit__(None, None, None)
             except (Exception, asyncio.CancelledError):
                 pass
 
@@ -135,7 +138,8 @@ class _SessionOwner:
                     except TimeoutError:
                         pass
                     try:
-                        opened = await _connect_one(name, config)
+                        async with asyncio.timeout(_RECONNECT_ATTEMPT_TIMEOUT_S):
+                            opened = await _connect_one(name, config)
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -256,6 +260,10 @@ async def connect_mcp_servers(
         if name.strip() == "":
             raise ConfigError("MCP server name must be non-empty")
         key = normalize_name_for_mcp(name)
+        if "__" in key or key.startswith("_") or key.endswith("_"):
+            raise ConfigError(
+                f"MCP server name is ambiguous after normalization: '{name}' -> '{key}'"
+            )
         if key in normalized:
             raise ConfigError(f"MCP server names collide after normalization: '{name}' -> '{key}'")
         normalized.add(key)

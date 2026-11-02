@@ -190,7 +190,8 @@ input của model (raise để từ chối), `execute()` thực hiện công vi�
 scheduler tránh xung đột. `ToolResult` mang `content` gọn mà model nhìn thấy,
 cùng các trường phong phú tùy chọn (`summary`, `metadata`, `citations`,
 `attachments`) để app host dùng cho provenance và kết xuất mà không làm phình
-context của model.
+context của model. `ToolContext.tool_timeout_s` chỉ nhận keyword; đối số vị trí
+thứ sáu vẫn là `file_read_tracker`.
 
 Để có JSON contract chuẩn, truyền `output_schema=` vào `@tool`. Khi đó function
 trả về giá trị JSON thô, `ToolOutput` hoặc `ToolOutputError`; trả về
@@ -298,8 +299,8 @@ agent = Agent(model="gpt-5", provider=provider, tools=empty_tools(bash))
 ```
 
 Đầu vào yêu cầu một chuỗi `command` không rỗng. Số nguyên `timeout_ms` tùy chọn có
-mặc định `120000`; giá trị không dương được đặt lại về mặc định, còn giá trị
-trên `1800000` bị giới hạn. Thực thi dùng `ctx.cwd`. Kết quả chứa stdout,
+mặc định `120000` và phải là số nguyên dương; boolean, giá trị không dương
+và không hữu hạn bị từ chối. Giá trị hợp lệ trên `1800000` bị giới hạn. Thực thi dùng `ctx.cwd`. Kết quả chứa stdout,
 tiếp theo là `[stderr]` và stderr nếu có, cùng trạng thái thoát, signal, dấu
 cắt bớt và đường dẫn spill. Lệnh đã kết thúc với exit khác 0, hoặc bị dừng với dấu
 `timed_out` hay `aborted`, trả `is_error=True`. Local và Docker giữ đầu ra từng
@@ -308,23 +309,25 @@ trả kết quả còn chạy bình thường với `is_error=False`. Xem [Mở 
 về giới hạn đầu ra và policy môi trường.
 
 Với backend Local và Docker, Bash hỗ trợ tiến trình được quản lý. `timeout_ms` là thời điểm lời gọi trả về, không phải hạn buộc
-hủy: lệnh chưa xong trả về đầu ra và mã như `p1`. Đặt
+hủy: lệnh chưa xong trả về đầu ra và mã như `p1234abcd` (`p` và tám chữ số hex thường của UUID4). Đặt
 `run_in_background=True` để trả về ngay; lệnh đã kết thúc có thể trả kết quả hoàn
 tất mà không có mã tiến trình. Dùng `BashProcess` tiếp trong cùng lượt chạy (`BashProcessTool` khi tự tạo danh sách công cụ):
 
 ```python
 # Model-facing tool inputs, within the same run:
 {"command": "python -m http.server 8000", "run_in_background": True}
-{"action": "wait", "id": "p1", "wait_ms": 1000}
-{"action": "status", "id": "p1"}
-{"action": "kill", "id": "p1"}
+{"action": "wait", "id": "p1234abcd", "wait_ms": 1000}
+{"action": "status", "id": "p1234abcd"}
+{"action": "kill", "id": "p1234abcd"}
 ```
 
 `wait` trả về đầu ra mới kể từ lần đọc trước, rồi trạng thái thoát hoặc thông báo
 còn chạy. Sau ba lần đọc không có đầu ra, công cụ gợi ý dừng tiến trình. Thời gian
 chờ được giới hạn dưới hạn scheduler để giữ đầu ra. Mỗi lượt chạy có tối đa bốn
 tiến trình đang chạy; lệnh vượt giới hạn bị hủy khi thời gian chờ Bash hết.
-`max_runtime_ms` là hạn buộc hủy riêng, mặc định 30 phút. Không chuyển đầu ra lệnh
+`max_runtime_ms` là hạn buộc hủy riêng, mặc định 30 phút. Cả hai giới hạn phải là số nguyên dương và thuộc fingerprint
+bền vững. Bash chạy nền cần registry được quản lý và shell hỗ trợ `ShellStarter`;
+nếu không sẽ bị từ chối. Không chuyển đầu ra lệnh
 chạy lâu qua `tail`, vì sẽ làm chậm đầu ra thấy được. Backend bên thứ ba chỉ có
 `run` nhận `timeout_s` và dùng hành vi timeout của chính nó, không có mã tiến trình
 được quản lý. Lời gọi Bash trực tiếp không có Session đang chạy cũng dùng `run`;
@@ -334,11 +337,12 @@ Khi lượt chạy kết thúc, bước dọn dẹp hủy các nhóm tiến trì
 tiến trình con còn sống sau lệnh foreground, và xóa tệp spill trước khi Session
 nhận lượt mới hay trả kết quả cuối. Nếu dọn dẹp thất bại, Session vẫn hoạt động;
 hãy thử đóng Session lại. Session con có registry riêng. Registry không bền vững:
-sau khởi động lại, mã cũ không còn; hãy chạy lệnh mới. Worker dừng bình thường sẽ
+sau resume hoặc cleanup, mã cũ không còn; hãy chạy lệnh mới. Registry giữ tối đa
+128 ID đã kết thúc gần nhất, và đường dẫn spill còn đọc được đến cleanup. Worker dừng bình thường sẽ
 đóng Session và dọn tiến trình; SIGKILL có thể để tiến trình sống tiếp. Docker dùng
 một handle `docker run` cho mỗi lệnh, không dùng container cố định cho Session.
 Việc xóa container khi hủy là best effort; host có thể cần đối soát container khi
-xóa thất bại. BashProcess chạy tuần tự, không được cache và
+xóa thất bại. Chỉ đúng BashProcess tích hợp chạy tuần tự, không được cache và
 không yêu cầu duyệt lại lệnh đã được Bash duyệt; quy tắc deny tường minh vẫn áp
 dụng. Schema Bash/BashProcess mới sẽ chặn resume hợp đồng công cụ cũ: cần hoàn tất
 các lượt cũ trước khi nâng cấp.
@@ -552,11 +556,12 @@ Tên MCP có dạng `mcp__SERVER__TOOL`. Mỗi ký tự bên ngoài
 `[a-zA-Z0-9_-]` trong tên server hoặc tool trở thành `_`; giữ nguyên chữ hoa
 chữ thường. Ví dụ server `ops.prod` với tool `get.status` trở thành
 `mcp__ops_prod__get_status`. Tên va chạm sau khi chuẩn hóa sẽ gây ra
-`ConfigError`.
+`ConfigError`. Tên server sau chuẩn hóa không được chứa `__`, bắt đầu hoặc
+kết thúc bằng `_`.
 
 Permission rule có thể nhắm tới một server đã chuẩn hóa bằng
 `ToolRule("mcp__ops_prod__*", "deny")`; dấu `*` cuối khớp với toàn bộ tiền tố
-literal `mcp__ops_prod__`. Không có dạng glob nào khác được hỗ trợ; rule
+literal `mcp__ops_prod__` và khớp đúng một server. Không có dạng glob nào khác được hỗ trợ; rule
 `ToolRule("*", ...)` hiện có vẫn khớp mọi tool.
 
 Chú thích của server bị bỏ qua theo mặc định: mọi tool có scope exec, chạy tuần
@@ -577,7 +582,7 @@ chạy parallel. Approval dùng `can_use_tool`, vì vậy một ask không có c
 bị từ chối.
 
 Cả `McpStdioServerConfig` và `McpHttpServerConfig` nhận `timeout_s` (mặc định
-300 giây), được truyền làm thời hạn đọc request gọi tool của SDK. Timeout trả về
+300 giây), phải là số dương hữu hạn và được truyền làm thời hạn đọc request gọi tool của SDK. Timeout trả về
 kết quả tool lỗi. Tín hiệu abort hủy lời gọi đang chạy và phát sinh `AbortError`;
 Linch chờ dọn dẹp lời gọi đã hủy. Việc hủy không bảo đảm server dừng hoặc hoàn tác
 các tác động từ xa.
@@ -588,16 +593,21 @@ phân cách, rồi thêm dấu báo cắt bớt nếu cần. Đây là giới h�
 Grep. Khi có call context, text lớn hơn có thể được ghi dưới
 `ctx.cwd/.linch/output/`; kết quả trả preview head/tail có giới hạn và nêu đường
 dẫn chứa toàn bộ text. Policy spill dùng chung giữ 4.000 byte đầu và 26.000 byte
-cuối, thêm dấu báo phần bị lược bỏ và loại tệp khi lỗi ghi hoặc vượt 64 MiB. Nếu
+cuối, thêm dấu báo phần bị lược bỏ và loại tệp khi lỗi ghi hoặc vượt 64 MiB.
+I/O spill được chuyển bất đồng bộ; file có mode `0600`, không ghi đè `.gitignore`
+hiện có và từ chối thư mục symlink. Nếu
 không còn spill, kết quả trả text đã giới hạn theo ký tự. Xem
 [policy đầu ra](./extending.md#môi-trường-và-đầu-ra-shell-cục-bộ).
 
 Nếu kết nối MCP bị mất, lời gọi thất bại trả về lỗi và không bao giờ được retry.
 Connection owner reconnect với năm lần exponential backoff, bắt đầu từ 0,5 giây
-và tối đa 30 giây; sau đó tool báo server không khả dụng cho tới khi host tạo
+và tối đa 30 giây, mỗi lần kết nối có timeout 30 giây; sau đó tool báo server không khả dụng cho tới khi host tạo
 connection mới (hoặc Agent mới với server được cấu hình). Tên tool được giữ
-nguyên, tool biến mất sau reconnect trả về lỗi, và catalog không tự xây lại.
-Subprocess stdio luôn được reap trên mọi đường dọn dẹp.
+nguyên, tool biến mất sau reconnect trả về lỗi; catalog và annotation không
+được liệt kê lại, nên server thay đổi tool cần session mới.
+Mỗi lần dọn dẹp tài nguyên có giới hạn năm giây trong task sở hữu kết nối;
+nếu hết thời gian, việc dọn dẹp tiếp tục với tài nguyên tiếp theo. Giới hạn
+này phụ thuộc vào việc tài nguyên hỗ trợ hủy.
 
 ---
 

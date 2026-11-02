@@ -7,7 +7,7 @@ from ..tools._output import BoundedOutput
 from ..tools.base import ToolResult
 
 
-def map_mcp_result(result: CallToolResult, *, cwd: str | None = None) -> ToolResult:
+async def map_mcp_result(result: CallToolResult, *, cwd: str | None = None) -> ToolResult:
     is_error = result.is_error or False
     content_blocks: list[dict[str, object]] = []
 
@@ -54,8 +54,14 @@ def map_mcp_result(result: CallToolResult, *, cwd: str | None = None) -> ToolRes
     truncated = len(text) > OUTPUT_CAP
     if truncated and cwd is not None:
         output = BoundedOutput(cwd, "mcp")
-        output.append(text.encode())
-        output.finish()
+        try:
+            try:
+                await output.append_async(text.encode())
+            finally:
+                await output.finish_async()
+        except BaseException:
+            await output.discard_async()
+            raise
         if output.path is not None:
             text = output.snapshot() + f"\n[output_path: {output.path}]"
             metadata["output_path"] = output.path

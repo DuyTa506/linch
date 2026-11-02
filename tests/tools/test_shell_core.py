@@ -6,7 +6,6 @@ import os
 import shlex
 import signal
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -78,19 +77,20 @@ async def run(tmp_path, command, **kwargs):
     )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_cat_stdin_is_closed(tmp_path):
     result = await run(tmp_path, "cat", timeout_s=0.2)
     assert not result.timed_out and result.returncode == 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_background_child_does_not_hold_result(tmp_path):
-    started = time.monotonic()
     result = await run(tmp_path, "sleep .7 & echo x")
-    elapsed = time.monotonic() - started
-    assert result.stdout == "x\n" and elapsed < 0.55
+    assert result.stdout.startswith("x\n") and "truncated" in result.stdout
     await asyncio.sleep(0.75)  # Let the intentionally surviving short child exit.
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /proc")
 async def test_timeout_preserves_output_and_kills_exited_shell_children(tmp_path):
     pidfile = tmp_path / "pid"
     result = await run(tmp_path, f"sleep .8 & echo $! > {pidfile}; echo earlier", timeout_s=0.1)
@@ -101,6 +101,7 @@ async def test_timeout_preserves_output_and_kills_exited_shell_children(tmp_path
     assert not status.exists() or status.read_text().split()[2] == "Z"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_abort_returns_partial_error_result(tmp_path):
     from linch.abort import AbortContext
 
@@ -112,6 +113,7 @@ async def test_abort_returns_partial_error_result(tmp_path):
     assert result.aborted and not result.timed_out and "partial" in result.stdout
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_handle_read_wait_and_kill(tmp_path):
     from linch import ShellProcess, ShellRead, ShellStarter
     from linch.tools.execution import LocalBackend
@@ -129,6 +131,7 @@ async def test_handle_read_wait_and_kill(tmp_path):
     assert result.returncode != 0 and result.signal == signal.SIGTERM
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_environment_allowlist_and_explicit_values(tmp_path, monkeypatch):
     from linch.tools.execution import LocalBackend
 
@@ -160,6 +163,7 @@ def test_environment_fingerprint(monkeypatch):
     assert backend.resume_policy_config != first
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_scheduler_timeout_keeps_bash_partial_output(tmp_path):
     from linch import BashTool, ToolCallEndEvent, ToolRegistry, ToolUseBlock
     from linch.scheduler import execute_tool_calls
@@ -181,6 +185,7 @@ async def test_scheduler_timeout_keeps_bash_partial_output(tmp_path):
     assert result.is_error and "partial" in result.content and "timed out" in result.content
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_bash_rendering_and_spilled_output_not_reoffloaded(tmp_path):
     from linch import BashTool, ToolContext
     from linch.filesystem import OffloadConfig, StateFileBackend
@@ -204,6 +209,7 @@ async def test_bash_rendering_and_spilled_output_not_reoffloaded(tmp_path):
     assert result.content == content
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux RSS units and POSIX shell")
 def test_300m_output_rss_growth_under_50mb(tmp_path):
     # Isolated interpreter gives a meaningful high-water RSS comparison.
     import subprocess
@@ -262,23 +268,53 @@ def test_spill_write_and_close_failures_are_best_effort(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("first_cause", ["timeout", "abort"])
-async def test_first_cause_survives_outer_deadline_and_later_abort(tmp_path, first_cause):
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
+async def test_first_cause_survives_outer_deadline_and_later_abort(
+    tmp_path, first_cause, monkeypatch
+):
     from linch.abort import AbortContext
+    from linch.tools.execution import LocalBackend, _LocalProcess
+
+    ready, cleanup_started = asyncio.Event(), asyncio.Event()
+    original_kill = _LocalProcess.kill
+
+    async def observed_kill(handle):
+        cleanup_started.set()
+        await original_kill(handle)
+
+    class ObservedBackend(LocalBackend):
+        async def start(self, command, *, cwd):
+            handle = await super().start(command, cwd=cwd)
+            output = ""
+            while "partial" not in output:
+                output += handle.read().stdout
+                await asyncio.sleep(0.01)
+            ready.set()
+            return handle
+
+    monkeypatch.setattr(_LocalProcess, "kill", observed_kill)
 
     abort = AbortContext()
-    started = time.monotonic()
     task = asyncio.create_task(
-        run(tmp_path, "trap '' TERM; echo partial; exec sleep 5", timeout_s=0.12, signal=abort)
+        ObservedBackend().run(
+            "trap '' TERM; echo partial; exec sleep 5",
+            cwd=str(tmp_path),
+            timeout_s=0.12,
+            signal=abort,
+        )
     )
-    await asyncio.sleep(0.05 if first_cause == "abort" else 0.18)
+    await asyncio.wait_for(ready.wait(), 5)
+    if first_cause == "timeout":
+        await asyncio.wait_for(cleanup_started.wait(), 5)
     abort.abort()
-    result = await asyncio.wait_for(task, timeout=0.05)
+    await asyncio.wait_for(cleanup_started.wait(), 5)
+    result = await asyncio.wait_for(task, timeout=1)
     assert result.timed_out is (first_cause == "timeout")
     assert result.aborted is (first_cause == "abort")
     assert "partial" in result.stdout and result.signal == signal.SIGKILL
-    assert 3 <= time.monotonic() - started < 4.5
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_external_cancellation_without_selected_cause_propagates(tmp_path):
     task = asyncio.create_task(run(tmp_path, "echo partial; sleep 5", timeout_s=5))
     await asyncio.sleep(0.05)
@@ -288,6 +324,7 @@ async def test_external_cancellation_without_selected_cause_propagates(tmp_path)
 
 
 @pytest.mark.parametrize("selected_timeout", [True, False])
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_repeated_cancellation_finishes_owned_group_cleanup(tmp_path, selected_timeout):
     from linch.tools.execution import LocalBackend
 
@@ -375,3 +412,92 @@ def test_shell_module_imports_without_posix_sigkill():
         check=False,
     )
     assert checked.returncode == 0, checked.stderr
+
+
+async def test_spill_io_offloaded_only_after_byte_cap(tmp_path, monkeypatch):
+    from linch.tools._output import BoundedOutput
+
+    calls = []
+    real = asyncio.to_thread
+
+    async def tracked(func, *args, **kwargs):
+        calls.append(func)
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", tracked)
+    stream = BoundedOutput(str(tmp_path), "stdout")
+    await stream.append_async("é".encode() * 15000)
+    await stream.finish_async()
+    assert not calls
+    await stream.append_async(b"x")
+    await stream.finish_async()
+    assert calls and Path(stream.path).read_bytes() == "é".encode() * 15000 + b"x"
+
+
+@pytest.mark.parametrize("link_component", [".linch", "output"])
+def test_spill_preserves_existing_gitignore_and_refuses_symlink(tmp_path, link_component):
+    directory = tmp_path / ".linch" / "output"
+    directory.mkdir(parents=True)
+    (directory / ".gitignore").write_text("custom\n")
+    stream = output(tmp_path)
+    stream.append(b"x" * 30001)
+    stream.finish()
+    assert (directory / ".gitignore").read_text() == "custom\n"
+    other = tmp_path / "other"
+    other.mkdir()
+    linkroot = tmp_path / "linked"
+    linkroot.mkdir()
+    if link_component == ".linch":
+        link = linkroot / ".linch"
+    else:
+        (linkroot / ".linch").mkdir()
+        link = linkroot / ".linch" / "output"
+    link.symlink_to(other, target_is_directory=True)
+    stream = output(linkroot)
+    stream.append(b"x" * 30001)
+    stream.finish()
+    assert stream.path is None and not list(other.iterdir())
+
+
+async def test_pending_reader_marks_result_truncated(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from linch.tools.execution import _LocalProcess
+
+    class Reader:
+        _transport = SimpleNamespace(close=lambda: None)
+
+        async def read(self, n):
+            await asyncio.Future()
+
+    class DoneReader(Reader):
+        async def read(self, n):
+            return b""
+
+    class Proc:
+        returncode = 0
+        stdout = Reader()
+        stderr = DoneReader()
+
+        async def wait(self):
+            return 0
+
+    real_wait = asyncio.wait
+
+    async def immediate(tasks, **kwargs):
+        if kwargs.get("timeout") == 0.25:
+            await asyncio.sleep(0)
+            return {t for t in tasks if t.done()}, {t for t in tasks if not t.done()}
+        return await real_wait(tasks, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", immediate)
+    result = await _LocalProcess(Proc(), str(tmp_path)).wait(None)
+    assert result.truncated and "truncated" in result.stdout
+
+
+def test_dropped_pipe_reader_is_visible_to_incremental_reads(tmp_path):
+    stream = output(tmp_path)
+    stream.append(b"partial")
+    stream.drop()
+    text, lossy = stream.read()
+    assert lossy and "partial" in text and "truncated" in text

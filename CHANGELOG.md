@@ -10,6 +10,11 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 This MINOR release adds execution capabilities with the behavior changes below.
 Review host policy and drain all active runs before upgrading.
 
+- Managed process IDs are ephemeral UUID-derived handles; finished handles are bounded to 128. Cleanup precedes durable terminal status and failures preserve admission for retry. Execution limits participate in resume identity.
+- Shell and MCP spills use asynchronous, symlink-safe mode-0600 files. MCP reconnect has bounded attempts and connection timeouts; changed tool lists require a new session.
+- Postgres admission bounds retries when a conflicting run disappears before it can be read.
+
+
 - **Managed shell processes.** With a live-process backend and available process
   capacity, Bash `timeout_ms` returns output and a process ID while the command
   keeps running; follow it with `BashProcess` wait/status/kill. Explicit

@@ -95,7 +95,7 @@ def make_mcp_tool(
             throw_if_aborted(ctx.signal)
             try:
                 result: CallToolResult = await call_tool(mcp_tool.name, input, ctx.signal)
-                return map_mcp_result(result, cwd=ctx.cwd)
+                return await map_mcp_result(result, cwd=ctx.cwd)
             except AbortError:
                 raise
             except Exception as exc:

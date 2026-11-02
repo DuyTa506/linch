@@ -63,9 +63,9 @@ class _LocalProcess:
         assert pipe is not None
         try:
             while chunk := await pipe.read(65536):
-                output.append(chunk)
+                await output.append_async(chunk)
         finally:
-            output.finish()
+            await output.finish_async()
 
     async def _finish(self) -> ExecResult:
         waiter = asyncio.create_task(self.proc.wait())
@@ -73,7 +73,10 @@ class _LocalProcess:
             # asyncio's wait also waits for inherited pipe descriptors to close.
             while self.proc.returncode is None:
                 await asyncio.sleep(0.01)
-            await asyncio.wait(self._readers, timeout=0.25)
+            _, pending = await asyncio.wait(self._readers, timeout=0.25)
+            for task, output in zip(self._readers, self.outputs, strict=True):
+                if task in pending:
+                    output.drop()
         finally:
             for task in (*self._readers, waiter):
                 await _cancel_and_drain(task)
@@ -92,6 +95,10 @@ class _LocalProcess:
             err.path,
             signal=-code if code < 0 else None,
         )
+
+    @property
+    def _leader_exited(self) -> bool:
+        return self.proc.returncode is not None
 
     @property
     def _group_alive(self) -> bool:
@@ -456,8 +463,6 @@ def _kill_process_group(proc: asyncio.subprocess.Process, sig: int | None = None
             return
         except ProcessLookupError:
             return
-        except OSError:
-            pass
     if proc.returncode is None:
         if sig is None:
             proc.kill()

@@ -72,12 +72,31 @@ async def test_unrelated_unique_violation_preserves_original_error():
     assert caught.value is error
 
 
-@pytest.mark.parametrize("transactional", [False, True])
-async def test_admission_retries_when_conflicting_run_has_already_finished(transactional):
-    conn = AdmissionConnection(disappear=True, transactional=transactional)
+async def test_admission_retries_when_conflicting_run_has_already_finished():
+    conn = AdmissionConnection(disappear=True, transactional=False)
     row = await PostgresRunStore("").create_pending_run(conn, "s", id="new")
+    assert row is not None
     assert row.id == "new" and row.status == "pending"
     assert conn.attempts == 2
+
+
+@pytest.mark.parametrize("transactional", [False, True])
+async def test_invisible_conflict_is_bounded_and_chains_violation(transactional):
+    conn = AdmissionConnection(disappear=True, transactional=transactional)
+    original_fetchrow = conn.fetchrow
+
+    async def always_conflict(sql, *args):
+        if sql.startswith("SELECT id, session_id"):
+            return await original_fetchrow(sql, *args)
+        conn.attempts += 1
+        assert conn.attempts <= 3, "admission retried indefinitely"
+        raise conn.conflict
+
+    conn.fetchrow = always_conflict
+    with pytest.raises(RuntimeError, match="admission.*conflict") as caught:
+        await PostgresRunStore("").create_pending_run(conn, "s", id="new")
+    assert caught.value.__cause__ is conn.conflict
+    assert conn.attempts == (1 if transactional else 3)
 
 
 async def test_duplicate_active_rows_fail_schema_install_with_clear_error(monkeypatch):
