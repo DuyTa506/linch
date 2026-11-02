@@ -1,4 +1,4 @@
-"""Redis-backed Mailbox adapter (ROADMAP P8).
+"""Redis-backed Mailbox adapter.
 
 External queue/store backends (Redis, SQS, Postgres, ...) are deployment choices,
 so they live in examples and optional packages — *not* in core. Core ships only

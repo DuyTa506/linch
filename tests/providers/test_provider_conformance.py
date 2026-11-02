@@ -1,4 +1,4 @@
-"""Provider conformance suite (ROADMAP Phase 3.1).
+"""Provider conformance suite.
 
 Two layers:
 

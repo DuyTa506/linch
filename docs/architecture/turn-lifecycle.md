@@ -25,7 +25,7 @@ sequenceDiagram
 
     loop Each turn
         RL->>SK: re-inject retained skill context after compaction/recovery (if needed)
-        Note over RL: at the turn boundary sync_catalog compares the live catalog;<br/>native existing-snapshot sync waits for context selection
+        Note over RL: at the turn boundary sync_catalog compares the live catalog,<br/>native existing-snapshot sync waits for context selection
         RL->>CB: build_context(session, turn_index)
         CB-->>RL: ContextBuildResult
         RL-->>Caller: ContextBuildEvent
@@ -52,7 +52,7 @@ sequenceDiagram
             SC-->>Caller: ToolCallStartEvent x N
             SC-->>Caller: ToolProgressEvent (optional, stream-only)
             Note over SC: with filesystem enabled and a configured backend/offload,<br/>maybe_offload() writes results over the threshold to FileBackend<br/>and replaces provider-facing content with a preview
-            SC-->>Caller: ToolCallEndEvent x N (preview when offloaded; tool_result=full)
+            SC-->>Caller: ToolCallEndEvent x N (preview when offloaded, tool_result=full)
             SC-->>RL: provider-facing result_blocks (offload preview when applicable)
 
             RL->>LG: evaluate_loop_guard(state, tool_blocks, result_blocks)

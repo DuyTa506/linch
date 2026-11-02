@@ -1,4 +1,4 @@
-"""Multi-tenancy & cancellation isolation (ROADMAP Phase 5.2).
+"""Multi-tenancy & cancellation isolation.
 
 N independent `Agent` instances must run concurrently in one host process with no
 cross-talk: each agent owns its sessions, tool registry, and extension state, and

@@ -490,7 +490,7 @@ def _translate_system(
     """Convert system blocks to the Anthropic system array, with optional caching.
 
     The cache breakpoint is placed on the *last* ``cacheable=True`` block in the
-    array (ROADMAP 3.2), so the cached prefix extends as far as possible. A
+    array, so the cached prefix extends as far as possible. A
     ``cacheable=False`` block placed *after* the last static block (a volatile
     trailing section) therefore sits outside the cached prefix and never
     invalidates it. When every block is static this is simply the last block —
