@@ -87,7 +87,14 @@ LogEntry = MessageEntry | ProjectionEntry
 class SessionLog:
     """Append-only log projecting the provider view and full history."""
 
-    __slots__ = ("_entries", "_full", "_derived", "_history_hash", "_history_hashed_count")
+    __slots__ = (
+        "_entries",
+        "_full",
+        "_derived",
+        "_history_hash",
+        "_history_hashed_count",
+        "_has_native_definitions",
+    )
 
     def __init__(self) -> None:
         """Initialize an empty append-only session log."""
@@ -97,6 +104,7 @@ class SessionLog:
         self._derived: list[Message] = []
         self._history_hash = None
         self._history_hashed_count = 0
+        self._has_native_definitions = False
 
     def append(self, message: Message, *, visible: bool = True, historical: bool = True) -> None:
         """Append one message, choosing which projections it joins.
@@ -114,6 +122,10 @@ class SessionLog:
         self._entries.append(MessageEntry(owned, visible=visible, historical=historical))
         if historical:
             self._full.append(owned)
+            if not self._has_native_definitions:
+                self._has_native_definitions = any(
+                    getattr(block, "tool_definitions", ()) for block in owned.content
+                )
         if visible:
             self._derived.append(owned)
 

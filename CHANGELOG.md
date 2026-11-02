@@ -5,6 +5,30 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## 3.0.1 — 2026-11-02
+
+This patch release adds `Agent.reload_skills()`, an owner-approved
+exception to the MINOR rule in `docs/versioning.md`.
+
+- Freeze each ordinary session's system blocks and ordered tool schemas in durable
+  metadata so stable catalogs and worker restarts preserve the provider prefix.
+  Skill listings move into the cacheable system prefix and are deduplicated in
+  requests that bypass snapshots.
+- Add async `Agent.reload_skills()` and preserve registry order when reloading
+  subagents. Catalog changes arrive as durable conversation reminders; tool
+  additions append schemas, schema edits retain their slot, and removed tools keep
+  their wire schema while execution reports the existing unknown-tool error.
+- Preserve system and tool bytes through compaction and consolidate accumulated
+  catalog changes into one subsequent reminder. Persist separate base and
+  notified digests, including skills, for restart deduplication and crash recovery.
+  Description changes carry the new description; MCP notifications use names only.
+- Add off-by-default `native_catalog_changes` to Anthropic and OpenAI Responses
+  provider options. Eligible models carry additions in durable positional tool
+  blocks while retaining the tool prefix; narrowing and schema edits use the
+  phase-2 path, and append-only fallback includes native additions. Anthropic
+  by-value removals remain text-only. Both native paths are **UNVERIFIED against
+  live endpoints**; fake-transport tests cover wire payloads and durable replay.
+
 ## 3.0.0 — 2026-11-01
 
 ### Breaking and new features

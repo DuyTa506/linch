@@ -31,6 +31,21 @@ class TextBlock:
 
 
 @dataclass(slots=True)
+class CatalogChangeBlock:
+    """Represent a durable notification that the live catalog changed.
+
+    Catalog changes are rendered as ordinary text by every provider in phase 2;
+    the structured fields are retained for host-side inspection and auditing.
+    """
+
+    text: str
+    added_tools: tuple[str, ...] = ()
+    removed_tools: tuple[str, ...] = ()
+    tool_definitions: tuple[dict[str, Any], ...] = ()
+    type: Literal["catalog_change"] = "catalog_change"
+
+
+@dataclass(slots=True)
 class ToolUseBlock:
     """Represent a model request to invoke a tool.
 
@@ -124,7 +139,13 @@ class ImageBlock:
 
 
 ContentBlock: TypeAlias = (
-    TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock | ImageBlock
+    TextBlock
+    | CatalogChangeBlock
+    | ToolUseBlock
+    | ToolResultBlock
+    | ThinkingBlock
+    | RedactedThinkingBlock
+    | ImageBlock
 )
 
 
@@ -400,6 +421,8 @@ class ProviderRequest:
     # consuming and assembling provider deltas but suppresses their raw
     # ``PartialAssistantEvent`` projection for this request.
     stream_partials: bool | None = None
+    # None allows direct adapter requests; False suppresses historical native blocks.
+    _native_catalog_changes: bool | None = None
 
 
 @dataclass(slots=True)
@@ -432,6 +455,14 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
 
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
+    if isinstance(block, CatalogChangeBlock):
+        return {
+            "type": "catalog_change",
+            "text": block.text,
+            "added_tools": list(block.added_tools),
+            "removed_tools": list(block.removed_tools),
+            "tool_definitions": list(block.tool_definitions),
+        }
     if isinstance(block, ToolUseBlock):
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
     if isinstance(block, ToolResultBlock):
@@ -476,6 +507,13 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
     typ = raw.get("type")
     if typ == "text":
         return TextBlock(text=str(raw.get("text", "")))
+    if typ == "catalog_change":
+        return CatalogChangeBlock(
+            text=str(raw.get("text", "")),
+            added_tools=tuple(str(name) for name in raw.get("added_tools", ())),
+            removed_tools=tuple(str(name) for name in raw.get("removed_tools", ())),
+            tool_definitions=tuple(dict(item) for item in raw.get("tool_definitions", ())),
+        )
     if typ == "tool_use":
         return ToolUseBlock(
             id=str(raw["id"]), name=str(raw["name"]), input=dict(raw.get("input", {}))

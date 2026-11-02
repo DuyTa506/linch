@@ -274,3 +274,14 @@ def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:
     assert snapshot.integrity_hash == (
         "sha256:779cf554f6f848fa02f28ae7425e0fc4ec3628c5c9bf9257f3af89d437000111"
     )
+
+
+def test_native_catalog_flag_round_trips_only_when_set() -> None:
+    plain = create_model_input_snapshot("run-1", 3, _request())
+    assert "_native_catalog_changes" not in plain.request_json
+    assert decode_model_input_snapshot(plain)._native_catalog_changes is None
+
+    native = create_model_input_snapshot(
+        "run-1", 3, replace(_request(), _native_catalog_changes=True)
+    )
+    assert decode_model_input_snapshot(native)._native_catalog_changes is True

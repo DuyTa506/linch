@@ -21,6 +21,7 @@ sequenceDiagram
 
     loop Each turn
         RL->>SK: inject skill context (if skill active)
+        Note over RL: sync_catalog persists prefix or tail reminders<br/>after completed tool batches; native existing-snapshot sync<br/>waits for context selection
         RL->>CB: build_context(session, turn_index)
         CB-->>RL: ContextBuildResult
         RL-->>Caller: ContextBuildEvent
@@ -69,6 +70,22 @@ sequenceDiagram
 ```
 
 ## Typed lifecycle points
+
+Catalog synchronization uses the tool registry generation and the agent catalog
+revision as its unchanged fast path. Notifications are appended as user messages
+containing an internal `CatalogChangeBlock`, wrapped in `<system-reminder>` tags,
+before updating last-notified metadata. A crash between these writes can repeat a
+reminder but cannot lose it. Notification text stays user-role on all providers;
+opt-in positional adapters also render native tool structures as described in the
+[provider contract](./provider-contract.md#native-catalog-rendering). Schema changes
+use the existing `tool_set_changed` advisory. With native support enabled and an
+existing snapshot, synchronization waits until context selection establishes the
+offered-tool boundary; initial snapshot creation and option-off ordering remain
+before context building. Both normal and reactive-compaction paths use the effective
+per-turn model, including skill overrides.
+Synchronization compares the live catalog directly with persisted `notified`
+digests, including skills. Compaction resets these digests to immutable `base`
+without changing the request prefix, so the next turn consolidates changes.
 
 The sequence is backed by the catalog in [events.md](./events.md). Run, turn,
 provider, and security hooks use `hook` points such as `AgentStart`,

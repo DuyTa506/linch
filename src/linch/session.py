@@ -246,6 +246,10 @@ class Session:
     _last_prompt_cache_tool_sig: Any = None
     """Tool signature (`_prompt_cache.tool_signature`) of the previous provider
     call; compared each turn to flag a cache-prefix-breaking tool-set change."""
+    _catalog_generation: int | None = field(default=None, repr=False)
+    """Last live tool-registry generation synchronized into the prefix snapshot."""
+    _catalog_revision_seen: int | None = field(default=None, repr=False)
+    """Last agent catalog revision synchronized into the prefix snapshot."""
     alignment_queue: list[AlignmentEntry] = field(default_factory=list)
     interrupt_requested: bool = False
     last_usage: Usage | None = None

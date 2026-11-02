@@ -210,7 +210,8 @@ async def test_skill_threshold_and_body_loading(count):
     events = await _run(session)
     reminder = session.full_history[0].content[0].text
     if count == 50:
-        assert "Skill description 49" in reminder
+        assert "Skill description 49" in "\n".join(block.text for block in _request(session).system)
+        assert "Skill description 49" not in reminder
         assert "tool_search" not in _names(_request(session))
         enabled = asdict(_request(session))
         await agent.tool_search.dispose()

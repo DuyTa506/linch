@@ -20,6 +20,28 @@ pairing, and do not assume a coding workspace. Missing or malformed current
 wire-3 snapshot caches can be rebuilt from `full_history`; incompatible snapshot
 versions are rejected rather than treated as cache misses.
 
+Compaction never changes the stored `system` or `tools`. When `notified` differs
+from the immutable `base`, it resets `notified` to a copy of `base`, persists that
+metadata, and clears the catalog fast path. The next synchronization emits one
+consolidated reminder of the live catalog's differences from `base`, retaining
+existing wire tool rows. With no changes, compaction performs no catalog metadata
+write. A slow-path synchronization also performs the reset when `notified`
+differs from `base` but the provider view has no catalog reminder, recovering a
+crash between projection persistence and metadata reset. Opt-in positional adapters
+suppress duplicate native additions if an earlier block survives alongside the
+consolidated notice. Frozen definitions and historical native provenance remain in
+the audit log for durable contract/schema comparisons even when compaction drops
+them from the provider view. An Anthropic by-value removal stays text-only while
+its provenance is in that view; a promoted prefix name can use a declared reference
+once its original definition is absent.
+
+Skill listing fingerprints and compaction context come from the session's frozen
+prefix when snapshots are enabled for the run. Reloading skills therefore does
+not independently change a durable run's compaction contract. Runs that bypass
+snapshots continue to reinject their live listing. Reinjected listing and invoked
+skill reminders are provider-view-only log entries (`historical=False`); they do
+not add duplicate skill bodies to `full_history`.
+
 The direct `summarize_with_provider(...)` helper remains available for
 standalone callers with its existing provider-stream behavior. The normal run
 path wraps built-in strategies and compliant custom strategies in the

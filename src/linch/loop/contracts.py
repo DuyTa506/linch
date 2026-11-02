@@ -10,6 +10,16 @@ import json
 from typing import Any, cast
 
 from .._version import get_version
+from ..catalog import (
+    _snapshot,
+    native_definitions,
+    positional_catalog,
+    snapshot_enabled,
+    snapshot_for,
+    snapshot_skill_listing,
+    snapshot_system,
+    snapshot_tools,
+)
 from ..compaction import _builtin_compaction_config, _skill_listing_fingerprint
 from ..errors import ConfigError
 from ..model_calls import _accounting_contract
@@ -103,15 +113,26 @@ def _principal_from_contract(contract: Any) -> Principal | None:
     return _principal_from_value(options["principal"])
 
 
-def _permission_policy_contract(agent: Any) -> dict[str, Any]:
+def _permission_policy_contract(agent: Any, *, freeze_skills: bool = False) -> dict[str, Any]:
     engine = agent.permission_engine
+    owner = getattr(agent, "_owner", agent)
+    generated_ids = (
+        {id(rule) for rule in (getattr(owner, "_skill_permission_rules", ()) or ())}
+        if freeze_skills
+        else set()
+    )
+    rules = [rule for rule in engine.rules if id(rule) not in generated_ids]
     layered: list[dict[str, Any]] = []
     rule_set = getattr(engine, "rule_set", None)
     for layer in getattr(rule_set, "layers", ()) or ():
         layered.append(
             {
                 "name": getattr(layer, "name", None),
-                "rules": [_permission_rule_contract(rule) for rule in layer.rules],
+                "rules": [
+                    _permission_rule_contract(rule)
+                    for rule in layer.rules
+                    if id(rule) not in generated_ids
+                ],
             }
         )
     callback = getattr(engine, "can_use_tool", None)
@@ -134,7 +155,7 @@ def _permission_policy_contract(agent: Any) -> dict[str, Any]:
     return {
         "mode": engine.mode,
         "project_root": engine.project_root,
-        "rules": [_permission_rule_contract(rule) for rule in engine.rules],
+        "rules": [_permission_rule_contract(rule) for rule in rules],
         "layers": layered,
         "layer_project_root": getattr(rule_set, "project_root", None),
         "callback": callback_identity,
@@ -318,8 +339,38 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     )
     registry = _contract_registry(session, config)
     tools = list(registry.list())
+    prefix = snapshot_for(session) if snapshot_enabled(session, config) else None
+    if prefix is None and snapshot_enabled(session, config):
+        # Build the same deterministic prefix that the provider-turn seam will
+        # persist immediately before the first provider request.  This keeps
+        # the initial durable run contract identical to a later resume.
+        prefix = _snapshot(session, config)
+    live_by_name = {str(getattr(tool, "name", "")): tool for tool in tools}
     tool_schemas: list[dict[str, Any]] = []
-    for tool, schema in zip(tools, registry.schemas(), strict=True):
+    pending = getattr(session, "pending_skill_overlay", None)
+    positional = bool(
+        prefix
+        and prefix["tools"]
+        and getattr(pending, "allowed_tools", None) is None
+        and positional_catalog(session, config, getattr(pending, "model_override", None))
+    )
+    source_schemas = (
+        snapshot_tools(
+            prefix,
+            registry.schemas(),
+            positional=positional,
+            previous=(
+                native_definitions(session.full_history)
+                if positional or session.session_log._has_native_definitions
+                else None
+            ),
+        )
+        if prefix is not None
+        else registry.schemas()
+    )
+    for schema in source_schemas:
+        tool = live_by_name.get(str(schema.get("name", "")))
+        output_schema = getattr(tool, "output_schema", None)
         tool_schemas.append(
             {
                 **schema,
@@ -329,11 +380,11 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
                 "parallel": bool(getattr(tool, "parallel", True)),
                 **(
                     {
-                        "output_schema": tool.output_schema,
+                        "output_schema": output_schema,
                         "renderer_id": getattr(tool, "renderer_id", None),
                         "renderer_version": getattr(tool, "renderer_version", None),
                     }
-                    if getattr(tool, "output_schema", None) is not None
+                    if output_schema is not None
                     else {}
                 ),
             }
@@ -341,7 +392,9 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     effective_system = config.system_blocks_override
     if effective_system is None:
         effective_system = session.system_blocks_override
-    if effective_system is not None:
+    if prefix is not None:
+        system_blocks = snapshot_system(prefix)
+    elif effective_system is not None:
         system_blocks = list(effective_system)
     else:
         active_names = [tool.name for tool in tools]
@@ -365,14 +418,21 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         tools,
         getattr(agent, "execution_backend", None),
     )
+    frozen_listing = (
+        snapshot_skill_listing(prefix)
+        if prefix is not None
+        else getattr(agent, "skill_listing_text", None)
+    )
+
     policies: dict[str, Any] = {
         "runtime_version": get_version(),
         "model_call_accounting": _accounting_contract(),
         "compaction_skill_listing_fingerprint": _skill_listing_fingerprint(
-            getattr(agent, "skill_listing_text", None)
+            frozen_listing,
+            session=session if prefix is not None else None,
         ),
         "compaction_replay_config": _builtin_compaction_config(getattr(agent, "compaction", None)),
-        "permissions": _permission_policy_contract(config),
+        "permissions": _permission_policy_contract(config, freeze_skills=prefix is not None),
         "hooks": _hook_policy_contract(config),
         "tool_pipeline": _tool_pipeline_contract(config),
         "features": getattr(agent, "features", None),
