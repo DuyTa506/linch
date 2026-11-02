@@ -145,6 +145,26 @@ handle you choose). `type` is a neutral category *you* interpret. Pair with the
 
 ---
 
+Local shell execution forwards only `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`,
+`LC_CTYPE`, `USER`, `SHELL`, and `TMPDIR` by default. Configure
+`LocalBackend(env={...}, forward_env=(...))` for additional values. This is
+credential hygiene, not a security boundary. Durable runs with explicit `env`
+or `forward_env` require a caller-owned `resume_fingerprint_key` of at least
+16 bytes; values enter resume identity through keyed HMACs, as with Docker.
+Default allowlist names enter the policy identity; their ambient values remain
+host state. Pin relevant defaults explicitly when a resume must reject changes.
+
+`ShellStarter` is an optional capability alongside the run-only `ShellBackend`.
+Its `start(command, cwd=...)` returns a `ShellProcess`; `read()` returns new
+stdout/stderr and marks lost bytes, `wait(timeout_s)` returns `None` while the
+process is running, and `kill()` terminates its process group. Local results
+retain the first 4,000 and last 26,000 bytes per stream; larger output spills
+under `.linch/output` until 64 MiB, with best-effort fallback to bounded memory.
+Bash reports partial output on timeout and abort. It reserves one second from
+the scheduler's deadline for cleanup; a process resisting SIGTERM can extend
+completion beyond that deadline while the owned three-second grace period
+finishes before SIGKILL. The original timeout/abort cause remains the result.
+
 ## Scheduling and queue workers
 
 Durable schedules and run dispatch are provided by the optional `linch.worker`

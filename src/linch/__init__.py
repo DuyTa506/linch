@@ -116,6 +116,9 @@ if TYPE_CHECKING:
         LocalExecutionBackend,
         RemoteExecutionBackend,
         ShellBackend,
+        ShellProcess,
+        ShellRead,
+        ShellStarter,
     )
     from .filesystem import (
         CompositeFileBackend,
@@ -375,6 +378,9 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "LocalExecutionBackend",
         "RemoteExecutionBackend",
         "ShellBackend",
+        "ShellProcess",
+        "ShellRead",
+        "ShellStarter",
     ),
     ".events": (
         "AssistantEvent",
@@ -687,6 +693,9 @@ __all__ = [
     "LocalExecutionBackend",
     "RemoteExecutionBackend",
     "ShellBackend",
+    "ShellProcess",
+    "ShellRead",
+    "ShellStarter",
     "DurabilityOptions",
     "InboxDelivery",
     "RunBudget",

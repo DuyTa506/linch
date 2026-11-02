@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from linch.filesystem.backend import FileBackend
-from linch.tools.execution import ExecResult
+from linch.tools.execution import ExecResult, ShellRead
 
 
 @runtime_checkable
@@ -44,6 +44,22 @@ class ShellBackend(Protocol):
             Execution result containing stdout, stderr, exit status, and timeout state.
         """
         ...
+
+
+@runtime_checkable
+class ShellProcess(Protocol):
+    """Optional live shell handle; timed waits do not terminate the command."""
+
+    def read(self) -> ShellRead: ...
+    async def wait(self, timeout_s: float | None) -> ExecResult | None: ...
+    async def kill(self) -> None: ...
+
+
+@runtime_checkable
+class ShellStarter(Protocol):
+    """Optional shell capability, independent of the run-only backend contract."""
+
+    async def start(self, command: str, *, cwd: str) -> ShellProcess: ...
 
 
 @runtime_checkable

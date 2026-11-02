@@ -320,3 +320,10 @@ def test_session_busy_error_is_public_and_carries_recovery_identity() -> None:
     assert isinstance(error, linch.LinchError)
     assert error.run_id == "active-run" and error.session_id == "session"
     assert "active-run" in str(error)
+
+
+def test_optional_shell_process_capability_is_public() -> None:
+    from linch import ShellProcess, ShellRead, ShellStarter
+
+    assert {"ShellProcess", "ShellRead", "ShellStarter"} <= set(linch.__all__)
+    assert callable(ShellRead) and hasattr(ShellProcess, "wait") and hasattr(ShellStarter, "start")

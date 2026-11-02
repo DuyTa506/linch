@@ -528,6 +528,7 @@ async def _execute_one(
         run_id=execution_run_id,
         session_store=session.store,
         signal=signal,
+        tool_timeout_s=result_timeout_ms / 1000 if result_timeout_ms is not None else None,
         file_read_tracker=getattr(session, "file_read_tracker", None),
         emit=_report_progress,
         deps=_captured_call_deps(call, session),

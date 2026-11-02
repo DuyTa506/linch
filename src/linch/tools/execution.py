@@ -1,14 +1,4 @@
-"""Pluggable execution backends for BashTool.
-
-``ExecutionBackend`` is a duck-typed protocol: any object with a matching
-``run`` coroutine is acceptable — no base-class inheritance needed.
-
-Two implementations ship:
-
-- ``LocalBackend``  — exact current behaviour (subprocess shell in cwd).
-- ``DockerBackend`` — Docker CLI backend; requires docker on PATH (guarded by
-  ``shutil.which``).  No Docker SDK dependency.
-"""
+"""Shell backends and bounded local process execution."""
 
 from __future__ import annotations
 
@@ -25,63 +15,180 @@ from typing import Any, Literal, cast
 from linch.abort import throw_if_aborted
 from linch.errors import ToolExecutionError
 
+from ._output import BoundedOutput
 
-@dataclass
+
+@dataclass(slots=True)
 class ExecResult:
     stdout: str
     stderr: str
     returncode: int
     timed_out: bool
+    truncated: bool = False
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+    aborted: bool = False
+    signal: int | None = None
+
+
+@dataclass(slots=True)
+class ShellRead:
+    """New stdout/stderr since the previous read; lossy marks dropped bytes."""
+
+    stdout: str = ""
+    stderr: str = ""
+    lossy: bool = False
+
+
+class _LocalProcess:
+    def __init__(self, proc: asyncio.subprocess.Process, cwd: str) -> None:
+        self.proc = proc
+        self.outputs = [BoundedOutput(cwd, name) for name in ("stdout", "stderr")]
+        self._readers = [
+            asyncio.create_task(self._pump(pipe, output))
+            for pipe, output in zip((proc.stdout, proc.stderr), self.outputs, strict=True)
+        ]
+        self._done = asyncio.create_task(self._finish())
+
+    async def _pump(self, pipe: asyncio.StreamReader | None, output: BoundedOutput) -> None:
+        assert pipe is not None
+        try:
+            while chunk := await pipe.read(65536):
+                output.append(chunk)
+        finally:
+            output.finish()
+
+    async def _finish(self) -> ExecResult:
+        waiter = asyncio.create_task(self.proc.wait())
+        try:
+            # asyncio's wait also waits for inherited pipe descriptors to close.
+            while self.proc.returncode is None:
+                await asyncio.sleep(0.01)
+            await asyncio.wait(self._readers, timeout=0.25)
+        finally:
+            for task in (*self._readers, waiter):
+                await _cancel_and_drain(task)
+            for pipe in (self.proc.stdout, self.proc.stderr):
+                if pipe is not None:
+                    cast(Any, pipe)._transport.close()
+        out, err = self.outputs
+        code = self.proc.returncode or 0
+        return ExecResult(
+            out.snapshot(),
+            err.snapshot(),
+            code,
+            False,
+            out.truncated or err.truncated,
+            out.path,
+            err.path,
+            signal=-code if code < 0 else None,
+        )
+
+    def read(self) -> ShellRead:
+        out, lost_out = self.outputs[0].read()
+        err, lost_err = self.outputs[1].read()
+        return ShellRead(out, err, lost_out or lost_err)
+
+    async def wait(self, timeout_s: float | None) -> ExecResult | None:
+        done, _ = await asyncio.wait({self._done}, timeout=timeout_s)
+        return self._done.result() if done else None
+
+    async def kill(self) -> None:
+        _kill_process_group(self.proc, signal_mod.SIGTERM)
+        deadline = asyncio.get_running_loop().time() + 3
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                if os.name == "nt":
+                    if self.proc.returncode is not None:
+                        break
+                else:
+                    os.killpg(self.proc.pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.01)
+        _kill_process_group(self.proc)
+        await self._done
 
 
 class LocalBackend:
-    """Runs commands in a subprocess shell — identical to the original BashTool body."""
+    """Local shell execution with bounded output and explicit environment forwarding."""
 
     resume_policy_id = "linch.execution.local"
-    resume_policy_version = "1"
+    resume_policy_version = "2"
+    _allowlist = ("PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR")
+
+    def __init__(
+        self,
+        *,
+        env: dict[str, str] | None = None,
+        forward_env: tuple[str, ...] = (),
+        resume_fingerprint_key: bytes | None = None,
+    ) -> None:
+        self._policy = DockerBackend(
+            env=env, forward_env=forward_env, resume_fingerprint_key=resume_fingerprint_key
+        )
 
     @property
     def resume_policy_config(self) -> dict[str, object]:
-        """Stable, JSON-safe identity used by durable run contracts."""
-        return {}
+        config = self._policy.resume_policy_config
+        return {
+            "allowlist": self._allowlist,
+            "env": config["env"],
+            "forward_env": config["forward_env"],
+        }
 
-    async def run(
-        self,
-        command: str,
-        *,
-        cwd: str,
-        timeout_s: float,
-        signal: Any = None,
-    ) -> ExecResult:
-        kwargs: dict[str, Any] = {}
-        if os.name != "nt":
-            kwargs["start_new_session"] = True
-
+    async def start(self, command: str, *, cwd: str) -> _LocalProcess:
+        environment = {
+            key: os.environ[key]
+            for key in (*self._allowlist, *self._policy.forward_env)
+            if key in os.environ
+        }
+        environment.update(self._policy.env)
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=cwd,
+            env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            **kwargs,
+            start_new_session=os.name != "nt",
         )
+        return _LocalProcess(proc, cwd)
+
+    async def run(
+        self, command: str, *, cwd: str, timeout_s: float, signal: Any = None
+    ) -> ExecResult:
+        handle = await self.start(command, cwd=cwd)
+        abort = (
+            asyncio.create_task(signal.wait()) if callable(getattr(signal, "wait", None)) else None
+        )
+        timed_out = aborted = False
         try:
-            stdout_b, stderr_b = await _communicate_with_timeout_and_abort(
-                proc, timeout_s=timeout_s, signal=signal
+            done, _ = await asyncio.wait(
+                {handle._done, *([abort] if abort else [])},
+                timeout=timeout_s,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-        except TimeoutError:
-            _kill_process_group(proc)
-            await _wait_after_kill(proc)
-            return ExecResult(stdout="", stderr="", returncode=-1, timed_out=True)
-        except BaseException:
-            _kill_process_group(proc)
-            await _wait_after_kill(proc)
-            raise
-        return ExecResult(
-            stdout=stdout_b.decode(errors="replace"),
-            stderr=stderr_b.decode(errors="replace"),
-            returncode=proc.returncode or 0,
-            timed_out=False,
-        )
+            if handle._done in done:
+                return handle._done.result()
+            aborted = abort in done
+            timed_out = not aborted
+        finally:
+            await _cancel_and_drain(abort)
+            if not handle._done.done() or timed_out or aborted:
+                cleanup = asyncio.create_task(handle.kill())
+                cancelled = False
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                cleanup.result()
+                if cancelled and not (timed_out or aborted):
+                    raise asyncio.CancelledError
+        result = handle._done.result()
+        result.timed_out, result.aborted = timed_out, aborted
+        return result
 
 
 class DockerBackend:
@@ -304,18 +411,20 @@ class DockerBackend:
                 await _wait_after_kill(proc)
 
 
-def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
+def _kill_process_group(proc: asyncio.subprocess.Process, sig: int | None = None) -> None:
     if os.name != "nt":
         try:
-            os.killpg(proc.pid, signal_mod.SIGKILL)
+            os.killpg(proc.pid, signal_mod.SIGKILL if sig is None else sig)
             return
         except ProcessLookupError:
             return
         except OSError:
             pass
-    proc.kill()
+    if proc.returncode is None:
+        if sig is None:
+            proc.kill()
+        else:
+            proc.terminate()
 
 
 async def _wait_after_kill(proc: asyncio.subprocess.Process) -> None:

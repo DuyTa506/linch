@@ -299,8 +299,12 @@ agent = Agent(model="gpt-5", provider=provider, tools=empty_tools(bash))
 The input requires a nonempty string `command`. Optional integer `timeout_ms`
 defaults to `120000`; nonpositive values reset to that default, and values above
 `1800000` are capped. Execution uses `ctx.cwd`. The result contains stdout,
-followed by `[stderr]` and stderr when present. A nonzero exit sets
-`is_error=True`; a timeout raises `ToolExecutionError`.
+followed by `[stderr]` and stderr when present, plus exit status, signal,
+truncation, and spill-path details. A nonzero exit or timeout returns
+`is_error=True`; timeouts preserve the backend's available partial output.
+Local execution also returns partial output on abort. See
+[Extending](./extending.md) for
+output bounds and environment policy.
 
 To inject a different execution world, pass a coherent `.shell`/`.fs` backend as
 `execution_backend=...` to `Agent`. The agent only replaces an existing

@@ -256,7 +256,7 @@ async def test_agent_unified_world_wires_bash_context_and_session_fs(tmp_path: A
         ),
     )
     assert isinstance(result, ToolResult)
-    assert result.content == "remote:pwd"
+    assert result.content == "remote:pwd\n[Exited 0]"
 
 
 async def test_explicit_filesystem_conflict_with_world_fails_closed(tmp_path: Any) -> None:
