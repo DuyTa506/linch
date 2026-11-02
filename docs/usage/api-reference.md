@@ -1194,7 +1194,7 @@ from linch import HookEvent
 ```
 
 ```text
-HookEvent(value, names=None, *, module=None, qualname=None, type=None, start=1, boundary=None)
+HookEvent(value)
 ```
 
 Name a lifecycle event accepted by the hook dispatcher.
