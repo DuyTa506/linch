@@ -7,6 +7,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Keep each MCP server's transport and session contexts in one dedicated owner
+  task so stdio and HTTP connections can close safely from any task, including
+  `Agent.close()`. Drain startup failures, cancellation, and concurrent shutdowns.
+
 - Add usage-page use cases, exact API headings with preserved anchors, and
   source-checked troubleshooting for configuration, tools, authentication, and resume.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ class _OpenSession:
 
     transport: Any = None
     session: Any = None
+    session_context: Any = None
     # HTTP only: mcp closes the httpx client only when it created it itself, so
     # the one we build to carry `headers` is ours to release.
     http_client: Any = None
@@ -37,13 +39,74 @@ class _OpenSession:
         session on exit. Secondary cleanup errors are dropped so that a caller
         unwinding from an earlier exception still sees the original one.
         """
-        for resource in (self.session, self.transport, self.http_client):
+        for resource in (self.session_context, self.transport, self.http_client):
             if resource is None:
                 continue
             try:
                 await resource.__aexit__(None, None, None)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 pass
+
+
+async def _wait_for_cleanup(task: asyncio.Task[None]) -> None:
+    """Drain owned cleanup even if a waiter is cancelled, then propagate cancellation."""
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    task.result()
+    if cancelled is not None:
+        raise cancelled
+
+
+class _SessionOwner:
+    """Enter and exit a server's AnyIO contexts in one dedicated task."""
+
+    def __init__(self, name: str, config: McpServerConfig) -> None:
+        self._ready = asyncio.Event()
+        self._close_requested = asyncio.Event()
+        self._started = False
+        self._error: BaseException | None = None
+        self.session: Any = None
+        self._task = asyncio.create_task(self._run(name, config), name=f"mcp:{name}")
+
+    async def _run(self, name: str, config: McpServerConfig) -> None:
+        opened: _OpenSession | None = None
+        try:
+            self._started = True
+            if self._close_requested.is_set():
+                return
+            try:
+                opened = await _connect_one(name, config)
+                self.session = opened.session
+                self._ready.set()
+                await self._close_requested.wait()
+            finally:
+                if opened is not None:
+                    await opened.aclose()
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            # On startup failure, readiness means all partial resources have
+            # already been released, and the connecting task can raise safely.
+            self._ready.set()
+
+    async def wait_ready(self) -> None:
+        await self._ready.wait()
+        if self._error is not None:
+            raise self._error
+
+    async def aclose(self) -> None:
+        if not self._close_requested.is_set():
+            self._close_requested.set()
+            if self._started and not self._ready.is_set():
+                # An incomplete handshake cannot wait for the normal close
+                # event. Cancel once; further waiter cancellations never reach
+                # the owner while it unwinds transport/session contexts.
+                self._task.cancel()
+        await _wait_for_cleanup(self._task)
 
 
 class McpConnection:
@@ -60,7 +123,7 @@ class McpConnection:
     def __init__(
         self,
         tools: list[object],
-        sessions: list[_OpenSession],
+        sessions: list[_SessionOwner],
     ) -> None:
         """Create a connection that owns its server resources.
 
@@ -70,13 +133,15 @@ class McpConnection:
         """
         self.tools = tools
         self._sessions = sessions
-        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def close(self) -> None:
         """Close every connected server session once, in reverse order."""
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_sessions())
+        await _wait_for_cleanup(self._close_task)
+
+    async def _close_sessions(self) -> None:
         for s in reversed(self._sessions):
             await s.aclose()
 
@@ -109,7 +174,7 @@ async def connect_mcp_servers(
             raise ConfigError(f"MCP server names collide after normalization: '{name}' -> '{key}'")
         normalized.add(key)
 
-    opened: list[_OpenSession] = []
+    opened: list[_SessionOwner] = []
     tools: list[object] = []
     tool_names: set[str] = set()
     failures: list[str] = []
@@ -119,7 +184,9 @@ async def connect_mcp_servers(
             # Track the open transport/session BEFORE list_tools() so the
             # except-cleanup loop below closes them even if list_tools() or
             # tool-building raises (otherwise the subprocess/session leak).
-            opened.append(await _connect_one(name, config))
+            owner = _SessionOwner(name, config)
+            opened.append(owner)
+            await owner.wait_ready()
             session = opened[-1].session
             result = await session.list_tools()
             mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
@@ -130,8 +197,7 @@ async def connect_mcp_servers(
                 tool_names.add(tool_name)
             tools.extend(mcp_tools)
         except BaseException as exc:
-            for s in reversed(opened):
-                await s.aclose()
+            await McpConnection(tools=[], sessions=opened).close()
             if not isinstance(exc, Exception):
                 # Cancellation is not an Exception. Release first — a connect
                 # cancelled by a shutdown or a timeout would otherwise strand
@@ -167,8 +233,9 @@ async def _connect_http(name: str, config: object) -> _OpenSession:
     headers = dict(getattr(config, "headers", None) or {})
     # mcp 2.x has no `headers=` kwarg: per-server headers ride on an httpx client
     # the caller supplies and therefore owns.
-    http_client = await create_mcp_http_client(headers or None).__aenter__()
-    opened = _OpenSession(http_client=http_client)
+    http_context = create_mcp_http_client(headers or None)
+    http_client = await http_context.__aenter__()
+    opened = _OpenSession(http_client=http_context)
     transport = streamable_http_client(url, http_client=http_client)
     try:
         read, write = await transport.__aenter__()
@@ -196,6 +263,7 @@ async def _start_session(opened: _OpenSession, read: Any, write: Any) -> _OpenSe
     try:
         session_ctx = ClientSession(read, write)
         opened.session = await session_ctx.__aenter__()
+        opened.session_context = session_ctx
         await opened.session.initialize()
         return opened
     except BaseException:
