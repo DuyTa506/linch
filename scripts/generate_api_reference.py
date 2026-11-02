@@ -11,7 +11,6 @@ import importlib.util
 import inspect
 import re
 import sys
-from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
@@ -142,7 +141,9 @@ def signature(name, node, public):
             if isinstance(base, ast.ClassDef):
                 return signature(owner, base, public)
         inherited = ast.unparse(node.bases[0]) if node.bases else "object"
-        builtin = StrEnum if inherited == "StrEnum" else getattr(builtins, inherited, None)
+        if inherited == "StrEnum":
+            return f"{public}(value)"  # The inherited signature differs between Python versions.
+        builtin = getattr(builtins, inherited, None)
         if builtin is None and inherited == "ABC":
             builtin = object  # ABC adds no constructor; its metaclass enforces abstract methods.
         try:
