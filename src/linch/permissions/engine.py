@@ -122,6 +122,7 @@ CanUseTool = Callable[[CanUseToolRequest], Any]
 
 
 _TASK_TOOL_NAMES = frozenset({"TaskCreate", "TaskList", "TaskGet", "TaskUpdate"})
+_PROCESS_TOOL_NAMES = frozenset({"BashProcess"})
 
 
 class PermissionEngine:
@@ -356,7 +357,7 @@ def evaluate_rule_list(
 
 
 def _mode_default(tool: Any, mode: str) -> PermissionDecision:
-    if tool.scope == "read" or tool.name in _TASK_TOOL_NAMES:
+    if tool.scope == "read" or tool.name in _TASK_TOOL_NAMES | _PROCESS_TOOL_NAMES:
         return PermissionDecision(decision="allow")
     if mode == "skip-dangerous":
         return PermissionDecision(decision="allow")

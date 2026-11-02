@@ -44,7 +44,7 @@ def test_reference_covers_every_declared_public_export_once():
     actual = re.findall(r"^### `([^`]+)`$", DOC.read_text(), re.M)
     assert len(actual) == len(set(actual))
     assert set(actual) == set(expected)
-    assert len(actual) == 319
+    assert len(actual) == 320
 
 
 @pytest.mark.parametrize(

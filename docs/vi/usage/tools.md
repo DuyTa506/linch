@@ -285,7 +285,7 @@ nó thực sự idempotent. Retry dùng exponential backoff bắt đầu từ
 
 ## `ExecutionBackend` — thực thi Bash
 
-`BashTool(*, execution: Any = None)` là tool scope exec, không parallel. Khởi
+`BashTool(*, execution=None, max_processes=4, max_runtime_ms=1_800_000)` là tool scope exec, không parallel. Khởi
 tạo trực tiếp dùng mặc định `LocalBackend`; object `execution` được truyền vào
 phải cung cấp `.shell`.
 
@@ -302,6 +302,38 @@ mặc định `120000`; giá trị không dương được đặt lại về m�
 trên `1800000` bị giới hạn. Thực thi dùng `ctx.cwd`. Kết quả chứa stdout,
 tiếp theo là `[stderr]` và stderr nếu có. Exit khác 0 đặt `is_error=True`; timeout
 raise `ToolExecutionError`.
+
+Với backend Local và Docker, Bash hỗ trợ tiến trình được quản lý. `timeout_ms` là thời điểm lời gọi trả về, không phải hạn buộc
+hủy: lệnh chưa xong trả về đầu ra và mã như `p1`. Đặt
+`run_in_background=True` để trả về ngay. Dùng `BashProcess` tiếp trong cùng lượt
+chạy (`BashProcessTool` khi tự tạo danh sách công cụ):
+
+```python
+# Model-facing tool inputs, within the same run:
+{"command": "python -m http.server 8000", "run_in_background": True}
+{"action": "wait", "id": "p1", "wait_ms": 1000}
+{"action": "status", "id": "p1"}
+{"action": "kill", "id": "p1"}
+```
+
+`wait` trả về đầu ra mới kể từ lần đọc trước, rồi trạng thái thoát hoặc thông báo
+còn chạy. Sau ba lần đọc không có đầu ra, công cụ gợi ý dừng tiến trình. Thời gian
+chờ được giới hạn dưới hạn scheduler để giữ đầu ra. Mỗi lượt chạy có tối đa bốn
+tiến trình đang chạy; lệnh vượt giới hạn bị hủy khi thời gian chờ Bash hết.
+`max_runtime_ms` là hạn buộc hủy riêng, mặc định 30 phút. Không chuyển đầu ra lệnh
+chạy lâu qua `tail`, vì sẽ làm chậm đầu ra thấy được. Backend bên thứ ba chỉ có
+`run`, hoặc lời gọi Bash trực tiếp không có Session đang chạy, vẫn hủy khi hết hạn.
+
+Khi lượt chạy kết thúc, mọi nhóm tiến trình được theo dõi, kể cả tiến trình con
+còn sống sau lệnh foreground, đều bị hủy và tệp spill bị xóa trước khi Session
+nhận lượt mới hay trả kết quả cuối. Session con có registry riêng. Registry không
+bền vững: sau khởi động lại, mã cũ không còn; hãy chạy lệnh mới. Worker dừng bình
+thường sẽ đóng Session và hủy tiến trình; SIGKILL có thể để tiến trình sống tiếp.
+Docker dùng một handle `docker run` cho mỗi lệnh và xóa container khi hủy, không
+dùng container cố định cho Session. BashProcess chạy tuần tự, không được cache và
+không yêu cầu duyệt lại lệnh đã được Bash duyệt; quy tắc deny tường minh vẫn áp
+dụng. Schema Bash/BashProcess mới sẽ chặn resume hợp đồng công cụ cũ: cần hoàn tất
+các lượt cũ trước khi nâng cấp.
 
 Để inject một môi trường thực thi khác, truyền backend `.shell`/`.fs` nhất quán làm
 `execution_backend=...` cho `Agent`. Agent chỉ thay thế tool `Bash` hiện có; nó

@@ -556,7 +556,7 @@ from linch import ShellRead
 ```
 
 ```text
-ShellRead(stdout: str = '', stderr: str = '', lossy: bool = False)
+ShellRead(stdout: str = '', stderr: str = '', lossy: bool = False, stdout_path: str | None = None, stderr_path: str | None = None)
 ```
 
 New stdout/stderr since the previous read; lossy marks dropped bytes.
@@ -1882,12 +1882,28 @@ from linch import BashTool
 ```
 
 ```text
-BashTool(*, execution: Any=None) -> None
+BashTool(*, execution: Any=None, max_processes: int=4, max_runtime_ms: int=1800000) -> None
 ```
 
 Run a shell command through the configured execution backend.
 
 Usage: [extending](extending.md).
+
+### `linch.BashProcessTool`
+
+Kind: Class.
+
+```python
+from linch import BashProcessTool
+```
+
+```text
+BashProcessTool()
+```
+
+Inspect or stop a command already approved through Bash.
+
+Usage: [tools](tools.md).
 
 ### `linch.DockerBackend`
 
@@ -2350,7 +2366,7 @@ from linch import Session
 ```
 
 ```text
-Session(id: str, created_at: str, meta: dict[str, object], agent: Agent, store: SessionStore, session_log: SessionLog = <factory>, _extensions: dict[str, Any] = <factory>, _active: bool = False, _closed: bool = False, _lifecycle_state: str = _OPEN, _close_task: asyncio.Task[None] | None = None, _idle: asyncio.Event = <factory>, _telemetry_run: Any = None, active_run_id: str | None = None, _active_principal: Principal | None = None, _run_bindings: dict[str, Any] = <factory>, _config_seed: Any = None, _active_gen: Any = None, _active_inner: Any = None, _active_started: bool = False, _event_journal: Any = None, _model_call_ledger: Any = None, _last_seq: int = 0, _seq_cacheable: bool = True, _last_prompt_cache_model: str | None = None, _last_prompt_cache_tool_sig: Any = None, _catalog_generation: int | None = None, _catalog_revision_seen: int | None = None, alignment_queue: list[AlignmentEntry] = <factory>, interrupt_requested: bool = False, last_usage: Usage | None = None, last_compaction_info: dict[str, Any] | None = None, active_budget: Any = None, inherited_budget: Any = None, compaction_retry_used_this_turn: bool = False, active_model: str | None = None, fallback_index: int = 0, pending_skill_overlay: SkillOverlay | None = None, current_turn_allowed_tools: list[str] | None = None, current_turn_permission_decisions: dict[str, dict] = <factory>, invoked_skills: list[InvokedSkillRecord] = <factory>, skills_loaded_emitted: bool = False, tools_override: ToolRegistry | None = None, system_blocks_override: Any = None, file_read_tracker: FileReadTracker = <factory>, _abort_controller: AbortContext = <factory>, run_deps: Any = None, filesystem: Any = None, workers: dict[str, Any] = <factory>, pending_child_events: list[Event] = <factory>, pending_notifications: list[Message] = <factory>, background_tasks: list[Any] = <factory>, mailbox_address: str | None = None, cwd_override: str | None = None)
+Session(id: str, created_at: str, meta: dict[str, object], agent: Agent, store: SessionStore, session_log: SessionLog = <factory>, _extensions: dict[str, Any] = <factory>, _active: bool = False, _closed: bool = False, _lifecycle_state: str = _OPEN, _close_task: asyncio.Task[None] | None = None, _idle: asyncio.Event = <factory>, _telemetry_run: Any = None, active_run_id: str | None = None, _active_principal: Principal | None = None, _run_bindings: dict[str, Any] = <factory>, _config_seed: Any = None, _active_gen: Any = None, _active_inner: Any = None, _active_started: bool = False, _event_journal: Any = None, _model_call_ledger: Any = None, _last_seq: int = 0, _seq_cacheable: bool = True, _last_prompt_cache_model: str | None = None, _last_prompt_cache_tool_sig: Any = None, _catalog_generation: int | None = None, _catalog_revision_seen: int | None = None, alignment_queue: list[AlignmentEntry] = <factory>, interrupt_requested: bool = False, last_usage: Usage | None = None, last_compaction_info: dict[str, Any] | None = None, active_budget: Any = None, inherited_budget: Any = None, compaction_retry_used_this_turn: bool = False, active_model: str | None = None, fallback_index: int = 0, pending_skill_overlay: SkillOverlay | None = None, current_turn_allowed_tools: list[str] | None = None, current_turn_permission_decisions: dict[str, dict] = <factory>, invoked_skills: list[InvokedSkillRecord] = <factory>, skills_loaded_emitted: bool = False, tools_override: ToolRegistry | None = None, system_blocks_override: Any = None, file_read_tracker: FileReadTracker = <factory>, _abort_controller: AbortContext = <factory>, run_deps: Any = None, filesystem: Any = None, workers: dict[str, Any] = <factory>, pending_child_events: list[Event] = <factory>, pending_notifications: list[Message] = <factory>, _processes: Any = None, background_tasks: list[Any] = <factory>, mailbox_address: str | None = None, cwd_override: str | None = None)
 ```
 
 Hold one conversation and its durable append-only message log.
@@ -2516,7 +2532,7 @@ from linch import ToolContext
 ```
 
 ```text
-ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, tool_timeout_s: float | None = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, _run_config: Any = None, _principal: Principal | None = None)
+ToolContext(cwd: str, session_id: str, run_id: str, session_store: Any, signal: Any = None, tool_timeout_s: float | None = None, file_read_tracker: Any = None, emit: Callable[[str, dict[str, Any] | None], None] | None = None, deps: Any = None, filesystem: Any = None, idempotency_key: str = '', execution: Any = None, *, _session: Any = None, _run_config: Any = None, _principal: Principal | None = None)
 ```
 
 Provide runtime capabilities to a tool invocation.

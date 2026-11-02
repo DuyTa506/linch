@@ -52,7 +52,7 @@ later on this page.
 `empty_tools(...)` builds a registry with *only* the tools you pass — the right
 choice for a pure domain agent that should never touch the filesystem or shell.
 `workspace_tools(exclude=..., extra=...)` starts from the standard SWE set
-(`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `TaskCreate`, `TaskList`,
+(`Read`, `Write`, `Edit`, `Bash`, `BashProcess`, `Glob`, `Grep`, `TaskCreate`, `TaskList`,
 `TaskGet`, `TaskUpdate`) and adds or removes from there.
 `Agent` copies the registry passed to its constructor. Register tools added later
 on `agent.tools` so request discovery sees them; mutating the original registry
@@ -284,7 +284,7 @@ idempotent. Retries use exponential backoff from `base_delay_ms`.
 
 ## `ExecutionBackend` — Bash execution
 
-`BashTool(*, execution: Any = None)` is an exec-scoped, non-parallel tool. Direct
+`BashTool(*, execution=None, max_processes=4, max_runtime_ms=1_800_000)` is an exec-scoped, non-parallel tool. Direct
 construction defaults to `LocalBackend`; a supplied `execution` object must
 expose `.shell`.
 
@@ -305,6 +305,39 @@ truncation, and spill-path details. A nonzero exit or timeout returns
 Local and Docker execution also return partial output on abort. See
 [Extending](./extending.md) for
 output bounds and environment policy.
+
+With Local and Docker backends, `timeout_ms` is when the Bash call returns,
+not a kill deadline: an unfinished command returns its output and a process id
+such as `p1`. Set `run_in_background=True` to return immediately. Follow up with
+`BashProcess` (`BashProcessTool` when constructing a custom registry):
+
+```python
+# Model-facing tool inputs, within the same run:
+{"command": "python -m http.server 8000", "run_in_background": True}
+{"action": "wait", "id": "p1", "wait_ms": 1000}
+{"action": "status", "id": "p1"}
+{"action": "kill", "id": "p1"}
+```
+
+`wait` returns only output produced since the previous read, then the exit status
+or a still-running message. Three quiet reads suggest stopping the process.
+Bash and BashProcess clamp waits below the scheduler deadline to preserve output.
+The default cap is four running processes per run; an overflow command is killed
+when its Bash wait expires. `max_runtime_ms` is an independent hard deadline,
+defaulting to 30 minutes. Do not pipe long commands through `tail`: it delays
+visible output. A third-party backend exposing only `run` retains killing timeout
+behavior. Direct Bash calls without a running Session retain that behavior too.
+
+All tracked process groups, including background children left by a foreground
+shell, stop before the run releases its session or delivers its final result;
+spill files are removed then. Child sessions have independent registries. Process
+ids are ephemeral and are gone after restart; resume needs a new command. Graceful
+worker shutdown closes sessions and kills processes, but a worker killed with
+SIGKILL can leave them alive. Docker uses one `docker run` handle per command,
+with container removal on kill, rather than a persistent session container.
+BashProcess is serialized, never tool-cached, and needs no second approval because
+Bash already approved the command; explicit deny rules still apply. The changed
+Bash/BashProcess schemas reject resume of older tool contracts: drain old runs.
 
 To inject a different execution world, pass a coherent `.shell`/`.fs` backend as
 `execution_backend=...` to `Agent`. The agent only replaces an existing

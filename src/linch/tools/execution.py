@@ -39,6 +39,8 @@ class ShellRead:
     stdout: str = ""
     stderr: str = ""
     lossy: bool = False
+    stdout_path: str | None = None
+    stderr_path: str | None = None
 
 
 class _LocalProcess:
@@ -91,10 +93,20 @@ class _LocalProcess:
             signal=-code if code < 0 else None,
         )
 
+    @property
+    def _group_alive(self) -> bool:
+        if os.name == "nt":
+            return self.proc.returncode is None
+        try:
+            os.killpg(self.proc.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
     def read(self) -> ShellRead:
         out, lost_out = self.outputs[0].read()
         err, lost_err = self.outputs[1].read()
-        return ShellRead(out, err, lost_out or lost_err)
+        return ShellRead(out, err, lost_out or lost_err, self.outputs[0].path, self.outputs[1].path)
 
     async def wait(self, timeout_s: float | None) -> ExecResult | None:
         done, _ = await asyncio.wait({self._done}, timeout=timeout_s)

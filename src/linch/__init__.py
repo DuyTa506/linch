@@ -295,6 +295,7 @@ if TYPE_CHECKING:
     from .tools.execution import DockerBackend
     from .tools.isolation import IsolationBackend, TempDirIsolation
     from .tools.pipeline import ToolExecution, ToolPipeline
+    from .tools.processes import BashProcessTool
     from .tools.registry import empty_tools, workspace_tools
     from .tools.search import ToolSearchPlugin
     from .tools.wrappers import metrics_wrapper, timeout_wrapper
@@ -576,6 +577,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".tools.search": ("ToolSearchPlugin",),
     ".tools.builtin": ("BashTool",),
+    ".tools.processes": ("BashProcessTool",),
     ".tools.execution": ("DockerBackend",),
     ".tools": (
         "AskUserHandler",
@@ -782,6 +784,7 @@ __all__ = [
     "JsonValue",
     "GeneratedSubagentDefinition",
     "BashTool",
+    "BashProcessTool",
     "DockerBackend",
     "McpHttpServerConfig",
     "McpServerConfig",

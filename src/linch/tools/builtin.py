@@ -464,14 +464,18 @@ class BashTool:
     """Run a shell command through the configured execution backend."""
 
     name = "Bash"
-    description = "Run a shell command in the workspace. Default timeout 120s."
+    description = (
+        "Run shell commands. timeout_ms returns without killing; follow with BashProcess. "
+        "Processes stop when the run ends. Do not pipe long commands through tail. Default 120s."
+    )
     input_schema = {
         "type": "object",
         "properties": {
             "command": {"type": "string"},
+            "run_in_background": {"type": "boolean"},
             "timeout_ms": {
                 "type": "integer",
-                "description": "Timeout in ms. Max 1800000 (30 min).",
+                "description": "Return after this many ms. Max 1800000 (30 min).",
             },
         },
         "required": ["command"],
@@ -479,7 +483,9 @@ class BashTool:
     scope: ToolScope = "exec"
     parallel: bool = False
 
-    def __init__(self, *, execution: Any = None) -> None:
+    def __init__(
+        self, *, execution: Any = None, max_processes: int = 4, max_runtime_ms: int = 1800000
+    ) -> None:
         """Create a shell tool using an optional execution capability.
 
         Args:
@@ -488,6 +494,9 @@ class BashTool:
 
         from .execution import LocalBackend
 
+        if max_processes < 1 or max_runtime_ms < 1:
+            raise ValueError("process limits must be positive")
+        self.max_processes, self.max_runtime_ms = max_processes, max_runtime_ms
         # An ExecutionBackend (capability seam) sources the shell half.
         self._backend: Any = execution.shell if execution is not None else LocalBackend()
 
@@ -510,6 +519,7 @@ class BashTool:
         return {
             "command": require_str(raw, "command"),
             "timeout_ms": min(timeout, 1800000),
+            "run_in_background": bool(raw.get("run_in_background", False)),
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
@@ -527,12 +537,19 @@ class BashTool:
         timeout_s = _to_float(input.get("timeout_ms"), 120000.0) / 1000.0
         if ctx.tool_timeout_s is not None:
             timeout_s = min(timeout_s, max(ctx.tool_timeout_s - 1, ctx.tool_timeout_s / 2))
+        registry = getattr(ctx._session, "_processes", None)
+        if registry is not None and callable(getattr(self._backend, "start", None)):
+            return await registry.run(self, input, ctx, timeout_s)
         result = await self._backend.run(
             str(input["command"]),
             cwd=ctx.cwd,
             timeout_s=timeout_s,
             signal=ctx.signal,
         )
+        return self._render(result)
+
+    @staticmethod
+    def _render(result: Any) -> ToolResult:
         status = (
             f"command timed out (exit {result.returncode})"
             if result.timed_out

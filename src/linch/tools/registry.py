@@ -13,6 +13,7 @@ from linch.kernel import Disposable
 
 from .base import Tool
 from .builtin import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
+from .processes import BashProcessTool
 from .tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 
 _REQUIRED_METHODS = ("validate", "execute", "summarize")
@@ -457,6 +458,7 @@ def workspace_tools(
         WriteTool(),
         EditTool(),
         BashTool(),
+        BashProcessTool(),
         GlobTool(),
         GrepTool(),
         TaskCreateTool(),

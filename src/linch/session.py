@@ -295,6 +295,7 @@ class Session:
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
     """In-process background-worker <task-notification> messages, drained next turn."""
+    _processes: Any = field(default=None, repr=False)
     background_tasks: list[Any] = field(default_factory=_BackgroundTasks)
     """Detached asyncio.Tasks for backgrounded tool calls (run_in_background hint).
     Removed on completion and cancelled/drained on abort or close."""
@@ -441,7 +442,9 @@ class Session:
     ) -> AsyncIterator[Event]:
         from .hooks import EventEmitContext, HookDispatcher
         from .lifecycle import EVENT_EMIT
+        from .tools.processes import ProcessRegistry
 
+        self._processes = ProcessRegistry(opts.run_id or "")
         self._active_started = True
         finished = False
 
@@ -465,7 +468,7 @@ class Session:
                     if scope is not None:
                         await scope.__aexit__(None, None, None)
                 finally:
-                    self._finish_run()
+                    await self._finish_processes()
                     if self.agent.max_idle_sessions is not None:
                         await self.agent._session_became_idle(self)
 
@@ -523,9 +526,17 @@ class Session:
                         await scope.__aexit__(None, None, None)
                 finally:
                     if not finished:
-                        self._finish_run()
+                        await self._finish_processes()
                         if self.agent.max_idle_sessions is not None:
                             await self.agent._session_became_idle(self)
+
+    async def _finish_processes(self) -> None:
+        try:
+            await self._processes.close()
+        finally:
+            self._processes.unwound.set()
+            if self._processes.cleaned:
+                self._finish_run()
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
@@ -632,6 +643,8 @@ class Session:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.background_tasks.clear()
+        if self._processes is not None:
+            await self._processes.close()
 
     async def aclose(self, force: bool = False) -> None:
         """Release this session's live resources and unregister it from the agent.
@@ -721,8 +734,11 @@ class Session:
             self._finish_run()
             return
 
+        assert self._processes is not None
+        await self._processes.close()
         if getattr(gen, "ag_running", False):
-            await self._idle.wait()
+            await self._processes.unwound.wait()
+            await self._finish_processes()
             return
         try:
             await _aclose_generator(gen)
@@ -732,8 +748,10 @@ class Session:
             # genuine teardown RuntimeErrors remain visible to the caller.
             if not self._active:
                 raise
-            await self._idle.wait()
+            await self._processes.unwound.wait()
+            await self._finish_processes()
             return
+        await self._finish_processes()
         await self._idle.wait()
 
     async def __aenter__(self) -> Session:
