@@ -430,3 +430,48 @@ async def test_isolation_remaps_mapping_dependencies(tmp_path: Path) -> None:
             if child.cwd_override:
                 shutil.rmtree(child.cwd_override, ignore_errors=True)
         await agent.close()
+
+
+async def test_child_run_uses_distinct_session_while_parent_run_is_active() -> None:
+    from linch import RunOptions
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    child_results = []
+
+    async def spawn_child(raw, ctx):
+        active_parent = await agent.run_store.load_run("parent-run")
+        assert active_parent.status == "running"
+        child = await run_subagent(
+            RunSubagentArgs(
+                parent_session=parent,
+                parent_agent=agent,
+                definition=DEFAULT_AGENT,
+                prompt="child",
+                display_name="child",
+                subagent_run_id="child-call",
+                retain=True,
+            )
+        )
+        child_results.append(child)
+
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("spawn_child", {}),
+            TextTurn("child finished"),
+            TextTurn("parent finished"),
+        ]
+    )
+    agent = make_agent(
+        provider, tools=tool_registry(StubTool("spawn_child", on_execute=spawn_child))
+    )
+    parent = await agent.session()
+    try:
+        events = [event async for event in parent.run("parent", RunOptions(run_id="parent-run"))]
+        assert events[-1].final_text == "parent finished"
+        (child,) = child_results
+        assert not child.errored and child.final_text == "child finished"
+        assert child.child_session_id != parent.id
+        assert (await agent.run_store.load_run("parent-run")).status == "completed"
+    finally:
+        await agent.close()

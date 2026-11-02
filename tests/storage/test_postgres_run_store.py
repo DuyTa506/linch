@@ -197,10 +197,10 @@ class _DeleteRacePool(_TracePool):
 
 
 @needs_postgres
-async def test_postgres_init_and_create_run_race() -> None:
+async def test_postgres_init_and_create_run_race(pg_dsn) -> None:
     from linch.run_stores.postgres import PostgresRunStore
 
-    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    dsn = pg_dsn
     run_id = f"pg-init-race-{uuid4()}"
     stores = [PostgresRunStore(dsn, min_size=1, max_size=4) for _ in range(8)]
     try:
@@ -218,10 +218,10 @@ async def test_postgres_init_and_create_run_race() -> None:
 
 
 @needs_postgres
-async def test_postgres_create_pending_run_is_transactional_and_session_scoped() -> None:
+async def test_postgres_create_pending_run_is_transactional_and_session_scoped(pg_dsn) -> None:
     from linch.run_stores.postgres import PostgresRunStore
 
-    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    dsn = pg_dsn
     store = PostgresRunStore(dsn)
     run_id = f"pg-pending-{uuid4()}"
     try:
@@ -247,13 +247,13 @@ async def test_postgres_create_pending_run_is_transactional_and_session_scoped()
 
 
 @needs_postgres
-async def test_postgres_leased_pending_adoption_skips_insert() -> None:
+async def test_postgres_leased_pending_adoption_skips_insert(pg_dsn) -> None:
     """An explicit token adopts a locked pending row without an INSERT race."""
     from linch.run_store import RunCheckpoint
     from linch.run_stores.postgres import PostgresRunStore
     from linch.types import Usage
 
-    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    dsn = pg_dsn
     store = PostgresRunStore(dsn)
     run_id = f"pg-leased-adoption-no-insert-{uuid4()}"
     real_pool: Any = None
@@ -280,13 +280,13 @@ async def test_postgres_leased_pending_adoption_skips_insert() -> None:
 
 
 @needs_postgres
-async def test_postgres_leased_adoption_race_does_not_recreate_pending_row() -> None:
+async def test_postgres_leased_adoption_race_does_not_recreate_pending_row(pg_dsn) -> None:
     """A row disappearing at the adoption boundary cannot be recreated."""
     from linch.run_store import LeaseLostError, RunCheckpoint
     from linch.run_stores.postgres import PostgresRunStore
     from linch.types import Usage
 
-    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    dsn = pg_dsn
     store = PostgresRunStore(dsn)
     run_id = f"pg-leased-adoption-race-{uuid4()}"
     real_pool: Any = None
@@ -314,11 +314,11 @@ async def test_postgres_leased_adoption_race_does_not_recreate_pending_row() -> 
 
 
 @needs_postgres
-async def test_postgres_concurrent_snapshot_delete_and_prune() -> None:
+async def test_postgres_concurrent_snapshot_delete_and_prune(pg_dsn) -> None:
     from linch.run_stores.postgres import PostgresRunStore
     from linch.types import ProviderRequest
 
-    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    dsn = pg_dsn
     store = PostgresRunStore(dsn)
     peer = PostgresRunStore(dsn)
     run_id = f"pg-snapshot-locks-{uuid4()}"
@@ -344,13 +344,14 @@ async def test_postgres_concurrent_snapshot_delete_and_prune() -> None:
 @needs_postgres
 async def test_postgres_claim_rollback_does_not_publish_local_lease(
     failure_type: type[BaseException],
+    pg_dsn,
 ) -> None:
     """A claim rolled back after UPDATE cannot poison the holder's local state."""
     from linch.run_store import LeaseLostError, RunCheckpoint, RunLease
     from linch.run_stores.postgres import PostgresRunStore
     from linch.types import Usage
 
-    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    dsn = pg_dsn
     first = PostgresRunStore(dsn)
     peer = PostgresRunStore(dsn)
     run_id = f"pg-claim-rollback-{uuid4()}"
@@ -607,7 +608,7 @@ async def test_missing_local_lease_owner_fails_closed(pg_dsn) -> None:
 
 
 @needs_postgres
-async def test_postgres_pool_reuses_clean_connection_after_cancel_and_failed_write() -> None:
+async def test_postgres_pool_reuses_clean_connection_after_cancel_and_failed_write(pg_dsn) -> None:
     """Cancellation and a fenced failure must not poison the one-connection pool."""
     import asyncpg
 
@@ -615,7 +616,7 @@ async def test_postgres_pool_reuses_clean_connection_after_cancel_and_failed_wri
     from linch.run_stores.postgres import PostgresRunStore
     from linch.types import Usage
 
-    store = PostgresRunStore(os.environ["AGENT_KIT_TEST_PG_DSN"], min_size=1, max_size=1)
+    store = PostgresRunStore(pg_dsn, min_size=1, max_size=1)
     run_id = f"pool-reset-{uuid4()}"
     try:
         await store.create_run("session", id=run_id)

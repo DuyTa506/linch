@@ -535,3 +535,35 @@ def test_worker_accepts_two_connection_pool():
     worker = Worker(pool, lambda job: None)
     assert worker._pool.get_max_size() == 2
     assert not pool.entered.is_set() and not pool.closed
+
+
+@pytest.mark.parametrize("limit", [0, 1, -1, True, 1.5, "2"])
+def test_worker_rejects_invalid_process_run_limit(limit):
+    from linch.worker import Worker
+
+    with pytest.raises(ValueError, match="max_concurrent_runs"):
+        Worker(CyclePool(), lambda job: None, max_concurrent_runs=limit)
+
+
+@pytest.mark.parametrize("limit", [None, 3])
+async def test_worker_passes_process_run_limit_to_queue_manager(monkeypatch, limit):
+    import linch.worker.runtime as runtime
+
+    async def ready(*args):
+        pass
+
+    monkeypatch.setattr(runtime, "install", ready)
+    kwargs = {} if limit is None else {"max_concurrent_runs": limit}
+    worker = runtime.Worker(CyclePool(), lambda job: None, **kwargs)
+    monkeypatch.setattr(worker._run_store, "_ensure", ready)
+    monkeypatch.setattr(worker._session_store, "_ensure", ready)
+
+    def manager(connection):
+        async def run(**options):
+            assert options["max_concurrent_tasks"] == (32 if limit is None else 3)
+            worker.stop()
+
+        return SimpleNamespace(run=run, shutdown=asyncio.Event())
+
+    monkeypatch.setattr(worker, "_make_manager", manager)
+    await worker.run()

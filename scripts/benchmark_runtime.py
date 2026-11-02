@@ -267,13 +267,13 @@ def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
             await agent.close()
 
     async def event_writes() -> Sample:
-        run = await event_write_store.create_run("benchmark-session")
+        run = await event_write_store.create_run(f"benchmark-session-{uuid4()}")
         started = time.perf_counter()
         sequences = [
             await event_write_store.append_event(
                 run.id,
                 SystemEvent(
-                    session_id="benchmark-session",
+                    session_id=run.session_id,
                     run_id=run.id,
                     model=f"write-{index}",
                     tools=[],

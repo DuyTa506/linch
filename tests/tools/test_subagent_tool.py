@@ -530,7 +530,8 @@ async def test_background_subagent_completion_is_audited_on_origin_run(tmp_path:
     import asyncio
 
     from linch.events import BackgroundWorkerEvent
-    from linch.run_store import InMemoryRunStore
+    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.types import Usage
 
     agent, session = await _make_agent_and_session(tmp_path)
     run_store = InMemoryRunStore()
@@ -538,6 +539,8 @@ async def test_background_subagent_completion_is_audited_on_origin_run(tmp_path:
     await run_store.create_run(session.id, id="test-run")
     await _spawn(agent, session, description="test", prompt="hello", run_in_background=True)
     worker_id = next(iter(session.workers))
+    # The launching turn can finish while its background child is still running.
+    await run_store.mark_completed("test-run", RunCheckpoint("completed", "hello", 0, Usage()))
     await asyncio.wait_for(session.workers[worker_id].task, timeout=5.0)
 
     stored = await run_store.load_events("test-run")

@@ -2231,6 +2231,9 @@ async def test_nonresumable_run_raises_without_side_effects(
     assert await run_store.load_events(run.id) == []
     assert await session_store.load_messages("s1") == []
 
+    # The host explicitly abandons an active row that has no resumable checkpoint.
+    if not has_checkpoint:
+        await run_store.mark_failed(run.id, error={"message": "no resumable checkpoint"})
     events = await _collect(session.run("new run"))
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
