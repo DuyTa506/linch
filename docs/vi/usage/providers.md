@@ -43,7 +43,7 @@ Hai khía cạnh quan trọng nhất:
   [Đọc các event thinking](#đọc-các-event-thinking).
 
 Để tìm hiểu luồng dữ liệu phía sau giao diện provider (`context_window`, `stream`,
-`capabilities`), xem [Hợp đồng provider](../../architecture/provider-contract.md).
+`capabilities`), xem [Hợp đồng provider](../architecture/provider-contract.md).
 
 ---
 
@@ -426,7 +426,7 @@ việc nén ngữ cảnh giữ nguyên các byte của tiền tố hiện có v�
 Với run đã bật cơ chế gốc và có snapshot hiện hữu, việc đồng bộ danh mục chờ
 đến khi xác định được ngữ cảnh được chọn. Vì vậy, các hook ngữ cảnh có thể chạy trước khi
 thông báo mới được nối thêm.
-Xem [hợp đồng provider](../../architecture/provider-contract.md#native-catalog-rendering)
+Xem [hợp đồng provider](../architecture/provider-contract.md#kết-xuất-danh-mục-theo-cơ-chế-gốc)
 để biết chi tiết về vị trí trong dữ liệu gửi qua API và việc phát lại.
 
 ---
@@ -589,4 +589,4 @@ các chữ ký suy luận bên dưới, nên bạn không bao giờ cần tự g
 - [Event](./events.md) — các loại event mà `partial_assistant`/`usage`/`result` mang theo.
 - [Đầu ra có cấu trúc](./structured-output.md) — cách `output_schema` được áp dụng theo từng provider.
 - [Hook](./hooks.md) — quan sát các lời gọi provider và luồng event trực tiếp.
-- [Hợp đồng provider](../../architecture/provider-contract.md) — giao diện `BaseProvider` và quy trình xử lý request.
+- [Hợp đồng provider](../architecture/provider-contract.md) — giao diện `BaseProvider` và quy trình xử lý request.

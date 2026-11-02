@@ -44,7 +44,7 @@ Mỗi tệp bắt đầu bằng phần frontmatter YAML và phần nội dung Ma
 chạy bên ngoài event loop và cập nhật tool `Skill` hiện có. Các session đang hoạt động
 nhận một thông điệp nhắc về danh mục và có thể gọi các skill mới ở request tiếp theo;
 phần tiền tố system ban đầu của chúng vẫn được giữ cố định. Xóa tất cả skill vẫn giữ tool
-được đăng ký. Xem [tiền tố session](../../architecture/system-prompt.md#session-prefix-and-catalog-changes)
+được đăng ký. Xem [tiền tố session](../architecture/system-prompt.md#tiền-tố-session-và-thay-đổi-danh-mục)
 để biết các giới hạn hiện tại về khả năng lưu bền.
 
 ## Các trang liên quan

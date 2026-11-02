@@ -243,7 +243,7 @@ Giá trị `extra={"trace_id": ...}` tường minh được ưu tiên, tiếp th
 `record.run_id` và giá trị dự phòng tùy chọn của bộ lọc. Một tool có thể truyền tường minh
 giá trị đã ghi nhận: `logger.info("search complete", extra={"trace_id": ctx.trace_id})`.
 Xem danh mục vòng đời được tạo tự động
-trong [hướng dẫn kiến trúc](../../architecture/events.md#typed-lifecycle-catalog)
+trong [hướng dẫn kiến trúc](../architecture/events.md#danh-mục-vòng-đời-có-kiểu)
 để biết dữ liệu và chế độ phân phối của mỗi điểm. Các điểm hook do
 `HookDispatcher` có thứ tự quản lý; các điểm trong pipeline tool chạy nối tiếp theo dạng waterfall, còn
 `turn-stopping` là điểm cho phép phủ quyết tuần tự.
