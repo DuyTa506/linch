@@ -246,9 +246,9 @@ rate brackets were **20–24, 32–40, and 24–32 runs/s**; four/eight-worker e
 was **38.8% / 15.7%** relative to one worker. These single-sample shared-host
 brackets do not establish a capacity improvement over the earlier campaign;
 size database writes and pools on the deployment host, without assuming linear scaling.
-See the [fleet measurements](../superpowers/measurements/2026-10-31-fleet-coordination.md).
+See the [fleet measurements](https://github.com/DuyTa506/linch/blob/3.0.1/docs/superpowers/measurements/2026-10-31-fleet-coordination.md).
 Use direct/session pooling for Worker LISTEN; transaction pooling needs a separate
-notification connection. [Earlier PgBouncer measurements](../superpowers/measurements/2026-10-31-scale-gate.md) also required `statement_cache_size=0` with PgBouncer 1.16.
+notification connection. [Earlier PgBouncer measurements](https://github.com/DuyTa506/linch/blob/3.0.1/docs/superpowers/measurements/2026-10-31-scale-gate.md) also required `statement_cache_size=0` with PgBouncer 1.16.
 
 The queue only dispatches. A job separately claims the D1 run lease using the
 worker ID. Renewal starts immediately, then repeats every **lease TTL / 3**.

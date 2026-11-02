@@ -203,7 +203,7 @@ prefix and cursor unchanged. Primary model-call binding uses this digest and
 `history_count` instead of copying and re-fingerprinting the whole audit view.
 The focused two-provider-turn probe reduces whole-history reads from two to
 zero; the four provider-view reads needed for request construction remain.
-See the [WP8 measurements](../superpowers/measurements/2026-10-31-hot-path.md)
+See the [WP8 measurements](https://github.com/DuyTa506/linch/blob/3.0.1/docs/superpowers/measurements/2026-10-31-hot-path.md)
 for scale results.
 
 Checkpoint recovery uses the journal-backed model-call watermark, not a receipt
