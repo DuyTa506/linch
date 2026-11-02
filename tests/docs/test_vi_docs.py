@@ -6,9 +6,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-PAGES = sorted(path.name for path in (ROOT / "docs/usage").glob("*.md"))
-PAGES.remove("api-reference.md")
+SECTIONS = ("usage", "architecture")
+PAGES = sorted(
+    f"{section}/{path.name}"
+    for section in SECTIONS
+    for path in (ROOT / "docs" / section).glob("*.md")
+    if path.name != "api-reference.md"
+)
 FENCE = re.compile(r"^```.*?^```$", re.M | re.S)
+LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 
 def _body(path: Path) -> str:
@@ -25,6 +31,15 @@ def _headings(text: str) -> list[int]:
 
 @pytest.mark.parametrize("page", PAGES)
 def test_vietnamese_page_keeps_code_and_structure(page: str) -> None:
-    english, vietnamese = _body(ROOT / "docs/usage" / page), _body(ROOT / "docs/vi/usage" / page)
+    english, vietnamese = _body(ROOT / "docs" / page), _body(ROOT / "docs/vi" / page)
     assert FENCE.findall(vietnamese) == FENCE.findall(english)
     assert _headings(vietnamese) == _headings(english)
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_vietnamese_page_links_resolve(page: str) -> None:
+    source = ROOT / "docs/vi" / page
+    for target in LINK.findall(FENCE.sub("", _body(source))):
+        path = target.split("#", 1)[0]
+        if path and not path.startswith(("http://", "https://", "mailto:")):
+            assert (source.parent / path).exists(), f"{page}: broken link {target}"

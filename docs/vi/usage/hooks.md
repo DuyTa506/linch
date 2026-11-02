@@ -8,7 +8,7 @@ Dùng hook để quan sát hoặc thay đổi hành vi của agent tại các ch
 
 Hook là **cơ chế mở rộng chuẩn tắc** cho runtime Linch. Hook là một đối tượng Python thuần với một hoặc nhiều phương thức `on_*`; bạn đăng ký hook bằng `Agent(hooks=[...])`, rồi loop gọi chúng tại các chokepoint đã định kiểu. Thông qua hook, bạn có thể quan sát event, biến đổi dữ liệu đang đi qua (viết lại prompt, input/output của tool, câu trả lời cuối), hoặc điều khiển loop (chặn tool, dừng sớm, buộc thêm một turn). Trace runtime và metric đến từ OpenTelemetry tại nguồn I/O; không cần telemetry hook.
 
-Mỗi chokepoint của hook là một điểm `hook` trong [catalog vòng đời](../../architecture/events.md#typed-lifecycle-catalog) được tạo tự động; `HookDispatcher` await các hook theo thứ tự đăng ký. Các điểm `tools/pre-execute`, `tools/execute` và `tools/post-execute` riêng biệt là các waterfall cho wrapper của tool; hook của user vẫn nằm trên adapter để việc ghép biến đổi, cô lập lỗi và thứ tự `PreToolUse` nhạy cảm với bảo mật được thể hiện rõ ràng.
+Mỗi chokepoint của hook là một điểm `hook` trong [catalog vòng đời](../architecture/events.md#danh-mục-vòng-đời-có-kiểu) được tạo tự động; `HookDispatcher` await các hook theo thứ tự đăng ký. Các điểm `tools/pre-execute`, `tools/execute` và `tools/post-execute` riêng biệt là các waterfall cho wrapper của tool; hook của user vẫn nằm trên adapter để việc ghép biến đổi, cô lập lỗi và thứ tự `PreToolUse` nhạy cảm với bảo mật được thể hiện rõ ràng.
 
 ```python
 from linch import Agent, HookResult, workspace_tools

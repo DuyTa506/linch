@@ -191,7 +191,7 @@ Ba thuộc tính giúp bạn yên tâm dựa vào cơ chế này:
 
 `register` từ chối tên trùng; dùng `replace` để thay thế nóng có thể hoàn tác.
 Hợp đồng tương tự áp dụng cho các dịch vụ đăng ký trên `Context` của agent
-(`ctx.register(key, service) -> Disposable`) và các listener của event. Để gắn bước thiết lập với thu dọn, `ctx.effect(fn)` chạy `fn` ngay và thu thập disposer mà hàm trả về; khi phạm vi đóng, nó hủy disposer đó (và mọi disposer được thêm sau nó) theo thứ tự ngược. Xem [kernel](../../architecture/kernel.md).
+(`ctx.register(key, service) -> Disposable`) và các listener của event. Để gắn bước thiết lập với thu dọn, `ctx.effect(fn)` chạy `fn` ngay và thu thập disposer mà hàm trả về; khi phạm vi đóng, nó hủy disposer đó (và mọi disposer được thêm sau nó) theo thứ tự ngược. Xem [kernel](../architecture/kernel.md).
 
 ---
 

@@ -132,4 +132,4 @@ Khi `threshold_tokens` là `None`, agent tính ngưỡng bằng `max(1_000, int(
 - [./tools.md](./tools.md) — tự động chuyển kết quả tool lớn ra ngoài ngữ cảnh
 - [./deep-agent.md](./deep-agent.md) — phân vùng `/memories/` lưu trữ lâu dài
 - [./context-and-memory.md](./context-and-memory.md) — giữ cửa sổ ngữ cảnh gọn nhẹ
-- [../architecture/subsystems.md#39-virtual-filesystem-and-result-offload](../../architecture/subsystems.md#39-virtual-filesystem-and-result-offload) — vị trí của hệ thống tệp trong vòng lặp
+- [../architecture/subsystems.md#39-virtual-filesystem-and-result-offload](../architecture/subsystems.md#39-hệ-thống-tệp-ảo-và-chuyển-kết-quả-ra-ngoài) — vị trí của hệ thống tệp trong vòng lặp

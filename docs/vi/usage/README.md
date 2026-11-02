@@ -9,7 +9,7 @@ agent và sử dụng từng hệ thống con. Nếu mới làm quen với SDK, 
 [Bắt đầu nhanh](./quickstart.md), rồi quay lại đây để xem bản đồ hệ thống con.
 
 Để hiểu *lý do* đằng sau thiết kế (luồng dữ liệu, pipeline của lượt, ranh giới
-module), xem [mục lục kiến trúc](../../architecture/README.md).
+module), xem [mục lục kiến trúc](../architecture/README.md).
 
 Linch là một SDK: `Agent` chưa cấu hình có prompt trung lập về miền nghiệp vụ và
 không có tool. Workspace lập trình và chính sách tin cậy của nó là những lựa chọn
@@ -96,7 +96,7 @@ Một `Agent`, nhiều `Session` là cấu trúc tiêu chuẩn cho ứng dụng 
 | [Kho run](./run-stores.md) | Checkpoint bền vững, Postgres, lease và fencing tùy chọn, kết nối lại theo số thứ tự event |
 | [Agent và session](./agent.md) | Kho session, cờ tính năng, system prompt, nén context, budget cho run, khôi phục khi đầu ra bị cắt ngắn |
 | [Profile miền nghiệp vụ](./profiles.md) | Vai trò có phiên bản theo từng run, cấu hình plugin, hạn chế tool, giới hạn, phân lớp và cố định phiên bản để resume |
-| [Plugin và `agent.use`](../../architecture/kernel.md#plugins) | Gắn plugin có thể hoàn tác, kích hoạt dependency, dịch vụ có phạm vi và giải phóng tài nguyên |
+| [Plugin và `agent.use`](../architecture/kernel.md#plugin) | Gắn plugin có thể hoàn tác, kích hoạt dependency, dịch vụ có phạm vi và giải phóng tài nguyên |
 | [Provider](./providers.md) | Chọn provider, danh mục model, khả năng, event suy luận |
 | [Event](./events.md) | Luồng event, các trường chi phí, báo cáo run, bộ chấm điểm eval cho run dài |
 | [Thống kê lời gọi model](./events.md#modelcallevent--thống-kê-lời-gọi-mô-hình) | Mức sử dụng tích lũy của model chính/nén context, chốt chặn budget, biên nhận và xử lý mức sử dụng không xác định |
@@ -104,7 +104,7 @@ Một `Agent`, nhiều `Session` là cấu trúc tiêu chuẩn cho ứng dụng 
 | [Eval và benchmark](./evals.md) | `EvalSuite`, `run_eval_benchmark` và `scripts/eval_benchmark.py` để so sánh trong CI/giữa các provider |
 | [Tool](./tools.md) | `@tool`, `FunctionTool`, tool dạng class, bộ lập lịch, timeout/thử lại, backend Bash, dependency, quyền, principal và vai trò theo từng run |
 | [Tìm kiếm tool](./tools.md#toolsearchplugin--danh-mục-lớn) | Trì hoãn nạp schema tool và danh sách skill cho danh mục lớn qua `ToolSearchPlugin` |
-| [Principal/RBAC](./tools.md#principal-và-rule-role-theo-từng-run) | Danh tính tenant/người dùng/vai trò theo từng run và quy tắc phân quyền có điều kiện theo vai trò |
+| [Principal/RBAC](./tools.md#principal-và-quy-tắc-theo-role-cho-từng-run) | Danh tính tenant/người dùng/vai trò theo từng run và quy tắc phân quyền có điều kiện theo vai trò |
 | [Đầu ra có cấu trúc](./structured-output.md) | `OutputSchema`, thu nhận kết quả từ tool cuối cùng, sửa schema |
 | [Đầu ra tool chuẩn](./tools.md#tool-và-tool--tool-tùy-chỉnh) | `ToolOutput` được xác thực bằng JSON Schema, bộ kết xuất, trích dẫn, tệp đính kèm và metadata kết quả được lưu bền vững |
 | [Hook](./hooks.md) | Cơ chế mở rộng tiêu chuẩn: điểm kiểm soát, `HookResult`, adapter tích hợp sẵn |
@@ -118,7 +118,7 @@ Một `Agent`, nhiều `Session` là cấu trúc tiêu chuẩn cho ứng dụng 
 | [Điều phối](./coordination.md) | Nhóm nhiều agent với nhắn tin qua mailbox và bắt tay bằng correlator |
 | [Skill](./skills.md) | Workflow prompt qua lệnh slash, skill `verify` tích hợp sẵn |
 | [Mở rộng](./extending.md) | Tự triển khai điểm tích hợp: `IsolationBackend`, `Mailbox`, lắp ghép prompt và bộ dựng context |
-| [Ranh giới `linch.ext.*`](../../architecture/overview.md#extensions) | Các phần mở rộng tường minh cho workflow, eval, deep agent, báo cáo, trình chạy vòng lặp và khởi tạo dự án |
+| [Ranh giới `linch.ext.*`](../architecture/overview.md#phần-mở-rộng) | Các phần mở rộng tường minh cho workflow, eval, deep agent, báo cáo, trình chạy vòng lặp và khởi tạo dự án |
 | [Ví dụ](./examples.md) | Mục lục các ví dụ có thể chạy trong `examples/` |
 
 ---

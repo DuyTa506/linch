@@ -14,9 +14,9 @@ Yêu cầu Python 3.11+. Linch 3.0 không tương thích với 2.x. Xem
 | Mảng | Cách triển khai |
 |---|---|
 | Runtime | `Agent`, `Session`, luồng event có kiểu, lập lịch tool, nén context và budget cho run |
-| Plugin | [`agent.use(plugin, config)`](docs/architecture/kernel.md#plugins) gắn plugin có phạm vi, kích hoạt dependency và cho phép tháo gỡ để hoàn tác |
+| Plugin | [`agent.use(plugin, config)`](docs/vi/architecture/kernel.md#plugin) gắn plugin có phạm vi, kích hoạt dependency và cho phép tháo gỡ để hoàn tác |
 | Profile | [Profile miền nghiệp vụ có phiên bản](docs/vi/usage/profiles.md) kết hợp cấu hình và cố định profile của mỗi run để resume |
-| Tìm kiếm tool | [Khám phá tool và skill theo cơ chế trì hoãn](docs/vi/usage/tools.md#tool-search-for-large-catalogs) tải schema khi cần, khi vượt các ngưỡng có thể cấu hình |
+| Tìm kiếm tool | [Khám phá tool và skill theo cơ chế trì hoãn](docs/vi/usage/tools.md#toolsearchplugin--danh-mục-lớn) tải schema khi cần, khi vượt các ngưỡng có thể cấu hình |
 | Run bền vững | Kho lưu trữ session/run dùng Postgres, lease có cơ chế fencing theo epoch, checkpoint trước các tác động phụ được bảo vệ và phát lại event theo số thứ tự |
 | Cụm worker | `linch.worker` tùy chọn: điều phối bằng PgQueuer, gia hạn lease, khôi phục sau khi worker ngừng hoạt động hoặc cơ sở dữ liệu tạm thời gián đoạn và dừng tiếp nhận việc mới để hoàn tất việc đang chạy |
 | Độ tin cậy | Mặc định sửa phản hồi với số lần giới hạn, tùy chọn điều kiện tiên quyết cho tool và điều kiện hoàn tất, cùng điểm tích hợp dừng lượt chạy tuần tự |
@@ -25,7 +25,7 @@ Yêu cầu Python 3.11+. Linch 3.0 không tương thích với 2.x. Xem
 | Provider | OpenAI Responses/Chat Completions, Anthropic, Gemini/Vertex AI qua `google-genai`, DeepSeek, llama.cpp và các endpoint tương thích |
 | Phần mở rộng | Các package `linch.ext` tường minh cho workflow, eval, deep agent, báo cáo, trình chạy vòng lặp và khởi tạo dự án; hook, MCP, skill và subagent |
 | Telemetry | Trace và metric OpenTelemetry trực tiếp; ứng dụng chủ cấu hình SDK và exporter |
-| Vòng đời | [Danh mục vòng đời có kiểu và trace ID](docs/architecture/events.md#typed-lifecycle-catalog) kết nối hook, điểm tích hợp kernel, event và log của ứng dụng chủ |
+| Vòng đời | [Danh mục vòng đời có kiểu và trace ID](docs/vi/architecture/events.md#danh-mục-vòng-đời-có-kiểu) kết nối hook, điểm tích hợp kernel, event và log của ứng dụng chủ |
 
 Postgres là backend lưu trữ bền vững. Các kho InMemory dành cho kiểm thử và phát triển.
 Tool có phạm vi đọc có thể chạy song song. Predicate `parallel` xét đầu vào còn
@@ -88,7 +88,7 @@ và tắt hệ thống.
 ## Tài liệu
 
 - [Mục lục hướng dẫn sử dụng](docs/vi/usage/README.md): thiết lập và ví dụ cho từng tính năng.
-- [Mục lục kiến trúc](docs/architecture/README.md): ranh giới module, hợp đồng và các bất biến.
+- [Mục lục kiến trúc](docs/vi/architecture/README.md): ranh giới module, hợp đồng và các bất biến.
 - [Chuyển đổi từ 2.x](docs/migration-3.0.md): các API đã bị loại bỏ và cách import thay thế.
 - [Quản lý phiên bản](docs/versioning.md): API công khai, bản phát hành thử và định dạng lưu trữ bền vững.
 - [Ví dụ](examples/): các ví dụ có thể chạy, được nhóm theo hệ thống con.

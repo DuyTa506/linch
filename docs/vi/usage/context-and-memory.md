@@ -216,4 +216,4 @@ của nó trong các dependency của run để một tenant không thể tìm k
 - [Hook](../../usage/hooks.md) — `ContextInjectionHook` và vòng đời hook
 - [Tool](../../usage/tools.md) — các tool hệ thống tệp và đối tượng `deps` dùng chung
 - [Hệ thống tệp ảo](./filesystem.md) — `FileBackend`, giới hạn phạm vi và chuyển dữ liệu ra ngoài
-- [Kiến trúc](../../architecture/README.md) — các hợp đồng và bất biến của từng phân hệ
+- [Kiến trúc](../architecture/README.md) — các hợp đồng và bất biến của từng phân hệ
