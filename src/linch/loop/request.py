@@ -7,6 +7,13 @@ import time
 from dataclasses import replace
 from typing import Any, Literal, cast
 
+from ..catalog import (
+    positional_catalog,
+    snapshot_enabled,
+    snapshot_for,
+    snapshot_system,
+    snapshot_tools,
+)
 from ..context import ContextBuildResult, apply_context_budget
 from ..profiles import _base_run_config
 from ..session import RunOptions, Session
@@ -55,6 +62,14 @@ def build_user_message(prompt: str, images: list[dict[str, str]] | None = None) 
     return Message(role="user", content=content)
 
 
+def _native_catalog_flag(session: Session, model: str, *, positional: bool) -> bool | None:
+    """Return ``None`` off native providers so snapshots keep their 3.0.0 bytes."""
+    capabilities = getattr(session.agent.provider, "capabilities", None)
+    if capabilities is None or capabilities(model).catalog_changes != "positional":
+        return None
+    return positional
+
+
 def final_text(message: Message) -> str | None:
     for block in message.content:
         if isinstance(block, TextBlock):
@@ -64,11 +79,21 @@ def final_text(message: Message) -> str | None:
 
 def _re_inject_skill_context(session: Session, *, config: Any = None) -> None:
     agent = session.agent
-    listing = agent.skill_listing_text
-    catalog = (config or _base_run_config(session)).context.get("request_catalog")
-    if catalog is not None:
-        listing = catalog.skill_listing(session, listing)
-    if not listing and not session.invoked_skills:
+    config = config or _base_run_config(session)
+    snapshot_allowed = snapshot_enabled(session, config)
+    listing = None
+    if not snapshot_allowed:
+        listing = agent.skill_listing_text
+        catalog = config.context.get("request_catalog")
+        if catalog is not None:
+            listing = catalog.skill_listing(session, listing)
+    reminders = [listing] if listing else []
+    reminders.extend(
+        f"Below is the body of a previously invoked skill named '{rec.name}'.\n\n"
+        f"{rec.substituted_body}"
+        for rec in session.invoked_skills
+    )
+    if not reminders:
         return
     from ..skills.system_reminder import wrap_in_system_reminder
 
@@ -78,27 +103,18 @@ def _re_inject_skill_context(session: Session, *, config: Any = None) -> None:
     # is intentional; if a compaction summarized the reminder away, it needs to
     # be restored verbatim.
     present_text = {
-        block.text
+        getattr(block, "text", "")
         for message in session.provider_view
         for block in message.content
-        if isinstance(block, TextBlock)
+        if getattr(block, "text", None) is not None
     }
 
-    if listing:
-        text = wrap_in_system_reminder(listing)
+    for reminder in reminders:
+        text = wrap_in_system_reminder(reminder)
         if text not in present_text:
             session.session_log.append(
-                Message(role="user", content=[TextBlock(text=text)]), historical=False
-            )
-            present_text.add(text)
-    for rec in session.invoked_skills:
-        text = wrap_in_system_reminder(
-            f"Below is the body of a previously invoked skill "
-            f"named '{rec.name}'.\n\n{rec.substituted_body}"
-        )
-        if text not in present_text:
-            session.session_log.append(
-                Message(role="user", content=[TextBlock(text=text)]), historical=False
+                Message(role="user", content=[TextBlock(text=text)]),
+                historical=False,
             )
             present_text.add(text)
 
@@ -202,25 +218,30 @@ def _build_turn_request(
     """
     agent = session.agent
 
-    catalog = (config or _base_run_config(session)).context.get("request_catalog")
+    config = config or _base_run_config(session)
+    catalog = config.context.get("request_catalog")
     if catalog is not None:
         catalog.prepare()
-    config = config or _base_run_config(session)
+    snapshot = snapshot_for(session) if snapshot_enabled(session, config) else None
     tools = _select_context_tools(session, context, config=config)
     if catalog is not None:
         tools = catalog.select_tools(session, tools)
-    effective_system = config.system_blocks_override
-    if effective_system is None:
-        effective_system = session.system_blocks_override
-    if effective_system is not None:
-        base_system = list(effective_system)
+    if snapshot is not None:
+        base_system = snapshot_system(snapshot)
     else:
-        active_names = [tool.name for tool in tools.list()]
-        base_system = list(
-            config._build_system_blocks(
-                active_names, tool_sections=tools.system_prompt_sections(active_names=active_names)
+        effective_system = config.system_blocks_override
+        if effective_system is None:
+            effective_system = session.system_blocks_override
+        if effective_system is not None:
+            base_system = list(effective_system)
+        else:
+            active_names = [tool.name for tool in tools.list()]
+            base_system = list(
+                config._build_system_blocks(
+                    active_names,
+                    tool_sections=tools.system_prompt_sections(active_names=active_names),
+                )
             )
-        )
     if context and context.system_blocks:
         # Per-turn context blocks (RAG, dates, retrieved snippets) are ephemeral
         # and volatile, so force them out of the cacheable prefix: a ContextBuilder
@@ -236,12 +257,48 @@ def _build_turn_request(
     if context and context.messages:
         messages.extend(context.messages)
 
+    model = model_override or getattr(session, "active_model", None) or agent.model
+    positional = bool(
+        snapshot
+        and snapshot["tools"]
+        and positional_catalog(session, config, model)
+        and (context is None or context.selected_tools is None)
+    )
+    if snapshot is not None:
+        expand_native = not positional and getattr(
+            session.session_log, "_has_native_definitions", False
+        )
+        frozen_tools = snapshot_tools(snapshot, config.tools.schemas() if expand_native else None)
+        allowed = getattr(session, "current_turn_allowed_tools", None)
+        selected_names: set[str] | None = None
+        if allowed is not None:
+            selected_names = {str(name) for name in allowed}
+        if context is not None and context.selected_tools is not None:
+            # ``tools`` is the already-resolved request registry: it includes
+            # tag expansion, registry selections, and the allowed-tools
+            # intersection.  Derive names from it instead of serializing the
+            # original selector (a tag is not a schema name).
+            context_names = {str(schema.get("name", "")) for schema in tools.schemas()}
+            selected_names = (
+                context_names
+                if selected_names is None
+                else selected_names.intersection(context_names)
+            )
+        if selected_names is not None:
+            frozen_tools = [
+                schema for schema in frozen_tools if str(schema.get("name", "")) in selected_names
+            ]
+        wire_tools = frozen_tools
+    else:
+        wire_tools = tools.schemas()
+
     req = ProviderRequest(
         # A run-level fallback (set by the model-fallback recovery path) overrides
         # agent.model for the rest of the run; an explicit model_override wins.
-        model=model_override or getattr(session, "active_model", None) or agent.model,
+        model=model,
+        _native_catalog_changes=_native_catalog_flag(session, model, positional=positional),
         system=base_system,
-        tools=tools.schemas(),
+        tools=wire_tools,
         messages=messages,
         max_output_tokens=opts.max_output_tokens or agent.max_output_tokens,
         temperature=opts.temperature,

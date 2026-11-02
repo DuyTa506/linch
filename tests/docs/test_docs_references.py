@@ -12,7 +12,7 @@ _IMPORT = re.compile(
     rf"(?:[ \t]*,[ \t]*{_NAME}(?:[ \t]+as[ \t]+{_NAME})?)*)"
 )
 _NON_API_CONTEXT = re.compile(
-    r'(?:\[\s*["\']linch\.(?:workflow|session|tool_search)["\']\s*\]|'
+    r'(?:\[\s*["\']linch\.(?:workflow|session|tool_search|prefix)["\']\s*\]|'
     r"`linch\.tool_search`\s+metadata\b|"
     r"linch\.(?:store\.duration|run_id|turn_index|run:default)(?![\w-]|\.[\w-])|"
     r'linch\.schedule[`"\']?\s+job\b)'
@@ -35,13 +35,13 @@ def _references(text: str) -> list[tuple[int, str]]:
 
 
 def test_references_only_skip_namespace_literals_in_their_known_contexts() -> None:
-    text = """linch.workflow
+    text = """linch.workflow linch.prefix
 from linch import workflow
-["linch.workflow"] ["linch.session"] ["linch.tool_search"]
+["linch.workflow"] ["linch.session"] ["linch.tool_search"] ["linch.prefix"]
 linch.store.duration linch.run_id linch.turn_index
 linch.run:default and a deferred `linch.schedule` job"""
 
-    assert [name for _, name in _references(text)] == ["workflow", "workflow"]
+    assert [name for _, name in _references(text)] == ["workflow", "prefix", "workflow"]
 
 
 def test_documented_api_names_and_source_paths_exist() -> None:

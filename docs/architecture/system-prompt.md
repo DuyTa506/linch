@@ -22,11 +22,49 @@ flowchart TD
     LFS["Layer 3b — Filesystem block\nadded when ls/read_file/write_file/edit_file are registered\nexplains virtual filesystem and offload recovery\npresent in either prompt mode when tools are active"]
     L4["Layer 4 — after_defaults sections\nSystemPromptConfig.sections"]
     L5["Layer 5 — Environment block\nalways present"]
+    LS["Layer 5b — Skill listing\ncacheable session snapshot only"]
     L6["Layer 6 — after_env sections\nSystemPromptConfig.sections"]
     L7["Layer 7 — Append block\nSystemPromptConfig.append\nor Agent(system_prompt=...)"]
 
-    L0 --> L1 --> L2 --> L3 --> LFS --> L4 --> L5 --> L6 --> L7
+    L0 --> L1 --> L2 --> L3 --> LFS --> L4 --> L5 --> LS --> L6 --> L7
 ```
+
+## Session prefix and catalog changes
+
+Before its first ordinary provider request, a session persists a version-1 prefix
+at `session.meta["linch.prefix"]` through `session.update_meta`. It contains the
+ordered `system` blocks, wire `tools`, and two catalog digest maps: immutable
+`base` and last-communicated `notified`. Both maps contain `tools`, `skills`, and
+`subagents`; tool and skill entries use names as keys.
+The skill listing is cacheable and follows the environment block before appended
+user instructions. Subsequent requests and restarted workers use these stored
+blocks without recomputing host OS, shell, or Python metadata. Per-turn context
+blocks follow the frozen prefix with `cacheable=False`; tool selection,
+`allowed_tools`, and provider capability downgrades still apply.
+
+Catalog synchronization normally runs before context building. Enabled native
+runs with an existing snapshot defer synchronization until context selection is
+known, so context hooks may run before the next notice. Description edits, skill
+changes, and removals produce durable reminders at the conversation tail while
+preserving the frozen prefix. On append-only paths, added tools append their
+schemas; edited input schemas replace their existing slot. Eligible opt-in positional paths instead
+carry new definitions in durable catalog blocks and retain the initial tool list.
+Schema edits, empty prefixes, and run/context tool narrowing use the append-only
+phase-2 path. An append-only fallback includes tools previously added natively.
+Removed schemas remain in the prefix, and calling a removed tool follows the existing unknown-tool error path. Tool changes
+that alter the offered schemas trigger the existing cache advisory.
+
+Profile overlays, session tool overrides, effective system-block overrides, and
+an active request catalog bypass snapshots and retain live request assembly.
+Their skill reminder is inserted only when its exact text is absent from the
+provider view. Native provider protocols are off by default and UNVERIFIED against
+live endpoints; see [provider usage](../usage/providers.md#native-catalog-changes-opt-in).
+
+After compaction, `system` and `tools` stay byte-identical. Resetting `notified`
+to `base` makes the next synchronization consolidate all changes into one tail
+reminder. Persisted skill digests in `notified` prevent repeated notifications
+after a worker restart or an unrelated registry change. Only a new session
+absorbs the live catalog into its system prefix.
 
 **Invariant:** when the explicit `workspace_tools()` preset is registered and
 `replace_defaults=False`, selected software-workspace protocol clauses are pinned by

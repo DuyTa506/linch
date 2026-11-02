@@ -11,11 +11,30 @@ Gated by `FeatureFlags(skills=True)`. Linch 2.0's bare `Agent` sets this flag
 to `False`, so an SDK embedder does not discover project instructions merely
 because its process is running in a checkout.
 
+Ordinary sessions put the skill listing in their durable, cacheable system prefix
+once. `await agent.reload_skills()` rescans files off the event loop, then replaces
+the live skill mapping, listing, and skill-derived permission rules together. It
+keeps the registered `Skill` tool, even when the new mapping is empty. Existing
+sessions retain their prefix and receive a durable catalog reminder; new skills
+can be invoked on the next provider request. Reminders reference skill names and
+descriptions, never skill bodies. Durable resume and compaction use the frozen
+listing when snapshots are enabled. A run that bypasses its existing snapshot
+continues to reinject the live listing. Invoked-skill reinjection remains a
+provider-view-only reminder and does not append to `full_history`.
+
 **Subagents** are defined in `.linch/agents/*.md`; built-in named agents
 such as `verification` are also registered unless a disk agent uses the same
 name. `subagents/runner.py` creates a child agent with its own tool overlay and
 system prompt. The child's system blocks are computed from its own tool names —
 not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
+
+`reload_subagents()` replaces existing tool registrations in their original slots,
+preserving the order of tools registered afterward, including MCP tools. Reloads
+advance the agent's catalog revision so sessions detect changes before their next
+context build. Description edits include the new description, including the
+`Subagent` description's available agent types. MCP tools are identified by their
+wrapper identity and receive name-only notifications, keeping third-party
+descriptions and instructions out of the reminder's operator text.
 
 The bare SDK agent also leaves `subagents`, `mcp`, and `filesystem` disabled.
 Enable each trusted project resource explicitly, or use the opt-in

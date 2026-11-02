@@ -14,6 +14,7 @@ from typing import Any, cast, get_args
 from uuid import uuid4
 
 from .._telemetry import ChatCall, in_span
+from ..catalog import native_definitions, positional_catalog, snapshot_for, sync_catalog
 from ..compaction import (
     apply_micro_compaction,
     build_compaction_event,
@@ -170,7 +171,7 @@ async def maybe_compact_resilient(
                 logical_call_id=logical_call_id,
                 **(
                     {"_run_config": config}
-                    if config is not None and config._values is not None
+                    if config is not None and getattr(config, "_values", None) is not None
                     else {}
                 ),
             )
@@ -188,8 +189,8 @@ def _apply_model_fallback(
     """Swap *req* to the next fallback model after an overload; ``None`` if none left.
 
     Run-level: records the swap on ``session.active_model`` so every later turn
-    uses the new model, and re-applies provider capability downgrades for it. The
-    request body (messages/system/tools) is untouched — only the model changes.
+    uses the new model, and re-applies provider capability downgrades for it.
+    Append-only fallback expands eligible frozen native definitions into tools.
     A no-op (returns ``None``) when ``agent.fallback_models`` is empty/exhausted,
     which keeps the default path byte-identical.
     """
@@ -205,7 +206,14 @@ def _apply_model_fallback(
     session.active_model = next_model
     req.model = next_model
     if hasattr(agent.provider, "capabilities"):
-        apply_provider_capabilities(req, agent.provider.capabilities(next_model))
+        caps = agent.provider.capabilities(next_model)
+        if req._native_catalog_changes and caps.catalog_changes != "positional":
+            names = {tool["name"] for tool in req.tools}
+            req.tools = req.tools + [
+                tool for name, tool in native_definitions(req.messages).items() if name not in names
+            ]
+            req._native_catalog_changes = False
+        apply_provider_capabilities(req, caps)
     return ModelFallbackEvent(from_model=from_model, to_model=next_model, reason=str(exc))
 
 
@@ -271,18 +279,31 @@ async def _stream_turn_with_recovery(
                 logical_call_id=compaction_logical_call_id,
                 **(
                     {"_run_config": config}
-                    if config is not None and config._values is not None
+                    if config is not None and getattr(config, "_values", None) is not None
                     else {}
                 ),
             )
         if ladder is not None:
             reset_read_tracker_after_compaction(session, agent)
         _re_inject_skill_context(session, config=config)
+        from ..catalog import reset_catalog_notifications
+        from .runtime import maybe_save_provider_snapshot
+
+        if getattr(session, "store", None) is not None:
+            await maybe_save_provider_snapshot(session)
+        await reset_catalog_notifications(session, config)
+        defer_catalog = snapshot_for(session) is not None and positional_catalog(
+            session, config, req.model
+        )
+        if not defer_catalog:
+            await sync_catalog(session, config, None, model=req.model)
         # The runner snapshots the final provider view while suspended here.
         yield build_compaction_event(session)
         context_result = await _build_context_result(
             session, turn_index, **({"config": config} if config is not None else {})
         )
+        if defer_catalog:
+            await sync_catalog(session, config, None, context=context_result, model=req.model)
         if context_result is not None:
             yield ContextBuildEvent(
                 system_blocks=len(context_result.system_blocks),
@@ -301,6 +322,8 @@ async def _stream_turn_with_recovery(
         if getattr(session, "current_turn_allowed_tools", None) == []:
             req.tools = []
             req.tool_choice = None
+            if getattr(req, "_native_catalog_changes", None):
+                req._native_catalog_changes = False
 
     async def dispatch() -> AsyncGenerator[Any, None]:
         async with aclosing(

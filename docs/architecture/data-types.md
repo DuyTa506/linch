@@ -35,6 +35,7 @@ classDiagram
         +structured_output: bool
         +tool_choice: bool
         +prompt_cache: bool
+        +catalog_changes: Literal~append_only, positional~
     }
 
     class LoopGuard {
@@ -74,6 +75,15 @@ classDiagram
 ```
 
 ## Design rationale
+
+`CatalogChangeBlock` is an internal message-content variant with reminder text and
+tuples of added and removed tool names, plus
+`tool_definitions: tuple[dict[str, Any], ...] = ()` for frozen native additions.
+Message codecs preserve these definitions through session store reloads. Providers
+and token estimators consume its text; eligible positional adapters also render
+its native tool structures. It adds no public top-level name or lifecycle event.
+`ProviderCapabilities.catalog_changes` defaults to `"append_only"`; opt-in
+providers may report `"positional"` for an eligible model/endpoint.
 
 - **`Agent` is immutable config; `Session` is mutable state.** Splitting them lets one
   `Agent` mint many concurrent sessions safely, and makes the config the single thing a

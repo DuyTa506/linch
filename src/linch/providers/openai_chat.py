@@ -12,6 +12,7 @@ from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
 from linch.providers.base import BaseProvider, ProviderCapabilities, full_capabilities
 from linch.types import (
+    CatalogChangeBlock,
     ImageBlock,
     ModelId,
     ProviderRequest,
@@ -309,7 +310,9 @@ def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dic
         )
     for message in req.messages:
         if message.role == "assistant":
-            text_blocks = [b.text for b in message.content if isinstance(b, TextBlock)]
+            text_blocks = [
+                b.text for b in message.content if isinstance(b, (TextBlock, CatalogChangeBlock))
+            ]
             thinking_blocks = [b.thinking for b in message.content if isinstance(b, ThinkingBlock)]
             tool_calls = []
             for b in message.content:
@@ -340,7 +343,9 @@ def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dic
                     content = block.content
                 else:
                     content = "\n".join(
-                        part.text for part in block.content if isinstance(part, TextBlock)
+                        part.text
+                        for part in block.content
+                        if isinstance(part, (TextBlock, CatalogChangeBlock))
                     )
                 messages.append(
                     {
@@ -349,7 +354,7 @@ def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dic
                         "content": content or "[tool result]",
                     }
                 )
-            elif isinstance(block, TextBlock):
+            elif isinstance(block, (TextBlock, CatalogChangeBlock)):
                 text_parts.append({"type": "text", "text": block.text})
             elif isinstance(block, ImageBlock):
                 text_parts.append(

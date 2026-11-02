@@ -34,6 +34,15 @@ Each skill is a `SKILL.md` file: YAML frontmatter (name, description, argument h
 
 ---
 
+## Reloading skills
+
+To rescan skills after changing files, call `await agent.reload_skills()`. The scan
+runs off the event loop and updates the existing `Skill` tool. Active sessions
+receive a catalog reminder and can invoke the new skills on their next request;
+their original system prefix stays frozen. Removing every skill keeps the tool
+registered. See [session prefixes](../architecture/system-prompt.md#session-prefix-and-catalog-changes)
+for the current durability limitations.
+
 ## Related pages
 
 - [Agent configuration](./agent.md) — `FeatureFlags(skills=...)` and the other subsystem toggles

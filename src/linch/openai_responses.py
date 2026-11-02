@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -16,6 +17,7 @@ from ._http_errors import (
 from ._prompt_cache import openai_responses_cached_tokens
 from .errors import AbortError, AuthError, ContextLengthError, ProviderError, RateLimitError
 from .types import (
+    CatalogChangeBlock,
     ImageBlock,
     Message,
     ProviderRequest,
@@ -129,7 +131,14 @@ def tool_result_to_output(
     return output
 
 
-def translate_input(messages: list[Message]) -> list[dict[str, Any]]:
+def supports_native_catalog(model: str) -> bool:
+    match = re.match(r"^gpt-(\d+)(?:\.(\d+))?(?:-|$)", model)
+    return bool(match and (int(match[1]), int(match[2] or 0)) >= (5, 4))
+
+
+def translate_input(
+    messages: list[Message], additions: dict[int, list[dict[str, Any]]] | None = None
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for message in messages:
         if message.role == "assistant":
@@ -140,7 +149,7 @@ def translate_input(messages: list[Message]) -> list[dict[str, Any]]:
             parts: list[dict[str, Any]] = []
             calls: list[dict[str, Any]] = []
             for block in message.content:
-                if block.type == "text":
+                if isinstance(block, (TextBlock, CatalogChangeBlock)):
                     parts.append({"type": "output_text", "text": block.text})
                 elif block.type == "tool_use":
                     calls.append(
@@ -166,8 +175,19 @@ def translate_input(messages: list[Message]) -> list[dict[str, Any]]:
                         "output": tool_result_to_output(block.content),
                     }
                 )
-            elif block.type == "text":
+            elif isinstance(block, (TextBlock, CatalogChangeBlock)):
                 parts.append({"type": "input_text", "text": block.text})
+                definitions = (additions or {}).get(id(block))
+                if definitions:
+                    out.append({"type": "message", "role": "user", "content": parts})
+                    parts = []
+                    out.append(
+                        {
+                            "type": "additional_tools",
+                            "role": "developer",
+                            "tools": translate_tools(definitions),
+                        }
+                    )
             elif block.type == "image":
                 parts.append({"type": "input_image", "image_url": image_to_url(block.source)})
         if parts:
@@ -184,16 +204,44 @@ def previous_response(messages: list[Message]) -> tuple[str, int] | None:
     return None
 
 
-def build_payload(req: ProviderRequest, reasoning: OpenAIReasoning | None = None) -> dict[str, Any]:
+def build_payload(
+    req: ProviderRequest,
+    reasoning: OpenAIReasoning | None = None,
+    *,
+    native_catalog_changes: bool = False,
+) -> dict[str, Any]:
     previous = (
         previous_response(req.messages)
         if reasoning is None or reasoning.previous_response_id == "auto"
         else None
     )
+    additions: dict[int, list[dict[str, Any]]] = {}
+    active = dict.fromkeys((tool["name"] for tool in req.tools), True)
+    changed = False
+    if (
+        native_catalog_changes
+        and req._native_catalog_changes is not False
+        and supports_native_catalog(req.model)
+    ):
+        for message in req.messages:
+            for block in message.content:
+                if not isinstance(block, CatalogChangeBlock):
+                    continue
+                definitions = [
+                    tool for tool in block.tool_definitions if tool["name"] not in active
+                ]
+                if definitions:
+                    additions[id(block)] = definitions
+                for name in block.added_tools:
+                    active[name] = True
+                for name in block.removed_tools:
+                    if name in active:
+                        active[name] = False
+                changed |= bool(block.added_tools or block.removed_tools)
     input_messages = req.messages[previous[1] + 1 :] if previous else req.messages
     payload: dict[str, Any] = {
         "model": req.model,
-        "input": translate_input(input_messages),
+        "input": translate_input(input_messages, additions),
         "stream": True,
     }
     instructions = translate_instructions(req.system)
@@ -237,6 +285,14 @@ def build_payload(req: ProviderRequest, reasoning: OpenAIReasoning | None = None
             }
         else:
             payload["tool_choice"] = req.tool_choice
+    if changed and req.tool_choice in (None, "auto"):
+        payload["tool_choice"] = {
+            "type": "allowed_tools",
+            "mode": "auto",
+            "tools": [
+                {"type": "function", "name": name} for name, enabled in active.items() if enabled
+            ],
+        }
     return payload
 
 
@@ -301,6 +357,8 @@ class OpenAIResponsesClient:
         self,
         options: OpenAIOptions | None = None,
         reasoning: OpenAIReasoning | None = None,
+        *,
+        native_catalog_changes: bool = False,
     ):
         options = options or OpenAIOptions()
         self._kwargs: dict[str, Any] = {}
@@ -313,6 +371,7 @@ class OpenAIResponsesClient:
         self.client: Any | None = None
         self._client_loop: Any | None = None
         self.reasoning = reasoning
+        self.native_catalog_changes = native_catalog_changes
 
     async def _get_client(self) -> Any:
         if self.client is not None and loop_changed(self._client_loop):
@@ -335,7 +394,9 @@ class OpenAIResponsesClient:
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, Any]]:
         client = await self._get_client()
-        payload = build_payload(req, self.reasoning)
+        payload = build_payload(
+            req, self.reasoning, native_catalog_changes=self.native_catalog_changes
+        )
         try:
             stream = await client.responses.create(**payload)
             async for event in stream:

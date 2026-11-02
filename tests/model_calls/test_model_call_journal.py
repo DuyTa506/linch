@@ -1266,9 +1266,8 @@ async def test_compaction_reminder_durability_failure_prevents_dispatch(
         await _close(sessions, runs)
 
 
-async def test_changed_skill_listing_contract_blocks_resume(tmp_path: Any) -> None:
-    """Regenerated listing reminders must have the same durable execution identity."""
-    from linch.errors import ConfigError
+async def test_changed_skill_listing_contract_uses_persisted_snapshot(tmp_path: Any) -> None:
+    """A resumed run keeps the persisted skill prefix after a host reload."""
 
     sessions, runs = await _stores("memory", tmp_path)
     agent = _agent(sessions, _FaultStore(runs, "event:intent"), _Provider())
@@ -1279,6 +1278,6 @@ async def test_changed_skill_listing_contract_blocks_resume(tmp_path: Any) -> No
     changed = _agent(sessions, runs, provider)
     changed.skill_listing_text = "changed skill listing"
     resumed = await changed.session(id="session")
-    with pytest.raises(ConfigError, match="Cannot safely resume"):
-        _ = [event async for event in resumed.resume(run_id)]
-    assert provider.calls == []
+    events = [event async for event in resumed.resume(run_id)]
+    assert events[-1].type == "result"
+    assert len(provider.calls) == 1
