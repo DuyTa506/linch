@@ -366,7 +366,7 @@ async def _start_session(opened: _OpenSession, read: Any, write: Any) -> _OpenSe
         The same `_OpenSession`, with `session` set to the live session.
     """
     try:
-        session_ctx = ClientSession(_LossAwareRead(read, opened.lost), write)
+        session_ctx = ClientSession(cast(Any, _LossAwareRead(read, opened.lost)), write)
         opened.session = await session_ctx.__aenter__()
         opened.session_context = session_ctx
         await opened.session.initialize()

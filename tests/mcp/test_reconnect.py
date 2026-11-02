@@ -171,7 +171,7 @@ async def test_idle_stdio_eof_starts_reconnect_without_a_call(tmp_path: Path) ->
             {}, ToolContext(cwd=str(tmp_path), session_id="s", run_id="r", session_store=None)
         )
         assert result.content == "done"
-        await _wait_until(lambda: starts.exists() and int(starts.read_text()) >= 2, timeout=3)
+        await _wait_until(lambda: starts.exists() and int(starts.read_text() or 0) >= 2, timeout=3)
         assert connection.tools[0].name == "mcp__local__echo"
     finally:
         await connection.close()

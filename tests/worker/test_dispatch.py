@@ -468,6 +468,7 @@ async def test_resubmitting_run_id_preserves_prompt_metadata_even_when_session_b
 async def test_enqueue_acquires_sessions_in_consistent_order_before_run_ids(monkeypatch):
     from types import SimpleNamespace
 
+    pytest.importorskip("pgqueuer")
     from linch.worker import RunRequest
     from linch.worker.dispatch import _enqueue
 
