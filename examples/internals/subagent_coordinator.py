@@ -1,7 +1,7 @@
 """Subagent coordinator — parent agent delegates to typed subagents.
 
 Run:
-    python3 examples/integrations/subagent_coordinator.py
+    python3 examples/internals/subagent_coordinator.py
 
 Requires OPENAI_API_KEY for the live demo.  The local section shows how to
 load and inspect agent definitions from disk without making a provider call.

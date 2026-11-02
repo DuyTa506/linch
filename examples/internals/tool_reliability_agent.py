@@ -1,7 +1,7 @@
 """Tool timeout and retry demo — Phase 11 reliability features.
 
 Run:
-    python3 examples/tools/tool_reliability_agent.py
+    python3 examples/internals/tool_reliability_agent.py
 
 Runs the scheduler directly; no live provider call needed.
 

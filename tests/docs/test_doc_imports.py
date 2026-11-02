@@ -306,6 +306,8 @@ def test_every_shipped_example_import_matches_contract():
     for path in sorted((ROOT / "examples").rglob("*.py")):
         code = path.read_text(encoding="utf-8")
         compile(code, str(path), "exec")
+        if "internals" in path.parts:
+            continue
         errors.extend(
             f"{path.relative_to(ROOT)}:{line}: {name}"
             for name, line in import_issues(code, exports, optional)

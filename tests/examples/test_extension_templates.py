@@ -12,7 +12,10 @@ TEMPLATES = ROOT / "examples" / "extensions"
 
 
 def _load(name: str):
-    return load_module(TEMPLATES / f"{name}.py", name)
+    path = TEMPLATES / f"{name}.py"
+    if not path.exists():
+        path = ROOT / "examples" / "internals" / f"{name}.py"
+    return load_module(path, name)
 
 
 @pytest.mark.asyncio

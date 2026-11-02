@@ -1,7 +1,7 @@
 """RAG context with the first-class ContextBuilder API.
 
 Run:
-    python3 examples/context/rag_context_builder.py
+    python3 examples/internals/rag_context_builder.py
 
 This example loads ../.env automatically when present. It does not print any
 secret values. The local demo runs without a provider key.

@@ -1,7 +1,7 @@
 """Parallel search tools with Scheduler V2 resource metadata.
 
 Run:
-    python3 examples/tools/parallel_search_agent.py
+    python3 examples/internals/parallel_search_agent.py
 
 This example loads ../.env automatically when present. It does not print any
 secret values.
