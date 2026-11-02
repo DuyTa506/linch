@@ -1,7 +1,7 @@
 """Runtime-created tools and registry selection.
 
 Run:
-    python3 examples/runtime_tools.py
+    python3 examples/tools/runtime_tools.py
 
 This example loads ../.env automatically when present. It does not print any
 secret values.
@@ -20,9 +20,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from linch import Agent
-from linch.sessions import InMemorySessionStore
-from linch.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
+from linch import Agent, InMemorySessionStore, ResourceAccess, ToolContext, ToolRegistry, ToolResult
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

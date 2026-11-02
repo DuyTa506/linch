@@ -32,6 +32,8 @@ async def test_provider_template_streams_normalized_events():
 
     assert provider.context_window("template-model") > 0
     assert provider.capabilities("template-model").structured_output is False
+    assert provider.capabilities("template-model").parallel_tool_calls is False
+    assert provider.capabilities("template-model").tool_choice is False
     assert events[0]["type"] == "message_start"
     assert events[1] == {"type": "text_delta", "text": "Echo: hello"}
     assert events[2]["type"] == "message_end"

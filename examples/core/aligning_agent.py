@@ -29,11 +29,15 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, ToolResult
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    SystemPromptConfig,
+    ToolResult,
+    empty_tools,
+)
 from linch.tools import ToolScope
-from linch.tools.registry import empty_tools
 
 SYSTEM = (
     "You are a coding assistant. Always call the `long_task` tool first to begin "
@@ -150,7 +154,7 @@ async def demo_interrupt(agent: Agent, tool: LongTaskTool) -> None:
 
 
 async def main() -> None:
-    from linch.providers import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:

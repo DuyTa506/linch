@@ -32,18 +32,19 @@ from __future__ import annotations
 import asyncio
 import os
 
-from linch import Agent
-from linch.config import SystemPromptConfig
-from linch.filesystem import (
+from linch import (
+    Agent,
     CompositeFileBackend,
     DiskFileBackend,
+    InMemorySessionStore,
     OffloadConfig,
     StateFileBackend,
+    SystemPromptConfig,
+    ToolContext,
+    ToolResult,
+    workspace_tools,
 )
 from linch.filesystem.offload import maybe_offload
-from linch.sessions import InMemorySessionStore
-from linch.tools.base import ToolContext, ToolResult
-from linch.tools.registry import workspace_tools
 
 # ── A tool that returns a large result (e.g. a verbose web/RAG search) ────────
 
@@ -128,7 +129,7 @@ async def demo_live() -> None:
         return
 
     print("\n── Demo 2: live agent with auto-offload ──")
-    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch import AnthropicProvider, AnthropicProviderOptions
 
     agent = Agent(
         model="claude-sonnet-4-6",

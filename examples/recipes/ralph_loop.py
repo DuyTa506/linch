@@ -38,10 +38,14 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, empty_tools
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.filesystem import StateFileBackend
-from linch.sessions import InMemorySessionStore
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    StateFileBackend,
+    SystemPromptConfig,
+    empty_tools,
+)
 
 PROGRESS_PATH = "/progress.md"
 DONE_MARKER = "ALL DONE"
@@ -136,7 +140,7 @@ async def run_ralph_loop(
 
 
 async def main() -> None:
-    from linch.providers import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:

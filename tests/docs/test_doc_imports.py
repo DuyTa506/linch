@@ -300,6 +300,29 @@ def test_every_shipped_python_import_matches_contract(shipped_markdown):
     )
 
 
+def test_every_shipped_example_import_matches_contract():
+    exports, optional = root_exports(), optional_modules()
+    errors = []
+    for path in sorted((ROOT / "examples").rglob("*.py")):
+        code = path.read_text(encoding="utf-8")
+        compile(code, str(path), "exec")
+        errors.extend(
+            f"{path.relative_to(ROOT)}:{line}: {name}"
+            for name, line in import_issues(code, exports, optional)
+        )
+    assert not errors, "Unsupported example imports:\n" + "\n".join(errors)
+
+
+def test_example_module_run_commands_name_the_real_file():
+    errors = []
+    for path in sorted((ROOT / "examples").rglob("*.py")):
+        docstring = ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
+        for command_path in re.findall(r"\bpython(?:3)?\s+(examples/[\w./-]+\.py)", docstring):
+            if ROOT / command_path != path:
+                errors.append(f"{path.relative_to(ROOT)}: {command_path}")
+    assert not errors, "Stale example run commands:\n" + "\n".join(errors)
+
+
 def test_marked_quickstart_runs_without_network_credentials_or_optional_extras(tmp_path):
     page = ROOT / "docs/usage/quickstart.md"
     fences = [fence for fence in python_fences(page) if fence.offline]

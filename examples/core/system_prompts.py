@@ -1,7 +1,7 @@
 """System prompt control — every pattern.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/03_system_prompts.py
+    OPENAI_API_KEY=sk-... python examples/core/system_prompts.py
 
 Demonstrates:
   1. Simple append (legacy system_prompt kwarg)
@@ -27,11 +27,14 @@ from __future__ import annotations
 import asyncio
 import os
 
-from linch import Agent
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
-from linch.types import SystemBlock
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    SystemBlock,
+    SystemPromptConfig,
+    empty_tools,
+)
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"
@@ -156,7 +159,7 @@ async def multi_tenant_example(api_key: str) -> None:
 
 
 def show_tool_aware_protocol() -> None:
-    from linch.tools.registry import workspace_tools as _tfd
+    from linch import workspace_tools as _tfd
 
     # Use a base config without 'tools' so we can supply it per agent
     _base = {k: v for k, v in BASE.items() if k != "tools"}

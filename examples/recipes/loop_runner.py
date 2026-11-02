@@ -31,9 +31,12 @@ from pathlib import Path
 
 from linch import (
     Agent,
+    FeatureFlags,
+    InMemorySessionStore,
     RunOptions,
+    SystemPromptConfig,
+    empty_tools,
 )
-from linch.config import FeatureFlags, SystemPromptConfig
 from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     LoopRunner,
@@ -41,8 +44,6 @@ from linch.ext.loop_runner import (
     LoopTickResult,
     LoopTrigger,
 )
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -88,7 +89,7 @@ async def main() -> None:
         or ("deepseek-chat" if base_url else "gpt-4o-mini"),
     )
 
-    from linch.providers import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     provider = OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(

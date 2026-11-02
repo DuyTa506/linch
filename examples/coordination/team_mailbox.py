@@ -31,9 +31,17 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, Correlator, InMemoryMailbox, MailboxMessage, MailboxPlugin, empty_tools
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore
+from linch import (
+    Agent,
+    Correlator,
+    FeatureFlags,
+    InMemoryMailbox,
+    InMemorySessionStore,
+    MailboxMessage,
+    MailboxPlugin,
+    SystemPromptConfig,
+    empty_tools,
+)
 
 LEAD_SYSTEM = "You are the team lead. Delegate work to teammates with the send_message tool."
 WORKER_SYSTEM = "You are a teammate. You receive assignments as <peer-message> and act on them."
@@ -107,7 +115,7 @@ async def plan_approval_handshake(box: InMemoryMailbox, correlator: Correlator) 
 
 
 async def main() -> None:
-    from linch.providers import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:

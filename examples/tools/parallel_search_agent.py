@@ -1,7 +1,7 @@
 """Parallel search tools with Scheduler V2 resource metadata.
 
 Run:
-    python3 examples/parallel_search_agent.py
+    python3 examples/tools/parallel_search_agent.py
 
 This example loads ../.env automatically when present. It does not print any
 secret values.
@@ -25,14 +25,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from linch import Agent
+from linch import (
+    Agent,
+    InMemorySessionStore,
+    ResourceAccess,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
+    ToolContext,
+    ToolRegistry,
+    ToolResult,
+    ToolUseBlock,
+)
 from linch.abort import AbortContext
-from linch.events import ToolCallEndEvent, ToolCallStartEvent
 from linch.permissions import PermissionEngine
 from linch.scheduler import execute_tool_calls
-from linch.sessions import InMemorySessionStore
-from linch.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
-from linch.types import ToolUseBlock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

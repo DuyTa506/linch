@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from linch.providers import OpenAIChatCompletionsProvider
+    from linch import OpenAIChatCompletionsProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,8 +48,7 @@ def load_project_env() -> None:
 
 
 def _make_provider(api_key: str) -> OpenAIChatCompletionsProvider:
-    from linch.providers import OpenAIChatCompletionsProvider
-    from linch.providers.openai_chat import OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     return OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(api_key=api_key))
 
@@ -58,10 +57,7 @@ def _make_provider(api_key: str) -> OpenAIChatCompletionsProvider:
 
 
 async def run_basic(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL,
@@ -92,10 +88,7 @@ async def run_thinking(api_key: str) -> None:
     streaming) will produce PartialAssistantEvent with kind="thinking".
     Standard GPT models skip this block gracefully (thinking_chars stays 0).
     """
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL,
@@ -126,11 +119,7 @@ async def run_thinking(api_key: str) -> None:
 
 
 async def run_tools(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.loop_guard import LoopGuard
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, LoopGuard, workspace_tools
 
     agent = Agent(
         model=MODEL,
@@ -172,11 +161,7 @@ async def run_thinking_with_tools(api_key: str) -> None:
     prior reasoning context (deepseek-v4-flash style).  Standard GPT models
     that don't emit reasoning_content just skip thinking events silently.
     """
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.loop_guard import LoopGuard
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, LoopGuard, workspace_tools
 
     agent = Agent(
         model=MODEL,
@@ -210,11 +195,7 @@ async def run_thinking_with_tools(api_key: str) -> None:
 
 async def run_structured(api_key: str) -> None:
     """JSON Schema response format — parsed dict in ResultEvent.structured_output."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-    from linch.types import OutputSchema
+    from linch import Agent, FeatureFlags, InMemorySessionStore, OutputSchema, empty_tools
 
     agent = Agent(
         model=MODEL,
@@ -256,10 +237,7 @@ async def run_structured(api_key: str) -> None:
 
 
 async def run_multi_turn(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL,

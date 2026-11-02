@@ -9,8 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from linch.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult, tool
-from linch.tools.registry import empty_tools
+from linch import ResourceAccess, ToolContext, ToolRegistry, ToolResult, empty_tools, tool
 
 
 def make_lookup_tool(values: dict[str, str]):

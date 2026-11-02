@@ -91,7 +91,9 @@ async def demo_loader() -> None:
         print(f"Loaded {len(result.agents)} agent definition(s):")
         for agent in registry.list():
             tools_note = (
-                f"  tools={agent.frontmatter.tools}" if agent.frontmatter.tools else "  tools=all"
+                "  tools=all"
+                if agent.frontmatter.tools is None
+                else f"  tools={agent.frontmatter.tools}"
             )
             print(f"  [{agent.name}] {agent.frontmatter.description}{tools_note}")
 
@@ -113,11 +115,7 @@ async def demo_live_subagents() -> None:
         print("\nOPENAI_API_KEY not set; skipping live subagent demo.")
         return
 
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import SubagentEvent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, SubagentEvent, workspace_tools
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"

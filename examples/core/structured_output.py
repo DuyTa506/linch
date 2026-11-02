@@ -1,7 +1,7 @@
 """Structured output — all patterns.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/04_structured_output.py
+    OPENAI_API_KEY=sk-... python examples/core/structured_output.py
 
 Demonstrates:
   1. OutputSchema on the Agent (agent-wide default)
@@ -18,12 +18,17 @@ from __future__ import annotations
 import asyncio
 import os
 
-from linch import Agent, RunOptions
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore
-from linch.tools.base import ToolContext, ToolResult
-from linch.tools.registry import empty_tools
-from linch.types import OutputSchema
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    OutputSchema,
+    RunOptions,
+    SystemPromptConfig,
+    ToolContext,
+    ToolResult,
+    empty_tools,
+)
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"

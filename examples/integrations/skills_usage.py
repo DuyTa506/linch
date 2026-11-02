@@ -20,8 +20,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from linch import Agent, BaseProvider, FeatureFlags, Usage
-from linch.sessions import InMemorySessionStore
+from linch import Agent, BaseProvider, FeatureFlags, InMemorySessionStore, Usage
 
 SKILL_MD = """---
 description: Convert rough notes into a short stakeholder update.
