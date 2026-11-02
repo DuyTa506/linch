@@ -13,18 +13,21 @@ class McpStdioServerConfig:
         command: Executable used to launch the MCP server.
         args: Command-line arguments passed to the executable.
         env: Optional environment mapping supplied to the subprocess.
+        timeout_s: Per-tool-call SDK request read timeout in seconds (default 300).
 
     Attributes:
         type: Optional stdio transport marker.
         command: Server executable.
         args: Server command-line arguments.
         env: Optional subprocess environment.
+        timeout_s: Per-tool-call request read timeout in seconds.
     """
 
     type: Literal["stdio"] | None = None
     command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] | None = None
+    timeout_s: float = 300
 
 
 @dataclass(slots=True)
@@ -35,16 +38,19 @@ class McpHttpServerConfig:
         type: HTTP transport marker, fixed to ``"http"``.
         url: Streamable HTTP endpoint for the MCP server.
         headers: Optional HTTP headers sent with the connection.
+        timeout_s: Per-tool-call SDK request read timeout in seconds (default 300).
 
     Attributes:
         type: The HTTP transport marker.
         url: Streamable HTTP endpoint.
         headers: Optional connection headers.
+        timeout_s: Per-tool-call request read timeout in seconds.
     """
 
     type: Literal["http"] = "http"
     url: str = ""
     headers: dict[str, str] | None = None
+    timeout_s: float = 300
 
 
 McpServerConfig = McpStdioServerConfig | McpHttpServerConfig

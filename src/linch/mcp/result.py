@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from mcp.types import CallToolResult, TextContent
 
+from ..tools._limits import OUTPUT_CAP
 from ..tools.base import ToolResult
 
 
@@ -26,7 +27,8 @@ def map_mcp_result(result: CallToolResult) -> ToolResult:
         elif hasattr(block, "type") and block.type == "audio":
             content_blocks.append({"type": "text", "text": "[audio content omitted]"})
         elif hasattr(block, "type") and block.type == "resource":
-            content_blocks.append({"type": "text", "text": "[resource content omitted]"})
+            text = getattr(getattr(block, "resource", None), "text", "[resource content omitted]")
+            content_blocks.append({"type": "text", "text": text})
         else:
             content_blocks.append({"type": "text", "text": "[unsupported content omitted]"})
 
@@ -46,8 +48,12 @@ def map_mcp_result(result: CallToolResult) -> ToolResult:
         else:
             text_parts.append(f"[{b.get('type', 'block')}]")
 
+    text = "\n".join(text_parts)
+    if len(text) > OUTPUT_CAP:
+        text = text[:OUTPUT_CAP] + f"\n… (output capped at {OUTPUT_CAP} chars)"
+
     return ToolResult(
-        content="\n".join(text_parts),
+        content=text,
         summary=summary,
         is_error=is_error,
     )

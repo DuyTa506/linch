@@ -508,10 +508,16 @@ chữ thường. Ví dụ server `ops.prod` với tool `get.status` trở thành
 `ConfigError`.
 
 Chú thích của server ảnh hưởng đến scheduling và permission:
-`readOnlyHint` cấp scope read và khả năng parallel; các tool khác có scope
-write. `destructiveHint` thêm ask rule, kể cả trong mode `acceptEdits` và
-`skip-dangerous`. Approval vẫn dùng `can_use_tool`, vì vậy một ask không có
-callback sẽ bị từ chối.
+chỉ `readOnlyHint: true` mới cấp scope read và khả năng parallel; mọi tool khác
+có scope exec và chạy tuần tự. Tool không read-only mặc định là destructive, theo
+mặc định của MCP schema, trừ khi server đặt rõ `destructiveHint: false`. Tool
+destructive thêm ask rule, kể cả trong mode `acceptEdits` và `skip-dangerous`.
+Tool exec vẫn hỏi trong `acceptEdits` dù `destructiveHint` là false. Approval
+dùng `can_use_tool`, vì vậy một ask không có callback sẽ bị từ chối.
+
+Hint chỉ là lời khai của server, không được kiểm chứng. Server không trung thực
+có thể gắn nhãn read-only cho tool có ghi dữ liệu để được tự động duyệt và chạy
+parallel. Chỉ kết nối server mà bạn tin tưởng phần chú thích của nó.
 
 ---
 
