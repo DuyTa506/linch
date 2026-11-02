@@ -128,6 +128,12 @@ def _skill(body: str, arguments: list[str] | None = None) -> Skill:
     ("body", "arguments", "call_args", "expected"),
     [
         (
+            'python "${SKILL_DIR}/scripts/x.py"',
+            None,
+            "",
+            ('python "/skills/demo/scripts/x.py"',),
+        ),
+        (
             "dir=${LINCH_SKILL_DIR} sid=${LINCH_SESSION_ID}",
             None,
             "",
@@ -156,11 +162,14 @@ def test_substitute_prefix_named_slots_independently() -> None:
     assert "Review main.py against every entry in manifest.txt." in out
 
 
-def test_substitute_slot_values_are_not_reprocessed() -> None:
+@pytest.mark.parametrize("value", ["$b", "${SKILL_DIR}"])
+def test_substitute_slot_values_are_not_reprocessed(value: str) -> None:
     """Keep a literal slot marker supplied as a value instead of cascading it."""
-    out = substitute_skill_body(_skill("first=$a second=$b", ["a", "b"]), "$b final", "sess-1")
+    out = substitute_skill_body(
+        _skill("first=$a second=$b", ["a", "b"]), f"{value} final", "sess-1"
+    )
 
-    assert "first=$b second=final" in out
+    assert f"first={value} second=final" in out
 
 
 def test_substitute_braced_runtime_placeholders_allow_adjacent_text() -> None:

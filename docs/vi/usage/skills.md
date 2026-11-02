@@ -36,6 +36,28 @@ Theo mặc định, các skill của dự án nằm tại `<cwd>/.linch/skills/<
 
 Mỗi tệp bắt đầu bằng phần frontmatter YAML và phần nội dung Markdown. `description` là bắt buộc; `name` mặc định là tên thư mục. Các trường tùy chọn gồm `arguments`, `argument_hint`, `when_to_use`, `allowed_tools`, `model`, `version` và `disable_model_invocation`. Tool trả phần nội dung đã thay thế giá trị về cho mô hình và ghi lại để chèn lại vào ngữ cảnh sau này. Các định nghĩa không hợp lệ và thư mục skill là symlink sẽ bị bỏ qua. Mô hình không thể gọi một skill có `disable_model_invocation: true`. Bản ghi đè của dự án cung cấp các chỉ dẫn riêng, vì vậy hãy giữ định dạng verdict trong phần nội dung nếu ứng dụng chủ của bạn phụ thuộc vào nó.
 
+## Script đi kèm
+
+Dùng `${SKILL_DIR}` trong phần nội dung skill để tham chiếu đến thư mục của skill đó
+(`Skill.dir`). `${LINCH_SKILL_DIR}` cũng được thay bằng cùng thư mục. Ví dụ, một skill
+có thể chỉ dẫn mô hình chạy lệnh sau qua `Bash`:
+
+```bash
+python "${SKILL_DIR}/scripts/x.py"
+```
+
+Tác giả skill phải đặt đường dẫn có thể chứa dấu cách trong dấu nháy, như ví dụ trên.
+Quá trình thay thế giữ nguyên dấu nháy của tác giả; nó không tự thêm dấu nháy cho shell,
+thực thi lệnh hay thay thế đệ quy các placeholder trong giá trị được chèn vào.
+Script chạy qua tool `Bash` thông thường và chịu các bước kiểm tra quyền của tool,
+kể cả khi thư mục skill nằm ngoài workspace. Việc thay thế không cấp quyền thực thi
+hay quyền truy cập workspace; hãy cấu hình quy tắc Bash và callback phê duyệt theo
+hướng dẫn trong [Quyền](../../usage/tools.md#permissions).
+
+Backend thực thi phải truy cập được thư mục skill tại đường dẫn sau khi thay thế.
+Ví dụ, backend Docker cần một mount cung cấp thư mục đó tại cùng đường dẫn;
+thư mục chỉ có trên máy chủ không tự động xuất hiện trong container.
+
 ---
 
 ## Nạp lại skill

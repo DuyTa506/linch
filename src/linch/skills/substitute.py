@@ -26,6 +26,7 @@ def substitute_skill_body(
 
     replacements = {
         "$ARGUMENTS": args,
+        "${SKILL_DIR}": skill.dir,
         "${LINCH_SKILL_DIR}": skill.dir,
         "${LINCH_SESSION_ID}": session_id,
     }
