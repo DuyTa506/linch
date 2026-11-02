@@ -91,7 +91,10 @@ def adapter(request: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     def import_driver() -> Any:
         imports.append(True)
-        return SimpleNamespace(create_pool=create_pool)
+        return SimpleNamespace(
+            create_pool=create_pool,
+            UniqueViolationError=type("UniqueViolationError", (Exception,), {}),
+        )
 
     monkeypatch.setattr(module, "_import_asyncpg", import_driver)
     return SimpleNamespace(

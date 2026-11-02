@@ -312,3 +312,11 @@ def test_rag_names_are_public() -> None:
             register_rag_connector,
         )
     )
+
+
+def test_session_busy_error_is_public_and_carries_recovery_identity() -> None:
+    assert "SessionBusyError" in linch.__all__
+    error = linch.SessionBusyError("session", "active-run")
+    assert isinstance(error, linch.LinchError)
+    assert error.run_id == "active-run" and error.session_id == "session"
+    assert "active-run" in str(error)

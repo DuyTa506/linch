@@ -3185,6 +3185,22 @@ Raised when a run has an unexpired lease owned by another worker.
 
 Usage: [run-stores](run-stores.md).
 
+### `linch.SessionBusyError`
+
+Kind: Class.
+
+```python
+from linch import SessionBusyError
+```
+
+```text
+SessionBusyError(session_id: str, run_id: str) -> None
+```
+
+Another nonterminal run owns this session; resume or fail ``run_id``.
+
+Usage: [production](production.md).
+
 ### `linch.LeaseLostError`
 
 Kind: Class.

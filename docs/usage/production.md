@@ -68,6 +68,14 @@ See [Events](./events.md). For a compact post-run health surface (slow/failing
 tools, context pressure, cost, and recovery counters), build a
 [`RunReport`](./events.md).
 
+With a run store, admission permits one nonterminal run per session across
+processes. A new run raises public `SessionBusyError`; its `run_id` identifies
+the existing run and `session_id` identifies the session. `pending`, `running`,
+`waiting_permission`, and `suspended` all keep the session busy. Completion,
+failure, or abortion frees it. Your host must queue later prompts or report busy
+to the caller; Linch rejects overlapping runs by default. Subagents create their
+own sessions and can run while the parent session is busy.
+
 ## 3. Human-in-the-loop, durably
 
 When a tool needs approval Linch yields a `PermissionRequestEvent` before it
@@ -110,6 +118,15 @@ session = await agent.session(id=session_id)  # reattach the original session
 async for event in session.resume(run_id):
     await publish(event)
 ```
+
+Worker crashes recover through PgQueuer stall redelivery and checkpoint resume,
+as described below. In-process execution has no crash reaper: an interrupted
+nonterminal row continues to block new runs. The host should resume
+`SessionBusyError.run_id` on the original session, or reconcile any external
+side effects and call `run_store.mark_failed(run_id, error={"message": ...})`
+when abandoning it. Task cancellation counts as an interruption, including a
+client disconnect that cancels your stream handler. To end a run on disconnect
+and free the session at once, call `session.abort()` and let the stream finish.
 
 Resume requires current wire-version-3 state, a checkpoint, and a matching
 execution contract. Terminal runs, runs without checkpoints, and pre-3.0,
@@ -198,7 +215,8 @@ async def agent_factory(job: WorkerJob) -> Agent:
     )
 
 worker = Worker(pool, agent_factory, queues={"provider-a": 8, "premium": 4},
-                profiles=(support,), lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
+                profiles=(support,), max_concurrent_runs=32,
+                lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
 await worker.run()
 ```
 
@@ -231,17 +249,19 @@ deadline; hosts must keep the pool open until `run()` returns.
 The borrowed pool caches successful schema verification for its fixed database
 and search path. Additional stores on `job.pool` reuse that verification without
 schema SQL. Keep its database, role, and search path stable; after changing them
-or changing a schema, create a new pool/worker to verify again. Serialize different
-runs targeting the same session at the API boundary; the run lease does not
-serialize distinct runs in one session.
+or changing a schema, create a new pool/worker to verify again. A partial unique
+index enforces admission across the fleet. Installing it fails with `ConfigError`
+if existing sessions contain duplicate nonterminal runs; inspect and reconcile
+those rows before starting the upgraded stores/workers.
 
 `enqueue_run` creates a `pending` run and its job in one transaction with
 `dedupe_key="run:<run_id>"`. A caller-supplied run ID makes repeated submissions
 permanent no-ops, including after the queue job is acknowledged. Reusing an ID
 with a different session is rejected; the first submission's prompt and metadata
 win. `enqueue_runs(pool, [RunRequest(...)])` batches queue inserts in one
-transaction. The job JSON includes run/session IDs, prompt, optional queue and
-the caller's W3C `traceparent`. The worker restores it before execution, so the
+transaction. Any busy-session rejection rolls back the entire batch, including
+its run rows and queue jobs. The job JSON includes run/session IDs, prompt,
+optional queue and the caller's W3C `traceparent`. The worker restores it before execution, so the
 kernel's `invoke_agent` span joins the caller's trace.
 
 `enqueue_run(..., profile=..., principal=...)` and the matching `RunRequest`
@@ -264,6 +284,12 @@ Each named run queue is a PgQueuer entrypoint with a database-enforced
 all workers. `0` means unlimited; the default is one `default` run queue with
 unlimited concurrency. Queues must be registered on a worker to execute.
 These limits cap runs; use host limiters for provider request/token quotas.
+`Worker(max_concurrent_runs=32)` additionally caps concurrent queue tasks per
+worker process, independently of fleet queue limits. PgQueuer requires a minimum
+of two tasks with the worker's batch size of one; booleans and non-integers are
+rejected. The default of 32 follows the WP18 M4 benchmark knee and was not
+remeasured for this admission change. Schedule callbacks also consume queue-task
+capacity.
 
 **Capacity.** Size the database and pools from a deployment-specific benchmark;
 the SDK does not promise linear worker scaling. Use direct/session pooling for

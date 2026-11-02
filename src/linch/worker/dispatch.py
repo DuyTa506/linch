@@ -106,11 +106,11 @@ async def install(pool: Any) -> None:
 
 
 async def _enqueue(conn: Any, requests: Sequence[RunRequest], traceparent: str | None) -> list[str]:
-    # Sorted row acquisition avoids deadlocks for overlapping batches. A run row
+    # Session-first acquisition orders both admission and run-ID uniqueness locks. A run row
     # is the permanent dedupe receipt; PgQueuer dedupes only active queue rows.
     inserted: dict[str, RunRequest] = {}
     store = PostgresRunStore("")
-    for request in sorted(requests, key=lambda r: r.run_id):
+    for request in sorted(requests, key=lambda r: (r.session_id, r.run_id)):
         _entrypoint(request.queue)
         if not request.run_id or not request.session_id:
             raise ValueError("run_id and session_id must be non-empty")

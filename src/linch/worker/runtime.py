@@ -175,6 +175,7 @@ class Worker:
         *,
         worker_id: str | None = None,
         queues: Mapping[str, int] | None = None,
+        max_concurrent_runs: int = 32,
         lease_ttl_s: float = 30,
         stall_timeout_s: float = 60,
         poll_interval_s: float = 1,
@@ -188,6 +189,7 @@ class Worker:
             agent_factory: Async factory returning a fresh agent for each job.
             worker_id: Stable owner identifier used for run leases.
             queues: Queue names mapped to fleet-wide concurrency limits; zero is unlimited.
+            max_concurrent_runs: Per-process task cap, at least two (PgQueuer minimum).
             lease_ttl_s: Duration for each claimed run lease.
             stall_timeout_s: PgQueuer heartbeat timeout for stale jobs.
             poll_interval_s: Dequeue polling interval when notifications are quiet.
@@ -202,6 +204,9 @@ class Worker:
             raise ValueError("worker pool must allow at least two connections")
         self._run_store = PostgresRunStore("", pool=self._pool)
         self._session_store = PostgresSessionStore("", pool=self._pool)
+        if type(max_concurrent_runs) is not int or max_concurrent_runs < 2:
+            raise ValueError("max_concurrent_runs must be an integer of at least two")
+        self.max_concurrent_runs = max_concurrent_runs
         self.agent_factory = agent_factory
         self.worker_id = worker_id or str(uuid4())
         self.lease_ttl_s = _positive(lease_ttl_s, "lease_ttl_s")
@@ -318,6 +323,7 @@ class Worker:
                             heartbeat_timeout=timedelta(seconds=self.stall_timeout_s),
                             dequeue_timeout=timedelta(seconds=self.poll_interval_s),
                             batch_size=1,
+                            max_concurrent_tasks=self.max_concurrent_runs,
                             log_aggregation_interval=timedelta(0),
                             shutdown_on_listener_failure=True,
                         )

@@ -68,7 +68,7 @@ async def test_enqueue_is_atomic_pending_and_idempotent(pool):
         "FOR EACH ROW EXECUTE FUNCTION reject_job()"
     )
     with pytest.raises(Exception, match="queue unavailable"):
-        await enqueue_run(pool, "s", "hello", run_id="rolled-back")
+        await enqueue_run(pool, "free-session", "hello", run_id="rolled-back")
     assert await pool.fetchval("SELECT count(*) FROM runs WHERE id='rolled-back'") == 0
 
 
@@ -413,3 +413,93 @@ async def test_overlapping_batches_create_one_receipt_and_job_per_run(pool):
             ],
         )
     assert await pool.fetchval("SELECT count(*) FROM runs WHERE id='new'") == 0
+
+
+async def test_enqueue_session_conflict_rolls_back_entire_batch(pool):
+    from linch import SessionBusyError
+    from linch.worker import RunRequest, enqueue_run, enqueue_runs
+
+    await enqueue_run(pool, "busy", "first", run_id="busy-owner", meta={"original": True})
+    with pytest.raises(SessionBusyError) as rejected:
+        await enqueue_runs(
+            pool,
+            [
+                RunRequest("a-free", "first in batch", run_id="a-inserted-then-rolled-back"),
+                RunRequest("busy", "conflict", run_id="z-rejected"),
+            ],
+        )
+    assert rejected.value.run_id == "busy-owner"
+    assert await pool.fetchval("SELECT count(*) FROM runs") == 1
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
+    # A conflict between two brand-new batch members also rolls both back.
+    with pytest.raises(SessionBusyError):
+        await enqueue_runs(
+            pool,
+            [
+                RunRequest("free", "one", run_id="new-a"),
+                RunRequest("free", "two", run_id="new-b"),
+            ],
+        )
+    assert await pool.fetchval("SELECT count(*) FROM runs") == 1
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
+
+
+async def test_resubmitting_run_id_preserves_prompt_metadata_even_when_session_busy(pool):
+    from linch.worker import enqueue_run
+
+    await enqueue_run(pool, "s", "first", run_id="original", meta={"source": "first"})
+    await pool.execute("UPDATE runs SET status='completed' WHERE id='original'")
+    await enqueue_run(pool, "s", "next turn", run_id="next")
+    assert (
+        await enqueue_run(pool, "s", "changed", run_id="original", meta={"source": "new"})
+        == "original"
+    )
+    assert json.loads(await pool.fetchval("SELECT meta FROM runs WHERE id='original'")) == {
+        "source": "first"
+    }
+    payload = json.loads(
+        await pool.fetchval("SELECT payload FROM pgqueuer WHERE dedupe_key='run:original'")
+    )
+    assert payload["prompt"] == "first"
+    assert await pool.fetchval("SELECT count(*) FROM runs") == 2
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 2
+
+
+async def test_enqueue_acquires_sessions_in_consistent_order_before_run_ids(monkeypatch):
+    from types import SimpleNamespace
+
+    from linch.worker import RunRequest
+    from linch.worker.dispatch import _enqueue
+
+    acquired = []
+
+    class Connection:
+        def is_in_transaction(self):
+            return True
+
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
+        async def fetchrow(self, sql, rid, sid, ts, meta):
+            acquired.append((sid, rid))
+            return {
+                "id": rid,
+                "session_id": sid,
+                "status": "pending",
+                "checkpoint": None,
+                "meta": meta,
+                "created_at": ts,
+                "updated_at": ts,
+            }
+
+    async def insert_jobs(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(
+        "linch.worker.dispatch.Queries.from_asyncpg_connection",
+        lambda conn: SimpleNamespace(enqueue=insert_jobs),
+    )
+    requests = [RunRequest("b", "b", run_id="a"), RunRequest("a", "a", run_id="z")]
+    assert await _enqueue(Connection(), requests, None) == ["a", "z"]
+    assert acquired == [("a", "z"), ("b", "a")]
