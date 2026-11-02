@@ -93,10 +93,10 @@ provider không có chúng vẫn giữ hành vi hiện tại — không phương
 
 - **`async def prepare(self) -> None`** — các lời gọi được gộp và được await một lần trước
   run đầu tiên, dành cho bước khởi động bất đồng bộ một lần không được chạy trong quá trình
-  khởi tạo đối tượng. Provider llama.cpp dùng phương thức này để thăm dò `/props` ngoài event loop và
-  cache cửa sổ ngữ cảnh phát hiện được; `context_window()` của nó chỉ tra cứu
-  giá trị đã cache/được cấu hình và không bao giờ thực hiện I/O mạng. Nếu thăm dò thất bại,
-  nó dùng giá trị cấu hình làm phương án dự phòng.
+  khởi tạo đối tượng. llama.cpp thăm dò `/v1/props` hoặc `/props`; vLLM và SGLang
+  mặc định thăm dò `/v1/models` qua chính async client dùng cho chat. Cửa sổ ngữ cảnh được cache;
+  `context_window(model)` chỉ tra cứu cấu hình/cache và không thực hiện I/O mạng.
+  Khi thăm dò thất bại, adapter dùng giá trị dự phòng riêng.
 - **`async def aclose(self) -> None`** — đóng HTTP transport do provider sở hữu.
   Provider Anthropic và OpenAI Responses triển khai phương thức này để quá trình giải phóng agent
   giải phóng socket một cách xác định. Phương thức phải có tính lũy đẳng.
@@ -116,6 +116,88 @@ Hàm này kiểm tra ID provider, cửa sổ ngữ cảnh dương, cấu trúc k
 khai báo khả năng mà bộ dựng request của nó bỏ qua. Hàm hỗ trợ này chỉ kiểm tra
 cấu trúc provider và vòng đời; nó không đọc `stream()` hay kiểm tra event của luồng.
 Hãy kiểm thử riêng chuỗi event theo hợp đồng chuẩn hóa ở trên.
+
+## Trách nhiệm của adapter chat và máy chủ cục bộ
+
+`OpenAIChatCompletionsProvider`, `DeepSeekProvider`, `LlamaCppProvider`,
+`VLLMProvider` và `SGLangProvider` triển khai hợp đồng provider độc lập. Bốn
+adapter sau không kế thừa provider OpenAI công khai. Lớp nội bộ
+`_ChatCompletionsProvider` trong `providers/openai_chat.py` chỉ chia sẻ transport,
+tuần tự hóa thông điệp và cơ chế streaming. Hai hook trừu tượng `_reasoning_text`
+và `_usage_from_chunk` buộc từng adapter chuẩn hóa response riêng. Mỗi adapter
+khai báo khả năng và hành vi ngữ cảnh tường minh; tên mô hình cục bộ không kế thừa
+cửa sổ hay giả định khả năng từ danh mục OpenAI. OpenAI giữ giá trị mặc định riêng
+cho các mô hình đã biết.
+
+vLLM ưu tiên `delta.reasoning` trong luồng, sau đó dùng `delta.reasoning_content`;
+lịch sử assistant tiếp tục gửi `reasoning_content`. Các adapter chat khác đọc
+`reasoning_content` tường minh. Tắt việc gửi phần tăng thêm (`stream_partials=False`)
+vẫn đọc cùng luồng từ máy chủ, không chọn transport không streaming.
+
+Tùy chọn vLLM và SGLang mặc định là `context_window=None`,
+`auto_context_window=True` và `context_window_timeout=2.0`. Bước `prepare()` bất
+đồng bộ thăm dò một lần qua helper nội bộ `providers/_context_probe.py`, dùng
+client chat để thông tin xác thực, base path và redirect khớp nhau, và không chạy
+khi cả `base_url` lẫn `OPENAI_BASE_URL` đều không chọn server. Bước này cache
+`max_model_len` là số nguyên dương từ `/v1/models` theo đúng ID mô hình.
+Giá trị thiếu, null, không dương hay không hợp lệ bị bỏ qua. Server chỉ liệt kê đúng một
+mô hình áp dụng giá trị đó cho mọi alias. ID không khớp khác và thăm dò thất bại
+dùng `128_000`. `context_window` tường minh bỏ qua thăm dò;
+`auto_context_window=False` cũng tắt phát hiện. Các tùy chọn mới được thêm sau
+những trường vị trí ban đầu.
+
+vLLM và SGLang hỗ trợ `chat_template_kwargs` và `disable_thinking_kwargs` theo
+mô hình. Chỉ khai báo `can_disable_thinking=True` khi trường sau khác `None`;
+request tắt thinking gộp các kwargs đã cấu hình vào thiết lập template. Linch
+không đoán khóa: ví dụ cấu hình
+`disable_thinking_kwargs={"enable_thinking": False}` cho template Qwen3;
+Granite 4 cũng dùng `enable_thinking`, còn Granite 3.2 dùng `thinking`.
+Xem [hướng dẫn suy luận vLLM](https://docs.vllm.ai/en/stable/features/reasoning_outputs/)
+và [ví dụ cấu hình](../usage/providers.md#cấu-hình-máy-chủ-cục-bộ).
+Các điều khiển thinking hiện có của llama.cpp không đổi.
+
+Khả năng khai báo mô tả adapter, không bảo đảm mô hình hỗ trợ hay máy chủ đã
+bật thiết lập cần thiết. Gọi tool cần cả mô hình/template phù hợp lẫn cấu hình
+máy chủ:
+
+| Máy chủ | Tool | Suy luận | Báo cáo cache / metrics |
+|---|---|---|---|
+| vLLM | `--enable-auto-tool-choice --tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-prompt-tokens-details` |
+| SGLang | `--tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-cache-report`; `--enable-metrics` cho metrics máy chủ |
+| llama.cpp | `--jinja` cùng template tool phù hợp | Tùy mô hình/template | Request `cache_prompt`; số đọc quan sát được ở `timings.cache_n` |
+
+Tham khảo: [CLI vLLM](https://docs.vllm.ai/en/stable/cli/serve/),
+[tham số SGLang](https://docs.sglang.io/docs/advanced_features/server_arguments),
+[máy chủ llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+vLLM có thể nhận `cache_salt` tùy chọn theo tenant qua cơ chế chuyển tiếp
+`extra_body` hiện có, ví dụ `extra_body={"cache_salt": "tenant-id"}`.
+
+`prompt_cache=True` của vLLM/SGLang khai báo cache tiền tố tự động phía máy chủ,
+không có điều khiển cache theo request. Với llama.cpp, khai báo này tương ứng
+trường request `cache_prompt` thực sự được gửi. Trường tùy chọn SGLang
+`enable_cache_report` vẫn được chấp nhận nhưng không gửi đi, kể cả khi là `True`;
+báo cáo đòi hỏi cờ máy chủ. Trường sampling SGLang được làm phẳng:
+`sampling_params={"top_k": 50}` trở thành `extra_body={"top_k": 50}`; giá trị
+`extra_body` tường minh được ưu tiên khi xung đột, trừ `temperature` của run luôn
+được ưu tiên.
+
+Khi thiếu `usage.prompt_tokens_details`, vLLM/SGLang ghi log WARNING một lần mỗi
+instance provider, nêu `--enable-prompt-tokens-details`/`--enable-cache-report`.
+Số không đi kèm cảnh báo nghĩa là chưa biết mức tái sử dụng; có chi tiết
+`cached_tokens=0` nghĩa là cache miss hợp lệ. vLLM ánh xạ `cached_tokens` trong
+chi tiết sang `Usage.cache_read_tokens`, `created_cache_tokens` sang
+`Usage.cache_creation_tokens`, với
+`input_tokens=max(prompt_tokens-cache_read_tokens-cache_creation_tokens, 0)`.
+llama.cpp giữ cách tính số đọc cache từ `timings.cache_n`. Không thay đổi schema
+`Usage` hay định dạng lưu trữ.
+
+Để tinh chỉnh, dùng `Usage.cache_read_tokens`, thuộc tính span hiện có
+`gen_ai.usage.cache_read.input_tokens` và
+`report.summary["prompt_cache"]["cache_read_ratio"]` trên `RunReport`. Tỷ lệ là
+read / (input + read + creation), hoặc không khi mẫu số rỗng. Đặt tool/system tĩnh
+trước, nội dung động sau; kiểm tra lý do `tool_set_changed` và `model_changed` của
+`prompt_cache_advisory` khi mức tái sử dụng giảm.
+Xem [cache prompt](../usage/providers.md#lưu-cache-prompt).
 
 ## Kết xuất danh mục theo cơ chế gốc
 

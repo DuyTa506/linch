@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any, cast
 
-from linch._blocking import run_blocking
+from linch._blocking import run_blocking, settle
 from linch.errors import ToolExecutionError
 from linch.filesystem.disk import _atomic_write
 
@@ -50,21 +50,7 @@ def _file_stamp(path: Path) -> tuple[int, int]:
 
 
 async def _run_mutation(tool: Any, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-    task = asyncio.create_task(run_blocking(tool._execute, input, ctx))
-    cancelled: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            cancelled = exc
-        except BaseException:
-            if cancelled is None:
-                raise
-    if cancelled is not None:
-        if not task.cancelled():
-            task.exception()
-        raise cancelled
-    return task.result()
+    return await settle(asyncio.create_task(run_blocking(tool._execute, input, ctx)))
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +136,7 @@ class ReadTool:
                 raise ToolExecutionError("File exceeds max_read_bytes; use Grep to narrow results.")
             if _file_stamp(path) != stamp:
                 raise ToolExecutionError("File changed while reading; Read this file again.")
-            if _is_binary(data):
+            if b"\x00" in data:
                 raise ToolExecutionError("Binary files cannot be read as text.")
             text = data.decode("utf-8")
         except Exception as exc:
@@ -366,8 +352,9 @@ class EditTool:
         """
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
+        stamp = _file_stamp(path) if path.exists() else None
         if ctx.file_read_tracker is not None and (
-            not path.exists() or not ctx.file_read_tracker.is_current(str(path), _file_stamp(path))
+            stamp is None or not ctx.file_read_tracker.is_current(str(path), stamp)
         ):
             return ToolResult(content="Read this file again before editing it.", is_error=True)
         text = path.read_bytes().decode("utf-8")
@@ -425,6 +412,8 @@ class EditTool:
             new_text = text.replace(old, str(input["new_string"]))
         else:
             new_text = text.replace(old, str(input["new_string"]), 1)
+        if ctx.file_read_tracker is not None and _file_stamp(path) != stamp:
+            return ToolResult(content="Read this file again before editing it.", is_error=True)
         _atomic_write(path, new_text)
         if ctx.file_read_tracker is not None:
             ctx.file_read_tracker.invalidate_ranges(str(path))

@@ -38,7 +38,7 @@ class AdmissionConnection:
     async def fetchrow(self, sql, *args):
         if sql.startswith("SELECT id, session_id"):
             assert self.depth == 0  # failed savepoint was rolled back
-            assert "session_id" in sql and args in (("s", None), (None, "new"))
+            assert "session_id" in sql and args in (("s", None), (None, "new"), ("s", "new"))
             return None if self.disappear else {"id": self.winner, "session_id": "s"}
         self.attempts += 1
         if self.attempts == 1:
@@ -201,3 +201,15 @@ async def test_existing_schema_installs_admission_index_under_transaction():
         await store._ensure()
     assert conn.depth == 0
     assert not store._initialized
+
+
+async def test_same_id_race_falls_through_to_existing_run_check():
+    class SameId(AdmissionConnection):
+        async def fetchrow(self, sql, *args):
+            if sql.startswith("SELECT id, session_id"):
+                assert args == ("s", "new")
+                return {"id": "new", "session_id": "s"}
+            raise self.conflict
+
+    row = await PostgresRunStore("")._admit(SameId(), "INSERT", session_id="s", run_id="new")
+    assert row is None

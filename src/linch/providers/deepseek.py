@@ -15,11 +15,12 @@ from typing import Any, Literal
 from linch.errors import ProviderError
 from linch.providers.base import EffortLevel, ProviderCapabilities
 from linch.providers.openai_chat import (
-    OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
     _build_openai_compatible_payload,
+    _ChatCompletionsProvider,
+    _normalize_openai_usage,
 )
-from linch.types import ProviderRequest
+from linch.types import ModelId, ProviderRequest, Usage
 
 _DEFAULT_BASE_URL = "https://api.deepseek.com"
 _ThinkingMode = Literal["enabled", "disabled"]
@@ -64,7 +65,7 @@ class DeepSeekProviderOptions:
     include_stream_options: bool = True
 
 
-class DeepSeekProvider(OpenAIChatCompletionsProvider):
+class DeepSeekProvider(_ChatCompletionsProvider):
     """DeepSeek-native Chat Completions provider.
 
     The parent handles streaming and, importantly, preserves
@@ -109,9 +110,35 @@ class DeepSeekProvider(OpenAIChatCompletionsProvider):
         Returns:
             Capability flags for the selected model.
         """
-        caps = super().capabilities(model)
-        caps.can_disable_thinking = True
-        return caps
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            parallel_tool_calls=self._deepseek_options.parallel_tool_calls is not False,
+            structured_output=True,
+            tool_choice=True,
+            prompt_cache=True,
+            can_disable_thinking=True,
+        )
+
+    def context_window(self, model: ModelId) -> int:
+        """Return DeepSeek's configured or conservative context capacity.
+
+        Args:
+            model: DeepSeek model identifier.
+
+        Returns:
+            The configured capacity or the conservative adapter fallback.
+        """
+        value = self._deepseek_options.context_window
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 128_000
+
+    def _reasoning_text(self, delta: Any) -> str | None:
+        value = getattr(delta, "reasoning_content", None)
+        return str(value) if value else None
+
+    def _usage_from_chunk(self, chunk_usage: Any) -> Usage:
+        return _normalize_openai_usage(chunk_usage)
 
 
 def _build_deepseek_payload(

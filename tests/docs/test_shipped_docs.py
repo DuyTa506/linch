@@ -252,8 +252,10 @@ def test_clean_wheel_install_outside_checkout(tmp_path, shipped_files) -> None:
             if name.startswith("linch/_docs/")
         }
     assert actual == {str(path.relative_to(ROOT)) for path in shipped_files}
+    metadata = tomllib.loads((project / "pyproject.toml").read_text())["project"]
+    sdist_root = f"{metadata['name']}-{metadata['version']}"
     with tarfile.open(next(dist.glob("*.tar.gz"))) as archive:
-        sdist_files = {str(Path(name).relative_to("linch-3.1.0")) for name in archive.getnames()}
+        sdist_files = {str(Path(name).relative_to(sdist_root)) for name in archive.getnames()}
     assert not set(private) & sdist_files
     assert {str(path.relative_to(ROOT)) for path in shipped_files} <= sdist_files
     clean = tmp_path / "clean"

@@ -29,6 +29,25 @@ def test_sglang_capabilities_and_provider_id() -> None:
     assert caps.prompt_cache is True
 
 
+def test_sglang_reasoning_and_thinking_options_are_explicit() -> None:
+    options = SGLangProviderOptions(
+        chat_template_kwargs={"enable_thinking": True},
+        disable_thinking_kwargs={"enable_thinking": False},
+    )
+    provider = SGLangProvider(options)
+    assert provider.capabilities("served-model").can_disable_thinking is True
+
+    req = ProviderRequest(
+        model="served-model",
+        system=[],
+        tools=[],
+        messages=[],
+        thinking={"type": "disabled"},
+    )
+    payload = _build_sglang_payload(req, options)
+    assert payload["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
 def test_sglang_payload_includes_sglang_extras_and_stream_options_by_default() -> None:
     req = ProviderRequest(
         model="served-model",
@@ -39,9 +58,9 @@ def test_sglang_payload_includes_sglang_extras_and_stream_options_by_default() -
     )
     options = SGLangProviderOptions(
         parallel_tool_calls=True,
-        sampling_params={"top_p": 0.9},
+        sampling_params={"top_p": 0.9, "top_k": 50},
         enable_cache_report=True,
-        extra_body={"sampling_params": {"top_p": 0.8}, "custom": "value"},
+        extra_body={"top_p": 0.8, "top_k": 10, "custom": "value"},
     )
 
     payload = _build_sglang_payload(req, options)
@@ -52,8 +71,8 @@ def test_sglang_payload_includes_sglang_extras_and_stream_options_by_default() -
     assert payload["parallel_tool_calls"] is True
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["extra_body"] == {
-        "sampling_params": {"top_p": 0.8},
-        "enable_cache_report": True,
+        "top_p": 0.8,
+        "top_k": 10,
         "custom": "value",
     }
 
@@ -128,4 +147,59 @@ async def test_sglang_stream_text_tool_reasoning_and_cache_usage() -> None:
         cache_read_tokens=5,
     )
     assert provider._client.completions.payload["stream_options"] == {"include_usage": True}
-    assert provider._client.completions.payload["extra_body"]["enable_cache_report"] is True
+    assert "enable_cache_report" not in provider._client.completions.payload.get("extra_body", {})
+
+
+async def test_sglang_missing_cache_report_warns_once_per_provider(caplog) -> None:
+    usage = SimpleNamespace(prompt_tokens=4, completion_tokens=1)
+    chunks = [
+        _chunk(
+            delta=SimpleNamespace(content="a", reasoning_content=None, tool_calls=[]),
+            usage=usage,
+        ),
+        _chunk(
+            delta=SimpleNamespace(content="b", reasoning_content=None, tool_calls=[]),
+            usage=usage,
+        ),
+    ]
+    provider = SGLangProvider(SGLangProviderOptions(enable_cache_report=True))
+    provider._client = OpenAICompatibleFakeClient(chunks)
+    with caplog.at_level("WARNING"):
+        _ = [
+            event
+            async for event in provider.stream(
+                ProviderRequest(model="m", system=[], tools=[], messages=[])
+            )
+        ]
+    records = [r for r in caplog.records if "--enable-cache-report" in r.message]
+    assert len(records) == 1
+
+
+def test_sglang_legacy_positional_options_keep_wire_fields() -> None:
+    options = SGLangProviderOptions(
+        None,
+        "https://server/v1",
+        {"X-Test": "yes"},
+        65_536,
+        False,
+        False,
+        False,
+        {"top_k": 50},
+        True,
+        {"top_k": 10},
+    )
+    payload = _build_sglang_payload(
+        ProviderRequest(
+            model="m",
+            system=[],
+            tools=[],
+            messages=[],
+            output_schema=OutputSchema(name="answer", schema={"type": "object"}),
+        ),
+        options,
+    )
+
+    assert "stream_options" not in payload
+    assert payload["parallel_tool_calls"] is False
+    assert payload["response_format"]["type"] == "json_schema"
+    assert payload["extra_body"] == {"top_k": 10}

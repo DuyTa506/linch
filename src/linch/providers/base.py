@@ -34,12 +34,13 @@ class ProviderCapabilities:
             named after the schema as the final answer.
         tool_choice: Whether the provider honours ``tool_choice`` hints.
             When ``False``, ``req.tool_choice`` is cleared.
-        prompt_cache: Whether the provider is cache-aware and should receive
-            the request-level cache intent. Providers may implement this with
-            explicit wire controls (Anthropic cache breakpoints, llama.cpp
-            ``cache_prompt``) or with provider-native automatic prefix/session
-            caching plus usage reporting (OpenAI/Gemini). When ``False``,
-            those fields are cleared before the provider sees the request.
+        prompt_cache: Whether the provider has prompt-cache behavior relevant
+            to this adapter. This declaration describes server or provider
+            behavior; it does not imply that Linch can control cache policy at
+            request level. Explicit controls include Anthropic breakpoints and
+            llama.cpp ``cache_prompt``; OpenAI-compatible local servers may use
+            server-automatic prefix caching with usage reporting. When ``False``,
+            request cache intent is cleared before the provider sees it.
         can_disable_thinking: Whether the provider supports an explicit
             request-level switch that disables its reasoning/thinking mode for
             every model it serves.
@@ -50,7 +51,8 @@ class ProviderCapabilities:
         structured_output: Whether schema-constrained output is supported.
         structured_output_terminal_tool: Whether structured output uses a terminal tool call.
         tool_choice: Whether the provider honors tool-choice hints.
-        prompt_cache: Whether request-level prompt-cache controls are supported.
+        prompt_cache: Whether this adapter/server reports or uses prompt-cache
+            behavior; this does not imply request-level cache controls.
         can_disable_thinking: Whether request-level thinking can be disabled safely.
     """
 
@@ -71,12 +73,11 @@ def full_capabilities(
     structured_output_terminal_tool: bool = False,
     can_disable_thinking: bool = False,
 ) -> ProviderCapabilities:
-    """Build capabilities for providers with schema/output and prompt-cache support
-    APIs (Anthropic, OpenAI Chat/Responses, Gemini, and OpenAI-compatible local
-    servers). These providers all declare the same feature set and only differ in
-    ``context_window``, optional parallel-tool support, and whether their
-    structured response is represented as a terminal tool call — this factors out
-    the otherwise-duplicated ``ProviderCapabilities(...)`` literal.
+    """Build capabilities for providers with schema/output and cache reporting.
+
+    The ``prompt_cache`` flag declares adapter/server cache behavior. It does
+    not promise a request-level cache control field; each adapter documents
+    whether cache operation is explicit or server-managed.
 
     Not a ``BaseProvider.capabilities()`` default: the base class stays
     conservative (``prompt_cache=False``) for providers that don't opt in.

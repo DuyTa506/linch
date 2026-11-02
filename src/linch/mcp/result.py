@@ -3,7 +3,7 @@ from __future__ import annotations
 from mcp.types import CallToolResult, TextContent
 
 from ..tools._limits import OUTPUT_CAP
-from ..tools._output import BoundedOutput
+from ..tools._output import SPILL_LIMIT, BoundedOutput
 from ..tools.base import ToolResult
 
 
@@ -52,7 +52,7 @@ async def map_mcp_result(result: CallToolResult, *, cwd: str | None = None) -> T
     text = "\n".join(text_parts)
     metadata: dict[str, str] = {}
     truncated = len(text) > OUTPUT_CAP
-    if truncated and cwd is not None:
+    if truncated and cwd is not None and len(text) <= SPILL_LIMIT:
         output = BoundedOutput(cwd, "mcp")
         try:
             try:

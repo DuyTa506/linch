@@ -159,7 +159,9 @@ behind. Shell stdin is closed, and timeout/abort results retain partial output.
 IDs are `p` plus eight lowercase UUID4 hex digits, ephemeral across resume and
 cleanup. At most the 128 most recent finished IDs remain; spill paths remain
 available until cleanup. `max_processes` and `max_runtime_ms` enter the durable
-fingerprint. Background Bash requires both a managed registry and `ShellStarter`.
+fingerprint. `run_in_background` at `max_processes` is refused before spawning; a
+foreground command that outlives its timeout at the cap is killed. `BashProcess`
+`kill` of an already finished process keeps that process's exit status. Background Bash requires both a managed registry and `ShellStarter`.
 Only the built-in `BashProcess` identity bypasses a second approval. Timeouts
 and limits must be positive integers, excluding booleans and non-finite values;
 valid timeouts are capped at 1,800,000 ms.

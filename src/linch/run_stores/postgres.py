@@ -202,6 +202,10 @@ class PostgresRunStore:
                     run_id,
                 )
                 if owner is not None:
+                    if session_id is not None and str(owner["id"]) == run_id:
+                        # A same-id race, not a busy session: the caller's locked
+                        # path adopts a pending row or rejects the duplicate id.
+                        return None
                     raise SessionBusyError(str(owner["session_id"]), str(owner["id"])) from exc
                 if transactional or attempt == 2:
                     raise RuntimeError(
@@ -264,6 +268,7 @@ class PostgresRunStore:
                     json.dumps(safe_meta, allow_nan=False),
                     payload,
                     session_id=session_id,
+                    run_id=rid,
                 )
                 if row is not None:
                     return _row_record(row)

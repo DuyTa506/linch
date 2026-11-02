@@ -206,7 +206,7 @@ agent = Agent(
         VLLMProviderOptions(
             api_key=os.environ.get("VLLM_API_KEY", "EMPTY"),
             base_url=os.environ["VLLM_BASE_URL"],
-            context_window=128_000,
+            # Context is probed from /v1/models during provider preparation.
             extra_body={"top_k": 40},
         )
     ),
@@ -217,9 +217,10 @@ agent = Agent(
 # ── SGLang server ────────────────────────────────────────────────────────────
 # Uses SGLang's OpenAI-compatible chat completions endpoint.
 # The provider sends OpenAI stream_options by default so SGLang streams token
-# usage (input/output, plus cached_tokens when enable_cache_report is set). Set
+# usage (input/output, plus cache details when the server reports them). Set
 # include_stream_options=False for servers that reject that OpenAI field.
-# SGLang sampling/cache-report controls are exposed through extra_body.
+# Launch SGLang with --enable-cache-report to report cache usage.
+# sampling_params are flattened into extra_body; explicit extra_body wins.
 from linch import SGLangProvider, SGLangProviderOptions
 
 agent = Agent(
@@ -228,9 +229,8 @@ agent = Agent(
         SGLangProviderOptions(
             api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
             base_url=os.environ["SGLANG_BASE_URL"],
-            context_window=128_000,
+            # Context is probed from /v1/models during provider preparation.
             sampling_params={"top_p": 0.9},
-            enable_cache_report=True,
             extra_body={"custom": "value"},
         )
     ),
@@ -288,10 +288,71 @@ the native DeepSeek API, where it owns DeepSeek-specific thinking and
 JSON-object semantics.
 
 llama.cpp, vLLM, and SGLang model names and context windows are deployment
-configuration. `LlamaCppProvider` can auto-detect `n_ctx` from the server when
-available; vLLM and SGLang default to `128_000` and let you set
-`context_window` explicitly. These providers are not listed in the static
-catalog.
+configuration. `LlamaCppProvider` can auto-detect `n_ctx` from the server.
+vLLM and SGLang probe `/v1/models` by default during asynchronous preparation,
+using positive integer `max_model_len` values keyed by exact model id; a server
+listing exactly one model applies its value to any alias. They fall back to
+`128_000` for other unmatched models, invalid/missing values, or probe failure.
+These providers are not listed in the static catalog and do not inherit OpenAI
+capabilities or known-model context windows, even for matching model names.
+
+### Local-server configuration
+
+For vLLM and SGLang, `context_window=None`, `auto_context_window=True`, and
+`context_window_timeout=2.0` are the defaults. `prepare()` performs the probe off
+the event loop once; `context_window(model)` only reads configured/cached values
+and never makes a network request. An explicit context window skips probing:
+
+```python
+# Default discovery (also available on SGLangProviderOptions).
+options = VLLMProviderOptions(base_url="http://localhost:8000/v1")
+# Override the deployment capacity and skip discovery.
+options = VLLMProviderOptions(context_window=32_768)
+# Skip discovery and use the 128_000 fallback.
+options = VLLMProviderOptions(auto_context_window=False)
+```
+
+Capabilities describe adapter support; they do not guarantee the server was
+launched with the required parser or that the model/template supports tools or
+reasoning. Configure these on the server:
+
+| Server | Tool calling | Reasoning | Cache reporting / metrics |
+|---|---|---|---|
+| vLLM | `--enable-auto-tool-choice --tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-prompt-tokens-details` |
+| SGLang | `--tool-call-parser <parser>` | `--reasoning-parser <parser>` | `--enable-cache-report`; `--enable-metrics` for server metrics |
+| llama.cpp | `--jinja` with a suitable tool template | Model/template-specific | Request `cache_prompt`; observed reads in `timings.cache_n` |
+
+See the upstream [vLLM server options](https://docs.vllm.ai/en/stable/cli/serve/),
+[SGLang server arguments](https://docs.sglang.io/docs/advanced_features/server_arguments),
+and [llama.cpp server guide](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+vLLM tenants can pass `extra_body={"cache_salt": "tenant-id"}` for optional
+server-supported prefix-cache isolation; this uses the existing pass-through.
+
+vLLM and SGLang accept `chat_template_kwargs` and `disable_thinking_kwargs`.
+`can_disable_thinking` is true only when `disable_thinking_kwargs` is configured
+(not `None`). A request with `thinking={"type": "disabled"}` merges those settings
+into the configured template kwargs. Choose the key for the actual model/template:
+
+```python
+# Qwen3 template example, for either VLLMProviderOptions or SGLangProviderOptions.
+options = VLLMProviderOptions(
+    chat_template_kwargs={"enable_thinking": True},
+    disable_thinking_kwargs={"enable_thinking": False},
+)
+```
+
+Qwen3 and Granite 4 use `enable_thinking`; Granite 3.2 uses `thinking`. Linch does
+not guess a key. Check your deployed template and the
+[vLLM reasoning guide](https://docs.vllm.ai/en/stable/features/reasoning_outputs/).
+llama.cpp's existing thinking controls are unchanged.
+
+SGLang `sampling_params={"top_k": 50}` produces flat
+`extra_body={"top_k": 50}`, not a nested `sampling_params` object. Explicit
+`extra_body` fields win on conflicts, except that a run's `temperature` always
+wins. See the
+[SGLang OpenAI-compatible API](https://docs.sglang.io/docs/basic_usage/openai_api_completions).
+`enable_cache_report` remains an options field for compatibility but has no
+request-wire effect, even when `True`; use the server launch flag above.
 
 ---
 
@@ -431,23 +492,47 @@ for wire placement and replay details.
 
 ## Prompt caching
 
-Every direct provider reports `prompt_cache=True`, but the wire mechanism
-differs:
+Caching support and reporting depend on the provider and server. vLLM and
+SGLang declare `prompt_cache=True` for server-automatic prefix caching, without
+request-level cache control; llama.cpp declares it for its actual `cache_prompt`
+request field. The mechanisms differ:
 
 | Provider | Mechanism | What Linch emits |
 |---|---|---|
 | `anthropic` | Explicit `cache_control` breakpoints | Marks the last static system block **and** the last user message — caches `tools → system → conversation`, the prefix growing each turn |
 | `llamacpp` | Explicit `cache_prompt` | Sends `cache_prompt: true` in the request body |
-| `sglang` | Server-managed cache | `enable_cache_report: true` requests cached-token reporting; availability depends on server configuration |
+| `sglang` | Server-automatic prefix cache | Reads returned cache details; launch with `--enable-cache-report`; no request-level cache switch |
 | `openai-chat` | Automatic prefix cache | Requests usage with `stream_options.include_usage`; reads cached-token details when returned |
-| `deepseek` | Server-managed cache | Requests stream usage and normalizes returned cache counts through the OpenAI-chat path |
+| `deepseek` | Server-managed cache | Requests stream usage and normalizes DeepSeek cache counts in its own adapter |
 | `openai-responses` | Automatic prefix cache | Reads cached-token details from response usage |
-| `vllm` | Server-configured automatic prefix cache (APC) | Uses the OpenAI-chat usage path; cache availability depends on server configuration |
+| `vllm` | Server-automatic prefix cache (APC) | Reads `prompt_tokens_details.cached_tokens` and `created_cache_tokens`; launch with `--enable-prompt-tokens-details`; no request-level cache switch |
 | `gemini` | Provider-managed implicit cache | Reads cached-token counts when the response supplies them; this adapter sends no explicit cache-control setting |
 
 Regardless of mechanism, a cache **hit** is surfaced uniformly as
 `Usage.cache_read_tokens`, which rolls up into `RunReport`'s cache-read ratio —
 these reported counts show observed cache reuse.
+
+If `usage.prompt_tokens_details` is missing, vLLM and SGLang log a WARNING once
+per provider instance naming `--enable-prompt-tokens-details` and
+`--enable-cache-report`, respectively. A reported zero with this warning means
+cache reuse is unknown, not a confirmed miss; present details with
+`cached_tokens=0` represent a valid miss. Setting SGLang's compatibility option
+`enable_cache_report=True` cannot enable server reporting or suppress the warning.
+vLLM maps `created_cache_tokens` to `Usage.cache_creation_tokens` and computes
+`input_tokens=max(prompt_tokens-cache_read_tokens-cache_creation_tokens, 0)`.
+llama.cpp keeps reading observed cache hits from `timings.cache_n`.
+
+### Tuning from observed usage
+
+Compare `Usage.cache_read_tokens` and the existing OpenTelemetry span attribute
+`gen_ai.usage.cache_read.input_tokens` across requests with a stable prefix.
+The `RunReport` summary exposes
+`report.summary["prompt_cache"]["cache_read_ratio"]`, calculated as cache reads
+divided by `input_tokens + cache_read_tokens + cache_creation_tokens` (zero for
+an empty denominator). Keep static tools and system content first, dynamic content
+later. Inspect `prompt_cache_advisory` reasons `tool_set_changed` and
+`model_changed` when reuse drops; these are existing observations, not server
+cache controls. The `Usage` schema and persisted format are unchanged.
 
 For a live check of the provider's current prompt-cache behavior, run:
 
@@ -558,7 +643,9 @@ Checklist for reliable hits:
 
 ## Reading thinking events
 
-Any provider that emits `reasoning_content` (DeepSeek and other OpenAI-compatible
+vLLM prefers streamed `delta.reasoning` and falls back to `reasoning_content`;
+assistant history still uses `reasoning_content`. Other chat adapters explicitly
+read `reasoning_content`. Any provider that emits `reasoning_content` (DeepSeek and other OpenAI-compatible
 reasoning models) or Anthropic thinking blocks streams its intermediate
 reasoning as `partial_assistant` events with `delta["kind"] == "thinking"`. This
 requires `include_partial_messages=True` on the `Agent`. Distinguish thinking

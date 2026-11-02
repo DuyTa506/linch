@@ -9,11 +9,12 @@ from urllib.parse import urlsplit, urlunsplit
 from linch._prompt_cache import LLAMACPP_PROMPT_CACHE, apply_extra_body_cache
 from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
-    OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
     _build_openai_compatible_payload,
+    _ChatCompletionsProvider,
+    _normalize_openai_usage,
 )
-from linch.types import ModelId, ProviderRequest
+from linch.types import ModelId, ProviderRequest, Usage
 
 
 @dataclass(slots=True)
@@ -67,7 +68,7 @@ class LlamaCppProviderOptions:
     extra_body: dict[str, Any] | None = None
 
 
-class LlamaCppProvider(OpenAIChatCompletionsProvider):
+class LlamaCppProvider(_ChatCompletionsProvider):
     """llama.cpp server provider using its OpenAI-compatible chat endpoint.
 
     Args:
@@ -143,9 +144,21 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
         Returns:
             Capability flags for the configured llama.cpp endpoint.
         """
-        caps = super().capabilities(model)
-        caps.can_disable_thinking = True
-        return caps
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            parallel_tool_calls=self._llamacpp_options.parallel_tool_calls is not False,
+            structured_output=True,
+            tool_choice=True,
+            prompt_cache=True,
+            can_disable_thinking=True,
+        )
+
+    def _reasoning_text(self, delta: Any) -> str | None:
+        value = getattr(delta, "reasoning_content", None)
+        return str(value) if value else None
+
+    def _usage_from_chunk(self, chunk_usage: Any) -> Usage:
+        return _normalize_openai_usage(chunk_usage)
 
     def _chunk_cache_read_tokens(self, chunk: Any) -> int | None:
         return _llamacpp_cache_read_tokens(chunk)

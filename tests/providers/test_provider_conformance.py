@@ -17,6 +17,7 @@ Two layers:
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -47,6 +48,27 @@ def _all_providers() -> list[tuple[str, Any, str]]:
         ("vllm", VLLMProvider, "local-model"),
         ("sglang", SGLangProvider, "local-model"),
     ]
+
+
+def test_local_compatible_adapters_do_not_inherit_openai_behavior() -> None:
+    from linch.providers import (
+        DeepSeekProvider,
+        LlamaCppProvider,
+        OpenAIChatCompletionsProvider,
+        SGLangProvider,
+        VLLMProvider,
+    )
+
+    for provider in (VLLMProvider(), SGLangProvider(), LlamaCppProvider(), DeepSeekProvider()):
+        assert not isinstance(provider, OpenAIChatCompletionsProvider)
+        assert provider.context_window("gpt-5.5") == 128_000
+
+
+def test_neutral_chat_base_requires_adapter_parsing_hooks() -> None:
+    from linch.providers.openai_chat import _ChatCompletionsProvider
+
+    assert inspect.isabstract(_ChatCompletionsProvider)
+    assert {"_reasoning_text", "_usage_from_chunk"} <= _ChatCompletionsProvider.__abstractmethods__
 
 
 @pytest.mark.parametrize("name,cls,model", _all_providers(), ids=[p[0] for p in _all_providers()])
