@@ -292,8 +292,9 @@ JSON-object riêng của DeepSeek.
 Tên mô hình và cửa sổ ngữ cảnh của llama.cpp, vLLM và SGLang thuộc cấu hình
 triển khai. `LlamaCppProvider` có thể tự phát hiện `n_ctx` từ máy chủ.
 vLLM và SGLang mặc định thăm dò `/v1/models` trong bước chuẩn bị bất đồng bộ,
-đọc `max_model_len` là số nguyên dương theo đúng ID mô hình. Giá trị dự phòng là
-`128_000` khi không khớp ID, giá trị thiếu/không hợp lệ hoặc thăm dò thất bại.
+đọc `max_model_len` là số nguyên dương theo đúng ID mô hình; server chỉ liệt kê
+đúng một mô hình áp dụng giá trị đó cho mọi alias. Giá trị dự phòng là `128_000`
+khi không khớp ID khác, giá trị thiếu/không hợp lệ hoặc thăm dò thất bại.
 Các provider này không có trong danh mục tĩnh và không kế thừa khả năng hay cửa sổ
 ngữ cảnh của OpenAI, kể cả khi tên mô hình giống nhau.
 
@@ -348,7 +349,8 @@ Các điều khiển thinking hiện có của llama.cpp không đổi.
 
 SGLang `sampling_params={"top_k": 50}` tạo phần thân phẳng
 `extra_body={"top_k": 50}`, không tạo đối tượng `sampling_params` lồng nhau.
-Các trường `extra_body` tường minh được ưu tiên khi xung đột. Xem
+Các trường `extra_body` tường minh được ưu tiên khi xung đột, trừ `temperature`
+của run luôn được ưu tiên. Xem
 [API tương thích OpenAI của SGLang](https://docs.sglang.io/docs/basic_usage/openai_api_completions).
 Trường tùy chọn `enable_cache_report` được giữ để tương thích nhưng không ảnh hưởng
 request gửi đi, kể cả khi là `True`; hãy dùng cờ khởi chạy máy chủ ở trên.

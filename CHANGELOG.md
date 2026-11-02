@@ -16,7 +16,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   `OPENAI_BASE_URL` apply, and the `/models` path matches the chat base URL.
 - Concurrent `create_run` calls with one id and session raise the documented
   duplicate-id `ValueError` or adopt the pending row instead of `SessionBusyError`.
-- `Agent(tools=...)` rejects anything but a `ToolRegistry` with a clear error.
+- `Agent(tools=...)` raises `ConfigError` for any non-`None` value other than a
+  `ToolRegistry`.
 - Local and DeepSeek adapters declare their own capabilities, context windows,
   reasoning, and usage semantics instead of inheriting OpenAI model assumptions.
 - vLLM streams prefer `reasoning` with a `reasoning_content` fallback and preserve

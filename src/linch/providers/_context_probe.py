@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, TypeGuard
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,11 @@ async def probe_context_windows(
         if len(rows) == 1:
             result[_SOLE_MODEL] = value
     return result
+
+
+def valid_context_window(value: object) -> TypeGuard[int]:
+    """Return whether a configured capacity is a positive non-boolean integer."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def probed_context_window(cache: dict[str, int] | None, model: str) -> int:

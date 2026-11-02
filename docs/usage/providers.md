@@ -290,8 +290,9 @@ JSON-object semantics.
 llama.cpp, vLLM, and SGLang model names and context windows are deployment
 configuration. `LlamaCppProvider` can auto-detect `n_ctx` from the server.
 vLLM and SGLang probe `/v1/models` by default during asynchronous preparation,
-using positive integer `max_model_len` values keyed by exact model id. They fall
-back to `128_000` for unmatched models, invalid/missing values, or probe failure.
+using positive integer `max_model_len` values keyed by exact model id; a server
+listing exactly one model applies its value to any alias. They fall back to
+`128_000` for other unmatched models, invalid/missing values, or probe failure.
 These providers are not listed in the static catalog and do not inherit OpenAI
 capabilities or known-model context windows, even for matching model names.
 
@@ -347,7 +348,8 @@ llama.cpp's existing thinking controls are unchanged.
 
 SGLang `sampling_params={"top_k": 50}` produces flat
 `extra_body={"top_k": 50}`, not a nested `sampling_params` object. Explicit
-`extra_body` fields win on conflicts. See the
+`extra_body` fields win on conflicts, except that a run's `temperature` always
+wins. See the
 [SGLang OpenAI-compatible API](https://docs.sglang.io/docs/basic_usage/openai_api_completions).
 `enable_cache_report` remains an options field for compatibility but has no
 request-wire effect, even when `True`; use the server launch flag above.

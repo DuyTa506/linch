@@ -4,7 +4,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from linch.providers._context_probe import probe_context_windows, probed_context_window
+from linch.providers._context_probe import (
+    probe_context_windows,
+    probed_context_window,
+    valid_context_window,
+)
 from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
     OpenAIChatProviderOptions,
@@ -107,7 +111,7 @@ class SGLangProvider(_ChatCompletionsProvider):
             The configured or discovered positive token capacity.
         """
         configured = self._sglang_options.context_window
-        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        if valid_context_window(configured):
             return configured
         return probed_context_window(self._context_window_cache, model)
 
@@ -116,7 +120,7 @@ class SGLangProvider(_ChatCompletionsProvider):
         opts = self._sglang_options
         if self._context_window_cache is not None:
             return
-        if opts.context_window is not None or not opts.auto_context_window:
+        if valid_context_window(opts.context_window) or not opts.auto_context_window:
             self._context_window_cache = {}
             return
         self._context_window_cache = await probe_context_windows(
@@ -140,7 +144,7 @@ class SGLangProvider(_ChatCompletionsProvider):
             structured_output=True,
             tool_choice=True,
             prompt_cache=True,
-            can_disable_thinking=self._sglang_options.disable_thinking_kwargs is not None,
+            can_disable_thinking=bool(self._sglang_options.disable_thinking_kwargs),
         )
 
     def _reasoning_text(self, delta: Any) -> str | None:
@@ -196,6 +200,8 @@ def _build_sglang_payload(
 ) -> dict[str, Any]:
     opts = options or SGLangProviderOptions()
     extra_body = _sglang_extra_body(opts) or {}
+    if req.temperature is not None:
+        extra_body.pop("temperature", None)
     if req.thinking is not None and req.thinking.get("type") == "disabled":
         if opts.disable_thinking_kwargs is not None:
             configured = extra_body.get("chat_template_kwargs")
@@ -213,4 +219,7 @@ def _build_sglang_payload(
 
 def _detail_value(details: Any, name: str) -> int:
     value = details.get(name) if isinstance(details, dict) else getattr(details, name, 0)
-    return max(0, int(value or 0))
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0

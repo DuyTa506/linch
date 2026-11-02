@@ -4,7 +4,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from linch.providers._context_probe import probe_context_windows, probed_context_window
+from linch.providers._context_probe import (
+    probe_context_windows,
+    probed_context_window,
+    valid_context_window,
+)
 from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
     OpenAIChatProviderOptions,
@@ -96,7 +100,7 @@ class VLLMProvider(_ChatCompletionsProvider):
             The configured or discovered positive token capacity.
         """
         configured = self._vllm_options.context_window
-        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        if valid_context_window(configured):
             return configured
         return probed_context_window(self._context_window_cache, model)
 
@@ -105,7 +109,7 @@ class VLLMProvider(_ChatCompletionsProvider):
         opts = self._vllm_options
         if self._context_window_cache is not None:
             return
-        if opts.context_window is not None or not opts.auto_context_window:
+        if valid_context_window(opts.context_window) or not opts.auto_context_window:
             self._context_window_cache = {}
             return
         self._context_window_cache = await probe_context_windows(
@@ -129,7 +133,7 @@ class VLLMProvider(_ChatCompletionsProvider):
             structured_output=True,
             tool_choice=True,
             prompt_cache=True,
-            can_disable_thinking=self._vllm_options.disable_thinking_kwargs is not None,
+            can_disable_thinking=bool(self._vllm_options.disable_thinking_kwargs),
         )
 
     def _reasoning_text(self, delta: Any) -> str | None:
@@ -191,4 +195,7 @@ def _thinking_extra_body(req: ProviderRequest, opts: VLLMProviderOptions) -> dic
 
 def _detail_value(details: Any, name: str) -> int:
     value = details.get(name) if isinstance(details, dict) else getattr(details, name, 0)
-    return max(0, int(value or 0))
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0

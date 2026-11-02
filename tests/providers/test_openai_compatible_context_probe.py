@@ -256,3 +256,54 @@ async def test_openai_compatible_cache_warning_is_once_per_instance(
             )
         ]
     assert not [record for record in caplog.records if flag in record.message]
+
+
+@pytest.mark.parametrize(
+    ("provider_cls", "options_cls"),
+    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
+)
+@pytest.mark.parametrize("configured", [0, -1, True])
+async def test_invalid_context_window_still_probes(provider_cls, options_cls, configured):
+    models = _Models([{"id": "m", "max_model_len": 16_384}])
+    provider = _with_models(
+        provider_cls(options_cls(base_url="https://server", context_window=configured)), models
+    )
+    await provider.prepare()
+    assert provider.context_window("m") == 16_384
+
+
+@pytest.mark.parametrize(
+    ("provider_cls", "options_cls"),
+    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
+)
+def test_empty_disable_thinking_kwargs_cannot_disable_thinking(provider_cls, options_cls):
+    provider = provider_cls(options_cls(disable_thinking_kwargs={}))
+    assert provider.capabilities("m").can_disable_thinking is False
+
+
+@pytest.mark.parametrize(
+    ("provider_cls", "options_cls"),
+    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
+)
+def test_malformed_cache_detail_does_not_abort_stream(provider_cls, options_cls):
+    provider = provider_cls(options_cls())
+    usage = SimpleNamespace(
+        prompt_tokens=10,
+        completion_tokens=2,
+        prompt_tokens_details=SimpleNamespace(cached_tokens="unknown", created_cache_tokens="x"),
+    )
+    parsed = provider._usage_from_chunk(usage)
+    assert parsed.input_tokens == 10
+    assert parsed.cache_read_tokens == 0
+
+
+def test_run_temperature_beats_configured_sampling_temperature():
+    opts = SGLangProviderOptions(sampling_params={"temperature": 0.9, "top_k": 50})
+    provider = SGLangProvider(opts)
+    req = ProviderRequest(model="m", system="", messages=[], tools=[], temperature=0.1)
+    payload = provider._build_payload(req)
+    assert payload["temperature"] == 0.1
+    assert payload["extra_body"] == {"top_k": 50}
+
+    unset = provider._build_payload(ProviderRequest(model="m", system="", messages=[], tools=[]))
+    assert unset["extra_body"]["temperature"] == 0.9

@@ -140,8 +140,9 @@ Tùy chọn vLLM và SGLang mặc định là `context_window=None`,
 client chat để thông tin xác thực, base path và redirect khớp nhau, và không chạy
 khi cả `base_url` lẫn `OPENAI_BASE_URL` đều không chọn server. Bước này cache
 `max_model_len` là số nguyên dương từ `/v1/models` theo đúng ID mô hình.
-Giá trị thiếu, null, không dương hay không hợp lệ bị bỏ qua. ID không khớp và
-thăm dò thất bại dùng `128_000`. `context_window` tường minh bỏ qua thăm dò;
+Giá trị thiếu, null, không dương hay không hợp lệ bị bỏ qua. Server chỉ liệt kê đúng một
+mô hình áp dụng giá trị đó cho mọi alias. ID không khớp khác và thăm dò thất bại
+dùng `128_000`. `context_window` tường minh bỏ qua thăm dò;
 `auto_context_window=False` cũng tắt phát hiện. Các tùy chọn mới được thêm sau
 những trường vị trí ban đầu.
 
@@ -177,7 +178,8 @@ trường request `cache_prompt` thực sự được gửi. Trường tùy ch�
 `enable_cache_report` vẫn được chấp nhận nhưng không gửi đi, kể cả khi là `True`;
 báo cáo đòi hỏi cờ máy chủ. Trường sampling SGLang được làm phẳng:
 `sampling_params={"top_k": 50}` trở thành `extra_body={"top_k": 50}`; giá trị
-`extra_body` tường minh được ưu tiên khi xung đột.
+`extra_body` tường minh được ưu tiên khi xung đột, trừ `temperature` của run luôn
+được ưu tiên.
 
 Khi thiếu `usage.prompt_tokens_details`, vLLM/SGLang ghi log WARNING một lần mỗi
 instance provider, nêu `--enable-prompt-tokens-details`/`--enable-cache-report`.

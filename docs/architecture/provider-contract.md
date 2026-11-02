@@ -138,8 +138,9 @@ vLLM and SGLang options default to `context_window=None`,
 `prepare()` probe uses the shared private `providers/_context_probe.py` helper,
 through the chat client so credentials, base path, and redirects match, and never
 runs when neither `base_url` nor `OPENAI_BASE_URL` selects a server. It caches
-positive integer `max_model_len` values from `/v1/models` by exact model id. Missing, null, nonpositive, or otherwise invalid values are ignored. Unknown
-ids and failed probes fall back to `128_000`. An explicit `context_window` skips
+positive integer `max_model_len` values from `/v1/models` by exact model id. Missing, null, nonpositive, or otherwise invalid values are ignored. A server
+listing exactly one model applies its value to any alias. Other unknown ids and
+failed probes fall back to `128_000`. An explicit `context_window` skips
 the probe; `auto_context_window=False` also disables discovery. New options are
 appended after the original positional fields.
 
@@ -174,7 +175,8 @@ request-level cache control. llama.cpp's declaration corresponds to the actual
 `cache_prompt` request field. SGLang's `enable_cache_report` options field remains
 accepted but is never sent, even if `True`; reporting requires the server flag.
 SGLang sampling fields are flat: `sampling_params={"top_k": 50}` becomes
-`extra_body={"top_k": 50}`, with explicit `extra_body` values winning conflicts.
+`extra_body={"top_k": 50}`, with explicit `extra_body` values winning conflicts
+except for a run's `temperature`, which always wins.
 
 If `usage.prompt_tokens_details` is absent, vLLM/SGLang log a WARNING once per
 provider instance naming `--enable-prompt-tokens-details`/`--enable-cache-report`.
