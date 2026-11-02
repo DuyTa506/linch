@@ -23,8 +23,11 @@ from typing import Any
 
 from linch import (
     Agent,
+    BaseProvider,
+    FeatureFlags,
+    InMemorySessionStore,
+    Usage,
 )
-from linch.config import FeatureFlags
 from linch.ext.loop_runner import (
     FileLoopArtifactStore,
     InMemoryLoopLeaseStore,
@@ -33,9 +36,6 @@ from linch.ext.loop_runner import (
     LoopTickResult,
     LoopTrigger,
 )
-from linch.providers.base import BaseProvider
-from linch.sessions import InMemorySessionStore
-from linch.types import Usage
 
 
 def build_runner(

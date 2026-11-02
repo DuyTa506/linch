@@ -16,11 +16,18 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from linch import Agent, CompactionLadder, DetailedCompaction
-from linch.errors import ContextLengthError
-from linch.sessions import InMemorySessionStore
-from linch.tools import ToolRegistry, ToolResult
-from linch.types import TextBlock, ToolResultBlock, Usage
+from linch import (
+    Agent,
+    CompactionLadder,
+    ContextLengthError,
+    DetailedCompaction,
+    InMemorySessionStore,
+    TextBlock,
+    ToolRegistry,
+    ToolResult,
+    ToolResultBlock,
+    Usage,
+)
 
 
 class NoisyTool:

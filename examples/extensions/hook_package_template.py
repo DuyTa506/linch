@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from linch.hooks import BeforeFinalAnswerContext, EventEmitContext, HookResult, PreToolUseContext
+from linch import BeforeFinalAnswerContext, HookResult, PreToolUseContext
+from linch.hooks import EventEmitContext
 
 
 @dataclass(slots=True)

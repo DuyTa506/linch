@@ -31,8 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from linch.providers import OpenAIChatCompletionsProvider
-    from linch.providers.anthropic import AnthropicProvider
+    from linch import AnthropicProvider, OpenAIChatCompletionsProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 DEEPSEEK_BASE_OPENAI = "https://api.deepseek.com"
@@ -55,8 +54,7 @@ def load_project_env() -> None:
 
 
 def _make_openai_provider(api_key: str) -> OpenAIChatCompletionsProvider:
-    from linch.providers import OpenAIChatCompletionsProvider
-    from linch.providers.openai_chat import OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     return OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=api_key, base_url=DEEPSEEK_BASE_OPENAI)
@@ -64,7 +62,7 @@ def _make_openai_provider(api_key: str) -> OpenAIChatCompletionsProvider:
 
 
 def _make_anthropic_provider(api_key: str) -> AnthropicProvider:
-    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch import AnthropicProvider, AnthropicProviderOptions
 
     return AnthropicProvider(
         AnthropicProviderOptions(api_key=api_key, base_url=DEEPSEEK_BASE_ANTHROPIC)
@@ -75,10 +73,7 @@ def _make_anthropic_provider(api_key: str) -> AnthropicProvider:
 
 
 async def run_openai_basic(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL_FLASH,
@@ -108,10 +103,7 @@ async def run_openai_thinking(api_key: str) -> None:
     each reasoning_content chunk.  The delta has kind="thinking" for thinking
     chunks and kind="text" for answer chunks.
     """
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL_FLASH,
@@ -145,11 +137,7 @@ async def run_openai_thinking(api_key: str) -> None:
 
 
 async def run_openai_tools(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.loop_guard import LoopGuard
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, LoopGuard, workspace_tools
 
     agent = Agent(
         model=MODEL_FLASH,
@@ -191,11 +179,7 @@ async def run_openai_thinking_with_tools(api_key: str) -> None:
     The model emits reasoning_content before each tool call; stream_turn
     flushes it into a ThinkingBlock that is round-tripped on the next turn.
     """
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.loop_guard import LoopGuard
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, LoopGuard, workspace_tools
 
     agent = Agent(
         model=MODEL_FLASH,
@@ -228,10 +212,7 @@ async def run_openai_thinking_with_tools(api_key: str) -> None:
 
 
 async def run_anthropic_basic(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL_FLASH,
@@ -256,11 +237,14 @@ async def run_anthropic_basic(api_key: str) -> None:
 
 async def run_anthropic_thinking(api_key: str) -> None:
     """DeepSeek reasoning via the Anthropic-compatible endpoint with thinking."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import (
+        Agent,
+        AnthropicProvider,
+        AnthropicProviderOptions,
+        FeatureFlags,
+        InMemorySessionStore,
+        empty_tools,
+    )
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(
@@ -298,10 +282,7 @@ async def run_anthropic_thinking(api_key: str) -> None:
 
 
 async def run_multi_turn(api_key: str) -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, empty_tools
 
     agent = Agent(
         model=MODEL_FLASH,

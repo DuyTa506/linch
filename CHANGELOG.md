@@ -7,6 +7,12 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Check shipped example imports and run commands against the supported surface.
+  Correct supported imports, Glob inputs and registration in the budget demo,
+  interruption before durable resume, empty subagent tool-list display, and the
+  provider template's capability claims. Private-helper imports remain flagged
+  for an owner decision rather than expanding the public API.
+
 - Export `ProviderRequest`, `SystemBlock`, `BashTool`, and `DockerBackend` lazily
   from `linch`. These four additions are an owner-approved exception to the
   MINOR rule in `docs/versioning.md`, as with `Agent.reload_skills()` in 3.0.1.

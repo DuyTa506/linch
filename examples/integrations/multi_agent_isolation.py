@@ -115,7 +115,7 @@ class ScriptedProvider:
         return 128_000
 
     async def stream(self, req):
-        from linch.types import Usage
+        from linch import Usage
 
         text = self._responses[self._idx % len(self._responses)]
         self._idx += 1
@@ -126,9 +126,7 @@ class ScriptedProvider:
 
 async def demo_isolation_mechanics() -> None:
     """Show with concrete numbers that child work never enters parent context."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
+    from linch import Agent, FeatureFlags, InMemorySessionStore
     from linch.subagents.runner import RunSubagentArgs, RunSubagentResult, run_subagent
     from linch.subagents.types import AgentDefinition, AgentFrontmatter
 
@@ -213,11 +211,7 @@ async def demo_sequential_pipeline() -> None:
         print("── Sequential pipeline (skipped — OPENAI_API_KEY not set) ──────")
         return
 
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import SubagentEvent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, SubagentEvent, workspace_tools
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"
@@ -290,11 +284,7 @@ async def demo_parallel_analysts() -> None:
         print("── Parallel analysts (skipped — OPENAI_API_KEY not set) ─────────")
         return
 
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import SubagentEvent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import Agent, FeatureFlags, InMemorySessionStore, SubagentEvent, workspace_tools
 
     SUBSYSTEMS = [
         ("tools", "tools/", "tool implementations"),
@@ -381,12 +371,15 @@ async def demo_subagent_with_offload() -> None:
         print("── Subagent + filesystem offload (skipped — OPENAI_API_KEY not set) ──")
         return
 
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import SubagentEvent
-    from linch.filesystem import DiskFileBackend, OffloadConfig
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import (
+        Agent,
+        DiskFileBackend,
+        FeatureFlags,
+        InMemorySessionStore,
+        OffloadConfig,
+        SubagentEvent,
+        workspace_tools,
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"

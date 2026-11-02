@@ -27,14 +27,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _make_agent():
-    from linch import Agent
-    from linch.config import FeatureFlags, SystemPromptConfig
-    from linch.loop_guard import LoopGuard
-    from linch.permissions import PathRule
-    from linch.providers import OpenAIChatCompletionsProvider
-    from linch.providers.openai_chat import OpenAIChatProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import workspace_tools
+    from linch import (
+        Agent,
+        FeatureFlags,
+        InMemorySessionStore,
+        LoopGuard,
+        OpenAIChatCompletionsProvider,
+        OpenAIChatProviderOptions,
+        PathRule,
+        SystemPromptConfig,
+        workspace_tools,
+    )
 
     api_key = (
         os.environ.get("DEEPSEEK_API_KEY")

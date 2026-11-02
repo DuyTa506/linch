@@ -31,11 +31,17 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, AskUserPlugin
-from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore
-from linch.tools import AskUserRequest, AskUserResponse, AskUserTool
-from linch.tools.registry import empty_tools
+from linch import (
+    Agent,
+    AskUserPlugin,
+    AskUserRequest,
+    AskUserResponse,
+    AskUserTool,
+    FeatureFlags,
+    InMemorySessionStore,
+    SystemPromptConfig,
+    empty_tools,
+)
 
 SYSTEM = (
     "You are a project assistant. When a request is ambiguous, do NOT guess — call "
@@ -104,7 +110,7 @@ async def build_ask_user_agent(
 
 
 async def main() -> None:
-    from linch.providers import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
+    from linch import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:

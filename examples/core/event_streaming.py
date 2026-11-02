@@ -1,7 +1,7 @@
 """Event streaming — consume, filter, and forward events.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/07_event_streaming.py
+    OPENAI_API_KEY=sk-... python examples/core/event_streaming.py
 
 Demonstrates:
   1. All event types — print every event to understand the stream
@@ -20,12 +20,16 @@ import json
 import os
 import time
 
-from linch import Agent
-from linch.config import FeatureFlags, SystemPromptConfig
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    SystemPromptConfig,
+    Usage,
+    empty_tools,
+    workspace_tools,
+)
 from linch.events import event_to_dict
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools, workspace_tools
-from linch.types import Usage
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"

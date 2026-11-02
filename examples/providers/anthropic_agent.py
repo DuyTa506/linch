@@ -36,11 +36,14 @@ def load_project_env() -> None:
 
 async def run_basic() -> None:
     """Simple turn with AnthropicProvider — no thinking, no caching."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import (
+        Agent,
+        AnthropicProvider,
+        AnthropicProviderOptions,
+        FeatureFlags,
+        InMemorySessionStore,
+        empty_tools,
+    )
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -68,11 +71,14 @@ async def run_with_thinking() -> None:
     ThinkingBlock events are streamed via PartialAssistantEvent while Claude
     reasons; the final text surfaces in ResultEvent.
     """
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import (
+        Agent,
+        AnthropicProvider,
+        AnthropicProviderOptions,
+        FeatureFlags,
+        InMemorySessionStore,
+        empty_tools,
+    )
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(
@@ -110,11 +116,15 @@ async def run_with_caching() -> None:
     subsequent turns pay cache_read_tokens instead of input_tokens for those
     blocks.  Pass `cache_prompt=True` in RunOptions to enable per-run.
     """
-    from linch import Agent, RunOptions
-    from linch.config import FeatureFlags
-    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import (
+        Agent,
+        AnthropicProvider,
+        AnthropicProviderOptions,
+        FeatureFlags,
+        InMemorySessionStore,
+        RunOptions,
+        empty_tools,
+    )
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(api_key=os.environ.get("ANTHROPIC_API_KEY"))

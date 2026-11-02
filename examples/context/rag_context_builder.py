@@ -1,7 +1,7 @@
 """RAG context with the first-class ContextBuilder API.
 
 Run:
-    python3 examples/rag_context_builder.py
+    python3 examples/context/rag_context_builder.py
 
 This example loads ../.env automatically when present. It does not print any
 secret values. The local demo runs without a provider key.
@@ -14,12 +14,18 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from linch import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
+from linch import (
+    Agent,
+    ContextBudget,
+    ContextBuildResult,
+    ContextBuildTurn,
+    ContextInjectionHook,
+    InMemorySessionStore,
+    Message,
+    TextBlock,
+    empty_tools,
+)
 from linch.context import apply_context_budget
-from linch.hooks import ContextInjectionHook
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
-from linch.types import Message, TextBlock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"
