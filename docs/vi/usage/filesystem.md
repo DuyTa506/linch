@@ -14,6 +14,13 @@ Kết quả tool lớn — các đoạn RAG, dữ liệu tìm kiếm web, nội 
 
 Khi một tool đủ điều kiện trả về kết quả dạng chuỗi quá lớn, scheduler ghi toàn bộ kết quả vào `FileBackend` và thay nội dung mô hình thấy trong `provider_view` bằng bản xem trước ngắn cùng tham chiếu đường dẫn. Kết quả đủ điều kiện phải thành công (không có lỗi), có nội dung là chuỗi, thuộc tool không nằm trong `skip_tools` và có kích thước ước tính vượt ngưỡng đã cấu hình. Mô hình chỉ lấy lại phần cần thiết qua `read_file`, thay vì mang theo toàn bộ dữ liệu trong mỗi lệnh gọi provider sau đó. Sau khi chuyển ra ngoài thành công, toàn bộ nội dung gốc vẫn nằm trong backend và trên `ToolCallEndEvent.tool_result` cho bên tiêu thụ event; chỉ bản sao dành cho mô hình được rút gọn. Nếu ghi vào backend thất bại, kết quả gốc vẫn được giữ nguyên trong hội thoại. Để biết cơ chế này tích hợp vào điểm kiểm soát thực thi tool như thế nào, xem [./tools.md](./tools.md).
 
+Kết quả Bash và MCP đã được đánh dấu cắt bớt, kèm `stdout_path`, `stderr_path`
+hoặc `output_path` trong metadata, không được chuyển ra ngoài lần nữa. Tệp spill
+hiện có vẫn là nguồn để đọc lại; cơ chế tự động không sao chép nó vào hệ thống
+tệp ảo. Tệp spill shell thuộc run được quản lý và được bước dọn dẹp xóa. Nếu dọn
+dẹp thất bại, hãy thử đóng Session lại. Xem
+[policy đầu ra shell](./extending.md#môi-trường-và-đầu-ra-shell-cục-bộ).
+
 ---
 
 ## Bật tường minh
@@ -103,6 +110,32 @@ Khi hệ thống con hoạt động, bốn tool được đăng ký tự động
 | `edit_file(path, old_string, new_string, replace_all?)` | Chỉnh sửa tệp hiện có |
 
 Mô hình được thông báo về các tool này và quy ước chuyển kết quả ra ngoài qua một khối system prompt được thêm tự động, nên bạn không phải hướng dẫn nó cách đọc lại. Khả năng giới hạn khoảng dòng bằng `offset`/`limit` của `read_file` có vai trò quan trọng ở đây: mô hình có thể chỉ đọc phần liên quan của khối dữ liệu lớn đã chuyển ra ngoài thay vì đưa toàn bộ trở lại ngữ cảnh. `write_file` và `edit_file` cũng cung cấp cho mô hình vùng ghi chép tạm trong phạm vi backend để lưu công việc trung gian vốn có thể làm hội thoại phình to.
+
+---
+
+## `Read`, `Write` và `Edit` trong workspace
+
+Các tool workspace viết hoa của coding preset thao tác với tệp cục bộ dưới
+`ctx.cwd`; chúng khác với `read_file`, `write_file` và `edit_file` của hệ thống
+tệp ảo bên trên. Đường dẫn thoát khỏi `cwd` bị từ chối.
+
+`ReadTool(max_read_bytes=10 * 1024 * 1024)` đọc text UTF-8, từ chối tệp nhị phân
+và kiểm tra kích thước toàn bộ tệp trước khi đọc. Tệp vượt giới hạn mặc định
+10 MiB gây lỗi kèm gợi ý dùng `Grep`. `offset` tính từ dòng 1 và `limit` chọn các
+dòng trả về (mặc định 2.000); chúng không bỏ qua giới hạn byte hay giới hạn phần
+tệp được đọc từ đĩa. `limit` âm trả toàn bộ dòng còn lại; giá trị 0 dùng mặc định.
+I/O tệp của cả ba tool chạy bên ngoài event loop.
+
+Khi có `ToolContext.file_read_tracker`, `Write` ghi đè tệp hiện có đòi hỏi lần
+đọc toàn bộ tệp trước đó và dấu `(mtime_ns, size)` còn khớp. Đọc một phần không
+đủ; tạo tệp mới không cần đọc trước. `Edit` đòi hỏi dấu còn khớp và đã đọc các
+dòng của từng match cần thay. Thay đổi bên ngoài, kể cả sửa qua Bash, trả lỗi yêu
+cầu `Read` lại. Ghi và sửa thành công cập nhật dấu; sửa làm mất hiệu lực vùng dòng
+đã đọc. Dấu này kiểm tra độ mới, không khóa tệp trước thao tác ghi đồng thời.
+
+Dấu và bằng chứng đã đọc toàn bộ tệp được giữ qua resume bền vững. Phạm vi dòng
+đọc một phần không được giữ; thiếu dấu cần đọc lại. Tệp thay đổi từ lần đọc trước
+cũng bị từ chối sau resume.
 
 ---
 

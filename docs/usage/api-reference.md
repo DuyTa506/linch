@@ -561,6 +561,8 @@ ShellRead(stdout: str = '', stderr: str = '', lossy: bool = False, stdout_path: 
 
 New stdout/stderr since the previous read; lossy marks dropped bytes.
 
+Usage: [extending](extending.md).
+
 ### `linch.ShellStarter`
 
 Kind: Class.

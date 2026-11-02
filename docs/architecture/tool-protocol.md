@@ -112,7 +112,7 @@ Approval callbacks cannot rewrite input. Mutation belongs in `PreToolUse`, where
 checked; this prevents approving one path or command and executing another.
 
 `BashTool` delegates command execution to a backend. `LocalBackend` supplies
-the default local subprocess behavior with timeout cleanup; `DockerBackend`
+the default local subprocess behavior with bounded output; `DockerBackend`
 uses `docker run --rm` when the Docker daemon is available. Passing
 `Agent(execution_backend=...)` replaces an existing `Bash` tool only, so a
 restricted registry that omits `Bash` does not gain shell access.
@@ -135,10 +135,46 @@ Permissions and execution backends are separate layers. `ToolRule`, `PathRule`,
 and `BashRule` determine whether a tool call may run. If a Bash call is
 approved, the configured backend determines the runtime boundary. `DockerBackend`
 defaults are: writable workspace mount, Docker default
-network, no environment forwarding, and no read-only root filesystem. Opt-in
-controls such as `network="none"`, `workspace_mount="ro"`,
+network, no environment forwarding, and no read-only root filesystem. Resource
+controls default to `memory="2g"`, `cpus=2`, `pids_limit=512`,
+`cap_drop=("ALL",)`, and `no_new_privileges=True`; `None` disables each control.
+Opt-in controls such as `network="none"`, `workspace_mount="ro"`,
 `read_only_root=True`, `tmpfs=(...)`, `env={...}`, `forward_env=(...)`, and
 `user="1000:1000"` restrict approved Bash commands inside the container.
+
+Local and Docker shells additionally implement the optional `ShellStarter.start`
+capability, returning a `ShellProcess` with `read`, timed `wait`, and `kill`.
+A timed wait returns `None` while the process remains alive. Existing run-only
+`ShellBackend` implementations need no new methods. In a session run, Bash uses
+live handles when available: `timeout_ms` yields current output and a process ID
+instead of killing, while `run_in_background` yields immediately. `BashProcess`
+wait/status/kill operates on already approved commands and stays serial. The
+run-owned registry caps live processes (default four), enforces a hard runtime
+(default 30 minutes), and cleans tracked groups and shell spill files when the
+run ends. Cleanup failures keep the session active so the host can retry close;
+Docker container removal is best effort. Capacity exhaustion kills a still-running
+new command when its call returns. Handles are not durable; a hard worker kill can leave children
+behind. Shell stdin is closed, and timeout/abort results retain partial output.
+
+Output retains 4,000 head bytes and 26,000 tail bytes per shell stream. Overflow
+can spill to a private mode-0600 file under `cwd/.linch/output/`; spill failures
+and streams over 64 MiB discard the spill and keep bounded output. `ExecResult`
+records truncation, spill paths, abort/timeout cause, and signal; tool results
+expose those paths in metadata for inspection during the run. MCP text shares
+the bounded spill collector; hosts own retention of MCP spill files.
+
+`LocalBackend` inherits only PATH, HOME, TERM, LANG, LC_ALL, LC_CTYPE, USER,
+SHELL, and TMPDIR. Hosts pass additional values with `env`/`forward_env`; durable
+identity keys those values with a stable host `resume_fingerprint_key`. The
+allowlist is environment hygiene, not a security boundary. Local/Docker policy
+versions are `2`; policy configuration remains part of resume identity.
+Container confinement metadata describes configuration and is not independently
+verified by Linch.
+
+MCP tools ignore server annotations by default and are serial `exec` tools.
+With `trust_annotations=True`, a claimed read-only tool is a parallel `read`;
+only an explicit destructive hint on a non-read tool adds the destructive ask
+rule. Hosts vouch for those claims and retain the risk of false annotations.
 
 For MCP configuration, tool naming, and a local stdio example, see
 [MCP tools](../usage/tools.md#mcp-tools).

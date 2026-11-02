@@ -13,6 +13,13 @@ Gated by `FeatureFlags(skills=True)`. A bare `Agent` sets this flag
 to `False`, so an SDK embedder does not discover project instructions merely
 because its process is running in a checkout.
 
+Skill substitution expands `${SKILL_DIR}` and `${LINCH_SKILL_DIR}` to the loaded
+skill directory, along with invocation arguments and `${LINCH_SESSION_ID}`.
+A bundled script such as `python "${SKILL_DIR}/scripts/check.py"` runs through
+Bash and its normal permission/backend path; substitution grants no execution
+authority. Authors quote paths with spaces, and the directory must be visible
+inside the configured execution world.
+
 Ordinary sessions put the skill listing in their durable, cacheable system prefix
 once. `await agent.reload_skills()` rescans files off the event loop, then replaces
 the live skill mapping, listing, and skill-derived permission rules together. It

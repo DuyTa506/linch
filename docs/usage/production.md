@@ -126,13 +126,26 @@ nonterminal row continues to block new runs. The host should resume
 side effects and call `run_store.mark_failed(run_id, error={"message": ...})`
 when abandoning it. Task cancellation counts as an interruption, including a
 client disconnect that cancels your stream handler. To end a run on disconnect
-and free the session at once, call `session.abort()` and let the stream finish.
+and free the session, call `session.abort()` and continue consuming through the
+final `ResultEvent`; cancelling the iterator is not a terminal abort.
 
 Resume requires current wire-version-3 state, a checkpoint, and a matching
 execution contract. Terminal runs, runs without checkpoints, and pre-3.0,
 missing-version, unknown-version, or contractless state are rejected; start a
 new run. Built-in Postgres stores reject incompatible existing schemas without
-upgrading them; use fresh databases. See the [3.0 migration guide](../migration-3.0.md).
+upgrading them; use fresh databases for incompatible schemas. Compatible
+version-3 schemas remain reusable, including installation of the run-admission
+index. See [Run stores](./run-stores.md) and the
+[3.0 migration guide](../migration-3.0.md).
+
+A package-version-only or top-level tool-description-only change permits resume
+when the rest of the contract matches. Tool input/output schemas, scope,
+concurrency, permissions, and execution backend policy remain part of identity.
+For the upgrade to 3.1.0, stop new admission and drain all active runs to zero
+before deploying: Local/Docker backend policy versions changed to `2`, and the
+Bash schemas changed. This release cannot resume those older contracts just
+because wire version 3 is unchanged. Finish or explicitly abandon suspended and
+interrupted runs as part of the drain; do not leave them for the new workers.
 
 ## 5. Shut down without leaking work
 
@@ -252,7 +265,7 @@ schema SQL. Keep its database, role, and search path stable; after changing them
 or changing a schema, create a new pool/worker to verify again. A partial unique
 index enforces admission across the fleet. Installing it fails with `ConfigError`
 if existing sessions contain duplicate nonterminal runs; inspect and reconcile
-those rows before starting the upgraded stores/workers.
+those rows with the old deployment before starting upgraded stores/workers.
 
 `enqueue_run` creates a `pending` run and its job in one transaction with
 `dedupe_key="run:<run_id>"`. A caller-supplied run ID makes repeated submissions
@@ -287,9 +300,8 @@ These limits cap runs; use host limiters for provider request/token quotas.
 `Worker(max_concurrent_runs=32)` additionally caps concurrent queue tasks per
 worker process, independently of fleet queue limits. PgQueuer requires a minimum
 of two tasks with the worker's batch size of one; booleans and non-integers are
-rejected. The default of 32 follows the WP18 M4 benchmark knee and was not
-remeasured for this admission change. Schedule callbacks also consume queue-task
-capacity.
+rejected. Tune this cap against your deployment's measured capacity. Schedule
+callbacks also consume queue-task capacity.
 
 **Capacity.** Size the database and pools from a deployment-specific benchmark;
 the SDK does not promise linear worker scaling. Use direct/session pooling for

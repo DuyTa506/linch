@@ -14,6 +14,12 @@ Tính năng này được bật bằng `FeatureFlags(skills=True)`. Một `Agent
 thành `False`, nên ứng dụng nhúng SDK sẽ không phát hiện các chỉ dẫn của dự án chỉ
 vì tiến trình của nó đang chạy trong một bản checkout.
 
+Phép thay thế skill mở rộng `${SKILL_DIR}` và `${LINCH_SKILL_DIR}` thành thư mục
+skill đã nạp, cùng các đối số gọi và `${LINCH_SESSION_ID}`. Script đi kèm như
+`python "${SKILL_DIR}/scripts/check.py"` chạy qua Bash cùng đường quyền/backend
+thông thường; phép thay thế không cấp quyền thực thi. Tác giả đặt dấu nháy quanh
+đường dẫn có khoảng trắng; thư mục phải hiển thị trong môi trường thực thi đã cấu hình.
+
 Các session thông thường đặt danh sách skill vào phần tiền tố hệ thống bền vững,
 có thể được cache của chúng một lần. `await agent.reload_skills()` quét lại các tệp
 ngoài event loop, sau đó thay thế đồng thời ánh xạ skill đang dùng, danh sách và các
