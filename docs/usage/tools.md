@@ -302,7 +302,7 @@ defaults to `120000`; nonpositive values reset to that default, and values above
 followed by `[stderr]` and stderr when present, plus exit status, signal,
 truncation, and spill-path details. A nonzero exit or timeout returns
 `is_error=True`; timeouts preserve the backend's available partial output.
-Local execution also returns partial output on abort. See
+Local and Docker execution also return partial output on abort. See
 [Extending](./extending.md) for
 output bounds and environment policy.
 
@@ -315,7 +315,11 @@ omits `Bash`.
 allowed to run. An execution backend only changes where and how an approved
 command runs. `DockerBackend` defaults to a writable
 workspace mount, Docker's default network, no environment forwarding, and a
-normal container root filesystem. Its hardening controls are opt-in.
+normal container root filesystem. It limits memory to `"2g"`, CPUs to `2`, and
+processes to `512`; it drops all capabilities and enables no-new-privileges.
+Configure these with `memory`, `cpus`, `pids_limit`, `cap_drop`, and
+`no_new_privileges`; `None` disables each control. Network, mount, root filesystem,
+and user restrictions are opt-in.
 
 ```python
 from linch import Agent, DockerBackend, RemoteExecutionBackend
@@ -353,7 +357,11 @@ environment variables, and `user="1000:1000"` for non-root container execution.
 (no Docker SDK dependency). An explicit `docker_path` bypasses that lookup.
 Both backends route timeout and abort through the same path, so
 `session.abort()` interrupts an in-flight command rather than leaking a runaway
-process. The backend is purely about *where and how* an approved command runs —
+process. Both also expose optional `start(command, cwd=...)` process handles with
+incremental `read()`, `wait(timeout_s)`, and `kill()` methods. Output remains
+bounded and oversized streams spill inside the workspace. Docker handle cleanup
+stops the CLI process group before attempting to remove the named container.
+The backend is purely about *where and how* an approved command runs —
 **whether** it runs is decided by [permissions](#permissions).
 
 For a strict durable deployment, use an explicit trusted `docker_path` and pin

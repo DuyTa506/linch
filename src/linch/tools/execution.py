@@ -9,6 +9,7 @@ import os
 import shutil
 import signal as signal_mod
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -41,8 +42,14 @@ class ShellRead:
 
 
 class _LocalProcess:
-    def __init__(self, proc: asyncio.subprocess.Process, cwd: str) -> None:
+    def __init__(
+        self,
+        proc: asyncio.subprocess.Process,
+        cwd: str,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.proc = proc
+        self._cleanup = cleanup
         self.outputs = [BoundedOutput(cwd, name) for name in ("stdout", "stderr")]
         self._readers = [
             asyncio.create_task(self._pump(pipe, output))
@@ -94,6 +101,13 @@ class _LocalProcess:
         return self._done.result() if done else None
 
     async def kill(self) -> None:
+        try:
+            await self._kill()
+        finally:
+            if self._cleanup is not None:
+                await self._cleanup()
+
+    async def _kill(self) -> None:
         _kill_process_group(self.proc, signal_mod.SIGTERM)
         deadline = asyncio.get_running_loop().time() + 3
         while asyncio.get_running_loop().time() < deadline:
@@ -159,36 +173,38 @@ class LocalBackend:
         self, command: str, *, cwd: str, timeout_s: float, signal: Any = None
     ) -> ExecResult:
         handle = await self.start(command, cwd=cwd)
-        abort = (
-            asyncio.create_task(signal.wait()) if callable(getattr(signal, "wait", None)) else None
+        return await _run_process(handle, timeout_s=timeout_s, signal=signal)
+
+
+async def _run_process(handle: _LocalProcess, *, timeout_s: float, signal: Any) -> ExecResult:
+    abort = asyncio.create_task(signal.wait()) if callable(getattr(signal, "wait", None)) else None
+    timed_out = aborted = False
+    try:
+        done, _ = await asyncio.wait(
+            {handle._done, *([abort] if abort else [])},
+            timeout=timeout_s,
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        timed_out = aborted = False
-        try:
-            done, _ = await asyncio.wait(
-                {handle._done, *([abort] if abort else [])},
-                timeout=timeout_s,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if handle._done in done:
-                return handle._done.result()
-            aborted = abort in done
-            timed_out = not aborted
-        finally:
-            await _cancel_and_drain(abort)
-            if not handle._done.done() or timed_out or aborted:
-                cleanup = asyncio.create_task(handle.kill())
-                cancelled = False
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                cleanup.result()
-                if cancelled and not (timed_out or aborted):
-                    raise asyncio.CancelledError
-        result = handle._done.result()
-        result.timed_out, result.aborted = timed_out, aborted
-        return result
+        if handle._done in done:
+            return handle._done.result()
+        aborted = abort in done
+        timed_out = not aborted
+    finally:
+        await _cancel_and_drain(abort)
+        if not handle._done.done() or timed_out or aborted:
+            cleanup = asyncio.create_task(handle.kill())
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            if cancelled and not (timed_out or aborted):
+                raise asyncio.CancelledError
+    result = handle._done.result()
+    result.timed_out, result.aborted = timed_out, aborted
+    return result
 
 
 class DockerBackend:
@@ -226,6 +242,11 @@ class DockerBackend:
         env: dict[str, str] | None = None,
         forward_env: tuple[str, ...] = (),
         user: str | None = None,
+        memory: str | None = "2g",
+        cpus: float | None = 2,
+        pids_limit: int | None = 512,
+        cap_drop: tuple[str, ...] | None = ("ALL",),
+        no_new_privileges: bool | None = True,
         resume_fingerprint_key: bytes | None = None,
     ) -> None:
         if workspace_mount not in ("rw", "ro"):
@@ -243,10 +264,12 @@ class DockerBackend:
         self.env = dict(env or {})
         self.forward_env = tuple(forward_env)
         self.user = user
+        self.memory, self.cpus, self.pids_limit = memory, cpus, pids_limit
+        self.cap_drop, self.no_new_privileges = cap_drop, no_new_privileges
         self._resume_fingerprint_key = resume_fingerprint_key
 
     resume_policy_id = "linch.execution.docker"
-    resume_policy_version = "1"
+    resume_policy_version = "2"
 
     @property
     def confinement(self) -> dict[str, object]:
@@ -303,6 +326,11 @@ class DockerBackend:
             "env": {key: digest(value) for key, value in sorted(self.env.items())},
             "forward_env": forwarded,
             "user": self.user,
+            "memory": self.memory,
+            "cpus": self.cpus,
+            "pids_limit": self.pids_limit,
+            "cap_drop": self.cap_drop,
+            "no_new_privileges": self.no_new_privileges,
         }
 
     async def run(
@@ -314,6 +342,10 @@ class DockerBackend:
         signal: Any = None,
     ) -> ExecResult:
         throw_if_aborted(signal)
+        handle = await self.start(command, cwd=cwd)
+        return await _run_process(handle, timeout_s=timeout_s, signal=signal)
+
+    async def start(self, command: str, *, cwd: str) -> _LocalProcess:
         docker = self._docker_path()
         container_name = f"linch-{uuid.uuid4().hex}"
         args = self._docker_args(
@@ -321,29 +353,12 @@ class DockerBackend:
         )
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name != "nt",
         )
-        try:
-            stdout_b, stderr_b = await _communicate_with_timeout_and_abort(
-                proc, timeout_s=timeout_s, signal=signal
-            )
-        except TimeoutError:
-            proc.kill()
-            await _wait_after_kill(proc)
-            await self._remove_container(docker, container_name)
-            return ExecResult(stdout="", stderr="", returncode=-1, timed_out=True)
-        except BaseException:
-            proc.kill()
-            await _wait_after_kill(proc)
-            await self._remove_container(docker, container_name)
-            raise
-        return ExecResult(
-            stdout=stdout_b.decode(errors="replace"),
-            stderr=stderr_b.decode(errors="replace"),
-            returncode=proc.returncode or 0,
-            timed_out=False,
-        )
+        return _LocalProcess(proc, cwd, lambda: self._remove_container(docker, container_name))
 
     def _docker_path(self) -> str:
         resolved = self._docker or shutil.which("docker")
@@ -364,6 +379,17 @@ class DockerBackend:
             "--name",
             container_name,
         ]
+        for flag, value in (
+            ("--memory", self.memory),
+            ("--cpus", self.cpus),
+            ("--pids-limit", self.pids_limit),
+        ):
+            if value is not None:
+                args.extend([flag, str(value)])
+        for capability in self.cap_drop or ():
+            args.extend(["--cap-drop", capability])
+        if self.no_new_privileges:
+            args.extend(["--security-opt", "no-new-privileges"])
         if self.network is not None:
             args.extend(["--network", self.network])
         if self.read_only_root:
@@ -444,39 +470,3 @@ async def _cancel_and_drain(task: asyncio.Task[Any] | None) -> None:
         await task
     except (asyncio.CancelledError, Exception):
         pass
-
-
-async def _communicate_with_timeout_and_abort(
-    proc: asyncio.subprocess.Process,
-    *,
-    timeout_s: float,
-    signal: Any = None,
-) -> tuple[bytes, bytes]:
-    communicate_task = asyncio.create_task(proc.communicate())
-    abort_task: asyncio.Task[Any] | None = None
-    # Prefer the public AbortContext.wait() API; fall back to no abort monitoring
-    # for signal objects that don't expose it.
-    wait_for_abort = getattr(signal, "wait", None)
-    if callable(wait_for_abort):
-        abort_task = asyncio.create_task(cast(Any, wait_for_abort()))
-
-    try:
-        if abort_task is None:
-            return await asyncio.wait_for(communicate_task, timeout=timeout_s)
-
-        done, _pending = await asyncio.wait(
-            {communicate_task, abort_task},
-            timeout=timeout_s,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if communicate_task in done:
-            return communicate_task.result()
-        if abort_task in done:
-            throw_if_aborted(signal)
-        raise TimeoutError
-    finally:
-        # Cancel AND await both tasks so the subprocess pipe readers held by
-        # proc.communicate() are released — an un-awaited cancelled task leaks
-        # those pipes until GC and emits "Task was destroyed but it is pending".
-        for task in (communicate_task, abort_task):
-            await _cancel_and_drain(task)
