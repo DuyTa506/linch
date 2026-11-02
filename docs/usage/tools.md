@@ -517,18 +517,27 @@ For example, server `ops.prod` with tool `get.status` becomes
 `mcp__ops_prod__get_status`. Names that collide after normalization raise
 `ConfigError`.
 
-Server annotations affect scheduling and permissions: only `readOnlyHint: true`
-gives a tool read scope and parallel safety; all other tools have exec scope and
-run serially. Non-read-only tools are destructive by default, following the MCP
-schema's documented default, unless the server explicitly sets
-`destructiveHint: false`. Destructive tools add an ask rule, including in
-`acceptEdits` and `skip-dangerous` modes. Exec tools still ask in `acceptEdits`
-even when `destructiveHint` is false. Approval uses `can_use_tool`, so an ask
-without a callback is denied.
+Permission rules can target one normalized server with
+`ToolRule("mcp__ops_prod__*", "deny")`; the trailing `*` matches the whole
+literal `mcp__ops_prod__` prefix. No other glob form is supported; the existing
+`ToolRule("*", ...)` rule still matches every tool.
 
-Hints are server claims, not verified guarantees. A dishonest server can label a
-mutating tool read-only and gain automatic approval, parallel execution, and
-read-tool treatment. Only connect servers whose annotation claims you trust.
+Server annotations are ignored by default: every tool has exec scope, runs
+serially, and is non-destructive. Set `trust_annotations=True` on the server
+config only when the host vouches for that server's claims. With trust enabled,
+only `readOnlyHint: true` gives a tool read scope and parallel safety; other
+tools have exec scope and run serially, and `destructive` is true only when
+`destructiveHint: true` is explicit. A read-only tool is never destructive. An
+unannotated tool adds no ask rule, so it can run in `skip-dangerous`; in
+`acceptEdits`, exec tools still ask. A trusted explicit destructive tool adds an
+ask rule even in `skip-dangerous`.
+
+Hints are server claims, not verified guarantees. `trust_annotations` and
+`skip-dangerous` are host decisions, and the host is responsible for the server
+it trusts and for the consequences of allowing dangerous calls. A dishonest
+server can label a mutating tool read-only and gain automatic approval, parallel
+execution, and read-tool treatment. Approval uses `can_use_tool`, so an ask
+without a callback is denied.
 
 Both `McpStdioServerConfig` and `McpHttpServerConfig` accept `timeout_s` (default
 300 seconds), passed to the SDK's per-tool-call request read timeout. The timeout
@@ -539,8 +548,19 @@ transport can delay SDK cancellation cleanup up to five seconds. Cancellation
 does not guarantee that a server stops or rolls back remote side effects.
 
 MCP results include embedded resource text; binary resource content stays omitted.
-The combined text result, including separators, is capped at 30,000 characters,
-using the same shared output limit as Grep.
+Without a spill, the combined text result, including separators, is capped at
+30,000 characters, using the same shared output limit as Grep. With a call
+context, larger text is stored below `ctx.cwd/.linch/output/`; the result gives
+a bounded head/tail preview and names the path containing the full text. If the
+spill cannot be written, the capped text is returned.
+
+If an MCP connection is lost, the failed call returns an error and is never
+retried. The connection owner reconnects with five exponential-backoff attempts
+starting at 0.5 seconds and capped at 30 seconds; after that, tools report the
+server unavailable until the host creates a fresh connection (or a new Agent for
+configured servers). Tool names stay stable, a vanished tool returns an error,
+and the catalog is not silently rebuilt. Stdio subprocesses are reaped on every
+cleanup path.
 
 ---
 

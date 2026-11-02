@@ -1914,7 +1914,7 @@ from linch import McpHttpServerConfig
 ```
 
 ```text
-McpHttpServerConfig(type: Literal['http'] = 'http', url: str = '', headers: dict[str, str] | None = None, timeout_s: float = 300)
+McpHttpServerConfig(type: Literal['http'] = 'http', url: str = '', headers: dict[str, str] | None = None, timeout_s: float = 300, trust_annotations: bool = False)
 ```
 
 Configure an MCP server reached through streamable HTTP.
@@ -1944,7 +1944,7 @@ from linch import McpStdioServerConfig
 ```
 
 ```text
-McpStdioServerConfig(type: Literal['stdio'] | None = None, command: str = '', args: list[str] = <factory>, env: dict[str, str] | None = None, timeout_s: float = 300)
+McpStdioServerConfig(type: Literal['stdio'] | None = None, command: str = '', args: list[str] = <factory>, env: dict[str, str] | None = None, timeout_s: float = 300, trust_annotations: bool = False)
 ```
 
 Configure an MCP server launched through a stdio subprocess.

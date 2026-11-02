@@ -28,6 +28,7 @@ class McpStdioServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] | None = None
     timeout_s: float = 300
+    trust_annotations: bool = False
 
 
 @dataclass(slots=True)
@@ -51,6 +52,7 @@ class McpHttpServerConfig:
     url: str = ""
     headers: dict[str, str] | None = None
     timeout_s: float = 300
+    trust_annotations: bool = False
 
 
 McpServerConfig = McpStdioServerConfig | McpHttpServerConfig

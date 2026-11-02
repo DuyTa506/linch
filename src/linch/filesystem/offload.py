@@ -137,8 +137,8 @@ async def maybe_offload(
     if not config.enabled or result.is_error or tool_name in config.skip_tools:
         return result
 
-    if result.truncated and (
-        result.metadata.get("stdout_path") or result.metadata.get("stderr_path")
+    if result.truncated and any(
+        result.metadata.get(key) for key in ("stdout_path", "stderr_path", "output_path")
     ):
         return result
 
