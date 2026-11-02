@@ -5,7 +5,7 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
-## Unreleased
+## 3.0.2 — 2026-11-02
 
 - Add the `build-agent-with-linch` skill, `linch skill install`, and Vietnamese
   translations of the README and usage guide.
