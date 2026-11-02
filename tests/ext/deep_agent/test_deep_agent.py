@@ -595,7 +595,7 @@ async def test_deep_agent_can_resume_with_postgres_stores(pg_dsn, tmp_path: Path
     assert len(restarted_calls) == 1
 
 
-# ── Open-loop safety rails (ROADMAP Step 2) ─────────────────────────────────
+# ── Open-loop safety rails ─────────────────────────────────
 
 
 def test_deep_agent_verifiers_are_wired_as_hook(tmp_path: Path) -> None:

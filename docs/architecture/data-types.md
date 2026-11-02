@@ -72,7 +72,7 @@ classDiagram
         +content: str
         +summary: str = ""
         +is_error: bool = false
-        +metadata: dict~str, Any~ = {}
+        +metadata: dict~str, Any~
         +citations: list~Citation~ = []
         +attachments: list~Any~ = []
         +duration_ms: int = 0
@@ -85,7 +85,7 @@ classDiagram
         +messages: list~Message~ = []
         +selected_tools: Any = None
         +budget: ContextBudget = ContextBudget()
-        +metadata: dict~str, Any~ = {}
+        +metadata: dict~str, Any~
     }
 
     class ContextBudget {

@@ -48,7 +48,7 @@ def test_build_payload_basic(max_output_tokens: int | None, expected_max_tokens:
 
 
 def test_build_payload_cache_boundary_excludes_dynamic_tail():
-    # ROADMAP 3.2: the cache breakpoint sits at the end of the leading static
+    # the cache breakpoint sits at the end of the leading static
     # (cacheable=True) run, so a volatile trailing section can change without
     # invalidating the cached static prefix.
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload

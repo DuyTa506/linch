@@ -1,4 +1,4 @@
-"""Background-any-tool (ROADMAP Phase 2.3).
+"""Background-any-tool.
 
 Any tool call carrying a ``run_in_background`` hint is detached: it returns an
 immediate ack as its tool result, runs as a detached task, and delivers its

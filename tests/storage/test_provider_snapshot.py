@@ -1,4 +1,4 @@
-"""Durable compacted provider views (ROADMAP Phase 3.3).
+"""Durable compacted provider views.
 
 Built-in session stores can persist a compacted ``provider_view`` plus the
 message ``seq`` watermark it covers; on reload the view is restored and messages

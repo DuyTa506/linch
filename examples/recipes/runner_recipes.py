@@ -1,4 +1,4 @@
-"""Host-owned runner recipes (ROADMAP P7).
+"""Host-owned runner recipes.
 
 ``LoopRunner.run_once()`` is the SDK's single primitive for one tick of recurring
 work. Cron schedules, webhook handlers, fixed-interval loops, and CI gates are
