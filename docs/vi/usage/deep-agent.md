@@ -51,6 +51,9 @@ Xem [Cấu hình agent](./agent.md) và [Hệ thống tệp ảo](./filesystem.m
 
 ---
 
+> Ở trang này, worker là subagent. Đây không phải tiến trình
+> [`linch.worker`](./production.md) dùng để chạy job trong hàng đợi.
+
 ## Worker chạy nền
 
 Tạo worker chạy nền bằng cách truyền `run_in_background=True` cho tool `Subagent`. Đầu vào bắt buộc của tool là `description` và `prompt` không rỗng; `subagent_type` và `run_in_background` là các trường tùy chọn:
@@ -89,6 +92,10 @@ async for event in session.run("Summarise what the background researcher found."
 ```
 
 Hành vi cốt lõi: việc tạo worker chạy nền **không** chặn lượt hiện tại. Worker chạy như một tác vụ tách rời trong khi agent điều phối tiếp tục làm việc. Khi hoàn thành, worker gọi `Session.notify()` với thông điệp `<task-notification>`. Theo mặc định, thông điệp đó đi vào hàng đợi chờ trong bộ nhớ của session. Ranh giới lượt provider tiếp theo lấy thông báo ra khỏi hàng đợi để agent điều phối thấy kết quả mà không cần thăm dò; ranh giới đó có thể là một lượt provider khác trong `session.run()` hiện tại hoặc thời điểm bắt đầu một `session.run()` sau đó. Khi có `RunStore`, Linch cũng ghi bản ghi kiểm toán `BackgroundWorkerEvent` kèm thông tin nguồn gốc; riêng kho run không bảo đảm chuyển kết quả một cách bền vững. Hàng đợi thông báo mặc định nằm trong bộ nhớ, còn `durability=DurabilityOptions(durable_inbox=True)` có thể lưu bền vững thông báo hoàn thành sau khi `Session.notify()` chuyển đến kho session có hỗ trợ. Không chế độ lưu trữ bền vững nào resume chính tác vụ đang hoạt động; ứng dụng chủ cần thực thi bền vững nên tự quản lý hàng đợi hoặc workflow. Việc tự chờ `handle.task` (như ở lượt 1.5 bên trên) là tùy chọn — nó chỉ quyết định thời điểm, không quyết định việc chuyển thông báo.
+
+Đóng session sẽ hủy các worker chạy nền chưa xong. Job của `linch.worker` đóng session
+khi run kết thúc, nên subagent nền tạo trong job sẽ dừng tại thời điểm đó. Trong job, hãy
+dùng subagent foreground, hoặc xếp hàng phần việc tiếp theo thành một run riêng.
 
 ---
 

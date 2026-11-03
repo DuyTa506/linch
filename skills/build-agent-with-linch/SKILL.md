@@ -1,12 +1,18 @@
 ---
 name: build-agent-with-linch
-description: Build, extend, debug, and test AI agents on the Linch Python SDK. Use this skill whenever a task touches Linch or `from linch import`, or asks for an agent with tools, hooks, RAG or context injection, MCP servers, skills, subagents, structured output, memory, compaction, budgets, durable resume, a custom provider, or deployment on Linch, even if the request only says "make an agent" inside a project that depends on linch.
+description: Design, build, extend, debug, and test AI agents on the Linch Python SDK. Use this skill whenever a task touches Linch or `from linch import`, or asks for an agent with tools, hooks, RAG or context injection, MCP servers, skills, subagents, structured output, memory, compaction, budgets, durable resume, a custom provider, deployment on Linch, or choosing an architecture for an agent pipeline, even if the request only says "make an agent" inside a project that depends on linch.
 ---
 
 # Build agents with Linch
 
 Linch changes between versions, and what you remember about it may be wrong. The docs for the
 exact installed version ship inside the package, so read them instead of guessing.
+
+## Design first when the architecture is open
+
+Most tasks skip this. Read [references/design.md](references/design.md) before building when the
+system has several stages or agents, runs for a long time, takes actions that are hard to undo,
+or the user is asking how to structure it. For a single agent with a few tools, go to step 1.
 
 ## 1. Find the docs
 

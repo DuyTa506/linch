@@ -203,6 +203,23 @@ Với công việc định kỳ được kích hoạt bởi cron/webhook/khoản
 Cài `linch[worker]` và import `linch.worker` một cách tường minh. Lệnh `import linch` của core
 không bao giờ import PgQueuer; các tên worker không có trong `linch.__all__`.
 
+"Worker" ở đây là tiến trình nhận job từ hàng đợi. Đây không phải pattern cho agent,
+và khác với các subagent mà [tài liệu deep agent](./deep-agent.md) cũng gọi là worker.
+`linch.worker` quyết định **run chạy ở đâu**. Agent, subagent và workflow quyết định
+bên trong run làm gì.
+
+Mỗi job chạy đúng một việc: một prompt đã xếp hàng, qua `session.run()` hoặc
+`session.resume()` trên agent do factory của bạn trả về. Lịch chạy cũng tạo cùng loại
+job này. Điều đó dẫn đến ba hệ quả:
+
+- Subagent chạy trong tiến trình của job. Chúng không tự trải ra cả fleet; chỉ các run
+  được xếp hàng riêng mới làm vậy.
+- Khi run kết thúc, worker đóng session, và thao tác này hủy mọi subagent nền chưa xong.
+  Trong job, hãy dùng subagent foreground, hoặc xếp hàng phần việc tiếp theo thành một
+  run riêng.
+- Worker không chạy `run_workflow`. Xem
+  [Chạy qua nhiều tiến trình](./workflows.md#chay-qua-nhieu-tien-trinh).
+
 Mô hình triển khai là **các tiến trình API → một Postgres → N tiến trình worker**. Các tiến trình
 API gọi `enqueue_run`; chúng không chạy vòng lặp model. Postgres lưu
 các session, run đang chờ, checkpoint, event có số thứ tự, định nghĩa lịch và

@@ -211,6 +211,31 @@ Ba điều cần biết:
 
 ---
 
+<a id="chay-qua-nhieu-tien-trinh"></a>
+
+## Chạy qua nhiều tiến trình
+
+`linch.worker` không điều phối workflow: job của nó chạy một prompt qua session, không
+chạy hàm workflow. Ứng dụng chủ tự quyết định tiến trình nào gọi `run_workflow`, ví dụ
+từ hàng đợi job hoặc dịch vụ của chính nó. Trạng thái workflow bền vững vẫn dùng chung
+an toàn: chỉ cần `run_store` Postgres và `run_id` ổn định, mọi tiến trình có cùng hàm
+workflow đều chạy tiếp được.
+
+- **Khôi phục sau crash là việc của ứng dụng chủ.** Không có gì tự gọi lại workflow bị
+  gián đoạn. Hãy tìm các run chưa xong và gọi lại `run_workflow` với cùng `run_id`.
+- **Sau crash sẽ phải chờ.** Khi không truyền `lease=`, `run_workflow` claim run trong
+  năm phút và gia hạn khi còn sống. Tiến trình chết sẽ để lại lease đó, nên gọi lại quá
+  sớm sẽ ném `RunLeaseConflictError`. Hãy thử lại với backoff. Chính lỗi này cũng ngăn
+  hai tiến trình cùng chạy một workflow.
+- **Câu trả lời có thể đến từ đâu cũng được.** Run đang suspended không giữ tiến trình
+  nào. Mọi tiến trình của ứng dụng chủ đều có thể trả lời bằng `run_workflow` với
+  `resume=`.
+- **Trong workflow, `max_concurrency` tính theo từng tiến trình.** Subagent chạy trong
+  tiến trình đã gọi `run_workflow`. Muốn dùng cả fleet, hãy tách thành một workflow cho
+  mỗi mục và để hàng đợi của bạn phân tán chúng.
+
+---
+
 ## Quy tắc phát lại
 
 Hàm workflow phải giữ luồng điều khiển tất định — không phân nhánh theo `random`, thời gian thực hoặc môi trường — để resume phát lại chính xác các lời gọi đã ghi nhật ký không thay đổi.

@@ -242,6 +242,29 @@ Three things to know:
 
 ---
 
+## Running across processes
+
+`linch.worker` does not dispatch workflows: its jobs run a prompt through a
+session, not a workflow function. Your host decides which process calls
+`run_workflow`, for example from its own job queue or service. Durable workflow
+state is still safe to share: use a Postgres `run_store` and a stable `run_id`, and
+any process with the same workflow function can continue the run.
+
+- **Crash recovery is the host's job.** Nothing re-invokes an interrupted workflow
+  for you. Find unfinished runs and call `run_workflow` again with the same
+  `run_id`.
+- **Expect a wait after a crash.** Without `lease=`, `run_workflow` claims the run
+  for five minutes and renews while it is alive. A process that dies leaves that
+  lease in place, so re-invoking early raises `RunLeaseConflictError`. Retry with
+  backoff. The same error stops two processes running one workflow at once.
+- **Answers can come from anywhere.** A suspended run holds no process. Any host
+  process can answer it by calling `run_workflow` with `resume=`.
+- **Inside a workflow, `max_concurrency` applies per process.** Subagents run in
+  the process that called `run_workflow`. To use a fleet, split the work into one
+  workflow per item and let your queue spread them.
+
+---
+
 ## Replay rule
 
 The workflow function must keep its control flow deterministic — no `random`, wall-clock, or environment-dependent branching — for resume to replay the unchanged journaled calls correctly.
