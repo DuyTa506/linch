@@ -5,6 +5,19 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## 3.1.2 — 2026-11-03
+
+### Added
+
+- `build-agent-with-linch` includes `references/design.md`, a design step for systems whose
+  architecture is still open.
+
+### Documentation
+
+- State what a `linch.worker` job runs: a queued prompt through a session, not a directed
+  workflow, and that ending a job cancels unfinished background subagents.
+- Cover running `run_workflow` across processes, including crash recovery and lease waits.
+
 ## 3.1.1 — 2026-11-02
 
 ### Fixed
