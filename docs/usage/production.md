@@ -202,6 +202,24 @@ For cron/webhook/interval/CI-driven recurring work, drive
 Install `linch[worker]` and import `linch.worker` explicitly. Core `import linch`
 never imports PgQueuer; worker names are absent from `linch.__all__`.
 
+"Worker" here means a process that takes jobs from a queue. It is not a pattern
+for agents, and it is separate from the subagents that
+[deep agent docs](./deep-agent.md) also call workers. `linch.worker` decides
+**where a run executes**. Agents, subagents, and workflows decide what happens
+inside it.
+
+A job runs one thing: a queued prompt, through `session.run()` or
+`session.resume()` on the agent your factory returns. Schedules enqueue the same
+kind of job. This has three consequences:
+
+- Subagents run inside the job's process. They do not spread across the fleet;
+  only separately queued runs do.
+- When the run ends, the worker closes its session, which cancels any background
+  subagent that has not finished. Use foreground subagents in a job, or enqueue
+  the follow-up work as its own run.
+- The worker does not run directed workflows. See
+  [Running across processes](./workflows.md#running-across-processes).
+
 The topology is **API processes → one Postgres → N worker processes**. API
 processes call `enqueue_run`; they do not run the model loop. Postgres holds
 sessions, pending runs, checkpoints, sequenced events, schedule definitions and

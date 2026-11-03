@@ -81,6 +81,9 @@ for the underlying store and routing contracts.
 
 ---
 
+> On this page a worker is a subagent. It is not a [`linch.worker`](./production.md#scale-out)
+> process, which runs queued jobs.
+
 ## Background workers
 
 Spawn a worker in the background by passing `run_in_background=True` to the
@@ -140,6 +143,11 @@ after `Session.notify()` reaches a capable session store. No persistence mode
 resumes the active task itself; hosts that need durable execution should own a
 queue or workflow. Awaiting `handle.task` yourself (as in turn 1.5 above) is
 optional — it only forces the timing, not the notification delivery.
+
+
+Closing a session cancels its unfinished background workers. A `linch.worker` job
+closes its session when the run ends, so a background spawn in a job stops at that
+point. Use a foreground subagent there, or enqueue the follow-up as its own run.
 
 ---
 
