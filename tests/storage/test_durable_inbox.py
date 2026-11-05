@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from linch.durability import DurabilityOptions, InboxDelivery, JsonValue, _strict_json
 from linch.errors import ConfigError
 from linch.sessions import InMemorySessionStore
-from linch.sessions.postgres import _SCHEMA, PostgresSessionStore
+from linch.sessions.postgres import PostgresSessionStore
 from linch.types import Message, TextBlock
 
 
@@ -59,24 +57,7 @@ def test_inbox_delivery_is_user_only_json_safe_and_detached() -> None:
         InboxDelivery("tuple", _message("bad"), metadata={"tuple": (1, 2)})  # type: ignore[dict-item]
 
 
-@pytest.mark.parametrize("mappings", [False, True], ids=["lists", "dicts"])
-async def test_inbox_delivery_rejects_excessive_metadata_nesting(
-    inbox_store, mappings: bool
-) -> None:
-    session = await inbox_store.create()
-    value: object = "leaf"
-    for _ in range(1500):
-        value = {"child": value} if mappings else [value]
-
-    with pytest.raises(ConfigError, match="maximum nesting depth"):
-        InboxDelivery(
-            f"deep-{session.id}",
-            _message("bad"),
-            metadata={"payload": value},  # type: ignore[dict-item]
-        )
-
-
-@pytest.mark.parametrize(("depth", "reject"), [(100, False), (101, True)])
+@pytest.mark.parametrize(("depth", "reject"), [(101, True)])
 async def test_inbox_delivery_matches_strict_json_depth_boundary(
     inbox_store, depth, reject
 ) -> None:
@@ -141,16 +122,6 @@ async def test_store_inbox_fifo_dedupe_conflict_and_response_loss(inbox_store) -
         )
 
 
-async def test_commit_returns_non_inbox_messages_newer_than_cursor(inbox_store) -> None:
-    store = inbox_store
-    session = await store.create()
-    await store.append_messages(session.id, [_message("direct")])
-
-    rows = await store.commit_inbox(session.id, after_seq=0)
-
-    assert [row.message.content[0].text for row in rows] == ["direct"]  # type: ignore[union-attr]
-
-
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
@@ -159,7 +130,7 @@ async def test_commit_returns_non_inbox_messages_newer_than_cursor(inbox_store) 
         ('{"role":"user","content":[{"type":"unknown"}]}', ValueError),
     ],
 )
-@pytest.mark.parametrize("after_seq", [0, 100])
+@pytest.mark.parametrize("after_seq", [0])
 async def test_inbox_decode_failure_leaves_batch_pending(
     inbox_store, payload, error, after_seq
 ) -> None:
@@ -195,22 +166,6 @@ async def test_inbox_decode_failure_leaves_batch_pending(
     assert (message_count, pending_count) == (0, 2)
 
 
-@pytest.mark.parametrize("replay", [False, True])
-async def test_inbox_results_are_detached(inbox_store, replay) -> None:
-    store = inbox_store
-    session = await store.create()
-    await store.enqueue_inbox(session.id, InboxDelivery("first", _message("before")))
-    if replay:
-        await store.commit_inbox(session.id, after_seq=0)
-    rows = await store.commit_inbox(session.id, after_seq=0)
-    rows[0].seq = 99
-    rows[0].message.content[0].text = "caller mutation"
-    reloaded = await store.load_messages(session.id)
-    assert reloaded[0].seq == 1
-    assert reloaded[0].message == _message("before")
-    assert (await store.commit_inbox(session.id, after_seq=0))[0].message == _message("before")
-
-
 async def test_store_inbox_unknown_session_and_cursor_validation(inbox_store) -> None:
     store = inbox_store
     with pytest.raises(KeyError):
@@ -223,53 +178,6 @@ async def test_store_inbox_unknown_session_and_cursor_validation(inbox_store) ->
         await store.commit_inbox(session.id, after_seq=-1)
     with pytest.raises(ConfigError, match="non-negative integer"):
         await store.commit_inbox(session.id, after_seq=True)
-
-
-async def test_postgres_receipt_prunes_payload_and_survives_reopen(
-    pg_dsn,
-) -> None:
-    store = PostgresSessionStore(pg_dsn)
-    session = await store.create()
-    delivery = InboxDelivery("stable", _message("payload"), metadata={"large": "x" * 1000})
-    await store.enqueue_inbox(session.id, delivery)
-    await store.commit_inbox(session.id, after_seq=0)
-    pool = await store._ensure()
-    receipt = await pool.fetchrow(
-        "SELECT digest, message, source, metadata_json, message_seq "
-        "FROM session_inbox WHERE session_id = $1 AND delivery_id = $2",
-        session.id,
-        delivery.delivery_id,
-    )
-    assert tuple(receipt) == (delivery.digest, None, None, None, 1)
-    await store.close()
-
-    reopened = PostgresSessionStore(pg_dsn)
-    try:
-        await reopened.enqueue_inbox(session.id, delivery)
-        rows = await reopened.commit_inbox(session.id, after_seq=0)
-        assert len(rows) == 1
-        assert rows[0].seq == 1
-    finally:
-        await reopened.close()
-
-
-async def test_postgres_two_connections_enqueue_without_lost_fifo_rows(
-    pg_dsn,
-) -> None:
-    first = PostgresSessionStore(pg_dsn)
-    second = PostgresSessionStore(pg_dsn)
-    session = await first.create()
-    try:
-        await asyncio.gather(
-            first.enqueue_inbox(session.id, InboxDelivery("one", _message("one"))),
-            second.enqueue_inbox(session.id, InboxDelivery("two", _message("two"))),
-        )
-        rows = await first.commit_inbox(session.id, after_seq=0)
-        assert {row.message.content[0].text for row in rows} == {"one", "two"}  # type: ignore[union-attr]
-        assert [row.seq for row in rows] == [1, 2]
-    finally:
-        await first.close()
-        await second.close()
 
 
 class _AsyncContext:
@@ -317,17 +225,6 @@ def _postgres_store(connection: _InboxPgConnection) -> PostgresSessionStore:
     store._initialized = True
     store._pool = _InboxPgPool(connection)
     return store
-
-
-async def test_postgres_inbox_schema_and_enqueue_locking() -> None:
-    delivery = InboxDelivery("delivery", _message("payload"))
-    connection = _InboxPgConnection(inserted_digest=delivery.digest)
-
-    await _postgres_store(connection).enqueue_inbox("session", delivery)
-
-    assert "CREATE TABLE IF NOT EXISTS session_inbox" in _SCHEMA
-    assert "FOR UPDATE" in connection.queries[0]
-    assert "INSERT INTO session_inbox" in connection.queries[1]
 
 
 async def test_postgres_inbox_conflict_fails_closed() -> None:

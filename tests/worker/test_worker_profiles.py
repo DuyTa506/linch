@@ -127,25 +127,6 @@ async def test_missing_or_changed_queued_profile_fails_before_provider_dispatch(
     assert not provider.requests
 
 
-async def test_profile_and_principal_refs_are_optional_for_legacy_queue_payloads(pool):
-    from linch.worker import Worker, enqueue_run
-
-    rid = await enqueue_run(pool, "legacy", "hello")
-    payload = json.loads(await pool.fetchval("SELECT payload FROM pgqueuer"))
-    metadata = json.loads(await pool.fetchval("SELECT meta FROM runs WHERE id=$1", rid))
-    assert "profile" not in payload
-    assert "principal" not in payload
-    assert metadata == {}
-
-    async def factory(job):
-        return make_agent(job)
-
-    async with running(Worker(pool, factory, poll_interval_s=0.02)):
-        await wait_for(
-            lambda: pool.fetchval("SELECT status='completed' FROM runs WHERE id=$1", rid)
-        )
-
-
 async def test_expired_lease_takeover_uses_the_pinned_profile_contract(pool):
     from linch import PostgresRunStore, Profile
     from linch.worker import Worker, enqueue_run

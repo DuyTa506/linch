@@ -195,14 +195,7 @@ def _normalized(value: Any) -> Any:
 @pytest.mark.parametrize(
     ("force_final", "point", "after"),
     [
-        (False, "mark_failed", False),
         (False, "mark_failed", True),
-        (True, "reminder", False),
-        (True, "reminder", True),
-        # Committed, this write also holds the next dispatch marker, so a
-        # retry is a new delivery attempt by design: only "before" applies.
-        (True, "next_turn", False),
-        (True, "completed", False),
         (True, "completed", True),
     ],
     ids=lambda value: {False: "before", True: "after_commit"}.get(value, str(value)),

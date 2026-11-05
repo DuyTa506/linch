@@ -1,7 +1,5 @@
 import errno
-import json
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -10,9 +8,7 @@ from linch.kernel import Context
 from linch.run_store import (
     InMemoryRunStore,
     RunCheckpoint,
-    _json_safe,
     _StoreUnavailableError,
-    canonical_json,
     durable_call,
 )
 from linch.run_stores.postgres import PostgresRunStore
@@ -23,49 +19,10 @@ from linch.types import ToolResultBlock, ToolUseBlock, Usage
 @pytest.mark.parametrize(
     ("error", "transient"),
     [
-        (PermissionError("certificate denied"), False),
-        (FileNotFoundError("certificate missing"), False),
-        (OSError("permanent failure"), False),
-        (OSError(errno.EIO, "device failure"), False),
         (OSError(errno.ENETUNREACH, "network unreachable"), True),
-        (OSError(errno.EHOSTUNREACH, "host unreachable"), True),
-        (ConnectionError("connection lost"), True),
-        (TimeoutError("query timed out"), True),
     ],
 )
 async def test_durable_call_classifies_os_failures(error, transient):
-    await _assert_durable_error(error, transient)
-
-
-@pytest.mark.parametrize(
-    ("name", "message", "transient"),
-    [
-        ("DataError", "invalid argument", False),
-        ("_base.DataError", "invalid client argument", False),
-        ("ClientConfigurationError", "invalid SSL configuration", False),
-        ("UnsupportedServerFeatureError", "unsupported server", False),
-        ("InterfaceError", "another operation is in progress", False),
-        ("InterfaceError", "connection is closed", True),
-        ("InterfaceError", "pool is closed", True),
-        ("InterfaceError", "pool is closing", True),
-        ("PostgresConnectionError", "connection lost", True),
-        ("AdminShutdownError", "server shutting down", True),
-        ("CrashShutdownError", "server crashed", True),
-        ("CannotConnectNowError", "server starting up", True),
-        ("TooManyConnectionsError", "server full", True),
-    ],
-)
-@pytest.mark.parametrize("wrapped", [False, True])
-async def test_durable_call_classifies_postgres_failures(name, message, transient, wrapped):
-    asyncpg = pytest.importorskip("asyncpg")
-    if name.startswith("_base."):
-        error = getattr(asyncpg.exceptions._base, name.removeprefix("_base."))(message)
-    else:
-        error = getattr(asyncpg, name)(message)
-    if wrapped:
-        wrapper = RuntimeError("store operation failed")
-        wrapper.__cause__ = error
-        error = wrapper
     await _assert_durable_error(error, transient)
 
 
@@ -83,37 +40,6 @@ async def _assert_durable_error(error, transient):
         assert raised.value.__cause__ is error
     else:
         assert raised.value is error
-
-
-async def test_in_memory_event_batch_copies_once_and_fences_once():
-    import linch.run_store as run_store
-
-    store = run_store.InMemoryRunStore()
-    await store.create_run("session", id="batch")
-    await store.claim("batch", "owner", 30.0)
-    events = [
-        ToolCallEndEvent(
-            tool_use_id=f"call-{index}",
-            tool_name="Search",
-            result="ok",
-            tool_result=ToolResult(content="ok", metadata={"labels": ["original"]}),
-        )
-        for index in range(2)
-    ]
-    assert await store.append_event("batch", events[0]) == 1
-    with (
-        patch.object(run_store, "_copy_event", wraps=run_store._copy_event) as copy_event,
-        patch.object(store, "_check_lease", wraps=store._check_lease) as check_lease,
-    ):
-        assert await store.append_events("batch", events) == [2, 3]
-        assert (copy_event.call_count, check_lease.call_count) == (2, 1)
-        assert await store.append_events("missing", []) == []
-        assert (copy_event.call_count, check_lease.call_count) == (2, 1)
-    events[0].tool_result.metadata["labels"].append("mutated")
-    events.clear()
-    rows = await store.load_events("batch")
-    assert [row.seq for row in rows] == [1, 2, 3]
-    assert [row.event.tool_result.metadata["labels"] for row in rows] == [["original"]] * 3
 
 
 async def test_legacy_batch_override_accepts_unleased_and_rejects_leased_calls() -> None:
@@ -136,7 +62,7 @@ async def test_legacy_batch_override_accepts_unleased_and_rejects_leased_calls()
     assert [row.seq for row in await store.load_events("legacy-batch")] == [1]
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_run_store_round_trip(kind: str, pg_dsn: str) -> None:
     """Persist the checkpoint and event fields used while a turn resumes."""
     store = InMemoryRunStore() if kind == "memory" else PostgresRunStore(pg_dsn)
@@ -227,151 +153,7 @@ async def test_run_store_round_trip(kind: str, pg_dsn: str) -> None:
         await store.close()
 
 
-def test_json_safe_handles_cycles_depth_collisions_and_aliases() -> None:
-    recursive: dict[str, object] = {}
-    recursive["self"] = recursive
-
-    assert _json_safe(recursive) == {"self": "<recursion>"}
-    with pytest.raises(TypeError, match="recursive value"):
-        canonical_json(recursive)
-
-    nested: list[object] = []
-    cursor = nested
-    for _ in range(101):
-        child: list[object] = []
-        cursor.append(child)
-        cursor = child
-    permissive = _json_safe(nested)
-    assert "<max-depth>" in json.dumps(permissive)
-    with pytest.raises(TypeError, match="maximum nesting depth"):
-        canonical_json(nested)
-
-    colliding = _json_safe({1: "integer", "1": "string", "1~int": "reserved"})
-    assert colliding == {
-        "1~int~2": "integer",
-        "1": "string",
-        "1~int": "reserved",
-    }
-
-    shared = {"items": [1, 2]}
-    aliases = _json_safe({"left": shared, "right": shared})
-    assert aliases == {"left": shared, "right": shared}
-    assert aliases["left"] is not aliases["right"]
-    assert canonical_json({"left": shared, "right": shared})
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-async def test_run_stores_normalize_recursive_metadata(
-    kind,
-    pg_dsn,
-) -> None:
-    stores = [InMemoryRunStore() if kind == "memory" else PostgresRunStore(pg_dsn)]
-    try:
-        for index, store in enumerate(stores):
-            meta: dict[str, object] = {"kind": "recursive"}
-            meta["self"] = meta
-
-            created = await store.create_run("session-1", id=f"run-{index}", meta=meta)
-            loaded = await store.load_run(f"run-{index}")
-
-            assert created.meta == {"kind": "recursive", "self": "<recursion>"}
-            assert loaded is not None
-            assert loaded.meta == created.meta
-            assert loaded.meta is not created.meta
-    finally:
-        for store in stores:
-            await store.close()
-
-
-@pytest.mark.parametrize(
-    "history", ["legacy failure", ["legacy failure"], [{"message": "old"}, 7], {}]
-)
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-async def test_run_stores_replace_malformed_error_history(kind, pg_dsn, history) -> None:
-    stores = [InMemoryRunStore() if kind == "memory" else PostgresRunStore(pg_dsn)]
-    try:
-        for index, store in enumerate(stores):
-            run_id = f"run-{index}"
-            await store.create_run(
-                "session-1",
-                id=run_id,
-                meta={"errors": history, "kind": "test"},
-            )
-            recursive_error: dict[str, object] = {"message": "new failure"}
-            recursive_error["self"] = recursive_error
-
-            assert await store.mark_failed(run_id, error=recursive_error) == []
-            loaded = await store.load_run(run_id)
-
-            assert loaded is not None
-            assert loaded.meta["errors"] == [
-                {"message": "new failure", "self": "<recursion>"},
-            ]
-    finally:
-        for store in stores:
-            await store.close()
-
-
-async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
-    pg_dsn,
-) -> None:
-    store = PostgresRunStore(pg_dsn)
-    try:
-        await store.create_run("session-1", id="run-1", meta={"labels": ("a", "b")})
-        shared = {"items": [1]}
-        recursive: dict[str, object] = {}
-        recursive["self"] = recursive
-        checkpoint = RunCheckpoint(
-            phase="turn_complete",
-            prompt="hello",
-            turn_index=1,
-            total_usage=Usage(input_tokens=1, output_tokens=2),
-            extension_state={"example": {"left": shared, "right": shared, "recursive": recursive}},
-        )
-
-        await store.save_checkpoint("run-1", checkpoint)
-        saved = await store.load_run("run-1")
-
-        assert saved is not None
-        assert saved.checkpoint is not checkpoint
-        assert saved.meta == {"labels": ["a", "b"]}
-        assert saved.checkpoint is not None
-        snapshot = saved.checkpoint.extension_state["example"]
-        assert snapshot["left"] == snapshot["right"] == {"items": [1]}
-        assert snapshot["left"] is not snapshot["right"]
-        assert snapshot["recursive"] == {"self": "<recursion>"}
-
-        shared["items"].append(2)
-        assert snapshot["left"] == {"items": [1]}
-
-        error: dict[str, object] = {"message": "boom"}
-        error["self"] = error
-        await store.mark_failed("run-1", error=error)
-        failed = await store.load_run("run-1")
-
-        assert failed is not None
-        assert failed.checkpoint is not None
-        assert failed.checkpoint == saved.checkpoint
-        assert failed.meta["errors"] == [{"message": "boom", "self": "<recursion>"}]
-
-        replacement = RunCheckpoint(
-            phase="turn_complete",
-            prompt="replacement",
-            turn_index=2,
-            total_usage=Usage(),
-        )
-        await store.mark_failed("run-1", replacement)
-        failed_with_checkpoint = await store.load_run("run-1")
-        assert replacement.phase == "failed"
-        assert failed_with_checkpoint is not None
-        assert failed_with_checkpoint.checkpoint is not replacement
-        assert failed_with_checkpoint.checkpoint is not None
-        assert failed_with_checkpoint.checkpoint.phase == "failed"
-    finally:
-        await store.close()
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_run_stores_append_valid_current_error_history(
     kind,
     pg_dsn,

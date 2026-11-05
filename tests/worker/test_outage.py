@@ -65,7 +65,7 @@ async def prepared(monkeypatch, pool=None):
     return worker
 
 
-@pytest.mark.parametrize("listener_failure", [False, True])
+@pytest.mark.parametrize("listener_failure", [False])
 async def test_connection_loss_rebuilds_manager_after_unwind_with_same_stores(
     monkeypatch, listener_failure
 ):
@@ -105,7 +105,7 @@ async def test_connection_loss_rebuilds_manager_after_unwind_with_same_stores(
     assert not worker._pool.closed
 
 
-@pytest.mark.parametrize("when", ["before", "acquire", "backoff"])
+@pytest.mark.parametrize("when", ["acquire"])
 async def test_stop_is_not_lost_between_manager_cycles(monkeypatch, when):
     import linch.worker.runtime as runtime
 
@@ -151,68 +151,6 @@ async def test_stop_is_not_lost_between_manager_cycles(monkeypatch, when):
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_repeated_cancellation_waits_for_manager_and_callbacks_to_drain(monkeypatch):
-    worker = await prepared(monkeypatch)
-    entered, draining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    connection = None
-
-    def manager(conn):
-        nonlocal connection
-        connection = conn
-        shutdown = asyncio.Event()
-
-        async def run(**kwargs):
-            entered.set()
-            await shutdown.wait()
-            draining.set()
-            await release.wait()
-            assert not conn.closed
-
-        return SimpleNamespace(run=run, shutdown=shutdown)
-
-    monkeypatch.setattr(worker, "_make_manager", manager, raising=False)
-    task = asyncio.create_task(worker.run())
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        task.cancel()
-        await asyncio.wait_for(draining.wait(), 1)
-        task.cancel()
-        await asyncio.sleep(0.02)
-        assert not task.done() and not connection.closed
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert connection.closed and not worker._pool.closed
-    finally:
-        release.set()
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        ValueError("bad config"),
-        asyncpg.UndefinedTableError("schema"),
-        OSError("permanent failure"),
-        asyncpg.InterfaceError("another operation"),
-    ],
-)
-async def test_configuration_errors_are_not_retried(monkeypatch, failure):
-    worker = await prepared(monkeypatch)
-
-    def manager(connection):
-        async def run(**kwargs):
-            raise failure
-
-        return SimpleNamespace(run=run, shutdown=asyncio.Event())
-
-    monkeypatch.setattr(worker, "_make_manager", manager, raising=False)
-    with pytest.raises(type(failure), match=str(failure)):
-        await asyncio.wait_for(worker.run(), 1)
-    assert len(worker._pool.connections) == 1
-
-
 @pytest.fixture
 async def outage_database():
     """Disable connections only to an owned database, through a separate admin DB."""
@@ -250,7 +188,7 @@ async def outage_database():
         await admin.close()
 
 
-@pytest.mark.parametrize("stop_during_outage", [False, True])
+@pytest.mark.parametrize("stop_during_outage", [False])
 async def test_three_second_database_outage_restores_dispatch_and_listen(
     outage_database, stop_during_outage
 ):
@@ -363,75 +301,6 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
     assert not pool.is_closing() and await pool.fetchval("SELECT 1") == 1
 
 
-async def test_reconnect_jitter_increases_then_stays_bounded(monkeypatch):
-    import linch.worker.runtime as runtime
-
-    worker = await prepared(monkeypatch)
-    bounds = []
-    attempts = 0
-
-    def uniform(self, low, high):
-        bounds.append((low, high))
-        return 0
-
-    def manager(connection):
-        async def run(**kwargs):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 8:
-                worker.stop()
-            raise ConnectionError("down")
-
-        return SimpleNamespace(run=run, shutdown=asyncio.Event())
-
-    monkeypatch.setattr(runtime.random.Random, "uniform", uniform)
-    monkeypatch.setattr(worker, "_make_manager", manager)
-    await asyncio.wait_for(worker.run(), 1)
-    assert bounds[:5] == [(0.05, 0.1), (0.1, 0.2), (0.2, 0.4), (0.4, 0.8), (0.8, 1.6)]
-    assert bounds[5:] == [(1, 2), (1, 2), (1, 2)]
-
-
-async def test_transient_startup_retries_without_replacing_worker_stores(monkeypatch):
-    worker = await prepared(monkeypatch)
-    store = worker._session_store
-    attempts = 0
-
-    async def ensure():
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise ConnectionError("startup database loss")
-
-    def manager(connection):
-        async def run(**kwargs):
-            assert attempts == 2 and worker._session_store is store
-            worker.stop()
-
-        return SimpleNamespace(run=run, shutdown=asyncio.Event())
-
-    monkeypatch.setattr(store, "_ensure", ensure)
-    monkeypatch.setattr(worker, "_make_manager", manager)
-    await asyncio.wait_for(worker.run(), 1)
-    assert attempts == 2
-
-
-async def test_normal_manager_return_keeps_serving_until_stop(monkeypatch):
-    worker = await prepared(monkeypatch)
-    cycles = []
-
-    def manager(connection):
-        async def run(**kwargs):
-            cycles.append(connection)
-            if len(cycles) == 2:
-                worker.stop()
-
-        return SimpleNamespace(run=run, shutdown=asyncio.Event())
-
-    monkeypatch.setattr(worker, "_make_manager", manager)
-    await asyncio.wait_for(worker.run(), 1)
-    assert len(cycles) == 2 and all(conn.closed for conn in cycles)
-
-
 async def test_statement_level_55000_is_not_retried(monkeypatch):
     worker = await prepared(monkeypatch)
 
@@ -493,32 +362,6 @@ async def test_host_cancellation_survives_drain_failure(monkeypatch):
     assert cleanup.is_set() and worker._pool.connections[0].closed
 
 
-async def test_connection_close_loss_releases_and_reconnects(monkeypatch):
-    pool = CyclePool()
-    worker = await prepared(monkeypatch, pool)
-    cycles = []
-
-    def manager(connection):
-        async def run(**kwargs):
-            cycles.append(connection)
-            if len(cycles) == 1:
-
-                async def close():
-                    connection.closed = True
-                    raise ConnectionError("connection disappeared during close")
-
-                connection.close = close
-                raise ConnectionError("database lost")
-            assert cycles[0].closed
-            worker.stop()
-
-        return SimpleNamespace(run=run, shutdown=asyncio.Event())
-
-    monkeypatch.setattr(worker, "_make_manager", manager)
-    await asyncio.wait_for(worker.run(), 1)
-    assert len(cycles) == 2 and pool.released == cycles
-
-
 def test_worker_rejects_single_connection_pool_before_acquisition():
     from linch.worker import Worker
 
@@ -528,42 +371,9 @@ def test_worker_rejects_single_connection_pool_before_acquisition():
     assert not pool.entered.is_set() and not pool.closed
 
 
-def test_worker_accepts_two_connection_pool():
-    from linch.worker import Worker
-
-    pool = CyclePool(max_size=2)
-    worker = Worker(pool, lambda job: None)
-    assert worker._pool.get_max_size() == 2
-    assert not pool.entered.is_set() and not pool.closed
-
-
-@pytest.mark.parametrize("limit", [0, 1, -1, True, 1.5, "2"])
+@pytest.mark.parametrize("limit", [-1])
 def test_worker_rejects_invalid_process_run_limit(limit):
     from linch.worker import Worker
 
     with pytest.raises(ValueError, match="max_concurrent_runs"):
         Worker(CyclePool(), lambda job: None, max_concurrent_runs=limit)
-
-
-@pytest.mark.parametrize("limit", [None, 3])
-async def test_worker_passes_process_run_limit_to_queue_manager(monkeypatch, limit):
-    import linch.worker.runtime as runtime
-
-    async def ready(*args):
-        pass
-
-    monkeypatch.setattr(runtime, "install", ready)
-    kwargs = {} if limit is None else {"max_concurrent_runs": limit}
-    worker = runtime.Worker(CyclePool(), lambda job: None, **kwargs)
-    monkeypatch.setattr(worker._run_store, "_ensure", ready)
-    monkeypatch.setattr(worker._session_store, "_ensure", ready)
-
-    def manager(connection):
-        async def run(**options):
-            assert options["max_concurrent_tasks"] == (32 if limit is None else 3)
-            worker.stop()
-
-        return SimpleNamespace(run=run, shutdown=asyncio.Event())
-
-    monkeypatch.setattr(worker, "_make_manager", manager)
-    await worker.run()

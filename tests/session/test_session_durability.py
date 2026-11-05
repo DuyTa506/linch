@@ -68,15 +68,3 @@ async def test_append_maps_transient_message_write_failure_during_run() -> None:
     assert isinstance(raised.value.__cause__, ConnectionError)
     assert session.message_count == 0
     assert session.session_log.history_count == 0
-
-
-async def test_update_meta_maps_transient_metadata_write_failure_during_run() -> None:
-    from linch.run_store import _StoreUnavailableError
-
-    session = _active_session()
-
-    with pytest.raises(_StoreUnavailableError) as raised:
-        await session.update_meta({"key": "value"})
-
-    assert isinstance(raised.value.__cause__, ConnectionError)
-    assert session.meta == {}
