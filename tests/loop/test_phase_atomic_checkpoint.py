@@ -26,7 +26,7 @@ class _AtomicBufferStore:
         if self.failure is not None:
             raise self.failure()
         self.saved.extend(events)
-        return None, [8, 9]
+        return [8, 9]
 
     async def mark_failed(self, run_id, checkpoint=None, error=None, *, events=()):
         return await self.save_checkpoint_with_events(run_id, checkpoint, events, status="failed")

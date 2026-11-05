@@ -596,7 +596,7 @@ class RunStore(Protocol):
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> RunRecord:
+    ) -> None:
         """Persist a checkpoint and update the run status.
 
         Args:
@@ -604,9 +604,6 @@ class RunStore(Protocol):
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            The detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -624,7 +621,7 @@ class RunStore(Protocol):
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Persist a checkpoint and its pending events as one phase boundary.
 
         Args:
@@ -635,8 +632,7 @@ class RunStore(Protocol):
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached updated record and 1-based sequence numbers parallel to
-            ``events``.
+            1-based sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -682,16 +678,13 @@ class RunStore(Protocol):
 
     async def mark_completed(
         self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
-    ) -> RunRecord:
+    ) -> None:
         """Persist a terminal completed status and checkpoint.
 
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            The detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -708,7 +701,7 @@ class RunStore(Protocol):
         *,
         events: Sequence[Event] = (),
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Persist a failed status, optional checkpoint, error, and events.
 
         Args:
@@ -719,7 +712,7 @@ class RunStore(Protocol):
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached failed record and 1-based sequence numbers for ``events``.
+            1-based sequence numbers for ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2094,7 +2087,7 @@ class InMemoryRunStore:
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> RunRecord:
+    ) -> None:
         """Persist a checkpoint and update the run status.
 
         Args:
@@ -2102,9 +2095,6 @@ class InMemoryRunStore:
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            A detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2117,7 +2107,6 @@ class InMemoryRunStore:
         rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
         rec.updated_at = now_iso()
-        return _copy_record(rec)
 
     async def save_checkpoint_with_events(
         self,
@@ -2127,7 +2116,7 @@ class InMemoryRunStore:
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Atomically publish a checkpoint and its pending event prefix.
 
         Args:
@@ -2138,7 +2127,7 @@ class InMemoryRunStore:
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached updated record and sequence numbers parallel to ``events``.
+            Sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2161,7 +2150,7 @@ class InMemoryRunStore:
             StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
             for seq, event in zip(seqs, event_copies, strict=True)
         )
-        return _copy_record(rec), seqs
+        return seqs
 
     async def append_event(
         self, run_id: str, event: Event, *, lease: RunLease | None = None
@@ -2347,16 +2336,13 @@ class InMemoryRunStore:
 
     async def mark_completed(
         self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
-    ) -> RunRecord:
+    ) -> None:
         """Persist a terminal completed status and checkpoint.
 
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            A detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2365,7 +2351,7 @@ class InMemoryRunStore:
 
         self._check_lease(run_id, lease)
         checkpoint.phase = "completed"
-        return await self.save_checkpoint(
+        await self.save_checkpoint(
             run_id,
             checkpoint,
             status="completed",
@@ -2380,7 +2366,7 @@ class InMemoryRunStore:
         *,
         events: Sequence[Event] = (),
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Persist a failed status, optional checkpoint, error, and events.
 
         Args:
@@ -2391,7 +2377,7 @@ class InMemoryRunStore:
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached failed record and sequence numbers parallel to ``events``.
+            Sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2419,7 +2405,7 @@ class InMemoryRunStore:
             StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
             for seq, event in zip(seqs, event_copies, strict=True)
         )
-        return _copy_record(rec), seqs
+        return seqs
 
     async def close(self) -> None:
         """Close the in-memory store; no resources require cleanup."""

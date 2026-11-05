@@ -446,7 +446,7 @@ class PostgresRunStore:
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> RunRecord:
+    ) -> None:
         """Persist a checkpoint and update the run status atomically.
 
         Args:
@@ -455,22 +455,18 @@ class PostgresRunStore:
             status: Status to store alongside the checkpoint.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
-        Returns:
-            The detached updated run record.
-
         Raises:
             KeyError: If the run does not exist.
             LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
-        record, _ = await self.save_checkpoint_with_events(
+        await self.save_checkpoint_with_events(
             run_id,
             checkpoint,
             (),
             status=status,
             **_lease_kwargs(self.save_checkpoint_with_events, lease),
         )
-        return record
 
     async def append_event(
         self, run_id: str, event: Event, *, lease: RunLease | None = None
@@ -504,17 +500,16 @@ class PostgresRunStore:
         args: tuple[object, ...],
         *,
         update: str,
+        count_arg: str,
         event_arg: str,
         fence: str,
-        returning: str,
-        result: str,
         connection: Any = None,
         lease: RunLease | None = None,
-    ) -> tuple[Any, list[int]]:
+    ) -> list[int]:
         sql = f"""
             WITH updated AS (
                 UPDATE runs SET {update} WHERE id = $1 AND ({fence})
-                RETURNING id, {returning}
+                RETURNING id, last_event_seq - {count_arg} AS first_seq
             ), inserted AS (
                 INSERT INTO run_events (run_id, seq, appended_at, event)
                 SELECT updated.id, updated.first_seq + ordinality, $2, event_json
@@ -522,7 +517,7 @@ class PostgresRunStore:
                     WITH ORDINALITY AS events(event_json, ordinality)
                 RETURNING seq
             )
-            SELECT {result}COALESCE((SELECT array_agg(seq ORDER BY seq) FROM inserted),
+            SELECT COALESCE((SELECT array_agg(seq ORDER BY seq) FROM inserted),
                                     ARRAY[]::BIGINT[]) AS allocated_seqs
             FROM updated
         """
@@ -533,7 +528,7 @@ class PostgresRunStore:
             row = await self._admit(conn, sql, *args, run_id=run_id)
             if row is None:
                 await self._classify_write_failure(conn, run_id, lease)
-        return row, [int(seq) for seq in row["allocated_seqs"]]
+        return [int(seq) for seq in row["allocated_seqs"]]
 
     async def save_checkpoint_with_events(
         self,
@@ -543,7 +538,7 @@ class PostgresRunStore:
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Commit a phase's events and checkpoint in one fenced statement.
 
         Args:
@@ -554,8 +549,7 @@ class PostgresRunStore:
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached updated record and 1-based sequence numbers parallel to
-            ``events``.
+            1-based sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -566,26 +560,18 @@ class PostgresRunStore:
         encoded = [dumps(_json_safe_stored_event(event)) for event in events]
         payload = dumps(checkpoint_to_dict(checkpoint))
         owner, epoch = self._fence_values(run_id, lease)
-        row, seqs = await self._write_event_rows(
+        return await self._write_event_rows(
             run_id,
             (run_id, now_iso(), status, payload, len(encoded), encoded, owner, epoch),
             update=(
                 "updated_at = $2, status = $3, checkpoint = $4, "
                 "last_event_seq = last_event_seq + $5"
             ),
+            count_arg="$5",
             event_arg="$6",
             fence="$7::text IS NULL OR (lease_owner = $7 AND COALESCE(lease_epoch, 0) = $8)",
-            returning=(
-                "session_id, status, created_at, updated_at, checkpoint, meta, "
-                "last_event_seq - $5 AS first_seq"
-            ),
-            result=(
-                "updated.id, updated.session_id, updated.status, updated.created_at, "
-                "updated.updated_at, updated.checkpoint, updated.meta,"
-            ),
             lease=lease,
         )
-        return _row_record(row), seqs
 
     async def append_events(
         self, run_id: str, events: list[Event], *, lease: RunLease | None = None
@@ -613,17 +599,15 @@ class PostgresRunStore:
             return []
         encoded = [dumps(_json_safe_stored_event(event)) for event in events]
         owner, epoch = self._fence_values(run_id, lease)
-        _, seqs = await self._write_event_rows(
+        return await self._write_event_rows(
             run_id,
             (run_id, now_iso(), len(encoded), encoded, owner, epoch),
             update="updated_at = $2, last_event_seq = last_event_seq + $3",
+            count_arg="$3",
             event_arg="$4",
             fence="$5::text IS NULL OR (lease_owner = $5 AND COALESCE(lease_epoch, 0) = $6)",
-            returning="last_event_seq - $3 AS first_seq",
-            result="",
             lease=lease,
         )
-        return seqs
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         """Load persisted events after an exclusive sequence watermark.
@@ -679,7 +663,7 @@ class PostgresRunStore:
 
     async def mark_completed(
         self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
-    ) -> RunRecord:
+    ) -> None:
         """Persist a terminal completed status and checkpoint.
 
         Args:
@@ -687,16 +671,13 @@ class PostgresRunStore:
             checkpoint: Final checkpoint whose phase is set to ``completed``.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
-        Returns:
-            The detached completed record.
-
         Raises:
             KeyError: If the run does not exist.
             LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         checkpoint.phase = "completed"
-        return await self.save_checkpoint(
+        await self.save_checkpoint(
             run_id,
             checkpoint,
             status="completed",
@@ -711,7 +692,7 @@ class PostgresRunStore:
         *,
         events: Sequence[Event] = (),
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Commit failed status, checkpoint, error metadata, and events together.
 
         Args:
@@ -722,8 +703,7 @@ class PostgresRunStore:
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached failed record and 1-based sequence numbers parallel to
-            ``events``.
+            1-based sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -752,7 +732,7 @@ class PostgresRunStore:
                 meta = _safe_meta(json.loads(stored_meta))
                 _append_run_error(meta, json.loads(error_json))
                 meta_json = dumps(meta)
-            row, seqs = await self._write_event_rows(
+            return await self._write_event_rows(
                 run_id,
                 (
                     run_id,
@@ -768,20 +748,12 @@ class PostgresRunStore:
                     updated_at = $2, status = 'failed', checkpoint = COALESCE($3, checkpoint),
                     last_event_seq = last_event_seq + $5, meta = COALESCE($4, meta)
                 """,
+                count_arg="$5",
                 event_arg="$6",
                 fence="$7::text IS NULL OR (lease_owner = $7 AND COALESCE(lease_epoch, 0) = $8)",
-                returning=(
-                    "session_id, status, created_at, updated_at, checkpoint, meta, "
-                    "last_event_seq - $5 AS first_seq"
-                ),
-                result=(
-                    "updated.id, updated.session_id, updated.status, updated.created_at, "
-                    "updated.updated_at, updated.checkpoint, updated.meta,"
-                ),
                 connection=conn,
                 lease=lease,
             )
-        return _row_record(row), seqs
 
     async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
         """Claim a run using one conditional PostgreSQL update.

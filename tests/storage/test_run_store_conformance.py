@@ -76,12 +76,14 @@ async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase)
     store = store_case.store
     await store.create_run("session-1", id=run_id, meta={"source": "test"})
 
-    saved = await store.save_checkpoint(run_id, _checkpoint())
+    assert await store.save_checkpoint(run_id, _checkpoint()) is None
+    saved = await store.load_run(run_id)
+    assert saved is not None
     assert saved.status == "running"
     assert saved.checkpoint is not None
     assert saved.checkpoint.prompt == "hello"
 
-    # A returned checkpoint is an isolated snapshot, so caller mutation cannot
+    # A loaded checkpoint is an isolated snapshot, so caller mutation cannot
     # alter the durable record.
     saved.checkpoint.extension_state["nested"]["labels"].append("caller")
     loaded = await store.load_run(run_id)
@@ -98,19 +100,20 @@ async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase)
     resumed = await store.load_events(run_id, after_seq=1)
     assert [row.seq for row in resumed] == [2, 3]
 
-    done = await store.mark_completed(run_id, _checkpoint("done"))
+    assert await store.mark_completed(run_id, _checkpoint("done")) is None
+    done = await store.load_run(run_id)
+    assert done is not None
     assert done.status == "completed"
     assert done.checkpoint is not None
     assert done.checkpoint.phase == "completed"
 
     failed_id = f"conformance-failed-{uuid4()}"
     await store.create_run("session-1", id=failed_id)
-    failed, seqs = await store.mark_failed(
+    seqs = await store.mark_failed(
         failed_id, _checkpoint("failed"), {"message": "boom"}, events=[_event("terminal")]
     )
     assert seqs == [1]
     assert [row.event for row in await store.load_events(failed_id)] == [_event("terminal")]
-    assert failed.status == "failed"
     failed_loaded = await store.load_run(failed_id)
     assert failed_loaded is not None
     assert failed_loaded.status == "failed"
@@ -279,15 +282,15 @@ async def test_leased_event_encoding_failure_is_atomic(store_case) -> None:
     await store.release(lease)
 
 
-async def test_leased_returned_records_are_detached(store_case: _StoreCase) -> None:
-    """A leased write returns an isolated record snapshot."""
+async def test_leased_write_detaches_the_caller_checkpoint(store_case: _StoreCase) -> None:
+    """A leased write stores a snapshot that later caller mutation cannot alter."""
     store = store_case.store
     run_id = f"leased-detached-{uuid4()}"
     await store.create_run("session", id=run_id)
     lease = await store.claim(run_id, "owner", 30.0)
-    saved = await store.save_checkpoint(run_id, _checkpoint("detached"), lease=lease)
-    assert saved.checkpoint is not None
-    saved.checkpoint.extension_state["nested"]["labels"].append("caller")
+    saved = _checkpoint("detached")
+    assert await store.save_checkpoint(run_id, saved, lease=lease) is None
+    saved.extension_state["nested"]["labels"].append("caller")
     loaded = await store.load_run(run_id)
     assert loaded is not None
     assert loaded.checkpoint is not None
@@ -559,14 +562,15 @@ async def test_mark_failed_preserves_nul_metadata_and_error_history(
     run_id = f"failed-nul-{uuid4()}"
     await store.create_run("session", id=run_id, meta=meta)
     assert await store.append_event(run_id, _event("before")) == 1
-    failed, seqs = await store.mark_failed(
+    seqs = await store.mark_failed(
         run_id, _checkpoint("failed\0prompt"), error, events=[_event("terminal\0event")]
     )
+    failed = await store.load_run(run_id)
+    assert failed is not None
     assert failed.status == "failed"
     assert failed.checkpoint.phase == "failed"
     assert failed.checkpoint.prompt == "failed\0prompt"
     assert failed.meta == {**meta, "errors": [*history, error]}
-    assert await store.load_run(run_id) == failed
     assert seqs == [2]
     assert [row.event for row in await store.load_events(run_id)] == [
         _event("before"),

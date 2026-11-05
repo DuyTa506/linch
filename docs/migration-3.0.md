@@ -140,8 +140,11 @@ Custom store implementations must follow these changed contracts:
   checkpoint with creation or adoption. An existing ID is adopted only for a
   same-session `pending` run, with metadata merging and contract checking;
   other existing IDs raise `ValueError`.
-- `mark_failed(..., events=())` returns `(run_record, event_seqs)` so a failed
-  status and pending terminal events commit together.
+- `mark_failed(..., events=())` commits a failed status and pending terminal
+  events together and returns only the event seqs.
+- Run-store writes no longer return a `RunRecord`: `save_checkpoint` and
+  `mark_completed` return `None`, `save_checkpoint_with_events` and
+  `mark_failed` return the event seqs. Use `load_run` to read stored state.
 - `RunStore.save_checkpoint_with_events(...)` atomically commits a checkpoint
   and its pending events; this is required when a phase has pending events.
 - `ModelInputSnapshotStore.delete` requires `run_id` for fenced cleanup.

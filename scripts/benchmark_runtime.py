@@ -836,7 +836,6 @@ class MeasuredStore:
                         self.metrics.turn.set(turn)
             result = await method(*args, **kwargs)
             self.metrics.writes[self.name, name, turn] += 1
-            record = result[0] if name in {"save_checkpoint_with_events", "mark_failed"} else result
             if (
                 self.name == "session"
                 and name == "append_messages"
@@ -872,7 +871,9 @@ class MeasuredStore:
                 "mark_completed",
                 "mark_failed",
             }:
-                persisted = getattr(record, "checkpoint", None)
+                # Write methods return no record; the argument is what was stored
+                # (mark_* set its phase before persisting).
+                persisted = result.checkpoint if name == "create_run" else checkpoint
                 if persisted is not None and self.metrics.capture_payload_bytes:
                     size = len(json.dumps(checkpoint_to_dict(persisted), allow_nan=False).encode())
                     self.metrics.payloads[turn, persisted.phase].append(size)
