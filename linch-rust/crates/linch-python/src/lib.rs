@@ -8,6 +8,7 @@
 
 mod canonical;
 mod deepcopy;
+mod journal;
 mod json_safe;
 
 use pyo3::prelude::*;
@@ -19,6 +20,8 @@ mod _linch_native {
     use super::canonical::{canonical_dumps, dumps};
     #[pymodule_export]
     use super::deepcopy::deepcopy;
+    #[pymodule_export]
+    use super::journal::check_journal_json;
     #[pymodule_export]
     use super::json_safe::json_safe;
 }
