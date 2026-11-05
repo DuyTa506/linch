@@ -35,9 +35,10 @@ pub struct ProviderRequest {
     /// Requested reasoning effort.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
-    /// Token budget for extended thinking/reasoning.
+    /// Requested extended-thinking/reasoning behavior; `None` is the
+    /// "provider default" state. See [`Thinking`] for the full mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u32>,
+    pub thinking: Option<Thinking>,
     /// Requested prompt-cache behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
@@ -99,6 +100,82 @@ pub enum ReasoningEffort {
     Xhigh,
     /// Maximum available reasoning.
     Max,
+}
+
+/// Requested extended-thinking/reasoning behavior for a call.
+///
+/// Mirrors the states the Python kernel's `ThinkingConfig` sends as a raw
+/// `{"type": ...}` dict on `ProviderRequest.thinking`
+/// (`src/linch/providers/base.py`); `None` on
+/// [`ProviderRequest::thinking`] is the fourth state, "provider default" —
+/// no directive is sent at all, matching Python's own
+/// `thinking: dict[str, Any] | None = None`, documented as "preserves
+/// provider defaults" (`AnthropicProviderOptions.thinking` docstring).
+/// `Disabled`/`Adaptive` are empty struct variants (see [`ToolChoice`]'s
+/// doc for why), not bare unit variants.
+///
+/// Per-adapter mapping (`src/linch/providers/`):
+/// - **Anthropic** (`anthropic.py`, `_effective_thinking`/`_build_payload`):
+///   forwards the dict to the native `thinking` payload field verbatim.
+///   `_thinking_is_active` treats only `None` and [`Thinking::Disabled`] as
+///   inactive; an active [`Thinking::Enabled`] or [`Thinking::Adaptive`]
+///   then restricts a synthesized structured-output tool choice to `auto`,
+///   because Anthropic only allows `auto`/`none` tool choice while thinking
+///   is on.
+/// - **Gemini** (`gemini.py`, `_build_generation_config` ~line 280): maps
+///   [`Thinking::Disabled`] to thinking budget `0`; [`Thinking::Adaptive`]
+///   and an [`Thinking::Enabled`] with no `budget_tokens` to the
+///   dynamic-thinking sentinel `-1`; an [`Thinking::Enabled`] with a budget
+///   to that budget. `display` maps to `include_thoughts`
+///   (`Omitted` → `false`, otherwise `true`). Gemini separately accepts a
+///   raw native override with no `type` tag (bare `thinking_budget`/
+///   `thinking_level` keys) via its own adapter options
+///   (`test_native_thinking_override`); that is untyped dynamic
+///   configuration the 9.1 ground rules exclude from this port — use a
+///   Gemini-specific adapter option instead (P5).
+/// - **DeepSeek** (`deepseek.py`, `_effective_thinking`): collapses to its
+///   own on/off switch — [`Thinking::Disabled`] is `"disabled"`, every
+///   other variant (including [`Thinking::Adaptive`]) is `"enabled"`;
+///   `budget_tokens` and `display` are ignored.
+/// - **llama.cpp, SGLang, vLLM** (`llamacpp.py`, `sglang.py`, `vllm.py`):
+///   only check for [`Thinking::Disabled`] to flip a template thinking
+///   switch off; every other state, including `None`, leaves the template
+///   default untouched.
+/// - **OpenAI chat/Responses** (`openai_chat.py`, `openai_responses.py`):
+///   ignore this field entirely; they use [`ReasoningEffort`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Thinking {
+    /// Explicitly turn thinking/reasoning off for this call.
+    Disabled {},
+    /// Let the provider pick its own reasoning depth, with no budget.
+    Adaptive {
+        /// Whether the provider should summarize or omit reasoning
+        /// surfaced back to the caller; `None` uses the provider default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<ThinkingDisplay>,
+    },
+    /// Turn thinking on, optionally bounded by a token budget.
+    Enabled {
+        /// Token budget for the provider's reasoning. `None` lets the
+        /// provider choose (Gemini: dynamic thinking).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_tokens: Option<u32>,
+        /// Whether the provider should summarize or omit reasoning
+        /// surfaced back to the caller; `None` uses the provider default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<ThinkingDisplay>,
+    },
+}
+
+/// How much of a provider's reasoning to surface back to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    /// Return a condensed summary of the reasoning.
+    Summarized,
+    /// Return no reasoning content at all.
+    Omitted,
 }
 
 /// Requested provider prompt-cache behavior for a request.
@@ -163,7 +240,7 @@ mod tests {
             temperature: None,
             stop_sequences: vec![],
             effort: None,
-            thinking_budget: None,
+            thinking: None,
             cache_control: None,
             output_schema: None,
             tool_choice: None,
@@ -236,5 +313,72 @@ mod tests {
             serde_json::to_value(CacheTtl::OneHour).unwrap(),
             json!("1h")
         );
+    }
+
+    #[test]
+    fn thinking_variants_round_trip() {
+        for (thinking, wire) in [
+            (Thinking::Disabled {}, json!({"type": "disabled"})),
+            (
+                Thinking::Adaptive { display: None },
+                json!({"type": "adaptive"}),
+            ),
+            (
+                Thinking::Adaptive {
+                    display: Some(ThinkingDisplay::Omitted),
+                },
+                json!({"type": "adaptive", "display": "omitted"}),
+            ),
+            (
+                Thinking::Enabled {
+                    budget_tokens: None,
+                    display: None,
+                },
+                json!({"type": "enabled"}),
+            ),
+            (
+                Thinking::Enabled {
+                    budget_tokens: Some(2_048),
+                    display: Some(ThinkingDisplay::Summarized),
+                },
+                json!({"type": "enabled", "budget_tokens": 2048, "display": "summarized"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&thinking).unwrap(), wire);
+            assert_eq!(serde_json::from_value::<Thinking>(wire).unwrap(), thinking);
+        }
+    }
+
+    #[test]
+    fn thinking_rejects_unknown_fields_and_tags() {
+        assert!(
+            serde_json::from_value::<Thinking>(json!({"type": "disabled", "extra": 1})).is_err()
+        );
+        assert!(serde_json::from_value::<Thinking>(json!({"type": "paused"})).is_err());
+    }
+
+    #[test]
+    fn absent_thinking_is_provider_default_and_omitted_on_the_wire() {
+        let request = ProviderRequest {
+            thinking: None,
+            ..minimal_request()
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("thinking").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProviderRequest>(wire)
+                .unwrap()
+                .thinking,
+            None
+        );
+    }
+
+    #[test]
+    fn old_thinking_budget_field_is_rejected() {
+        let mut wire = serde_json::to_value(minimal_request()).unwrap();
+        wire.as_object_mut()
+            .unwrap()
+            .insert("thinking_budget".into(), json!(1024));
+        assert!(serde_json::from_value::<ProviderRequest>(wire).is_err());
     }
 }

@@ -19,6 +19,6 @@ pub use event::{
     ToolUseEndEvent, ToolUseInputDeltaEvent, ToolUseStartEvent,
 };
 pub use request::{
-    CacheControl, CacheTtl, OutputSchema, ProviderRequest, ReasoningEffort, ToolChoice,
-    ToolDefinition,
+    CacheControl, CacheTtl, OutputSchema, ProviderRequest, ReasoningEffort, Thinking,
+    ThinkingDisplay, ToolChoice, ToolDefinition,
 };
