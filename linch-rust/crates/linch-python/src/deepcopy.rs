@@ -1,7 +1,7 @@
 //! Native `copy.deepcopy`.
 //!
-//! A port of CPython's `copy.deepcopy` / `copy._reconstruct` (identical in
-//! 3.11-3.13) that shares the caller's memo dict, including the keep-alive
+//! A port of CPython's `copy.deepcopy` / `copy._reconstruct` (3.11-3.14; 3.14
+//! only moved the atomic types into a set) that shares the caller's memo dict, including the keep-alive
 //! list stored under `id(memo)`. Exact `list`/`dict`/`tuple`, the atomic types
 //! and the `__reduce_ex__(4)` reconstruction run natively. Every other case
 //! (`__deepcopy__` hooks, `copyreg.dispatch_table`, the remaining dispatch
@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
@@ -37,17 +38,26 @@ static REFS: PyOnceLock<Refs> = PyOnceLock::new();
 fn refs(py: Python<'_>) -> PyResult<&'static Refs> {
     REFS.get_or_try_init(py, || {
         let copy = py.import("copy")?;
-        let atomic_copier = copy.getattr("_deepcopy_atomic")?;
         let native = [
             py.get_type::<PyList>(),
             py.get_type::<PyDict>(),
             py.get_type::<PyTuple>(),
         ];
         let (mut atomic, mut other_dispatch) = (Vec::new(), Vec::new());
+        // 3.14 keeps the atomic types in a set; older versions map them to
+        // `_deepcopy_atomic` in the dispatch table.
+        let atomic_copier = if copy.hasattr("_atomic_types")? {
+            for cls in copy.getattr("_atomic_types")?.try_iter()? {
+                atomic.push(cls?.cast_into::<PyType>()?.unbind());
+            }
+            None
+        } else {
+            Some(copy.getattr("_deepcopy_atomic")?)
+        };
         let dispatch = copy.getattr("_deepcopy_dispatch")?.cast_into::<PyDict>()?;
         for (cls, copier) in dispatch.iter() {
             let cls = cls.cast_into::<PyType>()?;
-            if copier.is(&atomic_copier) {
+            if atomic_copier.as_ref().is_some_and(|f| copier.is(f)) {
                 atomic.push(cls.unbind());
             } else if !native.iter().any(|ty| ty.is(&cls)) {
                 other_dispatch.push(cls.unbind());
@@ -405,6 +415,12 @@ impl<'py> Copier<'py> {
                     for pair in slots.call_method0("items")?.try_iter()? {
                         let (key, value): (Bound<'py, PyAny>, Bound<'py, PyAny>) =
                             pair?.extract()?;
+                        if !key.is_instance_of::<PyString>() {
+                            return Err(PyTypeError::new_err(format!(
+                                "attribute name must be string, not '{}'",
+                                key.get_type().name()?
+                            )));
+                        }
                         y.setattr(key.cast_into::<PyString>()?, value)?;
                     }
                 }

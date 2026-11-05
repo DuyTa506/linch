@@ -292,3 +292,12 @@ def test_slotted_fast_path_edges_match_stdlib() -> None:
     expected, copied = copy.deepcopy(hooked), native_deepcopy(hooked)
     assert copied.v == expected.v == ("from-getstate", [3])
     assert not hasattr(copied, "w") and not hasattr(expected, "w")
+
+
+class BadSlotState:
+    def __reduce_ex__(self, protocol: object) -> tuple[Any, ...]:
+        return (BadSlotState, (), (None, {1: "bad"}))
+
+
+def test_non_string_slot_state_key_raises_like_stdlib() -> None:
+    assert _outcome(native_deepcopy, BadSlotState()) == _outcome(copy.deepcopy, BadSlotState())
