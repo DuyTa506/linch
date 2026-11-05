@@ -1,1 +1,24 @@
-//! Placeholder; see BLUEPRINT section 9.
+//! The provider stream contract: the request a provider receives, the
+//! normalized event stream it emits, and the [`Assembler`] that turns that
+//! stream into one assistant turn.
+//!
+//! An adapter never emits raw vendor SDK objects or a vendor-specific shape;
+//! it translates into [`ProviderEvent`], and everything downstream of that
+//! boundary — the loop, the session log, the run store — only ever sees the
+//! resulting [`AssistantAssembly`]. See
+//! `docs/architecture/provider-contract.md` for the full contract this
+//! module enforces.
+
+mod assembler;
+mod event;
+mod request;
+
+pub use assembler::{Assembler, AssistantAssembly, StreamError, assemble};
+pub use event::{
+    MessageEndEvent, MessageStartEvent, ProviderEvent, TextDeltaEvent, ThinkingDeltaEvent,
+    ToolUseEndEvent, ToolUseInputDeltaEvent, ToolUseStartEvent,
+};
+pub use request::{
+    CacheControl, CacheTtl, OutputSchema, ProviderRequest, ReasoningEffort, ToolChoice,
+    ToolDefinition,
+};
