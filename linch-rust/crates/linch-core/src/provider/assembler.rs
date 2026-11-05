@@ -140,6 +140,13 @@ struct OpenCall {
 /// after the tool-use block in `content` order. Each `redacted_thinking`
 /// and each completed tool call appends its own block immediately and does
 /// not coalesce with neighbors.
+///
+/// A thinking run flushes to a block if it has any text, or carries a
+/// signature — a signed `thinking_delta` with empty text is valid provider
+/// output and its signature must still be preserved and replayed, even
+/// though the block's `thinking` text is empty. Only a run that is both
+/// textless and unsigned flushes to nothing; its signature is still reset
+/// so it cannot leak into the next run.
 #[derive(Default)]
 pub struct Assembler {
     message_started: bool,
@@ -171,11 +178,13 @@ impl Assembler {
     }
 
     fn flush_thinking(&mut self) {
-        // Always take the signature, even when the run produced no text: a
-        // run with nothing to flush must not leak its signature into the
-        // next, unrelated thinking run.
+        // Always take the signature, resetting it for the next run. Emit a
+        // block when the run has text or a signature; a run that is both
+        // textless and unsigned carries no information and emits nothing,
+        // but its (absent) signature must not leak into the next run
+        // either, hence taking it unconditionally above.
         let signature = self.thinking_sig.take();
-        if !self.thinking_buf.is_empty() {
+        if !self.thinking_buf.is_empty() || signature.is_some() {
             self.content.push(ContentBlock::Thinking(ThinkingBlock {
                 thinking: std::mem::take(&mut self.thinking_buf),
                 signature,

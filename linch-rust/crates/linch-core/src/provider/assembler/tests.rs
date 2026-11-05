@@ -59,11 +59,45 @@ enum Seed {
 fn seed_strategy() -> impl Strategy<Value = Seed> {
     prop_oneof![
         3 => "[a-zA-Z0-9 ]{1,8}".prop_map(Seed::Text),
-        3 => ("[a-zA-Z0-9 ]{1,8}", prop::option::of("[a-z]{1,6}"))
+        // 0-length text is included: a thinking_delta with empty text but a
+        // signature is valid provider output (see `Assembler::flush_thinking`).
+        3 => ("[a-zA-Z0-9 ]{0,8}", prop::option::of("[a-z]{1,6}"))
             .prop_map(|(text, sig)| Seed::Thinking(text, sig)),
         1 => "[a-z]{1,6}".prop_map(Seed::Redacted),
         2 => ("[A-Za-z]{1,8}", json_object(2)).prop_map(|(name, input)| Seed::ToolUse(name, input)),
     ]
+}
+
+/// Model state for [`events_and_expected`], tracking the same two pending
+/// runs [`Assembler`] does, flushed at the same points, so a kind-switching
+/// event that itself produces no block (an empty, unsigned `thinking_delta`)
+/// still correctly ends whatever run preceded it.
+#[derive(Default)]
+struct ExpectedContent {
+    blocks: Vec<ContentBlock>,
+    text: String,
+    thinking: String,
+    thinking_sig: Option<String>,
+}
+
+impl ExpectedContent {
+    fn flush_text(&mut self) {
+        if !self.text.is_empty() {
+            self.blocks.push(ContentBlock::Text(TextBlock {
+                text: std::mem::take(&mut self.text),
+            }));
+        }
+    }
+
+    fn flush_thinking(&mut self) {
+        let signature = self.thinking_sig.take();
+        if !self.thinking.is_empty() || signature.is_some() {
+            self.blocks.push(ContentBlock::Thinking(ThinkingBlock {
+                thinking: std::mem::take(&mut self.thinking),
+                signature,
+            }));
+        }
+    }
 }
 
 /// Turn seeds into the event stream that would produce them and the
@@ -73,43 +107,38 @@ fn events_and_expected(model: &str, seeds: &[Seed]) -> (Vec<ProviderEvent>, Vec<
     let mut events = vec![ProviderEvent::MessageStart(MessageStartEvent {
         model: model.to_string(),
     })];
-    let mut expected: Vec<ContentBlock> = Vec::new();
+    let mut expected = ExpectedContent::default();
     for (index, seed) in seeds.iter().enumerate() {
         match seed {
             Seed::Text(text) => {
                 events.push(ProviderEvent::TextDelta(TextDeltaEvent {
                     text: text.clone(),
                 }));
-                match expected.last_mut() {
-                    Some(ContentBlock::Text(block)) => block.text.push_str(text),
-                    _ => expected.push(ContentBlock::Text(TextBlock { text: text.clone() })),
-                }
+                expected.flush_thinking();
+                expected.text.push_str(text);
             }
             Seed::Thinking(text, signature) => {
                 events.push(ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
                     text: text.clone(),
                     signature: signature.clone(),
                 }));
-                match expected.last_mut() {
-                    Some(ContentBlock::Thinking(block)) => {
-                        block.thinking.push_str(text);
-                        if let Some(sig) = signature {
-                            block.signature = Some(sig.clone());
-                        }
-                    }
-                    _ => expected.push(ContentBlock::Thinking(ThinkingBlock {
-                        thinking: text.clone(),
-                        signature: signature.clone(),
-                    })),
+                expected.flush_text();
+                expected.thinking.push_str(text);
+                if let Some(sig) = signature {
+                    expected.thinking_sig = Some(sig.clone());
                 }
             }
             Seed::Redacted(data) => {
                 events.push(ProviderEvent::RedactedThinking(RedactedThinkingBlock {
                     data: data.clone(),
                 }));
-                expected.push(ContentBlock::RedactedThinking(RedactedThinkingBlock {
-                    data: data.clone(),
-                }));
+                expected.flush_text();
+                expected.flush_thinking();
+                expected
+                    .blocks
+                    .push(ContentBlock::RedactedThinking(RedactedThinkingBlock {
+                        data: data.clone(),
+                    }));
             }
             Seed::ToolUse(name, input) => {
                 let id = format!("call-{index}");
@@ -125,7 +154,9 @@ fn events_and_expected(model: &str, seeds: &[Seed]) -> (Vec<ProviderEvent>, Vec<
                 events.push(ProviderEvent::ToolUseEnd(ToolUseEndEvent {
                     id: id.clone(),
                 }));
-                expected.push(ContentBlock::ToolUse(ToolUseBlock {
+                expected.flush_text();
+                expected.flush_thinking();
+                expected.blocks.push(ContentBlock::ToolUse(ToolUseBlock {
                     id,
                     name: name.clone(),
                     input: input.clone(),
@@ -133,7 +164,9 @@ fn events_and_expected(model: &str, seeds: &[Seed]) -> (Vec<ProviderEvent>, Vec<
             }
         }
     }
-    (events, expected)
+    expected.flush_text();
+    expected.flush_thinking();
+    (events, expected.blocks)
 }
 
 fn non_tool_use_stop_reason() -> impl Strategy<Value = StopReason> {

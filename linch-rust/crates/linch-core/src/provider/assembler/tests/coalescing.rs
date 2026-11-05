@@ -64,15 +64,17 @@ fn thinking_signature_is_the_last_one_seen_in_the_run() {
 }
 
 #[test]
-fn an_empty_thinking_run_does_not_leak_its_signature_into_the_next_run() {
+fn an_empty_signed_thinking_run_emits_its_signature_and_does_not_leak_it_further() {
     let assembly = assemble([
         start("m"),
-        // An empty-text delta carrying a signature produces no block...
+        // An empty-text delta carrying a signature is valid provider output:
+        // it must still produce a block so the signature round-trips, even
+        // though the block's own thinking text is empty.
         ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
             text: "".into(),
-            signature: Some("stale".into()),
+            signature: Some("sig-1".into()),
         }),
-        // ...so a later, unrelated thinking run must not inherit it.
+        // A later, unrelated thinking run must not inherit that signature.
         ProviderEvent::TextDelta(TextDeltaEvent {
             text: "between".into(),
         }),
@@ -86,6 +88,10 @@ fn an_empty_thinking_run_does_not_leak_its_signature_into_the_next_run() {
     assert_eq!(
         assembly.message.content,
         vec![
+            ContentBlock::Thinking(ThinkingBlock {
+                thinking: "".into(),
+                signature: Some("sig-1".into()),
+            }),
             ContentBlock::Text(TextBlock {
                 text: "between".into()
             }),
@@ -95,6 +101,20 @@ fn an_empty_thinking_run_does_not_leak_its_signature_into_the_next_run() {
             }),
         ]
     );
+}
+
+#[test]
+fn an_empty_unsigned_thinking_run_emits_nothing() {
+    let assembly = assemble([
+        start("m"),
+        ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
+            text: "".into(),
+            signature: None,
+        }),
+        end(StopReason::EndTurn),
+    ])
+    .unwrap();
+    assert_eq!(assembly.message.content, vec![]);
 }
 
 #[test]
