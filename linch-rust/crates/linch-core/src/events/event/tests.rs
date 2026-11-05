@@ -3,11 +3,9 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn known_event_types_matches_decode_exhaustively() {
-    // Every tag `decode` handles explicitly must be in the table (used
-    // by `IgnorableEvent::new`'s known-type rejection), and vice versa.
-    // `error` is a convenient representative known event to prove the
-    // table isn't stale against the match arms below.
+fn known_event_types_rejects_already_known_types() {
+    // Every tag in the table must be rejected by `IgnorableEvent::new`'s
+    // known-type guard; an unlisted tag must not be.
     for tag in KNOWN_EVENT_TYPES {
         assert!(
             IgnorableEvent::new(*tag, JsonObject::new()).is_err(),
@@ -15,6 +13,88 @@ fn known_event_types_matches_decode_exhaustively() {
         );
     }
     assert!(IgnorableEvent::new("brand_new_kind", JsonObject::new()).is_ok());
+}
+
+/// Drift guard for the crate's two hand-kept event-type lists:
+/// `KNOWN_EVENT_TYPES` and the `type_name.as_str()` match arms in
+/// `Event::decode`. One sample of every kind (`one_of_every_kind`, minus
+/// the open-ended `Ignorable` fallback, which has no wire tag of its own)
+/// must encode to a `type` tag set that equals `KNOWN_EVENT_TYPES` exactly,
+/// with no duplicate tag on either side; and `decode` must not treat any
+/// `KNOWN_EVENT_TYPES` tag as unknown.
+#[test]
+fn known_event_types_matches_decode_exhaustively() {
+    use std::collections::BTreeSet;
+
+    let sample_tags: Vec<String> = one_of_every_kind()
+        .iter()
+        .filter(|event| !matches!(event, Event::Ignorable(_)))
+        .map(|event| match event.to_value() {
+            JsonValue::Object(obj) => match obj.get("type") {
+                Some(JsonValue::String(s)) => s.clone(),
+                _ => panic!("event is missing its type tag"),
+            },
+            _ => panic!("event did not encode to an object"),
+        })
+        .collect();
+
+    let sample_set: BTreeSet<&str> = sample_tags.iter().map(String::as_str).collect();
+    let known_set: BTreeSet<&str> = KNOWN_EVENT_TYPES.iter().copied().collect();
+    assert_eq!(
+        sample_set.len(),
+        sample_tags.len(),
+        "one_of_every_kind must not have two samples with the same type tag"
+    );
+    assert_eq!(
+        sample_set, known_set,
+        "KNOWN_EVENT_TYPES must equal the type tags of one_of_every_kind, as a set"
+    );
+
+    for tag in KNOWN_EVENT_TYPES {
+        let value = json!({"type": tag});
+        // A malformed payload (missing required fields) decodes to
+        // `InvalidPayload`; only a tag `decode`'s match does not recognize
+        // falls to `UnknownType`. Either way, this proves `decode`
+        // recognizes `tag`.
+        assert!(
+            !matches!(
+                Event::decode(value, DecodeCtx::strict()),
+                Err(EventError::UnknownType(_))
+            ),
+            "decode must recognize known type {tag:?}"
+        );
+    }
+}
+
+#[test]
+fn subagent_persistence_recurses_into_the_wrapped_event() {
+    let wrapped_progress = Event::Subagent(SubagentEvent {
+        child_run_id: RunId::new("child-1"),
+        event: Box::new(Event::ToolProgress(ToolProgressEvent {
+            tool_use_id: "c1".into(),
+            tool_name: "Read".into(),
+            message: "working".into(),
+            data: None,
+        })),
+    });
+    assert_eq!(wrapped_progress.persistence(), Persistence::StreamOnly);
+
+    use super::super::model_call::{CallDisposition, ModelCallKind, ModelCallReceiptEvent};
+    let wrapped_receipt = Event::Subagent(SubagentEvent {
+        child_run_id: RunId::new("child-1"),
+        event: Box::new(Event::ModelCallReceipt(ModelCallReceiptEvent {
+            run_id: RunId::new("r1"),
+            logical_call_id: "lc1".into(),
+            delivery_attempt_id: "da1".into(),
+            kind: ModelCallKind::Primary,
+            actual_model: None,
+            disposition: CallDisposition::Cancelled,
+            usage: None,
+            cost_usd: None,
+            duration_ms: 0,
+        })),
+    });
+    assert_eq!(wrapped_receipt.persistence(), Persistence::JournalOnly);
 }
 
 #[test]

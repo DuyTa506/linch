@@ -154,10 +154,11 @@ impl Event {
     /// `ctx` into its nested event unchanged except for the depth bound.
     pub(super) fn decode(value: JsonValue, ctx: DecodeCtx) -> Result<Event, EventError> {
         let mut obj = take_object(value)?;
-        let type_value = obj
-            .get("type")
-            .cloned()
-            .ok_or(EventError::MissingField("type"))?;
+        // Removed once up front (rather than per match arm): every known
+        // arm's payload uses `deny_unknown_fields`, so `type` must not reach
+        // it; the unknown-tag arm below re-inserts it for `IgnorableEvent`'s
+        // verbatim `raw`.
+        let type_value = obj.remove("type").ok_or(EventError::MissingField("type"))?;
         let type_name = match type_value {
             JsonValue::String(s) => s,
             other => {
@@ -169,90 +170,32 @@ impl Event {
             }
         };
         match type_name.as_str() {
-            "init" => {
-                obj.remove("type");
-                Ok(Event::Init(payload("init", obj)?))
-            }
-            "user" => {
-                obj.remove("type");
-                Ok(Event::User(payload("user", obj)?))
-            }
-            "assistant" => {
-                obj.remove("type");
-                Ok(Event::Assistant(payload("assistant", obj)?))
-            }
-            "partial_assistant" => {
-                obj.remove("type");
-                Ok(Event::PartialAssistant(payload("partial_assistant", obj)?))
-            }
-            "usage" => {
-                obj.remove("type");
-                Ok(Event::Usage(payload("usage", obj)?))
-            }
-            "tool_call_start" => {
-                obj.remove("type");
-                Ok(Event::ToolCallStart(payload("tool_call_start", obj)?))
-            }
-            "tool_call_end" => {
-                obj.remove("type");
-                Ok(Event::ToolCallEnd(payload("tool_call_end", obj)?))
-            }
-            "tool_progress" => {
-                obj.remove("type");
-                Ok(Event::ToolProgress(payload("tool_progress", obj)?))
-            }
-            "permission_request" => {
-                obj.remove("type");
-                Ok(Event::PermissionRequest(payload(
-                    "permission_request",
-                    obj,
-                )?))
-            }
-            "input_request" => {
-                obj.remove("type");
-                Ok(Event::InputRequest(payload("input_request", obj)?))
-            }
-            "suspended" => {
-                obj.remove("type");
-                Ok(Event::Suspended(payload("suspended", obj)?))
-            }
-            "context_build" => {
-                obj.remove("type");
-                Ok(Event::ContextBuild(payload("context_build", obj)?))
-            }
-            "compaction" => {
-                obj.remove("type");
-                Ok(Event::Compaction(payload("compaction", obj)?))
-            }
-            "loop_guard" => {
-                obj.remove("type");
-                Ok(Event::LoopGuard(payload("loop_guard", obj)?))
-            }
-            "budget" => {
-                obj.remove("type");
-                Ok(Event::Budget(payload("budget", obj)?))
-            }
-            "prompt_cache_advisory" => {
-                obj.remove("type");
-                Ok(Event::PromptCacheAdvisory(payload(
-                    "prompt_cache_advisory",
-                    obj,
-                )?))
-            }
-            "skills_loaded" => {
-                obj.remove("type");
-                Ok(Event::SkillsLoaded(payload("skills_loaded", obj)?))
-            }
-            "skill_invoked" => {
-                obj.remove("type");
-                Ok(Event::SkillInvoked(payload("skill_invoked", obj)?))
-            }
-            "skill_completed" => {
-                obj.remove("type");
-                Ok(Event::SkillCompleted(payload("skill_completed", obj)?))
-            }
+            "init" => Ok(Event::Init(payload("init", obj)?)),
+            "user" => Ok(Event::User(payload("user", obj)?)),
+            "assistant" => Ok(Event::Assistant(payload("assistant", obj)?)),
+            "partial_assistant" => Ok(Event::PartialAssistant(payload("partial_assistant", obj)?)),
+            "usage" => Ok(Event::Usage(payload("usage", obj)?)),
+            "tool_call_start" => Ok(Event::ToolCallStart(payload("tool_call_start", obj)?)),
+            "tool_call_end" => Ok(Event::ToolCallEnd(payload("tool_call_end", obj)?)),
+            "tool_progress" => Ok(Event::ToolProgress(payload("tool_progress", obj)?)),
+            "permission_request" => Ok(Event::PermissionRequest(payload(
+                "permission_request",
+                obj,
+            )?)),
+            "input_request" => Ok(Event::InputRequest(payload("input_request", obj)?)),
+            "suspended" => Ok(Event::Suspended(payload("suspended", obj)?)),
+            "context_build" => Ok(Event::ContextBuild(payload("context_build", obj)?)),
+            "compaction" => Ok(Event::Compaction(payload("compaction", obj)?)),
+            "loop_guard" => Ok(Event::LoopGuard(payload("loop_guard", obj)?)),
+            "budget" => Ok(Event::Budget(payload("budget", obj)?)),
+            "prompt_cache_advisory" => Ok(Event::PromptCacheAdvisory(payload(
+                "prompt_cache_advisory",
+                obj,
+            )?)),
+            "skills_loaded" => Ok(Event::SkillsLoaded(payload("skills_loaded", obj)?)),
+            "skill_invoked" => Ok(Event::SkillInvoked(payload("skill_invoked", obj)?)),
+            "skill_completed" => Ok(Event::SkillCompleted(payload("skill_completed", obj)?)),
             "subagent" => {
-                obj.remove("type");
                 let child_run_id = RunId::from(take_string(&mut obj, "child_run_id")?);
                 let nested_value = obj
                     .remove("event")
@@ -264,49 +207,28 @@ impl Event {
                     event: Box::new(nested),
                 }))
             }
-            "child_run_status" => {
-                obj.remove("type");
-                Ok(Event::ChildRunStatus(payload("child_run_status", obj)?))
-            }
-            "workflow" => {
-                obj.remove("type");
-                Ok(Event::Workflow(payload("workflow", obj)?))
-            }
-            "verification" => {
-                obj.remove("type");
-                Ok(Event::Verification(payload("verification", obj)?))
-            }
-            "error" => {
-                obj.remove("type");
-                Ok(Event::Error(payload("error", obj)?))
-            }
-            "result" => {
-                obj.remove("type");
-                Ok(Event::Result(payload("result", obj)?))
-            }
-            "model_call_delivery" => {
-                obj.remove("type");
-                Ok(Event::ModelCallDelivery(payload(
-                    "model_call_delivery",
-                    obj,
-                )?))
-            }
+            "child_run_status" => Ok(Event::ChildRunStatus(payload("child_run_status", obj)?)),
+            "workflow" => Ok(Event::Workflow(payload("workflow", obj)?)),
+            "verification" => Ok(Event::Verification(payload("verification", obj)?)),
+            "error" => Ok(Event::Error(payload("error", obj)?)),
+            "result" => Ok(Event::Result(payload("result", obj)?)),
+            "model_call_delivery" => Ok(Event::ModelCallDelivery(payload(
+                "model_call_delivery",
+                obj,
+            )?)),
             "model_call_receipt" => {
-                obj.remove("type");
                 Ok(Event::ModelCallReceipt(payload("model_call_receipt", obj)?))
             }
-            "model_call_usage_settlement" => {
-                obj.remove("type");
-                Ok(Event::ModelCallUsageSettlement(payload(
-                    "model_call_usage_settlement",
-                    obj,
-                )?))
-            }
+            "model_call_usage_settlement" => Ok(Event::ModelCallUsageSettlement(payload(
+                "model_call_usage_settlement",
+                obj,
+            )?)),
             other => {
                 if ctx.ignorable {
-                    // `obj` still carries its original "type" field: it was
-                    // never removed on this branch, so the sentinel's `raw`
-                    // is the untouched source object.
+                    // `obj` had its original "type" field removed above;
+                    // restore it so the sentinel's `raw` is the untouched
+                    // source object.
+                    obj.insert("type".to_string(), JsonValue::String(other.to_string()));
                     Ok(Event::Ignorable(IgnorableEvent::new_trusted(
                         other.to_string(),
                         obj,
@@ -369,7 +291,10 @@ impl Event {
     ///
     /// Exhaustive by variant (no wildcard arm): adding an `Event` kind
     /// without classifying it here is a compile error, not a silent
-    /// misclassification.
+    /// misclassification. `Subagent` is not a kind of its own: it recurses
+    /// into the wrapped child event, so a wrapped `ToolProgress` is
+    /// `StreamOnly` and a wrapped `ModelCallReceipt` is `JournalOnly`, not
+    /// `Both`.
     pub fn persistence(&self) -> Persistence {
         use Persistence::*;
         match self {
@@ -395,7 +320,7 @@ impl Event {
             Event::SkillsLoaded(_) => Both,
             Event::SkillInvoked(_) => Both,
             Event::SkillCompleted(_) => Both,
-            Event::Subagent(_) => Both,
+            Event::Subagent(e) => e.event.persistence(),
             Event::ChildRunStatus(_) => Both,
             Event::Workflow(_) => Both,
             Event::Verification(_) => Both,
