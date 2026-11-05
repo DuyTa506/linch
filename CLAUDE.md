@@ -19,6 +19,7 @@ under `tests/`; examples under `examples/`; docs under `docs/`.
 ## Commands
 
 ```bash
+pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'   # dev install
 pytest                                          # all tests
 pytest tests/test_budget.py::test_name          # one test

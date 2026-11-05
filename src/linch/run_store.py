@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import errno
 import hashlib
 import inspect
@@ -9,13 +8,11 @@ import math
 import time
 from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import date, datetime
-from decimal import Decimal
-from enum import Enum
-from pathlib import Path
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal, Protocol, TypeVar, cast
-from uuid import UUID, uuid4
+from uuid import uuid4
+
+from _linch_native import json_safe as _native_json_safe
 
 from ._json import walk_json
 from ._telemetry import store_call
@@ -861,91 +858,11 @@ def _json_safe(value: Any, *, strict: bool = False) -> Any:
     Persistence uses the permissive mode so an otherwise useful event is not
     lost because extension-owned metadata contains a ``Path`` or dataclass.
     Run-contract construction uses strict mode: an unstable ``repr`` must
-    never silently become part of a durability fingerprint.
+    never silently become part of a durability fingerprint. The walk runs in
+    the native extension (``linch-rust/crates/linch-python``).
     """
 
-    return _json_safe_inner(value, strict=strict, seen=frozenset(), depth=0)
-
-
-def _json_safe_inner(
-    value: Any,
-    *,
-    strict: bool,
-    seen: frozenset[int],
-    depth: int,
-) -> Any:
-    if value is None or isinstance(value, str | bool | int):
-        return value
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return value
-        return str(value)
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, Enum):
-        return _json_safe_inner(value.value, strict=strict, seen=seen, depth=depth)
-    if isinstance(value, datetime | date):
-        return value.isoformat()
-    if isinstance(value, Path | UUID):
-        return str(value)
-    if isinstance(value, bytes | bytearray | memoryview):
-        return {"$bytes_base64": base64.b64encode(bytes(value)).decode("ascii")}
-
-    is_recursive_value = (is_dataclass(value) and not isinstance(value, type)) or isinstance(
-        value, Mapping | set | frozenset | Sequence
-    )
-    if is_recursive_value:
-        if id(value) in seen:
-            if strict:
-                raise TypeError("run contract contains a recursive value")
-            return "<recursion>"
-        if depth >= _JSON_SAFE_MAX_DEPTH:
-            if strict:
-                raise TypeError(
-                    f"run contract exceeds maximum nesting depth {_JSON_SAFE_MAX_DEPTH}"
-                )
-            return "<max-depth>"
-        seen = seen | {id(value)}
-        depth += 1
-
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            item.name: _json_safe_inner(
-                getattr(value, item.name), strict=strict, seen=seen, depth=depth
-            )
-            for item in fields(value)
-        }
-    if isinstance(value, Mapping):
-        out: dict[str, Any] = {}
-        reserved_string_keys = {key for key in value if isinstance(key, str)}
-        for key, item in value.items():
-            if strict and not isinstance(key, str):
-                raise TypeError(f"run contract mapping key must be str, got {type(key).__name__}")
-            name = str(key)
-            if name in out or (not isinstance(key, str) and name in reserved_string_keys):
-                if strict:
-                    raise TypeError(
-                        f"run contract mapping keys collide after normalization: {name!r}"
-                    )
-                base = f"{name}~{type(key).__name__}"
-                name = base
-                discriminator = 2
-                while name in out or name in reserved_string_keys:
-                    name = f"{base}~{discriminator}"
-                    discriminator += 1
-            out[name] = _json_safe_inner(item, strict=strict, seen=seen, depth=depth)
-        return out
-    if isinstance(value, set | frozenset):
-        items = [_json_safe_inner(item, strict=strict, seen=seen, depth=depth) for item in value]
-        return sorted(items, key=canonical_json)
-    if isinstance(value, Sequence):
-        return [_json_safe_inner(item, strict=strict, seen=seen, depth=depth) for item in value]
-    if strict:
-        raise TypeError(
-            f"run contract value of type {type(value).__name__} "
-            "is not deterministically serializable"
-        )
-    return str(value)
+    return _native_json_safe(value, strict=strict, max_depth=_JSON_SAFE_MAX_DEPTH)
 
 
 def canonical_json(value: Any) -> str:
