@@ -2,7 +2,9 @@
 
 Read this page when upgrading a Linch 2.x application to Linch 3.0.
 
-Linch 3.0 is a headless agent kernel. Python 3.11+ is required. There are no
+Linch 3.0 is a headless agent kernel. Python 3.11+ is required, and so is
+`linch-native`, a compiled extension that `pip install linch` pulls in;
+building it from source needs a Rust toolchain. There are no
 compatibility shims or readers for pre-3.0 persisted data. Start new runs and
 use fresh Postgres schemas; built-in stores reject incompatible existing
 schemas rather than upgrading them.
