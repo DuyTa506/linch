@@ -71,8 +71,8 @@ sequenceDiagram
         S->>P: stream ProviderRequest
         P-->>S: normalized text/tool events
         alt tool calls
-            S->>R: checkpoint tool_batch_pending
-            S->>R: checkpoint tool_executing
+            Note over S,R: tool_batch_pending is held, not written
+            S->>R: commit tool_executing + pending events
             S->>T: resolve, authorize, execute tools
             T-->>S: ToolCallStart/End events
             S->>R: append tool results + checkpoint
