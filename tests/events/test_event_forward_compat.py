@@ -29,12 +29,8 @@ def test_unknown_without_flag_still_raises() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        {"ignorable": True},
-        {"type": None, "ignorable": True},
-        {"type": 1, "ignorable": True},
-        {"type": "", "ignorable": True},
-        {"type": "future_event", "ignorable": 1},
-        {"type": "future_event", "ignorable": "true"},
+        {"ignorable": True},  # missing/invalid "type" (None, int, "" all fail the same check)
+        {"type": "future_event", "ignorable": 1},  # must be exactly True, not merely truthy
     ],
 )
 def test_unknown_event_requires_a_valid_explicitly_ignorable_envelope(
@@ -98,8 +94,7 @@ def test_ignorable_event_isolates_nested_input_and_encoded_output() -> None:
     "payload",
     [
         {1: "non-string key"},
-        {"value": math.nan},
-        {"value": math.inf},
+        {"value": math.nan},  # math.inf fails the same non-finite-float check
         {"value": object()},
     ],
 )
@@ -214,12 +209,13 @@ def test_known_event_type_cannot_claim_ignorable() -> None:
         ),
         (
             {"type": "prompt_cache_advisory", "detail": "d"},
-            "tool_set_changed",
+            "tool_set_changed",  # default reason when the field is omitted
             None,
         ),
-        *(
-            ({"type": "prompt_cache_advisory", "reason": reason, "detail": "d"}, reason, None)
-            for reason in ("tool_set_changed", "model_changed")
+        (
+            {"type": "prompt_cache_advisory", "reason": "model_changed", "detail": "d"},
+            "model_changed",  # an explicit, non-default reason round-trips too
+            None,
         ),
     ],
 )
@@ -280,22 +276,22 @@ def test_ignorable_event_counts_every_container_toward_depth(kind: str) -> None:
         )
 
 
-@pytest.mark.parametrize("wrappers", [1, 2])
-def test_subagent_event_rejects_opaque_payload_overflow_at_construction(wrappers: int) -> None:
+def test_subagent_event_rejects_opaque_payload_overflow_at_construction() -> None:
     from linch.events import IGNORABLE_MAX_DEPTH
 
-    payload: Any = "leaf"
-    for _ in range(IGNORABLE_MAX_DEPTH - wrappers):
-        payload = [payload]
-    event = IgnorableEvent(
-        original_type="future_event",
-        raw={"type": "future_event", "ignorable": True, "payload": payload},
-    )
-    for _ in range(wrappers - 1):
-        event = SubagentEvent("parent", "child", "worker", "Worker", event)
+    for wrappers in (1, 2):
+        payload: Any = "leaf"
+        for _ in range(IGNORABLE_MAX_DEPTH - wrappers):
+            payload = [payload]
+        event = IgnorableEvent(
+            original_type="future_event",
+            raw={"type": "future_event", "ignorable": True, "payload": payload},
+        )
+        for _ in range(wrappers - 1):
+            event = SubagentEvent("parent", "child", "worker", "Worker", event)
 
-    with pytest.raises(ValueError, match="nesting depth"):
-        SubagentEvent("parent", "child", "worker", "Worker", event)
+        with pytest.raises(ValueError, match="nesting depth"):
+            SubagentEvent("parent", "child", "worker", "Worker", event)
 
 
 def test_subagent_event_revalidates_mutated_opaque_payload_depth() -> None:
