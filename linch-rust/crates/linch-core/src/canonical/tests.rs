@@ -26,9 +26,11 @@ fn round_trips_through_serde_json(f: f64) -> bool {
         .is_some_and(|back| back.to_bits() == f.to_bits())
 }
 
-/// Any finite JSON value: `serde_json::Value` cannot hold NaN/infinity
-/// without `arbitrary_precision`, but builds one directly to be explicit
-/// about what this module's input domain is.
+/// Any JSON value whose floats are finite and stable under
+/// [`round_trips_through_serde_json`] — `serde_json::Value` cannot hold
+/// NaN/infinity without `arbitrary_precision` anyway, and restricting to
+/// stable floats keeps these properties about this module's logic rather
+/// than about the dependency's float-parsing precision.
 fn arbitrary_json() -> impl Strategy<Value = JsonValue> {
     let leaf = prop_oneof![
         Just(JsonValue::Null),
