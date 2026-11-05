@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from functools import cache
 from importlib import metadata
 from pathlib import Path
 
@@ -8,6 +9,7 @@ _PACKAGE_NAME = "linch"
 _UNKNOWN_VERSION = "unknown"
 
 
+@cache
 def get_version() -> str:
     """Return the installed package version, falling back to ``pyproject.toml``.
 
