@@ -279,7 +279,7 @@ class RunEventBuffer:
                     status=status,
                     **_lease_kwargs(method, self.lease),
                 )
-            _, seqs = await durable_call(self.session, f"run.{operation}", write)
+            seqs = await durable_call(self.session, f"run.{operation}", write)
         except BaseException:
             self._pending = pending + self._pending
             self._atomic_write_failed = True

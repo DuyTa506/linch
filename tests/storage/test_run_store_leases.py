@@ -109,7 +109,9 @@ async def test_live_same_owner_claim_keeps_epoch_and_expiry_only_blocks_renewal(
     same_owner = await second.claim(run_id, "owner-a", 0.2)
     assert same_owner.epoch == lease_a.epoch
     await asyncio.sleep(max(0.0, same_owner.expires_at - time.time()) + 0.03)
-    saved = await first.save_checkpoint(run_id, _checkpoint("expired"), lease=lease_a)
+    await first.save_checkpoint(run_id, _checkpoint("expired"), lease=lease_a)
+    saved = await first.load_run(run_id)
+    assert saved is not None
     assert saved.checkpoint is not None
     assert saved.checkpoint.prompt == "expired"
     with pytest.raises(LeaseLostError):
@@ -170,7 +172,9 @@ async def test_token_remains_authoritative_after_store_reconnect(lease_stores) -
     else:
         reopened = copy.copy(first)
     try:
-        saved = await reopened.save_checkpoint(run_id, _checkpoint("reconnected"), lease=lease)
+        await reopened.save_checkpoint(run_id, _checkpoint("reconnected"), lease=lease)
+        saved = await reopened.load_run(run_id)
+        assert saved is not None
         assert saved.checkpoint is not None
         assert saved.checkpoint.prompt == "reconnected"
         await reopened.release(lease)
@@ -192,7 +196,9 @@ async def test_unclaimed_instance_keeps_legacy_write_behavior(lease_stores) -> N
     # Only the first instance claims the run.  The second has no local lease,
     # so its legacy writes remain available to hosts that do not opt in.
     await first.claim(run_id, "owner-a", 1.0)
-    saved = await second.save_checkpoint(run_id, _checkpoint("legacy"))
+    await second.save_checkpoint(run_id, _checkpoint("legacy"))
+    saved = await second.load_run(run_id)
+    assert saved is not None
     assert saved.checkpoint is not None
     assert saved.checkpoint.prompt == "legacy"
 

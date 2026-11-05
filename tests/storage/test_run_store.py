@@ -159,7 +159,9 @@ async def test_run_store_round_trip(kind: str, pg_dsn: str) -> None:
         assert created.id == "run-1"
         assert created.session_id == "session-1"
         assert created.status == "running"
-        saved_record = await store.save_checkpoint("run-1", checkpoint)
+        assert await store.save_checkpoint("run-1", checkpoint) is None
+        saved_record = await store.load_run("run-1")
+        assert saved_record is not None
         assert saved_record.status == "running"
         event = ToolCallEndEvent(
             tool_use_id="call-1",
@@ -215,7 +217,9 @@ async def test_run_store_round_trip(kind: str, pg_dsn: str) -> None:
         assert write_decision["decision"] == "allow"
         assert delete_decision["decision"] == "deny"
         assert delete_decision["reason"] == "user denied"
-        completed = await store.mark_completed("run-1", checkpoint)
+        assert await store.mark_completed("run-1", checkpoint) is None
+        completed = await store.load_run("run-1")
+        assert completed is not None
         assert completed.status == "completed"
         assert completed.checkpoint is not None
         assert completed.checkpoint.phase == "completed"
@@ -296,15 +300,13 @@ async def test_run_stores_replace_malformed_error_history(kind, pg_dsn, history)
             recursive_error: dict[str, object] = {"message": "new failure"}
             recursive_error["self"] = recursive_error
 
-            failed, _ = await store.mark_failed(run_id, error=recursive_error)
+            assert await store.mark_failed(run_id, error=recursive_error) == []
             loaded = await store.load_run(run_id)
 
-            assert failed.meta["errors"] == [
+            assert loaded is not None
+            assert loaded.meta["errors"] == [
                 {"message": "new failure", "self": "<recursion>"},
             ]
-            assert loaded is not None
-            assert loaded.meta == failed.meta
-            assert loaded.meta is not failed.meta
     finally:
         for store in stores:
             await store.close()
@@ -327,14 +329,12 @@ async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
             extension_state={"example": {"left": shared, "right": shared, "recursive": recursive}},
         )
 
-        saved = await store.save_checkpoint("run-1", checkpoint)
-        loaded = await store.load_run("run-1")
+        await store.save_checkpoint("run-1", checkpoint)
+        saved = await store.load_run("run-1")
 
+        assert saved is not None
         assert saved.checkpoint is not checkpoint
         assert saved.meta == {"labels": ["a", "b"]}
-        assert loaded is not None
-        assert saved.checkpoint == loaded.checkpoint
-        assert saved.meta == loaded.meta
         assert saved.checkpoint is not None
         snapshot = saved.checkpoint.extension_state["example"]
         assert snapshot["left"] == snapshot["right"] == {"items": [1]}
@@ -346,16 +346,13 @@ async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
 
         error: dict[str, object] = {"message": "boom"}
         error["self"] = error
-        failed, _ = await store.mark_failed("run-1", error=error)
-        loaded_failed = await store.load_run("run-1")
+        await store.mark_failed("run-1", error=error)
+        failed = await store.load_run("run-1")
 
+        assert failed is not None
         assert failed.checkpoint is not None
         assert failed.checkpoint == saved.checkpoint
-        assert failed.checkpoint is not saved.checkpoint
         assert failed.meta["errors"] == [{"message": "boom", "self": "<recursion>"}]
-        assert loaded_failed is not None
-        assert failed.checkpoint == loaded_failed.checkpoint
-        assert failed.meta == loaded_failed.meta
 
         replacement = RunCheckpoint(
             phase="turn_complete",
@@ -363,8 +360,10 @@ async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
             turn_index=2,
             total_usage=Usage(),
         )
-        failed_with_checkpoint, _ = await store.mark_failed("run-1", replacement)
+        await store.mark_failed("run-1", replacement)
+        failed_with_checkpoint = await store.load_run("run-1")
         assert replacement.phase == "failed"
+        assert failed_with_checkpoint is not None
         assert failed_with_checkpoint.checkpoint is not replacement
         assert failed_with_checkpoint.checkpoint is not None
         assert failed_with_checkpoint.checkpoint.phase == "failed"
