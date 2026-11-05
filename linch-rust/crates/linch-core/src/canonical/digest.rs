@@ -16,6 +16,11 @@ use super::{CanonicalError, to_canonical_string};
 pub struct Digest([u8; 32]);
 
 impl Digest {
+    /// Wrap raw SHA-256 output.
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// The raw 32-byte SHA-256 output.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

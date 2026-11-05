@@ -22,8 +22,9 @@
 
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
+use crate::canonical::{self, Digest};
 use crate::message::Message;
 
 #[cfg(test)]
@@ -202,27 +203,15 @@ impl SessionLog {
         log
     }
 
-    /// A stable hex-encoded SHA-256 fingerprint of `full_history`.
+    /// A stable SHA-256 fingerprint of `full_history`.
     ///
-    /// Folds only the unprocessed tail since the previous call, so repeated
-    /// calls cost `O(new historical messages)`, not `O(history_count())`. A
-    /// visible-only append or a projection never changes this value — only
-    /// `historical` appends do. The encoding: each historical message is
-    /// serialized to JSON (via `Message`'s `serde` implementation) and then
-    /// re-written with object keys sorted by Unicode code point and no
-    /// whitespace, so the digest does not depend on the insertion order of
-    /// any `provider_metadata`/`input` map. Messages are joined with `,` and
-    /// framed with a leading `[` and trailing `]`, mirroring a JSON array of
-    /// the canonical message strings. This is a private, minimal analogue of
-    /// the canonical-JSON encoding described in
-    /// `docs/architecture/invariants.md`; `linch-core`'s eventual
-    /// canonical-JSON module is expected to supersede it.
-    ///
-    /// Unlike the Python implementation (`_history_fingerprint`, which can
-    /// reject a `provider_metadata` value containing `NaN`/`Infinity`),
-    /// this cannot fail: `Message`'s fields are already typed as valid JSON,
-    /// so no invalid value can reach the encoder.
-    pub fn history_fingerprint(&mut self) -> String {
+    /// Equals [`canonical::digest`] of the JSON array of historical
+    /// messages, but folds only the tail added since the previous call, so
+    /// repeated calls cost `O(new historical messages)`. A visible-only
+    /// append or a projection never changes this value; only `historical`
+    /// appends do. It cannot fail: `Message` holds only valid JSON, unlike
+    /// Python's `_history_fingerprint`, which rejects `NaN` metadata.
+    pub fn history_fingerprint(&mut self) -> Digest {
         let pending: Vec<Arc<Message>> = self.full[self.fingerprint.hashed_count..].to_vec();
         for message in &pending {
             if self.fingerprint.hashed_count > 0 {
@@ -230,14 +219,14 @@ impl SessionLog {
             }
             let value = serde_json::to_value(message.as_ref())
                 .expect("Message always serializes to valid JSON");
-            let mut encoded = String::new();
-            write_canonical(&value, &mut encoded);
-            self.fingerprint.hasher.update(encoded.as_bytes());
+            self.fingerprint
+                .hasher
+                .update(canonical::to_canonical_string(&value).as_bytes());
             self.fingerprint.hashed_count += 1;
         }
         let mut complete = self.fingerprint.hasher.clone();
         complete.update(b"]");
-        to_hex(&complete.finalize())
+        Digest::from_bytes(complete.finalize().into())
     }
 }
 
@@ -268,48 +257,4 @@ fn arc_messages_eq(a: &[Arc<Message>], b: &[Arc<Message>]) -> bool {
         && a.iter()
             .zip(b)
             .all(|(x, y)| Arc::ptr_eq(x, y) || **x == **y)
-}
-
-/// Write `value` with object keys sorted by Unicode code point and no
-/// whitespace. See [`SessionLog::history_fingerprint`] for why this exists
-/// instead of reusing a shared canonical-JSON module.
-fn write_canonical(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            for (i, key) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(key.as_str()).expect("string key encodes"));
-                out.push(':');
-                write_canonical(&map[key.as_str()], out);
-            }
-            out.push('}');
-        }
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_canonical(item, out);
-            }
-            out.push(']');
-        }
-        scalar => out.push_str(&serde_json::to_string(scalar).expect("scalar encodes")),
-    }
-}
-
-/// Lowercase hex encoding of a digest's raw bytes.
-fn to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
