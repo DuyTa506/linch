@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod deepcopy;
 mod json_safe;
 
 use pyo3::prelude::*;
@@ -13,6 +14,8 @@ use pyo3::prelude::*;
 /// The `_linch_native` extension module.
 #[pymodule]
 mod _linch_native {
+    #[pymodule_export]
+    use super::deepcopy::deepcopy;
     #[pymodule_export]
     use super::json_safe::json_safe;
 }

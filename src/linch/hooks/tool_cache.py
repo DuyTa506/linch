@@ -32,9 +32,10 @@ Known limitations:
 from __future__ import annotations
 
 from collections import OrderedDict
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
+
+from _linch_native import deepcopy
 
 from ..permissions.keys import permission_decision_key
 from ..tools import CanonicalToolOutput, ToolOutput, ToolOutputError, ToolResult

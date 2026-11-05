@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 from typing import Any
+
+from _linch_native import deepcopy
 
 from .types import CatalogChangeBlock, Message, SystemBlock
 
@@ -85,7 +86,7 @@ def snapshot_enabled(session: Any, config: Any) -> bool:
 
 
 def _schemas(registry: Any) -> list[dict[str, Any]]:
-    return copy.deepcopy(list(registry.schemas()))
+    return deepcopy(list(registry.schemas()))
 
 
 def _skills(agent: Any) -> dict[str, str]:
@@ -147,7 +148,7 @@ def _snapshot(session: Any, config: Any) -> dict[str, Any]:
         "system": rows,
         "tools": schemas,
         "base": base,
-        "notified": copy.deepcopy(base),
+        "notified": deepcopy(base),
     }
 
 
@@ -179,8 +180,8 @@ async def reset_catalog_notifications(session: Any, config: Any = None) -> bool:
     current = snapshot_for(session)
     if current is None or current["base"] == current["notified"]:
         return False
-    updated = copy.deepcopy(current)
-    updated["notified"] = copy.deepcopy(current["base"])
+    updated = deepcopy(current)
+    updated["notified"] = deepcopy(current["base"])
     await session.update_meta({"linch.prefix": updated})
     session._catalog_generation = session._catalog_revision_seen = None
     return True
@@ -214,7 +215,7 @@ async def sync_catalog(
     if current["base"] != current["notified"] and not notice_present:
         await reset_catalog_notifications(session, config)
         current = snapshot_for(session) or current
-    current = copy.deepcopy(current)
+    current = deepcopy(current)
     notified = current["notified"]
     live_schemas = _schemas(registry)
     live_by_name = {str(item.get("name", "")): item for item in live_schemas}
@@ -240,7 +241,7 @@ async def sync_catalog(
     )
     prefix_names = {str(tool["name"]) for tool in current["tools"]}
     definitions = tuple(
-        copy.deepcopy((previous or {}).get(name, live_by_name[name]))
+        deepcopy((previous or {}).get(name, live_by_name[name]))
         for name in added
         if positional and name not in prefix_names
     )
@@ -309,7 +310,7 @@ def snapshot_tools(
     positional: bool = False,
     previous: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    preview = copy.deepcopy([item for item in snapshot.get("tools", ()) if isinstance(item, dict)])
+    preview = deepcopy([item for item in snapshot.get("tools", ()) if isinstance(item, dict)])
     if live_schemas is None:
         return preview
     positions = {str(item.get("name", "")): i for i, item in enumerate(preview)}
@@ -323,7 +324,7 @@ def snapshot_tools(
             ):
                 continue
             positions[name] = len(preview)
-            preview.append(copy.deepcopy(live))
+            preview.append(deepcopy(live))
         elif preview[row].get("input_schema") != live.get("input_schema"):
-            preview[row] = copy.deepcopy(live)
+            preview[row] = deepcopy(live)
     return preview

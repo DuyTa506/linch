@@ -11,11 +11,12 @@ import asyncio
 import hashlib
 import math
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
-from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args, get_type_hints
 from uuid import uuid4
+
+from _linch_native import deepcopy
 
 from ._json import walk_json
 from ._telemetry import ChatCall, in_span
