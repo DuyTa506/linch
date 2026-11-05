@@ -821,7 +821,8 @@ class _ModelCallLedger:
             ):
                 raise _invalid("compaction source must be durable before dispatch starts")
             _check_projection_conflict(owned, self._projections)
-            await self._write("projection", owned)
+            # The ledger keeps ``owned``, so the event gets its own copy.
+            await self._write("projection", deepcopy(owned))
             self._projections[key] = owned
 
     def consume_auxiliary_receipts(self) -> list[ModelCallReceipt]:
