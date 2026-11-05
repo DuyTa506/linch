@@ -21,13 +21,16 @@
 //!   re-implementing an escape table.
 //! - **Numbers** are serialized exactly as `serde_json` prints the
 //!   [`JsonValue`](crate::JsonValue) number it was given — this crate makes
-//!   no promise beyond what `serde_json` itself promises for a float. Common
-//!   float literals happen to match Python's `repr`-based formatting
-//!   (`1e16` prints as `1e+16` under both), but this is not guaranteed for
-//!   every float, and at extreme magnitudes (observed around `1e269`) this
-//!   `serde_json` version is not even bit-exact on its own format-then-parse
-//!   round trip. Integers and the common JSON shapes (objects, arrays,
-//!   strings, bools, null) match the Python reference byte-for-byte.
+//!   no promise beyond what `serde_json` itself promises for a float.
+//!   Common float literals happen to match Python's `repr`-based formatting
+//!   (`1e16` prints as `1e+16` under both), but without the
+//!   `float_roundtrip` Cargo feature, `serde_json`'s float *parser* is
+//!   documented as best-effort precision rather than correctly rounded, so
+//!   at extreme magnitudes (observed around `1e269`) a value parsed back
+//!   from this crate's own canonical output is not always bit-identical to
+//!   the value that produced it. Integers and the common JSON shapes
+//!   (objects, arrays, strings, bools, null) match the Python reference
+//!   byte-for-byte.
 //!
 //! [`check_depth`] bounds container nesting before encoding; it is a
 //! separate, explicit step — [`to_canonical_string`] itself recurses without

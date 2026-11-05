@@ -14,8 +14,8 @@ pub const JOURNAL_MAX_DEPTH: usize = 64;
 /// The root is depth 0; only containers (objects, arrays) count toward the
 /// limit — scalars never fail regardless of how deep they sit. A container
 /// is rejected, without descending into its children, as soon as its own
-/// depth exceeds `max_depth`, so recursion never goes deeper than
-/// `max_depth + 1` frames even on adversarially deep input.
+/// depth exceeds `max_depth`, so the recursion depth itself never exceeds
+/// `max_depth + 1` even on adversarially deep input.
 pub fn check_depth(value: &JsonValue, max_depth: usize) -> Result<(), CanonicalError> {
     visit(value, 0, max_depth)
 }

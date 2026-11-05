@@ -153,6 +153,13 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_rejects_anything_but_64_lowercase_hex_chars() {
+        assert!(serde_json::from_str::<Digest>(&format!("\"{}\"", "A".repeat(64))).is_err());
+        assert!(serde_json::from_str::<Digest>(&format!("\"{}\"", "a".repeat(63))).is_err());
+        assert!(serde_json::from_str::<Digest>("123").is_err());
+    }
+
+    #[test]
     fn domain_separation_changes_the_digest() {
         let value = json!({"name": "x"});
         assert_ne!(digest(&value), digest_with_domain("step", &value));
@@ -165,7 +172,7 @@ mod tests {
     #[test]
     fn pinned_vectors_match_an_independent_sha256_oracle() {
         // Computed with Python's hashlib against the same canonical bytes,
-        // independently of this crate (see .migration/p2/W4.md).
+        // independently of this crate's own implementation.
         assert_eq!(
             digest(&json!({})).to_string(),
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
@@ -185,6 +192,17 @@ mod tests {
         assert_eq!(
             digest(&json!({"x": true, "y": false})).to_string(),
             "be43c656e6ca2d6beccfda71b2d9a696b2b434c77f43f74bd451c441713568ed"
+        );
+        // Exercises the escape table end-to-end: the five short forms, a
+        // lowercase \u00xx control escape, and DEL (0x7f) left raw.
+        assert_eq!(
+            digest(&json!({"k": "\u{1}\u{1f}\u{7f}\n\t\r\u{8}\u{c}\"\\"})).to_string(),
+            "5e9458bd35f2eb25eeb85f87ed3f1392925f953efb93e0bb1faae214d6c9f019"
+        );
+        // Pins sign-of-zero, which `JsonValue`'s `PartialEq` would hide.
+        assert_eq!(
+            digest(&json!(-0.0)).to_string(),
+            "c26617c7ccbcaa6631b45d851b8cf56e21d2ca624bdb1193afdbd4b560702cec"
         );
         assert_eq!(
             digest_with_domain("step", &json!({"name": "x"})).to_string(),

@@ -12,12 +12,13 @@ use super::to_canonical_string;
 ///
 /// `to_canonical_string` delegates number formatting entirely to
 /// `serde_json` (see the `canonical` module docs); this crate makes no
-/// promise beyond what `serde_json` itself promises. At extreme magnitudes
-/// (observed around `1e269`) this build of `serde_json` is not bit-exact on
-/// round trip, which is a pre-existing property of that formatter, not of
-/// this module — so the properties below are checked over floats it *is*
-/// bit-exact for, rather than asserting a stronger guarantee than the
-/// dependency provides.
+/// promise beyond what `serde_json` itself promises. Without the
+/// `float_roundtrip` feature, `serde_json`'s float parser is documented as
+/// best-effort precision rather than correctly rounded, which shows up at
+/// extreme magnitudes (observed around `1e269`) — a property of that
+/// dependency's configuration, not of this module — so the properties below
+/// are checked over floats it *is* bit-exact for, rather than asserting a
+/// stronger guarantee than the dependency is configured to provide.
 fn round_trips_through_serde_json(f: f64) -> bool {
     serde_json::to_string(&f)
         .ok()
