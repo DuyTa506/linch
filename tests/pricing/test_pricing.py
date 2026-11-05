@@ -52,13 +52,13 @@ def test_unknown_model_returns_none(model, table):
     assert cost_usd(Usage(), model, table=table) is None
 
 
-@pytest.mark.parametrize("other", ["cache_creation", "input"])
-def test_cache_read_is_discounted(other):
+def test_cache_read_is_discounted():
     for model_id, pricing in _DEFAULT_PRICING.items():
-        assert pricing.cache_read < getattr(pricing, other), (
-            f"{model_id}: cache_read ({pricing.cache_read}) must be cheaper than "
-            f"{other} ({getattr(pricing, other)})"
-        )
+        for other in ("cache_creation", "input"):
+            assert pricing.cache_read < getattr(pricing, other), (
+                f"{model_id}: cache_read ({pricing.cache_read}) must be cheaper than "
+                f"{other} ({getattr(pricing, other)})"
+            )
 
 
 def test_custom_table_override():
