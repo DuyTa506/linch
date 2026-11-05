@@ -18,6 +18,7 @@ from functools import partial
 from typing import Any, cast
 
 from .. import lifecycle
+from .._json import dumps
 from .._telemetry import end_step, start_step
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
@@ -168,7 +169,7 @@ def checkpoint_extension_state(
         if not state:
             continue
         try:
-            serialized = json.dumps(state, allow_nan=False)
+            serialized = dumps(state)
             restored = json.loads(serialized)
         except (TypeError, ValueError) as exc:
             raise ConfigError(
@@ -1201,7 +1202,7 @@ class RunRuntime:
         self.checkpoint.extension_state["linch.reads"] = self.session.file_read_tracker.snapshot()
         if self.session._extensions:
             self.checkpoint.extension_state["linch.session"] = json.loads(
-                json.dumps(self.session._extensions, allow_nan=False)
+                dumps(self.session._extensions)
             )
         else:
             self.checkpoint.extension_state.pop("linch.session", None)

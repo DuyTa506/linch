@@ -13,6 +13,7 @@ from contextlib import nullcontext
 from typing import Any, NoReturn
 from uuid import uuid4
 
+from .._json import dumps
 from ..errors import ConfigError
 from ..events import Event, _stored_event_from_dict
 from ..run_store import (
@@ -246,7 +247,7 @@ class PostgresRunStore:
         rid = id or str(uuid4())
         safe_meta = _safe_meta(meta)
         payload = (
-            json.dumps(checkpoint_to_dict(initial_checkpoint), allow_nan=False)
+            dumps(checkpoint_to_dict(initial_checkpoint))
             if initial_checkpoint is not None
             else None
         )
@@ -265,7 +266,7 @@ class PostgresRunStore:
                     rid,
                     session_id,
                     ts,
-                    json.dumps(safe_meta, allow_nan=False),
+                    dumps(safe_meta),
                     payload,
                     session_id=session_id,
                     run_id=rid,
@@ -315,7 +316,7 @@ class PostgresRunStore:
                     RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
                     """,
                     now_iso(),
-                    json.dumps(merged_meta, allow_nan=False),
+                    dumps(merged_meta),
                     rid,
                     payload,
                 )
@@ -365,7 +366,7 @@ class PostgresRunStore:
             id,
             session_id,
             ts,
-            json.dumps(safe_meta, allow_nan=False),
+            dumps(safe_meta),
             session_id=session_id,
         )
         if row is not None:
@@ -562,8 +563,8 @@ class PostgresRunStore:
             TypeError: If checkpoint or event data cannot be encoded.
         """
 
-        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
-        payload = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
+        encoded = [dumps(_json_safe_stored_event(event)) for event in events]
+        payload = dumps(checkpoint_to_dict(checkpoint))
         owner, epoch = self._fence_values(run_id, lease)
         row, seqs = await self._write_event_rows(
             run_id,
@@ -610,7 +611,7 @@ class PostgresRunStore:
             if lease is not None:
                 await self._assert_current_lease(run_id, lease)
             return []
-        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
+        encoded = [dumps(_json_safe_stored_event(event)) for event in events]
         owner, epoch = self._fence_values(run_id, lease)
         _, seqs = await self._write_event_rows(
             run_id,
@@ -733,13 +734,9 @@ class PostgresRunStore:
         checkpoint_json = None
         if checkpoint is not None:
             checkpoint.phase = "failed"
-            checkpoint_json = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
-        error_json = (
-            json.dumps(_json_safe(error, strict=False), allow_nan=False)
-            if error is not None
-            else None
-        )
-        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
+            checkpoint_json = dumps(checkpoint_to_dict(checkpoint))
+        error_json = dumps(_json_safe(error, strict=False)) if error is not None else None
+        encoded = [dumps(_json_safe_stored_event(event)) for event in events]
         owner, epoch = self._fence_values(run_id, lease)
         pool = await self._ensure()
         async with pool.acquire() as conn, conn.transaction():
@@ -754,7 +751,7 @@ class PostgresRunStore:
                     await self._classify_write_failure(conn, run_id, lease)
                 meta = _safe_meta(json.loads(stored_meta))
                 _append_run_error(meta, json.loads(error_json))
-                meta_json = json.dumps(meta, allow_nan=False)
+                meta_json = dumps(meta)
             row, seqs = await self._write_event_rows(
                 run_id,
                 (

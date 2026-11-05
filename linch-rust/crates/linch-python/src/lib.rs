@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 #[pymodule]
 mod _linch_native {
     #[pymodule_export]
-    use super::canonical::canonical_dumps;
+    use super::canonical::{canonical_dumps, dumps};
     #[pymodule_export]
     use super::deepcopy::deepcopy;
     #[pymodule_export]

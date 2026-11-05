@@ -43,6 +43,7 @@ from linch.sessions.store import (
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
+from .._json import dumps
 from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
 
 # ── DDL ─────────────────────────────────────────────────────────────────────
@@ -339,7 +340,7 @@ class PostgresSessionStore:
             return []
         pool = await self._ensure()
         ts = now_iso()
-        encoded = [json.dumps(message_to_dict(message), allow_nan=False) for message in messages]
+        encoded = [dumps(message_to_dict(message)) for message in messages]
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
