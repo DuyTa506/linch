@@ -8,38 +8,15 @@ use crate::json::JsonValue;
 
 use super::to_canonical_string;
 
-/// Whether `f` survives `serde_json`'s own format-then-parse round trip.
-///
-/// `to_canonical_string` delegates number formatting entirely to
-/// `serde_json` (see the `canonical` module docs); this crate makes no
-/// promise beyond what `serde_json` itself promises. Without the
-/// `float_roundtrip` feature, `serde_json`'s float parser is documented as
-/// best-effort precision rather than correctly rounded, which shows up at
-/// extreme magnitudes (observed around `1e269`) — a property of that
-/// dependency's configuration, not of this module — so the properties below
-/// are checked over floats it *is* bit-exact for, rather than asserting a
-/// stronger guarantee than the dependency is configured to provide.
-fn round_trips_through_serde_json(f: f64) -> bool {
-    serde_json::to_string(&f)
-        .ok()
-        .and_then(|text| serde_json::from_str::<f64>(&text).ok())
-        .is_some_and(|back| back.to_bits() == f.to_bits())
-}
-
-/// Any JSON value whose floats are finite and stable under
-/// [`round_trips_through_serde_json`] — `serde_json::Value` cannot hold
-/// NaN/infinity without `arbitrary_precision` anyway, and restricting to
-/// stable floats keeps these properties about this module's logic rather
-/// than about the dependency's float-parsing precision.
+/// Any JSON value with finite floats. `serde_json::Value` cannot hold
+/// NaN or infinity, and `float_roundtrip` makes every finite float stable.
 fn arbitrary_json() -> impl Strategy<Value = JsonValue> {
     let leaf = prop_oneof![
         Just(JsonValue::Null),
         any::<bool>().prop_map(JsonValue::Bool),
         any::<i64>().prop_map(|n| json!(n)),
         any::<f64>()
-            .prop_filter("finite and serde_json round-trip stable", |f| {
-                f.is_finite() && round_trips_through_serde_json(*f)
-            })
+            .prop_filter("finite", |f| f.is_finite())
             .prop_map(|f| json!(f)),
         ".*".prop_map(JsonValue::String),
     ];
@@ -86,4 +63,12 @@ proptest! {
         let twice = to_canonical_string(&reparsed);
         prop_assert_eq!(once, twice);
     }
+}
+
+#[test]
+fn extreme_floats_round_trip_bit_exactly() {
+    // The default serde_json parser lands one ULP off here.
+    let f = -2.074_045_307_101_22e269_f64;
+    let back: f64 = serde_json::from_str(&to_canonical_string(&json!(f))).unwrap();
+    assert_eq!(back.to_bits(), f.to_bits());
 }
