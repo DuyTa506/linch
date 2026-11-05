@@ -22,4 +22,4 @@ pub mod model_call;
 mod wire;
 
 pub use envelope::{Envelope, EventError, WIRE_VERSION};
-pub use event::{Event, IgnorableEvent, Persistence};
+pub use event::{Event, IgnorableEvent, Persistence, SubagentEvent};
