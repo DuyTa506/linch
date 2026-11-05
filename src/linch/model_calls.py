@@ -10,15 +10,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args, get_type_hints
 from uuid import uuid4
 
-from _linch_native import deepcopy
+from _linch_native import check_journal_json, deepcopy
 
-from ._json import walk_json
 from ._telemetry import ChatCall, in_span
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
@@ -275,21 +275,12 @@ def _detached(receipt: ModelCallReceipt) -> ModelCallReceipt:
 def _copy_json_object(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise _invalid("journal record must be an object")
-    walk_json(raw, check_node=_check_journal_json_node, copy_containers=False)
+    # Bounded (64 levels), finite JSON with string keys and no cycles; the
+    # native walker reports the first violation in visit order.
+    error = check_journal_json(raw)
+    if error is not None:
+        raise _invalid(error)
     return deepcopy(raw)
-
-
-def _check_journal_json_node(value: Any, path: str, active: set[int], depth: int) -> int | None:
-    if value is None or type(value) in (str, bool, int):
-        return None
-    if type(value) is float and math.isfinite(value):
-        return None
-    if not isinstance(value, list | dict) or depth > 64 or id(value) in active:
-        raise _invalid("journal record must be bounded, finite JSON without cycles")
-    # Check every key before visiting children, preserving journal error order.
-    if isinstance(value, dict) and any(not isinstance(key, str) for key in value):
-        raise _invalid("journal object keys must be strings")
-    return depth + 1
 
 
 def _copy_model_call_record(
@@ -366,9 +357,12 @@ _COMPACTION_SOURCE_FIELDS = (
 ) | {"run_id", "logical_call_id", "delivery_attempt_id", "turn_index", "request_fingerprint"}
 
 
+_SHA256_HEX = re.compile("[0-9a-f]{64}")
+
+
 def _digest(value: Any, name: str) -> str:
     result = _string(value, name)
-    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+    if _SHA256_HEX.fullmatch(result) is None:
         raise _invalid(f"{name} must be a SHA-256 digest")
     return result
 
