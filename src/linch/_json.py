@@ -2,13 +2,35 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from typing import Any
+
+from _linch_native import canonical_dumps as _native_canonical_dumps
+
+# The native encoder bounds its own recursion; this only lifts the caller limit.
+_UNBOUNDED_DEPTH = 1 << 30
 
 # A node check returns its children's depth, or None for a scalar. This lets
 # validation boundaries retain their existing depth counting and error order.
 NodeCheck = Callable[[Any, str, set[int], int], int | None]
 KeyCheck = Callable[[Any, str], None]
+
+
+def canonical_dumps(value: Any) -> str:
+    """Return ``json.dumps(value)`` with sorted keys, compact separators,
+    ``ensure_ascii=False`` and ``allow_nan=False``.
+
+    Plain JSON trees are encoded natively; anything else (and every error)
+    goes through ``json.dumps`` itself.
+    """
+
+    encoded = _native_canonical_dumps(value, max_depth=_UNBOUNDED_DEPTH)
+    if encoded is not None:
+        return encoded
+    return json.dumps(
+        value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def walk_json(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -9,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
 
 from jsonschema import Draft202012Validator
 
-from .._json import walk_json
+from .._json import canonical_dumps, walk_json
 from .._tracing import trace_id_for
 
 if TYPE_CHECKING:
@@ -439,13 +438,7 @@ def default_render_output(value: JsonValue) -> str:
     normalized = normalize_json_value(value)
     if isinstance(normalized, str):
         return normalized
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+    return canonical_dumps(normalized)
 
 
 def render_tool_output(

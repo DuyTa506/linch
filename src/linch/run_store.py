@@ -14,7 +14,7 @@ from uuid import uuid4
 from _linch_native import deepcopy
 from _linch_native import json_safe as _native_json_safe
 
-from ._json import walk_json
+from ._json import canonical_dumps, walk_json
 from ._telemetry import store_call
 from ._wire import WIRE_VERSION, require_wire_version
 from .errors import ConfigError, LinchError
@@ -868,14 +868,7 @@ def _json_safe(value: Any, *, strict: bool = False) -> Any:
 def canonical_json(value: Any) -> str:
     """Serialize ``value`` deterministically for signatures and snapshots."""
 
-    safe = _json_safe(value, strict=True)
-    return json.dumps(
-        safe,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    return canonical_dumps(_json_safe(value, strict=True))
 
 
 _MODEL_INPUT_REQUEST_FIELDS = frozenset(
@@ -1057,13 +1050,7 @@ def create_model_input_snapshot(
     if not isinstance(snapshot_id, str) or not snapshot_id:
         raise ValueError("snapshot id must be a non-empty string")
     payload = _provider_request_payload(request)
-    request_json = json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    request_json = canonical_dumps(payload)
     snapshot = ModelInputSnapshot(
         id=snapshot_id,
         run_id=run_id,
