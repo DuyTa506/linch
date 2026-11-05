@@ -50,7 +50,12 @@ class _CrashAfterMicroTail:
         return result
 
     def _check(self, checkpoint: Any) -> None:
-        if checkpoint.phase == "tool_results_appended" and checkpoint.turn_index == 2:
+        # Group commit holds intermediate phases, so crash after the first run
+        # write that carries state past turn 2's tool results.
+        if checkpoint.turn_index > 2 or (
+            checkpoint.turn_index == 2
+            and checkpoint.phase in ("tool_results_appended", "turn_complete")
+        ):
             raise _Crash("process died after the micro snapshot's durable tail")
 
 

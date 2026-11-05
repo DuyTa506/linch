@@ -137,8 +137,10 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncGenerator[Event, None]:
         )
     ) as tool_events:
         async for event in tool_events:
-            # Progress is intentionally transient.  Recovery-critical start/end
-            # events are persisted and flushed before crossing the yield boundary.
+            # Progress is intentionally transient.  A tool start is a barrier:
+            # it is durable, with the held checkpoint, before the tool can run.
+            # An end is durable before it is yielded, so a finished result is
+            # never lost to the interrupted-tool placeholder.
             if not isinstance(event, ToolProgressEvent):
                 await ctx.persist_event(event)
             if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):

@@ -147,6 +147,14 @@ Custom store implementations must follow these changed contracts:
   `mark_failed` return the event seqs. Use `load_run` to read stored state.
 - `RunStore.save_checkpoint_with_events(...)` atomically commits a checkpoint
   and its pending events; this is required when a phase has pending events.
+- Run state is group-committed at barriers instead of written through per
+  phase: provider dispatch, paid receipts and projections, each tool start and
+  end, session-store writes, and terminals. A tool turn makes 7 store writes
+  instead of 14. Intermediate checkpoint phases (`assistant_appended`,
+  `tool_batch_pending`, `tool_results_appended`, `turn_complete`) usually reach
+  the store only inside the next barrier's write, so a crash between barriers
+  resumes from the last barrier. A crash before a tool-start commit asks the
+  permission callback again.
 - `ModelInputSnapshotStore.delete` requires `run_id` for fenced cleanup.
 - Postgres schemas require durable event/message sequence counters. Lease
   capabilities fence writes with owner/epoch; workers drive renewal. Import

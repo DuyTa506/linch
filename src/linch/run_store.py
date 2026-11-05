@@ -313,9 +313,13 @@ _T = TypeVar("_T")
 async def durable_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
     """Measure a durable operation and preserve active runs on transient failure.
 
+    A session-store write is a group-commit barrier: the session's held run
+    checkpoint, with the events it covers, is committed first, so no stored
+    session record is durable before run state that preceded it.
+
     Args:
         session: Session whose configured run store and active run govern recovery.
-        op: Measurement label; it does not affect failure classification.
+        op: Measurement label; ``session.*`` labels also mark a barrier.
         awaitable: Durable operation to execute, excluding run creation.
 
     Returns:
@@ -324,6 +328,15 @@ async def durable_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
     Raises:
         _StoreUnavailableError: A transient store failure interrupts an active durable run.
     """
+    journal = getattr(session, "_event_journal", None)
+    if journal is not None and op.startswith("session."):
+        try:
+            await journal.flush_checkpoint()
+        except BaseException:
+            close = getattr(awaitable, "close", None)
+            if close is not None:
+                close()
+            raise
     try:
         return await store_call(session, op, awaitable)
     except Exception as exc:

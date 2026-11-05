@@ -128,7 +128,12 @@ async def _close_terminal_processes(session: Session) -> None:
 async def _complete_with_pending_events(
     session: Session, run_id: str, checkpoint: Any, *, lease: Any = None
 ) -> None:
-    """Write through a successful terminal and its pending result together."""
+    """Write through a successful terminal and its pending result together.
+
+    Run state held before the result commits first, so a crash at the terminal
+    leaves the state the write-through order left (the final assistant turn
+    and its usage durable) rather than rolling them back with the terminal.
+    """
     await _close_terminal_processes(session)
     store = session.agent.run_store
     assert store is not None
@@ -136,8 +141,14 @@ async def _complete_with_pending_events(
     if (
         buf is not None
         and (lease is None or _same_lease_identity(buf.lease, lease))
-        and buf._pending
+        and (buf._pending or buf._dirty is not None)
     ):
+        if buf._dirty is not None or len(buf._pending) > 1:
+            result, buf._pending = buf._pending[-1:], buf._pending[:-1]
+            try:
+                await buf.flush()
+            finally:
+                buf._pending.extend(result)
         checkpoint.phase = "completed"
         await buf.flush_with_checkpoint(checkpoint, status="completed")
         return
