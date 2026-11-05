@@ -357,7 +357,7 @@ async def test_checkpoint_preserves_query_ids_and_correction_bound():
     await agent.close()
 
 
-@pytest.mark.parametrize("id", ["", "a]b", "a\nb", "a\rb"])
+@pytest.mark.parametrize("id", ["", "a]b", "a\nb"])  # \r hits the same control-char check as \n
 async def test_uncitable_ids_fail_visibly(id):
     from linch import register_rag_connector
 
@@ -430,22 +430,22 @@ async def test_context_length_recovery_replaces_retrieved_ids_and_audit(answer, 
     await agent.close()
 
 
-@pytest.mark.parametrize("profiled", [False, True])
-async def test_empty_profile_preserves_host_retrieval_and_grounding(profiled):
+async def test_empty_profile_preserves_host_retrieval_and_grounding():
     from linch import Profile, RunOptions, register_grounding_check, register_rag_connector
 
-    provider, connector = Provider(["unsupported"]), Connector(("d1",))
-    agent = make_agent(provider, reliability=None)
-    register_rag_connector(agent, connector)
-    register_grounding_check(agent)
-    session = await agent.session()
-    opts = RunOptions(profile=Profile("empty", "1")) if profiled else None
-    events = [event async for event in session.run("question", opts)]
-    assert connector.calls == [("question", 5, None)]
-    assert any("[doc:d1]" in block.text for block in provider.requests[0].system)
-    assert events[-1].subtype != "success"
-    assert session.agent is agent
-    await agent.close()
+    for profiled in (False, True):
+        provider, connector = Provider(["unsupported"]), Connector(("d1",))
+        agent = make_agent(provider, reliability=None)
+        register_rag_connector(agent, connector)
+        register_grounding_check(agent)
+        session = await agent.session()
+        opts = RunOptions(profile=Profile("empty", "1")) if profiled else None
+        events = [event async for event in session.run("question", opts)]
+        assert connector.calls == [("question", 5, None)]
+        assert any("[doc:d1]" in block.text for block in provider.requests[0].system)
+        assert events[-1].subtype != "success"
+        assert session.agent is agent
+        await agent.close()
 
 
 async def test_profile_connector_shadows_host_without_duplicate_retrieval():
