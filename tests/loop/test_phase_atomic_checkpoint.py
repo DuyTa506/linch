@@ -138,13 +138,17 @@ async def test_phase_atomic_run_reduces_writes_and_keeps_tool_guard_durable(pg_d
         assert events[-1].subtype == "success"
         assert (await store.load_run(run_id)).status == "completed"
 
-        assert "turn_complete" in store.atomic_phases
-        assert "completed" in store.atomic_phases
-        assert "provider_pending" in store.checkpoint_phases
-        assert {
+        # Group commit: held phases (tool_batch_pending, turn_complete) ride on
+        # the next barrier write instead of getting a write of their own.
+        assert store.atomic_phases == [
             "user_appended",
-            "tool_batch_pending",
-        }.issubset(store.atomic_phases)
+            "provider_pending",
+            "tool_executing",
+            "provider_pending",
+            "assistant_appended",
+            "completed",
+        ]
+        assert store.checkpoint_phases == []
     finally:
         await agent.close()
 
