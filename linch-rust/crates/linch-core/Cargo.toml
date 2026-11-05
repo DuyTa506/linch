@@ -1,0 +1,20 @@
+[package]
+name = "linch-core"
+description = "Python-free core of the Linch agent kernel: types, wire codecs, and run state."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
