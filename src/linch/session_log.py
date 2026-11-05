@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable, Sequence
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
+
+from _linch_native import deepcopy
 
 from .durability import _strict_json
 from .types import Message, message_to_dict

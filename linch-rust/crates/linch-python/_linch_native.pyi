@@ -1,3 +1,6 @@
-from typing import Any
+from typing import Any, TypeVar
 
+_T = TypeVar("_T")
+
+def deepcopy(x: _T, memo: dict[int, Any] | None = None) -> _T: ...
 def json_safe(value: Any, *, strict: bool, max_depth: int) -> Any: ...

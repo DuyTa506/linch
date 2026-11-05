@@ -111,6 +111,6 @@ async def test_unchanged_catalog_does_not_scan_schemas_after_first_turn(monkeypa
 
     monkeypatch.setattr(catalog, "_schemas", unexpected_diff)
     monkeypatch.setattr(catalog, "_digest", unexpected_diff)
-    monkeypatch.setattr(catalog.copy, "deepcopy", unexpected_diff)
+    monkeypatch.setattr(catalog, "deepcopy", unexpected_diff)
     monkeypatch.setattr(agent.tools, "list", unexpected_diff)
     await catalog.sync_catalog(session, config, None)

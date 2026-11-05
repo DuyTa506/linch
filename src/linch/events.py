@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, TypeAlias, cast
+
+from _linch_native import deepcopy
 
 from ._json import walk_json
 from ._wire import WIRE_VERSION, require_wire_version

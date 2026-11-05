@@ -7,11 +7,11 @@ import json
 import math
 import time
 from collections.abc import Awaitable, Mapping, Sequence
-from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
+from _linch_native import deepcopy
 from _linch_native import json_safe as _native_json_safe
 
 from ._json import walk_json

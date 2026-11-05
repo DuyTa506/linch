@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Mapping
-from copy import deepcopy
 from typing import TYPE_CHECKING, cast
+
+from _linch_native import deepcopy
 
 from linch.errors import ConfigError
 from linch.types import (

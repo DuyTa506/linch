@@ -4,9 +4,10 @@ resume recovery, and message-identity checks used on resume."""
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from html import escape
 from typing import Any
+
+from _linch_native import deepcopy
 
 from .._tracing import trace_id_for
 from .._wire import WIRE_VERSION, require_wire_version
