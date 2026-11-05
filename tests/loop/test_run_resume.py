@@ -98,14 +98,36 @@ class _Crash(BaseException):
     pass
 
 
+_PHASE_ORDER = (
+    "started",
+    "user_appended",
+    "provider_pending",
+    "assistant_appended",
+    "tool_batch_pending",
+    "permission_pending",
+    "tool_executing",
+    "tool_results_appended",
+    "turn_complete",
+    "completed",
+    "failed",
+    "aborted",
+)
+
+
 class _CheckpointCrashStore:
-    """Crash once at a selected checkpoint boundary, preserving prior writes."""
+    """Crash once at a selected checkpoint boundary, preserving prior writes.
+
+    Running checkpoints are group-committed at barriers, so a crash at phase X
+    is the first durable write made once X was reached: X's own write, or the
+    barrier write that carries a later phase of the same or a later turn.
+    """
 
     def __init__(self, store: Any) -> None:
         self.store = store
         self.boundary: str | None = None
         self.crashed = False
         self.drop_assistant_events = False
+        self.first_turn: int | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.store, name)
@@ -113,27 +135,28 @@ class _CheckpointCrashStore:
     def reset(self, boundary: str | None) -> None:
         self.boundary = boundary
         self.crashed = False
+        self.first_turn = None
 
-    async def save_checkpoint(self, run_id: str, checkpoint: Any, **kwargs: Any) -> Any:
-        if (
-            not self.crashed
-            and self.boundary is not None
-            and self.boundary == f"checkpoint:{checkpoint.phase}"
-        ):
+    def _check(self, checkpoint: Any) -> None:
+        if self.first_turn is None:
+            self.first_turn = checkpoint.turn_index
+        if self.crashed or self.boundary is None:
+            return
+        phase = self.boundary.removeprefix("checkpoint:")
+        if checkpoint.turn_index > self.first_turn or _PHASE_ORDER.index(
+            checkpoint.phase
+        ) >= _PHASE_ORDER.index(phase):
             self.crashed = True
             raise _Crash(self.boundary)
+
+    async def save_checkpoint(self, run_id: str, checkpoint: Any, **kwargs: Any) -> Any:
+        self._check(checkpoint)
         return await self.store.save_checkpoint(run_id, checkpoint, **kwargs)
 
     async def save_checkpoint_with_events(
         self, run_id: str, checkpoint: Any, events: list[Any], **kwargs: Any
     ) -> Any:
-        if (
-            not self.crashed
-            and self.boundary is not None
-            and self.boundary == f"checkpoint:{checkpoint.phase}"
-        ):
-            self.crashed = True
-            raise _Crash(self.boundary)
+        self._check(checkpoint)
         if self.drop_assistant_events:
             events = [event for event in events if getattr(event, "type", None) != "assistant"]
         return await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
@@ -181,7 +204,8 @@ class _TransientCheckpointStore:
         self, run_id: str, checkpoint: Any, events: list[Any], **kwargs: Any
     ) -> Any:
         self.checkpoint_phases.append(checkpoint.phase)
-        if self.fail_once and checkpoint.phase == "tool_batch_pending":
+        # The group commit that guards the tool; it carries the latest held phase.
+        if self.fail_once and checkpoint.phase in ("tool_batch_pending", "tool_executing"):
             self.fail_once = False
             self.failure_seen = True
             import asyncpg
@@ -1170,7 +1194,7 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
     # A transient durable-store failure must stop before terminal persistence;
     # the checkpoint itself is the replay boundary for the side effect.
     assert injected.failure_seen
-    assert "tool_batch_pending" in injected.checkpoint_phases
+    assert "tool_executing" in injected.checkpoint_phases
     assert not any(isinstance(event, (ErrorEvent, ResultEvent)) for event in first_events)
     assert injected.after_failure_calls == []
     record = await injected.load_run(run_id)
@@ -1188,11 +1212,16 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
     resumed_events = await _collect(resumed.resume(run_id))
 
     assert resumed_events[-1].type == "result"
-    assert counts == {"A": 1}
+    # The tool start commits with its guarding checkpoint. Committed, it makes
+    # the tool possibly-run, so recovery records the interrupted placeholder
+    # instead of re-running it; uncommitted, the tool runs once on resume.
+    assert counts == ({} if fail_after_commit else {"A": 1})
     stored = await injected.load_events(run_id)
     assert sum(isinstance(row.event, ErrorEvent) for row in stored) == 0
     assert sum(isinstance(row.event, ResultEvent) for row in stored) == 1
-    assert sum(row.event.type == "tool_call_end" for row in stored) == 1
+    assert sum(row.event.type == "tool_call_end" for row in stored) == (
+        0 if fail_after_commit else 1
+    )
     assert [row.seq for row in stored] == list(range(1, len(stored) + 1))
     tool_result_blocks = [
         block
@@ -1273,10 +1302,10 @@ async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
 
     assert events[-1].type == "result"
     assert counts == {"A": 1, "B": 1}
-    assert run_store.saved_phases.count("tool_batch_pending") == 1
-    # Write-amplification guard: the tool_executing checkpoint is saved once per
-    # batch (by the permissions-resolved callback), NOT once per tool start/end.
+    # Write-amplification guard: the batch checkpoints are held and committed
+    # once, with the first tool start, NOT once per phase or per tool start/end.
     # Two tools previously produced four tool_executing saves.
+    assert run_store.saved_phases.count("tool_batch_pending") == 0
     assert run_store.saved_phases.count("tool_executing") == 1
 
 
@@ -1555,7 +1584,9 @@ async def test_interrupted_tool_guard_recovery_survives_two_resume_cuts() -> Non
 
     checkpointed = await run_store.load_run(run_id)
     assert checkpointed is not None and checkpointed.checkpoint is not None
-    assert checkpointed.checkpoint.phase == "tool_results_appended"
+    # The session write of the placeholder results committed the held batch
+    # checkpoint; later held phases died with the cut.
+    assert checkpointed.checkpoint.phase == "tool_batch_pending"
 
     run_store.reset(None)
     restarted_again = _agent(
@@ -1904,7 +1935,8 @@ async def test_guard_trip_after_results_checkpoint_replays_guard_action(force_fi
     assert tool_results_seen == 3
     crashed_record = await run_store.load_run(run_id)
     assert crashed_record is not None and crashed_record.checkpoint is not None
-    assert crashed_record.checkpoint.phase == "tool_results_appended"
+    # The results are in the session; their held checkpoint died with the process.
+    assert crashed_record.checkpoint.phase == "tool_executing"
     await agent.close()
 
     restarted = _guard_agent(
@@ -1924,29 +1956,28 @@ async def test_guard_trip_after_results_checkpoint_replays_guard_action(force_fi
     assert actual == expected
 
 
-async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool() -> None:
-    """Crash after the tool_executing checkpoint but before the start event is
-    durable: the resolved permission decision was persisted by the callback, so
-    resume replays it (no re-prompt) and runs the tool exactly once.
+async def test_crash_before_tool_start_commit_reruns_tool_once() -> None:
+    """The tool_executing checkpoint and the start event commit together.
 
-    Injects the crash by dropping the ToolCallStartEvent append — simulating a
-    process death after the checkpoint commit but before the event-log write.
+    A crash before that commit leaves neither durable: resume asks the
+    permission callback again (callbacks are at-least-once) and runs the tool
+    exactly once, since no start marks it possibly-run.
     """
     from linch.run_store import InMemoryRunStore
 
-    class DropStartAppendStore(InMemoryRunStore):
+    class CrashStartCommitStore(InMemoryRunStore):
         def __init__(self) -> None:
             super().__init__()
-            self.drop_starts = True
+            self.crash_start = True
 
-        async def append_event(self, run_id, event):
-            if self.drop_starts and getattr(event, "type", None) == "tool_call_start":
-                # Pretend the event log write never committed.
-                return 0
-            return await super().append_event(run_id, event)
+        async def save_checkpoint_with_events(self, run_id, checkpoint, events, **kwargs):
+            if self.crash_start and any(e.type == "tool_call_start" for e in events):
+                self.crash_start = False
+                raise _Crash("tool-start commit")
+            return await super().save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
 
     session_store = _memory_session_store()
-    run_store = DropStartAppendStore()
+    run_store = CrashStartCommitStore()
     counts: dict[str, int] = {}
     callback_calls: list[Any] = []
 
@@ -1964,18 +1995,21 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
         run_store=run_store,
     )
     session = await agent.session(id="s1")
-    run_id, _ = await _run_until(session, "write", lambda e: e.type == "tool_call_start")
+    run_id = ""
+    with pytest.raises(_Crash, match="tool-start commit"):
+        async for event in session.run("write"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
     assert len(callback_calls) == 1
-    assert counts == {}  # stopped before the tool executed
+    assert counts == {}
 
-    # The start event was dropped; the checkpoint still carries the allow decision.
     run = await run_store.load_run(run_id)
     assert run is not None and run.checkpoint is not None
-    assert run.checkpoint.phase == "tool_executing"
+    assert run.checkpoint.phase != "tool_executing"
     stored = await run_store.load_events(run_id)
     assert [s for s in stored if s.event.type == "tool_call_start"] == []
 
-    run_store.drop_starts = False  # "restart" — the event log commits normally now
     restarted = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
@@ -1986,10 +2020,7 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
 
-    # No re-prompt: the resolved allow decision was durable via the callback.
-    assert not any(e.type == "permission_request" for e in resume_events)
-    assert len(callback_calls) == 1
-    # Tool had not started (no durable start event) → it runs exactly once now.
+    assert len(callback_calls) == 2
     assert counts == {"WriteThing": 1}
     assert resume_events[-1].type == "result"
 
@@ -2566,9 +2597,9 @@ async def test_tool_recovery_with_null_cursor_fails_before_side_effects() -> Non
         session_store=sessions,
         run_store=store,
     ).session(id="s1")
-    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "assistant")
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_start")
     checkpoint = store._runs[run_id].checkpoint
-    assert checkpoint is not None
+    assert checkpoint is not None and checkpoint.phase == "tool_executing"
     checkpoint.tool_batch_event_after_seq = None
     checkpoint.background_workers = {
         "worker": {"worker_id": "worker", "display_name": "worker", "status": "running"}

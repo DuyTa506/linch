@@ -32,6 +32,9 @@ class Boundaries:
         self.dead = False
         self.active = False
         self.finished = False
+        # Writes that also commit a dispatch marker: once committed the
+        # provider may have been called, so startup is over.
+        self.dispatching: set[int] = set()
 
     def wrap(self, store, label):
         state = self
@@ -58,6 +61,11 @@ class Boundaries:
                         if name == "save_checkpoint_with_events"
                         else (args[1] if name == "append_events" else [])
                     )
+                    if selected and any(
+                        getattr(event, "record_kind", None) == "dispatch_started"
+                        for event in events
+                    ):
+                        state.dispatching.add(index)
                     receipt_hit = isinstance(state.target, tuple) and any(
                         getattr(event, "type", None) == "model_call"
                         and (event.record["delivery_attempt_id"], event.record_kind) == state.target
@@ -417,6 +425,7 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                 normalized(rows),
                 list(session.full_history),
                 list(session.provider_view),
+                gate.dispatching,
             )
         finally:
             gate.dead = False
@@ -425,7 +434,7 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
             await raw.close()
             await messages.close()
 
-    calls, baseline, history, view = await exercise()
+    calls, baseline, history, view, dispatching = await exercise()
     assert blocked or any(phase == "provider_pending" for _, _, phase in calls)
     targets = list(enumerate(calls))
     timings = ("before", "committed", "returned")
@@ -442,7 +451,9 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
         timings = ("committed", "returned")
     for target, boundary in targets:
         for timing in timings:
-            _, trace, recovered_history, recovered_view = await exercise(target, timing)
+            if target in dispatching and timing != "before":
+                continue
+            _, trace, recovered_history, recovered_view, _ = await exercise(target, timing)
             assert trace == baseline, (boundary, timing, trace, baseline)
             assert recovered_history == history, (boundary, timing)
             assert recovered_view == view, (boundary, timing)

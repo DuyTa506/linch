@@ -12,13 +12,16 @@ class _ProcessDeath(BaseException):
 
 
 class _CrashWrites:
-    """Keep dying through finally, just as a process cannot perform cleanup writes."""
+    """Keep dying through finally, just as a process cannot perform cleanup writes.
+
+    Arms at the first run write that commits turn 1's tool results; group commit
+    may fold that state into a later barrier or the terminal write itself.
+    """
 
     def __init__(self, store: Any, point: str = "", after: bool = False) -> None:
         self.store, self.point, self.after = store, point, after
         self.dead = False
         self.armed = False
-        self.turn_complete = 0
         self.terminals = 0
         self.peer: _CrashWrites | None = None
 
@@ -34,17 +37,18 @@ class _CrashWrites:
     async def _write(self, name: str, *args: Any, **kw: Any) -> Any:
         if self.dead or (self.peer is not None and self.peer.dead):
             raise _ProcessDeath("cleanup after process death")
-        checkpoint = args[1] if name.startswith("save_checkpoint") else None
-        point = name
-        if checkpoint is not None and checkpoint.phase == "turn_complete" and self.armed:
-            self.turn_complete += 1
-            point = f"turn_complete:{self.turn_complete}"
-        if name == "append_messages" and any(
-            "Please provide your final answer now" in getattr(block, "text", "")
-            for message in args[1]
-            for block in message.content
+        checkpoint = (
+            args[1] if name.startswith("save_checkpoint") or name == "mark_failed" else None
+        )
+        if checkpoint is not None and (
+            checkpoint.turn_index >= 2
+            or (
+                checkpoint.turn_index == 1
+                and checkpoint.phase in {"tool_results_appended", "turn_complete"}
+            )
         ):
-            point = "reminder"
+            self.armed = True
+        point = self._point(name, checkpoint, args, kw)
         hit = self.armed and point == self.point
         if hit and not self.after:
             self.dead = True
@@ -53,16 +57,24 @@ class _CrashWrites:
         status = kw.get("status")
         if name in {"mark_failed", "mark_completed"} or status in {"completed", "aborted"}:
             self.terminals += 1
-        if (
-            checkpoint is not None
-            and checkpoint.phase == "tool_results_appended"
-            and checkpoint.turn_index == 1
-        ):
-            self.armed = True
         if hit:
             self.dead = True
             raise _ProcessDeath(point)
         return result
+
+    def _point(self, name: str, checkpoint: Any, args: tuple[Any, ...], kw: dict[str, Any]) -> str:
+        if checkpoint is not None and kw.get("status") == "completed":
+            return "completed"
+        if checkpoint is not None and checkpoint.turn_index >= 2:
+            # The next turn's dispatch commits the held turn_complete checkpoint.
+            return "next_turn"
+        if name == "append_messages" and any(
+            "Please provide your final answer now" in getattr(block, "text", "")
+            for message in args[1]
+            for block in message.content
+        ):
+            return "reminder"
+        return name
 
     async def save_checkpoint(self, *args: Any, **kw: Any) -> Any:
         return await self._write("save_checkpoint", *args, **kw)
@@ -180,15 +192,20 @@ def _normalized(value: Any) -> Any:
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("after", [False, True], ids=["before", "after_commit"])
 @pytest.mark.parametrize(
-    ("force_final", "point"),
+    ("force_final", "point", "after"),
     [
-        (False, "mark_failed"),
-        (True, "reminder"),
-        (True, "turn_complete:1"),
-        (True, "turn_complete:2"),
+        (False, "mark_failed", False),
+        (False, "mark_failed", True),
+        (True, "reminder", False),
+        (True, "reminder", True),
+        # Committed, this write also holds the next dispatch marker, so a
+        # retry is a new delivery attempt by design: only "before" applies.
+        (True, "next_turn", False),
+        (True, "completed", False),
+        (True, "completed", True),
     ],
+    ids=lambda value: {False: "before", True: "after_commit"}.get(value, str(value)),
 )
 async def test_guard_terminal_crash_preserves_exact_log(pg_dsn, kind, after, force_final, point):
     from linch import RunNotResumableError

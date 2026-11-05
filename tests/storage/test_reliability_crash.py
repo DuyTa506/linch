@@ -15,17 +15,36 @@ class CorrectionWrites(_CrashWrites):
     def __init__(self, *args, nth=1):
         super().__init__(*args)
         self.nth, self.hits = nth, 0
+        self.turn: int | None = None
+
+    def _point(self, name: str, checkpoint: Any, args: tuple[Any, ...], kw: dict[str, Any]) -> str:
+        return name
+
+    def _ends_turn(self, checkpoint: Any) -> bool:
+        """Whether this write commits a turn's held turn_complete checkpoint."""
+        previous, self.turn = self.turn, checkpoint.turn_index
+        return checkpoint.phase == "turn_complete" or (
+            previous is not None and checkpoint.turn_index > previous
+        )
 
     async def _write(self, name: str, *args: Any, **kw: Any) -> Any:
+        checkpoint = args[1] if name.startswith("save_checkpoint") else None
         hit = (
-            name == "append_messages"
-            and any("[Linch]" in str(message) for message in args[1])
-            and self.point == "feedback"
-        ) or (
-            name.startswith("save_checkpoint")
-            and args[1].phase
-            == ("assistant_appended" if self.point == "assistant" else "turn_complete")
-            and self.point in {"checkpoint", "assistant"}
+            (
+                name == "append_messages"
+                and any("[Linch]" in str(message) for message in args[1])
+                and self.point == "feedback"
+            )
+            or (
+                checkpoint is not None
+                and self.point == "assistant"
+                and checkpoint.phase == "assistant_appended"
+            )
+            or (
+                checkpoint is not None
+                and self.point == "checkpoint"
+                and self._ends_turn(checkpoint)
+            )
         )
         if hit:
             self.hits += 1
@@ -33,9 +52,6 @@ class CorrectionWrites(_CrashWrites):
         original = self.point
         self.point = name if hit else ""
         self.armed = True
-        # Avoid the parent's guard-specific turn_complete counter.
-        if name.startswith("save_checkpoint") and args[1].phase == "turn_complete":
-            self.point = f"turn_complete:{self.turn_complete + 1}" if hit else ""
         try:
             return await super()._write(name, *args, **kw)
         finally:
@@ -138,8 +154,13 @@ def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("after", [False, True], ids=["before", "after"])
-@pytest.mark.parametrize("point", ["feedback", "checkpoint"])
+@pytest.mark.parametrize(
+    ("point", "after"),
+    # The write committing a turn's end also holds the next dispatch marker;
+    # committed, a retry is a new delivery attempt by design, so only "before".
+    [("feedback", False), ("feedback", True), ("checkpoint", False)],
+    ids=["feedback-before", "feedback-after", "checkpoint-before"],
+)
 @pytest.mark.parametrize(
     "case", ["text", "native", "completion", "final_tool", "text_twice", "native_twice"]
 )

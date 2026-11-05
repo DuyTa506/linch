@@ -512,14 +512,16 @@ async def test_runtime_checkpoint_does_not_borrow_newer_event_buffer() -> None:
     runtime.pending_truncation_feedback = None
     runtime.sync_checkpoint_accounting = lambda: None
 
+    # A running checkpoint is held for the next barrier, where the stale lease fails.
+    await runtime.save_checkpoint("turn_complete")
     with pytest.raises(LeaseLostError):
-        await runtime.save_checkpoint("turn_complete")
+        await old_buffer.flush()
 
     assert new_buffer._pending == [event]
     assert await store.load_events(record.id) == []
 
 
-async def test_observational_events_batch_and_tool_events_flush_per_event() -> None:
+async def test_events_group_commit_and_tool_start_closes_its_batch() -> None:
     session_store = memory_session_store()
     run_store = _RecordingRunStore()
     agent = make_agent(
@@ -543,8 +545,8 @@ async def test_observational_events_batch_and_tool_events_flush_per_event() -> N
     assert "tool_call_start" in durable and "tool_call_end" in durable
 
     for batch in run_store.batches:
-        for etype in ("tool_call_start", "tool_call_end"):
-            if etype in batch:
-                assert batch == [etype], f"{etype} must flush alone, got {batch}"
+        if "tool_call_start" in batch:
+            # A tool start is a barrier: it is the last record before the tool runs.
+            assert batch[-1] == "tool_call_start", batch
 
     assert any(len(batch) > 1 for batch in run_store.batches), run_store.batches
