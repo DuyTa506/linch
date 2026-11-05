@@ -15,6 +15,8 @@ use pyo3::types::{
     PyString, PyTuple, PyType,
 };
 
+use crate::dict_iter::for_each_item;
+
 struct Refs {
     decimal: Py<PyType>,
     enum_: Py<PyType>,
@@ -204,9 +206,10 @@ impl<'py> Walker<'py> {
         {
             // Exact `str` keys are already their own normalized names and are
             // unique, so neither collision branch can fire.
-            for (key, item) in dict.iter() {
+            for_each_item(dict, |key, item| {
                 out.set_item(key, self.walk(&item)?)?;
-            }
+                Ok(None::<()>)
+            })?;
             return Ok(out.into_any());
         }
         let reserved = PySet::empty(self.py)?;

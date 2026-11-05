@@ -15,6 +15,8 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
 
+use crate::dict_iter::for_each_item;
+
 /// Native recursion depth before delegating to the stdlib, which then owns
 /// any `RecursionError`. Keeps Rust stack use bounded on worker threads.
 const NATIVE_DEPTH: usize = 200;
@@ -319,9 +321,10 @@ impl<'py> Copier<'py> {
     fn dict(&mut self, x: &Bound<'py, PyAny>, d: usize) -> PyResult<Bound<'py, PyAny>> {
         let y = PyDict::new(self.py);
         self.memo.set_item(d, &y)?;
-        for (key, value) in x.cast::<PyDict>()?.iter() {
+        for_each_item(x.cast::<PyDict>()?, |key, value| {
             y.set_item(self.deep(&key)?, self.deep(&value)?)?;
-        }
+            Ok(None::<()>)
+        })?;
         Ok(y.into_any())
     }
 

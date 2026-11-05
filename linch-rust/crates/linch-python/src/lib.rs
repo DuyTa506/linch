@@ -8,6 +8,7 @@
 
 mod canonical;
 mod deepcopy;
+mod dict_iter;
 mod journal;
 mod json_safe;
 

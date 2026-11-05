@@ -11,6 +11,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
+use crate::dict_iter::for_each_item;
+
 /// Deepest container depth a journal record may use; the root is depth 0.
 const MAX_DEPTH: usize = 64;
 
@@ -69,10 +71,8 @@ impl Checker {
         depth: usize,
     ) -> PyResult<Option<&'static str>> {
         if let Ok(dict) = value.cast_exact::<PyDict>() {
-            for (_, child) in dict.iter() {
-                if let Some(error) = self.visit(&child, depth)? {
-                    return Ok(Some(error));
-                }
+            if let Some(error) = for_each_item(dict, |_, child| self.visit(&child, depth))? {
+                return Ok(Some(error));
             }
         } else if let Ok(list) = value.cast_exact::<PyList>() {
             for child in list.iter() {
