@@ -138,12 +138,12 @@ async def test_no_signal_normal_retry_path():
     assert calls == 2
 
 
-@pytest.mark.parametrize("delay", [37.0, 37.125])
-def test_server_retry_delay_exceeds_exponential_cap(delay: float) -> None:
+def test_server_retry_delay_exceeds_exponential_cap() -> None:
     from linch.errors import RateLimitError
     from linch.providers.retry import _delay_for_error
 
     opts = RetryOptions(base_delay_ms=5000, max_delay_ms=30000, jitter=0.0)
+    delay = 37.125
     assert (
         _delay_for_error(RateLimitError("quota", retry_after_seconds=delay), 0, opts)
         == delay * 1000

@@ -302,9 +302,21 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
         await asyncio.wait_for(consume(), timeout=0.05)
 
 
-@pytest.mark.parametrize("method", ["aclose", "close"])
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize(
+    "method, asynchronous, fails",
+    [
+        # `method` and `asynchronous` are independent conditions in
+        # `aclose_client` (which attribute `getattr` picks vs. whether its
+        # result is awaitable) with no interaction between them, so the
+        # diagonal exercises both branches of each without the full cross
+        # product; `fails` is crossed fully since "preserves errors" must
+        # hold on both the preferred (aclose) and fallback (close) paths.
+        ("aclose", False, False),
+        ("aclose", False, True),
+        ("close", True, False),
+        ("close", True, True),
+    ],
+)
 async def test_chat_client_close_resets_fields_before_close_and_preserves_errors(
     method: str, asynchronous: bool, fails: bool
 ) -> None:
@@ -339,21 +351,25 @@ async def test_chat_client_close_resets_fields_before_close_and_preserves_errors
     assert calls == [method]
 
 
-@pytest.mark.parametrize(
-    "provider_name",
-    [
-        "OpenAIChatCompletionsProvider",
-        "DeepSeekProvider",
-        "LlamaCppProvider",
-        "VLLMProvider",
-        "SGLangProvider",
-    ],
-)
-@pytest.mark.parametrize("arguments", ["", " \n\t"])
+@pytest.mark.parametrize("provider_name", ["OpenAIChatCompletionsProvider", "DeepSeekProvider"])
 @pytest.mark.parametrize("finish_reason", ["tool_calls", "stop"])
 async def test_stream_normalizes_empty_tool_arguments(
-    provider_name: str, arguments: str, finish_reason: str
+    finish_reason: str, provider_name: str
 ) -> None:
+    # `arguments` is not parametrized here: the normalization checks
+    # `tool_input[tid].strip()`, so "" and " \n\t" are the same branch.
+    # `finish_reason` *does* select between two distinct code paths — the
+    # inline tool_calls-triggered flush vs. the end-of-stream fallback for
+    # servers (e.g. llama.cpp) that close with "stop" instead — so that axis
+    # stays. `provider_name` is kept at two values (not the original five):
+    # `stream()` and its empty-arguments normalization live only on the
+    # shared `_ChatCompletionsProvider` base, so OpenAIChatCompletionsProvider
+    # alone would cover that; but `stream()` also calls `self._reasoning_text`,
+    # which every subclass overrides independently, and DeepSeekProvider's
+    # override (`deepseek.py::_reasoning_text`) has no other test that
+    # exercises it through `stream()` (its own stream test uses an
+    # empty-choices chunk). LlamaCpp/VLLM/SGLang's overrides are already
+    # covered by their own dedicated stream tests, so they're not needed here.
     import json
 
     import linch.providers as providers
@@ -367,7 +383,7 @@ async def test_stream_normalizes_empty_tool_arguments(
                     SimpleNamespace(
                         index=0,
                         id="call_1",
-                        function=SimpleNamespace(name="NoArgs", arguments=arguments),
+                        function=SimpleNamespace(name="NoArgs", arguments=""),
                     )
                 ],
             ),

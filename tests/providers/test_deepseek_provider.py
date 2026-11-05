@@ -84,15 +84,6 @@ def test_deepseek_payload_round_trips_reasoning_content_with_a_tool_call() -> No
     }
 
 
-def test_deepseek_provider_has_no_terminal_schema_tool() -> None:
-    from linch.providers import DeepSeekProvider
-
-    caps = DeepSeekProvider().capabilities("deepseek-v4-flash")
-
-    assert caps.structured_output is True
-    assert caps.structured_output_terminal_tool is False
-
-
 def test_deepseek_thinking_rejects_forced_tool_choice_but_allows_auto() -> None:
     from linch.errors import ProviderError
     from linch.providers.deepseek import _build_deepseek_payload

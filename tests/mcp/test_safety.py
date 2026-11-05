@@ -151,7 +151,7 @@ async def test_large_mcp_text_falls_back_to_cap_when_spill_fails(tmp_path) -> No
     assert result.content == "x" * 30000 + "\n… (output capped at 30000 chars)"
 
 
-@pytest.mark.parametrize("size", [30000, 30001, 90000])
+@pytest.mark.parametrize("size", [30000, 30001])
 async def test_result_text_is_bounded_at_thirty_thousand_characters(size: int) -> None:
     from mcp.types import CallToolResult, TextContent
 

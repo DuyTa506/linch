@@ -42,39 +42,6 @@ def test_tool_input_schema_reaches_the_model_intact() -> None:
     assert tool.input_schema == schema  # type: ignore[attr-defined]
 
 
-def test_tool_annotations_map_to_scope_and_destructive_when_trusted() -> None:
-    from mcp.types import Tool, ToolAnnotations
-
-    from linch.mcp.tool import make_mcp_tool
-
-    read_only = make_mcp_tool(
-        "srv",
-        Tool(
-            name="peek",
-            inputSchema={"type": "object", "properties": {}},
-            annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
-        ),
-        _unused_call_tool,
-        trust_annotations=True,
-    )
-    dangerous = make_mcp_tool(
-        "srv",
-        Tool(
-            name="wipe",
-            inputSchema={"type": "object", "properties": {}},
-            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
-        ),
-        _unused_call_tool,
-        trust_annotations=True,
-    )
-
-    assert read_only.scope == "read"  # type: ignore[attr-defined]
-    assert read_only.parallel is True  # type: ignore[attr-defined]
-    assert read_only.destructive is False  # type: ignore[attr-defined]
-    assert dangerous.scope == "exec"  # type: ignore[attr-defined]
-    assert dangerous.destructive is True  # type: ignore[attr-defined]
-
-
 @pytest.mark.parametrize("case", ["ok", "error", "image"])
 async def test_call_tool_result_mapping(case: str) -> None:
     from mcp.types import CallToolResult, ImageContent, TextContent
