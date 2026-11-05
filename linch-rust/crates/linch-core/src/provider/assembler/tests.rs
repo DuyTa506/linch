@@ -189,14 +189,20 @@ fn start(model: &str) -> ProviderEvent {
     })
 }
 
+/// A `message_end` event with the given stop reason and usage, shared by
+/// every test submodule.
+fn end_with_usage(stop_reason: StopReason, usage: Usage) -> ProviderEvent {
+    ProviderEvent::MessageEnd(MessageEndEvent {
+        stop_reason,
+        usage,
+        provider_metadata: None,
+    })
+}
+
 /// A `message_end` event with the given stop reason and default usage,
 /// shared by every test submodule.
 fn end(stop_reason: StopReason) -> ProviderEvent {
-    ProviderEvent::MessageEnd(MessageEndEvent {
-        stop_reason,
-        usage: Usage::default(),
-        provider_metadata: None,
-    })
+    end_with_usage(stop_reason, Usage::default())
 }
 
 proptest! {

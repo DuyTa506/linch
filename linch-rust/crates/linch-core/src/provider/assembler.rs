@@ -10,8 +10,11 @@ use crate::usage::Usage;
 
 use super::event::{MessageEndEvent, ProviderEvent};
 
+mod error;
 #[cfg(test)]
 mod tests;
+
+pub use error::StreamError;
 
 /// The assembled assistant turn: one message plus provider accounting.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,85 +27,6 @@ pub struct AssistantAssembly {
     pub usage: Usage,
     /// Model that actually served the call, from `message_start`.
     pub model: String,
-}
-
-/// A violation of the provider stream contract, naming the rule broken.
-#[derive(Debug, thiserror::Error)]
-pub enum StreamError {
-    /// A second `message_start` was pushed.
-    #[error("duplicate message_start")]
-    DuplicateMessageStart,
-    /// An event other than `message_start` arrived before one was pushed.
-    #[error("event {kind:?} arrived before message_start")]
-    MissingMessageStart {
-        /// Wire `type` of the offending event.
-        kind: &'static str,
-    },
-    /// `message_start.model` was empty or all-whitespace.
-    #[error("message_start.model must be a nonblank string")]
-    BlankModel,
-    /// An event arrived after `message_end`.
-    #[error("event {kind:?} arrived after message_end")]
-    EventAfterEnd {
-        /// Wire `type` of the offending event.
-        kind: &'static str,
-    },
-    /// `tool_use_start.id` was empty.
-    #[error("tool_use_start.id must not be empty")]
-    EmptyToolId,
-    /// `tool_use_start.name` was empty.
-    #[error("tool_use_start.name must not be empty")]
-    EmptyToolName,
-    /// Two `tool_use_start` events in the same stream used the same id.
-    #[error("duplicate tool-use id {id:?}")]
-    DuplicateToolId {
-        /// The repeated id.
-        id: String,
-    },
-    /// An input delta or `tool_use_end` named an id with no open call.
-    #[error("{event} references an id with no open call: {id:?}")]
-    UnknownToolId {
-        /// The offending id.
-        id: String,
-        /// Which event referenced it.
-        event: &'static str,
-    },
-    /// `message_end` arrived while one or more tool calls were still open.
-    #[error("message_end arrived before tool_use_end for {ids:?}")]
-    UnfinishedToolCalls {
-        /// Ids of the tool calls that never ended, sorted.
-        ids: Vec<String>,
-    },
-    /// A tool call's concatenated input deltas did not parse as JSON.
-    #[error("tool {id:?} input is invalid JSON: {source}")]
-    InvalidToolInput {
-        /// The tool call's id.
-        id: String,
-        /// The underlying JSON parse error.
-        #[source]
-        source: serde_json::Error,
-    },
-    /// A tool call's input parsed but was not a JSON object.
-    #[error("tool {id:?} input must decode to a JSON object")]
-    NonObjectToolInput {
-        /// The tool call's id.
-        id: String,
-    },
-    /// The stream ended without ever pushing a `message_start`.
-    #[error("stream ended before message_start")]
-    EndedBeforeStart,
-    /// The stream ended without ever pushing a `message_end`.
-    #[error("stream ended before message_end")]
-    EndedBeforeEnd,
-    /// `stop_reason` was `tool_use` but no tool call completed.
-    #[error("stop_reason='tool_use' requires at least one completed tool call")]
-    ToolUseWithoutCalls,
-    /// One or more tool calls completed but `stop_reason` was not `tool_use`.
-    #[error("completed tool calls but stop_reason was {stop_reason:?}, not tool_use")]
-    CallsWithoutToolUse {
-        /// The stop reason actually reported.
-        stop_reason: StopReason,
-    },
 }
 
 /// A tool call that has been opened but not yet closed.
@@ -313,10 +237,22 @@ impl Assembler {
     }
 
     fn push_message_end(&mut self, end: MessageEndEvent) -> Result<(), StreamError> {
+        // Destructure up front: `usage`/`stop_reason` are the event's own
+        // observed accounting, not a side effect of the checks below, so
+        // every end-shape error can carry them without re-reading `end`.
+        let MessageEndEvent {
+            stop_reason,
+            usage,
+            provider_metadata,
+        } = end;
         if !self.open_calls.is_empty() {
             let mut ids: Vec<String> = self.open_calls.keys().cloned().collect();
             ids.sort();
-            return Err(StreamError::UnfinishedToolCalls { ids });
+            return Err(StreamError::UnfinishedToolCalls {
+                ids,
+                usage,
+                stop_reason,
+            });
         }
         self.flush_text();
         self.flush_thinking();
@@ -324,17 +260,15 @@ impl Assembler {
             .content
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolUse(_)));
-        if end.stop_reason == StopReason::ToolUse && !has_tool_use {
-            return Err(StreamError::ToolUseWithoutCalls);
+        if stop_reason == StopReason::ToolUse && !has_tool_use {
+            return Err(StreamError::ToolUseWithoutCalls { usage, stop_reason });
         }
-        if end.stop_reason != StopReason::ToolUse && has_tool_use {
-            return Err(StreamError::CallsWithoutToolUse {
-                stop_reason: end.stop_reason,
-            });
+        if stop_reason != StopReason::ToolUse && has_tool_use {
+            return Err(StreamError::CallsWithoutToolUse { stop_reason, usage });
         }
-        self.stop_reason = Some(end.stop_reason);
-        self.usage = Some(end.usage);
-        self.provider_metadata = end.provider_metadata;
+        self.stop_reason = Some(stop_reason);
+        self.usage = Some(usage);
+        self.provider_metadata = provider_metadata;
         self.message_ended = true;
         Ok(())
     }

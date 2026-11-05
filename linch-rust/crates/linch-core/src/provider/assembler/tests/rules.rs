@@ -172,18 +172,29 @@ fn tool_use_end_for_unknown_call_is_rejected() {
 
 #[test]
 fn message_end_with_an_open_call_is_rejected() {
+    let usage = Usage {
+        input_tokens: 11,
+        output_tokens: 22,
+        cache_read_tokens: 33,
+        cache_creation_tokens: 44,
+    };
     let err = assemble([
         start("m"),
         ProviderEvent::ToolUseStart(ToolUseStartEvent {
             id: "c1".into(),
             name: "Read".into(),
         }),
-        end(StopReason::ToolUse),
+        end_with_usage(StopReason::ToolUse, usage),
     ])
     .unwrap_err();
-    assert!(
-        matches!(err, StreamError::UnfinishedToolCalls { ids } if ids == vec!["c1".to_string()])
-    );
+    // The usage and stop reason observed on the message_end that triggered
+    // this error must survive it: the caller's spend accounting must never
+    // be lost just because the stream also broke a shape rule.
+    assert!(matches!(
+        err,
+        StreamError::UnfinishedToolCalls { ids, usage: got_usage, stop_reason: StopReason::ToolUse }
+            if ids == vec!["c1".to_string()] && got_usage == usage
+    ));
 }
 
 #[test]
@@ -236,12 +247,29 @@ fn stream_missing_message_end_is_rejected() {
 
 #[test]
 fn tool_use_stop_reason_without_a_completed_call_is_rejected() {
-    let err = assemble([start("m"), end(StopReason::ToolUse)]).unwrap_err();
-    assert!(matches!(err, StreamError::ToolUseWithoutCalls));
+    let usage = Usage {
+        input_tokens: 5,
+        output_tokens: 6,
+        cache_read_tokens: 7,
+        cache_creation_tokens: 8,
+    };
+    let err = assemble([start("m"), end_with_usage(StopReason::ToolUse, usage)]).unwrap_err();
+    // Usage must still be observable even though no tool call completed.
+    assert!(matches!(
+        err,
+        StreamError::ToolUseWithoutCalls { usage: got_usage, stop_reason: StopReason::ToolUse }
+            if got_usage == usage
+    ));
 }
 
 #[test]
 fn completed_calls_require_the_tool_use_stop_reason() {
+    let usage = Usage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: 3,
+        cache_creation_tokens: 4,
+    };
     let err = assemble([
         start("m"),
         ProviderEvent::ToolUseStart(ToolUseStartEvent {
@@ -253,13 +281,15 @@ fn completed_calls_require_the_tool_use_stop_reason() {
             json_delta: "{}".into(),
         }),
         ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
-        end(StopReason::EndTurn),
+        end_with_usage(StopReason::EndTurn, usage),
     ])
     .unwrap_err();
+    // The completed call's usage must not be lost behind the shape error.
     assert!(matches!(
         err,
         StreamError::CallsWithoutToolUse {
-            stop_reason: StopReason::EndTurn
-        }
+            stop_reason: StopReason::EndTurn,
+            usage: got_usage,
+        } if got_usage == usage
     ));
 }
