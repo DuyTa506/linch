@@ -197,11 +197,7 @@ impl SessionLog {
             log.append(message, true, true);
         }
         if let Some(visible) = visible {
-            let current: Vec<Message> = log.derived.iter().map(|m| (**m).clone()).collect();
-            if visible != current {
-                let replacement = visible.into_iter().map(Arc::new).collect();
-                log.record_projection(replacement, "");
-            }
+            log.record_projection(visible.into_iter().map(Arc::new).collect(), "");
         }
         log
     }

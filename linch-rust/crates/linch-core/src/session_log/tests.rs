@@ -370,15 +370,17 @@ proptest! {
                 }
                 Op::ProjectFresh { tags, reason } => {
                     let replacement: Vec<Message> = tags.iter().map(|t| make_message(*t)).collect();
-                    if replacement != ref_derived {
+                    let expected_changed = replacement != ref_derived;
+                    if expected_changed {
                         ref_derived = replacement.clone();
                     }
-                    log.record_projection(arc_messages(&replacement), reason);
+                    let changed = log.record_projection(arc_messages(&replacement), reason);
+                    prop_assert_eq!(changed, expected_changed);
                 }
                 Op::ProjectSameAsCurrent => {
                     let replacement = log.provider_view();
-                    log.record_projection((*replacement).clone(), "same");
-                    // ref_derived is unchanged: replacement equals the current view by construction.
+                    // Equals the current view by construction: never a change.
+                    prop_assert!(!log.record_projection((*replacement).clone(), "same"));
                 }
             }
             prop_assert_eq!(history_as_messages(&log), ref_full.clone());
@@ -386,5 +388,12 @@ proptest! {
             prop_assert_eq!(log.history_count(), ref_full.len());
             prop_assert_eq!(log.visible_count(), ref_derived.len());
         }
+
+        // "Equal histories" means equal full_history content however
+        // reached: a log reseeded from just the historical messages (none of
+        // the visible-only entries/projections above) must fingerprint the
+        // same as the original.
+        let mut reseeded = SessionLog::seed(ref_full, None);
+        prop_assert_eq!(log.history_fingerprint(), reseeded.history_fingerprint());
     }
 }
