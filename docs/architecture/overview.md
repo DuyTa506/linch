@@ -82,11 +82,13 @@ flowchart LR
 - A leased run has at most one live worker owner. `RunLease.epoch` is a fencing token.
   `claim()` increments the epoch when ownership changes; `renew()` keeps the
   same epoch; a write with a stale epoch raises `LeaseLostError`.
-- The loop writes a checkpoint before an external operation whose result must
-  be recoverable. `provider_pending` is saved before a provider stream, and
-  `tool_batch_pending`/`tool_executing` are saved before tool execution. Stores
-  can commit pending run events and the checkpoint together through
-  `save_checkpoint_with_events()`.
+- Run state is group-committed at barriers. Checkpoints and events are held
+  in the per-run buffer and committed in one `save_checkpoint_with_events()`
+  write before the next external effect: provider dispatch, each tool start
+  and end, session-store writes, and terminals. Paid receipts and projections
+  are written as soon as they exist. A held checkpoint is a snapshot of its
+  save, so every committed state is one that writing through would also have
+  produced.
 - Durable run events have a per-run sequence. A reader reconnects with
   `PostgresRunStore.load_events(run_id, after_seq=...)`; notifications are
   wakeups, not the source of truth.

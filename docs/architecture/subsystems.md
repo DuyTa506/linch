@@ -164,14 +164,26 @@ lease, retain the single-process behavior of the `RunStore` protocol.
 
 ### Checkpoint and event ordering
 
-The loop persists `provider_pending` before it advances the provider stream.
-After an assistant tool-use response it persists `tool_batch_pending`; after
-all permission decisions and `PreToolUse` mutations settle, it persists
-`tool_executing` before starting any tool. `ToolCallStartEvent` is flushed
-before the event is yielded, so a started-but-unfinished tool is recoverable
-from the event log. Tool results, the next checkpoint, and terminal error
-events are committed through the run event buffer and, when supported, one
-`save_checkpoint_with_events()` statement.
+`RunEventBuffer` (`loop/checkpoint.py`) group-commits run state. Running
+checkpoints and events stay in memory until a barrier commits them in one
+`save_checkpoint_with_events()` write:
+
+- `flush()` before provider dispatch, before each `ToolCallStartEvent` is
+  yielded (with the `tool_executing` checkpoint, so the tool cannot run first),
+  after each `ToolCallEndEvent`, and at terminals;
+- `flush_checkpoint()` before every session-store write (`durable_call` ops
+  named `session.*`); it commits only the held checkpoint and the events it
+  covers.
+
+A held checkpoint is a snapshot taken at its save together with the count of
+events pending then, so every committed state is one the write-through order
+also produced. Dispatch markers, paid receipts and projections are written
+immediately. Startup preparation (`started`), exact-input runs, queued host
+alignment and non-running statuses still write through. Intermediate phases
+(`assistant_appended`, `tool_batch_pending`, `tool_results_appended`,
+`turn_complete`) usually reach the store only inside the next barrier's write,
+so a crash between barriers resumes from the last barrier. A started tool with
+no durable end resumes with an interrupted-tool result and is not re-run.
 
 `RunCheckpoint.tool_batch_event_after_seq` is the recovery cursor for tool
 results. `load_events(run_id, after_seq=...)` returns ascending `StoredRunEvent`

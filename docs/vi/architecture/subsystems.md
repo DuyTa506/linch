@@ -164,14 +164,26 @@ vẫn giữ hành vi đơn tiến trình của protocol `RunStore`.
 
 ### Thứ tự checkpoint và event
 
-Vòng lặp lưu bền vững `provider_pending` trước khi tiếp tục luồng provider.
-Sau phản hồi sử dụng tool của assistant, nó lưu bền vững `tool_batch_pending`;
-sau khi mọi quyết định phân quyền và thay đổi `PreToolUse` đã ổn định, nó lưu
-bền vững `tool_executing` trước khi bắt đầu bất kỳ tool nào. `ToolCallStartEvent`
-được ghi hoàn tất trước khi event được yield, nên tool đã bắt đầu nhưng chưa
-hoàn tất có thể được khôi phục từ log event. Kết quả tool, checkpoint tiếp theo
-và các event lỗi kết thúc được commit thông qua bộ đệm event của run và, khi
-được hỗ trợ, bằng một lệnh `save_checkpoint_with_events()`.
+`RunEventBuffer` (`loop/checkpoint.py`) group-commit trạng thái run.
+Checkpoint đang chạy và event nằm trong bộ nhớ cho đến khi một barrier commit
+chúng trong một lần ghi `save_checkpoint_with_events()`:
+
+- `flush()` trước khi gửi provider, trước khi yield mỗi `ToolCallStartEvent`
+  (cùng checkpoint `tool_executing`, nên tool không thể chạy trước), sau mỗi
+  `ToolCallEndEvent`, và khi kết thúc run;
+- `flush_checkpoint()` trước mỗi lần ghi session store (các op `durable_call`
+  tên `session.*`); nó chỉ commit checkpoint đang giữ và các event mà
+  checkpoint đó bao phủ.
+
+Checkpoint đang giữ là snapshot tại lúc lưu, kèm số event đang chờ khi đó, nên
+mọi trạng thái đã commit đều là trạng thái mà thứ tự write-through cũng tạo ra.
+Dispatch marker, receipt đã trả tiền và projection được ghi ngay. Giai đoạn
+chuẩn bị (`started`), run exact-input, alignment đang chờ của host và các
+trạng thái không phải `running` vẫn ghi xuyên. Các phase trung gian
+(`assistant_appended`, `tool_batch_pending`, `tool_results_appended`,
+`turn_complete`) thường chỉ tới store bên trong lần ghi của barrier kế tiếp,
+nên crash giữa hai barrier sẽ resume từ barrier gần nhất. Tool đã bắt đầu mà
+chưa có kết thúc bền vững sẽ resume với kết quả "bị gián đoạn" và không chạy lại.
 
 `RunCheckpoint.tool_batch_event_after_seq` là con trỏ khôi phục cho kết quả tool.
 `load_events(run_id, after_seq=...)` trả về các hàng `StoredRunEvent` theo thứ tự
