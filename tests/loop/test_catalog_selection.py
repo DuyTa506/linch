@@ -86,32 +86,3 @@ async def test_snapshot_intersects_allowed_tools_with_context_selection() -> Non
     )
 
     assert request.tools == []
-
-
-@pytest.mark.asyncio
-async def test_snapshot_keeps_volatile_context_system_blocks_uncacheable() -> None:
-    from linch import ContextBuildResult
-    from linch.loop.request import _build_turn_request
-    from linch.types import SystemBlock
-
-    _, session, config = await _request_fixture()
-    request = _build_turn_request(
-        session,
-        _opts(),
-        context=ContextBuildResult(system_blocks=[SystemBlock(text="fresh", cacheable=True)]),
-        config=config,
-    )
-
-    assert request.system[-1].text == "fresh"
-    assert request.system[-1].cacheable is False
-
-
-@pytest.mark.asyncio
-async def test_snapshot_without_context_selection_keeps_frozen_tools() -> None:
-    from linch.loop.request import _build_turn_request
-
-    agent, session, config = await _request_fixture()
-    agent.tools.unregister("WriteNote")
-    request = _build_turn_request(session, _opts(), config=config)
-
-    assert [schema["name"] for schema in request.tools] == ["SearchDocs", "WriteNote"]

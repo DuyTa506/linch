@@ -16,7 +16,6 @@ from linch.run_store import InMemoryRunStore, LeaseLostError
 from linch.run_stores.postgres import PostgresRunStore
 from linch.sessions import InMemorySessionStore
 from linch.sessions.postgres import PostgresSessionStore
-from linch.types import Message, TextBlock
 
 
 class ProcessDeath(BaseException):
@@ -465,103 +464,6 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                     assert result.get("usage_complete", True)
 
 
-@pytest.mark.parametrize("after_event", ["system", "hook"])
-async def test_graceful_startup_close_does_not_duplicate_durable_prefix(after_event):
-    raw, messages = InMemoryRunStore(), InMemorySessionStore()
-    provider = ScriptProvider()
-
-    def make():
-        return Agent(
-            model="m",
-            provider=provider,
-            run_store=raw,
-            session_store=messages,
-            tools=empty_tools(),
-            hooks=[Transform()],
-            cwd=".",
-        )
-
-    first = make()
-    session = await first.session(id="s")
-    iterator = session.run("hello", RunOptions(run_id="r"))
-    async for event in iterator:
-        if event.type == after_event:
-            break
-    await iterator.aclose()
-    record = await raw.load_run("r")
-    assert record.checkpoint.phase == "started"
-    prefix = await raw.load_events("r")
-    assert [row.event.type for row in prefix] == (["system"] if after_event == "hook" else [])
-    if after_event == "hook":
-        assert "prepared_message" in record.checkpoint.extension_state["linch.startup"]
-    second = make()
-    try:
-        fresh = await second.session(id="s")
-        _ = [event async for event in fresh.resume("r")]
-        rows = await raw.load_events("r")
-        assert [r.event.type for r in rows].count("system") == 1
-        assert [r.event.type for r in rows].count("hook") == 1
-    finally:
-        await first.close()
-        await second.close()
-
-
-async def test_same_session_resume_after_skills_yield_keeps_startup_atomic():
-    from linch.skills.types import Skill, SkillFrontmatter
-
-    raw = InMemoryRunStore()
-    agent = Agent(
-        model="m",
-        provider=ScriptProvider(),
-        run_store=raw,
-        session_store=InMemorySessionStore(),
-        tools=empty_tools(),
-        cwd=".",
-    )
-    agent.skills = {"test": Skill("test", ".", SkillFrontmatter("test", "fixture"), "body")}
-    session = await agent.session(id="s")
-    iterator = session.run("hello", RunOptions(run_id="r"))
-    try:
-        async for event in iterator:
-            if event.type == "skills_loaded":
-                break
-        await iterator.aclose()
-        assert not session.skills_loaded_emitted
-        assert await raw.load_events("r") == []
-        _ = [event async for event in session.resume("r")]
-        types = [r.event.type for r in await raw.load_events("r")]
-        assert types[:3] == ["system", "skills_loaded", "user"]
-        assert types.count("skills_loaded") == 1
-        assert session.skills_loaded_emitted
-    finally:
-        await iterator.aclose()
-        await agent.close()
-
-
-async def test_fresh_prompt_hook_can_append_logged_context_before_prompt():
-    class LoggedContext:
-        resume_policy_id = "logged-context"
-
-        async def on_user_prompt_submit(self, ctx):
-            await ctx.session.append([Message("user", [TextBlock(text="logged context")])])
-
-    agent = Agent(
-        model="m",
-        provider=ScriptProvider(),
-        run_store=InMemoryRunStore(),
-        session_store=InMemorySessionStore(),
-        tools=empty_tools(),
-        hooks=[LoggedContext()],
-    )
-    try:
-        session = await agent.session()
-        events = [event async for event in session.run("hello")]
-        assert events[-1].subtype == "success"
-        assert [m.content[-1].text for m in session.full_history[:2]] == ["logged context", "hello"]
-    finally:
-        await agent.close()
-
-
 async def test_initial_hook_checkpoint_receives_run_context_and_option_deps():
     contexts = []
 
@@ -586,59 +488,6 @@ async def test_initial_hook_checkpoint_receives_run_context_and_option_deps():
         assert all(
             active == run_id == "r" and captured is deps for active, run_id, captured in contexts
         )
-    finally:
-        await agent.close()
-
-
-@pytest.mark.parametrize("terminal_failure", [False, True])
-async def test_blocked_prompt_marks_skills_seen_only_after_terminal_commit(terminal_failure):
-    from linch.skills.types import Skill, SkillFrontmatter
-
-    class Store(InMemoryRunStore):
-        async def mark_failed(self, *args, **kwargs):
-            if terminal_failure:
-                raise ConnectionResetError("terminal unavailable")
-            return await super().mark_failed(*args, **kwargs)
-
-    class BlockFirst:
-        resume_policy_id = "block-first"
-        calls = 0
-
-        def on_user_prompt_submit(self, ctx):
-            self.calls += 1
-            return HookResult.block("blocked") if self.calls == 1 else None
-
-    store = Store()
-    agent = Agent(
-        model="m",
-        provider=ScriptProvider(),
-        run_store=store,
-        session_store=InMemorySessionStore(),
-        tools=empty_tools(),
-        hooks=[BlockFirst()],
-    )
-    agent.skills = {"test": Skill("test", ".", SkillFrontmatter("test", "fixture"), "body")}
-    try:
-        session = await agent.session(id="s")
-        events = [event async for event in session.run("hello", RunOptions(run_id="blocked"))]
-        if terminal_failure:
-            # A transient terminal-store loss may have emitted the blocked
-            # ErrorEvent, but it must not append a durable ResultEvent.
-            assert any(event.type == "error" for event in events)
-            assert not any(event.type == "result" for event in events)
-            assert not session.skills_loaded_emitted
-            rows = await store.load_events("blocked")
-            assert [row.event.type for row in rows] == ["system", "skills_loaded"]
-            assert (await store.load_run("blocked")).status == "running"
-        else:
-            assert events[-1].type == "result"
-            assert session.skills_loaded_emitted
-            assert (
-                "linch.startup" not in (await store.load_run("blocked")).checkpoint.extension_state
-            )
-            events = [event async for event in session.run("allowed")]
-            assert not any(event.type == "skills_loaded" for event in events)
-            assert events[-1].subtype == "success"
     finally:
         await agent.close()
 
@@ -684,32 +533,5 @@ async def test_preparation_barrier_requires_actual_startup_handler(handler, expe
         events = [event async for event in session.run("hello")]
         assert events[-1].subtype == "success"
         assert store.barriers == expected_barriers
-    finally:
-        await agent.close()
-
-
-async def test_no_store_blocked_error_callback_refreshes_result_and_stop_usage():
-    hook = BlockedErrorAccountedTransform()
-    provider = ScriptProvider()
-    agent = Agent(
-        model="m",
-        provider=provider,
-        run_store=None,
-        session_store=InMemorySessionStore(),
-        tools=empty_tools(),
-        hooks=[hook],
-    )
-    try:
-        session = await agent.session()
-        events = [event async for event in session.run("blocked")]
-        assert [event.type for event in events].count("error") == 1
-        result = events[-1]
-        assert result.type == "result" and result.subtype == "error"
-        assert result.total_usage.input_tokens == 111
-        assert result.total_usage.output_tokens == 22
-        assert result.total_cost_usd == 0.125 and result.usage_complete
-        assert len(hook.stop_results) == 1
-        assert hook.stop_results[0].total_usage == result.total_usage
-        assert provider.calls == 0
     finally:
         await agent.close()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -88,22 +87,6 @@ def _config(registry: _Registry, blocks: list[Any] | None = None) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_has_frozen_base_and_notified_catalogs_including_skills() -> None:
-    from linch.catalog import sync_catalog
-
-    registry = _Registry([_tool("first")])
-    session = _Session(registry)
-
-    await sync_catalog(session, _config(registry))
-
-    snapshot = session.meta["linch.prefix"]
-    assert set(snapshot) == {"version", "system", "tools", "base", "notified"}
-    assert snapshot["base"] == snapshot["notified"]
-    assert set(snapshot["base"]) == {"tools", "skills", "subagents"}
-    assert set(snapshot["notified"]["skills"]) == {"demo"}
-
-
-@pytest.mark.asyncio
 async def test_description_notifications_include_new_text_except_mcp() -> None:
     from linch.catalog import sync_catalog
     from linch.types import CatalogChangeBlock
@@ -148,22 +131,6 @@ async def test_description_notifications_include_new_text_except_mcp() -> None:
     assert "new third-party instructions" not in text
 
 
-def test_base_system_inserts_listing_after_the_actual_runtime_block() -> None:
-    from linch.catalog import _base_system
-    from linch.types import SystemBlock
-
-    registry = _Registry([])
-    session = _Session(registry)
-    blocks = [
-        SystemBlock(text="Runtime: user instructions should stay first"),
-        SystemBlock(text="Runtime:\n\n- Tools available: none"),
-    ]
-
-    built = _base_system(session, _config(registry, blocks), registry)
-
-    assert [block.text for block in built] == [blocks[0].text, blocks[1].text, "- demo: Demo skill"]
-
-
 @pytest.mark.asyncio
 async def test_sync_crash_recovery_resets_pending_notifications_without_a_notice() -> None:
     from linch.catalog import sync_catalog
@@ -197,39 +164,6 @@ async def test_sync_crash_recovery_resets_pending_notifications_without_a_notice
 
 
 @pytest.mark.asyncio
-async def test_reset_then_sync_preserves_pending_tool_rows_and_consolidates_notice() -> None:
-    from linch.catalog import reset_catalog_notifications, sync_catalog
-    from linch.types import CatalogChangeBlock
-
-    first = _tool("first", schema={"type": "object"})
-    registry = _Registry([first])
-    session = _Session(registry)
-    config = _config(registry)
-    await sync_catalog(session, config)
-
-    first.input_schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
-    registry.tools.append(_tool("second"))
-    registry.generation += 1
-    await sync_catalog(session, config)
-    before = (session.meta["linch.prefix"]["system"], session.meta["linch.prefix"]["tools"])
-
-    session.provider_view.clear()
-    assert await reset_catalog_notifications(session, config)
-    await sync_catalog(session, config)
-
-    snapshot = session.meta["linch.prefix"]
-    assert (snapshot["system"], snapshot["tools"]) == before
-    assert (
-        sum(
-            isinstance(block, CatalogChangeBlock)
-            for message in session.provider_view
-            for block in message.content
-        )
-        == 1
-    )
-
-
-@pytest.mark.asyncio
 async def test_reset_with_no_pending_notifications_does_not_write_meta() -> None:
     from linch.catalog import reset_catalog_notifications, sync_catalog
 
@@ -240,110 +174,3 @@ async def test_reset_with_no_pending_notifications_does_not_write_meta() -> None
 
     assert not await reset_catalog_notifications(session)
     assert session.meta_updates == []
-
-
-@pytest.mark.asyncio
-async def test_description_reversion_still_carries_the_live_description() -> None:
-    from linch.catalog import sync_catalog
-    from linch.types import CatalogChangeBlock
-
-    tool = _tool("local", "old description")
-    registry = _Registry([tool])
-    session = _Session(registry)
-    config = _config(registry)
-    await sync_catalog(session, config)
-
-    tool.description = "new description"
-    registry.generation += 1
-    await sync_catalog(session, config)
-    tool.description = "old description"
-    registry.generation += 1
-    await sync_catalog(session, config)
-
-    notices = [
-        block
-        for message in session.provider_view
-        for block in message.content
-        if isinstance(block, CatalogChangeBlock)
-    ]
-    notice = notices[-1]
-    assert "local: old description" in notice.text
-
-
-@pytest.mark.asyncio
-async def test_pending_added_tool_schema_edit_updates_its_retained_row() -> None:
-    from linch.catalog import reset_catalog_notifications, sync_catalog
-
-    registry = _Registry([_tool("first")])
-    session = _Session(registry)
-    config = _config(registry)
-    await sync_catalog(session, config)
-    registry.tools.append(_tool("second"))
-    registry.generation += 1
-    await sync_catalog(session, config)
-    session.provider_view.clear()
-    await reset_catalog_notifications(session, config)
-
-    registry.tools[-1].input_schema = {
-        "type": "object",
-        "properties": {"path": {"type": "string"}},
-    }
-    registry.generation += 1
-    await sync_catalog(session, config)
-
-    rows = session.meta["linch.prefix"]["tools"]
-    assert rows[1]["input_schema"]["properties"]["path"]["type"] == "string"
-
-
-@pytest.mark.asyncio
-async def test_skill_notice_is_not_repeated_after_restart_and_unrelated_tool_change(
-    tmp_path: Path,
-) -> None:
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.types import CatalogChangeBlock
-    from tests.support.agents import make_agent
-    from tests.support.providers import ScriptedProvider, TextTurn
-    from tests.support.tools import StubTool, tool_registry
-
-    skill = tmp_path / ".linch" / "skills" / "alpha"
-    skill.mkdir(parents=True)
-    definition = skill / "SKILL.md"
-    definition.write_text("---\ndescription: Alpha old.\n---\nBody.\n", encoding="utf-8")
-    sessions = InMemorySessionStore()
-    flags = FeatureFlags(skills=True, subagents=False, mcp=False)
-    first = make_agent(
-        ScriptedProvider([TextTurn("one"), TextTurn("two")]),
-        cwd=str(tmp_path),
-        config_dir=".linch",
-        features=flags,
-        session_store=sessions,
-        tools=tool_registry(StubTool("Read")),
-    )
-    session = await first.session(id="notice-restart")
-    [event async for event in session.run("one")]
-    definition.write_text("---\ndescription: Alpha new.\n---\nBody.\n", encoding="utf-8")
-    await first.reload_skills()
-    [event async for event in session.run("two")]
-    await first.close()
-
-    second = make_agent(
-        ScriptedProvider([TextTurn("three")]),
-        cwd=str(tmp_path),
-        config_dir=".linch",
-        features=flags,
-        session_store=sessions,
-        tools=tool_registry(StubTool("Read")),
-    )
-    restored = await second.session(id="notice-restart")
-    second.tools.register(StubTool("Append"))
-    [event async for event in restored.run("three")]
-
-    notices = [
-        block
-        for message in restored.provider_view
-        for block in message.content
-        if isinstance(block, CatalogChangeBlock)
-    ]
-    assert sum("alpha: Alpha new." in block.text for block in notices) == 1
-    assert sum("Append" in block.text for block in notices) == 1

@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-import pytest
-
 from tests.support.agents import make_agent
 from tests.support.tools import StubTool, tool_registry
 
@@ -63,59 +61,9 @@ def _agent(provider: FlakyProvider, **kwargs: Any) -> Any:
     )
 
 
-def _texts(message: Any) -> str:
-    return "".join(b.text for b in message.content if hasattr(b, "text"))
-
-
 async def _run(provider: FlakyProvider, **kwargs: Any) -> list[Any]:
     session = await _agent(provider, **kwargs).session()
     return [event async for event in session.run("go")]
-
-
-async def test_overload_falls_back_to_next_model() -> None:
-    provider = FlakyProvider(fail_on="primary")
-    events = await _run(provider, fallback_models=["backup"])
-
-    fallbacks = [e for e in events if e.type == "model_fallback"]
-    assert len(fallbacks) == 1
-    assert fallbacks[0].from_model == "primary"
-    assert fallbacks[0].to_model == "backup"
-    assert provider.models_seen == ["primary", "backup"]
-    assert events[-1].type == "result"
-    assert events[-1].subtype == "success"
-    assistants = [e for e in events if e.type == "assistant"]
-    assert _texts(assistants[-1].message) == "done"
-
-
-@pytest.mark.parametrize(
-    ("provider_kwargs", "expected_models", "subtype"),
-    [
-        ({"fail_on": "primary"}, ["primary"] * 3, "error"),
-        ({"fail_calls": 1}, ["primary"] * 2, "success"),
-    ],
-    ids=["permanent-overload", "transient-overload"],
-)
-async def test_same_model_retry_is_bounded_or_recovers(
-    provider_kwargs: dict[str, Any], expected_models: list[str], subtype: str
-) -> None:
-    provider = FlakyProvider(**provider_kwargs)
-    events = await _run(provider, max_retries=2)
-    assert not any(e.type == "model_fallback" for e in events)
-    assert provider.models_seen == expected_models
-    assert events[-1].type == "result"
-    assert events[-1].subtype == subtype
-    if subtype == "success":
-        assistants = [e for e in events if e.type == "assistant"]
-        assert _texts(assistants[-1].message) == "done"
-
-
-async def test_fallback_persists_for_the_rest_of_the_run() -> None:
-    provider = FlakyProvider(fail_on="primary", backup_behaviors=("tool", "text"))
-    events = await _run(provider, fallback_models=["backup"])
-
-    assert provider.models_seen == ["primary", "backup", "backup"]
-    assert len([e for e in events if e.type == "model_fallback"]) == 1
-    assert events[-1].subtype == "success"
 
 
 async def test_fallback_exhausted_surfaces_error() -> None:

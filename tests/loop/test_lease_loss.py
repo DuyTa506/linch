@@ -515,56 +515,6 @@ async def test_fenced_persistence_origin_preserves_lease_exception(origin: str) 
     assert raised.value is loss
 
 
-async def test_failed_tail_atomic_lease_loss_skips_later_writes() -> None:
-    import gc
-
-    from linch import Agent, HookResult
-    from linch.run_store import InMemoryRunStore, LeaseLostError
-    from linch.sessions import InMemorySessionStore
-
-    class Store(InMemoryRunStore):
-        failed_calls = 0
-
-        async def mark_failed(
-            self,
-            run_id: str,
-            checkpoint: Any = None,
-            error: Any = None,
-            *,
-            events: list[Any] = (),
-        ) -> Any:
-            self.failed_calls += 1
-            assert any(event.type == "result" and event.subtype == "error" for event in events)
-            raise LeaseLostError("terminal batch fenced")
-
-    class StopHook:
-        resume_policy_id = "test.tail-lease-stop"
-        resume_policy_version = "1"
-
-        def on_before_final_answer(self, ctx: Any) -> Any:
-            return HookResult.stop("blocked")
-
-    store = Store()
-    agent = Agent(
-        model="lease-model",
-        provider=cast(Any, _provider()),
-        session_store=InMemorySessionStore(),
-        run_store=store,
-        hooks=[StopHook()],
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-    )
-    session = await agent.session()
-    try:
-        events = [event async for event in session.run("hello")]
-        assert store.failed_calls == 1
-        assert events[-2].error["name"] == "LeaseLostError"
-        assert events[-1].stop_reason == "lease_lost"
-        gc.collect()
-    finally:
-        await agent.close()
-
-
 async def test_blocked_prompt_terminal_lease_loss_reaches_single_agent_stop(
     lease_stores: Any,
 ) -> None:

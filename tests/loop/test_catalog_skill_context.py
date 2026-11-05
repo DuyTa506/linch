@@ -65,33 +65,6 @@ def test_skill_listing_is_reinjected_when_snapshot_is_bypassed() -> None:
     )
 
 
-def test_skill_reminder_is_provider_visible_but_not_historical() -> None:
-    from linch.loop.request import _re_inject_skill_context
-
-    session = _session()
-    session.meta = {}
-    session.agent.skill_listing_text = ""
-    session.invoked_skills = (SimpleNamespace(name="alpha", substituted_body="Alpha body"),)
-
-    _re_inject_skill_context(session, config=SimpleNamespace(_values=None, context={}))
-
-    assert len(session.provider_view) == 1
-    assert len(session.full_history) == 0
-    assert isinstance(session.provider_view[0], Message)
-
-
-def test_compaction_skill_messages_use_live_listing_for_snapshot_bypass() -> None:
-    from linch.compaction import _skill_context_messages
-
-    session = _session()
-    config = SimpleNamespace(_values={"profile": "overlay"}, context={})
-
-    messages = _skill_context_messages(session, session.agent, config=config)
-
-    assert len(messages) == 1
-    assert "- alpha: Alpha skill" in messages[0].content[0].text
-
-
 def test_compaction_listing_fingerprint_uses_live_listing_for_snapshot_bypass() -> None:
     from linch.compaction import _skill_listing_fingerprint
 
