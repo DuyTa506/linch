@@ -36,37 +36,38 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_project_env() -> None:
-    env_path = ROOT / ".env"
+def load_project_env(env_path: Path = ROOT / ".env") -> dict[str, str]:
+    # Read into a dict: exporting .env into os.environ at collection time leaks
+    # values such as ANTHROPIC_BASE_URL into unrelated tests.
+    values: dict[str, str] = {}
     if not env_path.exists():
-        return
+        return values
     for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
 
 
-load_project_env()
+ENV = {**load_project_env(), **os.environ}
 
-RUN_LIVE = os.environ.get("LINCH_RUN_LIVE_LOOP_TESTS") == "1"
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-GENERIC_KEY = os.environ.get("API_KEY")
+RUN_LIVE = ENV.get("LINCH_RUN_LIVE_LOOP_TESTS") == "1"
+DEEPSEEK_KEY = ENV.get("DEEPSEEK_API_KEY")
+OPENAI_KEY = ENV.get("OPENAI_API_KEY")
+GENERIC_KEY = ENV.get("API_KEY")
 API_KEY = DEEPSEEK_KEY or OPENAI_KEY or GENERIC_KEY
 BASE_URL = (
     "https://api.deepseek.com"
     if DEEPSEEK_KEY
-    else os.environ.get("LOOP_RUNNER_BASE_URL") or os.environ.get("BASE_URL")
+    else ENV.get("LOOP_RUNNER_BASE_URL") or ENV.get("BASE_URL")
 )
-MODEL = os.environ.get(
+MODEL = ENV.get(
     "LOOP_RUNNER_MODEL",
-    os.environ.get("MODEL")
-    or os.environ.get("model")
-    or ("deepseek-chat" if BASE_URL else "gpt-4o-mini"),
+    ENV.get("MODEL") or ENV.get("model") or ("deepseek-chat" if BASE_URL else "gpt-4o-mini"),
 )
-TIMEOUT_S = float(os.environ.get("LOOP_RUNNER_TEST_TIMEOUT_S", "45"))
+TIMEOUT_S = float(ENV.get("LOOP_RUNNER_TEST_TIMEOUT_S", "45"))
 needs_live_loop = pytest.mark.skipif(
     not RUN_LIVE or not API_KEY,
     reason="set LINCH_RUN_LIVE_LOOP_TESTS=1 and API_KEY/DEEPSEEK_API_KEY/OPENAI_API_KEY in .env",
@@ -198,3 +199,12 @@ def _skip_if_endpoint_unreachable() -> None:
         return
     except OSError as exc:
         pytest.skip(f"live provider endpoint is not reachable: {type(exc).__name__}")
+
+
+def test_project_env_is_read_without_touching_process_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LINCH_ENV_LEAK_PROBE", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("# comment\nLINCH_ENV_LEAK_PROBE='value'\n", encoding="utf-8")
+
+    assert load_project_env(env_file) == {"LINCH_ENV_LEAK_PROBE": "value"}
+    assert "LINCH_ENV_LEAK_PROBE" not in os.environ
