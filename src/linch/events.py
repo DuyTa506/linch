@@ -280,6 +280,29 @@ class ModelCallEvent:
             ),
         )
 
+    @classmethod
+    def _trusted(
+        cls,
+        run_id: str,
+        record_kind: Literal["intent", "dispatch_started", "receipt", "abandoned", "projection"],
+        record: dict[str, Any],
+        *,
+        budget_owner_id: str | None,
+    ) -> ModelCallEvent:
+        """Build an event from a record the ledger has already validated and owns."""
+
+        event = object.__new__(cls)
+        for name, value in (
+            ("run_id", run_id),
+            ("record_kind", record_kind),
+            ("record", record),
+            ("budget_owner_id", budget_owner_id),
+            ("schema_version", WIRE_VERSION),
+            ("type", "model_call"),
+        ):
+            object.__setattr__(event, name, value)
+        return event
+
 
 @dataclass(slots=True)
 class BudgetEvent:

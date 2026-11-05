@@ -921,3 +921,24 @@ async def test_restore_preserves_proven_source_order_against_later_checkpoint(
     assert restored.total_usage.input_tokens == (111 if phase == "settled" else 0)
     await restored.restore(journal)
     assert budget.spent_tokens == (133 if phase == "settled" else 0)
+
+
+async def test_ledger_events_equal_publicly_validated_events_and_receipts_detach() -> None:
+    from linch.events import ModelCallEvent
+
+    written: list[Any] = []
+
+    async def persist(event: Any) -> None:
+        written.append(event)
+
+    ledger = await _settled(persist=persist)
+    assert [event.record_kind for event in written] == ["intent", "dispatch_started", "receipt"]
+    for event in written:
+        rebuilt = ModelCallEvent(
+            event.run_id, event.record_kind, event.record, budget_owner_id=event.budget_owner_id
+        )
+        assert rebuilt == event
+    returned = ledger.receipts()[0]
+    returned.usage.input_tokens = 0
+    assert ledger.receipts()[0].usage.input_tokens == 111
+    assert ledger.total_usage.input_tokens == 111
