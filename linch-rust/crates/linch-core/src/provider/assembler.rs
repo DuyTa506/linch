@@ -171,10 +171,14 @@ impl Assembler {
     }
 
     fn flush_thinking(&mut self) {
+        // Always take the signature, even when the run produced no text: a
+        // run with nothing to flush must not leak its signature into the
+        // next, unrelated thinking run.
+        let signature = self.thinking_sig.take();
         if !self.thinking_buf.is_empty() {
             self.content.push(ContentBlock::Thinking(ThinkingBlock {
                 thinking: std::mem::take(&mut self.thinking_buf),
-                signature: self.thinking_sig.take(),
+                signature,
             }));
         }
     }

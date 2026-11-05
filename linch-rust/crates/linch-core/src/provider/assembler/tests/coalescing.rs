@@ -64,6 +64,40 @@ fn thinking_signature_is_the_last_one_seen_in_the_run() {
 }
 
 #[test]
+fn an_empty_thinking_run_does_not_leak_its_signature_into_the_next_run() {
+    let assembly = assemble([
+        start("m"),
+        // An empty-text delta carrying a signature produces no block...
+        ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
+            text: "".into(),
+            signature: Some("stale".into()),
+        }),
+        // ...so a later, unrelated thinking run must not inherit it.
+        ProviderEvent::TextDelta(TextDeltaEvent {
+            text: "between".into(),
+        }),
+        ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
+            text: "fresh".into(),
+            signature: None,
+        }),
+        end(StopReason::EndTurn),
+    ])
+    .unwrap();
+    assert_eq!(
+        assembly.message.content,
+        vec![
+            ContentBlock::Text(TextBlock {
+                text: "between".into()
+            }),
+            ContentBlock::Thinking(ThinkingBlock {
+                thinking: "fresh".into(),
+                signature: None,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn message_end_provider_metadata_becomes_the_message_provider_metadata() {
     let metadata: JsonObject = [("response_id".to_string(), JsonValue::String("r1".into()))]
         .into_iter()
