@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from _linch_native import canonical_dumps as _native_canonical_dumps
+from _linch_native import dumps as _native_dumps
 
 # The native encoder bounds its own recursion; this only lifts the caller limit.
 _UNBOUNDED_DEPTH = 1 << 30
@@ -31,6 +32,15 @@ def canonical_dumps(value: Any) -> str:
     return json.dumps(
         value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
     )
+
+
+def dumps(value: Any) -> str:
+    """Return ``json.dumps(value, allow_nan=False)``, natively for plain trees."""
+
+    encoded = _native_dumps(value)
+    if encoded is not None:
+        return encoded
+    return json.dumps(value, allow_nan=False)
 
 
 def walk_json(

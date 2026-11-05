@@ -1,8 +1,8 @@
-//! Native canonical JSON encoding.
+//! Native JSON encoding for plain JSON trees.
 //!
-//! Produces exactly the bytes of `json.dumps(value, sort_keys=True,
-//! ensure_ascii=False, allow_nan=False, separators=(",", ":"))` for plain JSON
-//! trees: exact `dict` (with exact `str` keys), `list`, `str`, `int`, `float`,
+//! `canonical_dumps` produces exactly the bytes of `json.dumps(value,
+//! sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))`
+//! and `dumps` those of `json.dumps(value, allow_nan=False)`, for plain trees: exact `dict` (with exact `str` keys), `list`, `str`, `int`, `float`,
 //! `bool` and `None`. Anything else — subclasses, tuples, non-finite floats,
 //! lone surrogates, cycles, or nesting at `max_depth` — returns `None` so the
 //! Python caller takes its existing path and raises its own errors.
@@ -15,10 +15,34 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 /// Native recursion bound regardless of `max_depth`, to keep stack use small.
 const NATIVE_DEPTH: usize = 200;
 
+/// Output format: the canonical form or `json.dumps` defaults.
+#[derive(Clone, Copy)]
+struct Format {
+    sort_keys: bool,
+    ensure_ascii: bool,
+    item_sep: &'static str,
+    key_sep: &'static str,
+}
+
+const CANONICAL: Format = Format {
+    sort_keys: true,
+    ensure_ascii: false,
+    item_sep: ",",
+    key_sep: ":",
+};
+
+const DEFAULT: Format = Format {
+    sort_keys: false,
+    ensure_ascii: true,
+    item_sep: ", ",
+    key_sep: ": ",
+};
+
 struct Encoder {
     out: String,
     max_depth: usize,
     ancestors: Vec<usize>,
+    format: Format,
 }
 
 impl Encoder {
@@ -74,7 +98,7 @@ impl Encoder {
         self.out.push('[');
         for (index, item) in list.iter().enumerate() {
             if index > 0 {
-                self.out.push(',');
+                self.out.push_str(self.format.item_sep);
             }
             if !self.value(&item)? {
                 return Ok(false);
@@ -95,16 +119,18 @@ impl Encoder {
             };
             items.push((text, item));
         }
-        // Valid UTF-8 byte order is code point order, which is how Python
-        // compares `str` keys.
-        items.sort_by(|left, right| left.0.cmp(&right.0));
+        if self.format.sort_keys {
+            // Valid UTF-8 byte order is code point order, which is how Python
+            // compares `str` keys.
+            items.sort_by(|left, right| left.0.cmp(&right.0));
+        }
         self.out.push('{');
         for (index, (key, item)) in items.iter().enumerate() {
             if index > 0 {
-                self.out.push(',');
+                self.out.push_str(self.format.item_sep);
             }
             self.string(key);
-            self.out.push(':');
+            self.out.push_str(self.format.key_sep);
             if !self.value(item)? {
                 return Ok(false);
             }
@@ -113,8 +139,10 @@ impl Encoder {
         Ok(true)
     }
 
-    /// `json`'s `ensure_ascii=False` escaping: quote, backslash, the five
-    /// short control escapes, and `\u00XX` (lowercase) for other C0 controls.
+    /// `json`'s string escaping: quote, backslash, the five short control
+    /// escapes and `\u00XX` (lowercase) for other C0 controls; with
+    /// `ensure_ascii`, every character outside `' '..='~'` as `\uXXXX`
+    /// (astral characters as a surrogate pair).
     fn string(&mut self, text: &str) {
         self.out.push('"');
         for ch in text.chars() {
@@ -126,8 +154,11 @@ impl Encoder {
                 '\t' => self.out.push_str("\\t"),
                 '\u{08}' => self.out.push_str("\\b"),
                 '\u{0c}' => self.out.push_str("\\f"),
-                ch if (ch as u32) < 0x20 => {
-                    write!(self.out, "\\u{:04x}", ch as u32).expect("write to String");
+                ch if (ch as u32) < 0x20 || (self.format.ensure_ascii && ch > '~') => {
+                    let mut units = [0u16; 2];
+                    for unit in ch.encode_utf16(&mut units) {
+                        write!(self.out, "\\u{unit:04x}").expect("write to String");
+                    }
                 }
                 ch => self.out.push(ch),
             }
@@ -142,10 +173,22 @@ impl Encoder {
 #[pyfunction]
 #[pyo3(signature = (value, *, max_depth))]
 pub fn canonical_dumps(value: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Option<String>> {
+    encode(value, max_depth, CANONICAL)
+}
+
+/// Encode a plain JSON tree as `json.dumps(value, allow_nan=False)` does, or
+/// return `None` to defer to Python.
+#[pyfunction]
+pub fn dumps(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    encode(value, usize::MAX, DEFAULT)
+}
+
+fn encode(value: &Bound<'_, PyAny>, max_depth: usize, format: Format) -> PyResult<Option<String>> {
     let mut encoder = Encoder {
         out: String::new(),
         max_depth,
         ancestors: Vec::new(),
+        format,
     };
     Ok(encoder.value(value)?.then_some(encoder.out))
 }

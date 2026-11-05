@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 import pytest
-from _linch_native import canonical_dumps
+from _linch_native import canonical_dumps, dumps
 
 
 def _reference(value: Any) -> str:
@@ -18,7 +18,18 @@ def _reference(value: Any) -> str:
     )
 
 
-_TEXT = ["", "a", "é☃", "😀", '"q"', "back\\slash", "\b\f\n\r\t", "\x00\x01\x1f\x7f", " "]
+_TEXT = [
+    "",
+    "a",
+    "é☃",
+    "😀",
+    '"q"',
+    "back\\slash",
+    "\b\f\n\r\t",
+    "\x00\x01\x1f\x7f",
+    " ",
+    "~\x80\uffff",
+]
 _NUMBERS = [0, -1, 2**63 - 1, 2**63, -(2**100), True, False, None]
 _FLOATS = [0.0, -0.0, 0.1, 1.0, 1e16, 1e-7, 123456789.123, 5e-324, sys.float_info.max]
 
@@ -77,3 +88,19 @@ def test_depth_limit_matches_strict_json_boundary() -> None:
     assert canonical_dumps(_nested(101), max_depth=100) is None
     shared = [1]
     assert canonical_dumps({"a": shared, "b": shared}, max_depth=100) == '{"a":[1],"b":[1]}'
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_default_dumps_matches_json_dumps(seed: int) -> None:
+    rng = random.Random(seed)
+    for _ in range(100):
+        value = _tree(rng, 0)
+        assert dumps(value) == json.dumps(value, allow_nan=False)
+
+
+def test_default_dumps_keeps_insertion_order_and_defers() -> None:
+    assert dumps({"b": 1, "a": [2, "\u00e9"]}) == '{"b": 1, "a": [2, "\\u00e9"]}'
+    for value in ((1,), {1: 2}, [float("nan")], "\ud800", Level.LOW):
+        assert dumps({"wrap": value}) is None
+    assert dumps(_nested(150)) == json.dumps(_nested(150))
+    assert dumps(_nested(250)) is None
