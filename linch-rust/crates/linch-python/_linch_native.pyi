@@ -1,0 +1,3 @@
+from typing import Any
+
+def json_safe(value: Any, *, strict: bool, max_depth: int) -> Any: ...

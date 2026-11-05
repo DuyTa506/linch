@@ -36,6 +36,7 @@ allows read-only subagent calls; write/exec tools with boolean flags stay serial
 From a checkout:
 
 ```sh
+pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e .
 ```
 
@@ -113,6 +114,7 @@ linch skill install             # offline, matches the installed Linch version
 ## Development
 
 ```sh
+pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'
 python -m pytest -q
 ruff check . && ruff format --check .

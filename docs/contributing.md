@@ -9,6 +9,7 @@ Rules, conventions, and workflow for contributors. Read this before opening a PR
 ```bash
 git clone https://github.com/DuyTa506/linch.git
 cd linch
+pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'
 ```
 

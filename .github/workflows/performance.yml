@@ -38,6 +38,8 @@ jobs:
       - name: Install package and extras
         run: |
           python -m pip install --upgrade pip
+          # linch-native is the PyO3 extension; runners ship a Rust toolchain.
+          python -m pip install ./linch-rust/crates/linch-python
           python -m pip install -e ".[dev,mcp,anthropic,gemini]"
 
       - name: Run benchmark (record only)
