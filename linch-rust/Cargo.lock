@@ -1647,6 +1647,7 @@ dependencies = [
 name = "linch"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures",
  "linch-core",
  "linch-ext",
@@ -1655,6 +1656,7 @@ dependencies = [
  "linch-providers",
  "linch-tools",
  "rmcp",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",

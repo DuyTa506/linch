@@ -33,10 +33,16 @@ url = "2.5.8"
 yaml-rust2 = { version = "0.13.0", default-features = false }
 
 [dev-dependencies]
+# The `bench_driver` example implements `Tool` for its Echo tool.
+async-trait = "0.1.92"
 futures = "0.3.34"
 # The `mcp_stdio_server` example serves linch-mcp's test server on stdio.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
+# The `bench_driver` example reads the process CPU-time clock.
+rustix = { version = "1.1.6", features = ["time"] }
 # Creates the Postgres test schema and counts its connections.
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["rt", "macros", "sync"] }
+# `rt-multi-thread`: the `bench_driver` example runs on the runtime
+# `linch-server` uses.
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
