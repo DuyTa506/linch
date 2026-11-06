@@ -1,11 +1,13 @@
 //! Hook tests. The shared helpers and the ordering, rewrite, short-circuit
 //! and #102 cases live here; failure handling and registration lifetime in
 //! `tests/chain.rs`, per-point semantics and the digest in
-//! `tests/points.rs`, property tests in `tests/props.rs`.
+//! `tests/points.rs`, property tests in `tests/props.rs`, the approval
+//! wire form in `tests/wire.rs`.
 
 mod chain;
 mod points;
 mod props;
+mod wire;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,5 +1,7 @@
 //! The tool points: `pre_tool_use`, `permission_request`, `post_tool_use`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::policy::{HookPoint, PermissionDecision, Principal};
@@ -157,8 +159,15 @@ pub struct ApprovalRequest {
     pub principal: Option<Principal>,
 }
 
-/// A `permission_request` hook's answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A `permission_request` hook's answer, and the host's answer to a
+/// pending call in [`crate::Agent::approve`].
+///
+/// On the wire it is tagged by `decision`: `{"decision": "allow"}` or
+/// `{"decision": "deny", "reason": "..."}`. Decoding is strict: an unknown
+/// field is refused on `allow` too, which serde does not do for a unit
+/// variant, so both variants travel as struct variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ApprovalWire", into = "ApprovalWire")]
 pub enum ApprovalResponse {
     /// Approve the call. Later hooks still run and may deny it.
     Allow,
@@ -167,6 +176,32 @@ pub enum ApprovalResponse {
         /// Shown to the model.
         reason: String,
     },
+}
+
+/// The wire form of [`ApprovalResponse`].
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+enum ApprovalWire {
+    Allow {},
+    Deny { reason: String },
+}
+
+impl From<ApprovalWire> for ApprovalResponse {
+    fn from(wire: ApprovalWire) -> Self {
+        match wire {
+            ApprovalWire::Allow {} => Self::Allow,
+            ApprovalWire::Deny { reason } => Self::Deny { reason },
+        }
+    }
+}
+
+impl From<ApprovalResponse> for ApprovalWire {
+    fn from(response: ApprovalResponse) -> Self {
+        match response {
+            ApprovalResponse::Allow => Self::Allow {},
+            ApprovalResponse::Deny { reason } => Self::Deny { reason },
+        }
+    }
 }
 
 impl Sealed for PermissionRequest {}
