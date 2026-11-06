@@ -626,3 +626,28 @@ async def test_overlapping_barriers_commit_in_buffer_order() -> None:
     assert run is not None and run.checkpoint is not None
     assert run.checkpoint.phase == "tool_results_appended"
     assert [row.event for row in await store.load_events(record.id)] == [first, second]
+
+
+async def test_session_barrier_keeps_uncovered_events_ahead_of_later_appends() -> None:
+    store = _InterleavingRunStore()
+    record = await store.create_run("s1", id="r1")
+    buffer = RunEventBuffer(store, record.id)
+    covered, uncovered, appended = (
+        PartialAssistantEvent(delta={"text": text}) for text in ("covered", "uncovered", "appended")
+    )
+    await buffer.append(covered)
+    buffer.defer_checkpoint(RunCheckpoint("assistant_appended", "hi", 0, Usage()))
+    await buffer.append(uncovered)
+
+    async def loop_appends() -> None:
+        await buffer.append(appended)
+
+    store.during_write.append(loop_appends)
+
+    await buffer.flush_checkpoint()  # commits only the event the held checkpoint covers
+    assert buffer._pending == [uncovered, appended]
+    await buffer.flush()
+
+    rows = await store.load_events(record.id)
+    assert [row.event for row in rows] == [covered, uncovered, appended]
+    assert [row.seq for row in rows] == [1, 2, 3]

@@ -281,13 +281,17 @@ class RunEventBuffer:
         self,
         checkpoint: RunCheckpoint,
         *,
+        count: int | None = None,
         status: str = "running",
         error: dict[str, object] | None = None,
     ) -> None:
         if not self._pending and status == "running" and self._dirty is None:
             return
         held = self._dirty
-        pending, self._pending = self._pending, []
+        # Take the first ``count`` events in place: anything appended while the
+        # write is in flight lands after the events still pending.
+        split = len(self._pending) if count is None else count
+        pending, self._pending = self._pending[:split], self._pending[split:]
         try:
             operation = "mark_failed" if status == "failed" else "save_checkpoint_with_events"
             if status == "failed":
@@ -331,12 +335,7 @@ class RunEventBuffer:
             checkpoint = self._dirty
             if self.store is None or self._atomic_write_failed or checkpoint is None:
                 return
-            later = self._pending[self._dirty_covers :]
-            self._pending = self._pending[: self._dirty_covers]
-            try:
-                await self._commit(checkpoint)
-            finally:
-                self._pending.extend(later)
+            await self._commit(checkpoint, count=self._dirty_covers)
 
     async def flush(self) -> int:
         """Barrier: commit pending events and any held checkpoint in one write."""
