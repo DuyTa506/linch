@@ -126,6 +126,11 @@ fn decode(row: JobRow, since: Instant) -> JobLease {
 }
 
 impl JobLease {
+    /// Which dequeue of the job this hold is: 1 for the first.
+    pub(crate) fn attempt(&self) -> i32 {
+        self.attempts
+    }
+
     /// Hide the job for another `timeout`. `false` means another worker
     /// holds it now.
     pub(crate) async fn heartbeat(

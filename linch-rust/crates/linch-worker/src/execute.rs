@@ -131,7 +131,7 @@ async fn open(
     let job = &lease.job;
     if let Some(run_id) = &job.run_id {
         match shared.runs.load(&job.namespace, run_id).await {
-            Ok(record) => return continue_run(shared, agent, job, record),
+            Ok(record) => return continue_run(shared, agent, lease, record),
             // A start job recorded this id, but the run's create never landed.
             Err(StoreError::NotFound { .. }) if job.start.is_some() => {}
             Err(StoreError::NotFound { .. }) => {
@@ -159,7 +159,7 @@ async fn open(
 fn continue_run(
     shared: &Shared,
     agent: &Agent,
-    job: &Job,
+    lease: &JobLease,
     record: RunRecord,
 ) -> Result<Option<RunStream>, Outcome> {
     if record.status.is_terminal() {
@@ -169,16 +169,31 @@ fn continue_run(
     // crashed between its claim and its commit leaves the status `running`.
     let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
     let options = shared.options(record.session_id);
+    let (job, run_id) = (&lease.job, record.run_id);
     match (&job.approvals, suspended) {
         (Some(Err(error)), _) => Err(Outcome::Fail(format!("approvals do not decode: {error}"))),
-        (Some(Ok(approvals)), true) => {
+        // On a first attempt a run that is not suspended was never waiting
+        // for these answers: core refuses the approve before it claims, so
+        // whoever drives the run keeps it.
+        (Some(Ok(approvals)), _) if suspended || lease.attempt() == 1 => {
             let answers = approvals.clone().into_iter().collect();
-            Ok(Some(agent.approve(record.run_id, answers, options)))
+            Ok(Some(agent.approve(run_id, answers, options)))
         }
         // Waits for an approve job; a resume would only suspend it again.
         (None, true) => Ok(None),
-        // A plain resume, or an approve whose answers already committed.
-        (_, false) => Ok(Some(agent.resume(record.run_id, options))),
+        (None, false) => Ok(Some(agent.resume(run_id, options))),
+        // An earlier attempt of this job may have committed the answers
+        // and stopped: the run continues from them.
+        (Some(Ok(_)), _) => {
+            let attempt = lease.attempt();
+            tracing::warn!(
+                job = job.id.0,
+                run = %run_id,
+                attempt,
+                "the run is no longer awaiting approval; continuing the approve job as a resume"
+            );
+            Ok(Some(agent.resume(run_id, options)))
+        }
     }
 }
 
