@@ -32,6 +32,8 @@ pub struct Fixture {
     pub hang_lists: Arc<AtomicBool>,
     /// Notified when a `tools/list` request starts hanging.
     pub hung: Arc<Notify>,
+    /// Notify to end one open `subscriptions/listen` stream normally.
+    pub end_subscription: Arc<Notify>,
     /// Whether to answer `server/discover` like a pre-2026-07-28 server.
     legacy: bool,
     /// Whether every `tools/list` page holds one new tool and a next cursor.
@@ -47,6 +49,7 @@ impl Fixture {
             subscriptions: Arc::new(AtomicUsize::new(0)),
             hang_lists: Arc::new(AtomicBool::new(false)),
             hung: Arc::new(Notify::new()),
+            end_subscription: Arc::new(Notify::new()),
             legacy: false,
             endless: false,
         }
@@ -199,6 +202,7 @@ impl ServerHandler for TestServer {
         loop {
             tokio::select! {
                 () = context.cancelled() => return Ok(()),
+                () = self.0.end_subscription.notified() => return Ok(()),
                 changed = version.changed() => {
                     if changed.is_err() {
                         return Ok(());

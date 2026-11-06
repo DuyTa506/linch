@@ -12,6 +12,10 @@ use tokio_util::sync::CancellationToken;
 /// Longest wait for the subscription's cancellation to go out on close.
 const CANCEL_GRACE: Duration = Duration::from_secs(1);
 
+/// Wait before opening a new subscription when the server ended the last
+/// one normally, so a server that ends each at once is not asked in a loop.
+const RENEW_DELAY: Duration = Duration::from_secs(1);
+
 /// Forwards a `subscriptions/listen` stream's tool changes to the relist
 /// loop.
 pub(crate) struct Listener {
@@ -32,10 +36,10 @@ impl Listener {
         if !needs_subscription(peer) {
             return Ok(None);
         }
-        let filter = SubscriptionFilter::builder().tools_list_changed().build();
-        let subscription = peer.listen(filter).await?;
+        let subscription = peer.listen(filter()).await?;
         let closing = CancellationToken::new();
         let task = tokio::spawn(forward(
+            peer.clone(),
             subscription,
             Arc::clone(list_changed),
             lost.clone(),
@@ -70,9 +74,15 @@ fn needs_subscription(peer: &Peer<RoleClient>) -> bool {
     })
 }
 
+fn filter() -> SubscriptionFilter {
+    SubscriptionFilter::builder().tools_list_changed().build()
+}
+
 /// Wake the relist loop on each tool change. A stream that ends without
-/// the server's final result means the connection dropped.
+/// the server's final result means the connection dropped; one the server
+/// ends normally is opened again after [`RENEW_DELAY`].
 async fn forward(
+    peer: Peer<RoleClient>,
     mut subscription: Subscription,
     list_changed: Arc<Notify>,
     lost: CancellationToken,
@@ -93,11 +103,26 @@ async fn forward(
                 list_changed.notify_one();
             }
             Ok(Some(_)) => {}
-            Ok(None) => {
-                if matches!(subscription.end(), Some(SubscriptionEnd::Abrupt)) {
-                    lost.cancel();
-                }
+            Ok(None) if matches!(subscription.end(), Some(SubscriptionEnd::Abrupt)) => {
+                lost.cancel();
                 return;
+            }
+            Ok(None) => {
+                let renewed = tokio::select! {
+                    biased;
+                    () = closing.cancelled() => return,
+                    renewed = async {
+                        tokio::time::sleep(RENEW_DELAY).await;
+                        peer.listen(filter()).await
+                    } => renewed,
+                };
+                let Ok(renewed) = renewed else {
+                    lost.cancel();
+                    return;
+                };
+                subscription = renewed;
+                // A change between the two streams went unseen.
+                list_changed.notify_one();
             }
             Err(_) => {
                 lost.cancel();

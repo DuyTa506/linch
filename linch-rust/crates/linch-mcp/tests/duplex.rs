@@ -163,6 +163,27 @@ async fn list_changed_from_a_legacy_server_relists() {
 }
 
 #[tokio::test]
+async fn a_subscription_the_server_ends_is_renewed() {
+    let fixture = Fixture::new(standard_tools());
+    let (server, _duplex, _registry) = connect(fixture.clone()).await;
+    assert_eq!(fixture.subscriptions.load(Ordering::SeqCst), 1);
+    fixture.end_subscription.notify_one();
+    eventually("the renewed subscription", || async {
+        fixture.subscriptions.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    let mut tools = standard_tools();
+    tools.push(tool("extra", "New."));
+    fixture.set_tools(tools);
+    eventually("the relist on the renewed subscription", || async {
+        server.tools().len() == 6
+    })
+    .await;
+    assert_eq!(server.status(), ServerStatus::Connected);
+    server.disconnect().await;
+}
+
+#[tokio::test]
 async fn reconnect_relists_and_calls_fail_readably_meanwhile() {
     let fixture = Fixture::new(standard_tools());
     let duplex = Duplex::new(fixture.clone());
