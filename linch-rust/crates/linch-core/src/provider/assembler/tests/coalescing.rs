@@ -126,7 +126,7 @@ fn message_end_provider_metadata_becomes_the_message_provider_metadata() {
         start("m"),
         ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
             provider_metadata: Some(metadata.clone()),
         }),
     ])

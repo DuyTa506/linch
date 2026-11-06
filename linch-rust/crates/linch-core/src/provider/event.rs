@@ -120,8 +120,10 @@ pub struct ToolUseEndEvent {
 pub struct MessageEndEvent {
     /// Why the response stopped.
     pub stop_reason: StopReason,
-    /// Token usage reported for the response.
-    pub usage: Usage,
+    /// Token usage reported for the response; `None` when the provider did
+    /// not report any (unknown usage, never a zero fill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
     /// Opaque provider data carried onto the assembled message's
     /// `provider_metadata`, such as a response id needed to continue a
     /// provider-side conversation.
@@ -156,7 +158,7 @@ mod tests {
     fn message_end_omits_absent_metadata_and_round_trips() {
         let event = ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
             provider_metadata: None,
         });
         let wire = serde_json::to_value(&event).unwrap();

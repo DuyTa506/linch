@@ -373,7 +373,7 @@ impl TurnBuilder {
         };
         self.events.push(ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason: self.stop_reason.unwrap_or(default_stop),
-            usage: self.usage,
+            usage: Some(self.usage),
             provider_metadata: None,
         }));
         ScriptedTurn {

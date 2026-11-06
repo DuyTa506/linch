@@ -74,11 +74,11 @@ async fn recorded_text_turn_assembles_thinking_then_text() {
     assert_eq!(turn.message.content.len(), 2);
     assert_eq!(
         turn.usage,
-        Usage {
+        Some(Usage {
             input_tokens: 39,
             output_tokens: 42,
             ..Usage::default()
-        }
+        })
     );
 }
 
@@ -98,8 +98,9 @@ async fn recorded_parallel_tool_calls_map_index_to_id() {
         calls[1].input,
         *json!({"city": "Tokyo"}).as_object().unwrap()
     );
-    assert_eq!(turn.usage.input_tokens, 308);
-    assert_eq!(turn.usage.output_tokens, 96);
+    let usage = turn.usage.expect("the recording reports usage");
+    assert_eq!(usage.input_tokens, 308);
+    assert_eq!(usage.output_tokens, 96);
 }
 
 #[tokio::test]
@@ -130,12 +131,12 @@ async fn stop_with_tool_calls_and_usage_only_chunk() {
     );
     assert_eq!(
         turn.usage,
-        Usage {
+        Some(Usage {
             input_tokens: 56,
             output_tokens: 30,
             cache_read_tokens: 64,
             cache_creation_tokens: 0,
-        }
+        })
     );
 }
 
@@ -197,6 +198,13 @@ async fn finish_reasons_map_to_stop_reasons() {
             stop
         );
     }
+}
+
+#[tokio::test]
+async fn a_stream_without_usage_reports_unknown_usage() {
+    let sse =
+        chunk(json!({"delta": {"content": "x"}, "finish_reason": "stop"})) + "data: [DONE]\n\n";
+    assert_eq!(assemble(run_ok(&sse, 4096).await).unwrap().usage, None);
 }
 
 #[tokio::test]

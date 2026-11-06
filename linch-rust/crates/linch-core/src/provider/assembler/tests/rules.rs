@@ -193,7 +193,7 @@ fn message_end_with_an_open_call_is_rejected() {
     assert!(matches!(
         err,
         StreamError::UnfinishedToolCalls { ids, usage: got_usage, stop_reason: StopReason::ToolUse }
-            if ids == vec!["c1".to_string()] && got_usage == usage
+            if ids == vec!["c1".to_string()] && got_usage == Some(usage)
     ));
 }
 
@@ -258,7 +258,7 @@ fn tool_use_stop_reason_without_a_completed_call_is_rejected() {
     assert!(matches!(
         err,
         StreamError::ToolUseWithoutCalls { usage: got_usage, stop_reason: StopReason::ToolUse }
-            if got_usage == usage
+            if got_usage == Some(usage)
     ));
 }
 
@@ -290,6 +290,6 @@ fn completed_calls_require_the_tool_use_stop_reason() {
         StreamError::CallsWithoutToolUse {
             stop_reason: StopReason::EndTurn,
             usage: got_usage,
-        } if got_usage == usage
+        } if got_usage == Some(usage)
     ));
 }

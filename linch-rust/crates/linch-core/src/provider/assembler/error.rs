@@ -53,7 +53,7 @@ pub enum StreamError {
         /// Usage observed on the `message_end` event that triggered this
         /// error, preserved so the caller's spend accounting is never lost
         /// just because the stream also broke a shape rule.
-        usage: Usage,
+        usage: Option<Usage>,
         /// Stop reason observed on the `message_end` event that triggered
         /// this error.
         stop_reason: StopReason,
@@ -85,7 +85,7 @@ pub enum StreamError {
         /// Usage observed on the `message_end` event that triggered this
         /// error, preserved so the caller's spend accounting is never lost
         /// just because the stream also broke a shape rule.
-        usage: Usage,
+        usage: Option<Usage>,
         /// Stop reason observed on the `message_end` event that triggered
         /// this error (always [`StopReason::ToolUse`]).
         stop_reason: StopReason,
@@ -98,6 +98,6 @@ pub enum StreamError {
         /// Usage observed on the `message_end` event that triggered this
         /// error, preserved so the caller's spend accounting is never lost
         /// just because the stream also broke a shape rule.
-        usage: Usage,
+        usage: Option<Usage>,
     },
 }

@@ -194,7 +194,7 @@ fn start(model: &str) -> ProviderEvent {
 fn end_with_usage(stop_reason: StopReason, usage: Usage) -> ProviderEvent {
     ProviderEvent::MessageEnd(MessageEndEvent {
         stop_reason,
-        usage,
+        usage: Some(usage),
         provider_metadata: None,
     })
 }
@@ -215,6 +215,7 @@ proptest! {
         seeds in prop::collection::vec(seed_strategy(), 0..8),
         other_stop_reason in non_tool_use_stop_reason(),
         usage_buckets in any::<[u64; 4]>(),
+        usage_known in any::<bool>(),
     ) {
         let (mut events, expected) = events_and_expected(&model, &seeds);
         let has_tool_use = expected.iter().any(|block| matches!(block, ContentBlock::ToolUse(_)));
@@ -225,6 +226,8 @@ proptest! {
             cache_read_tokens: usage_buckets[2],
             cache_creation_tokens: usage_buckets[3],
         };
+        // Unknown usage passes through as `None`, never as a zero fill.
+        let usage = usage_known.then_some(usage);
         events.push(ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason,
             usage,

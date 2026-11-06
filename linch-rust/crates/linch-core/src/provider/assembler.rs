@@ -23,8 +23,9 @@ pub struct AssistantAssembly {
     pub message: Message,
     /// Why the response stopped.
     pub stop_reason: StopReason,
-    /// Token usage reported for the response.
-    pub usage: Usage,
+    /// Token usage reported for the response; `None` when the provider
+    /// reported none.
+    pub usage: Option<Usage>,
     /// Model that actually served the call, from `message_start`.
     pub model: String,
 }
@@ -267,7 +268,7 @@ impl Assembler {
             return Err(StreamError::CallsWithoutToolUse { stop_reason, usage });
         }
         self.stop_reason = Some(stop_reason);
-        self.usage = Some(usage);
+        self.usage = usage;
         self.provider_metadata = provider_metadata;
         self.message_ended = true;
         Ok(())
@@ -296,7 +297,7 @@ impl Assembler {
             stop_reason: self
                 .stop_reason
                 .expect("message_ended implies stop_reason is set"),
-            usage: self.usage.expect("message_ended implies usage is set"),
+            usage: self.usage,
             model: self.model,
         })
     }

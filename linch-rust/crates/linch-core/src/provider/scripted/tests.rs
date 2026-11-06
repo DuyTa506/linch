@@ -120,7 +120,7 @@ fn builder_turns_assemble_to_the_scripted_message() {
     assert!(deltas.iter().all(|delta| delta.chars().count() <= 3));
     let assembly = assemble(turn.events).unwrap();
     assert_eq!(assembly.stop_reason, StopReason::ToolUse);
-    assert_eq!(assembly.usage, usage(7, 2));
+    assert_eq!(assembly.usage, Some(usage(7, 2)));
     assert_eq!(assembly.model, "m");
     assert_eq!(
         assembly.message.content,

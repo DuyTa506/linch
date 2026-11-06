@@ -68,6 +68,8 @@ pub struct CallFailure {
 struct Observed {
     model: Option<String>,
     usage: Option<Usage>,
+    /// Whether a `message_end` arrived, with or without usage.
+    ended: bool,
 }
 
 impl ModelCall {
@@ -187,13 +189,16 @@ async fn consume(
         let model = match &event {
             ProviderEvent::MessageStart(start) => Some(start.model.clone()),
             ProviderEvent::MessageEnd(end) => {
-                seen.usage.get_or_insert(end.usage);
+                seen.ended = true;
+                if seen.usage.is_none() {
+                    seen.usage = end.usage;
+                }
                 None
             }
             _ => None,
         };
         if let Err(error) = assembler.push(event) {
-            if seen.usage.is_none() {
+            if !seen.ended {
                 drain_usage(&mut stream, cancel, seen).await;
             }
             return Err(error.into());
@@ -215,7 +220,7 @@ async fn drain_usage(stream: &mut ProviderStream, cancel: &CancellationToken, se
             return;
         }
         if let ProviderEvent::MessageEnd(end) = event {
-            seen.usage = Some(end.usage);
+            seen.usage = end.usage;
             return;
         }
     }

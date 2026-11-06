@@ -179,9 +179,9 @@ impl Translator {
         }
         out.push_back(ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason,
-            // `include_usage` is always requested; `MessageEndEvent` has no
-            // "unknown" state, so a missing usage chunk reads as zero.
-            usage: self.usage.unwrap_or_default(),
+            // `include_usage` is always requested; if no chunk carried usage
+            // it stays unknown (`None`), never a zero fill.
+            usage: self.usage,
             provider_metadata: None,
         }));
         Ok(())

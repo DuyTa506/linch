@@ -58,7 +58,7 @@ fn text(text: &str) -> ProviderEvent {
 fn end(stop_reason: StopReason, usage: Usage) -> ProviderEvent {
     ProviderEvent::MessageEnd(MessageEndEvent {
         stop_reason,
-        usage,
+        usage: Some(usage),
         provider_metadata: None,
     })
 }
@@ -106,6 +106,29 @@ async fn an_accepted_call_settles_with_the_reported_usage() {
     assert_eq!(receipt.delivery_attempt_id, "r1:primary:2:1");
     assert_eq!(receipt.kind, ModelCallKind::Primary);
     assert_eq!(receipt.cost_usd, None);
+}
+
+/// A `message_end` without usage settles as accepted with unknown usage,
+/// on both the receipt and the assembly.
+#[tokio::test]
+async fn unreported_usage_stays_unknown() {
+    let events = vec![
+        start(),
+        text("hello"),
+        ProviderEvent::MessageEnd(MessageEndEvent {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+            provider_metadata: None,
+        }),
+    ];
+    let outcome = drive_turn(ScriptedTurn {
+        events,
+        error: None,
+    })
+    .await;
+    assert_eq!(outcome.receipt.disposition, CallDisposition::Accepted);
+    assert_eq!(outcome.receipt.usage, None);
+    assert_eq!(outcome.result.unwrap().usage, None);
 }
 
 /// Every failure path still yields one receipt; usage is whatever the
