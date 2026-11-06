@@ -4,6 +4,7 @@ use std::panic::AssertUnwindSafe;
 
 use futures::{FutureExt, StreamExt};
 use linch::{Principal, RunId, RunOptions, RunStream};
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::{Driven, Reply, Server, Tables, lock, to_value};
 use crate::error::{ErrorObject, code};
@@ -28,10 +29,12 @@ impl Server {
         if let Some(run_id) = &options.run_id {
             tables.not_driven(run_id)?;
         }
+        let place = self.run_place()?;
         let stream = agent.run(params.prompt, options);
         let driven = Driven {
             agent: params.agent,
             cancel,
+            _place: place,
         };
         tables.runs.insert(stream.run_id().clone(), driven);
         Ok(Reply::Run(stream))
@@ -76,6 +79,7 @@ impl Server {
         let mut tables = lock(&self.0.tables);
         let agent = tables.agent(&handle)?;
         tables.not_driven(run_id)?;
+        let place = self.run_place()?;
         // Resume and approve use the session stored with the run.
         let mut options = RunOptions::new("");
         options.principal = principal;
@@ -83,6 +87,7 @@ impl Server {
         let driven = Driven {
             agent: handle,
             cancel: options.cancel.clone(),
+            _place: place,
         };
         tables.runs.insert(run_id.clone(), driven);
         Ok(Reply::Run(continue_run(&agent, options)))
@@ -93,6 +98,13 @@ impl Server {
             Some(tenant) => tenant.admit_principal(principal),
             None => Ok(()),
         }
+    }
+
+    /// A place among the tenant's live runs; a local client needs none.
+    fn run_place(&self) -> Result<Option<OwnedSemaphorePermit>, ErrorObject> {
+        (self.0.tenant.as_ref())
+            .map(|tenant| tenant.run_place())
+            .transpose()
     }
 
     /// Forward every envelope as `run.event`, then send `run.end`.

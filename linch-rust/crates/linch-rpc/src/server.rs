@@ -19,7 +19,7 @@ use futures::FutureExt;
 use linch::{JsonObject, JsonValue, OpenedAgent, PgPools, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -86,6 +86,8 @@ struct Driven {
     /// Handle of the agent it runs on.
     agent: String,
     cancel: CancellationToken,
+    /// Its place among the tenant's live runs, freed with the entry.
+    _place: Option<OwnedSemaphorePermit>,
 }
 
 /// What a method produced: a result, or a run to drive after the result

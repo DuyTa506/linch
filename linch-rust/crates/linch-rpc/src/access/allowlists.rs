@@ -10,14 +10,28 @@ use url::{Origin, Url};
 
 use super::AccessError;
 
-/// What a tenant's `agent.open` may ask for, built with the methods
-/// below. A new value allows the memory stores, the permission modes
-/// `default` and `accept_edits`, the live providers at their public
-/// endpoints, and nothing else: no `Bash`, no workspace.
+/// Live runs a tenant drives at once unless its allowlists say otherwise:
+/// each streams from a provider on the server's key, so this bounds what
+/// one tenant spends of the server's rate limits and memory.
+pub const DEFAULT_MAX_RUNS: usize = 16;
+
+/// Connections a tenant holds at once unless its allowlists say
+/// otherwise: each may buffer a 16 MiB line (a WebSocket about 128 MiB),
+/// so this bounds one tenant to about 1 GiB of buffers.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
+
+/// What a tenant may ask for, built with the methods below. A new value
+/// allows the memory stores, the permission modes `default` and
+/// `accept_edits`, the live providers at their public endpoints, and
+/// nothing else: no `Bash`, no workspace; and at most
+/// [`DEFAULT_MAX_RUNS`] live runs and [`DEFAULT_MAX_CONNECTIONS`]
+/// connections at once.
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
     pub(super) exec_tools: bool,
+    pub(super) max_runs: usize,
+    pub(super) max_connections: usize,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
     pub(super) workspace_roots: Vec<PathBuf>,
@@ -110,6 +124,8 @@ impl Allowlists {
         Self {
             scripted_provider: false,
             exec_tools: false,
+            max_runs: DEFAULT_MAX_RUNS,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
             workspace_roots: Vec::new(),
@@ -134,6 +150,21 @@ impl Allowlists {
     pub fn provider_base_urls(mut self, urls: &[String]) -> Result<Self, AccessError> {
         self.provider_origins = origins("provider_base_urls", urls)?;
         Ok(self)
+    }
+
+    /// How many runs the tenant's connections may drive at once, all
+    /// together: a `run.start`, `run.resume` or `run.approve` past it is
+    /// refused with `-32005`. A run holds its place until its `run.end`.
+    pub fn max_runs(mut self, max: usize) -> Self {
+        self.max_runs = max;
+        self
+    }
+
+    /// How many connections may act for the tenant at once; one past it
+    /// is refused with `-32005` and closed.
+    pub fn max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
     }
 
     /// Whether a workspace agent gets `Bash`, which runs commands

@@ -10,11 +10,14 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::error::{ErrorObject, limit_reached};
 
 mod admit;
 mod allowlists;
 
-pub use allowlists::{Allowlists, McpCommand};
+pub use allowlists::{Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, McpCommand};
 
 /// How a connection's client is trusted.
 #[derive(Debug, Clone)]
@@ -30,12 +33,15 @@ pub enum Access {
     Login(Arc<Tokens>),
 }
 
-/// A tenant: the name its agents and runs belong to, and what its agents
-/// may use.
+/// A tenant: the name its agents and runs belong to, what its agents may
+/// use, and its places for live runs and connections, shared by every
+/// connection that acts for it (share one `Arc<Tenant>` among them).
 #[derive(Debug)]
 pub struct Tenant {
     name: String,
     allow: Allowlists,
+    runs: Arc<Semaphore>,
+    connections: Arc<Semaphore>,
 }
 
 impl Tenant {
@@ -52,7 +58,23 @@ impl Tenant {
         if !valid {
             return Err(AccessError::TenantName { name });
         }
-        Ok(Self { name, allow })
+        let places = |max: usize| Arc::new(Semaphore::new(max.min(Semaphore::MAX_PERMITS)));
+        Ok(Self {
+            name,
+            runs: places(allow.max_runs),
+            connections: places(allow.max_connections),
+            allow,
+        })
+    }
+
+    /// A place among the tenant's live runs, or `-32005`.
+    pub(crate) fn run_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
+        take(&self.runs, "runs", self.allow.max_runs)
+    }
+
+    /// A place among the tenant's connections, or `-32005`.
+    pub(crate) fn connection_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
+        take(&self.connections, "connections", self.allow.max_connections)
     }
 
     /// The tenant name.
@@ -123,6 +145,16 @@ impl fmt::Debug for Tokens {
         let tenants: Vec<&str> = self.0.iter().map(|(_, tenant)| tenant.name()).collect();
         f.debug_struct("Tokens").field("tenants", &tenants).finish()
     }
+}
+
+fn take(
+    places: &Arc<Semaphore>,
+    kind: &str,
+    max: usize,
+) -> Result<OwnedSemaphorePermit, ErrorObject> {
+    Arc::clone(places)
+        .try_acquire_owned()
+        .map_err(|_| limit_reached(kind, max))
 }
 
 fn digest(token: &str) -> [u8; 32] {

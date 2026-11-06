@@ -70,6 +70,12 @@ pub struct AllowConfig {
     /// Whether a workspace agent gets `Bash`, which runs commands
     /// unconfined, as the server's user; off when absent.
     pub exec_tools: bool,
+    /// Runs the tenant's connections may drive at once, together;
+    /// [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
+    pub max_runs: Option<usize>,
+    /// Connections that may act for the tenant at once;
+    /// [`linch_rpc::DEFAULT_MAX_CONNECTIONS`] when absent.
+    pub max_connections: Option<usize>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
@@ -181,12 +187,14 @@ impl AllowConfig {
     /// The [`Allowlists`] this describes.
     ///
     /// Raises:
-    ///     AccessError: If a URL or DSN is invalid or a root cannot be
-    ///         resolved.
+    ///     AccessError: If a URL or DSN is invalid, a root cannot be
+    ///         resolved, or an MCP entry lists a refused variable.
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
             .exec_tools(self.exec_tools)
+            .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
+            .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?
