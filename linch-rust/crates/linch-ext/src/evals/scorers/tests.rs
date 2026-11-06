@@ -149,6 +149,37 @@ fn context_metadata_contains_matches_the_key_and_the_expected_value() {
     assert_eq!(score(&any, vec![other]), Some(false));
 }
 
+/// Numbers compare by value, as Python's `==` does, at any depth.
+#[test]
+fn context_metadata_contains_compares_numbers_by_value() {
+    let expect = |expected: JsonValue| Scorer::ContextMetadataContains {
+        key: "k".into(),
+        expected: Some(expected),
+    };
+    let built = |value: JsonValue| vec![build(&[], json!({}), json!({ "k": value }))];
+    assert_eq!(score(&expect(json!(1)), built(json!(1.0))), Some(true));
+    assert_eq!(score(&expect(json!(1.0)), built(json!(1))), Some(true));
+    let nested = json!({"ids": [1, 2.5], "n": {"x": -3}});
+    let same = json!({"n": {"x": -3.0}, "ids": [1.0, 2.5]});
+    assert_eq!(score(&expect(nested.clone()), built(same)), Some(true));
+    assert_eq!(score(&expect(json!(1)), built(json!(1.5))), Some(false));
+    assert_eq!(
+        score(&expect(json!([1])), built(json!([1, 1]))),
+        Some(false)
+    );
+    assert_eq!(score(&expect(json!(1)), built(json!("1"))), Some(false));
+    let large = json!(u64::MAX);
+    assert_eq!(score(&expect(large.clone()), built(large)), Some(true));
+    assert_eq!(
+        score(&expect(json!(i64::MAX)), built(json!(u64::MAX))),
+        Some(false)
+    );
+    assert_eq!(
+        score(&expect(nested), built(json!({"ids": [1, 2.5]}))),
+        Some(false)
+    );
+}
+
 #[test]
 fn recovery_needs_a_success_after_a_failure() {
     let any = Scorer::RecoverySucceeded { tool: None };

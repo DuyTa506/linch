@@ -132,7 +132,9 @@ impl Scorer {
                     build
                         .metadata
                         .get(key)
-                        .is_some_and(|value| expected.as_ref().is_none_or(|e| e == value))
+                        .is_some_and(|value| {
+                            expected.as_ref().is_none_or(|e| same_value(e, value))
+                        })
                 })
             }),
             Self::RecoverySucceeded { tool } => recovered(events, tool.as_deref()),
@@ -149,6 +151,45 @@ fn schema_accepts(schema: &JsonObject, output: &str) -> bool {
     };
     let schema = JsonValue::Object(schema.clone());
     jsonschema::validator_for(&schema).is_ok_and(|validator| validator.is_valid(&instance))
+}
+
+/// Whether `a` equals `b` as Python's `==` compares decoded JSON: numbers
+/// by value (`1 == 1.0`), arrays and objects member by member.
+fn same_value(a: &JsonValue, b: &JsonValue) -> bool {
+    match (a, b) {
+        (JsonValue::Number(a), JsonValue::Number(b)) => same_number(a, b),
+        (JsonValue::Array(a), JsonValue::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b))
+        }
+        (JsonValue::Object(a), JsonValue::Object(b)) => {
+            a.len() == b.len()
+                && (a.iter()).all(|(key, a)| b.get(key).is_some_and(|b| same_value(a, b)))
+        }
+        _ => a == b,
+    }
+}
+
+/// Exact numeric equality across integers and floats, like Python's: an
+/// integer equals a float only when the float is that exact integer.
+fn same_number(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+    match (integer(a), integer(b)) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => a.as_f64() == b.as_f64(),
+        _ => false,
+    }
+}
+
+/// The number as an integer, when it is one (an integral float included).
+fn integer(number: &serde_json::Number) -> Option<i128> {
+    if let Some(value) = number.as_i64() {
+        return Some(value.into());
+    }
+    if let Some(value) = number.as_u64() {
+        return Some(value.into());
+    }
+    let value = number.as_f64()?;
+    // Integral floats of |value| < 2^127 convert exactly.
+    (value.fract() == 0.0 && value.abs() < 2f64.powi(127)).then_some(value as i128)
 }
 
 /// `verdict` over the run's `context_build` events; `None` without one.
