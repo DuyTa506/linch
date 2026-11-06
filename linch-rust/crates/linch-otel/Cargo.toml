@@ -25,4 +25,3 @@ futures = "0.3.34"
 # The in-memory span and metric exporters the tests read back.
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "metrics", "testing"] }
 tokio = { version = "1.54.1", features = ["rt", "macros", "sync"] }
-tokio-util = "0.7.20"

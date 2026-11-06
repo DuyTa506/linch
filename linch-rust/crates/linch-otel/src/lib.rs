@@ -251,6 +251,13 @@ mod tests {
     }
 
     #[test]
+    fn observers_move_between_tasks() {
+        fn send<T: Send>() {}
+        send::<Telemetry>();
+        send::<RunObserver>();
+    }
+
+    #[test]
     fn an_empty_context_has_no_trace_id() {
         assert_eq!(span_trace_id(&Context::new()), None);
     }
