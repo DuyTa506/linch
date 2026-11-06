@@ -39,6 +39,10 @@ pub use canonical::{
 pub use events::{
     Envelope, Event, EventError, IgnorableEvent, Persistence, SubagentEvent, WIRE_VERSION,
 };
+pub use hooks::{
+    CallbackError, ChainResult, Hook, HookChain, HookError, HookRecord, HookStatus, Hooks, Point,
+    ToolMatcher,
+};
 pub use ids::{RunId, SessionId};
 pub use json::{JsonObject, JsonValue};
 pub use message::{
