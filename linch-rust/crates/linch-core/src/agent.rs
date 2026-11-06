@@ -24,6 +24,7 @@ use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
+use crate::run::RunStatus;
 use crate::runner::{self, Families, RunStream};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{Registry, Roster, Workers};
@@ -285,6 +286,16 @@ impl Agent {
             self.inner.close(&worker);
         }
         self.inner.close(session_id);
+    }
+
+    /// The status of `run_id`, from its record alone.
+    ///
+    /// Raises:
+    ///     RunError: `Store` (`NotFound` for an unknown run) if the read
+    ///         fails.
+    pub async fn status(&self, run_id: &RunId) -> Result<RunStatus, RunError> {
+        let record = self.inner.runs.load(&self.inner.namespace, run_id).await?;
+        Ok(record.status)
     }
 
     /// The run's durable envelopes with seq greater than `after_seq`,
