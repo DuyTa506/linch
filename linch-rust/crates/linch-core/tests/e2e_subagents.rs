@@ -67,6 +67,38 @@ fn wrapped(events: &[Envelope]) -> Vec<(RunId, Vec<Event>)> {
     children
 }
 
+/// As Python's: the parent's `total_usage` and last `usage` cumulative
+/// count its own calls only; a child's usage reaches it wrapped.
+#[tokio::test]
+async fn the_parents_total_usage_counts_its_own_calls_only() {
+    let parent = vec![spawn_turn(None, &["look"]), text_turn("done")];
+    let child = linch_core::provider::scripted::TurnBuilder::new(MODEL)
+        .text("seen")
+        .usage(usage(100, 50))
+        .build();
+    let family = Arc::new(Family::new(parent, vec![child]));
+    let runs = Runs::default();
+    let (envelopes, _, _) = run(family, tools(&runs), PermissionMode::SkipDangerous).await;
+
+    let Event::Result(result) = &envelopes.last().unwrap().event else {
+        panic!("no result")
+    };
+    let own = (
+        result.total_usage.input_tokens,
+        result.total_usage.output_tokens,
+    );
+    assert_eq!(own, (20, 10), "two parent calls of 10 in, 5 out");
+    let child_usage: Vec<(u64, u64)> = wrapped(&envelopes)
+        .into_iter()
+        .flat_map(|(_, events)| events)
+        .filter_map(|event| match event {
+            Event::Usage(usage) => Some((usage.usage.input_tokens, usage.usage.output_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(child_usage, [(100, 50)], "the child's, wrapped");
+}
+
 #[tokio::test]
 async fn a_subagent_is_a_durable_child_run_of_its_parent() {
     let parent = vec![
