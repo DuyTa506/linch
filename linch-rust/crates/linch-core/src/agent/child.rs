@@ -99,11 +99,16 @@ impl AgentInner {
     /// definition's body, and a contract that also covers the definition.
     /// It offers no subagents, so its runs cannot spawn.
     ///
+    /// The contract is digested from the tools and hook policies this
+    /// agent's own contract was built from, so a tool or hook registered
+    /// since does not change it; the child's runs still use the live tools,
+    /// as the parent's do.
+    ///
     /// Raises:
     ///     BuildError: If the definition or the tools cannot be digested.
     pub(crate) fn child(&self, definition: &SubagentDefinition) -> Result<Self, BuildError> {
         let filter = ChildTools::of(definition);
-        let tools = filter.apply(&self.tools.snapshot());
+        let tools = filter.apply(&self.built_tools);
         let mut system = spec::prompt_block(&self.spec);
         let listing_at = (tools.resolve(SKILL_TOOL).is_some()).then_some(system.len());
         system.push(SystemBlock {
@@ -114,7 +119,7 @@ impl AgentInner {
         let value =
             serde_json::to_value(definition).map_err(|e| BuildError::Invalid(e.to_string()))?;
         features.insert("subagent".into(), value);
-        let hooks = self.hooks.policy_digest();
+        let hooks = self.built_hooks;
         let contract = contract_digest(&self.spec, &tools.contract_tools(), hooks, &features)?;
         Ok(Self {
             spec: self.spec.clone(),
@@ -127,6 +132,8 @@ impl AgentInner {
             sessions: Arc::clone(&self.sessions),
             namespace: self.namespace.clone(),
             contract,
+            built_tools: Arc::new(tools),
+            built_hooks: hooks,
             system,
             listing_at,
             features,

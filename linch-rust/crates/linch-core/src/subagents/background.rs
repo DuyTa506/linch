@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use futures::StreamExt;
 
 use super::SUBAGENT_TOOL;
-use super::run::{Outcome, failed, finished};
+use super::run::{Outcome, failed, finished, mismatched};
 use super::tool::in_background;
 use super::workers::Worker;
 use crate::agent::{AgentInner, RunOptions};
@@ -139,6 +139,11 @@ async fn pick_up(
         }
         Ok(record) if record.status.is_terminal() => {
             let outcome = finished(&child, &id).await?;
+            family.complete(Completion::of(id, worker.display_name, outcome));
+            return Ok(());
+        }
+        Ok(record) if record.contract != child.contract => {
+            let outcome = mismatched(&child, &record, options).await?;
             family.complete(Completion::of(id, worker.display_name, outcome));
             return Ok(());
         }

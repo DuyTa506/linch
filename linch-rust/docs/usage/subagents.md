@@ -427,6 +427,12 @@ A parent that suspends for approval keeps its workers running in the server
 until its approve or resume takes them over there. Only a parent resumed after
 a crash, or in another server, picks its workers up again from their logs.
 
+A child run's contract is its parent agent's, as the agent was opened, plus
+the child's definition: a tool registered since does not change it. A child
+whose definition changed since it started (a host that reloaded the subagents
+before resuming the parent) cannot continue: resuming the parent ends it
+`failed`, which frees its session, and the parent gets that error.
+
 ---
 
 ## What differs from Python Linch

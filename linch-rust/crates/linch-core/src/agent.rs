@@ -23,7 +23,7 @@ use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
-use crate::registry::ToolRegistry;
+use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
 use crate::runner::{self, Families, RunStream};
 use crate::skills::SkillSet;
@@ -110,6 +110,12 @@ pub(crate) struct AgentInner {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) namespace: String,
     pub(crate) contract: Digest,
+    /// The tools the contract was digested from at build (a subagent's
+    /// agent: its share of the parent's); a child's contract derives from
+    /// them, never from the live registry.
+    pub(crate) built_tools: Arc<ToolSnapshot>,
+    /// The hook policy digest the contract was built with.
+    pub(crate) built_hooks: Digest,
     /// The system blocks a new session's prefix takes, but for the skill
     /// listing (see [`AgentInner::system`]).
     pub(crate) system: Vec<SystemBlock>,

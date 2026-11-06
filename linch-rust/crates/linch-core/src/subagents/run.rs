@@ -6,13 +6,13 @@ use futures::StreamExt;
 use tokio::sync::oneshot;
 
 use super::SubagentDefinition;
-use crate::agent::{AgentInner, RunOptions};
+use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::ResultSubtype;
 use crate::events::{Event, SubagentEvent};
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::runner::{self, RunStream};
-use crate::store::StoreError;
+use crate::store::{RunRecord, StoreError};
 use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 
 /// Run the `definition` subagent on `prompt` as the child run of the call
@@ -49,6 +49,9 @@ pub(super) async fn run(
             runner::start_child(child, prompt, options, ctx.run_id.clone())
         }
         Ok(record) if record.status.is_terminal() => return finished(&child, &child_id).await,
+        Ok(record) if record.contract != child.contract => {
+            return mismatched(&child, &record, options).await;
+        }
         Ok(_) => runner::resume(child, child_id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
@@ -62,6 +65,28 @@ pub(super) async fn run(
     });
     let result = result.await;
     result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
+}
+
+/// End the unfinished child run `record`, whose contract is not `child`'s
+/// (its definition changed since it started): it is failed for good, so its
+/// session takes runs again, and the parent gets the error. A child that
+/// ended meanwhile reads back as it ended.
+pub(super) async fn mismatched(
+    child: &AgentInner,
+    record: &RunRecord,
+    options: RunOptions,
+) -> Result<Outcome, ToolOutputError> {
+    let run_id = record.run_id.clone();
+    let error = RunError::ContractMismatch {
+        run_id: run_id.clone(),
+        expected: child.contract,
+        found: record.contract,
+    };
+    match runner::fail(child, run_id.clone(), error.to_string(), options).await {
+        Ok(_) => Err(failed("could not continue", error)),
+        Err(RunError::Terminal { .. }) => finished(child, &run_id).await,
+        Err(other) => Err(failed("could not be ended", other)),
+    }
 }
 
 /// How the finished child run `child_id` ended, read back from its events.

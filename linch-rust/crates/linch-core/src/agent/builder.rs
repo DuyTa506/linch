@@ -263,9 +263,10 @@ impl AgentBuilder {
             let tool = SearchTool::new(Arc::clone(&handle));
             built_ins.register(&self.tools, Arc::new(tool))?;
         }
-        let tools = self.tools.snapshot().contract_tools();
-        let hooks = self.hooks.policy_digest();
-        let contract = spec::contract_digest(&self.spec, &tools, hooks, &features)?;
+        let built_tools = self.tools.snapshot();
+        let built_hooks = self.hooks.policy_digest();
+        let tools = built_tools.contract_tools();
+        let contract = spec::contract_digest(&self.spec, &tools, built_hooks, &features)?;
         let system = spec::prompt_block(&self.spec);
         let listing_at = skill_versions.as_ref().map(|_| system.len());
         let inner = Arc::new(AgentInner {
@@ -279,6 +280,8 @@ impl AgentBuilder {
             hooks: self.hooks,
             namespace,
             contract,
+            built_tools,
+            built_hooks,
             system,
             listing_at,
             features,
