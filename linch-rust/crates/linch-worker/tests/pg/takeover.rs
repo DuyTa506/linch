@@ -97,7 +97,7 @@ async fn a_killed_workers_job_is_taken_over() {
     .await;
     let run_id = db.run_of("s1").await;
     first.kill().await;
-    // The heartbeats kept the job hidden up to the kill, for this long yet.
+    // The dead worker's job stays hidden for this long yet.
     let killed = Instant::now();
     let hidden = db.hidden_for().await;
 
@@ -124,6 +124,44 @@ async fn a_killed_workers_job_is_taken_over() {
     assert_eq!(db.tool_results("s1").await, vec![INTERRUPTED_TOOL_TEXT]);
     assert_eq!(tool_ends(&db.events(&run_id).await), 1);
     wait_until("the job is acked", || async { db.jobs().await == 0 }).await;
+    second.stop().await;
+    db.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_heartbeat_keeps_a_job_past_its_timeout() {
+    let Some(db) = TestDb::new("heartbeat").await else {
+        return;
+    };
+    // The tool outlasts the job's visibility timeout twice over.
+    let probe = Probe::new("Lookup", ToolScope::Read, Hold::Sleep(TIMEOUT * 2));
+    enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
+        .await
+        .unwrap();
+    let first = Running::spawn(&db.pool, losing("w1"), agent(&db.pool, probe.clone()));
+    wait_until("the first worker runs the tool", || async {
+        probe.started() == 1
+    })
+    .await;
+    let run_id = db.run_of("s1").await;
+    // It would take the job over as soon as the job became visible.
+    let second = Running::spawn(
+        &db.pool,
+        config("w2"),
+        agent(&db.pool, probe.with_hold(Hold::None)),
+    );
+    wait_until("the first worker completes the run", || async {
+        db.status(&run_id).await == RunStatus::Completed
+    })
+    .await;
+    assert_eq!(
+        db.record(&run_id).await.epoch,
+        1,
+        "nobody took the job over"
+    );
+    assert_eq!(probe.started(), 1);
+    wait_until("the job is acked", || async { db.jobs().await == 0 }).await;
+    first.stop().await;
     second.stop().await;
     db.finish().await;
 }
