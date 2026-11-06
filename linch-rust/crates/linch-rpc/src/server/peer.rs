@@ -26,15 +26,19 @@ use crate::protocol::{CancelRequestParams, method};
 const ID_PREFIX: &str = "srv-";
 
 /// Why a server request produced no result.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum CallError {
     /// The client answered with an error object.
+    #[error("the client answered with an error: {0}")]
     Rpc(ErrorObject),
     /// No answer within the request's timeout.
+    #[error("no answer within {} ms", .0.as_millis())]
     Timeout(Duration),
     /// The caller's cancel token fired.
+    #[error("the request was cancelled")]
     Cancelled,
     /// The connection is closed, or closed while waiting.
+    #[error("the host connection is closed")]
     Closed,
 }
 

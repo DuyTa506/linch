@@ -10,9 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::error::ErrorObject;
 
 mod call;
+mod hook;
 mod open;
 
 pub use call::{CancelRequestParams, ToolCallParams, tool_code};
+pub use hook::{
+    CallbackSpec, ContextBuildAnswer, HookCallParams, PostToolUseAnswer, PostTurnAnswer,
+    PreToolUseAnswer, StopAnswer, UserPromptAnswer, WireToolResult,
+};
 pub use open::{HostToolSpec, OpenParams};
 
 /// Method and notification names.
@@ -35,6 +40,8 @@ pub mod method {
     pub const RUN_END: &str = "run.end";
     /// Server request: run a host tool in the client.
     pub const TOOL_CALL: &str = "tool.call";
+    /// Server request: one occurrence of a callback's hook point.
+    pub const HOOK_CALL: &str = "hook.call";
     /// Notification from the server: it no longer waits for the answer to
     /// one of its requests.
     pub const CANCEL_REQUEST: &str = "$/cancelRequest";

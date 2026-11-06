@@ -5,8 +5,9 @@
 //! drives their runs; the client starts, approves, cancels and replays runs
 //! and receives every envelope as a notification. Everything inside a turn
 //! runs in the server; it calls back into the client, on the same
-//! connection, only for what the client declared: host tools. There is no
-//! socket or HTTP transport and no auth yet.
+//! connection, only for what the client declared: host tools, and
+//! intercept callbacks at the occurrences their matchers accept. There is
+//! no socket or HTTP transport and no auth yet.
 //!
 //! # Framing
 //!
@@ -33,7 +34,8 @@
 //! # Methods
 //!
 //! **`agent.open`**: params are an [`AgentConfig`](linch::AgentConfig) plus
-//! an optional `tools` list ([`OpenParams`](protocol::OpenParams)):
+//! optional `tools` and `callbacks` lists
+//! ([`OpenParams`](protocol::OpenParams)):
 //!
 //! ```json
 //! {"namespace": "acme",
@@ -47,7 +49,10 @@
 //!  "tools": [{"name": "crm_lookup", "description": "Find a customer.",
 //!             "input_schema": {"type": "object",
 //!                              "properties": {"email": {"type": "string"}}},
-//!             "scope": "read"}]}
+//!             "scope": "read"}],
+//!  "callbacks": [{"point": "permission_request", "policy_id": "acme-approvals",
+//!                 "policy_version": 3, "matcher": ["Bash", "mcp__git__*"],
+//!                 "timeout_ms": 5000}]}
 //! ```
 //!
 //! `stores` defaults to `{"type": "memory"}`: stores owned by this agent
@@ -68,6 +73,27 @@
 //! (in mode `default`, `write` and `exec` calls ask), and only `read` calls
 //! run in parallel. `timeout_ms` defaults to 300 000. A host tool is run
 //! with `tool.call` on the connection that opened the agent.
+//!
+//! Each of `callbacks` ([`CallbackSpec`](protocol::CallbackSpec)) is
+//! `{point, policy_id, policy_version, matcher?, timeout_ms?, fail_mode?}`
+//! and is answered with `hook.call`. `point` is one of `user_prompt_submit`,
+//! `context_build`, `pre_tool_use`, `permission_request`, `post_tool_use`,
+//! `stop`, `post_turn`; callbacks at one point run in declaration order.
+//! `matcher` is a list of tool-name globs (`*`, `?`), allowed only at the
+//! three tool points; it is evaluated in the server, so an occurrence it
+//! rejects never crosses the connection. `timeout_ms` defaults to 30 000. A
+//! callback that errors, answers badly or times out is handled by its
+//! `fail_mode`: `closed` turns it into the point's blocking answer (the
+//! call is blocked or denied, the result withheld, the stop refused),
+//! `open` skips it. The default is `closed` at `pre_tool_use` and
+//! `permission_request` and `open` elsewhere; `context_build` and
+//! `post_turn` cannot fail closed. Each `(point, policy_id,
+//! policy_version)` enters the contract, so bump `policy_version` whenever
+//! a callback's behaviour, matcher, timeout or fail mode changes. The
+//! loop runs the tool points now; the turn points register and count in
+//! the contract but are not called until the loop runs them (card P6-C).
+//!
+//! Invalid `tools` or `callbacks` entries are `-32602`.
 //!
 //! **`run.start`** `{agent, session_id, prompt, principal?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
@@ -122,6 +148,31 @@
 //! as details. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
 //!
+//! **`hook.call`** `{agent, point, policy_id, request}`
+//! ([`HookCallParams`](protocol::HookCallParams)) asks a callback about one
+//! occurrence of its point. Every `request` has `session_id` and `run_id`;
+//! the rest, and the answer, depend on the point. A tool result
+//! ([`WireToolResult`](protocol::WireToolResult)) is
+//! `{"output": {"value", "metadata"?}}` or
+//! `{"error": {"message", "code"?, "details"?}}`.
+//!
+//! | `point` | `request` also has | answer |
+//! |---|---|---|
+//! | `pre_tool_use` | `tool_use_id, tool_name, input` | `{"action": "continue"}`, `{"action": "rewrite", "input"}`, `{"action": "block", "reason"}`, `{"action": "resolve", "result"}` |
+//! | `permission_request` | `tool_use_id, tool_name, input, reason?, principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
+//! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
+//! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
+//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}]}` |
+//! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
+//! | `post_turn` | `turn, stop_reason` | `{}` |
+//!
+//! A `pre_tool_use` rewrite feeds the next callback and is validated
+//! against the tool's schema again; a block or resolve stops the chain,
+//! and permission still applies to a resolved call. At
+//! `permission_request`, a deny stops the chain and an allow does not, so
+//! a later deny wins; with no answer the call asks the host as usual
+//! (`suspended`, then `run.approve`).
+//!
 //! # Notifications
 //!
 //! **`run.event`**: params are one [`Envelope`](linch::Envelope),
@@ -148,7 +199,7 @@
 //! | -32700 | parse error | the line is not JSON |
 //! | -32600 | invalid request | bad request object, batch, line too long, malformed answer |
 //! | -32601 | method not found | |
-//! | -32602 | invalid params | unknown, missing or mistyped field; invalid host tool |
+//! | -32602 | invalid params | unknown, missing or mistyped field; invalid host tool or callback |
 //! | -32603 | internal error | a result or envelope did not encode |
 //! | -32001 | agent not found | unknown `agent` handle |
 //! | -32002 | run busy | the server already drives that run |

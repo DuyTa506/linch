@@ -8,17 +8,21 @@ use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::CallbackSpec;
+
 /// Params of `agent.open`: the members of an [`AgentConfig`] plus the
-/// optional `tools` this connection's client implements.
+/// optional `tools` and `callbacks` this connection's client serves.
 ///
-/// Decoding is strict at every level: `tools` is taken out, and the
-/// remaining members must form a valid [`AgentConfig`].
+/// Decoding is strict at every level: `tools` and `callbacks` are taken
+/// out, and the remaining members must form a valid [`AgentConfig`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenParams {
     /// The agent config.
     pub config: AgentConfig,
     /// Host tools, registered before the config's workspace and MCP tools.
     pub tools: Vec<HostToolSpec>,
+    /// Intercept callbacks, each run in declaration order within its point.
+    pub callbacks: Vec<CallbackSpec>,
 }
 
 /// A tool implemented by the client and called with `tool.call` on the
@@ -48,10 +52,8 @@ impl Serialize for OpenParams {
             JsonValue::Object(object) => object,
             _ => return Err(S::Error::custom("an agent config encodes as an object")),
         };
-        if !self.tools.is_empty() {
-            let tools = serde_json::to_value(&self.tools).map_err(S::Error::custom)?;
-            object.insert("tools".into(), tools);
-        }
+        put(&mut object, "tools", &self.tools).map_err(S::Error::custom)?;
+        put(&mut object, "callbacks", &self.callbacks).map_err(S::Error::custom)?;
         object.serialize(serializer)
     }
 }
@@ -60,9 +62,26 @@ impl<'de> Deserialize<'de> for OpenParams {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut object = JsonObject::deserialize(deserializer)?;
         let tools = take(&mut object, "tools")?;
+        let callbacks = take(&mut object, "callbacks")?;
         let config = serde_json::from_value(JsonValue::Object(object)).map_err(D::Error::custom)?;
-        Ok(Self { config, tools })
+        Ok(Self {
+            config,
+            tools,
+            callbacks,
+        })
     }
+}
+
+/// Insert `items` under `key` unless empty.
+fn put<T: Serialize>(
+    object: &mut JsonObject,
+    key: &str,
+    items: &[T],
+) -> Result<(), serde_json::Error> {
+    if !items.is_empty() {
+        object.insert(key.into(), serde_json::to_value(items)?);
+    }
+    Ok(())
 }
 
 /// Remove `key` from `object` and decode it; absent is empty.

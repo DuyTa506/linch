@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::StreamExt;
-use linch::{Agent, Hooks, JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
+use linch::{Agent, JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -27,6 +27,7 @@ use crate::error::{ErrorObject, code, invalid_params, invalid_request};
 use crate::message::{Id, Notification, Request, Response};
 use crate::protocol::{AgentOpened, Events, EventsParams, OpenParams, RunAccepted, method};
 
+mod callback;
 mod host;
 mod peer;
 mod run;
@@ -280,13 +281,15 @@ impl Server {
         }
     }
 
-    /// Open an agent whose host tools call back over this connection.
+    /// Open an agent whose host tools and callbacks call back over this
+    /// connection. They are bound before the agent is built, so the
+    /// contract covers them.
     async fn open(&self, params: OpenParams) -> Result<JsonValue, ErrorObject> {
-        // The handle is named first: the host tools carry it in each call.
+        // The handle is named first: tools and callbacks carry it per call.
         let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
         let handle = format!("agent-{number}");
         let tools = host::registry(params.tools, &handle, &self.0.peer)?;
-        let hooks = Arc::new(Hooks::default());
+        let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
         let opened = params
             .config
             .open_with(tools, hooks)
