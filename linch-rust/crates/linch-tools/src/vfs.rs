@@ -13,7 +13,8 @@
 //! - [`CompositeBackend`] routes paths by longest prefix to other backends,
 //!   and [`ScopedBackend`] exposes one subtree of another backend.
 //!
-//! Callers find a session's backend through [`SessionFiles`]:
+//! The `ls`, `read_file`, `write_file` and `edit_file` tools
+//! ([`vfs_tools`]) find a session's backend through [`SessionFiles`]:
 //! [`MemorySessions`] gives each session a fresh [`MemoryBackend`], and
 //! [`SharedFiles`] gives every session one backend.
 //!
@@ -25,6 +26,7 @@ pub mod conformance;
 mod disk;
 mod memory;
 mod scoped;
+mod tools;
 
 use std::sync::Arc;
 
@@ -36,6 +38,7 @@ pub use composite::CompositeBackend;
 pub use disk::DiskBackend;
 pub use memory::{MemoryBackend, MemorySessions};
 pub use scoped::ScopedBackend;
+pub use tools::{EditFile, Ls, ReadFile, WriteFile, vfs_tools};
 
 /// Boxed error of a storage layer under a backend.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
