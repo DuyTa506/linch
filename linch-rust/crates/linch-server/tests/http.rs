@@ -45,7 +45,9 @@ async fn send(socket: &mut Socket, id: u64, method: &str, params: Value) {
 
 async fn recv(socket: &mut Socket) -> Option<Value> {
     loop {
-        let frame = tokio::time::timeout(Duration::from_secs(10), socket.next()).await;
+        // Generous: an `agent.open` on a fresh Postgres schema runs the
+        // migrations, which took over 10 s on a loaded machine.
+        let frame = tokio::time::timeout(Duration::from_secs(30), socket.next()).await;
         match frame.expect("server silent")? {
             Ok(Message::Text(text)) => return Some(serde_json::from_str(&text).unwrap()),
             Ok(Message::Close(_)) | Err(_) => return None,
