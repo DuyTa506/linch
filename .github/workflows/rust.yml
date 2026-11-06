@@ -30,8 +30,8 @@ jobs:
         with:
           workspaces: linch-rust
       - run: cargo fmt --all --check
-      - run: cargo clippy -p linch-core -p linch-providers --all-targets --locked -- -D warnings
-      - run: cargo test -p linch-core -p linch-providers --locked
-      - run: cargo doc -p linch-core -p linch-providers --no-deps --locked
+      - run: cargo clippy -p linch-core -p linch-providers -p linch-postgres --all-targets --locked -- -D warnings
+      - run: cargo test -p linch-core -p linch-providers -p linch-postgres --locked
+      - run: cargo doc -p linch-core -p linch-providers -p linch-postgres --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
