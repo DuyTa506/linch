@@ -82,6 +82,61 @@ async fn stdio_round_trip_and_clean_exit() {
     );
 }
 
+/// Send `signal` (`STOP`, `KILL`) to process `pid`.
+fn signal(signal: &str, pid: u32) {
+    let status = std::process::Command::new("kill")
+        .args([format!("-{signal}"), pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -{signal} {pid} failed");
+}
+
+#[tokio::test]
+async fn disconnect_kills_a_server_that_stopped_reading() {
+    let registry = Arc::new(ToolRegistry::new());
+    let mut config = McpServerConfig::new(
+        "stalled",
+        McpTransport::stdio(stdio_server().to_string_lossy(), Vec::new()),
+    );
+    config.call_timeout = Duration::from_millis(500);
+    let server = McpServer::connect(config, Arc::clone(&registry))
+        .await
+        .expect("connect over stdio");
+    let pid = call(&registry, "mcp__stalled__pid", JsonObject::new())
+        .await
+        .unwrap();
+    let pid: u32 = pid.value.as_str().unwrap().parse().unwrap();
+
+    // A stopped server reads nothing. The request is larger than the pipe,
+    // so its write, and the close after it, wait for a reader.
+    signal("STOP", pid);
+    let big = text_input(&"x".repeat(256 * 1024));
+    let timed_out = call(&registry, "mcp__stalled__echo", big)
+        .await
+        .unwrap_err();
+    assert_eq!(timed_out.code.as_deref(), Some(codes::TIMEOUT));
+
+    let closed = tokio::time::timeout(Duration::from_secs(60), server.disconnect()).await;
+    if closed.is_err() {
+        signal("KILL", pid);
+    }
+    assert!(
+        closed.is_ok(),
+        "disconnect hung on a server that stopped reading"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the stopped server {pid} survived"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn disconnect_kills_what_the_server_started() {
     let marker = std::env::temp_dir().join(format!("linch-mcp-orphan-{}", std::process::id()));
@@ -110,4 +165,64 @@ async fn disconnect_kills_what_the_server_started() {
     let survived = marker.exists();
     let _ = std::fs::remove_file(&marker);
     assert!(!survived, "the server's child outlived the disconnect");
+}
+
+#[tokio::test]
+async fn a_server_that_closed_its_stdin_is_reconnected() {
+    // The launcher passes the client's lines to the server until one says
+    // `close-stdin`. Then it closes the client's pipe, passes that line on
+    // and holds the server's input open, so the server keeps running and
+    // answers on stdout, but nothing the client writes is read any more.
+    let script = r#"exec 3<&0 0</dev/null
+{
+    while IFS= read -r line <&3; do
+        case $line in
+            *close-stdin*) exec 3<&-; printf '%s\n' "$line"; exec sleep 120 ;;
+        esac
+        printf '%s\n' "$line"
+    done
+} | "$1" 3<&- &
+exec 3<&-
+wait"#;
+    let args = vec![
+        "-c".to_owned(),
+        script.to_owned(),
+        "sh".to_owned(),
+        stdio_server().to_string_lossy().into_owned(),
+    ];
+    let registry = Arc::new(ToolRegistry::new());
+    let config = McpServerConfig::new("half", McpTransport::stdio("/bin/sh", args));
+    let server = McpServer::connect(config, Arc::clone(&registry))
+        .await
+        .expect("connect through sh");
+    let pid =
+        |output: linch_core::ToolOutput| -> u32 { output.value.as_str().unwrap().parse().unwrap() };
+    let first = pid(call(&registry, "mcp__half__pid", JsonObject::new())
+        .await
+        .unwrap());
+
+    let closing = call(&registry, "mcp__half__echo", text_input("close-stdin"))
+        .await
+        .unwrap();
+    assert_eq!(closing.value, json!("close-stdin"));
+    let failed = call(&registry, "mcp__half__echo", text_input("unread"))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code.as_deref(), Some(codes::UNAVAILABLE));
+
+    // The first server is closed and a fresh one started.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let second = loop {
+        match call(&registry, "mcp__half__pid", JsonObject::new()).await {
+            Ok(output) => break pid(output),
+            Err(error) => assert!(
+                Instant::now() < deadline,
+                "never reconnected: {}",
+                error.message
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_ne!(second, first);
+    server.disconnect().await;
 }

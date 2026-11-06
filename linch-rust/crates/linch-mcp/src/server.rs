@@ -6,15 +6,15 @@ use linch_core::ToolRegistry;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use thiserror::Error;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{Catalog, SkippedTool};
-use crate::config::{ConfigError, McpServerConfig, ReconnectPolicy};
+use crate::config::{ConfigError, McpServerConfig, McpTransport, ReconnectPolicy};
 use crate::connector::{ConnectError, Connector, Handler, connector};
 use crate::listener::Listener;
-use crate::tool::{Conn, Link, ToolSpec};
+use crate::tool::{Conn, Link, MAX_WAITING_CANCELS, ToolSpec};
 
 /// Most `tools/list` pages read in one listing.
 const MAX_LIST_PAGES: usize = 100;
@@ -88,6 +88,7 @@ impl McpServer {
         let link = Arc::new(Link {
             server: config.name.clone(),
             call_timeout: config.call_timeout,
+            stdio: matches!(config.transport, McpTransport::Stdio { .. }),
             conn: watch::Sender::new(None),
             status: watch::Sender::new(ServerStatus::Connected),
         });
@@ -148,7 +149,8 @@ impl McpServer {
     ///
     /// The registrations go at once. Then this waits for the transport to
     /// close; a stdio server gets its stdin closed, then `SIGTERM`, then
-    /// `SIGKILL`, a few seconds apart.
+    /// `SIGKILL`, a few seconds apart. A stdio server that has stopped
+    /// reading, so that closing its stdin hangs, gets `SIGKILL` after 10 s.
     pub async fn disconnect(mut self) {
         self.stop();
         if let Some(task) = self.task.take() {
@@ -316,6 +318,7 @@ impl Supervisor {
         self.link.conn.send_replace(Some(Conn {
             peer: live.service.peer().clone(),
             lost: live.lost.clone(),
+            cancels: Arc::new(Semaphore::new(MAX_WAITING_CANCELS)),
         }));
         self.sync(tools);
         self.link.status.send_replace(ServerStatus::Connected);

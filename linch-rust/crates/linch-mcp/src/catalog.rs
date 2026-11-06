@@ -121,6 +121,7 @@ mod tests {
         Arc::new(Link {
             server: "s".into(),
             call_timeout: Duration::from_secs(1),
+            stdio: false,
             conn: watch::Sender::new(None),
             status: watch::Sender::new(ServerStatus::Connected),
         })
