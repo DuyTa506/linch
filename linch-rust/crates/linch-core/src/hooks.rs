@@ -28,9 +28,6 @@ mod turn;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
-
 use serde_json::json;
 
 use crate::canonical::{Digest, digest_with_domain};
@@ -74,13 +71,17 @@ pub struct Hooks {
 impl Hooks {
     /// Digest of the registered policies, for the run contract.
     ///
-    /// Covers the set of `(point, policy_id, policy_version)` triples, sorted
-    /// by the point's wire name, then id, then version. So it does not
-    /// depend on registration order or on the order of [`HookPoint`]'s
-    /// variants, and a policy registered twice at one point counts once. A
-    /// resumed run compares it with the digest it started with.
+    /// Covers every `(point, policy_id, policy_version)` triple, point by
+    /// point in a fixed order (`user_prompt_submit`, `context_build`,
+    /// `pre_tool_use`, `permission_request`, `post_tool_use`, `stop`,
+    /// `post_turn`) and in chain order within a point, duplicates kept. The
+    /// order of a point's hooks decides what its chain does (a rewrite feeds
+    /// the next hook, a block stops it), so reordering them, or registering
+    /// one twice, changes the digest; the order of registrations across
+    /// points does not. A resumed run compares it with the digest it started
+    /// with.
     pub fn policy_digest(&self) -> Digest {
-        let set: BTreeSet<(String, Arc<str>, u32)> = [
+        let triples = [
             self.user_prompt_submit.policies(),
             self.context_build.policies(),
             self.pre_tool_use.policies(),
@@ -91,12 +92,8 @@ impl Hooks {
         ]
         .into_iter()
         .flatten()
-        .map(|(point, id, version)| (point_name(point), id, version))
+        .map(|(point, id, version)| json!([point_name(point), &*id, version]))
         .collect();
-        let triples = set
-            .into_iter()
-            .map(|(point, id, version)| json!([point, &*id, version]))
-            .collect();
         digest_with_domain(POLICY_DOMAIN, &JsonValue::Array(triples))
             .expect("an array of flat triples is far below the depth limit")
     }

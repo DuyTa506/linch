@@ -1,5 +1,6 @@
 //! Property tests: the `pre_tool_use` chain against a reference fold (the
-//! #102 invariant), and digest independence from registration order.
+//! #102 invariant), and digest independence from the order of registrations
+//! across points.
 
 use proptest::prelude::*;
 
@@ -163,19 +164,21 @@ proptest! {
         prop_assert_eq!(done.records.len(), expected_calls.len());
     }
 
+    /// Only each point's own sequence counts: registering point by point
+    /// gives the digest of registering interleaved.
     #[test]
-    fn the_digest_ignores_registration_order(
-        regs in prop::collection::vec((0u8..7, 0u8..3, 1u32..3), 0..10)
-            .prop_flat_map(|regs| (Just(regs.clone()), Just(regs).prop_shuffle())),
+    fn the_digest_ignores_the_order_across_points(
+        regs in prop::collection::vec((0u8..7, 0u8..3, 1u32..3), 0..10),
     ) {
-        let (ordered, shuffled) = regs;
+        let mut grouped = regs.clone();
+        grouped.sort_by_key(|(point, _, _)| *point);
         let log = new_log();
         let a = Hooks::default();
         let b = Hooks::default();
-        for (point, id, version) in &ordered {
+        for (point, id, version) in &regs {
             let _ = register_at(&a, *point, &format!("p{id}"), *version, &log);
         }
-        for (point, id, version) in &shuffled {
+        for (point, id, version) in &grouped {
             let _ = register_at(&b, *point, &format!("p{id}"), *version, &log);
         }
         prop_assert_eq!(a.policy_digest(), b.policy_digest());

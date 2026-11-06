@@ -338,7 +338,7 @@ fn registration_rejects_bad_settings() {
 }
 
 #[test]
-fn the_digest_covers_the_policy_set_and_pins_its_encoding() {
+fn the_digest_covers_each_points_chain_in_order_and_pins_its_encoding() {
     let log = new_log();
     let empty = Hooks::default();
     assert_eq!(
@@ -362,18 +362,40 @@ fn the_digest_covers_the_policy_set_and_pins_its_encoding() {
         &hooks.pre_tool_use,
         Scripted::new("cache", &log, |_| Act::Answer(PreToolUseResponse::Continue)),
     );
-    // Sorted by wire name: `post_tool_use` before `pre_tool_use`, unlike the
-    // variants' declaration order.
-    let expected = json!([["post_tool_use", "redact", 2], ["pre_tool_use", "cache", 1]]);
+    // Points in their fixed order, each chain in registration order with
+    // its duplicate kept (R1-rpc 9).
+    let expected = json!([
+        ["pre_tool_use", "cache", 1],
+        ["pre_tool_use", "cache", 1],
+        ["post_tool_use", "redact", 2]
+    ]);
     assert_eq!(
         hooks.policy_digest(),
         digest_with_domain(POLICY_DOMAIN, &expected).unwrap()
     );
 
     post.dispose();
-    let after = json!([["pre_tool_use", "cache", 1]]);
+    let after = json!([["pre_tool_use", "cache", 1], ["pre_tool_use", "cache", 1]]);
     assert_eq!(
         hooks.policy_digest(),
         digest_with_domain(POLICY_DOMAIN, &after).unwrap()
     );
+}
+
+/// The order of a point's hooks decides what its chain does (a rewrite feeds
+/// the next hook), so swapping two, or listing one twice, is another policy.
+#[test]
+fn the_digest_changes_with_a_chains_order_and_duplicates() {
+    let log = new_log();
+    let chain = |ids: &[&str]| {
+        let hooks = Hooks::default();
+        for id in ids {
+            let continue_ = |_: &PreToolUseRequest| Act::Answer(PreToolUseResponse::Continue);
+            let _ = register(&hooks.pre_tool_use, Scripted::new(id, &log, continue_));
+        }
+        hooks.policy_digest()
+    };
+    assert_eq!(chain(&["a", "b"]), chain(&["a", "b"]));
+    assert_ne!(chain(&["a", "b"]), chain(&["b", "a"]));
+    assert_ne!(chain(&["a"]), chain(&["a", "a"]));
 }
