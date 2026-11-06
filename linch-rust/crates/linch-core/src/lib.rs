@@ -19,6 +19,7 @@
 pub mod agent;
 pub mod canonical;
 pub mod compaction;
+pub mod coordination;
 pub mod events;
 pub mod hooks;
 pub mod ids;
@@ -47,6 +48,7 @@ pub use canonical::{
     digest_with_domain, to_canonical_string,
 };
 pub use compaction::CompactionSpec;
+pub use coordination::{Correlator, InMemoryMailbox, Mailbox, MailboxError, MailboxMessage};
 pub use events::{
     Envelope, Event, EventError, IgnorableEvent, Persistence, SubagentEvent, WIRE_VERSION,
 };
