@@ -13,6 +13,7 @@ use linch_ext::workflow::{
     WorkflowOptions, WorkflowStatus, run_workflow,
 };
 use serde_json::json;
+use tokio::sync::Notify;
 
 use crate::common::TestDb;
 
@@ -114,8 +115,10 @@ async fn a_crashed_workflow_resumes_in_a_new_process() {
         return;
     };
     let runs = AtomicUsize::new(0);
+    let reached_two = Notify::new();
     let flow = |wf: WorkflowContext, hang: bool| {
         let runs = &runs;
+        let reached_two = &reached_two;
         async move {
             let one = wf
                 .step("one", || async {
@@ -125,6 +128,7 @@ async fn a_crashed_workflow_resumes_in_a_new_process() {
             let two = wf
                 .step("two", || async move {
                     if hang {
+                        reached_two.notify_one();
                         std::future::pending::<()>().await;
                     }
                     Ok::<_, Infallible>(10)
@@ -135,12 +139,14 @@ async fn a_crashed_workflow_resumes_in_a_new_process() {
     };
     let crashed = process(&mut db).await;
     let run = run_workflow(options(&crashed), |wf| flow(wf, true));
-    // Dropping the future mid-step is a crash: no status write follows.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), run)
-            .await
-            .is_err()
-    );
+    // Dropping the future mid-step is a crash: no status write follows. Wait
+    // for step two to start rather than a fixed time, so a slow DB still has
+    // step one recorded.
+    tokio::select! {
+        _ = run => panic!("the hanging workflow finished"),
+        () = reached_two.notified() => {}
+        () = tokio::time::sleep(Duration::from_secs(30)) => panic!("step two never started"),
+    }
     let stored = crashed.load(NS, "migrate-42").await.unwrap().unwrap();
     assert_eq!(
         (stored.status, stored.records.len()),
