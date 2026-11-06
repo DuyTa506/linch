@@ -19,7 +19,7 @@ linch-tools = { path = "../linch-tools" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt"] }
+tokio = { version = "1.54.1", features = ["rt", "sync"] }
 # Replaces only the password of a DSN when a config is serialized (already
 # in the lockfile for linch-rpc).
 url = "2.5.8"
@@ -28,5 +28,7 @@ url = "2.5.8"
 futures = "0.3.34"
 # The `mcp_stdio_server` example serves linch-mcp's test server on stdio.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
+# Creates the Postgres test schema and counts its connections.
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "macros", "sync"] }

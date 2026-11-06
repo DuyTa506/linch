@@ -34,8 +34,9 @@
 //! MCP servers ([`McpConfig`]). Provider keys are never part of it;
 //! [`AgentConfig::open`] reads each one from the process environment.
 //! Custom tools and hooks are bound in code and passed to
-//! [`AgentConfig::open_with`]; anything else (other stores) is bound with
-//! [`AgentBuilder`]. The result is an [`OpenedAgent`], whose
+//! [`AgentConfig::open_with`], along with the [`PgPools`] that lets agents
+//! on one DSN share a Postgres pool; anything else (other stores) is bound
+//! with [`AgentBuilder`]. The result is an [`OpenedAgent`], whose
 //! [`close`](OpenedAgent::close) disconnects the MCP servers.
 
 #![forbid(unsafe_code)]
@@ -43,6 +44,7 @@
 mod config;
 mod error;
 mod open;
+mod pools;
 
 pub use config::{
     AgentConfig, McpConfig, McpTransportConfig, ProviderConfig, ReasoningSummaryConfig,
@@ -51,6 +53,7 @@ pub use config::{
 pub use error::OpenError;
 pub use linch_core::*;
 pub use open::OpenedAgent;
+pub use pools::PgPools;
 
 /// The MCP client (`linch-mcp`).
 pub use linch_mcp as mcp;

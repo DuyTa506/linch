@@ -89,7 +89,7 @@ async fn a_run_that_panics_ends_with_an_error_and_frees_its_id() {
     let tools = Arc::new(ToolRegistry::new());
     let _ = tools.register(Arc::new(Panics)).unwrap();
     let opened = config
-        .open_with(tools, Arc::new(Hooks::default()))
+        .open_with(tools, Arc::new(Hooks::default()), &linch::PgPools::new())
         .await
         .unwrap();
     lock(&server.0.tables)

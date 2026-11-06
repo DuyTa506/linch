@@ -21,17 +21,20 @@ use linch_tools::{LocalFs, ReadTracker, workspace_tools};
 
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::error::OpenError;
+use crate::pools::{PgPools, Shared};
 
 impl AgentConfig {
     /// Open the agent this config describes, with no tools or hooks beyond
-    /// what the config declares. Same as [`Self::open_with`] on an empty
-    /// registry and empty hooks.
+    /// what the config declares and a Postgres pool of its own. Same as
+    /// [`Self::open_with`] on an empty registry, empty hooks and a fresh
+    /// [`PgPools`].
     ///
     /// Raises:
     ///     OpenError: As for [`Self::open_with`].
     pub async fn open(self) -> Result<OpenedAgent, OpenError> {
         let tools = Arc::new(ToolRegistry::new());
-        self.open_with(tools, Arc::new(Hooks::default())).await
+        let hooks = Arc::new(Hooks::default());
+        self.open_with(tools, hooks, &PgPools::new()).await
     }
 
     /// Open the agent this config describes on top of tools and hooks bound
@@ -39,15 +42,19 @@ impl AgentConfig {
     ///
     /// Reads the provider key from the environment, registers the workspace
     /// tools into `tools`, validates the permission policy, opens the stores
-    /// (for Postgres: connects a pool and runs the migrations), connects the
-    /// MCP servers in order, then builds the agent. Nothing is written to
-    /// the stores. [`Agent::close_session`] drops what the workspace tools
-    /// recorded as read in that session, so its next write must read again.
+    /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
+    /// and running the migrations when no open agent uses one), connects
+    /// the MCP servers in order, then builds the agent. Nothing is written
+    /// to the stores. [`Agent::close_session`] drops what the workspace
+    /// tools recorded as read in that session, so its next write must read
+    /// again.
     ///
     /// Args:
     ///     tools: Registry the agent runs with. Tools already in it come
     ///         first; the workspace and MCP tools are added after them.
     ///     hooks: Hook chains the agent runs with.
+    ///     pools: Postgres pools shared with the other agents opened with
+    ///         it; unused with memory stores.
     ///
     /// Returns:
     ///     The built agent with the MCP servers it connected. Its contract
@@ -64,6 +71,7 @@ impl AgentConfig {
         self,
         tools: Arc<ToolRegistry>,
         hooks: Arc<Hooks>,
+        pools: &PgPools,
     ) -> Result<OpenedAgent, OpenError> {
         let provider = provider(self.provider)?;
         let reads = Arc::new(ReadTracker::new());
@@ -76,7 +84,7 @@ impl AgentConfig {
             PermissionPolicy::new(PermissionMode::Default, project_root)
         });
         let permissions = PermissionEngine::new(policy)?;
-        let (runs, sessions) = stores(self.stores).await?;
+        let (runs, sessions, pool) = stores(self.stores, pools).await?;
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
         let built = AgentBuilder::new(self.spec)
             .provider(provider)
@@ -89,7 +97,7 @@ impl AgentConfig {
             .on_session_close(move |session| reads.forget(session))
             .build();
         match built {
-            Ok(agent) => Ok(OpenedAgent { agent, mcp }),
+            Ok(agent) => Ok(OpenedAgent { agent, mcp, pool }),
             Err(error) => {
                 disconnect(mcp).await;
                 Err(error.into())
@@ -106,6 +114,8 @@ impl AgentConfig {
 pub struct OpenedAgent {
     agent: Agent,
     mcp: Vec<McpServer>,
+    /// Keeps the Postgres pool in its [`PgPools`] while this agent is open.
+    pool: Option<Arc<Shared>>,
 }
 
 impl OpenedAgent {
@@ -121,8 +131,10 @@ impl OpenedAgent {
 
     /// Disconnect every MCP server and wait for each to close (a stdio
     /// server's process to exit). Clones of the agent keep working, but
-    /// the MCP tools are no longer registered.
+    /// the MCP tools are no longer registered. The Postgres pool is not
+    /// closed: other agents may share it, and it goes once nothing uses it.
     pub async fn close(self) {
+        drop(self.pool);
         disconnect(self.mcp).await;
     }
 }
@@ -183,24 +195,27 @@ async fn register_workspace(
     Ok(canonical)
 }
 
-type Stores = (Arc<dyn RunStore>, Arc<dyn SessionStore>);
+/// The run and session stores, and for Postgres the pool's slot in
+/// `pools`, which the opened agent holds.
+type Stores = (
+    Arc<dyn RunStore>,
+    Arc<dyn SessionStore>,
+    Option<Arc<Shared>>,
+);
 
-async fn stores(config: StoreConfig) -> Result<Stores, OpenError> {
+async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenError> {
     match config {
         StoreConfig::Memory {} => Ok((
             Arc::new(MemoryRunStore::default()),
             Arc::new(MemorySessionStore::default()),
+            None,
         )),
         StoreConfig::Postgres { dsn } => {
-            let pool = linch_postgres::connect(&dsn, linch_postgres::CONNECT_TIMEOUT)
-                .await
-                .map_err(|error| OpenError::Store(Box::new(error)))?;
-            linch_postgres::migrate(&pool)
-                .await
-                .map_err(|error| OpenError::Store(Box::new(error)))?;
+            let (shared, pool) = pools.get(&dsn).await?;
             Ok((
                 Arc::new(PgRunStore::new(pool.clone())),
                 Arc::new(PgSessionStore::new(pool)),
+                Some(shared),
             ))
         }
     }
