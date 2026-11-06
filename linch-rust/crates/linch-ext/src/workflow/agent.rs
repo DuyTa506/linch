@@ -30,7 +30,12 @@ impl WorkflowContext {
     /// and the next resume runs the call again as a fresh run. A run that
     /// stops for an approval also fails the call; approve it with
     /// [`Agent::approve`] (drain the stream), then resume the workflow,
-    /// which reads the finished run's text.
+    /// which reads the finished run's text. A run the agent can no longer
+    /// continue (say, a [`RunError::ContractMismatch`] after the agent
+    /// changed) fails the call on every resume until the host ends it with
+    /// [`Agent::fail`]. The workflow's cancel token
+    /// aborts the run; step timeouts and retries do not apply, the
+    /// workflow deadline does.
     ///
     /// Args:
     ///     agent: The agent to run; its namespace and stores hold the run.

@@ -18,7 +18,9 @@ pub struct FilesystemConfig {
     /// Move a text tool result estimated above this many tokens (four bytes
     /// per token) into the filesystem, leaving its first lines and its path
     /// in the result (see [`linch_tools::vfs::ResultOffload`]). Absent:
-    /// results are never offloaded.
+    /// results are never offloaded. Turning offload on or off changes the
+    /// run contract, so a run cannot resume across that change; changing
+    /// the threshold does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_threshold_tokens: Option<u64>,
 }

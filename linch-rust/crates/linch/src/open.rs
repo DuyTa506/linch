@@ -178,7 +178,8 @@ impl OpenedAgent {
 
     /// Disconnect every MCP server and wait for each to close (a stdio
     /// server's process to exit). Clones of the agent keep working, but
-    /// the MCP tools are no longer registered. The Postgres pool is not
+    /// the MCP tools are no longer registered; the workspace and virtual
+    /// filesystem tools and the offload hook stay. The Postgres pool is not
     /// closed: other agents may share it, and it goes once nothing uses it.
     pub async fn close(self) {
         drop(self.pool);
