@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common::*;
 use linch_core::{
@@ -53,8 +53,11 @@ async fn a_subagent_runs_under_a_parent_run_with_its_definition() {
     let stores = Arc::new(Stores::default());
     let mut scout = SubagentDefinition::new("scout", "Reads around.", "Scout the code.");
     scout.tools = Some(vec!["Echo".into()]);
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let seen = closed.clone();
     let agent = builder(provider.clone(), &stores)
         .subagents(vec![scout])
+        .on_session_close(move |session| seen.lock().unwrap().push(session.to_string()))
         .build()
         .unwrap();
 
@@ -73,6 +76,8 @@ async fn a_subagent_runs_under_a_parent_run_with_its_definition() {
     assert_eq!(last.text, "User-provided instructions:\n\nScout the code.");
     let general = agent.subagent(None).unwrap();
     assert_ne!(general.contract(), child.contract());
+    child.close_session(&linch_core::SessionId::new("c1"));
+    assert_eq!(*closed.lock().unwrap(), ["c1"], "the parent's callbacks");
 }
 
 #[tokio::test]

@@ -47,7 +47,8 @@ impl Agent {
     /// The agent shares this agent's bindings and stores, sees the
     /// definition's tools without the subagent tools, cannot spawn, and has
     /// its own contract. Start its runs with [`Agent::run_child`] to record
-    /// the parent; the host drives and ends them.
+    /// the parent; the host drives and ends them. Its
+    /// [`Agent::close_session`] runs this agent's session-close callbacks.
     ///
     /// Raises:
     ///     BuildError: `Invalid` when this agent has no subagents or none
@@ -137,7 +138,7 @@ impl AgentInner {
             pricing: self.pricing.clone(),
             mailbox: self.mailbox.clone(),
             families: Default::default(),
-            session_close: Vec::new(),
+            session_close: self.session_close.clone(),
             registrations: Vec::new(),
         })
     }
