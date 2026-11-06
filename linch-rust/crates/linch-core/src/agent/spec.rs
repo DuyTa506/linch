@@ -13,7 +13,7 @@ use crate::provider::{ProviderRequest, ReasoningEffort, Thinking, ToolDefinition
 /// Domain separator for the run contract digest.
 const CONTRACT_DOMAIN: &str = "linch.agent.contract";
 
-fn default_concurrency() -> usize {
+fn default_concurrency() -> u32 {
     4
 }
 
@@ -44,7 +44,7 @@ pub struct AgentSpec {
     pub max_output_tokens: Option<u32>,
     /// Most read-scope tools that run at once (default 4; 0 counts as 1).
     #[serde(default = "default_concurrency")]
-    pub max_tool_concurrency: usize,
+    pub max_tool_concurrency: u32,
     /// Longest one tool call may run, in milliseconds; `None` waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_ms: Option<u64>,

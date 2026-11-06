@@ -113,7 +113,7 @@ impl Runner {
     async fn execute(&mut self, plan: BatchPlan) -> Result<Vec<crate::ToolResultBlock>, RunError> {
         let spec = &self.agent.spec;
         let options = ExecuteOptions {
-            max_concurrency: spec.max_tool_concurrency,
+            max_concurrency: usize::try_from(spec.max_tool_concurrency).unwrap_or(usize::MAX),
             call_timeout: spec.call_timeout(),
             cancel: self.cancel.clone(),
         };

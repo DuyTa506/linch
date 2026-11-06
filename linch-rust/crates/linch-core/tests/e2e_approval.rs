@@ -228,6 +228,7 @@ async fn an_agent_with_another_contract_cannot_continue_the_run() {
         fixture.stores.clone(),
     );
     let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
+    let epoch = fixture.stores.runs.load(NS, &run_id).await.unwrap().epoch;
     for stream in [
         agent.resume(run_id.clone(), RunOptions::new("s1")),
         agent.approve(run_id.clone(), allow, RunOptions::new("s1")),
@@ -238,5 +239,8 @@ async fn an_agent_with_another_contract_cannot_continue_the_run() {
             "{error:?}"
         );
     }
+    // Refused before the claim: the lease of whoever owns the run holds.
+    let record = fixture.stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.epoch, epoch);
     assert!(fixture.runs.lock().unwrap().is_empty());
 }

@@ -97,8 +97,13 @@ pub(super) async fn continue_run(
     outbox: Outbox,
 ) -> Result<(), RunError> {
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
-    // Check before claiming, so a mistaken call does not fence a live owner.
-    check(&runs.load(namespace, &run_id).await?, answers.is_some())?;
+    // Check before claiming, so a mistaken call does not fence a live owner;
+    // check again after, against the state the claim fixed.
+    check(
+        &runs.load(namespace, &run_id).await?,
+        &agent,
+        answers.is_some(),
+    )?;
     let lease = match runs.claim(namespace, &run_id, &options.owner).await {
         Ok(lease) => lease,
         Err(StoreError::InvalidTransition { from, .. }) if from.is_terminal() => {
@@ -110,14 +115,7 @@ pub(super) async fn continue_run(
         Err(error) => return Err(error.into()),
     };
     let record = runs.load(namespace, &run_id).await?;
-    check(&record, answers.is_some())?;
-    if record.contract != agent.contract {
-        return Err(RunError::ContractMismatch {
-            run_id,
-            expected: agent.contract,
-            found: record.contract,
-        });
-    }
+    check(&record, &agent, answers.is_some())?;
     let events = runs.events(namespace, &run_id, 0).await?;
     let entries = agent.sessions.load(namespace, &record.session_id).await?;
     let checkpoint = &record.checkpoint;
@@ -191,12 +189,20 @@ pub(super) async fn continue_run(
     runner.drive(step).await
 }
 
-/// Refuse a terminal run, and an approve on a run that is not suspended.
-fn check(record: &RunRecord, approving: bool) -> Result<(), RunError> {
+/// Refuse a terminal run, a run of another contract, and an approve on a
+/// run that is not suspended.
+fn check(record: &RunRecord, agent: &AgentInner, approving: bool) -> Result<(), RunError> {
     if record.status.is_terminal() {
         return Err(RunError::Terminal {
             run_id: record.run_id.clone(),
             status: record.status,
+        });
+    }
+    if record.contract != agent.contract {
+        return Err(RunError::ContractMismatch {
+            run_id: record.run_id.clone(),
+            expected: agent.contract,
+            found: record.contract,
         });
     }
     let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
