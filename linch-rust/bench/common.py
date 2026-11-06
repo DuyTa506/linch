@@ -83,30 +83,34 @@ class Clock:
     def __init__(self, extra_pids: Callable[[], list[int]] = list) -> None:
         self.wall_ms: list[float] = []
         self.cpu_ms = 0.0
+        self.other_cpu_ms = 0.0  # the part of cpu_ms spent in `extra_pids`
         self.last: list = []  # the last timed run's events, for checks
         self._extra = extra_pids
         self._start = 0.0
-        self._cpu = 0.0
+        self._own = 0.0
+        self._other = 0.0
 
     def _other_ms(self) -> float:
         return sum(proc_cpu_ns(pid) for pid in self._extra()) / 1e6
 
-    # Reading other processes' /proc files costs this process CPU, so the
+    # Reading another process's CPU clock costs this process CPU, so the
     # reads sit outside the measured window: before our own clock at the
     # start, after it at the stop.
     def start(self) -> None:
-        other = self._other_ms()
-        self._cpu = time.process_time() * 1000 + other
+        self._other = self._other_ms()
+        self._own = time.process_time() * 1000
         self._start = time.perf_counter()
 
     def stop(self) -> None:
         self.wall_ms.append(1000 * (time.perf_counter() - self._start))
-        own = time.process_time() * 1000
-        self.cpu_ms += own + self._other_ms() - self._cpu
+        own = time.process_time() * 1000 - self._own
+        other = self._other_ms() - self._other
+        self.cpu_ms += own + other
+        self.other_cpu_ms += other
 
 
 def ok(clock: Clock, ops: float, op: str, rss_mb: float, **extra: Any) -> Result:
-    return {
+    result = {
         "status": "ok",
         "iterations": len(clock.wall_ms),
         "wall_ms": clock.wall_ms,
@@ -116,6 +120,9 @@ def ok(clock: Clock, ops: float, op: str, rss_mb: float, **extra: Any) -> Result
         "peak_rss_mb": rss_mb,
         **extra,
     }
+    if clock.other_cpu_ms:
+        result["sidecar_cpu_ms"] = clock.other_cpu_ms
+    return result
 
 
 def na(reason: str) -> Result:
