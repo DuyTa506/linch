@@ -41,6 +41,7 @@ from .errors import (
 )
 from .events import (
     AssistantEvent,
+    ChildRunStatusEvent,
     CompactionEvent,
     ContextBuildEvent,
     Envelope,
@@ -52,6 +53,9 @@ from .events import (
     PartialAssistantEvent,
     PermissionRequestEvent,
     ResultEvent,
+    SkillCompletedEvent,
+    SkillInvokedEvent,
+    SubagentEvent,
     SuspendedEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
@@ -62,7 +66,7 @@ from .events import (
 )
 from .run import Run
 from .server import Server
-from .tools import HostTool, Scope, tool
+from .tools import HostTool, Scope, ToolOutput, tool
 
 __all__ = [
     "Agent",
@@ -71,6 +75,7 @@ __all__ = [
     "Allow",
     "AssistantEvent",
     "Callback",
+    "ChildRunStatusEvent",
     "CompactionEvent",
     "ConnectionClosed",
     "ContextBuildEvent",
@@ -107,9 +112,13 @@ __all__ = [
     "Scope",
     "Server",
     "SessionBusy",
+    "SkillCompletedEvent",
+    "SkillInvokedEvent",
+    "SubagentEvent",
     "SuspendedEvent",
     "ToolCallEndEvent",
     "ToolCallStartEvent",
+    "ToolOutput",
     "ToolProgressEvent",
     "ToolSearch",
     "UnknownEvent",

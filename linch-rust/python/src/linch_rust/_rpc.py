@@ -24,7 +24,7 @@ import orjson
 
 from .callbacks import Callback
 from .errors import ConnectionClosed, LinchError, error_from, run_end_error
-from .tools import HostTool
+from .tools import HostTool, ToolOutput
 
 JsonObject = dict[str, Any]
 # A host tool's or callback's own failure; the code is application-defined.
@@ -205,7 +205,10 @@ class Connection:
             tool = handlers.tools.get(name) if handlers else None
             if tool is None:
                 raise _Refused(_METHOD_NOT_FOUND, f"no host tool {name!r}")
-            return {"value": await tool.fn(**params.get("input", {}))}
+            output = await tool.fn(**params.get("input", {}))
+            if isinstance(output, ToolOutput):
+                return output.wire()
+            return {"value": output}
         if method == "hook.call":
             key = (params.get("point", ""), params.get("policy_id", ""))
             found = handlers.callbacks.get(key) if handlers else None
