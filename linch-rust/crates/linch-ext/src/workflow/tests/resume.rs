@@ -13,6 +13,29 @@ fn ok<T>(value: T) -> std::future::Ready<Result<T, Infallible>> {
     std::future::ready(Ok(value))
 }
 
+fn assert_send<T: Send>(value: T) -> T {
+    value
+}
+
+#[tokio::test]
+async fn a_workflow_future_is_send_so_a_host_can_spawn_it() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let run = run_workflow(
+        options(&store, "w1", &Recorder::default()),
+        |wf| async move {
+            let fetched = wf.step("fetch", || ok(1u8));
+            let answer = wf.interrupt::<u8>("ask", json!(null));
+            let both = wf.settled([Box::pin(fetched) as Branch<'_>, Box::pin(answer)]);
+            both.await
+        },
+    );
+    let result = assert_send(run).await;
+    assert!(matches!(result, Err(WorkflowError::Suspended(_))));
+}
+
+type Branch<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<u8, WorkflowError>> + Send + 'a>>;
+
 #[tokio::test]
 async fn run_workflow_returns_the_function_value_and_marks_it_completed() {
     let store = Arc::new(MemoryJournalStore::default());

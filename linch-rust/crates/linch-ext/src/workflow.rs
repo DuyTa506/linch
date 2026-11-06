@@ -3,7 +3,10 @@
 //!
 //! [`run_workflow`] runs an async function on a [`WorkflowContext`]. Its
 //! journaled calls are [`WorkflowContext::step`] (host code with side
-//! effects); everything else in the function runs again on every resume.
+//! effects) and [`WorkflowContext::interrupt`] (a question for a human);
+//! [`WorkflowContext::parallel`] and [`WorkflowContext::settled`] fan
+//! branches out, and [`WorkflowContext::phase`] marks progress. Everything
+//! else in the function runs again on every resume.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -15,24 +18,46 @@
 //! async fn review(wf: WorkflowContext) -> Result<String, WorkflowError> {
 //!     wf.phase("Find");
 //!     let diff = wf.step("fetch", || async { Ok::<_, std::io::Error>("diff".to_owned()) });
-//!     Ok(format!("reviewed {}", diff.await?))
+//!     let diff = diff.await?;
+//!     let approved: bool = wf.interrupt("approve", &diff).await?;
+//!     Ok(if approved { format!("merged {diff}") } else { "closed".to_owned() })
 //! }
 //!
 //! # async fn run() -> Result<(), WorkflowError> {
 //! let journal = Arc::new(MemoryJournalStore::default());
-//! let options = WorkflowOptions::new(journal, "tenant-a", "review-pr-42");
-//! assert_eq!(run_workflow(options, review).await?, "reviewed diff");
+//! let options = WorkflowOptions::new(journal.clone(), "tenant-a", "review-pr-42");
+//! match run_workflow(options, review).await {
+//!     Err(WorkflowError::Suspended(question)) => assert_eq!(question.key, "approve"),
+//!     other => panic!("{other:?}"),
+//! }
+//! let mut options = WorkflowOptions::new(journal, "tenant-a", "review-pr-42");
+//! options.resume.insert("approve".into(), true.into());
+//! assert_eq!(run_workflow(options, review).await?, "merged diff");
 //! # Ok(()) }
+//! # let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+//! # runtime.unwrap().block_on(run()).unwrap();
 //! ```
 //!
 //! ## Replay rule
 //!
-//! A call is identified by a content key ([`step_key`]) plus its
-//! occurrence: how many calls with that key came before it in this run.
-//! A resume replays every call whose key and occurrence the journal holds,
-//! so the function must take the same path again: branching on a
-//! journaled value is fine, branching on the clock, randomness or the
+//! A call is identified by a content key ([`step_key`], [`interrupt_key`])
+//! plus its occurrence: how many calls with that key came before it in
+//! this run. A resume replays every call whose key and occurrence the
+//! journal holds, so the function must take the same path again: branching
+//! on a journaled value is fine, branching on the clock, randomness or the
 //! environment is not, unless that value comes from a step.
+//!
+//! ## Running across processes
+//!
+//! With a durable store, any process with the same workflow function can
+//! continue a workflow: call [`run_workflow`] with the same namespace and
+//! workflow id. Nothing re-invokes an interrupted workflow; the host finds
+//! unfinished ones (status `running` or `failed`) and calls again. A claim
+//! always wins and fences out the process that held the workflow before,
+//! whose next journal write fails, so keep one runner per workflow (for
+//! example with a job queue). A suspended workflow holds no process: any
+//! process can read the question with [`JournalStore::load`] and answer it
+//! through [`WorkflowOptions::resume`].
 //!
 //! ## Journal stores
 //!
@@ -44,13 +69,16 @@ pub mod conformance;
 mod context;
 mod engine;
 mod error;
+mod fanout;
+mod interrupt;
 mod journal;
 mod memory;
 mod policy;
+mod step;
 #[cfg(test)]
 mod tests;
 
-pub use context::{EventSink, StepOptions, WorkflowContext};
+pub use context::{EventSink, WorkflowContext};
 pub use engine::{WorkflowOptions, run_workflow};
 pub use error::{BoxError, WorkflowError};
 pub use journal::{
@@ -59,3 +87,4 @@ pub use journal::{
 };
 pub use memory::MemoryJournalStore;
 pub use policy::Retry;
+pub use step::StepOptions;

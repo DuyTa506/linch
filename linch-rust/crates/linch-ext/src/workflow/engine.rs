@@ -25,6 +25,9 @@ pub struct WorkflowOptions {
     /// Answers to pending interrupts, by interrupt key. Each answer is
     /// used once, then journaled.
     pub resume: HashMap<String, JsonValue>,
+    /// Most branches one `parallel` or `settled` call runs at once; 0
+    /// counts as 1. Each call, nested ones included, gets its own limit.
+    pub max_concurrency: usize,
     /// Default limit on each step attempt; a step's own
     /// [`StepOptions::timeout`](super::StepOptions::timeout) wins.
     pub step_timeout: Option<Duration>,
@@ -41,8 +44,8 @@ pub struct WorkflowOptions {
 
 impl WorkflowOptions {
     /// Options for workflow `workflow_id` of `namespace`, journaled in
-    /// `journal`, with no answers, no timeouts, a fresh cancel token and no
-    /// event sink.
+    /// `journal`, with no answers, 4 branches at once, no timeouts, a fresh
+    /// cancel token and no event sink.
     pub fn new(
         journal: Arc<dyn JournalStore>,
         namespace: impl Into<String>,
@@ -53,6 +56,7 @@ impl WorkflowOptions {
             namespace: namespace.into(),
             workflow_id: workflow_id.into(),
             resume: HashMap::new(),
+            max_concurrency: 4,
             step_timeout: None,
             deadline: None,
             cancel: CancellationToken::new(),
