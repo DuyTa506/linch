@@ -382,8 +382,7 @@ fn the_digest_covers_each_points_chain_in_order_and_pins_its_encoding() {
     );
 }
 
-/// The order of a point's hooks decides what its chain does (a rewrite feeds
-/// the next hook), so swapping two, or listing one twice, is another policy.
+/// A point's hook order decides what its chain does, so order and repeats count.
 #[test]
 fn the_digest_changes_with_a_chains_order_and_duplicates() {
     let log = new_log();
