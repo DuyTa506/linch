@@ -170,12 +170,15 @@ class AgentConfig(TypedDict, total=False):
         stores: `{"type": "memory"}` (the default: runs live in the agent
             handle) or `{"type": "postgres", "dsn": ...}`.
         workspace: An existing directory, the root of the built-in tools
-            `Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash`. Absent: no
+            `Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash`; a relative
+            path resolves against the server's working directory. Absent: no
             workspace tools.
         bash: Whether the workspace tools include `Bash`, which runs
             commands as the server's user. On when absent.
-        permissions: `{"mode": ..., "project_root": ...}` and rules. Mode
-            `default` (read tools run, write and exec tools ask) when absent.
+        permissions: `{"mode": ..., "project_root": ...}` and rules.
+            `project_root` is required and must be an absolute path: path
+            rules resolve against it. Mode `default` (read tools run, write
+            and exec tools ask) when absent.
         mcp_servers: MCP servers connected in order when the agent opens.
         skills: Whether the agent has skills: the built-in `verify` and
             those in `config_dir/skills`, called through the `Skill` tool.
