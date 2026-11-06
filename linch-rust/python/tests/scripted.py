@@ -1,38 +1,13 @@
-"""Scripted-provider turns and agent configs for the tests."""
+"""Scripted agent configs for the tests, and the client's scripted turns."""
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 
 from linch_rust import AgentConfig
+from linch_rust.scripted import MODEL, text_turn, tool_turn
 
-MODEL = "scripted-model"
-_USAGE = {"input_tokens": 3, "output_tokens": 1, "cache_read_tokens": 0, "cache_creation_tokens": 0}
-
-
-def text_turn(text: str, model: str = MODEL) -> dict[str, Any]:
-    """A provider turn from `model` that answers `text` and ends the run."""
-    return {
-        "events": [
-            {"type": "message_start", "model": model},
-            {"type": "text_delta", "text": text},
-            {"type": "message_end", "stop_reason": "end_turn", "usage": _USAGE},
-        ]
-    }
-
-
-def tool_turn(call_id: str, name: str, input: dict[str, Any]) -> dict[str, Any]:
-    """A provider turn that calls tool `name` once."""
-    return {
-        "events": [
-            {"type": "message_start", "model": MODEL},
-            {"type": "tool_use_start", "id": call_id, "name": name},
-            {"type": "tool_use_input_delta", "id": call_id, "json_delta": json.dumps(input)},
-            {"type": "tool_use_end", "id": call_id},
-            {"type": "message_end", "stop_reason": "tool_use", "usage": _USAGE},
-        ]
-    }
+__all__ = ["MODEL", "config", "text_turn", "tool_turn"]
 
 
 def config(turns: list[dict[str, Any]], mode: str = "default", **extra: Any) -> AgentConfig:
