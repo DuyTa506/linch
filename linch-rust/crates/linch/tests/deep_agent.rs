@@ -252,6 +252,37 @@ async fn a_project_subagent_overrides_the_roster_entry_of_its_name() {
 }
 
 #[tokio::test]
+async fn a_reload_keeps_the_roster_and_the_skill_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join(".linch/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let file = "---\ndescription: My own researcher.\ntools: [Read]\n---\nResearch.";
+    std::fs::write(agents.join("researcher.md"), file).unwrap();
+    let extra = json!({"workspace": dir.path(), "skills": true, "subagents": true});
+    let (opened, tools) = open(config(vec![], with(ephemeral(), extra))).await;
+    let (_subagents, skipped) = opened.reload_subagents().await.unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let listing = description(&tools, "Subagent");
+    for name in ["researcher", "planner", "implementer", "verification"] {
+        let line = format!("\n- {name}: ");
+        assert_eq!(
+            listing.matches(&line).count(),
+            1,
+            "{name} once in:\n{listing}"
+        );
+    }
+    assert!(
+        listing.contains("- researcher: My own researcher."),
+        "{listing}"
+    );
+    let (_skills, _) = opened.reload_skills().await.unwrap();
+    assert!(
+        tools.snapshot().resolve("Skill").is_some(),
+        "Skill is still offered"
+    );
+}
+
+#[tokio::test]
 async fn a_retained_worker_answers_with_its_id() {
     let turns = vec![
         call(

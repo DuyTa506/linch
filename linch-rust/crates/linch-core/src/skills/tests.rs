@@ -101,7 +101,8 @@ async fn the_tool_returns_the_substituted_body() {
     fmt.body = "fix $ARGUMENTS in ${LINCH_SESSION_ID}".into();
     let mut off = skill("off", "Hidden.");
     off.disable_model_invocation = true;
-    let tool = SkillTool::new(vec![fmt, off]);
+    let set = SkillSet::new(vec![fmt, off]).unwrap();
+    let tool = SkillTool::new(crate::agent::Versions::new(Arc::new(set)));
     let out = tool
         .execute(input(json!({"skill": "/fmt", "args": "a.rs"})), context())
         .await

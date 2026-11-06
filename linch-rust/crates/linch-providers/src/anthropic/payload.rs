@@ -9,9 +9,11 @@ use linch_core::{
 use serde_json::json;
 
 use super::DEFAULT_MAX_TOKENS;
+use super::catalog::Native;
 
-/// The streaming request body for `request`.
-pub(crate) fn build(request: &ProviderRequest) -> Result<JsonValue, ProviderError> {
+/// The streaming request body for `request`; `native` renders its
+/// catalog changes as tool blocks (see [`super::catalog`]).
+pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue, ProviderError> {
     if request.output_schema.is_some() {
         return Err(invalid(
             "the Anthropic adapter does not support output_schema yet",
@@ -37,18 +39,23 @@ pub(crate) fn build(request: &ProviderRequest) -> Result<JsonValue, ProviderErro
         ));
     }
     let cache = request.cache_control.map(cache_block);
+    let mut catalog = native.then(|| Native::new(&request.tools, &request.messages));
     let mut body = json!({
         "model": request.model,
         "max_tokens": max_tokens,
         "stream": true,
-        "messages": messages(&request.messages, cache.as_ref())?,
+        "messages": messages(&request.messages, cache.as_ref(), catalog.as_mut())?,
     });
     let system = system(&request.system, cache.as_ref());
     if !system.is_empty() {
         body["system"] = system.into();
     }
-    if !request.tools.is_empty() {
-        body["tools"] = tools(&request.tools).into();
+    let kept: Vec<ToolDefinition> = (request.tools.iter())
+        .filter(|tool| catalog.as_ref().is_none_or(|catalog| catalog.keeps(tool)))
+        .cloned()
+        .collect();
+    if !kept.is_empty() {
+        body["tools"] = tools(&kept).into();
     }
     if let Some(choice) = &request.tool_choice {
         body["tool_choice"] = tool_choice(choice);
@@ -128,16 +135,30 @@ fn system(blocks: &[SystemBlock], cache: Option<&JsonValue>) -> Vec<JsonValue> {
 }
 
 /// The conversation; with caching on, the last block of the last user
-/// message is the second breakpoint.
+/// message is the second breakpoint. A `native` catalog's tool blocks
+/// follow the message of their notice, in a `system` message before the
+/// next assistant turn or at the end.
 fn messages(
     conversation: &[Message],
     cache: Option<&JsonValue>,
+    mut native: Option<&mut Native>,
 ) -> Result<Vec<JsonValue>, ProviderError> {
     let last_user = conversation
         .iter()
         .rposition(|message| message.role == Role::User);
     let mut out = Vec::with_capacity(conversation.len());
+    let mut pending = Vec::new();
     for (index, message) in conversation.iter().enumerate() {
+        if let Some(native) = native.as_deref_mut() {
+            if message.role == Role::Assistant {
+                flush(&mut out, &mut pending);
+            }
+            for block in &message.content {
+                if let ContentBlock::CatalogChange(change) = block {
+                    pending.extend(native.blocks(change, tool)?);
+                }
+            }
+        }
         let (role, mut content) = match message.role {
             Role::Assistant => ("assistant", assistant(message)?),
             Role::User => ("user", user(message)?),
@@ -152,7 +173,17 @@ fn messages(
         }
         out.push(json!({"role": role, "content": content}));
     }
+    flush(&mut out, &mut pending);
     Ok(out)
+}
+
+/// Put the `pending` tool blocks in a `system` message, unless no message
+/// came before them.
+fn flush(out: &mut Vec<JsonValue>, pending: &mut Vec<JsonValue>) {
+    let blocks = std::mem::take(pending);
+    if !blocks.is_empty() && !out.is_empty() {
+        out.push(json!({"role": "system", "content": blocks}));
+    }
 }
 
 fn assistant(message: &Message) -> Result<Vec<JsonValue>, ProviderError> {
@@ -250,16 +281,15 @@ fn image_block(source: &ImageSource) -> JsonValue {
 }
 
 fn tools(tools: &[ToolDefinition]) -> Vec<JsonValue> {
-    tools
-        .iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-            })
-        })
-        .collect()
+    tools.iter().map(tool).collect()
+}
+
+fn tool(tool: &ToolDefinition) -> JsonValue {
+    json!({
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+    })
 }
 
 fn tool_choice(choice: &ToolChoice) -> JsonValue {

@@ -199,14 +199,15 @@ pub fn kind(event: &Event) -> String {
         .to_owned()
 }
 
-/// The messages of a session log, in order.
+/// The messages of a session log, in order, without its frozen prefix.
 pub async fn messages(sessions: &dyn SessionStore, session: &str) -> Vec<Message> {
     let entries = sessions.load(NS, &SessionId::new(session)).await.unwrap();
     entries
         .into_iter()
-        .map(|entry| match entry {
-            LogEntry::Message(entry) => (*entry.message).clone(),
+        .filter_map(|entry| match entry {
+            LogEntry::Message(entry) => Some((*entry.message).clone()),
             LogEntry::Projection(_) => panic!("no projections in P4"),
+            LogEntry::Prefix(_) => None,
         })
         .collect()
 }

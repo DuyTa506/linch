@@ -9,7 +9,7 @@ use linch_core::Skill;
 use yaml_rust2::Yaml;
 
 use super::frontmatter::{self, get};
-use super::{SkipReason, Skipped, entries, name_error, valid_name};
+use super::{NOT_FOLLOWED, SkipReason, Skipped, entries, name_error, symlink, valid_name};
 
 /// Load the skills in `config_dir/skills`, one per directory holding a
 /// `SKILL.md`.
@@ -31,11 +31,16 @@ use super::{SkipReason, Skipped, entries, name_error, valid_name};
 ///
 /// Returns:
 ///     The skills sorted by name, and in directory order each directory
-///     left out: a symlink (never followed), one without a `SKILL.md`, an
-///     unreadable one, a bad frontmatter, or a name a tool or an earlier
-///     skill already has. Nothing at all when `skills/` cannot be listed.
+///     left out: a symlink or a symlinked `SKILL.md` (never followed), one
+///     without a `SKILL.md`, an unreadable one, a bad frontmatter, or a
+///     name a tool or an earlier skill already has. A symlinked `skills/`
+///     alone is skipped; nothing at all when `skills/` cannot be listed.
 pub fn load_skills(config_dir: &Path, tool_names: &HashSet<String>) -> (Vec<Skill>, Vec<Skipped>) {
-    let Some(Ok(entries)) = entries(&config_dir.join("skills")) else {
+    let root = config_dir.join("skills");
+    if let Some(link) = symlink(&root) {
+        return (Vec::new(), vec![link]);
+    }
+    let Some(Ok(entries)) = entries(&root) else {
         return (Vec::new(), Vec::new());
     };
     let mut skills: Vec<Skill> = Vec::new();
@@ -52,7 +57,7 @@ pub fn load_skills(config_dir: &Path, tool_names: &HashSet<String>) -> (Vec<Skil
         };
         let kind = match entry.file_type() {
             Ok(kind) if kind.is_symlink() => {
-                skip(SkipReason::IoError, "symlinks are not followed".into());
+                skip(SkipReason::IoError, NOT_FOLLOWED.into());
                 continue;
             }
             Ok(kind) => kind,
@@ -64,7 +69,12 @@ pub fn load_skills(config_dir: &Path, tool_names: &HashSet<String>) -> (Vec<Skil
         if !kind.is_dir() {
             continue;
         }
-        let raw = match fs::read_to_string(path.join("SKILL.md")) {
+        let skill_md = path.join("SKILL.md");
+        if symlink(&skill_md).is_some() {
+            skip(SkipReason::IoError, NOT_FOLLOWED.into());
+            continue;
+        }
+        let raw = match fs::read_to_string(skill_md) {
             Ok(raw) => raw,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 skip(SkipReason::MissingSkillMd, "SKILL.md not found".into());

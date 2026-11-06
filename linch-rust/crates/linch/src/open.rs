@@ -25,6 +25,9 @@ use crate::error::OpenError;
 use crate::files::Files;
 use crate::pools::{PgPools, Shared};
 use crate::project::{self, Loaded, Skipped};
+use linch_ext::deep_agent::DeepAgent;
+
+mod reload;
 
 impl AgentConfig {
     /// Open the agent this config describes, with no tools or hooks beyond
@@ -137,14 +140,13 @@ impl AgentConfig {
             files.remember(&hooks);
         }
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
+        let config_dir = project::dir(self.config_dir, root.as_deref());
         let mut project = match self.skills || self.subagents {
-            true => {
-                let root = root.as_deref();
-                project::load(self.config_dir, root, self.skills, self.subagents, &tools).await
-            }
+            true => project::load(config_dir.clone(), self.skills, self.subagents, &tools).await,
             false => Loaded::default(),
         };
         deep::add_roster(deep.as_ref(), &mut project);
+        let registry = Arc::clone(&tools);
         let forget = files.forget();
         let mut builder = AgentBuilder::new(files.teach(self.spec))
             .provider(provider)
@@ -171,6 +173,9 @@ impl AgentConfig {
         if self.mailbox {
             builder = builder.mailbox(Arc::new(InMemoryMailbox::new()));
         }
+        if let Some(search) = self.tool_search {
+            builder = builder.tool_search(search);
+        }
         let skipped = project.skipped;
         match builder.build() {
             Ok(agent) => {
@@ -180,6 +185,9 @@ impl AgentConfig {
                     mcp,
                     pool,
                     skipped,
+                    config_dir,
+                    tools: registry,
+                    deep,
                 })
             }
             Err(error) => {
@@ -201,6 +209,11 @@ pub struct OpenedAgent {
     /// Keeps the Postgres pool in its [`PgPools`] while this agent is open.
     pool: Option<Arc<Shared>>,
     skipped: Vec<Skipped>,
+    /// Where [`Self::reload_skills`] and [`Self::reload_subagents`] scan.
+    config_dir: PathBuf,
+    tools: Arc<ToolRegistry>,
+    /// The deep agent preset, whose roster a reload keeps.
+    deep: Option<DeepAgent>,
 }
 
 impl OpenedAgent {

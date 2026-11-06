@@ -72,6 +72,7 @@ impl Runner {
         if self.agent.child {
             plan.refuse_asks(CANNOT_ASK);
         }
+        self.refuse_unoffered(&mut plan);
         for call in plan.calls() {
             let records = call.hook_records.clone();
             self.push_records(records, Some(&call.tool_use_id));
@@ -96,6 +97,8 @@ impl Runner {
         });
         let mut blocks: Vec<ContentBlock> = results.map(ContentBlock::ToolResult).collect();
         blocks.extend(self.notes().await?);
+        let notice = self.catalog_loads(&blocks);
+        blocks.extend(notice);
         let message = Message::new(Role::User, blocks);
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),

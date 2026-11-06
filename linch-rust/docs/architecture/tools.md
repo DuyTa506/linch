@@ -89,6 +89,34 @@ same handle type comes back from `HookChain::register`
 (`crates/linch-core/src/hooks/chain.rs:132`) and from the MCP client, so a
 host undoes a whole wiring by disposing the handles it kept.
 
+### Catalog changes mid-session
+
+A session's first prompt is logged with a `PrefixEntry`: the system blocks,
+the tools and the listed skills at that moment
+(`crates/linch-core/src/catalog.rs`). Every later request of the session
+starts with exactly those bytes, so the prompt cache keeps them whatever the
+registry, the skills or the subagents do. A change goes at the tail instead:
+a `CatalogChangeBlock` (Python Linch's `<system-reminder>` text) in the next
+user message the run logs anyway, so it costs no write.
+
+- A removed tool keeps its row; a call to it is refused as not registered.
+- An added tool is appended to the request's tools, which costs the cache
+  once. `native_catalog_changes` on `AnthropicOptions` or `ResponsesOptions`
+  sends it at the notice instead (off by default, not verified live).
+- A new description is told in text; a new input schema replaces its row.
+- A compaction never rewrites the prefix; its summary restates the changes.
+
+`Agent::reload_skills` and `Agent::reload_subagents` (and
+`OpenedAgent::reload_*`, which rescan the config directory) are reversible
+registrations of the same kind. The run contract stays the one the agent was
+built with.
+
+`AgentBuilder::tool_search(ToolSearch)` defers a large catalog
+(`crates/linch-core/src/tool_search.rs`): past `max_tools` a new session is
+offered only the tools whose `always_load` says so and `tool_search`. What a
+search finds is told as added tools at the tail and offered from the next
+request on; a call of a tool not offered is refused as deferred.
+
 ## How a batch runs
 
 The tool calls of one response go through two steps

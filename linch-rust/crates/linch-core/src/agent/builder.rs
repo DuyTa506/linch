@@ -3,19 +3,19 @@
 use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
-use super::{Agent, AgentInner, BuildError, Pricing, SessionClose};
+use super::{Agent, AgentInner, BuildError, Pricing, SessionClose, Versions};
 use crate::coordination::{Mailbox, SendMessageTool};
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
 use crate::json::JsonObject;
-use crate::message::SystemBlock;
 use crate::permissions::PermissionEngine;
 use crate::provider::Provider;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
-use crate::skills::{self, Skill, SkillTool};
+use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
+use crate::tool_search::{SearchTool, ToolSearch};
 use crate::usage::Usage;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
@@ -38,6 +38,7 @@ pub struct AgentBuilder {
     pricing: Option<Pricing>,
     mailbox: Option<Arc<dyn Mailbox>>,
     workers: Option<Workers>,
+    tool_search: Option<ToolSearch>,
 }
 
 impl AgentBuilder {
@@ -58,6 +59,7 @@ impl AgentBuilder {
             pricing: None,
             mailbox: None,
             workers: None,
+            tool_search: None,
         }
     }
 
@@ -162,6 +164,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Defer part of the catalog past `search`'s sizes, for the model to
+    /// find with the `tool_search` tool (see [`crate::tool_search`]).
+    /// [`Self::build`] registers that tool; the setting is part of the
+    /// contract.
+    pub fn tool_search(mut self, search: ToolSearch) -> Self {
+        self.tool_search = Some(search);
+        self
+    }
+
     /// Give the agent a mailbox for peer messages (see
     /// [`crate::coordination`]).
     ///
@@ -202,17 +213,16 @@ impl AgentBuilder {
         let sessions = self.sessions.ok_or(BuildError::Missing("session store"))?;
         let mut features = JsonObject::new();
         let mut built_ins = BuiltIns::default();
-        let mut listing = None;
-        let mut overlays = skills::Overlays::new();
-        let skills_on = self.skills.is_some();
+        let mut skill_versions = None;
         if let Some(skills) = self.skills {
-            let skills = skills::with_builtins(skills);
-            overlays = skills::overlays(&skills);
-            let value =
-                serde_json::to_value(&skills).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            let set = SkillSet::new(skills)?;
+            let value = serde_json::to_value(&set.skills)
+                .map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("skills".into(), value);
-            listing = listing_block(&skills);
-            built_ins.register(&self.tools, Arc::new(SkillTool::new(skills)))?;
+            let versions = Versions::new(Arc::new(set));
+            let tool = SkillTool::new(Arc::clone(&versions));
+            built_ins.register(&self.tools, Arc::new(tool))?;
+            skill_versions = Some(versions);
         }
         if let Some(mailbox) = &self.mailbox {
             let tool = SendMessageTool::new(Arc::clone(mailbox));
@@ -234,6 +244,7 @@ impl AgentBuilder {
             let value =
                 serde_json::to_value(&*roster).map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("subagents".into(), value);
+            subagents = Some(Versions::new(Arc::clone(&roster)));
             let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle), workers);
             built_ins.register(&self.tools, Arc::new(tool))?;
             if workers.background || workers.retain {
@@ -244,13 +255,19 @@ impl AgentBuilder {
                 let tool = StopTool::new(Arc::clone(&handle));
                 built_ins.register(&self.tools, Arc::new(tool))?;
             }
-            subagents = Some(roster);
+        }
+        if let Some(search) = self.tool_search {
+            let value =
+                serde_json::to_value(search).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            features.insert("tool_search".into(), value);
+            let tool = SearchTool::new(Arc::clone(&handle));
+            built_ins.register(&self.tools, Arc::new(tool))?;
         }
         let tools = self.tools.snapshot().contract_tools();
         let hooks = self.hooks.policy_digest();
         let contract = spec::contract_digest(&self.spec, &tools, hooks, &features)?;
-        let mut system = spec::prompt_block(&self.spec);
-        system.extend(listing.clone());
+        let system = spec::prompt_block(&self.spec);
+        let listing_at = skill_versions.as_ref().map(|_| system.len());
         let inner = Arc::new(AgentInner {
             provider,
             permissions,
@@ -263,11 +280,11 @@ impl AgentBuilder {
             namespace,
             contract,
             system,
+            listing_at,
             features,
-            skills: skills_on,
-            skill_listing: listing,
-            overlays: Arc::new(overlays),
+            skills: skill_versions,
             subagents,
+            tool_search: self.tool_search,
             workers,
             worker_registry: Default::default(),
             child: false,
@@ -281,18 +298,6 @@ impl AgentBuilder {
         let _ = handle.set(Arc::downgrade(&inner));
         Ok(Agent { inner })
     }
-}
-
-/// The skill listing as a cacheable system block; `None` when no skill is
-/// visible to the model.
-fn listing_block(skills: &[Skill]) -> Option<SystemBlock> {
-    let listing = skills::listing(skills);
-    (!listing.is_empty()).then(|| SystemBlock {
-        text: format!(
-            "The following skills are available for use with the Skill tool:\n\n{listing}"
-        ),
-        cacheable: true,
-    })
 }
 
 /// The built-in tools registered so far; disposed again if the build

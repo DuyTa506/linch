@@ -7,7 +7,7 @@ use linch_core::SubagentDefinition;
 use yaml_rust2::Yaml;
 
 use super::frontmatter::{self, get};
-use super::{SkipReason, Skipped, entries, name_error, valid_name};
+use super::{NOT_FOLLOWED, SkipReason, Skipped, entries, name_error, symlink, valid_name};
 
 /// Load the subagent definitions in `config_dir/agents`, one per `.md`
 /// file (the extension in any case).
@@ -28,9 +28,13 @@ use super::{SkipReason, Skipped, entries, name_error, valid_name};
 ///     The definitions sorted by name, and in file order each file left
 ///     out: a symlink (never followed), an unreadable one, a bad
 ///     frontmatter, or a name an earlier file already has (ignoring case).
-///     When `agents/` cannot be listed, it alone is skipped.
+///     When `agents/` is a symlink or cannot be listed, it alone is
+///     skipped.
 pub fn load_subagents(config_dir: &std::path::Path) -> (Vec<SubagentDefinition>, Vec<Skipped>) {
     let root = config_dir.join("agents");
+    if let Some(link) = symlink(&root) {
+        return (Vec::new(), vec![link]);
+    }
     let entries = match entries(&root) {
         None => return (Vec::new(), Vec::new()),
         Some(Ok(entries)) => entries,
@@ -57,7 +61,7 @@ pub fn load_subagents(config_dir: &std::path::Path) -> (Vec<SubagentDefinition>,
         };
         let kind = match entry.file_type() {
             Ok(kind) if kind.is_symlink() => {
-                skip(SkipReason::IoError, "symlinks are not followed".into());
+                skip(SkipReason::IoError, NOT_FOLLOWED.into());
                 continue;
             }
             Ok(kind) => kind,

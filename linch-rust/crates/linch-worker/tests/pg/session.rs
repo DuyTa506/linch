@@ -98,9 +98,10 @@ fn reply_agent(pool: &PgPool) -> Agent {
 async fn texts(pool: &PgPool, session: &str) -> Vec<String> {
     let sessions = PgSessionStore::new(pool.clone());
     let entries = sessions.load(NS, &SessionId::new(session)).await.unwrap();
-    let texts = entries.into_iter().map(|entry| match entry {
-        LogEntry::Message(entry) => entry.message.text(),
+    let texts = entries.into_iter().filter_map(|entry| match entry {
+        LogEntry::Message(entry) => Some(entry.message.text()),
         LogEntry::Projection(_) => panic!("no compaction here"),
+        LogEntry::Prefix(_) => None,
     });
     texts.collect()
 }

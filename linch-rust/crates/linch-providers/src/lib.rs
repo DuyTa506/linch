@@ -10,6 +10,7 @@ pub mod anthropic;
 mod api_key;
 pub mod deepseek;
 pub mod gemini;
+mod native;
 pub mod openai;
 mod openai_compat;
 mod pricing;

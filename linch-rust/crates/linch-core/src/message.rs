@@ -3,7 +3,9 @@
 //! Every block is tagged by `type` on the wire and rejects unknown fields, so
 //! a reader never silently drops data it does not understand.
 
+use crate::canonical::Digest;
 use crate::json::JsonObject;
+use crate::provider::ToolDefinition;
 use serde::{Deserialize, Serialize};
 
 /// Who authored a message. System text travels separately as [`SystemBlock`]s.
@@ -198,7 +200,11 @@ pub struct RedactedThinkingBlock {
 
 /// A runtime notice that the catalog offered to the model changed.
 ///
-/// It travels as user content so every provider sees it the same way.
+/// It travels as user content, so its text never gains system authority;
+/// every provider renders the text, and an adapter that can change tools
+/// in place also renders the added and removed tools natively. The
+/// structured fields are what the session's catalog folds (see
+/// [`crate::PrefixEntry`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogChangeBlock {
@@ -210,9 +216,26 @@ pub struct CatalogChangeBlock {
     /// Names of tools removed since the last notice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_tools: Vec<String>,
-    /// Wire definitions of the added tools.
+    /// The definition of each tool added or changed since the last notice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_definitions: Vec<JsonObject>,
+    pub tool_definitions: Vec<ToolDefinition>,
+    /// Each skill added or changed since the last notice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillStamp>,
+    /// Names of skills removed since the last notice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_skills: Vec<String>,
+}
+
+/// One skill as a catalog records it: its name and the digest of its
+/// definition, so a later change is found without keeping the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillStamp {
+    /// The skill's name.
+    pub name: String,
+    /// Digest of the whole skill definition.
+    pub digest: Digest,
 }
 
 /// One block of system prompt text.

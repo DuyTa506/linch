@@ -14,6 +14,7 @@ which calls run, ask or are denied.
 | MCP tools: `mcp__<server>__<tool>` | In the MCP server | `mcp_servers` |
 | Session tasks: `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate` | In the server | `tasks` ([Tasks](./tasks.md)) |
 | `Skill`, `Subagent`, `SubagentContinue`, `TaskStop`, `send_message` | In the server | `skills`, `subagents`, `workers`, `mailbox` ([Skills](./skills.md), [Subagents](./subagents.md)) |
+| `tool_search` | In the server | `tool_search` ([Agent config](./agent.md#top-level-fields)) |
 
 The `init` event of each run lists the tool names the model is offered, in
 order: host tools first, then the others.

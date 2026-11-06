@@ -12,22 +12,26 @@ use crate::ApiKey;
 /// Longest error summary kept in a [`ProviderError`].
 const MAX_ERROR_CHARS: usize = 500;
 
-/// POST `body` to `url` with `x-api-key` auth. A redirect is refused,
+/// POST `body` to `url` with `x-api-key` auth, and `beta` as the
+/// `anthropic-beta` header when there is one. A redirect is refused,
 /// never followed; any other non-2xx maps through [`status_error`].
 pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
     key: &ApiKey,
     body: &JsonValue,
+    beta: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, ProviderError> {
-    let request = client
+    let mut request = client
         .post(url)
         .header("x-api-key", key.expose())
         .header("anthropic-version", API_VERSION)
-        .header(ACCEPT, "text/event-stream")
-        .json(body)
-        .send();
+        .header(ACCEPT, "text/event-stream");
+    if let Some(beta) = beta {
+        request = request.header("anthropic-beta", beta);
+    }
+    let request = request.json(body).send();
     let response = cancel
         .run_until_cancelled(request)
         .await

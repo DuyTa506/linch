@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, Workers};
+use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, ToolSearch, Workers};
 use serde::{Deserialize, Serialize};
 
 use crate::profile::Profile;
@@ -78,6 +78,11 @@ pub struct AgentConfig {
     /// [`linch_core::coordination`]). Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mailbox: bool,
+    /// Past which sizes part of the catalog waits for the model to find it
+    /// with `tool_search` (see [`linch_core::tool_search`]). Off when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_search: Option<ToolSearch>,
     /// Directory holding `skills/` and `agents/`. Absent: `.linch`. A
     /// relative path resolves against the workspace root, or the process's
     /// working directory without a workspace. Unused unless `skills` or

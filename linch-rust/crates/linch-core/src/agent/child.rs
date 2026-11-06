@@ -10,10 +10,12 @@ use crate::registry::ToolSnapshot;
 use crate::runner::{self, RunStream};
 use crate::skills::SKILL_TOOL;
 use crate::subagents::{CONTINUE_TOOL, STOP_TOOL, SUBAGENT_TOOL, SubagentDefinition};
+use crate::tool_search::TOOL_SEARCH_TOOL;
 
 /// Which of the parent's tools a child run sees: never `Subagent` (a child
-/// cannot spawn) nor the worker tools (it has no workers), and only the
-/// named ones when the definition names any.
+/// cannot spawn), the worker tools (it has no workers) nor `tool_search`
+/// (it is offered every tool), and only the named ones when the
+/// definition names any.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildTools {
     only: Option<Vec<String>>,
@@ -28,7 +30,7 @@ impl ChildTools {
     }
 
     fn keeps(&self, name: &str) -> bool {
-        ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL].contains(&name)
+        ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL, TOOL_SEARCH_TOOL].contains(&name)
             && (self.only.as_ref()).is_none_or(|only| only.iter().any(|n| n == name))
     }
 
@@ -56,7 +58,8 @@ impl Agent {
     ///         digested.
     pub fn subagent(&self, name: Option<&str>) -> Result<Agent, BuildError> {
         let roster = (self.inner.subagents.as_ref())
-            .ok_or_else(|| BuildError::Invalid("this agent has no subagents".into()))?;
+            .ok_or_else(|| BuildError::Invalid("this agent has no subagents".into()))?
+            .current();
         let definition = roster.get(name).ok_or_else(|| {
             let name = name.unwrap_or_default().trim();
             BuildError::Invalid(format!("unknown subagent type: {name}"))
@@ -102,9 +105,7 @@ impl AgentInner {
         let filter = ChildTools::of(definition);
         let tools = filter.apply(&self.tools.snapshot());
         let mut system = spec::prompt_block(&self.spec);
-        if tools.resolve(SKILL_TOOL).is_some() {
-            system.extend(self.skill_listing.clone());
-        }
+        let listing_at = (tools.resolve(SKILL_TOOL).is_some()).then_some(system.len());
         system.push(SystemBlock {
             text: format!("User-provided instructions:\n\n{}", definition.body),
             cacheable: true,
@@ -127,11 +128,11 @@ impl AgentInner {
             namespace: self.namespace.clone(),
             contract,
             system,
+            listing_at,
             features,
-            skills: self.skills,
-            skill_listing: self.skill_listing.clone(),
-            overlays: Arc::clone(&self.overlays),
+            skills: self.skills.clone(),
             subagents: None,
+            tool_search: None,
             workers: Default::default(),
             worker_registry: Default::default(),
             child: true,

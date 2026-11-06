@@ -28,6 +28,7 @@ use crate::ApiKey;
 use crate::openai::{API_KEY_ENV, DEFAULT_BASE_URL};
 use crate::openai_compat::http;
 
+mod catalog;
 mod payload;
 mod stream;
 
@@ -72,6 +73,11 @@ pub struct ResponsesOptions {
     /// sends `store: false` and asks for encrypted reasoning, which zero
     /// data retention organizations need.
     pub store: bool,
+    /// Whether a tool added or removed mid-session goes in the input as
+    /// `additional_tools`, with an `allowed_tools` choice, keeping the
+    /// prompt cache, instead of in `tools`. Used only with gpt-5.4 and
+    /// later; off by default and not verified against the live API.
+    pub native_catalog_changes: bool,
 }
 
 impl ResponsesOptions {
@@ -83,6 +89,7 @@ impl ResponsesOptions {
             base_url: DEFAULT_BASE_URL.into(),
             reasoning_summary: None,
             store: true,
+            native_catalog_changes: false,
         }
     }
 

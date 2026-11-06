@@ -65,22 +65,25 @@ pub(crate) struct Loaded {
     pub(crate) skipped: Vec<Skipped>,
 }
 
+/// The config directory `dir` names: `.linch` when absent; a relative
+/// one resolves against `root` (the workspace), else the process's
+/// working directory.
+pub(crate) fn dir(dir: Option<PathBuf>, root: Option<&str>) -> PathBuf {
+    let dir = dir.unwrap_or_else(|| PathBuf::from(".linch"));
+    match root {
+        Some(root) => Path::new(root).join(dir),
+        None => std::path::absolute(&dir).unwrap_or(dir),
+    }
+}
+
 /// Load the skills and subagents turned on from `dir` off the async loop.
-/// `dir` defaults to `.linch`; a relative one resolves against `root` (the
-/// workspace), else the process's working directory. No skill may take
-/// the name of a tool in `tools` at this point.
+/// No skill may take the name of a tool in `tools` at this point.
 pub(crate) async fn load(
-    dir: Option<PathBuf>,
-    root: Option<&str>,
+    dir: PathBuf,
     skills: bool,
     subagents: bool,
     tools: &ToolRegistry,
 ) -> Loaded {
-    let dir = dir.unwrap_or_else(|| PathBuf::from(".linch"));
-    let dir = match root {
-        Some(root) => Path::new(root).join(dir),
-        None => std::path::absolute(&dir).unwrap_or(dir),
-    };
     let names = (tools.snapshot().definitions().into_iter())
         .map(|definition| definition.name)
         .collect();
@@ -106,6 +109,20 @@ pub(crate) async fn load(
         Ok(loaded) => loaded,
         Err(join) => std::panic::resume_unwind(join.into_panic()),
     }
+}
+
+/// The detail of a symlink a loader skipped.
+const NOT_FOLLOWED: &str = "symlinks are not followed";
+
+/// `path` skipped as a symlink when it is one. The check reads the link
+/// itself, so a file swapped for a link after it remains a window.
+fn symlink(path: &Path) -> Option<Skipped> {
+    let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    linked.then(|| Skipped {
+        path: path.to_owned(),
+        reason: SkipReason::IoError,
+        detail: NOT_FOLLOWED.into(),
+    })
 }
 
 /// The entries of `root` sorted by name, or `None` when `root` is not a

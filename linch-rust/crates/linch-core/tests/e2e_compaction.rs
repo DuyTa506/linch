@@ -131,6 +131,7 @@ fn view(entries: Vec<LogEntry>) -> Vec<Message> {
             LogEntry::Projection(p) => {
                 log.record_projection(p.replacement, p.reason);
             }
+            LogEntry::Prefix(p) => log.record_prefix(p),
         }
     }
     log.provider_view().iter().map(|m| (**m).clone()).collect()
@@ -228,7 +229,7 @@ async fn compaction_is_off_by_default_and_below_its_threshold() {
         let agent = agent_with(spec, provider.clone(), tools, permissions, stores.clone());
         finish(agent.run("go", RunOptions::new("s1"))).await;
         let log = entries(&stores).await;
-        assert!(log.iter().all(|e| matches!(e, LogEntry::Message(_))));
+        assert!(!log.iter().any(|e| matches!(e, LogEntry::Projection(_))));
         assert_eq!(
             provider.requests.lock().unwrap().len(),
             4,
@@ -250,7 +251,7 @@ async fn a_failed_summary_leaves_the_turn_uncompacted() {
     let run_id = stream.run_id().clone();
     let envelopes = finish(stream).await;
     let log = entries(&stores).await;
-    assert!(log.iter().all(|e| matches!(e, LogEntry::Message(_))));
+    assert!(!log.iter().any(|e| matches!(e, LogEntry::Projection(_))));
     let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
     let failed = (events.iter())
         .filter(|e| {

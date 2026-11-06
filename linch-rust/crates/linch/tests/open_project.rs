@@ -136,7 +136,7 @@ async fn skills_and_subagents_stay_off_unless_turned_on() {
 }
 
 #[tokio::test]
-async fn workers_and_a_mailbox_add_their_tools() {
+async fn workers_a_mailbox_and_tool_search_add_their_tools() {
     let dir = tempfile::tempdir().unwrap();
     let tools = Arc::new(ToolRegistry::new());
     let extra = json!({
@@ -144,10 +144,18 @@ async fn workers_and_a_mailbox_add_their_tools() {
         "subagents": true,
         "workers": {"background": true},
         "mailbox": true,
+        "tool_search": {},
     });
     let opened = open(config("notes", extra), &tools).await;
     let snapshot = tools.snapshot();
-    for name in ["Subagent", "SubagentContinue", "TaskStop", "send_message"] {
+    let names = [
+        "Subagent",
+        "SubagentContinue",
+        "TaskStop",
+        "send_message",
+        "tool_search",
+    ];
+    for name in names {
         assert!(snapshot.resolve(name).is_some(), "{name}");
     }
     opened.close().await;
@@ -164,4 +172,46 @@ async fn workers_and_a_mailbox_add_their_tools() {
         error.to_string().contains("workers need subagents"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn a_reload_rescans_the_config_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills = dir.path().join("skills");
+    write(
+        &skills.join("deploy/SKILL.md"),
+        "---\ndescription: Ship it.\n---\nDeploy.",
+    );
+    let tools = Arc::new(ToolRegistry::new());
+    let extra = json!({"skills": true, "subagents": true, "config_dir": dir.path()});
+    let opened = open(config("notes", extra), &tools).await;
+    write(
+        &skills.join("notes/SKILL.md"),
+        "---\ndescription: Take notes.\n---\nNotes for $ARGUMENTS.",
+    );
+    write(&skills.join("broken/SKILL.md"), "no frontmatter");
+    write(
+        &dir.path().join("agents/scout.md"),
+        "---\ndescription: Reads around.\n---\nScout.",
+    );
+
+    let (_skills, skipped) = opened.reload_skills().await.unwrap();
+    let reasons: Vec<SkipReason> = skipped.iter().map(|s| s.reason).collect();
+    assert_eq!(reasons, [SkipReason::InvalidFrontmatter]);
+    let (subagents, skipped) = opened.reload_subagents().await.unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let listed = || {
+        let snapshot = tools.snapshot();
+        let tool = snapshot.resolve("Subagent").unwrap().tool();
+        tool.description().to_owned()
+    };
+    assert!(listed().contains("- scout: Reads around."));
+    let (text, _) = skill_result(&opened).await;
+    assert!(text.ends_with("\n\nNotes for prod."), "{text}");
+    subagents.dispose();
+    assert!(!listed().contains("scout"));
+    opened.close().await;
+
+    let opened = open(config("notes", json!({})), &Arc::new(ToolRegistry::new())).await;
+    assert!(opened.reload_skills().await.is_err(), "skills are off");
 }

@@ -9,8 +9,10 @@ use tokio_util::sync::CancellationToken;
 use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
 use super::progress::Progress;
+use super::write::session_log;
 use super::{Family, Outbox};
 use crate::agent::{AgentInner, RunError};
+use crate::catalog::Catalog;
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
 use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
@@ -80,23 +82,6 @@ pub(super) struct Batch {
     pub(super) after_seq: Option<u64>,
 }
 
-/// The in-memory log of the stored session `entries`.
-pub(crate) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
-    let mut log = SessionLog::new();
-    for entry in entries {
-        match entry {
-            LogEntry::Message(entry) => {
-                let message = Arc::unwrap_or_clone(entry.message);
-                log.append(message, entry.visible, entry.historical);
-            }
-            LogEntry::Projection(entry) => {
-                log.record_projection(entry.replacement, entry.reason);
-            }
-        }
-    }
-    log
-}
-
 /// One run in progress: its journal, its session view and its accounting.
 pub(super) struct Runner {
     pub(super) agent: Arc<AgentInner>,
@@ -105,7 +90,15 @@ pub(super) struct Runner {
     pub(super) run: RunIdentity,
     pub(super) cancel: CancellationToken,
     pub(super) snapshot: Arc<ToolSnapshot>,
+    /// Whether a skill narrowed this turn's tools.
+    pub(super) narrowed: bool,
     pub(super) log: SessionLog,
+    /// The session's frozen prefix and what the model was told since;
+    /// `None` until the prefix is logged with the session's first prompt.
+    pub(super) catalog: Option<Catalog>,
+    /// The catalog version the run last diffed against (see
+    /// [`crate::catalog::version`]).
+    pub(super) seen: Option<(u64, u64, u64)>,
     /// Entries in the stored session log.
     pub(super) session_len: u64,
     pub(super) turn: u32,
@@ -135,6 +128,9 @@ impl Runner {
         let log = session_log(entries);
         let mut runner = Self {
             snapshot: agent.snapshot(),
+            narrowed: false,
+            catalog: Catalog::of(&log),
+            seen: None,
             agent,
             journal,
             outbox,
@@ -158,14 +154,18 @@ impl Runner {
     /// model just loaded sets them (see [`crate::skills`]).
     fn narrow(&mut self) -> Option<String> {
         self.snapshot = self.agent.snapshot();
-        if self.agent.overlays.is_empty() {
+        self.narrowed = false;
+        self.offered_only();
+        let set = self.agent.skill_set()?;
+        if set.overlays.is_empty() {
             return None;
         }
         let view = self.log.provider_view();
-        let overlay = skills::overlay(&view, &self.agent.overlays)?;
+        let overlay = skills::overlay(&view, &set.overlays)?;
         if let Some(allowed) = &overlay.allowed_tools {
             let keep = |name: &str| allowed.iter().any(|tool| tool == name);
             self.snapshot = Arc::new(self.snapshot.filtered(keep));
+            self.narrowed = true;
         }
         overlay.model.clone()
     }
@@ -265,7 +265,7 @@ impl Runner {
             return Ok(None);
         };
         add_context(&mut messages, context);
-        let mut request = self.agent.request(self.snapshot.definitions(), messages);
+        let mut request = self.request(messages);
         if let Some(model) = model {
             request.model = skills::model_override(&model, &request.model);
         }

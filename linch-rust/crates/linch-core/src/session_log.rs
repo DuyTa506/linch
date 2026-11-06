@@ -11,8 +11,10 @@
 //!   accumulated view by its `replacement` (invariant 18: a projection is a
 //!   logged, copy-on-write fact, never an in-place mutation).
 //!
-//! No method mutates or removes an existing entry; `append` and
-//! `record_projection` only ever add one. Every appended message is wrapped
+//! No method mutates or removes an existing entry; `append`,
+//! `record_projection` and `record_prefix` only ever add one. A
+//! [`PrefixEntry`] (the session's frozen request prefix) is in neither
+//! projection. Every appended message is wrapped
 //! in an `Arc` once; `full_history`/`provider_view` hand out a clone of the
 //! log's own `Arc`, so a read is a pointer clone, never a copy of message
 //! data (unlike the Python implementation, which must `deepcopy` on every
@@ -24,13 +26,17 @@ use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
 
+use serde::{Deserialize, Serialize};
+
 use crate::canonical::{self, Digest};
-use crate::message::Message;
+use crate::message::{Message, SkillStamp, SystemBlock};
+use crate::provider::ToolDefinition;
 
 #[cfg(test)]
 mod tests;
 
-/// One logged entry: a message, or a recorded compaction.
+/// One logged entry: a message, a recorded compaction, or the session's
+/// frozen prefix.
 ///
 /// No API mutates or removes an entry; a [`SessionLog`] only ever appends
 /// one of these.
@@ -40,6 +46,28 @@ pub enum LogEntry {
     Message(MessageEntry),
     /// A logged compaction: the provider view becomes `replacement`.
     Projection(ProjectionEntry),
+    /// The cached prefix of every request of the session.
+    Prefix(PrefixEntry),
+}
+
+/// The frozen prefix of a session: the system blocks and the tools its
+/// first request sent, logged with its first prompt.
+///
+/// Every later request of the session sends these system blocks and these
+/// tools first, byte for byte, so a provider's prompt cache keeps them
+/// across catalog changes. A change goes at the conversation's tail as a
+/// [`crate::CatalogChangeBlock`]; only a new session takes the live
+/// catalog into its own prefix. Neither projection holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefixEntry {
+    /// The system blocks of every request.
+    pub system: Vec<SystemBlock>,
+    /// The leading tools of every request, in order.
+    pub tools: Vec<ToolDefinition>,
+    /// The skills the system blocks list, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillStamp>,
 }
 
 /// A logged message, optionally excluded from one projection.
@@ -81,12 +109,29 @@ pub struct SessionLog {
     full: Arc<Vec<Arc<Message>>>,
     derived: Arc<Vec<Arc<Message>>>,
     fingerprint: FingerprintState,
+    /// Index in `entries` of the first prefix.
+    prefix: Option<usize>,
 }
 
 impl SessionLog {
     /// An empty log with no messages or projections.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Log the session's frozen prefix. Only the first one counts (see
+    /// [`Self::prefix`]); neither projection changes.
+    pub fn record_prefix(&mut self, prefix: PrefixEntry) {
+        self.prefix.get_or_insert(self.entries.len());
+        self.entries.push(LogEntry::Prefix(prefix));
+    }
+
+    /// The session's frozen prefix: the first one logged, if any.
+    pub fn prefix(&self) -> Option<&PrefixEntry> {
+        match self.entries.get(self.prefix?) {
+            Some(LogEntry::Prefix(prefix)) => Some(prefix),
+            _ => None,
+        }
     }
 
     /// Append one message, choosing which projections it joins.

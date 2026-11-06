@@ -53,9 +53,10 @@ use crate::hooks::ApprovalResponse;
 use crate::ids::RunId;
 pub(crate) use fail::fail;
 pub(crate) use family::{Families, Family};
-pub(crate) use turn::session_log;
+pub(crate) use write::session_log;
 
 mod batch;
+mod catalog;
 mod compact;
 mod end;
 mod fail;

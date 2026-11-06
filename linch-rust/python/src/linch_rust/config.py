@@ -45,6 +45,25 @@ class Filesystem(TypedDict, total=False):
     offload_threshold_tokens: int
 
 
+class ToolSearch(TypedDict, total=False):
+    """Past which sizes part of the catalog waits for `tool_search`.
+
+    `{}` turns it on with the defaults. Past `max_tools` a new session is
+    offered only the tools that always load and `tool_search`; the model
+    finds the rest by keyword or `select:a,b`, and they load for its next
+    request.
+
+    Attributes:
+        max_tools: The most tools, `tool_search` aside, offered inline; 30
+            when absent.
+        max_skills: The most skills listed inline; past it the listing only
+            names them. 50 when absent.
+    """
+
+    max_tools: int
+    max_skills: int
+
+
 class DeepAgentProfile(TypedDict):
     """A deep agent profile written out in full; every key is required.
 
@@ -149,6 +168,8 @@ class AgentConfig(TypedDict, total=False):
             `send_message` tool. A message addressed to a session id is
             added to that session's next user message (the next run's
             prompt when it is idle); it is lost if the server stops first.
+        tool_search: Whether a large catalog waits for the model to search
+            it, and past which sizes; see `ToolSearch`.
         config_dir: Directory holding `skills/` and `agents/`; `.linch`
             when absent. A relative path resolves against the workspace,
             or the server's working directory without one.
@@ -172,6 +193,7 @@ class AgentConfig(TypedDict, total=False):
     subagents: bool
     workers: Workers
     mailbox: bool
+    tool_search: ToolSearch
     config_dir: str
     filesystem: Filesystem
     tasks: bool

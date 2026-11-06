@@ -198,7 +198,8 @@ impl Runner {
         };
         // The feedback is a user message to append before the next turn,
         // which is what `ToolResults` already records and recovers.
-        let message = Message::user_text(feedback);
+        let mut message = Message::user_text(feedback);
+        message.content.extend(self.catalog_change());
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::Notification,

@@ -49,7 +49,8 @@ pub(super) fn appended(
 /// [`appended()`], except that a session that grew by other entries is not
 /// a conflict. The store admits one live run per session, so those entries
 /// came from runs that ended before this run was created, and the prompt is
-/// not in the session yet.
+/// not in the session yet. A session's first prompt lands after its frozen
+/// prefix, in the same write.
 pub(super) fn prompt_appended(
     checkpoint: &Checkpoint,
     session: &[LogEntry],
@@ -62,8 +63,13 @@ pub(super) fn prompt_appended(
             found,
         });
     }
-    let last = |entry: &LogEntry| matches!(entry, LogEntry::Message(e) if *e.message == *prompt);
-    Ok(found == checkpoint.session_len + 1 && session.last().is_some_and(last))
+    let start = usize::try_from(checkpoint.session_len).unwrap_or(usize::MAX);
+    Ok(match session.get(start..).unwrap_or_default() {
+        [LogEntry::Message(entry)] | [LogEntry::Prefix(_), LogEntry::Message(entry)] => {
+            *entry.message == *prompt
+        }
+        _ => false,
+    })
 }
 
 /// Whether the compaction projection was already appended: like
