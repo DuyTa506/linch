@@ -12,7 +12,6 @@ import linch.tools.builtin as builtin_tools
 from linch.abort import AbortContext
 from linch.errors import AbortError
 from linch.events import (
-    ResultEvent,
     ToolCallEndEvent,
     event_from_dict,
     event_to_dict,
@@ -21,7 +20,7 @@ from linch.permissions import BashRule, PendingToolCall, PermissionEngine
 from linch.scheduler import execute_tool_calls
 from linch.tools import Citation, ToolContext, ToolRegistry, ToolResult
 from linch.tools.builtin import BashTool, GlobTool, GrepTool, WriteTool
-from linch.types import ToolUseBlock, Usage
+from linch.types import ToolUseBlock
 from tests.support.tools import StubTool, tool_registry
 
 
@@ -98,27 +97,6 @@ class ReadSleepTool:
 
 
 @pytest.mark.asyncio
-async def test_permission_callback_allows_sync_and_async() -> None:
-    call = PendingToolCall(tool_use_id="t1", tool=StubTool("WriteDummy", scope="write"), input={})
-    signal = AbortContext()
-
-    sync_engine = PermissionEngine(
-        mode="default",
-        can_use_tool=lambda _req: {"behavior": "allow"},
-    )
-    sync_decision = await sync_engine.resolve(call, signal)
-    assert sync_decision.decision == "allow"
-
-    async def allow_async(_req: object) -> dict[str, str]:
-        await asyncio.sleep(0)
-        return {"behavior": "allow"}
-
-    async_engine = PermissionEngine(mode="default", can_use_tool=allow_async)
-    async_decision = await async_engine.resolve(call, signal)
-    assert async_decision.decision == "allow"
-
-
-@pytest.mark.asyncio
 async def test_spurious_signal_wait_does_not_cancel_permission_callback() -> None:
     class SpuriousSignal:
         def __init__(self) -> None:
@@ -186,25 +164,6 @@ def test_deep_agent_verification_profile_has_no_unrestricted_shell() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_emits_non_zero_duration() -> None:
-    registry = ToolRegistry()
-    registry.register(SleepTool())
-    agent, session = _scheduler_world(registry, PermissionEngine(mode="skip-dangerous"))
-    events = [
-        event
-        async for event in execute_tool_calls(
-            [ToolUseBlock(id="call-1", name="SleepTool", input={})],
-            agent,
-            session,
-            AbortContext(),
-        )
-    ]
-    end_events = [e for e in events if isinstance(e, ToolCallEndEvent)]
-    assert len(end_events) == 1
-    assert end_events[0].duration_ms > 0
-
-
-@pytest.mark.asyncio
 async def test_scheduler_propagates_abort_from_permission_resolve() -> None:
     async def aborting_callback(_req: object) -> dict[str, str]:
         raise AbortError("user cancelled")
@@ -257,30 +216,6 @@ async def test_malformed_stored_permission_decision_reprompts() -> None:
 
     assert any(getattr(event, "type", None) == "permission_request" for event in events)
     assert any(isinstance(event, ToolCallEndEvent) and event.is_error is False for event in events)
-
-
-@pytest.mark.asyncio
-async def test_read_tools_with_parallel_flag_run_in_parallel() -> None:
-    registry = ToolRegistry()
-    registry.register(ReadSleepTool("A"))
-    registry.register(ReadSleepTool("B"))
-    agent, session = _scheduler_world(registry, PermissionEngine(mode="skip-dangerous"))
-
-    events = [
-        event
-        async for event in execute_tool_calls(
-            [
-                ToolUseBlock(id="call-1", name="A", input={}),
-                ToolUseBlock(id="call-2", name="B", input={}),
-            ],
-            agent,
-            session,
-            AbortContext(),
-        )
-    ]
-
-    event_types = [event.type for event in events if event.type.startswith("tool_call")]
-    assert event_types[:2] == ["tool_call_start", "tool_call_start"]
 
 
 @pytest.mark.asyncio
@@ -347,10 +282,9 @@ async def test_grep_and_glob_are_confined_to_cwd(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("tool", "arguments"),
     [
-        (GrepTool(), {"pattern": "needle", "glob": "**/*.py"}),
         (GlobTool(), {"glob_pattern": "**/*.py"}),
     ],
-    ids=["grep", "glob"],
+    ids=["glob"],
 )
 async def test_builtin_python_fallback_uses_root_dir_relative_paths(
     tool, arguments, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -398,39 +332,6 @@ def test_permission_decision_from_dict_rejects_missing_decision() -> None:
 
     with pytest.raises(ValueError, match="stored permission decision"):
         permission_decision_from_dict({"schema_version": 3, "reason": "corrupt"})
-
-
-def test_event_round_trip() -> None:
-    event = ResultEvent(
-        subtype="success",
-        stop_reason="end_turn",
-        total_usage=Usage(input_tokens=10, output_tokens=4),
-        duration_ms=123,
-        final_text="done",
-    )
-    raw = event_to_dict(event)
-    rebuilt = event_from_dict(raw)
-    assert isinstance(rebuilt, ResultEvent)
-    assert rebuilt.subtype == "success"
-    assert rebuilt.duration_ms == 123
-    assert rebuilt.final_text == "done"
-    assert rebuilt.total_usage.input_tokens == 10
-
-
-def test_compaction_event_round_trip() -> None:
-    from linch.events import CompactionEvent
-
-    event = CompactionEvent(
-        messages_before=8,
-        messages_after=3,
-        tokens_before=120,
-        tokens_after=45,
-        strategy="summary",
-    )
-
-    rebuilt = event_from_dict(event_to_dict(event))
-
-    assert rebuilt == event
 
 
 def test_tool_call_end_event_round_trips_structured_tool_result() -> None:

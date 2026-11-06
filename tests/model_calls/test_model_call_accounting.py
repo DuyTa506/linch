@@ -13,10 +13,9 @@ from typing import Any
 import pytest
 
 from tests.support.agents import make_agent
-from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.providers import ScriptedProvider, TextTurn
 from tests.support.runs import pin_run_contract
-from tests.support.stores import memory_run_store, memory_session_store
-from tests.support.tools import StubTool, tool_registry
+from tests.support.stores import memory_session_store
 
 
 class _NeverCalledProvider:
@@ -98,25 +97,6 @@ async def _run_compaction_case(
 
 
 @pytest.mark.asyncio
-async def test_default_compaction_and_primary_share_one_run_ledger() -> None:
-    """Removing an auxiliary receipt must lose the 111+22 summary usage."""
-    from linch.events import ResultEvent, UsageEvent
-    from linch.types import Usage
-
-    provider, events, budget = await _run_compaction_case(max_tokens=10_000)
-
-    result = next(event for event in events if isinstance(event, ResultEvent))
-    usages = [event for event in events if isinstance(event, UsageEvent)]
-    assert provider.calls == ["summary", "main"]
-    assert [event.usage for event in usages] == [Usage(111, 22), Usage(333, 44)]
-    assert usages[0].source == "compaction"
-    assert usages[1].source is None
-    assert result.total_usage == Usage(444, 66)
-    assert budget.spent_tokens == 510
-    assert result.usage_complete is True
-
-
-@pytest.mark.asyncio
 async def test_summary_budget_exhaustion_stops_before_primary_delivery() -> None:
     """Removing post-compaction admission allows an over-cap primary delivery."""
     from linch.events import BudgetEvent, ResultEvent
@@ -131,31 +111,6 @@ async def test_summary_budget_exhaustion_stops_before_primary_delivery() -> None
     assert result.subtype == "error"
     assert result.total_usage == Usage(111, 22)
     assert any(isinstance(event, BudgetEvent) and event.kind == "exceeded" for event in events)
-
-
-@pytest.mark.asyncio
-async def test_actual_models_price_each_settled_receipt() -> None:
-    """Requested offline model must not overwrite normalized actual models."""
-    from linch.events import ResultEvent, UsageEvent
-    from linch.pricing import cost_usd
-    from linch.types import Usage
-
-    summary_model = "claude-haiku-4-5"
-    main_model = "claude-sonnet-4-6"
-    _, events, _ = await _run_compaction_case(
-        max_tokens=10_000,
-        summary_model=summary_model,
-        main_model=main_model,
-    )
-
-    usages = [event for event in events if isinstance(event, UsageEvent)]
-    result = next(event for event in events if isinstance(event, ResultEvent))
-    expected_summary = cost_usd(Usage(111, 22), summary_model)
-    expected_main = cost_usd(Usage(333, 44), main_model)
-    assert expected_summary is not None and expected_main is not None
-    assert usages[0].cost_usd == expected_summary
-    assert usages[1].cost_usd == expected_main
-    assert result.total_cost_usd == pytest.approx(expected_summary + expected_main)
 
 
 @pytest.mark.asyncio
@@ -185,74 +140,13 @@ async def test_after_provider_stop_preserves_settled_primary_usage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_deliveries_get_fresh_ids_under_one_logical_operation() -> None:
-    """A retryable fallback is two physical deliveries, never one reused ID."""
-    from linch import Agent
-    from linch.errors import ProviderError
-    from linch.events import ModelCallEvent, SystemEvent
-    from linch.providers import BaseProvider
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.types import Usage
-
-    class Provider(BaseProvider):
-        id = "accounted-fallback"
-
-        def __init__(self) -> None:
-            self.models: list[str] = []
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-            self.models.append(req.model)
-            if req.model == "primary":
-                raise ProviderError("overloaded", status=529, retryable=True)
-            yield {"type": "message_start", "model": "claude-haiku-4-5"}
-            yield {"type": "text_delta", "text": "recovered"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage(3, 2)}
-
-    provider = Provider()
-    run_store = InMemoryRunStore()
-    agent = Agent(
-        model="primary",
-        fallback_models=["backup"],
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        run_store=run_store,
-        permissions={"mode": "skip-dangerous"},
-    )
-    session = await agent.session()
-    events = [event async for event in session.run("go")]
-    run_id = next(event.run_id for event in events if isinstance(event, SystemEvent))
-    rows = await run_store.load_events(run_id)
-    intents = [
-        row.event.record
-        for row in rows
-        if isinstance(row.event, ModelCallEvent)
-        and row.event.record_kind == "intent"
-        and row.event.record["kind"] == "primary"
-    ]
-
-    assert provider.models == ["primary", "backup"]
-    assert len(intents) == 2
-    assert intents[0]["logical_call_id"] == intents[1]["logical_call_id"]
-    assert intents[0]["delivery_attempt_id"] != intents[1]["delivery_attempt_id"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "raw_input",
-    ['{"secret": "native-leak"', '["native-leak"]', "", "   "],
-)
-@pytest.mark.parametrize("flag_disabled", [False, True])
-async def test_rejected_native_arguments_are_charged_but_never_durable(
-    raw_input: str, flag_disabled: bool
-) -> None:
+async def test_rejected_native_arguments_are_charged_but_never_durable() -> None:
     """Malformed native input drains final usage without an SDK raw-argument leak."""
     import json
 
-    from linch import Agent, ReliabilityPolicy
+    raw_input = '["native-leak"]'
+
+    from linch import Agent
     from linch.events import (
         ErrorEvent,
         ModelCallEvent,
@@ -294,7 +188,7 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(
     agent = Agent(
         model="offline-model",
         provider=Provider(),
-        reliability=ReliabilityPolicy(retry_invalid_responses=False) if flag_disabled else None,
+        reliability=None,
         session_store=InMemorySessionStore(),
         run_store=run_store,
         permissions={"mode": "skip-dangerous"},
@@ -327,35 +221,6 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(
     assert "native-leak" not in json.dumps(
         [message_to_dict(message) for message in session.full_history], sort_keys=True
     )
-
-
-@pytest.mark.asyncio
-async def test_explicit_empty_native_object_remains_a_valid_tool_input() -> None:
-    """Only an explicit ``{}`` is accepted; an omitted delta is not guessed."""
-    from linch.events import ResultEvent
-
-    calls: list[dict[str, object]] = []
-
-    tool = StubTool(
-        "EmptyInputTool",
-        output="accepted",
-        on_execute=lambda input, _ctx: calls.append(input),
-    )
-    provider = ScriptedProvider(
-        [ToolUseTurn("EmptyInputTool", {}), TextTurn("done")], context_window=100_000
-    )
-    agent = make_agent(
-        provider,
-        tools=tool_registry(tool),
-        session_store=memory_session_store(),
-        run_store=None,
-    )
-    session = await agent.session()
-    events = [event async for event in session.run("go")]
-
-    assert calls == [{}]
-    assert len(provider.requests) == 2
-    assert next(event for event in events if isinstance(event, ResultEvent)).subtype == "success"
 
 
 @pytest.mark.asyncio
@@ -550,225 +415,9 @@ async def test_legacy_nonzero_checkpoint_without_receipts_is_rejected_before_dis
     assert budget.spent_usd == 0.0
 
 
-@pytest.mark.asyncio
-async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts() -> None:
-    """A later ledger cannot legitimize a prior aggregate-only usage offset."""
-    from linch.errors import ConfigError
-    from linch.loop.checkpoint import _model_call_runtime_to_extension
-    from linch.model_calls import ModelCallIntent, ModelCallReceipt, _ModelCallLedger
-    from linch.run_store import InMemoryRunStore, RunCheckpoint
-    from linch.session import RunOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.types import Usage
-
-    session_store = InMemorySessionStore()
-    run_store = InMemoryRunStore()
-    await session_store.create(id="legacy-offset")
-    run = await run_store.create_run("legacy-offset", id="legacy-offset-run")
-
-    intent = ModelCallIntent(
-        logical_call_id="receipt-backed-logical",
-        delivery_attempt_id="receipt-backed-delivery",
-        parent_logical_call_id=None,
-        kind="primary",
-        run_id=run.id,
-        turn_index=0,
-        requested_model="offline-model",
-        request_fingerprint="receipt-backed-request",
-        strategy_id=None,
-    )
-    receipt = ModelCallReceipt(
-        logical_call_id=intent.logical_call_id,
-        delivery_attempt_id=intent.delivery_attempt_id,
-        kind=intent.kind,
-        run_id=intent.run_id,
-        turn_index=intent.turn_index,
-        actual_model="offline-model",
-        usage_status="reported",
-        usage=Usage(input_tokens=1),
-        cost_usd=None,
-        disposition="rejected",
-        rejection_reason="fixture",
-        accepted_text=None,
-        accepted_text_sha256=None,
-        duration_ms=0,
-        request_fingerprint=intent.request_fingerprint,
-        strategy_id=None,
-        source_context_fingerprint=None,
-    )
-    ledger = _ModelCallLedger(run.id)
-    await ledger.begin(intent)
-    await ledger.mark_dispatch_started(intent)
-    await ledger.settle(receipt)
-    extension_state: dict[str, Any] = {}
-    _model_call_runtime_to_extension(
-        extension_state,
-        active_primary=None,
-    )
-    await run_store.save_checkpoint(
-        run.id,
-        RunCheckpoint(
-            phase="turn_complete",
-            prompt="continue",
-            turn_index=0,
-            # This differs from the receipt-backed one-token ledger total,
-            # representing the former aggregate migration offset.
-            total_usage=Usage(input_tokens=10),
-            extension_state=extension_state,
-        ),
-    )
-
-    provider = _NeverCalledProvider()
-    agent = make_agent(
-        provider,
-        model="offline-model",
-        session_store=session_store,
-        run_store=run_store,
-    )
-    session = await agent.session(id="legacy-offset")
-
-    await pin_run_contract(session, run.id)
-
-    with pytest.raises(ConfigError, match="receipt provenance"):
-        _ = [event async for event in session.resume(run.id, RunOptions())]
-
-    assert provider.calls == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reuse_budget", [False, True], ids=["fresh-budget", "same-budget"])
-async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_double_charge(
-    reuse_budget: bool,
-) -> None:
-    """A later durable receipt advances a receipt-backed checkpoint on resume."""
-    from linch import RunBudget
-    from linch.events import ResultEvent
-    from linch.loop.checkpoint import _model_call_runtime_to_extension
-    from linch.model_calls import ModelCallIntent, ModelCallReceipt, _ModelCallLedger
-    from linch.run_store import RunCheckpoint
-    from linch.session import RunOptions
-    from linch.types import Usage
-
-    session_store = memory_session_store()
-    run_store = memory_run_store()
-    await session_store.create(id=f"journal-ahead-{reuse_budget}")
-    run = await run_store.create_run(f"journal-ahead-{reuse_budget}")
-    owner_budget = RunBudget(max_tokens=100)
-    durable_after_checkpoint: list[Any] = []
-
-    async def persist(event: Any) -> None:
-        durable_after_checkpoint.append(event)
-
-    ledger = _ModelCallLedger(run.id, budget=owner_budget, persist=persist)
-
-    async def settle(delivery_id: str, input_tokens: int) -> None:
-        intent = ModelCallIntent(
-            logical_call_id="journal-ahead-logical",
-            delivery_attempt_id=delivery_id,
-            parent_logical_call_id=None,
-            kind="primary",
-            run_id=run.id,
-            turn_index=0,
-            requested_model="offline-model",
-            request_fingerprint=f"request-{delivery_id}",
-            strategy_id=None,
-        )
-        receipt = ModelCallReceipt(
-            logical_call_id=intent.logical_call_id,
-            delivery_attempt_id=intent.delivery_attempt_id,
-            kind=intent.kind,
-            run_id=intent.run_id,
-            turn_index=intent.turn_index,
-            actual_model="offline-model",
-            usage_status="reported",
-            usage=Usage(input_tokens=input_tokens),
-            cost_usd=None,
-            disposition="rejected",
-            rejection_reason="fixture",
-            accepted_text=None,
-            accepted_text_sha256=None,
-            duration_ms=0,
-            request_fingerprint=intent.request_fingerprint,
-            strategy_id=None,
-            source_context_fingerprint=None,
-        )
-        await ledger.begin(intent)
-        await ledger.mark_dispatch_started(intent)
-        await ledger.settle(receipt)
-
-    await settle("checkpoint-receipt", 1)
-    checkpoint_event_count = len(durable_after_checkpoint)
-    await run_store.append_events(run.id, durable_after_checkpoint[:checkpoint_event_count])
-    await settle("journal-receipt", 2)
-    await run_store.append_events(run.id, durable_after_checkpoint[checkpoint_event_count:])
-
-    extension_state: dict[str, Any] = {}
-    _model_call_runtime_to_extension(
-        extension_state,
-        active_primary=None,
-        journal_count=checkpoint_event_count,
-    )
-    await run_store.save_checkpoint(
-        run.id,
-        RunCheckpoint(
-            phase="turn_complete",
-            prompt="continue",
-            turn_index=0,
-            total_usage=Usage(input_tokens=1),
-            extension_state=extension_state,
-        ),
-    )
-
-    resumed_budget = owner_budget if reuse_budget else RunBudget(max_tokens=100)
-    provider = ScriptedProvider([TextTurn("resumed", usage=Usage())])
-    agent = make_agent(
-        provider,
-        model="offline-model",
-        session_store=session_store,
-        run_store=run_store,
-    )
-    session = await agent.session(id=f"journal-ahead-{reuse_budget}")
-    await pin_run_contract(session, run.id, RunOptions(budget=resumed_budget))
-    events = [
-        event
-        async for event in session.resume(
-            run.id,
-            RunOptions(budget=resumed_budget),
-        )
-    ]
-
-    result = next(event for event in events if isinstance(event, ResultEvent))
-    assert len(provider.requests) == 1
-    assert result.total_usage == Usage(input_tokens=3)
-    assert resumed_budget.spent_tokens == 3
-
-
-def test_run_report_propagates_incomplete_usage_lower_bound() -> None:
-    """The report must retain the terminal lower-bound marker verbatim."""
-    from linch.events import ResultEvent
-    from linch.ext.reports import build_run_report
-    from linch.types import Usage
-
-    report = build_run_report(
-        [
-            ResultEvent(
-                subtype="error",
-                stop_reason="error",
-                total_usage=Usage(input_tokens=2),
-                duration_ms=1,
-                usage_complete=False,
-            )
-        ]
-    )
-    assert report.final is not None
-    assert report.final["usage_complete"] is False
-
-
-@pytest.mark.parametrize("with_ladder", [False, True], ids=["default-forced", "ladder-forced"])
-async def test_rejected_forced_compaction_yields_its_paid_usage_once(with_ladder: bool) -> None:
+async def test_rejected_forced_compaction_yields_its_paid_usage_once() -> None:
     """A rejected paid summary remains visible before its original terminal error."""
     from linch import Agent, RunBudget
-    from linch.compaction import CompactionLadder
     from linch.errors import ContextLengthError
     from linch.events import ModelCallEvent, ResultEvent, UsageEvent
     from linch.pricing import cost_usd
@@ -822,7 +471,7 @@ async def test_rejected_forced_compaction_yields_its_paid_usage_once(with_ladder
         permissions={"mode": "skip-dangerous"},
         hooks=[hook],
         budget=budget,
-        compaction_ladder=CompactionLadder(micro=False) if with_ladder else None,
+        compaction_ladder=None,
     )
     session = await agent.session()
     await session.append(

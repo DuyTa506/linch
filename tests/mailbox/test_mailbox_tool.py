@@ -40,30 +40,6 @@ def _texts(message: Any) -> str:
 # --- send_message tool -------------------------------------------------------
 
 
-async def test_send_message_tool_addresses_a_peer() -> None:
-    from linch.coordination.mailbox import InMemoryMailbox
-    from linch.coordination.send_message import SendMessageTool
-    from linch.tools import ToolContext
-
-    box = InMemoryMailbox()
-
-    class _Sess:
-        mailbox_address = "alice"
-
-    tool = SendMessageTool(mailbox=box, get_session=lambda _sid: _Sess())
-    ctx = ToolContext(cwd=".", session_id="s1", run_id="r1", session_store=None)
-
-    result = await tool.execute({"to": "bob", "content": "task for you", "type": "assignment"}, ctx)
-
-    assert not result.is_error
-    drained = await box.drain("bob")
-    assert len(drained) == 1
-    assert drained[0].sender == "alice"
-    assert drained[0].recipient == "bob"
-    assert drained[0].content == "task for you"
-    assert drained[0].type == "assignment"
-
-
 async def test_send_message_tool_falls_back_to_session_id_address() -> None:
     from linch.coordination.mailbox import InMemoryMailbox
     from linch.coordination.send_message import SendMessageTool
@@ -83,14 +59,11 @@ async def test_send_message_tool_falls_back_to_session_id_address() -> None:
 # --- registration & default byte-identical ----------------------------------
 
 
-@pytest.mark.parametrize("configured", [True, False])
-async def test_mailbox_send_tool_registration(configured: bool) -> None:
-    from linch.coordination.mailbox import InMemoryMailbox
+async def test_send_message_tool_is_absent_without_a_mailbox() -> None:
     from tests.support.providers import ScriptedProvider, TextTurn
 
-    mailbox = InMemoryMailbox() if configured else None
-    agent = await _agent(ScriptedProvider([TextTurn(text="ok")]), mailbox=mailbox)
-    assert (agent.tools.get("send_message") is not None) is configured
+    agent = await _agent(ScriptedProvider([TextTurn(text="ok")]))
+    assert agent.tools.get("send_message") is None
 
 
 async def test_same_mailbox_plugin_object_keeps_agents_and_boxes_isolated() -> None:
@@ -287,7 +260,7 @@ async def test_agent_sends_to_peer_via_tool_during_turn() -> None:
         [
             ToolUseTurn(
                 tool_name="send_message",
-                tool_input={"to": "bob", "content": "do the thing"},
+                tool_input={"to": "bob", "content": "do the thing", "type": "assignment"},
             ),
             TextTurn(text="sent"),
         ]
@@ -296,9 +269,13 @@ async def test_agent_sends_to_peer_via_tool_during_turn() -> None:
     session = await agent.session()
     session.mailbox_address = "alice"
 
-    [event async for event in session.run("go")]
+    events = [event async for event in session.run("go")]
 
+    tool_end = next(event for event in events if event.type == "tool_call_end")
+    assert not tool_end.tool_result.is_error
     drained = await box.drain("bob")
     assert len(drained) == 1
     assert drained[0].sender == "alice"
+    assert drained[0].recipient == "bob"
     assert drained[0].content == "do the thing"
+    assert drained[0].type == "assignment"

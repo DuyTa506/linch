@@ -242,12 +242,16 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
         await asyncio.wait_for(consume(), timeout=0.05)
 
 
-@pytest.mark.parametrize("arguments", ["", " \n\t"])
 @pytest.mark.parametrize("completed_arguments", ["", " ", '{"value":"complete"}'])
-async def test_map_wire_events_normalizes_empty_tool_arguments(
-    arguments: str, completed_arguments: str
-) -> None:
+async def test_map_wire_events_normalizes_empty_tool_arguments(completed_arguments: str) -> None:
     import json
+
+    # The delta text itself is whitespace-only regardless of its exact
+    # content (confirmed against map_wire_events: the fallback below fires
+    # whenever `delta.strip()` is falsy, and json.loads tolerates the
+    # leading whitespace either way), so only one delta value is needed —
+    # the dimension under test is `completed_arguments`.
+    arguments = " \n\t"
 
     async def wire():
         yield {

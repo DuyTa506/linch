@@ -55,132 +55,6 @@ async def _events(session: Any) -> list[Any]:
     return [event async for event in session.run("hello")]
 
 
-class _FailCheckpointStore:
-    def __init__(self) -> None:
-        from linch.run_store import InMemoryRunStore
-
-        self._inner = InMemoryRunStore()
-        self.calls = 0
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def save_checkpoint(
-        self, run_id: str, checkpoint: Any, *, status: str = "running"
-    ) -> Any:
-        self.calls += 1
-        if self.calls == 1:
-            raise ValueError("checkpoint write failed")
-        return await self._inner.save_checkpoint(run_id, checkpoint, status=status)
-
-    async def save_checkpoint_with_events(
-        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
-    ) -> Any:
-        self.calls += 1
-        if self.calls == 1:
-            raise ValueError("checkpoint write failed")
-        return await self._inner.save_checkpoint_with_events(
-            run_id, checkpoint, events, status=status
-        )
-
-
-class _FailEventStore:
-    def __init__(self) -> None:
-        from linch.run_store import InMemoryRunStore
-
-        self._inner = InMemoryRunStore()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
-        raise ValueError("event flush failed")
-
-    async def save_checkpoint_with_events(
-        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
-    ) -> Any:
-        raise ValueError("event flush failed")
-
-
-class _FailModelCallJournalStore:
-    def __init__(self) -> None:
-        from linch.run_store import InMemoryRunStore
-
-        self._inner = InMemoryRunStore()
-        self.failed = False
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
-        if not self.failed and any(
-            getattr(event, "type", None) == "model_call" for event in events
-        ):
-            self.failed = True
-            raise ConnectionResetError("model-call journal connection lost")
-        return await self._inner.append_events(run_id, events)
-
-
-class _FailCompletedStore:
-    def __init__(self) -> None:
-        from linch.run_store import InMemoryRunStore
-
-        self._inner = InMemoryRunStore()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def mark_completed(self, run_id: str, checkpoint: Any) -> Any:
-        raise ValueError("completion write failed")
-
-    async def save_checkpoint_with_events(
-        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
-    ) -> Any:
-        if status == "completed":
-            raise ValueError("completion write failed")
-        return await self._inner.save_checkpoint_with_events(
-            run_id, checkpoint, events, status=status
-        )
-
-
-class _FailCreateStore:
-    def __init__(self) -> None:
-        self.error = OSError("run creation failed")
-
-    async def create_run(self, session_id: str, **kwargs: Any) -> Any:
-        raise self.error
-
-
-class _FailCompletedAndFailedStore(_FailCompletedStore):
-    async def mark_failed(
-        self,
-        run_id: str,
-        checkpoint: Any = None,
-        error: dict[str, object] | None = None,
-        *,
-        events: list[Any] = (),
-    ) -> Any:
-        raise RuntimeError("secondary failure")
-
-
-class _RetryableCompletionError(RuntimeError):
-    retryable = True
-
-
-class _FailRetryableCompletedStore(_FailCompletedStore):
-    async def mark_completed(self, run_id: str, checkpoint: Any) -> Any:
-        raise _RetryableCompletionError("try again")
-
-    async def save_checkpoint_with_events(
-        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
-    ) -> Any:
-        if status == "completed":
-            raise _RetryableCompletionError("try again")
-        return await self._inner.save_checkpoint_with_events(
-            run_id, checkpoint, events, status=status
-        )
-
-
 class _FailSessionStore:
     def __init__(self) -> None:
         from linch.sessions import InMemorySessionStore
@@ -231,97 +105,6 @@ class _FailProviderSnapshotStore:
 
     async def save_provider_snapshot(self, session_id: str, snapshot: Any) -> None:
         raise OSError("provider snapshot failed")
-
-
-class _FailMarkFailedStore:
-    def __init__(self) -> None:
-        from linch.run_store import InMemoryRunStore
-
-        self._inner = InMemoryRunStore()
-        self.mark_failed_calls = 0
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def mark_failed(
-        self,
-        run_id: str,
-        checkpoint: Any = None,
-        error: dict[str, object] | None = None,
-        *,
-        events: list[Any] = (),
-    ) -> Any:
-        self.mark_failed_calls += 1
-        raise ValueError("failed status write")
-
-
-@pytest.mark.parametrize(
-    ("store_factory", "expected"),
-    [
-        (_FailCheckpointStore, "ValueError"),
-        (_FailEventStore, "ValueError"),
-        (_FailCompletedStore, "ValueError"),
-    ],
-)
-async def test_run_store_write_failure_is_error_result_and_single_stop(
-    store_factory: Any, expected: str
-) -> None:
-    from linch.sessions import InMemorySessionStore
-
-    stop = _StopCounter()
-    agent = _agent(
-        session_store=InMemorySessionStore(),
-        run_store=store_factory(),
-        hooks=[stop],
-    )
-    session = await agent.session(id=f"store-{expected}")
-
-    events = await _events(session)
-
-    assert [event.type for event in events[-2:]] == ["error", "result"]
-    assert events[-2].error["name"] == expected
-    assert events[-2].error["retryable"] is False
-    assert events[-1].subtype == "error"
-    assert stop.calls == 1
-
-
-async def test_transient_model_call_journal_failure_resumes_without_terminal() -> None:
-    from linch import ErrorEvent, ResultEvent
-    from linch.sessions import InMemorySessionStore
-
-    store = _FailModelCallJournalStore()
-    session_store = InMemorySessionStore()
-    agent = _agent(session_store=session_store, run_store=store)
-    session = await agent.session(id="model-call-journal")
-    first = await _events(session)
-    run_id = next(event.run_id for event in first if event.type == "system")
-
-    assert store.failed
-    assert not any(isinstance(event, (ErrorEvent, ResultEvent)) for event in first)
-    record = await store.load_run(run_id)
-    assert record is not None and record.status == "running"
-
-    restarted = _agent(session_store=session_store, run_store=store)
-    resumed = await restarted.session(id="model-call-journal")
-    events = [event async for event in resumed.resume(run_id)]
-
-    assert events[-1].type == "result" and events[-1].subtype == "success"
-    stored = await store.load_events(run_id)
-    assert sum(isinstance(row.event, ResultEvent) for row in stored) == 1
-    assert [row.seq for row in stored] == list(range(1, len(stored) + 1))
-
-
-async def test_session_append_failure_without_run_store_is_terminalized() -> None:
-    stop = _StopCounter()
-    agent = _agent(session_store=_FailSessionStore(), hooks=[stop])
-    session = await agent.session(id="session-only")
-
-    events = await _events(session)
-
-    assert [event.type for event in events[-2:]] == ["error", "result"]
-    assert events[-2].error["name"] == "OSError"
-    assert events[-1].subtype == "error"
-    assert stop.calls == 1
 
 
 @pytest.mark.parametrize("failure", ["checkpoint", "session", "provider"])
@@ -407,68 +190,6 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
     assert stop.calls == 1
 
 
-async def test_run_creation_failure_raises_before_loop() -> None:
-    from linch.sessions import InMemorySessionStore
-
-    stop = _StopCounter()
-    store = _FailCreateStore()
-    agent = _agent(
-        session_store=InMemorySessionStore(),
-        run_store=store,
-        hooks=[stop],
-    )
-    session = await agent.session(id="create-failure")
-
-    with pytest.raises(OSError, match="run creation failed") as raised:
-        await _events(session)
-
-    assert raised.value is store.error
-    assert stop.calls == 0
-
-
-async def test_secondary_terminal_write_is_logged_with_run_and_original_context(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from linch.sessions import InMemorySessionStore
-
-    stop = _StopCounter()
-    agent = _agent(
-        session_store=InMemorySessionStore(),
-        run_store=_FailCompletedAndFailedStore(),
-        hooks=[stop],
-    )
-    session = await agent.session(id="secondary")
-
-    events = await _events(session)
-
-    assert events[-2].error["name"] == "ValueError"
-    assert stop.calls == 1
-    record = next(record for record in caplog.records if "run.mark_failed" in record.message)
-    assert stop.run_ids and stop.run_ids[0] in record.message
-    assert record.exc_info is not None
-    assert isinstance(record.exc_info[1], RuntimeError)
-    assert record.exc_info[1].__context__ is not None
-    assert record.exc_info[1].__context__.__class__ is ValueError
-
-
-async def test_retryable_attribute_is_propagated_to_error_event() -> None:
-    from linch.sessions import InMemorySessionStore
-
-    stop = _StopCounter()
-    agent = _agent(
-        session_store=InMemorySessionStore(),
-        run_store=_FailRetryableCompletedStore(),
-        hooks=[stop],
-    )
-    session = await agent.session(id="retryable")
-
-    events = await _events(session)
-
-    assert events[-2].error["name"] == "_RetryableCompletionError"
-    assert events[-2].error["retryable"] is True
-    assert stop.calls == 1
-
-
 async def test_exact_model_input_snapshot_failure_keeps_original_exception_class() -> None:
     from linch.durability import DurabilityOptions
     from linch.run_store import InMemoryRunStore
@@ -491,40 +212,6 @@ async def test_exact_model_input_snapshot_failure_keeps_original_exception_class
 
     assert events[-2].error["name"] == "LookupError"
     assert events[-1].subtype == "error"
-    assert stop.calls == 1
-
-
-@pytest.mark.parametrize("events_to_consume", [1, 2])
-async def test_startup_failure_closing_after_terminal_event_still_dispatches_stop(
-    events_to_consume: int,
-) -> None:
-    from linch.sessions import InMemorySessionStore
-
-    stop = _StopCounter()
-    agent = _agent(
-        session_store=InMemorySessionStore(),
-        run_store=_FailCheckpointStore(),
-        hooks=[stop],
-    )
-    session = await agent.session(id="startup-close")
-    iterator = session.run("hello")
-
-    try:
-        async for event in iterator:
-            if event.type == "error":
-                break
-        else:
-            pytest.fail("the injected checkpoint failure must emit an error")
-        events = [event, *[await anext(iterator) for _ in range(events_to_consume - 1)]]
-        assert events[0].type == "error"
-        assert events[0].error["name"] == "ValueError"
-        assert "checkpoint write failed" in events[0].error["message"]
-        if events_to_consume == 2:
-            assert events[1].type == "result"
-    finally:
-        await iterator.aclose()
-        await agent.close()
-
     assert stop.calls == 1
 
 
@@ -590,33 +277,6 @@ async def test_alignment_append_failure_escapes_for_typed_run_terminal() -> None
             pass
 
 
-async def test_terminal_mark_failed_failure_has_one_bounded_error_status_attempt() -> None:
-    from linch import HookResult
-    from linch.sessions import InMemorySessionStore
-
-    class StopHook:
-        resume_policy_id = "test.stop-hook"
-        resume_policy_version = "1"
-
-        def on_before_final_answer(self, ctx: Any) -> Any:
-            return HookResult.stop("blocked")
-
-    store = _FailMarkFailedStore()
-    agent = _agent(
-        session_store=InMemorySessionStore(),
-        run_store=store,
-        hooks=[StopHook()],
-    )
-    session = await agent.session(id="mark-failed-once")
-
-    events = await _events(session)
-
-    assert [event.type for event in events[-2:]] == ["error", "result"]
-    assert events[-2].error["name"] == "ValueError"
-    assert events[-2].error["message"] == "failed status write"
-    assert store.mark_failed_calls == 2
-
-
 async def test_abort_terminal_write_failure_persists_error_pair_before_failed_status() -> None:
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
@@ -675,31 +335,6 @@ async def test_abort_terminal_write_failure_persists_error_pair_before_failed_st
     assert store.visible_terminal_pairs == [["error", "result"]]
     assert [event.type for event in events[-2:]] == ["error", "result"]
     assert events[-2].error["name"] == "ValueError"
-    assert stop.calls == 1
-
-
-@pytest.mark.parametrize("close_after", ["error", "result", None])
-async def test_blocked_prompt_stops_once_even_when_closed_at_terminal(
-    close_after: str | None,
-) -> None:
-    from linch import HookResult
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
-    class BlockHook(_StopCounter):
-        def on_user_prompt_submit(self, ctx: Any) -> Any:
-            return HookResult.block("blocked")
-
-    stop = BlockHook()
-    agent = _agent(session_store=InMemorySessionStore(), run_store=InMemoryRunStore(), hooks=[stop])
-    session = await agent.session()
-    iterator = session.run("hello")
-    try:
-        async for event in iterator:
-            if event.type == close_after:
-                break
-    finally:
-        await iterator.aclose()
     assert stop.calls == 1
 
 

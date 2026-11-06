@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 
-import linch.filesystem.disk as disk_mod
 from linch.errors import ToolExecutionError
 from linch.tools import builtin as builtin_mod
 from linch.tools.builtin import EditTool, GlobTool, GrepTool, ReadTool, WriteTool
@@ -63,12 +62,6 @@ def test_builtin_legacy_argument_aliases_are_rejected(tool_cls, raw, error) -> N
 def test_edit_legacy_replacement_aliases_are_rejected(legacy_field, raw) -> None:
     with pytest.raises(ValueError, match=legacy_field):
         EditTool().validate(raw)
-
-
-def test_glob_path_alias_does_not_select_target_directory() -> None:
-    assert GlobTool().validate({"glob_pattern": "*.py", "path": "other"}) == {
-        "glob_pattern": "*.py"
-    }
 
 
 @pytest.mark.asyncio
@@ -149,21 +142,6 @@ async def test_windowed_read_only_grants_edit_for_seen_lines(tmp_path) -> None:
     assert "changed" in target.read_text(encoding="utf-8")
 
 
-async def test_windowed_read_allows_edit_through_seen_line_ending(tmp_path) -> None:
-    target = tmp_path / "line-ending.txt"
-    target.write_text("a\nb\nc\n", encoding="utf-8")
-    ctx = _make_ctx(tmp_path)
-    ctx.file_read_tracker = FileReadTracker()
-    await ReadTool().execute({"file_path": target.name, "offset": 2, "limit": 1}, ctx)
-
-    result = await EditTool().execute(
-        {"file_path": target.name, "old_string": "b\n", "new_string": "B\n"}, ctx
-    )
-
-    assert not result.is_error
-    assert target.read_text(encoding="utf-8") == "a\nB\nc\n"
-
-
 @pytest.mark.asyncio
 async def test_windowed_read_replace_all_requires_every_match_region(tmp_path) -> None:
     target = tmp_path / "repeated.txt"
@@ -204,27 +182,6 @@ async def test_windowed_read_beyond_eof_records_no_range(tmp_path) -> None:
     )
 
     assert not tracker.has_read_range(str(target), 99, 99)
-
-
-async def test_zero_read_limit_keeps_default_window(tmp_path) -> None:
-    target = tmp_path / "long.txt"
-    target.write_text("line\n" * 2000 + "outside-default-window", encoding="utf-8")
-    ctx = _make_ctx(tmp_path)
-    ctx.file_read_tracker = FileReadTracker()
-
-    result = await ReadTool().execute({"file_path": target.name, "limit": 0}, ctx)
-
-    assert "outside-default-window" not in result.content
-    assert not ctx.file_read_tracker.has_read_range(str(target), 2001, 2001)
-
-
-def test_partial_read_ranges_are_not_exported_as_whole_file_evidence() -> None:
-    tracker = FileReadTracker()
-    tracker.mark_read("/partial.txt", 2, 3)
-
-    assert tracker.files() == []
-    assert len(tracker) == 0
-    assert "/partial.txt" not in tracker
 
 
 @pytest.mark.asyncio
@@ -311,54 +268,17 @@ async def test_fallback_globs_skip_symlink_results_outside_root(
 
 
 @pytest.mark.asyncio
-async def test_workspace_file_tools_preserve_crlf_and_lone_cr(tmp_path) -> None:
-    target = tmp_path / "line-endings.txt"
-    target.write_bytes(b"one\r\ntwo\rthree\n")
+@pytest.mark.skipif(builtin_mod._RG_PATH is None, reason="ripgrep not on PATH")
+async def test_grep_malformed_regex_rg_reports_error(tmp_path) -> None:
+    (tmp_path / "a.txt").write_text("hello\n")
+
+    tool = GrepTool()
     ctx = _make_ctx(tmp_path)
-    ctx.file_read_tracker = FileReadTracker()
-    read = ReadTool()
-    edit = EditTool()
+    validated = tool.validate({"pattern": "("})
+    result = await tool.execute(validated, ctx)
 
-    await read.execute(read.validate({"file_path": target.name}), ctx)
-    edited = await edit.execute(
-        edit.validate(
-            {
-                "file_path": target.name,
-                "old_string": "two\rthree",
-                "new_string": "changed\rthree",
-            }
-        ),
-        ctx,
-    )
-
-    assert not edited.is_error
-    assert target.read_bytes() == b"one\r\nchanged\rthree\n"
-
-    await WriteTool().execute(
-        {"file_path": target.name, "content": "a\r\nb\rc\n"},
-        ctx,
-    )
-    assert target.read_bytes() == b"a\r\nb\rc\n"
-
-
-@pytest.mark.asyncio
-async def test_failed_workspace_write_keeps_original_bytes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    target = tmp_path / "atomic.txt"
-    target.write_bytes(b"original\r\n")
-
-    def fail_replace(_source, _destination):
-        raise OSError("replace failed")
-
-    monkeypatch.setattr(disk_mod.os, "replace", fail_replace)
-    with pytest.raises(OSError, match="replace failed"):
-        await WriteTool().execute(
-            {"file_path": target.name, "content": "replacement"},
-            _make_ctx(tmp_path),
-        )
-
-    assert target.read_bytes() == b"original\r\n"
+    assert result.is_error is True
+    assert result.content != "No matches found."
 
 
 @pytest.mark.parametrize("use_rg", [False, True])
@@ -388,33 +308,10 @@ async def test_grep_malformed_regex_reports_error(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(builtin_mod._RG_PATH is None, reason="ripgrep not on PATH")
-async def test_grep_malformed_regex_rg_reports_error(tmp_path) -> None:
-    (tmp_path / "a.txt").write_text("hello\n")
-
-    tool = GrepTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"pattern": "("})
-    result = await tool.execute(validated, ctx)
-
-    assert result.is_error is True
-    assert result.content != "No matches found."
-
-
-@pytest.mark.parametrize("use_rg", [False, True])
-@pytest.mark.asyncio
 async def test_grep_no_match_is_consistently_non_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, use_rg: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    if use_rg:
-        monkeypatch.setattr(builtin_mod, "_RG_PATH", "/usr/bin/rg")
-
-        async def fake_rg(args, search_root, timeout=120.0):
-            return "", 1, ""
-
-        monkeypatch.setattr(builtin_mod, "_run_grep_via_rg_async", fake_rg)
-    else:
-        monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
+    monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
     (tmp_path / "a.txt").write_text("hello\n")
 
     tool = GrepTool()

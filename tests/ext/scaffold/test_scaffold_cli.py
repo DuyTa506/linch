@@ -166,8 +166,9 @@ async def test_generated_greet_tool_passes_contract(tmp_path):
     assert result.content == "Hello, Ada!"
 
 
-async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
-    from tests.support.providers import ScriptedProvider, TextTurn
+async def test_generated_agent_runs_offline_and_wires_its_tool(tmp_path, monkeypatch):
+    from linch import ToolResultBlock
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
     proj = _new_project(tmp_path, "offline-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -180,31 +181,20 @@ async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
 
         offline_agent = module.build_agent()
         assert await _final_text(offline_agent) == module.OFFLINE_REPLY
+
+        tool_turns = [
+            ToolUseTurn(tool_name="greet", tool_input={"name": "Linch"}),
+            TextTurn(text="done"),
+        ]
+        wired_provider = ScriptedProvider(tool_turns)
+        wired = module.build_agent(provider=wired_provider)
+        assert await _final_text(wired) == "done"
+        tool_result = wired_provider.requests[-1].messages[-1].content[0]
+        assert isinstance(tool_result, ToolResultBlock)
+        assert tool_result.content == "Hello, Linch!"
+        assert not tool_result.is_error
     finally:
         for key in [k for k in list(sys.modules) if k.split(".")[0] == "offline_proof"]:
-            sys.modules.pop(key, None)
-
-
-async def test_generated_agent_tool_wiring(tmp_path, monkeypatch):
-    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
-
-    proj = _new_project(tmp_path, "wiring-proof")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.syspath_prepend(str(proj / "src"))
-    importlib.invalidate_caches()
-    try:
-        module = importlib.import_module("wiring_proof.agent")
-        agent = module.build_agent(
-            provider=ScriptedProvider(
-                [
-                    ToolUseTurn(tool_name="greet", tool_input={"name": "Linch"}),
-                    TextTurn(text="done"),
-                ]
-            )
-        )
-        assert await _final_text(agent) == "done"
-    finally:
-        for key in [k for k in list(sys.modules) if k.split(".")[0] == "wiring_proof"]:
             sys.modules.pop(key, None)
 
 

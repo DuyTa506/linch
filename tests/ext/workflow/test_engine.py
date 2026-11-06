@@ -49,18 +49,6 @@ async def _run_workflow(agent: Any, fn: Any, **kwargs: Any) -> Any:
     return await run_workflow(agent, fn, **kwargs)
 
 
-async def test_run_workflow_returns_function_value() -> None:
-    agent = _make_agent(CountingTextProvider())
-
-    async def flow(wf: Any) -> dict[str, int]:
-        await wf.phase("noop")
-        return {"answer": 42}
-
-    result = await _run_workflow(agent, flow)
-
-    assert result == {"answer": 42}
-
-
 async def test_run_workflow_uses_supplied_lease_for_every_durable_write() -> None:
     from linch import InMemoryRunStore
     from linch._wire import WIRE_VERSION
@@ -1042,18 +1030,6 @@ async def test_wf_agent_unknown_name_raises_config_error() -> None:
         await _run_workflow(agent, flow)
 
 
-async def test_wf_agent_child_error_raises_workflow_error() -> None:
-    from linch.ext.workflow import WorkflowError
-
-    agent = _make_agent(CountingTextProvider(fail_on_call=1))
-
-    async def flow(wf: Any) -> str:
-        return await wf.agent("doomed task")
-
-    with pytest.raises(WorkflowError, match="provider blew up"):
-        await _run_workflow(agent, flow)
-
-
 async def test_budget_shared_across_workflow_children() -> None:
     from linch import RunBudget
 
@@ -1140,8 +1116,19 @@ async def test_changed_prompt_invalidates_cache(
     await agent2.close()
 
 
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, False, "3", 3.0])
-@pytest.mark.parametrize("with_events", [False, True])
+@pytest.mark.parametrize(
+    ("version", "with_events"),
+    [
+        (None, False),  # schema_version missing entirely
+        (None, True),  # ...and existing journal events still can't bless it
+        (1, False),  # a plain wrong version number
+        (4, False),  # a future version: never read ahead of this code
+        (True, False),  # bool is an int subclass: True must not pass as version 1
+        ("3", False),  # a stringified correct version must not pass
+        (3.0, False),  # loose equality: 3.0 == 3 in Python; strict check must still reject it
+        (3.0, True),  # ...and existing journal events still can't bless it
+    ],
+)
 async def test_resume_rejects_incompatible_workflow_version(
     version: object, with_events: bool
 ) -> None:

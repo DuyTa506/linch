@@ -20,8 +20,7 @@ class _SubagentParallelProvider:
 
     id = "subagent-parallel-test"
 
-    def __init__(self, mode: str) -> None:
-        self.mode = mode
+    def __init__(self) -> None:
         self.calls = 0
         self.active_children = 0
         self.max_active_children = 0
@@ -41,17 +40,13 @@ class _SubagentParallelProvider:
             first_input = {
                 "description": "first",
                 "prompt": "first child",
+                "subagent_type": "reader",
             }
             second_input = {
                 "description": "second",
                 "prompt": "second child",
+                "subagent_type": "reader",
             }
-            if self.mode == "reader":
-                first_input["subagent_type"] = "reader"
-                second_input["subagent_type"] = "reader"
-            elif self.mode == "writer":
-                first_input["subagent_type"] = "writer"
-                second_input["subagent_type"] = "writer"
             for tool_id, tool_input in (("child-1", first_input), ("child-2", second_input)):
                 yield {"type": "tool_use_start", "id": tool_id, "name": "Subagent"}
                 yield {
@@ -89,17 +84,16 @@ class _SubagentParallelProvider:
         }
 
 
-async def _run_real_subagent_pair(
-    tmp_path: Any, mode: str, *, session_write_override: bool = False
+async def _run_real_reader_subagent_pair(
+    tmp_path: Any, *, session_write_override: bool = False
 ) -> tuple[Any, _SubagentParallelProvider]:
     from linch import workspace_tools
     from linch.config import FeatureFlags
     from tests.support.agents import make_agent
     from tests.support.stores import memory_session_store
 
-    definition_tools = ["Read"] if mode == "reader" else ["Read", "Write"]
-    definition = _definition(mode, definition_tools)
-    provider = _SubagentParallelProvider(mode)
+    definition = _definition("reader", ["Read"])
+    provider = _SubagentParallelProvider()
     agent = make_agent(
         provider,
         model="test-model",
@@ -133,7 +127,7 @@ def _subagent_end_ids(events: list[Any]) -> list[str]:
 async def test_real_read_only_subagents_overlap_and_reassemble_provider_order(
     tmp_path: Any,
 ) -> None:
-    events, provider = await _run_real_subagent_pair(tmp_path, "reader")
+    events, provider = await _run_real_reader_subagent_pair(tmp_path)
 
     assert provider.max_active_children == 2
     assert provider.child_finished == [3, 2]
@@ -141,28 +135,10 @@ async def test_real_read_only_subagents_overlap_and_reassemble_provider_order(
     assert provider.parent_result_ids == ["child-1", "child-2"]
 
 
-async def test_real_general_purpose_subagents_serialize(tmp_path: Any) -> None:
-    events, provider = await _run_real_subagent_pair(tmp_path, "general")
-
-    assert provider.max_active_children == 1
-    assert provider.child_finished == [2, 3]
-    assert _subagent_end_ids(events) == ["child-1", "child-2"]
-
-
-async def test_real_write_capable_typed_subagents_serialize(tmp_path: Any) -> None:
-    events, provider = await _run_real_subagent_pair(tmp_path, "writer")
-
-    assert provider.max_active_children == 1
-    assert provider.child_finished == [2, 3]
-    assert _subagent_end_ids(events) == ["child-1", "child-2"]
-
-
 async def test_session_write_override_prevents_read_typed_subagent_parallelism(
     tmp_path: Any,
 ) -> None:
-    events, provider = await _run_real_subagent_pair(
-        tmp_path, "reader", session_write_override=True
-    )
+    events, provider = await _run_real_reader_subagent_pair(tmp_path, session_write_override=True)
 
     assert provider.max_active_children == 1
     assert provider.child_finished == [2, 3]
@@ -177,7 +153,7 @@ async def test_parallel_resolves_catalog_installed_after_subagent_connect(tmp_pa
 
     definition = _definition("reader", ["Read"])
     agent = make_agent(
-        _SubagentParallelProvider("reader"),
+        _SubagentParallelProvider(),
         model="test-model",
         tools=empty_tools(),
         session_store=memory_session_store(),

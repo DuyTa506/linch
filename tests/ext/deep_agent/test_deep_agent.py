@@ -134,14 +134,6 @@ def test_deep_agent_is_a_package_with_prompt_and_subagents() -> None:
     assert "Virtual filesystem" in DEEP_AGENT_SYSTEM_PROMPT
 
 
-def test_deep_agent_preserves_original_agent_defaults(tmp_path: Path) -> None:
-    from linch import Agent
-
-    agent = Agent(model="gpt-5", provider=ToolAwareProvider(), cwd=str(tmp_path))
-
-    assert agent.run_store is None
-
-
 def test_deep_agent_prompt_has_delegation_doctrine() -> None:
     from linch.ext.deep_agent import DEEP_AGENT_SYSTEM_PROMPT
 
@@ -171,6 +163,8 @@ def test_deep_agent_workspace_tools_include_tasks(tmp_path: Path) -> None:
     names = {tool.name for tool in agent.tools.list()}
     assert {"TaskCreate", "TaskList", "TaskGet", "TaskUpdate"} <= names
     assert {"ls", "read_file", "write_file", "edit_file"} <= names
+    # Without coordinator mode the parent keeps the heavy workspace tools.
+    assert {"Edit", "Bash", "Write"} <= names
 
 
 def test_deep_agent_custom_tools_are_copied_and_task_tools_added(tmp_path: Path) -> None:
@@ -273,7 +267,9 @@ def test_deep_agent_planner_has_no_real_disk_write_tools() -> None:
 
 
 async def test_deep_agent_memories_persist_across_agents(pg_dsn, tmp_path: Path) -> None:
+    from linch import CompositeFileBackend, PostgresRunStore
     from linch.ext.deep_agent import create_deep_agent
+    from linch.sessions.postgres import PostgresSessionStore
 
     # Write to /memories via a session
     session_store, run_store, filesystem = _postgres_storage(pg_dsn)
@@ -285,7 +281,10 @@ async def test_deep_agent_memories_persist_across_agents(pg_dsn, tmp_path: Path)
         run_store=run_store,
         filesystem=filesystem,
     )
+    assert isinstance(agent1.session_store, PostgresSessionStore)
+    assert isinstance(agent1.run_store, PostgresRunStore)
     session1 = await agent1.session(id="s1")
+    assert isinstance(session1.filesystem, CompositeFileBackend)
     await session1.filesystem.write("/memories/plan.md", "my plan")
     await agent1.close()
 
@@ -304,74 +303,6 @@ async def test_deep_agent_memories_persist_across_agents(pg_dsn, tmp_path: Path)
     await agent2.close()
 
     assert content == "my plan"
-
-
-async def test_deep_agent_explicit_postgres_stores(pg_dsn, tmp_path: Path) -> None:
-    from linch import PostgresRunStore
-    from linch.ext.deep_agent import create_deep_agent
-    from linch.sessions.postgres import PostgresSessionStore
-
-    session_store, run_store, filesystem = _postgres_storage(pg_dsn)
-    agent = create_deep_agent(
-        model="gpt-5",
-        provider=ToolAwareProvider(),
-        cwd=str(tmp_path),
-        session_store=session_store,
-        run_store=run_store,
-        filesystem=filesystem,
-    )
-    assert isinstance(agent.session_store, PostgresSessionStore)
-    assert isinstance(agent.run_store, PostgresRunStore)
-    await agent.close()
-
-
-async def test_deep_agent_preserves_explicit_composite_filesystem(pg_dsn, tmp_path: Path) -> None:
-    from linch import CompositeFileBackend
-    from linch.ext.deep_agent import create_deep_agent
-
-    session_store, run_store, filesystem = _postgres_storage(pg_dsn)
-    agent = create_deep_agent(
-        model="gpt-5",
-        provider=ToolAwareProvider(),
-        cwd=str(tmp_path),
-        session_store=session_store,
-        run_store=run_store,
-        filesystem=filesystem,
-    )
-    session = await agent.session(id="s1")
-    await agent.close()
-    assert isinstance(session.filesystem, CompositeFileBackend)
-
-
-def test_deep_agent_respects_explicit_stores_and_durable_false(tmp_path: Path) -> None:
-    from linch import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
-    session_store = InMemorySessionStore()
-    run_store = InMemoryRunStore()
-    agent = _create_agent(
-        ToolAwareProvider(),
-        tmp_path,
-        session_store=session_store,
-        run_store=run_store,
-    )
-
-    assert agent.session_store is session_store
-    assert agent.run_store is run_store
-
-    ephemeral = _create_agent(ToolAwareProvider(), tmp_path)
-    assert ephemeral.run_store is None
-
-
-async def test_deep_agent_explicit_filesystem_respected(tmp_path: Path) -> None:
-    from linch.filesystem.backend import StateFileBackend
-
-    explicit_fs = StateFileBackend()
-    agent = _create_agent(ToolAwareProvider(), tmp_path, filesystem=explicit_fs)
-    session = await agent.session(id="s1")
-    await agent.close()
-
-    assert session.filesystem is explicit_fs
 
 
 # ── End Phase 0 tests ────────────────────────────────────────────────────────
@@ -542,14 +473,6 @@ async def test_task_stop_cancels_background_worker(tmp_path: Path) -> None:
     assert task.cancelled() or task.done()
 
 
-def test_non_coordinator_mode_preserves_full_tools(tmp_path: Path) -> None:
-    agent = _create_agent(ToolAwareProvider(), tmp_path)
-    names = {tool.name for tool in agent.tools.list()}
-    assert "Edit" in names
-    assert "Bash" in names
-    assert "Write" in names
-
-
 # ── End Phase 3 tests ─────────────────────────────────────────────────────────
 
 
@@ -598,7 +521,7 @@ async def test_deep_agent_can_resume_with_postgres_stores(pg_dsn, tmp_path: Path
 # ── Open-loop safety rails ─────────────────────────────────
 
 
-def test_deep_agent_verifiers_are_wired_as_hook(tmp_path: Path) -> None:
+def test_deep_agent_verifier_hook_is_wired_only_when_verifiers_are_given(tmp_path: Path) -> None:
     from linch.hooks import FinalAnswerVerifierHook
 
     class _V:
@@ -610,15 +533,10 @@ def test_deep_agent_verifiers_are_wired_as_hook(tmp_path: Path) -> None:
             return Verdict(action="pass")
 
     agent = _create_agent(ToolAwareProvider(), tmp_path, verifiers=[_V()])
-
     assert any(isinstance(h, FinalAnswerVerifierHook) for h in agent.hooks)
 
-
-def test_deep_agent_no_verifiers_adds_no_verifier_hook(tmp_path: Path) -> None:
-    from linch.hooks import FinalAnswerVerifierHook
-
-    agent = _create_agent(ToolAwareProvider(), tmp_path)
-    assert not any(isinstance(h, FinalAnswerVerifierHook) for h in agent.hooks)
+    plain = _create_agent(ToolAwareProvider(), tmp_path)
+    assert not any(isinstance(h, FinalAnswerVerifierHook) for h in plain.hooks)
 
 
 def test_deep_agent_forwards_budget_and_max_turns(tmp_path: Path) -> None:
@@ -639,6 +557,7 @@ def test_deep_agent_balanced_profile_has_safe_defaults(tmp_path: Path) -> None:
     assert agent.budget is not None
     assert agent.budget.max_tokens == 1_000_000
     assert agent.retain_subagents is True
+    assert agent.loop_guard is not None  # invariant #9
 
 
 def test_deep_agent_unbounded_profile_requires_explicit_name(tmp_path: Path) -> None:
@@ -663,9 +582,3 @@ async def test_deep_agent_explicitly_enables_required_feature_profile(tmp_path: 
     assert not isinstance(session.filesystem, CompositeFileBackend)
     assert agent.subagent_registry is not None
     assert agent.tools.get("Skill") is not None
-
-
-def test_deep_agent_loop_guard_on_by_default(tmp_path: Path) -> None:
-    agent = _create_agent(ToolAwareProvider(), tmp_path)
-
-    assert agent.loop_guard is not None

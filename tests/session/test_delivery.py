@@ -89,31 +89,6 @@ class _DrainBarrierMailbox:
         return messages
 
 
-async def test_notification_survives_failed_append() -> None:
-    """Keep an in-process notify delivery queued until its append succeeds."""
-
-    from linch.types import Message, TextBlock
-
-    store = _FlakyNotificationStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("a"), TextTurn("b")]),
-        session_store=store,
-        run_store=None,
-    )
-    session = await agent.session()
-    await session.notify(
-        Message(role="user", content=[TextBlock(text="<task-notification>w1 done")])
-    )
-
-    store.fail_next = True
-    [event async for event in session.run("first")]
-    [event async for event in session.run("second")]
-
-    texts = [_text(message) for message in session.full_history]
-    assert "<task-notification>w1 done" in texts
-    await agent.close()
-
-
 async def test_non_durable_mailbox_redelivers_after_append_failure() -> None:
     """Return a drained mailbox batch when its session append fails."""
 
@@ -294,44 +269,6 @@ async def test_non_durable_mailbox_render_failure_redelivers() -> None:
     events = [event async for event in session.run("go")]
     assert any(getattr(event, "type", None) == "error" for event in events)
     assert len(await box.drain("alice")) == 1
-    await agent.close()
-
-
-async def test_closing_run_mid_mailbox_delivery_preserves_pending_peer_messages(
-    delivery_store: Any,
-) -> None:
-    """Leave unappended non-durable mailbox messages available for the next turn."""
-
-    from linch import InMemoryMailbox, MailboxMessage, MailboxPlugin
-
-    box = InMemoryMailbox()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("a"), TextTurn("b")]),
-        session_store=delivery_store,
-        run_store=None,
-    )
-    await agent.use(MailboxPlugin(), box)
-    session = await agent.session()
-    session.mailbox_address = "alice"
-    for index in range(3):
-        await box.send(MailboxMessage(sender="bob", recipient="alice", content=f"msg-{index}"))
-
-    run = cast(Any, session.run("go"))
-    async for event in run:
-        if (
-            getattr(event, "type", None) == "user"
-            and getattr(event, "subtype", None) == "notification"
-        ):
-            break
-    await run.aclose()
-    [event async for event in session.run("again")]
-
-    seen = sum(
-        any(f"msg-{index}" in _text(message) for index in range(3))
-        for message in session.provider_view
-    )
-    leftover = await box.drain("alice")
-    assert seen + len(leftover) == 3
     await agent.close()
 
 

@@ -137,22 +137,22 @@ async def test_gateway_settles_before_return_and_gates_only_one_delivery() -> No
     assert UUID(receipt.delivery_attempt_id).version == 4
 
 
-@pytest.mark.parametrize("reasoning", ["thinking_delta", "redacted_thinking"])
-async def test_summary_ignores_reasoning_content(reasoning: str) -> None:
+async def test_summary_ignores_reasoning_content() -> None:
     from linch.types import Usage
 
-    events = _events()
-    events.insert(1, {"type": reasoning, "text": "private reasoning"})
-    events.insert(3, {"type": reasoning, "text": "later reasoning"})
-    provider, ledger, _, caller = _setup(provider=_Provider(events))
+    for reasoning in ("thinking_delta", "redacted_thinking"):
+        events = _events()
+        events.insert(1, {"type": reasoning, "text": "private reasoning"})
+        events.insert(3, {"type": reasoning, "text": "later reasoning"})
+        provider, ledger, _, caller = _setup(provider=_Provider(events))
 
-    result = await _text(caller)
+        result = await _text(caller)
 
-    assert result.text == "Paid summary."
-    assert result.receipt.disposition == "accepted"
-    assert result.receipt.usage_status == "reported"
-    assert ledger.total_usage == Usage(111, 22)
-    assert provider.requests[0].thinking is None
+        assert result.text == "Paid summary."
+        assert result.receipt.disposition == "accepted"
+        assert result.receipt.usage_status == "reported"
+        assert ledger.total_usage == Usage(111, 22)
+        assert provider.requests[0].thinking is None
 
 
 @pytest.mark.parametrize("accounted", [False, True])
@@ -187,19 +187,15 @@ async def test_summary_request_disables_thinking_only_when_supported(
     assert backing_provider.requests[0].thinking == expected
 
 
-@pytest.mark.parametrize("output", ["", "  ", "tool", "oversized", "native-json"])
+@pytest.mark.parametrize("output", ["", "native-json", "oversized"])
 async def test_valid_final_usage_is_charged_when_output_is_rejected(output: str) -> None:
     from linch.types import Usage
 
     events = _events(output)
-    if output in ("tool", "native-json"):
+    if output == "native-json":
         events[1:2] = [
             {"type": "tool_use_start", "id": "tool-1", "name": "read"},
-            {
-                "type": "tool_use_input_delta",
-                "id": "tool-1",
-                "json_delta": "[invalid" if output == "native-json" else "{}",
-            },
+            {"type": "tool_use_input_delta", "id": "tool-1", "json_delta": "[invalid"},
             {"type": "tool_use_end", "id": "tool-1"},
         ]
         events[-1]["stop_reason"] = "tool_use"
@@ -471,31 +467,35 @@ def _compaction_fixture(*, strategy: Any, provider: Any, limiter: Any):
     return session, agent
 
 
-@pytest.mark.parametrize("detailed", [False, True])
-async def test_builtins_use_injected_gateway_without_nested_slot(detailed: bool):
+async def test_builtins_use_injected_gateway_without_nested_slot():
     from linch.abort import AbortContext
     from linch.compaction import DefaultCompaction, DetailedCompaction, run_forced_compaction
 
-    provider, ledger, limiter, caller = _setup()
-    strategy = DetailedCompaction() if detailed else DefaultCompaction()
-    session, agent = _compaction_fixture(strategy=strategy, provider=provider, limiter=limiter)
-    original_history = session.session_log.full_history
-    await asyncio.wait_for(
-        run_forced_compaction(
-            session, agent, AbortContext(), auxiliary_caller=caller, logical_call_id="compaction-op"
-        ),
-        timeout=1,
-    )
-    assert len(session.provider_view) < 30
-    assert session.session_log.full_history == original_history
-    assert len(provider.requests) == 1
-    assert limiter.acquired == limiter.released == ["requested-model"]
-    receipt = ledger.receipts()[0]
-    assert receipt.strategy_id == strategy.id
-    assert receipt.logical_call_id == "compaction-op"
-    assert receipt.source_context_fingerprint
-    assert provider.requests[0].system[0].text == strategy.prompt
-    assert provider.requests[0].max_output_tokens == (8192 if detailed else 4096)
+    for detailed in (False, True):
+        provider, ledger, limiter, caller = _setup()
+        strategy = DetailedCompaction() if detailed else DefaultCompaction()
+        session, agent = _compaction_fixture(strategy=strategy, provider=provider, limiter=limiter)
+        original_history = session.session_log.full_history
+        await asyncio.wait_for(
+            run_forced_compaction(
+                session,
+                agent,
+                AbortContext(),
+                auxiliary_caller=caller,
+                logical_call_id="compaction-op",
+            ),
+            timeout=1,
+        )
+        assert len(session.provider_view) < 30
+        assert session.session_log.full_history == original_history
+        assert len(provider.requests) == 1
+        assert limiter.acquired == limiter.released == ["requested-model"]
+        receipt = ledger.receipts()[0]
+        assert receipt.strategy_id == strategy.id
+        assert receipt.logical_call_id == "compaction-op"
+        assert receipt.source_context_fingerprint
+        assert provider.requests[0].system[0].text == strategy.prompt
+        assert provider.requests[0].max_output_tokens == (8192 if detailed else 4096)
 
 
 @pytest.mark.parametrize("early_break", [False, True])

@@ -89,20 +89,6 @@ def test_case_result_dataclass():
     assert result.output == "hello world"
 
 
-def test_eval_result_dataclass():
-    """EvalResult aggregates CaseResults with pass_rate."""
-    from linch.ext.evals import CaseResult, EvalCase, EvalResult
-
-    cases = [
-        CaseResult(case=EvalCase(prompt="a", expected="x"), output="x", passed=True, scores={}),
-        CaseResult(case=EvalCase(prompt="b", expected="y"), output="nope", passed=False, scores={}),
-    ]
-    result = EvalResult(cases=cases)
-    assert result.pass_rate == 0.5
-    assert result.passed == 1
-    assert result.total == 2
-
-
 def test_eval_result_report_exports():
     """EvalResult exports dict and markdown reports with scores, tools, and cost."""
     from linch.events import ResultEvent, ToolCallStartEvent

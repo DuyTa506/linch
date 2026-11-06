@@ -32,10 +32,19 @@ def _with_models(provider: object, models: _Models) -> object:
     return provider
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
+# Both OpenAI-compatible local adapters must independently pass every probe
+# scenario below (neither inherits the other's behavior — see
+# test_provider_conformance.py::test_local_compatible_adapters_do_not_inherit_openai_behavior).
+_COMPATIBLE_PROVIDERS = [
+    (VLLMProvider, VLLMProviderOptions),
+    (SGLangProvider, SGLangProviderOptions),
+]
+_compatible_providers = pytest.mark.parametrize(
+    ("provider_cls", "options_cls"), _COMPATIBLE_PROVIDERS
 )
+
+
+@_compatible_providers
 async def test_probe_matches_served_model_once(provider_cls, options_cls):
     models = _Models(
         [
@@ -55,10 +64,7 @@ async def test_probe_matches_served_model_once(provider_cls, options_cls):
     assert models.calls == 1
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_explicit_context_skips_probe(provider_cls, options_cls):
     models = _Models()
     provider = _with_models(
@@ -69,10 +75,7 @@ async def test_explicit_context_skips_probe(provider_cls, options_cls):
     assert models.calls == 0
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_probe_uses_the_chat_client_not_a_second_transport(provider_cls, options_cls):
     """Auth, base path, and redirect policy must match the chat transport."""
     provider = provider_cls(options_cls(base_url="https://host/inference", api_key="secret"))
@@ -83,10 +86,7 @@ async def test_probe_uses_the_chat_client_not_a_second_transport(provider_cls, o
     assert "urlopen" not in probe and "request" not in probe
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_probe_honors_base_url_from_environment(monkeypatch, provider_cls, options_cls):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://env-host/v1")
     models = _Models([{"id": "m", "max_model_len": 9_000}])
@@ -95,10 +95,7 @@ async def test_probe_honors_base_url_from_environment(monkeypatch, provider_cls,
     assert provider.context_window("m") == 9_000
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_probe_never_targets_the_default_openai_endpoint(
     monkeypatch, provider_cls, options_cls
 ):
@@ -110,10 +107,7 @@ async def test_probe_never_targets_the_default_openai_endpoint(
     assert provider.context_window("m") == 128_000
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_probe_timeout_falls_back(provider_cls, options_cls):
     class _Hung(_Models):
         async def list(self) -> SimpleNamespace:
@@ -158,10 +152,7 @@ async def test_probe_swallows_client_construction_failure():
     assert provider.context_window("m") == 128_000
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_single_model_applies_to_alias(provider_cls, options_cls):
     models = _Models([{"id": "/root/models/local", "max_model_len": 262_144}])
     provider = _with_models(provider_cls(options_cls(base_url="https://server/v1")), models)
@@ -169,10 +160,7 @@ async def test_single_model_applies_to_alias(provider_cls, options_cls):
     assert provider.context_window("public/alias") == 262_144
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 async def test_multi_model_does_not_guess_alias(provider_cls, options_cls):
     models = _Models([{"id": "a", "max_model_len": 1_024}, {"id": "b", "max_model_len": None}])
     provider = _with_models(provider_cls(options_cls(base_url="https://server/v1")), models)
@@ -258,11 +246,12 @@ async def test_openai_compatible_cache_warning_is_once_per_instance(
     assert not [record for record in caplog.records if flag in record.message]
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
-@pytest.mark.parametrize("configured", [0, -1, True])
+@_compatible_providers
+# 0 and -1 both fail `valid_context_window`'s same `value > 0` clause (no
+# added branch coverage); True fails the earlier `not isinstance(value, bool)`
+# clause instead — a deliberate gotcha since `isinstance(True, int)` is True
+# in Python, so it's kept as the second, genuinely distinct case.
+@pytest.mark.parametrize("configured", [0, True])
 async def test_invalid_context_window_still_probes(provider_cls, options_cls, configured):
     models = _Models([{"id": "m", "max_model_len": 16_384}])
     provider = _with_models(
@@ -272,19 +261,13 @@ async def test_invalid_context_window_still_probes(provider_cls, options_cls, co
     assert provider.context_window("m") == 16_384
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 def test_empty_disable_thinking_kwargs_cannot_disable_thinking(provider_cls, options_cls):
     provider = provider_cls(options_cls(disable_thinking_kwargs={}))
     assert provider.capabilities("m").can_disable_thinking is False
 
 
-@pytest.mark.parametrize(
-    ("provider_cls", "options_cls"),
-    [(VLLMProvider, VLLMProviderOptions), (SGLangProvider, SGLangProviderOptions)],
-)
+@_compatible_providers
 def test_malformed_cache_detail_does_not_abort_stream(provider_cls, options_cls):
     provider = provider_cls(options_cls())
     usage = SimpleNamespace(

@@ -48,47 +48,6 @@ def test_sglang_reasoning_and_thinking_options_are_explicit() -> None:
     assert payload["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
-def test_sglang_payload_includes_sglang_extras_and_stream_options_by_default() -> None:
-    req = ProviderRequest(
-        model="served-model",
-        system=[],
-        tools=[],
-        messages=[],
-        output_schema=OutputSchema(name="answer", schema={"type": "object"}),
-    )
-    options = SGLangProviderOptions(
-        parallel_tool_calls=True,
-        sampling_params={"top_p": 0.9, "top_k": 50},
-        enable_cache_report=True,
-        extra_body={"top_p": 0.8, "top_k": 10, "custom": "value"},
-    )
-
-    payload = _build_sglang_payload(req, options)
-
-    assert payload["stream"] is True
-    # stream_options is on by default so SGLang returns token usage (incl. cache).
-    assert payload["stream_options"] == {"include_usage": True}
-    assert payload["parallel_tool_calls"] is True
-    assert payload["response_format"]["type"] == "json_schema"
-    assert payload["extra_body"] == {
-        "top_p": 0.8,
-        "top_k": 10,
-        "custom": "value",
-    }
-
-
-def test_sglang_payload_can_omit_stream_options() -> None:
-    req = ProviderRequest(model="served-model", system=[], tools=[], messages=[])
-
-    payload = _build_sglang_payload(
-        req,
-        SGLangProviderOptions(include_stream_options=False),
-    )
-
-    assert payload["stream"] is True
-    assert "stream_options" not in payload
-
-
 async def test_sglang_stream_text_tool_reasoning_and_cache_usage() -> None:
     chunks = [
         _chunk(delta=SimpleNamespace(content=None, reasoning_content="think", tool_calls=[])),

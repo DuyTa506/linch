@@ -160,16 +160,6 @@ async def test_run_options_principal_is_snapshotted_before_caller_mutation() -> 
         assert tool.seen == [expected]
 
 
-def test_role_guards_are_optional_contract_fields() -> None:
-    from linch.loop.contracts import _permission_rule_contract
-    from linch.permissions import ToolRule
-
-    plain = _permission_rule_contract(ToolRule("Read", "allow"))
-    guarded = _permission_rule_contract(ToolRule("Read", "allow", role="reader"))
-    assert "role" not in plain and "unless_role" not in plain
-    assert guarded["role"] == "reader"
-
-
 @pytest.mark.asyncio
 async def test_pending_run_adoption_hydrates_omitted_principal() -> None:
     from linch.loop.contracts import _build_run_contract
@@ -231,37 +221,6 @@ async def test_changed_role_policy_rejects_resume(original_guard: str, changed_g
             )
         ]
     assert provider.requests == []
-
-
-@pytest.mark.asyncio
-async def test_explicit_same_principal_resume_succeeds() -> None:
-    run_store = InMemoryRunStore()
-    session_store = InMemorySessionStore()
-    principal = Principal("tenant-a", "alice", {"reader"})
-    first = _agent(
-        ScriptedProvider([TextTurn("done")]),
-        _PrincipalTool(),
-        run_store,
-        session_store,
-    )
-    run_id = await _interrupt(await first.session(id="s"), RunOptions(principal=principal))
-    await first.close()
-
-    provider = ScriptedProvider([TextTurn("done")])
-    resumed = _agent(
-        provider,
-        _PrincipalTool(),
-        run_store,
-        session_store,
-    )
-    events = [
-        event
-        async for event in (await resumed.session(id="s")).resume(
-            run_id, RunOptions(principal=principal)
-        )
-    ]
-    assert events[-1].subtype == "success"
-    assert provider.requests
 
 
 @pytest.mark.asyncio

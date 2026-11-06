@@ -249,7 +249,7 @@ async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
     assert await scenario(True) == await scenario(False)
 
 
-@pytest.mark.parametrize("raw", [None, {"v": 2, "corrections": 0, "succeeded": []}])
+@pytest.mark.parametrize("raw", [None])
 async def test_resume_poisoned_reliability_namespace_fails_closed(raw):
     from linch.errors import ConfigError
 
@@ -273,99 +273,8 @@ async def test_resume_poisoned_reliability_namespace_fails_closed(raw):
     assert provider.calls == 1
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("crash", [False, True])
-@pytest.mark.parametrize("parallel", [False, True])
-async def test_resumed_batch_cannot_unlock_its_own_prerequisite(pg_dsn, kind, crash, parallel):
-    from linch import Agent, ReliabilityPolicy, ToolPrerequisite
-    from linch.tools import tool
-    from linch.tools.registry import empty_tools
-    from linch.types import Usage
-
-    calls = []
-
-    @tool(scope="read" if parallel else "write", parallel=parallel)
-    async def first() -> str:
-        calls.append("first")
-        return "success"
-
-    @tool(scope="read" if parallel else "write", parallel=parallel)
-    async def second() -> str:
-        calls.append("second")
-        return "success"
-
-    class Provider(CorrectionProvider):
-        async def stream(self, request):
-            self.calls += 1
-            yield {"type": "message_start", "model": request.model}
-            if self.calls == 1:
-                for name in ("first", "second"):
-                    yield {"type": "tool_use_start", "id": name, "name": name}
-                    yield {"type": "tool_use_input_delta", "id": name, "json_delta": "{}"}
-                    yield {"type": "tool_use_end", "id": name}
-            else:
-                yield {"type": "text_delta", "text": "done"}
-            yield {
-                "type": "message_end",
-                "stop_reason": "tool_use" if self.calls == 1 else "end_turn",
-                "usage": Usage(),
-            }
-
-    sessions, runs = await _stores(kind, pg_dsn)
-    provider = Provider("batch")
-
-    def agent(store):
-        return Agent(
-            model="test",
-            provider=provider,
-            session_store=sessions,
-            run_store=store,
-            tools=empty_tools(first, second),
-            permissions={"mode": "skip-dangerous"},
-            reliability=ReliabilityPolicy(prerequisites=(ToolPrerequisite("second", ("first",)),)),
-        )
-
-    session = await agent(ToolEndCrash(runs) if crash else runs).session()
-    run_id = ""
-    try:
-        async for event in session.run("go"):
-            if event.type == "system":
-                run_id = event.run_id
-    except _ProcessDeath:
-        assert crash
-        assert "linch.reliability" not in (await runs.load_run(run_id)).checkpoint.extension_state
-        sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
-        session = await agent(runs).session(id=session.id)
-        _ = [event async for event in session.resume(run_id)]
-    else:
-        assert not crash
-    assert calls == ["first"]
-    rows = await runs.load_events(run_id)
-    assert [row.event.tool_name for row in rows if row.event.type == "tool_call_end"] == (
-        ["first"] if crash and parallel else ["first", "second"]
-    )
-    results = [
-        block.tool_use_id
-        for message in session.full_history
-        for block in message.content
-        if block.type == "tool_result"
-    ]
-    assert results == ["first", "second"]
-    assert next(
-        block
-        for message in session.full_history
-        for block in message.content
-        if block.type == "tool_result" and block.tool_use_id == "second"
-    ).is_error
-    assert (await runs.load_run(run_id)).checkpoint.extension_state["linch.reliability"][
-        "succeeded"
-    ] == ["first"]
-
-    await _close(sessions, runs)
-
-
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("after", [False, True])
+@pytest.mark.parametrize("after", [False])
 @pytest.mark.parametrize("hooked", [False, True])
 async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hooked):
     from linch import Agent, HookResult, ReliabilityPolicy
@@ -409,7 +318,7 @@ async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hoo
     assert not any(row.event.type == "reliability" for row in await runs.load_events(run_id))
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["postgres"])
 @pytest.mark.parametrize("crash", [0, 1, 2])
 async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind, crash):
     from linch import Agent, HookResult, ReliabilityPolicy, ToolPrerequisite

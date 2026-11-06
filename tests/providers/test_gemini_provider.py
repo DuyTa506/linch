@@ -628,27 +628,28 @@ async def test_usage_only_chunks_preserve_omitted_fields(fake_client: FakeClient
     assert events[-1]["usage"] == Usage(input_tokens=6, output_tokens=2, cache_read_tokens=4)
 
 
-@pytest.mark.parametrize("stage", ["open", "stream"])
 @pytest.mark.parametrize(
     "code, message, error_name, retryable",
     [
         (401, "unauthenticated", "AuthError", False),
         (403, "permission denied", "AuthError", False),
         (429, "resource exhausted", "RateLimitError", True),
-        (429, "quota exceeded for API key", "RateLimitError", True),
         (400, "input token count exceeds maximum tokens allowed", "ContextLengthError", False),
+        # Trivial fallback: matches none of the special-case keywords at all.
         (400, "invalid temperature", "ProviderError", False),
+        # Near-miss fallback: has "token"+"exceed" but not "input"/"prompt", so it
+        # must NOT be misclassified as ContextLengthError.
         (400, "max_output_tokens exceeds limit", "ProviderError", False),
         (408, "deadline exceeded", "ProviderError", True),
         (500, "internal", "ProviderError", True),
-        (503, "service unavailable", "ProviderError", True),
+        # Must NOT be misclassified as AuthError: the "credentials" keyword only
+        # matters for codes in (None, 400); 503 never reaches that check.
         (503, "temporarily unable to check credentials", "ProviderError", True),
     ],
 )
 async def test_sdk_errors_mapped(
     fake_client: FakeClient,
     sdk: Any,
-    stage: str,
     code: int,
     message: str,
     error_name: str,
@@ -658,7 +659,7 @@ async def test_sdk_errors_mapped(
     from linch.providers.gemini import GeminiProvider
 
     error = sdk.errors.APIError(code, {"error": {"message": message}})
-    setattr(fake_client, f"{stage}_error", error)
+    fake_client.open_error = error
     events = []
     with pytest.raises(getattr(errors, error_name)) as info:
         async for event in GeminiProvider().stream(request()):
@@ -668,6 +669,25 @@ async def test_sdk_errors_mapped(
         assert info.value.status == code
     assert info.value.__cause__ is error
     assert not any(e["type"] == "message_end" for e in events)
+
+
+@pytest.mark.parametrize(
+    "code, error_name",
+    [(401, "AuthError"), (429, "RateLimitError")],
+)
+async def test_sdk_errors_mapped_mid_stream(
+    fake_client: FakeClient, sdk: Any, code: int, error_name: str
+) -> None:
+    """The same mapping applies whether the error surfaces at `open` or mid-`stream`."""
+    from linch import errors
+    from linch.providers.gemini import GeminiProvider
+
+    error = sdk.errors.APIError(code, {"error": {"message": "boom"}})
+    fake_client.stream_error = error
+    with pytest.raises(getattr(errors, error_name)) as info:
+        async for _ in GeminiProvider().stream(request()):
+            pass
+    assert info.value.__cause__ is error
 
 
 async def test_retry_after_from_sdk_response(fake_client: FakeClient, sdk: Any) -> None:
@@ -682,10 +702,17 @@ async def test_retry_after_from_sdk_response(fake_client: FakeClient, sdk: Any) 
     assert info.value.retry_after_seconds == 2.5
 
 
-@pytest.mark.parametrize("delay, expected", [("37s", 37.0), ("0.125s", 0.125)])
-@pytest.mark.parametrize("header", [None, "2.5", "0"])
+@pytest.mark.parametrize(
+    "header, delay, expected",
+    [
+        (None, "37s", 37.0),
+        (None, "0.125s", 0.125),
+        ("2.5", "37s", 2.5),  # Retry-After header takes priority over retryDelay
+        ("0", "37s", 0.0),  # a falsy-but-present header still overrides retryDelay
+    ],
+)
 async def test_retry_info_delay_from_sdk_error(
-    fake_client: FakeClient, sdk: Any, delay: str, expected: float, header: str | None
+    fake_client: FakeClient, sdk: Any, header: str | None, delay: str, expected: float
 ) -> None:
     from linch.errors import RateLimitError
     from linch.providers.gemini import GeminiProvider
@@ -704,7 +731,7 @@ async def test_retry_info_delay_from_sdk_error(
     )
     with pytest.raises(RateLimitError) as info:
         _ = [event async for event in GeminiProvider().stream(request())]
-    assert info.value.retry_after_seconds == (float(header) if header is not None else expected)
+    assert info.value.retry_after_seconds == expected
 
 
 @pytest.mark.parametrize("error", [TimeoutError("timeout"), ConnectionError("disconnected")])

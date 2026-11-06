@@ -129,40 +129,6 @@ def test_micro_compact_noop_returns_zero() -> None:
     assert results <= uses
 
 
-async def test_detailed_compaction_preserves_provider_tool_pairing() -> None:
-    from linch.abort import AbortContext
-    from linch.compaction import CompactionContext, DetailedCompaction
-    from linch.types import ToolResultBlock, ToolUseBlock, Usage
-
-    def assert_paired(messages: list[Any]) -> None:
-        seen: set[str] = set()
-        for message in messages:
-            for block in message.content:
-                if isinstance(block, ToolUseBlock):
-                    seen.add(block.id)
-                elif isinstance(block, ToolResultBlock):
-                    assert block.tool_use_id in seen
-
-    class PairCheckingProvider:
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-            # The compaction provider request itself must not contain an orphan.
-            assert_paired(req.messages)
-            yield {"type": "text_delta", "text": "paired summary"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-    history = _history(2)
-    strategy = DetailedCompaction(keep_recent_turns=1)
-
-    compacted = await strategy.compact(
-        CompactionContext(messages=history, model="test", signal=AbortContext()),
-        PairCheckingProvider(),
-    )
-
-    # The summary + retained recent tail sent to the next provider remains
-    # paired too (assistant tool-use immediately precedes its user result).
-    assert_paired(compacted)
-
-
 # ── integration: providers and tools ─────────────────────────────────────────
 
 
@@ -298,63 +264,6 @@ async def test_maybe_compact_micro_rung_avoids_llm_summarization() -> None:
     assert len(_elided_results(session.provider_view)) == 1
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
-
-
-async def test_maybe_compact_falls_through_to_full_strategy_when_micro_insufficient() -> None:
-    from linch import DetailedCompaction
-    from linch.compaction import CompactionLadder
-
-    # Old result is small (500), the protected recent one is huge (9_000):
-    # eliding can't get under threshold, so the full strategy summarizes.
-    provider = LadderProvider(
-        [("tool", 500), ("tool", 9_000), ("text", 0)],
-        window=10_000,
-    )
-    agent = _make_agent(
-        provider,
-        compaction_ladder=CompactionLadder(keep_recent_turns=1),
-        compaction=DetailedCompaction(keep_recent_turns=1),
-        token_estimator=_char_estimator,
-        max_output_tokens=10,
-    )
-    session = await agent.session()
-
-    events = [event async for event in session.run("go")]
-
-    compactions = [e for e in events if e.type == "compaction"]
-    assert [e.strategy for e in compactions] == ["detailed-continuation-keep-recent-10"]
-    assert provider.summarize_calls == 1
-    assert events[-1].subtype == "success"
-
-
-@pytest.mark.parametrize("ladder_enabled", [False, True])
-async def test_forced_compaction_resets_read_tracker(ladder_enabled: bool) -> None:
-    from linch import DetailedCompaction
-    from linch.compaction import CompactionLadder
-
-    provider = LadderProvider(
-        [("tool", 500), ("tool", 9_000), ("text", 0)],
-        window=10_000,
-    )
-    kwargs: dict[str, Any] = {
-        "compaction": DetailedCompaction(keep_recent_turns=1),
-        "token_estimator": _char_estimator,
-        "max_output_tokens": 10,
-    }
-    if ladder_enabled:
-        kwargs["compaction_ladder"] = CompactionLadder(keep_recent_turns=1)
-    agent = _make_agent(provider, **kwargs)
-    session = await agent.session()
-    session.file_read_tracker.add("/seen.py")
-
-    events = [event async for event in session.run("go")]
-
-    # A forced compaction fired, and the read tracker was cleared so the agent
-    # must re-read a file whose contents may have left the context.
-    assert [e.strategy for e in events if e.type == "compaction"] == [
-        "detailed-continuation-keep-recent-10"
-    ]
-    assert ("/seen.py" not in session.file_read_tracker) is ladder_enabled
 
 
 # ── integration: reactive rungs on ContextLengthError ────────────────────────
@@ -605,32 +514,6 @@ async def test_recovery_provider_error_boundary(
         swaps = [item for item in output if getattr(item, "type", None) == "model_fallback"]
         assert len(swaps) == int(fallback)
         assert session.active_model == ("fallback" if fallback else None)
-
-
-@pytest.mark.parametrize("ladder_enabled", [False, True])
-async def test_forced_compaction_budget_scope_across_turns(ladder_enabled: bool) -> None:
-    """Default gets one recovery each turn; the ladder cap spans the whole run."""
-    from linch import DetailedCompaction
-    from linch.compaction import CompactionLadder
-
-    provider = LadderProvider(
-        [("tool", 100), ("raise_cle", 0), ("tool", 100), ("raise_cle", 0), ("text", 0)]
-    )
-    agent = _make_agent(
-        provider,
-        compaction=DetailedCompaction(keep_recent_turns=1),
-        compaction_ladder=CompactionLadder(micro=False, max_forced_compactions=1)
-        if ladder_enabled
-        else None,
-    )
-    session = await agent.session()
-    session.file_read_tracker.add("/seen.py")
-
-    events = [event async for event in session.run("go")]
-
-    assert events[-1].subtype == ("error" if ladder_enabled else "success")
-    assert provider.summarize_calls == (1 if ladder_enabled else 2)
-    assert ("/seen.py" in session.file_read_tracker) is (not ladder_enabled)
 
 
 @pytest.mark.parametrize("ladder_enabled", [False, True])

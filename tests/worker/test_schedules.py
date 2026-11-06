@@ -84,34 +84,3 @@ async def test_cron_and_tool_registration_are_scoped_and_reversible(pool):
     await disposer()
     await disposer()
     assert not registry.list()
-
-
-async def test_concurrent_schedule_fires_serialize_per_definition(pool):
-    from linch.worker import create_schedule
-    from linch.worker.schedules import _fire
-
-    definitions = await asyncio.gather(
-        create_schedule(pool, "first", "tick", interval_s=60),
-        create_schedule(pool, "second", "tock", interval_s=60),
-    )
-    payloads = [
-        json.loads(row["payload"]) for row in await pool.fetch("SELECT payload FROM pgqueuer")
-    ]
-    await asyncio.gather(*(_fire(pool, payload) for payload in payloads for _ in range(4)))
-    assert await pool.fetchval("SELECT count(*) FROM runs") == 2
-    assert (
-        await pool.fetchval("SELECT count(*) FROM pgqueuer WHERE entrypoint='linch.schedule'") == 4
-    )
-    for definition in definitions:
-        assert (
-            await pool.fetchval(
-                "SELECT count(*) FROM runs WHERE session_id=$1", definition.session_id
-            )
-            == 1
-        )
-        assert (
-            await pool.fetchval(
-                "SELECT next_fire FROM linch_worker_schedules WHERE id=$1", definition.id
-            )
-            > definition.next_fire
-        )

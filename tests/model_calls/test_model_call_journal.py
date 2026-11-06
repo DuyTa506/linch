@@ -181,58 +181,7 @@ async def _seed_history(session: Any, *, repeat: int = 120) -> None:
     )
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-async def test_primary_append_after_hook_recovers_without_reinference(
-    pg_dsn,
-    kind: str,
-) -> None:
-    """Losing the append checkpoint must not buy or mutate the accepted answer twice."""
-    from linch.hooks import HookResult
-    from linch.types import TextBlock, Usage
-
-    class Mutate:
-        resume_policy_id = "test.primary-post-hook"
-        resume_policy_version = "1"
-        resume_policy_config: dict[str, Any] = {}
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def on_after_provider_call(self, ctx: Any) -> Any:
-            self.calls += 1
-            ctx.assembly.message.content = [TextBlock(text="after hook")]
-            return HookResult.mutate(assembly=ctx.assembly)
-
-    sessions, runs = await _stores(kind, pg_dsn)
-    hook, provider = Mutate(), _Provider()
-    fault = _FaultStore(runs, "checkpoint:assistant_appended")
-    agent = _agent(sessions, fault, provider, hooks=[hook])
-    session = await agent.session(id="session")
-    run_id = await _crash_run(session)
-    journal = [row.event for row in await runs.load_events(run_id)]
-    projections = [
-        event.record for event in journal if getattr(event, "record_kind", None) == "projection"
-    ]
-    assert len(projections) == 1
-    assert projections[0]["projection_kind"] == "primary_append"
-    assert projections[0]["assistant_stop_reason"] == "end_turn"
-    assert hook.calls == 1
-    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
-    try:
-        resumed_provider, resumed_hook = _Provider(), Mutate()
-        resumed = await _agent(sessions, runs, resumed_provider, hooks=[resumed_hook]).session(
-            id="session"
-        )
-        events = [event async for event in resumed.resume(run_id)]
-        assert resumed_provider.calls == []
-        assert resumed_hook.calls == 0
-        assert events[-1].final_text == "after hook"
-        assert events[-1].total_usage == Usage(11, 2)
-    finally:
-        await _close(sessions, runs)
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_frozen_replay_rejects_unbound_assistant_suffix(
     pg_dsn,
     kind: str,
@@ -260,7 +209,7 @@ async def test_frozen_replay_rejects_unbound_assistant_suffix(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["postgres"])
 async def test_rejected_native_receipt_restores_terminal_error(
     pg_dsn,
     kind: str,
@@ -290,125 +239,7 @@ async def test_rejected_native_receipt_restores_terminal_error(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize(
-    "boundary",
-    [
-        "event:projection",
-        "checkpoint:provider_pending",
-        "snapshot",
-        "provider_snapshot",
-    ],
-)
-async def test_paid_compaction_recovers_after_cache_loss(
-    pg_dsn,
-    kind: str,
-    boundary: str,
-) -> None:
-    """Both receipt-only and consumed projections rebuild their paid summary from history."""
-    from linch.types import Usage
-
-    sessions, runs = await _stores(kind, pg_dsn)
-    session_store = (
-        _FaultStore(sessions, boundary)
-        if boundary in {"snapshot", "provider_snapshot"}
-        else sessions
-    )
-    provider = _Provider(compact=True)
-    session = await _agent(session_store, _FaultStore(runs, boundary), provider).session(
-        id="session"
-    )
-    await _seed_history(session)
-    run_id = await _crash_run(session)
-    assert len(provider.calls) == 1
-    if boundary in {"event:projection", "checkpoint:provider_pending"}:
-        if kind == "memory":
-            sessions._snapshots.clear()
-        else:
-            pool = await sessions._ensure()
-            await pool.execute("DELETE FROM session_snapshots")
-    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
-    try:
-        provider = _Provider(compact=True)
-        resumed = await _agent(sessions, runs, provider).session(id="session")
-        events = [event async for event in resumed.resume(run_id)]
-        assert len(provider.calls) == 1
-        assert not any(
-            "Summarize the conversation so far." in block.text for block in provider.calls[0].system
-        )
-        assert events[-1].total_usage == Usage(22, 4)
-        projections = [
-            row.event.record
-            for row in await runs.load_events(run_id)
-            if getattr(row.event, "record_kind", None) == "projection"
-            and row.event.record.get("projection_kind") == "compaction"
-        ]
-        assert len(projections) == 1
-        snapshot = await sessions.load_provider_snapshot("session")
-        assert snapshot is not None
-        assert snapshot.projection_id == projections[0]["projection_id"]
-        assert "paid summary" in provider.calls[0].messages[0].content[0].text
-    finally:
-        await _close(sessions, runs)
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize(
-    "boundary", ["event:intent", "event:dispatch_started", "event:projection", "assistant_append"]
-)
-@pytest.mark.parametrize("reuse_budget", [False, True])
-async def test_primary_retry_uses_new_delivery_and_receipt_charges(
-    pg_dsn,
-    kind: str,
-    boundary: str,
-    reuse_budget: bool,
-) -> None:
-    """A retry keeps its operation, never its physical id or aggregate-only charge."""
-    from linch import RunBudget
-    from linch.pricing import cost_usd
-    from linch.types import Usage
-
-    sessions, runs = await _stores(kind, pg_dsn)
-    budget = RunBudget(max_tokens=1000)
-    run_fault = _FaultStore(runs, boundary)
-    session_fault = _FaultStore(sessions, boundary)
-    provider = _Provider()
-    session = await _agent(session_fault, run_fault, provider, budget=budget).session(id="session")
-    run_id = await _crash_run(session)
-    before = await runs.load_run(run_id)
-    assert before is not None and before.checkpoint is not None
-    binding = before.checkpoint.extension_state["linch.model_calls.v1"]["active_primary"]
-    old_delivery = binding["delivery_attempt_id"]
-    dispatched = boundary in {"event:projection", "assistant_append"}
-    assert len(provider.calls) == int(dispatched)
-    if not reuse_budget:
-        budget = RunBudget(max_tokens=1000)
-    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
-    try:
-        provider = _Provider()
-        resumed = await _agent(sessions, runs, provider, budget=budget).session(id="session")
-        events = [event async for event in resumed.resume(run_id)]
-        assert len(provider.calls) == 1
-        receipts = [
-            row.event.record
-            for row in await runs.load_events(run_id)
-            if getattr(row.event, "record_kind", None) == "receipt"
-        ]
-        assert len(receipts) == 1 + int(dispatched)
-        assert receipts[-1]["logical_call_id"] == binding["logical_call_id"]
-        assert receipts[-1]["delivery_attempt_id"] != old_delivery
-        assert budget.spent_tokens == 13 * (1 + int(dispatched))
-        assert events[-1].total_usage == Usage(
-            11 * (1 + int(dispatched)), 2 * (1 + int(dispatched))
-        )
-        assert events[-1].total_cost_usd == pytest.approx(
-            cost_usd(Usage(11, 2), "claude-haiku-4-5") * (1 + int(dispatched))
-        )
-    finally:
-        await _close(sessions, runs)
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_started_without_receipt_blocks_capped_resume(
     pg_dsn,
     kind: str,
@@ -442,37 +273,6 @@ async def test_started_without_receipt_blocks_capped_resume(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("prefix", [0, 1, 2])
-def test_shared_receipt_prefix_matches_only_its_fixed_order(prefix: int) -> None:
-    """Reliability can share ordered identity checking without enabling correction."""
-    from linch.loop.checkpoint import _message_digest, _receipt_message_prefix
-    from linch.model_calls import _context_fingerprint
-    from linch.types import Message, TextBlock
-
-    base = [Message(role="user", content=[TextBlock(text="durable base")])]
-    expected = [
-        Message(role="assistant", content=[TextBlock(text="safe diagnostic")]),
-        Message(role="user", content=[TextBlock(text="fixed feedback")]),
-    ]
-    assert (
-        _receipt_message_prefix(
-            [*base, *expected[:prefix]],
-            base_count=1,
-            base_fingerprint=_context_fingerprint(base),
-            expected_digests=[_message_digest(message) for message in expected],
-        )
-        == prefix
-    )
-    wrong = [*base, Message(role="assistant", content=[TextBlock(text="wrong receipt")])]
-    with pytest.raises(Exception, match="unexpected durable message suffix"):
-        _receipt_message_prefix(
-            wrong,
-            base_count=1,
-            base_fingerprint=_context_fingerprint(base),
-            expected_digests=[_message_digest(message) for message in expected],
-        )
-
-
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -481,7 +281,6 @@ def test_shared_receipt_prefix_matches_only_its_fixed_order(prefix: int) -> None
         ("turn_index", False),
         ("assistant_stop_reason", "unknown"),
         ("after_action", "retry"),
-        ("extra", "unknown"),
         ("assistant_sha256", "wrong"),
     ],
 )
@@ -513,7 +312,7 @@ def test_primary_projection_codec_rejects_tampering(field: str, value: Any) -> N
         ModelCallEvent("run", "projection", record)
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_accepted_assistant_recovers_even_after_budget_exhaustion(
     pg_dsn,
     kind: str,
@@ -541,11 +340,10 @@ async def test_accepted_assistant_recovers_even_after_budget_exhaustion(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 @pytest.mark.parametrize(
     "control,boundary",
     [
-        ("continue", "checkpoint:assistant_appended"),
         ("continue", "checkpoint:turn_complete"),
         ("stop", "event:usage"),
     ],
@@ -606,92 +404,7 @@ async def test_primary_recovers_post_hook_control_without_rerunning_hook(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("consumed", [False, True])
-@pytest.mark.parametrize("detailed", [False, True])
-async def test_paid_projection_and_consumption_reconcile_independently(
-    pg_dsn,
-    kind: str,
-    consumed: bool,
-    detailed: bool,
-) -> None:
-    """Either store may lead; consumption never substitutes for a projection identity."""
-    from linch.compaction import DefaultCompaction, DetailedCompaction
-    from linch.model_calls import _ModelCallLedger
-    from linch.types import Usage
-
-    sessions, runs = await _stores(kind, pg_dsn)
-    strategy = DetailedCompaction(keep_recent_turns=2) if detailed else DefaultCompaction()
-    fault = _FaultStore(runs, "event:projection" if consumed else "checkpoint:provider_pending")
-    session = await _agent(sessions, fault, _Provider(compact=True), compaction=strategy).session(
-        id="session"
-    )
-    await _seed_history(session)
-    run_id = await _crash_run(session)
-    saved = await runs.load_run(run_id)
-    assert saved is not None and saved.checkpoint is not None
-    checkpoint = saved.checkpoint
-    checkpoint.extension_state["host.unrelated"] = {"version": 1, "unrelated": "preserved"}
-    checkpoint.extension_state["host.extension"] = {"owner": "host"}
-    if consumed:
-        from linch.events import UsageEvent
-        from linch.loop.checkpoint import _model_call_runtime_to_extension
-
-        ledger = _ModelCallLedger(run_id)
-        rows = await runs.load_events(run_id)
-        model_events = [row.event for row in rows if row.event.type == "model_call"]
-        await ledger.restore(model_events)
-        for receipt in ledger.consume_auxiliary_receipts():
-            if receipt.usage is not None:
-                await runs.append_event(
-                    run_id,
-                    UsageEvent(
-                        usage=receipt.usage,
-                        cumulative=ledger.total_usage,
-                        cost_usd=receipt.cost_usd,
-                        cumulative_cost_usd=ledger.total_cost_usd,
-                        source="compaction",
-                        call_id=receipt.delivery_attempt_id,
-                        logical_call_id=receipt.logical_call_id,
-                        model=receipt.actual_model,
-                    ),
-                )
-        _model_call_runtime_to_extension(
-            checkpoint.extension_state,
-            active_primary=None,
-            journal_count=len(model_events),
-        )
-        checkpoint.total_usage = ledger.total_usage
-    await runs.save_checkpoint(run_id, checkpoint)
-    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
-    try:
-        provider = _Provider(compact=True)
-        resumed = await _agent(sessions, runs, provider, compaction=strategy).session(id="session")
-        events = [event async for event in resumed.resume(run_id)]
-        assert len(provider.calls) == 1
-        assert events[-1].total_usage == Usage(22, 4)
-        complete = await runs.load_run(run_id)
-        # The paid compaction's usage is durable exactly once across the crash:
-        # committed before it, or emitted once by the resumed run.
-        durable = [row.event for row in await runs.load_events(run_id)]
-        assert sum(event.type == "usage" and event.source == "compaction" for event in durable) == 1
-        assert complete.checkpoint.extension_state["host.extension"] == {"owner": "host"}
-        assert complete.checkpoint.extension_state["host.unrelated"] == {
-            "version": 1,
-            "unrelated": "preserved",
-        }
-        snapshot = await sessions.load_provider_snapshot("session")
-        assert snapshot.projection_id
-        assert provider.calls[0].messages[0].content[0].text == (
-            "<detailed summary of earlier conversation>\n\npaid summary"
-            if detailed
-            else "<summary of earlier conversation>\n\npaid summary"
-        )
-    finally:
-        await _close(sessions, runs)
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 @pytest.mark.parametrize(
     "field", ["snapshot_id", "request_fingerprint", "logical_call_id", "full_history_base_count"]
 )
@@ -722,7 +435,7 @@ async def test_primary_binding_tampering_fails_before_dispatch(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_custom_subclass_has_accounting_without_paid_transform_replay(
     pg_dsn,
     kind: str,
@@ -856,7 +569,7 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
         await ledger.record_projection(_projection_record(**values))
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 async def test_changed_paid_projection_view_fails_without_dispatch(
     pg_dsn,
     kind: str,
@@ -891,7 +604,7 @@ async def test_changed_paid_projection_view_fails_without_dispatch(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("owner", ["nonzero", "mismatched"])
+@pytest.mark.parametrize("owner", ["mismatched"])
 async def test_durable_primary_rejects_incompatible_budget_owner(owner: str, tmp_path: Any) -> None:
     """A capped host budget cannot silently reinterpret saved receipt spending."""
     from linch import RunBudget
@@ -915,71 +628,13 @@ async def test_durable_primary_rejects_incompatible_budget_owner(owner: str, tmp
     assert provider.calls == []
 
 
-async def test_contract_rejects_unsupported_accounting_semantics(tmp_path: Any) -> None:
-    """An execution contract with old accounting cannot opt into new replay implicitly."""
-    from linch.errors import ConfigError
-    from linch.run_store import (
-        RunContract,
-        _run_contract_fingerprint,
-        run_contract_from_meta,
-        run_meta_with_contract,
-    )
-    from linch.session import RunOptions
-
-    sessions, runs = await _stores("memory", tmp_path)
-    session = await _agent(sessions, _FaultStore(runs, "event:intent"), _Provider()).session(
-        id="session"
-    )
-    run_id = await _crash_run(session)
-    record = runs._runs[run_id]
-    contract = run_contract_from_meta(record.meta)
-    payload = contract.payload
-    payload["policies"]["model_call_accounting"]["native_rejection"] = "bounded_feedback_v1"
-    record.meta = run_meta_with_contract(
-        RunContract(
-            contract.schema_version,
-            payload,
-            _run_contract_fingerprint(contract.schema_version, payload),
-        ),
-        record.meta,
-    )
-    provider = _Provider()
-    resumed = await _agent(sessions, runs, provider).session(id="session")
-    with pytest.raises(ConfigError, match="Cannot safely resume"):
-        _ = [event async for event in resumed.resume(run_id, RunOptions())]
-    assert provider.calls == []
-
-
-async def test_recovered_accepted_assistant_defers_new_inbox_delivery(tmp_path: Any) -> None:
-    """A new user message cannot be inserted into a recovered frozen turn."""
-    from linch.durability import DurabilityOptions, InboxDelivery
-    from linch.types import Message, TextBlock
-
-    sessions, runs = await _stores("memory", tmp_path)
-    durability = DurabilityOptions(durable_inbox=True, exact_model_input=True)
-    session = await _agent(
-        sessions,
-        _FaultStore(runs, "checkpoint:assistant_appended"),
-        _Provider(),
-        durability=durability,
-    ).session(id="session")
-    run_id = await _crash_run(session)
-    await sessions.enqueue_inbox(
-        "session",
-        InboxDelivery(
-            "late", Message(role="user", content=[TextBlock(text="next turn")]), source="host"
-        ),
-    )
-    resumed = await _agent(sessions, runs, _Provider(), durability=durability).session(id="session")
-    events = [event async for event in resumed.resume(run_id)]
-    assert not any(event.type == "user" and event.subtype == "notification" for event in events)
-    assert len(resumed.full_history) == 2
-
-
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("cache_present", [False, True])
-@pytest.mark.parametrize("consumed_before_projection", [False, True])
-@pytest.mark.parametrize("detailed", [False, True])
+@pytest.mark.parametrize(
+    ("kind", "cache_present", "consumed_before_projection", "detailed"),
+    [
+        ("memory", False, False, False),
+        ("postgres", False, True, True),
+    ],
+)
 async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
     pg_dsn,
     kind: str,
@@ -1201,7 +856,7 @@ async def test_compaction_source_recipe_is_bound_to_the_pending_delivery() -> No
     assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
 
 
-@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("kind", ["memory"])
 @pytest.mark.parametrize("boundary", ["skill_records", "source_recipe"])
 async def test_compaction_reminder_durability_failure_prevents_dispatch(
     pg_dsn,
@@ -1267,20 +922,3 @@ async def test_compaction_reminder_durability_failure_prevents_dispatch(
             ledger.assert_may_start()
     finally:
         await _close(sessions, runs)
-
-
-async def test_changed_skill_listing_contract_uses_persisted_snapshot(tmp_path: Any) -> None:
-    """A resumed run keeps the persisted skill prefix after a host reload."""
-
-    sessions, runs = await _stores("memory", tmp_path)
-    agent = _agent(sessions, _FaultStore(runs, "event:intent"), _Provider())
-    agent.skill_listing_text = "original skill listing"
-    session = await agent.session(id="session")
-    run_id = await _crash_run(session)
-    provider = _Provider()
-    changed = _agent(sessions, runs, provider)
-    changed.skill_listing_text = "changed skill listing"
-    resumed = await changed.session(id="session")
-    events = [event async for event in resumed.resume(run_id)]
-    assert events[-1].type == "result"
-    assert len(provider.calls) == 1

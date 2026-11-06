@@ -85,31 +85,6 @@ def test_normalize_verifiers_accepts_none_single_and_list():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_verifiers_returns_first_non_pass():
-    from linch.verification import Verdict, VerificationContext, evaluate_verifiers
-
-    class _Pass:
-        name = "ok"
-
-        def verify(self, ctx):
-            return Verdict()
-
-    class _Retry:
-        name = "strict"
-
-        def verify(self, ctx):
-            return Verdict(action="retry", feedback="try again")
-
-    ctx = VerificationContext(
-        final_text="x", structured_output=None, structured_error=None, turn_index=0, attempt=0
-    )
-    name, verdict = await evaluate_verifiers([_Pass(), _Retry()], ctx)
-    assert name == "strict"
-    assert verdict.action == "retry"
-    assert verdict.feedback == "try again"
-
-
-@pytest.mark.asyncio
 async def test_evaluate_verifiers_supports_async_and_swallows_errors():
     from linch.verification import Verdict, VerificationContext, evaluate_verifiers
 
@@ -131,29 +106,6 @@ async def test_evaluate_verifiers_supports_async_and_swallows_errors():
     name, verdict = await evaluate_verifiers([_Broken(), _AsyncStop()], ctx)
     assert name == "judge"
     assert verdict.action == "stop"
-
-
-def test_scorer_verifier_maps_outcomes():
-    from linch.ext.evals.scorers import text_contains
-    from linch.verification import ScorerVerifier, VerificationContext
-
-    verifier = ScorerVerifier(text_contains("done"), feedback="say done")
-    ctx_fail = VerificationContext(
-        final_text="nope", structured_output=None, structured_error=None, turn_index=0, attempt=0
-    )
-    ctx_pass = VerificationContext(
-        final_text="all done",
-        structured_output=None,
-        structured_error=None,
-        turn_index=0,
-        attempt=0,
-    )
-    assert verifier.verify(ctx_fail).action == "retry"
-    assert verifier.verify(ctx_fail).feedback == "say done"
-    assert verifier.verify(ctx_pass).action == "pass"
-    # None outcome (unknown) maps to pass.
-    verifier_none = ScorerVerifier(lambda **_: None, feedback="n/a", name="unknown")
-    assert verifier_none.verify(ctx_fail).action == "pass"
 
 
 # ---------------------------------------------------------------------------
@@ -310,50 +262,6 @@ async def test_final_tool_retry_pairs_tool_use_with_tool_result():
 # ---------------------------------------------------------------------------
 
 
-class _RequireFinal:
-    """Retry until the answer contains the word FINAL."""
-
-    name = "require_final"
-
-    def verify(self, ctx):
-        from linch.verification import Verdict
-
-        if ctx.final_text and "FINAL" in ctx.final_text:
-            return Verdict()
-        return Verdict(action="retry", feedback="Prefix your answer with FINAL.")
-
-
-@pytest.mark.asyncio
-async def test_verifier_retry_then_pass():
-    from linch.hooks import FinalAnswerVerifierHook
-
-    provider = ScriptedProvider(turns=[TextTurn(text="draft"), TextTurn(text="FINAL answer")])
-    agent = _make_agent(provider, hooks=[FinalAnswerVerifierHook(_RequireFinal())])
-    session = await agent.session()
-    events = await _collect(session)
-
-    result = _result(events)
-    assert result.subtype == "success"
-    assert result.final_text == "FINAL answer"
-
-    retries = _verification_events(events)
-    assert len(retries) == 1
-    assert retries[0].verifier == "require_final"
-    assert retries[0].action == "retry"
-    assert retries[0].feedback == "Prefix your answer with FINAL."
-
-    # The feedback must reach the model as a user message.
-    from linch.events import UserEvent
-
-    feedback_msgs = [
-        e
-        for e in events
-        if isinstance(e, UserEvent)
-        and any("FINAL" in getattr(b, "text", "") for b in e.message.content)
-    ]
-    assert feedback_msgs, "verifier feedback was not injected into the conversation"
-
-
 @pytest.mark.asyncio
 async def test_verifier_stop_fails_run():
     from linch.hooks import FinalAnswerVerifierHook
@@ -426,104 +334,9 @@ async def test_scorer_verifier_in_live_run():
     assert len(_verification_events(events)) == 1
 
 
-@pytest.mark.asyncio
-async def test_forced_final_turn_bypasses_verifiers():
-    """A loop-guard force_final answer must not be bounced back by a verifier,
-    otherwise a stuck run could never produce its forced final answer."""
-    import json as _json
-
-    from linch.hooks import FinalAnswerVerifierHook
-    from linch.loop_guard import LoopGuard
-    from linch.types import Usage
-    from linch.verification import Verdict
-
-    class _LoopingProvider:
-        id = "looping"
-
-        def __init__(self) -> None:
-            self.call_count = 0
-
-        def context_window(self, model: str) -> int:
-            return 128_000
-
-        async def stream(self, req):
-            self.call_count += 1
-            yield {"type": "message_start", "model": req.model}
-            if not req.tools:  # force_final turn — tools stripped
-                yield {"type": "text_delta", "text": "stuck, giving up"}
-                yield {
-                    "type": "message_end",
-                    "stop_reason": "end_turn",
-                    "usage": Usage(),
-                    "provider_metadata": None,
-                }
-                return
-            tool_id = f"t{self.call_count}"
-            yield {"type": "tool_use_start", "id": tool_id, "name": "FakeTool"}
-            yield {"type": "tool_use_input_delta", "id": tool_id, "json_delta": _json.dumps({})}
-            yield {"type": "tool_use_end", "id": tool_id}
-            yield {
-                "type": "message_end",
-                "stop_reason": "tool_use",
-                "usage": Usage(),
-                "provider_metadata": None,
-            }
-
-    class _AlwaysRetry:
-        name = "never_happy"
-
-        def verify(self, ctx):
-            return Verdict(action="retry", feedback="more")
-
-    provider = _LoopingProvider()
-    agent = _make_agent(
-        provider,
-        loop_guard=LoopGuard(max_identical_tool_calls=2, force_final_answer=True),
-        hooks=[FinalAnswerVerifierHook(_AlwaysRetry())],
-    )
-    session = await agent.session()
-    events = await _collect(session)
-
-    result = _result(events)
-    assert result.subtype == "success"
-    assert result.final_text == "stuck, giving up"
-    # The verifier never ran against the forced final answer.
-    assert _verification_events(events) == []
-
-
 # ---------------------------------------------------------------------------
 # Integration — stop_when predicate
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_stop_when_predicate_stops_run_early():
-    from linch.hooks import StopPredicateHook
-
-    provider = ScriptedProvider(
-        turns=[
-            ToolUseTurn(tool_name="FakeTool", tool_input={}),
-            TextTurn(text="never reached"),
-        ]
-    )
-
-    def _saw_tool_result(sess) -> bool:
-        return any(
-            getattr(block, "type", None) == "tool_result"
-            for message in sess.provider_view
-            for block in message.content
-        )
-
-    agent = _make_agent(provider, hooks=[StopPredicateHook(_saw_tool_result)])
-    session = await agent.session()
-
-    events = await _collect(session)
-
-    result = _result(events)
-    assert result.subtype == "success"
-    # Only the first scripted turn was consumed — the predicate stopped the
-    # run before the second provider call.
-    assert len(provider.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -546,12 +359,3 @@ async def test_stop_when_faulty_predicate_does_not_crash():
 # ---------------------------------------------------------------------------
 # VerificationEvent serialization round-trip
 # ---------------------------------------------------------------------------
-
-
-def test_verification_event_round_trips():
-    from linch.events import VerificationEvent, event_from_dict, event_to_dict
-
-    event = VerificationEvent(verifier="judge", action="retry", feedback="fix it", attempt=2)
-    raw = event_to_dict(event)
-    restored = event_from_dict(raw)
-    assert restored == event

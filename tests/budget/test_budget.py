@@ -149,23 +149,6 @@ async def test_agent_level_budget_fallback_and_runoptions_precedence() -> None:
     async for _ in session2.run("go", RunOptions(budget=run_budget)):
         pass
     assert run_budget.spent_tokens == 100  # RunOptions wins
+    assert run_budget.remaining_tokens == 9_900
+    assert session2.active_budget is run_budget  # the caller's object, not a copy
     assert agent_budget.spent_tokens == 100  # agent budget untouched on run 2
-
-
-async def test_budget_queryable_after_run() -> None:
-    from linch import RunBudget, RunOptions
-    from linch.types import Usage
-    from tests.support.agents import make_agent
-    from tests.support.providers import ScriptedProvider, TextTurn
-
-    provider = ScriptedProvider([TextTurn("done", usage=Usage(input_tokens=250))])
-    agent = make_agent(provider, model="gpt-5", run_store=None)
-    session = await agent.session()
-    budget = RunBudget(max_tokens=1000)
-
-    async for _ in session.run("go", RunOptions(budget=budget)):
-        pass
-
-    assert budget.spent_tokens == 250
-    assert budget.remaining_tokens == 750
-    assert session.active_budget is budget

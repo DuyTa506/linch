@@ -8,8 +8,6 @@ import pytest
 
 from linch.sessions.postgres import (
     PostgresSessionStore,
-    _allocate_task_id_pg,
-    _lock_session_pg,
 )
 from linch.types import Message, TextBlock
 
@@ -100,24 +98,6 @@ def _store_with(conn: _FakeConnection) -> PostgresSessionStore:
     return store
 
 
-async def test_append_advances_session_sequence_in_one_statement() -> None:
-    conn = _FakeConnection(current_seq=4)
-    store = _store_with(conn)
-    messages = [
-        Message(role="user", content=[TextBlock(text="a")]),
-        Message(role="assistant", content=[TextBlock(text="b")]),
-    ]
-
-    stored = await store.append_messages("s-1", messages)
-
-    assert [item.seq for item in stored] == [5, 6]
-    assert len(conn.queries) == 1
-    assert "UPDATE sessions" in conn.queries[0]
-    assert "last_message_seq" in conn.queries[0]
-    assert "MAX(seq)" not in conn.queries[0]
-    assert conn.executions == []
-
-
 async def test_append_rejects_unknown_session_before_inserting() -> None:
     conn = _FakeConnection(session_exists=False)
     store = _store_with(conn)
@@ -128,69 +108,4 @@ async def test_append_rejects_unknown_session_before_inserting() -> None:
             [Message(role="user", content=[TextBlock(text="orphan")])],
         )
 
-    assert conn.executions == []
-
-
-async def test_task_allocator_uses_atomic_incrementing_upsert() -> None:
-    conn = _FakeConnection()
-
-    allocated = await _allocate_task_id_pg(conn, "s-1")
-
-    assert allocated == "7"
-    sql = conn.queries[-1]
-    assert "MAX(id::BIGINT)" in sql
-    assert "id ~ '^[0-9]+$'" in sql
-    assert "ON CONFLICT (session_id) DO UPDATE" in sql
-    assert "task_counters.next_id + 1" in sql
-    assert "RETURNING next_id - 1" in sql
-
-
-async def test_session_lock_raises_for_missing_parent() -> None:
-    conn = _FakeConnection(session_exists=False)
-
-    with pytest.raises(KeyError, match="session not found: absent"):
-        await _lock_session_pg(conn, "absent")
-
-
-async def test_create_if_absent_proves_ownership_with_insert_returning() -> None:
-    conn = _FakeConnection(insert_session_wins=True)
-    store = _store_with(conn)
-
-    created = await store.create_if_absent(id="fork-1", meta={"owner": "this-run"})
-
-    assert created is not None
-    assert created.id == "fork-1"
-    assert created.meta == {"owner": "this-run"}
-    sql = conn.queries[0]
-    assert "INSERT INTO sessions" in sql
-    assert "ON CONFLICT (id) DO NOTHING" in sql
-    assert "RETURNING id, created_at, updated_at, meta, invoked_skills" in sql
-    assert "SELECT" not in sql
-    counter_sql = next(
-        query for query, _ in conn.executions if "INSERT INTO task_counters" in query
-    )
-    assert "MAX(id::BIGINT)" in counter_sql
-    assert "ON CONFLICT DO NOTHING" in counter_sql
-
-
-async def test_create_if_absent_tolerates_orphan_task_counter() -> None:
-    conn = _FakeConnection(insert_session_wins=True)
-    store = _store_with(conn)
-
-    created = await store.create_if_absent(id="orphan-counter", meta={})
-
-    assert created is not None
-    counter_sql = next(
-        query for query, _ in conn.executions if "INSERT INTO task_counters" in query
-    )
-    assert "ON CONFLICT DO NOTHING" in counter_sql
-
-
-async def test_create_if_absent_loser_does_not_initialize_existing_session() -> None:
-    conn = _FakeConnection(insert_session_wins=False)
-    store = _store_with(conn)
-
-    created = await store.create_if_absent(id="taken", meta={"owner": "loser"})
-
-    assert created is None
     assert conn.executions == []

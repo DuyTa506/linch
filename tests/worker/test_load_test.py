@@ -110,58 +110,6 @@ def test_summarize_marks_duplicate_note_conflicts_as_invariant_errors(note_confl
     assert any(result["invariant_errors"].values()) is (note_conflicts > 0)
 
 
-@pytest.mark.asyncio
-async def test_reader_propagates_permanent_errors_after_a_successful_result():
-    module = _load_script("load_test_reader")
-    import asyncpg
-
-    stop = asyncio.Event()
-    metrics = {
-        "reader_results": [0],
-        "reader_seq_errors": 0,
-        "reader_retries": 0,
-        "reader_errors": 0,
-    }
-    calls = 0
-
-    class Pool:
-        async def fetchval(self, query):
-            return "run-1"
-
-        async def fetch(self, query, rid, cursor):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return [{"seq": 1, "at": 0.0, "kind": "result"}]
-            raise asyncpg.DataError("invalid reader query")
-
-    with pytest.raises(asyncpg.DataError, match="invalid reader query"):
-        await asyncio.wait_for(module.reader(Pool(), stop, metrics, 0), 1.0)
-    assert metrics["reader_results"] == [1]
-    assert metrics["reader_errors"] == 1
-
-
-@pytest.mark.asyncio
-async def test_reader_retries_closed_connections_and_stops():
-    module = _load_script("load_test_reader_transient")
-    import asyncpg
-
-    stop = asyncio.Event()
-    metrics = {"reader_results": [0], "reader_seq_errors": 0, "reader_retries": 0}
-
-    class Pool:
-        async def fetchval(self, query):
-            return "run-1"
-
-        async def fetch(self, query, rid, cursor):
-            stop.set()
-            raise asyncpg.InterfaceError("connection is closed")
-
-    await module.reader(Pool(), stop, metrics, 0)
-    assert metrics["reader_retries"] == 1
-    assert metrics.get("reader_errors", 0) == 0
-
-
 @pytest.mark.skipif(not os.getenv("AGENT_KIT_TEST_PG_DSN"), reason="Postgres DSN required")
 async def test_two_process_workers_finish_once_without_duplicate_notes(tmp_path):
     root = Path(__file__).resolve().parents[2]

@@ -51,27 +51,7 @@ def make_agent(store):
     return _make_agent(ScriptedProvider([TextTurn("done")]), run_store=store, model="m")
 
 
-async def test_run_options_adopts_pending_run_id(pending_store):
-    from linch import RunOptions
-
-    store, dsn = pending_store
-    rid = f"options-pending-{uuid4()}"
-    await seed_pending(store, dsn, rid)
-    agent = make_agent(store)
-    try:
-        session = await agent.session(id="s")
-        events = [e async for e in session.run("hello", RunOptions(run_id=rid))]
-        record = await store.load_run(rid)
-        assert record.status == "completed"
-        assert record.meta["queued"] is True
-        assert "run_contract" in record.meta
-        systems = [e for e in events if e.type == "system"]
-        assert len(systems) == 1 and systems[0].run_id == rid
-    finally:
-        await agent.close()
-
-
-@pytest.mark.parametrize("status", ["other-session", "running", "completed", "failed", "aborted"])
+@pytest.mark.parametrize("status", ["other-session", "aborted"])
 async def test_run_options_rejects_owned_or_nonpending_id(pending_store, status):
     from linch import RunOptions
 

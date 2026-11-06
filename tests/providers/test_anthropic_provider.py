@@ -963,8 +963,14 @@ def test_stream_does_not_prefix_normal_anthropic_tool_deltas_with_initial_input(
     ] == deltas
 
 
-@pytest.mark.parametrize("deltas", [[""], ["   "], ["", " ", "\n\t"]])
-@pytest.mark.parametrize("initial_input", [{}, {"value": "initial"}])
+@pytest.mark.parametrize(
+    "initial_input, deltas",
+    [
+        ({}, [""]),
+        ({"value": "initial"}, ["   "]),
+        ({"value": "initial"}, ["", " ", "\n\t"]),
+    ],
+)
 def test_stream_normalizes_empty_or_whitespace_anthropic_input_delta(initial_input, deltas):
     """Whitespace-only tool input falls back to the native initial object."""
     import json

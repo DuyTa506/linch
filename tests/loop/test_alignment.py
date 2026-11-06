@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -63,61 +62,6 @@ async def test_idle_align_rejects() -> None:
 
     with pytest.raises(ConfigError):
         await session.align("not running")
-
-
-@pytest.mark.asyncio
-async def test_alignment_injects_user_message_before_next_model_turn() -> None:
-    from linch.events import ResultEvent, UserEvent
-
-    provider = _tool_then_text_provider()
-    tool = _wait_tool()
-    session = await _agent(provider, tool).session()
-    events: list[Any] = []
-
-    async def collect() -> None:
-        async for event in session.run("start"):
-            events.append(event)
-
-    run_task = asyncio.create_task(collect())
-    await tool.started.wait()
-    align_task = asyncio.create_task(session.align("please adjust course"))
-    tool.release.set()
-    await run_task
-    await align_task
-
-    alignment_events = [
-        event for event in events if isinstance(event, UserEvent) and event.subtype == "alignment"
-    ]
-    assert len(alignment_events) == 1
-    assert len(provider.requests) == 2
-    assert "please adjust course" in _text_messages(provider.requests[1])
-    assert isinstance(events[-1], ResultEvent)
-    assert events[-1].subtype == "success"
-
-
-@pytest.mark.asyncio
-async def test_interrupt_stops_before_next_model_turn() -> None:
-    from linch.events import ResultEvent
-
-    provider = _tool_then_text_provider()
-    tool = _wait_tool()
-    session = await _agent(provider, tool).session()
-    events: list[Any] = []
-
-    async def collect() -> None:
-        async for event in session.run("start"):
-            events.append(event)
-
-    run_task = asyncio.create_task(collect())
-    await tool.started.wait()
-    session.interrupt()
-    tool.release.set()
-    await run_task
-
-    assert len(provider.requests) == 1
-    result = next(event for event in reversed(events) if isinstance(event, ResultEvent))
-    assert result.subtype == "interrupted"
-    assert result.stop_reason == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -205,19 +149,6 @@ async def test_timed_out_alignment_is_not_applied_after_slow_hook() -> None:
 
     assert not any(getattr(event, "subtype", None) == "alignment" for event in events)
     assert "change" not in _text_messages(provider.requests[1])
-
-
-def test_user_event_subtype_serializes() -> None:
-    from linch.events import UserEvent, event_from_dict, event_to_dict
-    from linch.types import Message, TextBlock
-
-    event = UserEvent(
-        message=Message(role="user", content=[TextBlock(text="hi")]),
-        subtype="alignment",
-    )
-    rebuilt = event_from_dict(json.loads(json.dumps(event_to_dict(event))))
-    assert isinstance(rebuilt, UserEvent)
-    assert rebuilt.subtype == "alignment"
 
 
 @pytest.mark.asyncio

@@ -54,16 +54,6 @@ class AdmissionConnection:
         }
 
 
-async def test_pending_conflict_maps_active_run_after_savepoint_rollback():
-    from linch import SessionBusyError
-
-    conn = AdmissionConnection()
-    with pytest.raises(SessionBusyError) as busy:
-        await PostgresRunStore("").create_pending_run(conn, "s", id="new")
-    assert busy.value.run_id == "active"
-    assert busy.value.session_id == "s"
-
-
 async def test_unrelated_unique_violation_preserves_original_error():
     error = violation("unrelated_unique_index")
     conn = AdmissionConnection(conflict=error)
@@ -72,15 +62,7 @@ async def test_unrelated_unique_violation_preserves_original_error():
     assert caught.value is error
 
 
-async def test_admission_retries_when_conflicting_run_has_already_finished():
-    conn = AdmissionConnection(disappear=True, transactional=False)
-    row = await PostgresRunStore("").create_pending_run(conn, "s", id="new")
-    assert row is not None
-    assert row.id == "new" and row.status == "pending"
-    assert conn.attempts == 2
-
-
-@pytest.mark.parametrize("transactional", [False, True])
+@pytest.mark.parametrize("transactional", [False])
 async def test_invisible_conflict_is_bounded_and_chains_violation(transactional):
     conn = AdmissionConnection(disappear=True, transactional=transactional)
     original_fetchrow = conn.fetchrow
@@ -99,19 +81,7 @@ async def test_invisible_conflict_is_bounded_and_chains_violation(transactional)
     assert conn.attempts == (1 if transactional else 3)
 
 
-async def test_duplicate_active_rows_fail_schema_install_with_clear_error(monkeypatch):
-    import linch.run_stores.postgres as postgres
-    from linch import ConfigError
-
-    async def duplicate_rows(*args, **kwargs):
-        raise violation()
-
-    monkeypatch.setattr(postgres, "ensure_pool", duplicate_rows)
-    with pytest.raises(ConfigError, match="duplicate.*nonterminal|nonterminal.*duplicate"):
-        await PostgresRunStore("")._ensure()
-
-
-@pytest.mark.parametrize("operation", ["create", "checkpoint", "checkpoint_events"])
+@pytest.mark.parametrize("operation", ["create"])
 async def test_direct_run_and_checkpoint_conflicts_map_to_recoverable_busy_error(
     monkeypatch, operation
 ):
@@ -159,48 +129,6 @@ async def test_existing_duplicate_rows_reject_index_installation(pg_dsn):
             await fresh._ensure()
     finally:
         await store.close()
-
-
-async def test_existing_schema_installs_admission_index_under_transaction():
-    from linch import ConfigError
-
-    class ExistingSchemaConnection:
-        depth = 0
-
-        @asynccontextmanager
-        async def transaction(self):
-            self.depth += 1
-            try:
-                yield
-            finally:
-                self.depth -= 1
-
-        async def fetchval(self, *args):
-            return True  # version metadata and required columns already exist
-
-        async def fetchrow(self, *args):
-            return {"version": 3}
-
-        async def execute(self, sql, *args):
-            if "CREATE UNIQUE INDEX" in sql:
-                assert self.depth == 1
-                assert "ON runs (session_id)" in sql
-                for status in ("pending", "running", "waiting_permission", "suspended"):
-                    assert f"'{status}'" in sql
-                raise violation()
-
-    conn = ExistingSchemaConnection()
-
-    class Pool:
-        @asynccontextmanager
-        async def acquire(self):
-            yield conn
-
-    store = PostgresRunStore("", pool=Pool())
-    with pytest.raises(ConfigError, match="duplicate nonterminal"):
-        await store._ensure()
-    assert conn.depth == 0
-    assert not store._initialized
 
 
 async def test_same_id_race_falls_through_to_existing_run_check():

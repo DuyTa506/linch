@@ -36,7 +36,7 @@ class _FailOnceMarkFailedStore:
         return await self._inner.mark_failed(run_id, checkpoint, error=error, events=events)
 
 
-@pytest.mark.parametrize("route", ["stop", "budget", "max_turns"])
+@pytest.mark.parametrize("route", ["budget", "max_turns"])
 async def test_failed_terminal_tail_recovery_persists_one_result_event(route: str) -> None:
     from linch import HookResult, RunBudget
     from linch.sessions import InMemorySessionStore

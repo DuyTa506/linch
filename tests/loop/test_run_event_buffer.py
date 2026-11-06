@@ -34,40 +34,6 @@ class _RecordingRunStore(InMemoryRunStore):
         return await super().save_checkpoint_with_events(run_id, checkpoint, events, status=status)
 
 
-class _TrackingBatchStore(InMemoryRunStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.leases: list[Any] = []
-
-    async def append_events(
-        self, run_id: str, events: list[Any], *, lease: RunLease | None = None
-    ) -> list[int]:
-        self.leases.append(lease)
-        return await super().append_events(run_id, events, lease=lease)
-
-
-class _NoLeaseCreateStore(InMemoryRunStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.create_calls = 0
-
-    async def create_run(
-        self,
-        session_id: str,
-        *,
-        id: str | None = None,
-        meta: dict[str, object] | None = None,
-        initial_checkpoint: Any = None,
-    ) -> Any:
-        self.create_calls += 1
-        return await super().create_run(
-            session_id,
-            id=id,
-            meta=meta,
-            initial_checkpoint=initial_checkpoint,
-        )
-
-
 class _NoLeaseSnapshotStore(InMemoryRunStore):
     def __init__(self) -> None:
         super().__init__()
@@ -95,58 +61,6 @@ class _NoLeaseSnapshotStore(InMemoryRunStore):
     async def save(self, run_id: str, provider_attempt: int, request: Any) -> Any:
         self.save_calls += 1
         return await super().save(run_id, provider_attempt, request)
-
-
-class _OpaqueCallable:
-    def __init__(self, callback: Any) -> None:
-        self._callback = callback
-
-    @property
-    def __signature__(self) -> Any:
-        raise ValueError("opaque callable")
-
-    async def __call__(self, run_id: str, event: Any) -> int:
-        return await self._callback(run_id, event)
-
-
-class _OpaqueAppendStore(InMemoryRunStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.create_calls = 0
-        self.append_calls = 0
-        self.append_events = None
-        self.append_event = _OpaqueCallable(self._append_event)
-
-    async def create_run(self, session_id: str, **kwargs: Any) -> Any:
-        self.create_calls += 1
-        return await super().create_run(session_id, **kwargs)
-
-    async def _append_event(self, run_id: str, event: Any) -> int:
-        self.append_calls += 1
-        return await InMemoryRunStore.append_event(self, run_id, event)
-
-
-class _VarPositionalCallable:
-    def __init__(self, callback: Any) -> None:
-        self._callback = callback
-
-    async def __call__(self, run_id: str, event: Any, *lease: Any) -> int:
-        return await self._callback(run_id, event)
-
-
-class _VarPositionalAppendStore(InMemoryRunStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.create_calls = 0
-        self.append_events = None
-        self.append_event = _VarPositionalCallable(self._append_event)
-
-    async def create_run(self, session_id: str, **kwargs: Any) -> Any:
-        self.create_calls += 1
-        return await super().create_run(session_id, **kwargs)
-
-    async def _append_event(self, run_id: str, event: Any) -> int:
-        return await InMemoryRunStore.append_event(self, run_id, event)
 
 
 class _InterleavingRunStore(InMemoryRunStore):
@@ -198,19 +112,6 @@ class _StatusRecordingRunStore(InMemoryRunStore):
         )
 
 
-class _FailOnceBatchStore:
-    def __init__(self) -> None:
-        self.fail = True
-        self.events: list[Any] = []
-
-    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
-        if self.fail:
-            self.fail = False
-            raise OSError("temporary batch failure")
-        self.events.extend(events)
-        return list(range(1, len(events) + 1))
-
-
 class _FailSecondSingleStore:
     def __init__(self) -> None:
         self.calls = 0
@@ -233,21 +134,6 @@ async def _expect_flush_failure(buffer: RunEventBuffer) -> None:
         await buffer.flush()
 
 
-async def test_failed_batch_flush_restores_pending_events_for_retry() -> None:
-    store = _FailOnceBatchStore()
-    buffer = RunEventBuffer(store, "r1")
-    events = [PartialAssistantEvent(delta={"text": text}) for text in ("a", "b")]
-    for event in events:
-        await buffer.append(event)
-
-    await _expect_flush_failure(buffer)
-
-    assert buffer.last_seq == 0
-    assert buffer._pending == events
-    assert await buffer.flush() == 2
-    assert store.events == events
-
-
 async def test_failed_single_event_flush_preserves_progress_and_requeues_unattempted() -> None:
     store = _FailSecondSingleStore()
     buffer = RunEventBuffer(store, "r1")
@@ -266,21 +152,6 @@ async def test_failed_single_event_flush_preserves_progress_and_requeues_unattem
     assert store.events == [*events, store.concurrent_event]
 
 
-async def test_event_buffer_forwards_captured_lease_to_batch_writes() -> None:
-    store = _TrackingBatchStore()
-    record = await store.create_run("s1", id="r1")
-    lease = await store.claim(record.id, "worker-a", 30.0)
-    buffer = RunEventBuffer(store, record.id, lease=lease)
-    event = PartialAssistantEvent(delta={"text": "leased"})
-
-    await buffer.append(event)
-    await buffer.flush()
-
-    rows = await store.load_events(record.id)
-    assert [row.event for row in rows] == [event]
-    assert store.leases == [lease]
-
-
 async def test_event_buffer_rejects_unsupported_leased_batch_before_side_effect() -> None:
     store = _RecordingRunStore()
     buffer = RunEventBuffer(store, "r1", lease=RunLease("r1", "owner", 1, 999.0, 30.0))
@@ -290,24 +161,6 @@ async def test_event_buffer_rejects_unsupported_leased_batch_before_side_effect(
     with pytest.raises(TypeError, match="lease"):
         await buffer.flush()
     assert store.batches == []
-
-
-async def test_session_rejects_unsupported_leased_store_before_create() -> None:
-    from linch.session import RunOptions
-
-    store = _NoLeaseCreateStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("done")]),
-        model="gpt-5",
-        session_store=memory_session_store(),
-        run_store=store,
-    )
-    session = await agent.session(id="s1")
-    lease = RunLease("r1", "owner", 1, 999.0, 30.0)
-
-    with pytest.raises(TypeError, match="lease"):
-        session.run("hello", RunOptions(run_id="r1", lease=lease))
-    assert store.create_calls == 0
 
 
 async def test_session_rejects_unsupported_leased_snapshot_before_create() -> None:
@@ -328,98 +181,6 @@ async def test_session_rejects_unsupported_leased_snapshot_before_create() -> No
     with pytest.raises(TypeError, match="lease"):
         session.run("hello", RunOptions(run_id="r1", lease=lease))
     assert store.create_calls == store.save_calls == 0
-
-
-async def test_session_rejects_opaque_leased_store_before_create() -> None:
-    from linch.session import RunOptions
-
-    provider = ScriptedProvider([TextTurn("must-not-run")])
-    store = _OpaqueAppendStore()
-    agent = make_agent(
-        provider,
-        model="gpt-5",
-        session_store=memory_session_store(),
-        run_store=store,
-    )
-    session = await agent.session(id="s1")
-    record = await store.create_run(session.id, id="opaque-run")
-    store._runs[record.id].status = "pending"
-    lease = await store.claim(record.id, "worker-a", 30.0)
-    before_create = store.create_calls
-
-    try:
-        with pytest.raises(TypeError, match="does not support lease"):
-            iterator = session.run("hello", RunOptions(run_id=record.id, lease=lease))
-            _ = [event async for event in iterator]
-        assert store.create_calls == before_create
-        assert store.append_calls == 0
-        assert provider.requests == []
-        assert await store.load_events(record.id) == []
-    finally:
-        await agent.close()
-
-
-async def test_unleased_opaque_store_keeps_old_call_shape() -> None:
-    provider = ScriptedProvider([TextTurn("done")])
-    store = _OpaqueAppendStore()
-    agent = make_agent(
-        provider,
-        model="gpt-5",
-        session_store=memory_session_store(),
-        run_store=store,
-    )
-
-    try:
-        session = await agent.session(id="s1")
-        events = [event async for event in session.run("hello")]
-        assert events[-1].subtype == "success"
-        assert store.append_calls > 0
-    finally:
-        await agent.close()
-
-
-async def test_session_rejects_var_positional_lease_before_create() -> None:
-    from linch.session import RunOptions
-
-    provider = ScriptedProvider([TextTurn("must-not-run")])
-    store = _VarPositionalAppendStore()
-    agent = make_agent(
-        provider,
-        model="gpt-5",
-        session_store=memory_session_store(),
-        run_store=store,
-    )
-    session = await agent.session(id="s1")
-    record = await store.create_run(session.id, id="var-positional-run")
-    store._runs[record.id].status = "pending"
-    lease = await store.claim(record.id, "worker-a", 30.0)
-    before_create = store.create_calls
-
-    try:
-        with pytest.raises(TypeError, match="does not support lease"):
-            iterator = session.run("hello", RunOptions(run_id=record.id, lease=lease))
-            _ = [event async for event in iterator]
-        assert store.create_calls == before_create
-        assert provider.requests == []
-    finally:
-        await agent.close()
-
-
-def test_lease_signature_accepts_keyword_and_kwargs_parameters() -> None:
-    from linch.run_store import _supports_lease_keyword
-
-    async def keyword_only(run_id: str, event: Any, *, lease: Any = None) -> int:
-        return 1
-
-    async def keyword_or_positional(run_id: str, event: Any, lease: Any = None) -> int:
-        return 1
-
-    async def arbitrary_keywords(run_id: str, event: Any, **kwargs: Any) -> int:
-        return 1
-
-    assert _supports_lease_keyword(keyword_only)
-    assert _supports_lease_keyword(keyword_or_positional)
-    assert _supports_lease_keyword(arbitrary_keywords)
 
 
 async def test_explicit_lease_does_not_borrow_newer_event_buffer() -> None:

@@ -19,14 +19,11 @@ def _msg(sender: str, recipient: str, content: str = "hi", **kw: Any) -> Mailbox
     return MailboxMessage(sender=sender, recipient=recipient, content=content, **kw)
 
 
-def test_message_assigns_id_when_absent() -> None:
+def test_message_id_is_generated_unless_explicit() -> None:
     m1 = MailboxMessage(sender="a", recipient="b", content="x")
     m2 = MailboxMessage(sender="a", recipient="b", content="x")
     assert m1.id and m2.id
     assert m1.id != m2.id
-
-
-def test_message_keeps_explicit_id() -> None:
     m = MailboxMessage(sender="a", recipient="b", content="x", id="fixed")
     assert m.id == "fixed"
 
@@ -34,42 +31,29 @@ def test_message_keeps_explicit_id() -> None:
 # --- Correlation FSM ---------------------------------------------------------
 
 
-def test_open_then_resolve_matches_by_request_id() -> None:
+def test_resolve_matches_by_request_id_and_first_wins() -> None:
     c = Correlator()
     c.open("req-1")
     assert not c.is_resolved("req-1")
-
-    response = MailboxMessage(sender="b", recipient="a", content="pong", in_reply_to="req-1")
-    matched = c.resolve(response)
-
-    assert matched is True
-    assert c.is_resolved("req-1")
-    assert c.response("req-1") is response
-
-
-def test_resolve_without_open_returns_false() -> None:
-    c = Correlator()
-    response = MailboxMessage(sender="b", recipient="a", content="pong", in_reply_to="ghost")
-    assert c.resolve(response) is False
-
-
-def test_resolve_response_without_in_reply_to_returns_false() -> None:
-    c = Correlator()
-    c.open("req-1")
-    bare = MailboxMessage(sender="b", recipient="a", content="pong")
-    assert c.resolve(bare) is False
-    assert not c.is_resolved("req-1")
-
-
-def test_double_resolve_is_idempotent_first_wins() -> None:
-    c = Correlator()
-    c.open("req-1")
     first = MailboxMessage(sender="b", recipient="a", content="one", in_reply_to="req-1")
     second = MailboxMessage(sender="b", recipient="a", content="two", in_reply_to="req-1")
 
     assert c.resolve(first) is True
+    assert c.is_resolved("req-1")
     assert c.resolve(second) is False
     assert c.response("req-1") is first
+
+
+def test_unmatched_responses_resolve_nothing() -> None:
+    c = Correlator()
+    ghost = MailboxMessage(sender="b", recipient="a", content="pong", in_reply_to="ghost")
+    assert c.resolve(ghost) is False
+    assert c.response("ghost") is None
+
+    c.open("req-1")
+    bare = MailboxMessage(sender="b", recipient="a", content="pong")
+    assert c.resolve(bare) is False
+    assert not c.is_resolved("req-1")
 
 
 def test_pending_lists_unresolved_requests() -> None:
@@ -80,37 +64,22 @@ def test_pending_lists_unresolved_requests() -> None:
     assert c.pending() == ["b"]
 
 
-def test_response_unknown_request_is_none() -> None:
-    c = Correlator()
-    assert c.response("nope") is None
-
-
 # --- Concurrent delivery and leases ------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_memory_mailbox_drain_is_destructive(tmp_path) -> None:
+async def test_memory_mailbox_drain_is_fifo_per_recipient_and_destructive() -> None:
     box = InMemoryMailbox()
-    await box.send(_msg("a", "b", "one"))
+    for i in range(5):
+        await box.send(_msg("a", "b", str(i)))
 
     assert await box.drain("c") == []
     assert await box.drain("nobody") == []
     first = await box.drain("b")
     second = await box.drain("b")
 
-    assert [m.content for m in first] == ["one"]
+    assert [m.content for m in first] == ["0", "1", "2", "3", "4"]
     assert second == []
-
-
-@pytest.mark.asyncio
-async def test_memory_mailbox_preserves_fifo_order(tmp_path) -> None:
-    box = InMemoryMailbox()
-    for i in range(5):
-        await box.send(_msg("a", "b", str(i)))
-
-    drained = await box.drain("b")
-
-    assert [m.content for m in drained] == ["0", "1", "2", "3", "4"]
 
 
 @pytest.mark.asyncio

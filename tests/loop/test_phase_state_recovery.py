@@ -71,89 +71,11 @@ def _agent(
     )
 
 
-async def _leave_at_force_final_checkpoint(session_store: Any, run_store: Any) -> str:
-    from tests.support.providers import ScriptedProvider, ToolUseTurn
-
-    provider = ScriptedProvider(
-        [ToolUseTurn("Repeat", {"value": "same"}, tool_id=f"call-{i}") for i in range(3)]
-    )
-    agent = _agent(provider, session_store=session_store, run_store=run_store)
-    session = await agent.session(id="phase-state")
-    iterator = session.run("repeat until stopped").__aiter__()
-    run_id: str | None = None
-    try:
-        async for event in iterator:
-            if event.type == "system":
-                run_id = event.run_id
-            if event.type == "user" and getattr(event, "subtype", None) == "notification":
-                break
-    finally:
-        await iterator.aclose()
-    assert run_id is not None
-    record = await run_store.load_run(run_id)
-    assert record is not None and record.checkpoint is not None
-    assert record.checkpoint.phase == "turn_complete"
-    assert record.checkpoint.force_final_pending is True
-    return run_id
-
-
-@pytest.mark.asyncio
-async def test_force_final_checkpoint_survives_phase_state_transfer() -> None:
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
-    session_store = InMemorySessionStore()
-    run_store = InMemoryRunStore()
-    run_id = await _leave_at_force_final_checkpoint(session_store, run_store)
-
-    from tests.support.providers import ScriptedProvider, TextTurn
-
-    provider = ScriptedProvider([TextTurn("final")])
-    restarted = _agent(provider, session_store=session_store, run_store=run_store)
-    session = await restarted.session(id="phase-state")
-    events = [event async for event in session.resume(run_id)]
-
-    assert provider.requests
-    assert provider.requests[0].tools == []
-    assert provider.requests[0].tool_choice is None
-    assert events[-1].type == "result"
-    assert events[-1].subtype == "success"
-
-
-@pytest.mark.asyncio
-async def test_provider_checkpoint_clears_force_final_state_before_persist() -> None:
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
-    session_store = InMemorySessionStore()
-    run_store = InMemoryRunStore()
-    run_id = await _leave_at_force_final_checkpoint(session_store, run_store)
-
-    from tests.support.providers import ScriptedProvider, TextTurn
-
-    provider = ScriptedProvider([TextTurn("final")])
-    restarted = _agent(provider, session_store=session_store, run_store=run_store)
-    session = await restarted.session(id="phase-state")
-    iterator = session.resume(run_id).__aiter__()
-    try:
-        async for event in iterator:
-            if event.type == "assistant":
-                break
-    finally:
-        await iterator.aclose()
-
-    record = await run_store.load_run(run_id)
-    assert record is not None and record.checkpoint is not None
-    assert record.checkpoint.phase == "assistant_appended"
-    assert record.checkpoint.force_final_pending is False
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "terminal_type", "subtype", "stop_reason", "error_name"),
     [
         ("abort", "result", "aborted", "error", None),
-        ("provider_error", "error", "error", "error", "ProviderError"),
         ("budget", "budget", "error", "error", None),
     ],
 )

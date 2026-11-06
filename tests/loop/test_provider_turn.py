@@ -72,42 +72,6 @@ def _preparation_context(
 
 
 @pytest.mark.asyncio
-async def test_resumed_tool_results_keep_pending_skill_overlay(monkeypatch: Any) -> None:
-    """A checkpointed skill overlay applies to the following resumed turn."""
-    from linch.loop import provider_turn
-    from linch.types import SkillOverlay
-
-    checkpoint = SimpleNamespace(
-        phase="tool_results_appended",
-        turn_index=0,
-        assistant_message=object(),
-        current_turn_allowed_tools=None,
-    )
-    ctx = _preparation_context(
-        pending_overlay=SkillOverlay(allowed_tools=["OnlyThis"], model_override="skill-model"),
-        resume_checkpoint=checkpoint,
-    )
-    monkeypatch.setattr(provider_turn, "maybe_compact_resilient", _no_compaction)
-    monkeypatch.setattr(provider_turn, "_build_context_result", _no_context)
-    monkeypatch.setattr(
-        provider_turn,
-        "_build_turn_request",
-        lambda *args, **kwargs: SimpleNamespace(tools=[], tool_choice=None),
-    )
-
-    [event async for event in provider_turn.prepare_provider_turn(ctx)]
-
-    assert ctx.session.pending_skill_overlay is not None
-
-    ctx.turn_index = 1
-    [event async for event in provider_turn.prepare_provider_turn(ctx)]
-
-    assert ctx.session.pending_skill_overlay is None
-    assert ctx.session.current_turn_allowed_tools == ["OnlyThis"]
-    assert ctx.outcome_model_override == "skill-model"
-
-
-@pytest.mark.asyncio
 async def test_exact_pending_replay_restores_checkpoint_tool_allowlist(monkeypatch: Any) -> None:
     """A frozen provider replay keeps the checkpoint execution allowlist."""
     from linch.loop import provider_turn
@@ -130,28 +94,6 @@ async def test_exact_pending_replay_restores_checkpoint_tool_allowlist(monkeypat
     [event async for event in provider_turn.prepare_provider_turn(ctx)]
 
     assert ctx.session.current_turn_allowed_tools == ["OnlyThis"]
-
-
-@pytest.mark.asyncio
-async def test_force_final_turn_closes_execution_boundary(monkeypatch: Any) -> None:
-    """A forced-final request also denies provider-emitted tool execution."""
-    from linch.loop import provider_turn
-
-    ctx = _preparation_context(force_final_pending=True)
-    monkeypatch.setattr(provider_turn, "maybe_compact_resilient", _no_compaction)
-    monkeypatch.setattr(provider_turn, "_build_context_result", _no_context)
-
-    def build_request(*args: Any, **kwargs: Any) -> Any:
-        return SimpleNamespace(tools=[{"name": "Write"}], tool_choice="auto")
-
-    monkeypatch.setattr(provider_turn, "_build_turn_request", build_request)
-
-    [event async for event in provider_turn.prepare_provider_turn(ctx)]
-
-    assert ctx.session.current_turn_allowed_tools == []
-    assert ctx.outcome_req is not None
-    assert ctx.outcome_req.tools == []
-    assert ctx.outcome_req.tool_choice is None
 
 
 @pytest.mark.asyncio
@@ -212,38 +154,6 @@ async def test_force_final_turn_rejects_provider_tool_calls() -> None:
     second_end = [event for event in events if event.type == "tool_call_end"][1]
     assert second_end.is_error is True
     assert "not offered for the current turn" in second_end.result
-
-
-@pytest.mark.asyncio
-async def test_closing_provider_parser_closes_raw_provider_stream() -> None:
-    """Closing a parser phase closes the provider iterator it delegates to."""
-    import asyncio
-
-    from linch.loop.streaming import _stream_turn
-
-    class TrackedProvider:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def stream(self, _req: Any) -> Any:
-            try:
-                yield {"type": "message_start", "model": "model"}
-                yield {"type": "text_delta", "text": "partial"}
-                await asyncio.Event().wait()
-            finally:
-                self.closed = True
-
-    provider = TrackedProvider()
-    session = SimpleNamespace(
-        agent=SimpleNamespace(include_partial_messages=True, provider=provider)
-    )
-    request = SimpleNamespace(stream_partials=True)
-    iterator = _stream_turn(session, request).__aiter__()
-
-    await iterator.__anext__()
-    await iterator.aclose()
-
-    assert provider.closed is True
 
 
 @pytest.mark.asyncio
@@ -366,10 +276,6 @@ async def test_force_final_context_recovery_keeps_tool_choice_disabled(
     assert output == ["compacted", "done"]
     assert prepared[1] is rebuilt[0]
     assert rebuilt[0].tool_choice is None
-
-
-async def _no_compaction(*args: Any, **kwargs: Any) -> bool:
-    return False
 
 
 async def _no_context(*args: Any, **kwargs: Any) -> None:

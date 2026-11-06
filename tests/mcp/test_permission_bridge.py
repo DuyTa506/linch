@@ -80,18 +80,6 @@ def test_mcp_permission_rules_maps_only_destructive() -> None:
     assert [(r.tool, r.decision) for r in rules] == [("srv__danger", "ask")]
 
 
-def test_destructive_rule_forces_ask_under_permissive_mode() -> None:
-    from linch.mcp import mcp_permission_rules
-    from linch.permissions.engine import PendingToolCall, PermissionEngine
-
-    tool = _FakeMcpTool("srv__danger", destructive=True)
-    engine = PermissionEngine(mode="skip-dangerous", rules=mcp_permission_rules([tool]))
-    decision = engine.evaluate(
-        PendingToolCall(tool_use_id="t", tool=tool, input={}),
-    )
-    assert decision.decision == "ask"
-
-
 async def test_tool_attached_mid_run_appears_next_turn() -> None:
     from linch import Agent
     from linch.mcp import McpConnection
@@ -297,7 +285,8 @@ async def test_mcp_attach_rollback_cleans_subagent_registry() -> None:
     assert subagent_registry.get("srv__collision") is collision
 
 
-async def test_configured_mcp_connection_closes_when_attachment_fails(monkeypatch) -> None:
+@pytest.mark.parametrize("entrypoint", ["configured", "added"])
+async def test_mcp_connection_closes_when_attachment_fails(monkeypatch, entrypoint: str) -> None:
     import linch.mcp as mcp_module
     from linch import Agent
     from linch.errors import ConfigError
@@ -313,7 +302,8 @@ async def test_configured_mcp_connection_closes_when_attachment_fails(monkeypatc
         cwd=".",
         tools=tool_registry(existing),
     )
-    agent._mcp_servers = {"srv": object()}
+    if entrypoint == "configured":
+        agent._mcp_servers = {"srv": object()}
     connection = _FakeConnection([_FakeMcpTool("srv__collision")])
 
     async def connect(_servers: Any) -> _FakeConnection:
@@ -323,42 +313,16 @@ async def test_configured_mcp_connection_closes_when_attachment_fails(monkeypatc
 
     try:
         with pytest.raises(ConfigError, match="already registered"):
-            await agent.connect_mcp()
+            if entrypoint == "configured":
+                await agent.connect_mcp()
+            else:
+                await agent.add_mcp_servers({"srv": object()})
         assert connection.closed == 1
-        assert agent._mcp_connection is None
-        assert agent._mcp_connect is None
-    finally:
-        await agent.close()
-
-
-async def test_added_mcp_connection_closes_when_attachment_fails(monkeypatch) -> None:
-    import linch.mcp as mcp_module
-    from linch import Agent
-    from linch.errors import ConfigError
-    from linch.sessions import InMemorySessionStore
-    from tests.support.tools import tool_registry
-
-    existing = _FakeMcpTool("srv__collision")
-    agent = Agent(
-        model="m",
-        provider=ScriptedProvider([TextTurn("ok")]),  # type: ignore[arg-type]
-        permissions={"mode": "acceptEdits"},
-        session_store=InMemorySessionStore(),
-        cwd=".",
-        tools=tool_registry(existing),
-    )
-    connection = _FakeConnection([_FakeMcpTool("srv__collision")])
-
-    async def connect(_servers: Any) -> _FakeConnection:
-        return connection
-
-    monkeypatch.setattr(mcp_module, "connect_mcp_servers", connect)
-
-    try:
-        with pytest.raises(ConfigError, match="already registered"):
-            await agent.add_mcp_servers({"srv": object()})
-        assert connection.closed == 1
-        assert agent._extra_mcp_connections == []
+        if entrypoint == "configured":
+            assert agent._mcp_connection is None
+            assert agent._mcp_connect is None
+        else:
+            assert agent._extra_mcp_connections == []
     finally:
         await agent.close()
 

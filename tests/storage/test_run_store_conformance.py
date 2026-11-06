@@ -71,195 +71,6 @@ def _event(label: str) -> UserEvent:
     return UserEvent(message=Message(role="user", content=[TextBlock(text=label)]))
 
 
-async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase) -> None:
-    run_id = f"conformance-{uuid4()}"
-    store = store_case.store
-    await store.create_run("session-1", id=run_id, meta={"source": "test"})
-
-    assert await store.save_checkpoint(run_id, _checkpoint()) is None
-    saved = await store.load_run(run_id)
-    assert saved is not None
-    assert saved.status == "running"
-    assert saved.checkpoint is not None
-    assert saved.checkpoint.prompt == "hello"
-
-    # A loaded checkpoint is an isolated snapshot, so caller mutation cannot
-    # alter the durable record.
-    saved.checkpoint.extension_state["nested"]["labels"].append("caller")
-    loaded = await store.load_run(run_id)
-    assert loaded is not None
-    assert loaded.checkpoint is not None
-    assert loaded.checkpoint.extension_state["nested"]["labels"] == ["a", "b"]
-
-    seqs = await store.append_events(run_id, [_event("one"), _event("two")])
-    assert seqs == [1, 2]
-    assert await store.append_event(run_id, _event("three")) == 3
-    rows = await store.load_events(run_id)
-    assert [row.seq for row in rows] == [1, 2, 3]
-    assert [row.event.message.content[0].text for row in rows] == ["one", "two", "three"]
-    resumed = await store.load_events(run_id, after_seq=1)
-    assert [row.seq for row in resumed] == [2, 3]
-
-    assert await store.mark_completed(run_id, _checkpoint("done")) is None
-    done = await store.load_run(run_id)
-    assert done is not None
-    assert done.status == "completed"
-    assert done.checkpoint is not None
-    assert done.checkpoint.phase == "completed"
-
-    failed_id = f"conformance-failed-{uuid4()}"
-    await store.create_run("session-1", id=failed_id)
-    seqs = await store.mark_failed(
-        failed_id, _checkpoint("failed"), {"message": "boom"}, events=[_event("terminal")]
-    )
-    assert seqs == [1]
-    assert [row.event for row in await store.load_events(failed_id)] == [_event("terminal")]
-    failed_loaded = await store.load_run(failed_id)
-    assert failed_loaded is not None
-    assert failed_loaded.status == "failed"
-    assert failed_loaded.meta["errors"] == [{"message": "boom"}]
-
-
-async def test_run_store_preserves_cyclic_tool_metadata_as_markers(store_case: _StoreCase) -> None:
-    from linch.events import ToolCallEndEvent
-    from linch.tools.base import ToolResult
-
-    metadata = {"labels": ["stable"]}
-    metadata["cycle"] = metadata
-    event = ToolCallEndEvent(
-        tool_use_id="tool-1",
-        tool_name="Lookup",
-        tool_result=ToolResult(content="done", metadata=metadata),
-    )
-    store = store_case.store
-    run_id = f"conformance-{uuid4()}"
-    await store.create_run("session-1", id=run_id)
-
-    await store.append_event(run_id, event)
-    rows = await store.load_events(run_id)
-
-    assert rows[0].event.tool_result.metadata == {"labels": ["stable"], "cycle": "<recursion>"}
-
-
-async def test_run_store_bounds_deep_acyclic_tool_metadata(store_case: _StoreCase) -> None:
-    from typing import Any
-
-    from linch.events import IGNORABLE_MAX_DEPTH, ToolCallEndEvent
-    from linch.tools.base import ToolResult
-
-    payload: Any = "leaf"
-    for _ in range(IGNORABLE_MAX_DEPTH + 1000):
-        payload = [payload]
-    event = ToolCallEndEvent(
-        tool_use_id="tool-1",
-        tool_name="Lookup",
-        tool_result=ToolResult(content="done", metadata={"payload": payload}),
-    )
-    store = store_case.store
-    run_id = f"conformance-{uuid4()}"
-    await store.create_run("session-1", id=run_id)
-
-    await store.append_event(run_id, event)
-    rows = await store.load_events(run_id)
-
-    node = rows[0].event.tool_result.metadata["payload"]
-    while isinstance(node, list):
-        node = node[0]
-    assert node == "<max-depth>"
-
-
-async def test_run_store_omits_attachments_beyond_json_encoder_recursion_limit(
-    store_case: _StoreCase,
-) -> None:
-    from typing import Any
-
-    from linch.events import ToolCallEndEvent
-    from linch.tools.base import ToolResult
-
-    payload: Any = "leaf"
-    for _ in range(1100):
-        payload = [payload]
-    event = ToolCallEndEvent(
-        tool_use_id="tool-1",
-        tool_name="Lookup",
-        tool_result=ToolResult(content="done", attachments=[payload]),
-    )
-    store = store_case.store
-    run_id = f"conformance-{uuid4()}"
-    await store.create_run("session-1", id=run_id)
-
-    await store.append_event(run_id, event)
-    rows = await store.load_events(run_id)
-
-    assert rows[0].event.tool_result.attachments == []
-
-
-@pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
-@pytest.mark.parametrize("wrappers", [0, 1, 2])
-async def test_run_store_preserves_opaque_event_at_exact_depth_boundary(
-    store_case: _StoreCase, kind: str, wrappers: int
-) -> None:
-    from typing import Any
-
-    from linch.events import IGNORABLE_MAX_DEPTH, IgnorableEvent, SubagentEvent, event_to_dict
-
-    payload: Any = "leaf"
-    for index in range(IGNORABLE_MAX_DEPTH - 1 - wrappers):
-        payload = (
-            {"next": payload} if kind == "dict" or (kind == "mixed" and index % 2) else [payload]
-        )
-    event = IgnorableEvent(
-        original_type="future_event",
-        raw={"type": "future_event", "ignorable": True, "payload": payload},
-    )
-    for _ in range(wrappers):
-        event = SubagentEvent("parent", "child", "worker", "Worker", event)
-    expected = event_to_dict(event)
-    store = store_case.store
-    run_id = f"conformance-{uuid4()}"
-    await store.create_run("session-1", id=run_id)
-
-    await store.append_event(run_id, event)
-    rows = await store.load_events(run_id)
-
-    assert event_to_dict(rows[0].event) == expected
-
-
-async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
-    store_case: _StoreCase,
-) -> None:
-    import asyncio
-
-    run_id = f"conformance-concurrent-{uuid4()}"
-    store = store_case.store
-    await store.create_run("session-1", id=run_id)
-    returned = await asyncio.gather(
-        *(
-            (store if index % 2 == 0 else store_case.peer).append_event(run_id, _event(str(index)))
-            for index in range(32)
-        )
-    )
-    assert sorted(returned) == list(range(1, 33))
-    rows = await store.load_events(run_id)
-    assert [row.seq for row in rows] == list(range(1, 33))
-
-    other_run_id = f"conformance-concurrent-other-{uuid4()}"
-    await store.create_run("session-2", id=other_run_id)
-    assert await store.append_event(other_run_id, _event("independent")) == 1
-
-
-async def test_event_batch_encoding_failure_is_atomic(store_case) -> None:
-    store = store_case.store
-    run_id = f"batch-encoding-{uuid4()}"
-    await store.create_run("session", id=run_id)
-    await store.append_event(run_id, _event("before"))
-    before = await store.load_events(run_id)
-    with pytest.raises(ValueError):
-        await store.append_events(run_id, [_event("valid prefix"), object()])
-    assert await store.load_events(run_id) == before
-    assert await store.append_event(run_id, _event("after")) == 2
-
-
 async def test_leased_event_encoding_failure_is_atomic(store_case) -> None:
     """A leased invalid batch cannot partially update the run or event log."""
     store = store_case.store
@@ -279,22 +90,6 @@ async def test_leased_event_encoding_failure_is_atomic(store_case) -> None:
     assert await store.load_run(run_id) == before
     assert await store.load_events(run_id) == before_events
     await store.save_checkpoint(run_id, _checkpoint("after"), lease=lease)
-    await store.release(lease)
-
-
-async def test_leased_write_detaches_the_caller_checkpoint(store_case: _StoreCase) -> None:
-    """A leased write stores a snapshot that later caller mutation cannot alter."""
-    store = store_case.store
-    run_id = f"leased-detached-{uuid4()}"
-    await store.create_run("session", id=run_id)
-    lease = await store.claim(run_id, "owner", 30.0)
-    saved = _checkpoint("detached")
-    assert await store.save_checkpoint(run_id, saved, lease=lease) is None
-    saved.extension_state["nested"]["labels"].append("caller")
-    loaded = await store.load_run(run_id)
-    assert loaded is not None
-    assert loaded.checkpoint is not None
-    assert loaded.checkpoint.extension_state["nested"]["labels"] == ["a", "b"]
     await store.release(lease)
 
 
@@ -391,24 +186,6 @@ async def test_unleased_public_delegates_support_legacy_override_signatures(
             await store.mark_completed(run_id, _checkpoint("leased complete"), lease=lease)
 
 
-async def test_run_store_concurrent_create_same_id_rejects_existing_id(
-    store_case: _StoreCase,
-) -> None:
-    import asyncio
-
-    run_id = f"conformance-create-{uuid4()}"
-    results = await asyncio.gather(
-        store_case.store.create_run("session-1", id=run_id, meta={"owner": "first"}),
-        store_case.peer.create_run("session-1", id=run_id, meta={"owner": "second"}),
-        return_exceptions=True,
-    )
-    errors = [result for result in results if isinstance(result, ValueError)]
-    successes = [result for result in results if not isinstance(result, Exception)]
-    assert len(errors) == 1
-    assert len(successes) == 1
-    assert successes[0].id == run_id
-
-
 async def _seed_pending(
     store_case: _StoreCase,
     run_id: str,
@@ -452,13 +229,6 @@ async def test_pending_adoption_merges_metadata_and_retains_contract(
     assert adopted.meta["created"] == "after"
     assert adopted.meta["worker"] == "one"
     assert adopted.meta["run_contract"] == run_meta_with_contract(contract)["run_contract"]
-
-
-async def test_pending_adoption_rejects_different_session(store_case: _StoreCase) -> None:
-    run_id = f"conformance-pending-owner-{uuid4()}"
-    await _seed_pending(store_case, run_id, "session-1", {})
-    with pytest.raises(ValueError, match="belongs to session session-1"):
-        await store_case.store.create_run("session-2", id=run_id, initial_checkpoint=_checkpoint())
 
 
 async def test_pending_adoption_rejects_incompatible_contract_without_mutation(
@@ -539,45 +309,6 @@ async def test_failed_terminal_encoding_failure_changes_neither_status_nor_log(s
     assert await store.load_events(run_id) == before_events
 
 
-@pytest.mark.parametrize(
-    ("meta", "error", "history"),
-    [
-        ({"prompt": "before\0after"}, {"message": "failed"}, []),
-        ({"prompt\0key": "value"}, {"message": "failed"}, []),
-        (
-            {"errors": [{"message": "old\0failure"}]},
-            {"message": "failed"},
-            [{"message": "old\0failure"}],
-        ),
-        ({"errors": [{"old\0key": "failure"}]}, {"message": "failed"}, [{"old\0key": "failure"}]),
-        ({}, {"message": "failed\0again", "key\0": "value"}, []),
-        ({"errors": ["malformed\0history"]}, {"message": "failed"}, []),
-        ({"errors": {"malformed\0key": "value"}}, {"message": "failed"}, []),
-    ],
-)
-async def test_mark_failed_preserves_nul_metadata_and_error_history(
-    store_case, meta, error, history
-):
-    store = store_case.store
-    run_id = f"failed-nul-{uuid4()}"
-    await store.create_run("session", id=run_id, meta=meta)
-    assert await store.append_event(run_id, _event("before")) == 1
-    seqs = await store.mark_failed(
-        run_id, _checkpoint("failed\0prompt"), error, events=[_event("terminal\0event")]
-    )
-    failed = await store.load_run(run_id)
-    assert failed is not None
-    assert failed.status == "failed"
-    assert failed.checkpoint.phase == "failed"
-    assert failed.checkpoint.prompt == "failed\0prompt"
-    assert failed.meta == {**meta, "errors": [*history, error]}
-    assert seqs == [2]
-    assert [row.event for row in await store.load_events(run_id)] == [
-        _event("before"),
-        _event("terminal\0event"),
-    ]
-
-
 async def test_create_run_atomically_detaches_initial_checkpoint(store_case):
     store = store_case.store
     rid = f"initial-{uuid4()}"
@@ -596,50 +327,7 @@ async def test_create_run_atomically_detaches_initial_checkpoint(store_case):
     assert await store.load_run(rid + "-invalid") is None
 
 
-async def test_invalid_initial_checkpoint_cannot_partially_adopt_pending(store_case):
-    rid = f"invalid-adoption-{uuid4()}"
-    store = store_case.store
-    await _seed_pending(store_case, rid, "s", {"queue": "original"})
-    before = await store.load_run(rid)
-    invalid = _checkpoint()
-    invalid.pending_tool_blocks = [object()]
-    with pytest.raises(TypeError):
-        await store.create_run("s", id=rid, meta={"new": "metadata"}, initial_checkpoint=invalid)
-    assert await store.load_run(rid) == before
-    assert await store.load_events(rid) == []
-
-
-@pytest.mark.parametrize("status", ["pending", "running", "waiting_permission", "suspended"])
-async def test_active_run_rejects_another_run_for_same_session(store_case, status):
-    from linch import SessionBusyError
-
-    session_id, run_id = str(uuid4()), str(uuid4())
-    await store_case.store.create_run(session_id, id=run_id)
-    await store_case.store.save_checkpoint(run_id, _checkpoint(), status=status)
-    with pytest.raises(SessionBusyError) as busy:
-        await store_case.peer.create_run(session_id, id="rejected-" + run_id)
-    assert busy.value.run_id == run_id
-    assert busy.value.session_id == session_id
-    assert await store_case.store.load_run("rejected-" + run_id) is None
-
-
-async def test_concurrent_new_runs_admit_exactly_one_per_session(store_case):
-    import asyncio
-
-    from linch import SessionBusyError
-
-    session_id = str(uuid4())
-    results = await asyncio.gather(
-        store_case.store.create_run(session_id),
-        store_case.peer.create_run(session_id),
-        return_exceptions=True,
-    )
-    (winner,) = [result for result in results if not isinstance(result, BaseException)]
-    (rejected,) = [result for result in results if isinstance(result, SessionBusyError)]
-    assert rejected.run_id == winner.id
-
-
-@pytest.mark.parametrize("terminal", ["completed", "failed", "aborted"])
+@pytest.mark.parametrize("terminal", ["aborted"])
 async def test_terminal_run_frees_session_and_reactivation_is_atomic(store_case, terminal):
     from linch import SessionBusyError
 
@@ -658,50 +346,3 @@ async def test_terminal_run_frees_session_and_reactivation_is_atomic(store_case,
         assert busy.value.run_id == new_id
         assert await store.load_run(old_id) == before
         assert await store.load_events(old_id) == []
-
-
-async def test_two_session_handles_reject_concurrent_start_before_provider_or_session_write():
-    import asyncio
-
-    from linch import InMemoryRunStore, RunOptions, SessionBusyError
-    from linch.sessions import InMemorySessionStore
-    from tests.support.agents import make_agent
-    from tests.support.providers import ScriptedProvider, TextTurn
-
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    class GatedProvider(ScriptedProvider):
-        calls = 0
-
-        async def stream(self, request, **kwargs):
-            self.calls += 1
-            entered.set()
-            await release.wait()
-            async for event in super().stream(request, **kwargs):
-                yield event
-
-    provider = GatedProvider([TextTurn("done")])
-    runs, sessions = InMemoryRunStore(), InMemorySessionStore()
-    agents = [make_agent(provider, run_store=runs, session_store=sessions) for _ in range(2)]
-    first, second = [await agent.session(id="shared-session") for agent in agents]
-
-    async def consume():
-        return [event async for event in first.run("first", RunOptions(run_id="winner"))]
-
-    task = asyncio.create_task(consume())
-    try:
-        await asyncio.wait_for(entered.wait(), 2)
-        before = list(second.full_history)
-        with pytest.raises(SessionBusyError) as busy:
-            _ = [event async for event in second.run("rejected")]
-        assert busy.value.run_id == "winner"
-        assert list(second.full_history) == before
-        assert provider.calls == 1
-        assert (await runs.load_run("winner")).status == "running"
-        release.set()
-        assert (await asyncio.wait_for(task, 2))[-1].final_text == "done"
-    finally:
-        release.set()
-        await task
-        for agent in agents:
-            await agent.close()

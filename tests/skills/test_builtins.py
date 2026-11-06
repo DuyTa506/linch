@@ -162,14 +162,13 @@ def test_substitute_prefix_named_slots_independently() -> None:
     assert "Review main.py against every entry in manifest.txt." in out
 
 
-@pytest.mark.parametrize("value", ["$b", "${SKILL_DIR}"])
-def test_substitute_slot_values_are_not_reprocessed(value: str) -> None:
+def test_substitute_slot_values_are_not_reprocessed() -> None:
     """Keep a literal slot marker supplied as a value instead of cascading it."""
-    out = substitute_skill_body(
-        _skill("first=$a second=$b", ["a", "b"]), f"{value} final", "sess-1"
-    )
-
-    assert f"first={value} second=final" in out
+    for value in ("$b", "${SKILL_DIR}"):
+        out = substitute_skill_body(
+            _skill("first=$a second=$b", ["a", "b"]), f"{value} final", "sess-1"
+        )
+        assert f"first={value} second=final" in out
 
 
 def test_substitute_braced_runtime_placeholders_allow_adjacent_text() -> None:

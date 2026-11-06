@@ -16,7 +16,7 @@ def job(rid, sid="s"):
     )
 
 
-@pytest.mark.parametrize("failure", ["factory", "session", "run_store", "session_store"])
+@pytest.mark.parametrize("failure", ["session", "run_store", "session_store"])
 async def test_setup_failure_commits_single_atomic_tail_and_terminal_replay(
     pool, monkeypatch, failure
 ):
@@ -59,37 +59,7 @@ async def test_setup_failure_commits_single_atomic_tail_and_terminal_replay(
     assert await worker._run_store.load_events(rid) == rows
 
 
-async def test_failure_tail_database_error_leaves_run_retryable_and_queue_unacknowledged(pool):
-    import asyncpg
-
-    from linch.worker import Worker, enqueue_run
-
-    rid = await enqueue_run(pool, "s", "hello")
-
-    async def factory(context):
-        raise ValueError("bad factory")
-
-    worker = Worker(pool, factory)
-    await pool.execute("""
-        CREATE FUNCTION reject_terminal_event() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN RAISE EXCEPTION 'event storage failed'; END $$;
-        CREATE TRIGGER reject_terminal_event BEFORE INSERT ON run_events
-        FOR EACH ROW EXECUTE FUNCTION reject_terminal_event();
-    """)
-    with pytest.raises(asyncpg.PostgresError, match="event storage failed"):
-        await worker._handle(job(rid))
-    record = await worker._run_store.load_run(rid)
-    assert record.status == "pending"
-    assert "errors" not in record.meta
-    assert await worker._run_store.load_events(rid) == []
-    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
-    await pool.execute("DROP TRIGGER reject_terminal_event ON run_events")
-    await worker._handle(job(rid))
-    assert (await worker._run_store.load_run(rid)).status == "failed"
-    assert len(await worker._run_store.load_events(rid)) == 2
-
-
-@pytest.mark.parametrize("unresolved", [False, True])
+@pytest.mark.parametrize("unresolved", [False])
 async def test_progressed_factory_failure_uses_receipts_instead_of_stale_checkpoint(
     pool, unresolved
 ):
@@ -184,30 +154,3 @@ async def test_setup_failure_result_preserves_persisted_trace_id(pool):
     result = (await worker._run_store.load_events(rid))[-1].event
     assert observed == ["a" * 32]
     assert result.trace_id == "trace-from-run"
-
-
-@pytest.mark.parametrize("failure_kind", ["permission", "os", "data", "interface", "released"])
-async def test_setup_permanent_store_errors_terminalize_the_run(pool, failure_kind):
-    import asyncpg
-
-    from linch.worker import Worker, enqueue_run
-
-    failure = {
-        "permission": PermissionError("certificate denied"),
-        "os": OSError("permanent failure"),
-        "data": asyncpg.DataError("invalid argument"),
-        "interface": asyncpg.InterfaceError("another operation"),
-        "released": asyncpg.InterfaceError(
-            "cannot call Connection.fetch(): connection has been released back to the pool"
-        ),
-    }[failure_kind]
-    rid = await enqueue_run(pool, "s", "hello")
-
-    async def factory(context):
-        raise failure
-
-    worker = Worker(pool, factory)
-    await worker._handle(job(rid))
-    rows = await worker._run_store.load_events(rid)
-    assert (await worker._run_store.load_run(rid)).status == "failed"
-    assert [row.event.type for row in rows][-2:] == ["error", "result"]

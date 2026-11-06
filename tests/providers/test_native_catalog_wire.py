@@ -84,9 +84,11 @@ async def capture_responses(req, *, enabled=True):
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "responses"])
-@pytest.mark.parametrize("definitions", [False, True])
-async def test_option_off_phase2_bytes(provider, definitions):
-    block = change(added=("new",), definitions=(NEW,) if definitions else ())
+async def test_option_off_phase2_bytes(provider):
+    # `definitions` present or not makes no difference to the expected bytes
+    # below — disabling the feature degrades the block to plain text either
+    # way, so the stronger input (definitions present) is the one kept.
+    block = change(added=("new",), definitions=(NEW,))
     req = request(
         [Message(role="user", content=[block])],
         model="claude-opus-5" if provider == "anthropic" else "gpt-5.4",

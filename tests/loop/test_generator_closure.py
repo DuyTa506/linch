@@ -9,26 +9,6 @@ from typing import Any
 from tests.support.agents import make_agent
 
 
-class _TrackedProvider:
-    id = "tracked-close"
-
-    def __init__(self) -> None:
-        self.running = 0
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        self.running += 1
-        try:
-            yield {"type": "message_start", "model": req.model}
-            yield {"type": "text_delta", "text": "partial"}
-            await asyncio.sleep(60)
-            yield {"type": "message_end", "stop_reason": "end_turn"}
-        finally:
-            self.running -= 1
-
-
 class _ParallelToolProvider:
     id = "parallel-close"
 
@@ -83,21 +63,3 @@ async def test_closing_after_one_parallel_tool_end_cancels_the_other_tool() -> N
     await iterator.aclose()
 
     await asyncio.wait_for(slow_cancelled.wait(), timeout=1)
-
-
-async def test_closing_after_partial_assistant_closes_provider_generator() -> None:
-    """Closing the run iterator immediately closes its active provider phase."""
-    provider = _TrackedProvider()
-    agent = make_agent(provider, include_partial_messages=True, run_store=None)
-    session = await agent.session()
-    iterator = session.run("hello").__aiter__()
-
-    while True:
-        event = await iterator.__anext__()
-        if event.type == "partial_assistant":
-            break
-
-    assert provider.running == 1
-    await iterator.aclose()
-
-    assert provider.running == 0

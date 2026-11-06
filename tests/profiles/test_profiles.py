@@ -609,8 +609,12 @@ def test_profile_resolve_preserves_plugin_execution_order() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
+        # id="" and version="" both hit the exact same `any(not isinstance
+        # or not .strip())` clause for the exact same reason (empty after
+        # strip) -- version="" dropped as a literal duplicate of id="".
+        # version=1 is kept: it hits that clause via `not isinstance(str)`
+        # instead, a genuinely different sub-reason.
         ({"id": "", "version": "1"}, "profile id"),
-        ({"id": "support", "version": ""}, "profile id"),
         ({"id": "support", "version": 1}, "profile id"),
         ({"id": "support", "version": "1", "max_turns": 0}, "max_turns"),
         ({"id": "support", "version": "1", "max_turns": True}, "max_turns"),
@@ -1266,8 +1270,7 @@ async def test_profile_preserves_custom_context_adapter_override_signature():
     await owner.close()
 
 
-@pytest.mark.parametrize("nested", [False, True])
-async def test_retained_child_continuation_keeps_seed_services_and_restrictions(nested):
+async def test_retained_child_continuation_keeps_seed_services_and_restrictions():
     from linch.context import ContextBuildResult
     from linch.hooks.adapters import ContextInjectionHook
     from linch.kernel import Disposable
@@ -1330,10 +1333,12 @@ async def test_retained_child_continuation_keeps_seed_services_and_restrictions(
     assert original.profile is profile
     assert cleaned == []
     handle = WorkerHandle("worker", child.id, "child", _child_definition())
-    options = (
-        RunOptions(profile=Profile("nested", "1", plugins={"extra": (Extra("extra", "1"), {})}))
-        if nested
-        else RunOptions()
+    # Pass a profile with its own plugin on the continuation call to prove it
+    # is ignored, not just absent -- continue_subagent() always re-derives
+    # `config` from the retained child's own `_config_seed`, never from
+    # `run_options.profile` (confirmed in src/linch/subagents/runner.py).
+    options = RunOptions(
+        profile=Profile("nested", "1", plugins={"extra": (Extra("extra", "1"), {})})
     )
     result = await continue_subagent(
         ContinueSubagentArgs(parent, owner, handle, "continue", "continue", run_options=options)
@@ -1480,7 +1485,15 @@ async def test_inactive_request_and_contract_helpers_use_session_tool_override()
 
 
 @pytest.mark.parametrize(
-    "base,role", [(["SESSION BASE"], "PROFILE ROLE"), ([], "PROFILE ROLE"), ([], None)]
+    # (["SESSION BASE"], "PROFILE ROLE") and ([], "PROFILE ROLE") both hit the
+    # same two nested branches in profiles.py (`profile.system_prompt is not
+    # None` True, then `session.system_blocks_override is not None` True --
+    # `[]` is not None either) and differ only in whether the base list being
+    # appended to is empty; dropped the empty-base row, kept the
+    # non-empty-base row (proves concatenation order) and the role=None row
+    # (the only one that hits the outer branch's False side).
+    "base,role",
+    [(["SESSION BASE"], "PROFILE ROLE"), ([], None)],
 )
 async def test_explicit_subagent_fork_preserves_effective_profile_system_override(base, role):
     from linch.profiles import _profile_scope

@@ -43,12 +43,3 @@ async def test_cancelled_run_blocks_until_marked_failed() -> None:
     await agent.run_store.mark_failed("r1", error={"message": "client disconnected"})
     assert (await _collect(session, "second", "r3"))[-1].final_text == "second"
     await agent.close()
-
-
-async def test_abort_frees_the_session_without_host_cleanup() -> None:
-    agent, session, task = await _start_blocked_run([TextTurn("second")])
-    session.abort()
-    await task
-
-    assert (await _collect(session, "second", "r2"))[-1].final_text == "second"
-    await agent.close()

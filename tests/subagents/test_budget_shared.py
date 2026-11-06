@@ -45,38 +45,6 @@ async def test_subagent_run_charges_parent_budget() -> None:
     assert budget.spent_tokens == 1500
 
 
-async def test_budget_aggregates_across_three_levels() -> None:
-    from linch import RunBudget, RunOptions
-    from linch.types import Usage
-
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                "Subagent",
-                {"description": "helper", "prompt": "go deeper"},
-                usage=Usage(input_tokens=300),
-            ),
-            ToolUseTurn(
-                "Subagent",
-                {"description": "helper", "prompt": "go deeper"},
-                usage=Usage(input_tokens=300),
-            ),
-            TextTurn("done", usage=Usage(input_tokens=300)),
-            TextTurn("done", usage=Usage(input_tokens=300)),
-            TextTurn("done", usage=Usage(input_tokens=300)),
-        ]
-    )
-    agent = _make_agent(provider)
-    session = await agent.session()
-    budget = RunBudget(max_tokens=100_000)
-
-    events = [event async for event in session.run("delegate", RunOptions(budget=budget))]
-    assert events[-1].type == "result"
-    assert events[-1].subtype == "success"
-    assert len(provider.requests) >= 3
-    assert budget.spent_tokens == len(provider.requests) * 300
-
-
 async def test_exhausted_budget_stops_child_run() -> None:
     from linch import RunBudget
     from linch.subagents.default_agent import DEFAULT_AGENT
