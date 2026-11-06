@@ -9,6 +9,8 @@ use super::{METADATA_KEY, Translator, events};
 use crate::ApiKey;
 use crate::openai::test_support::{bytes, collect_ok};
 
+mod cut;
+
 const TOOLS: &str = include_str!("../../../tests/fixtures/responses_reasoning_tools.sse");
 const TEXT: &str = include_str!("../../../tests/fixtures/responses_text.sse");
 

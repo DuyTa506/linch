@@ -193,22 +193,30 @@ impl Translator {
         self.completed_calls += 1;
     }
 
-    /// Close the message. A completed call makes the stop reason
-    /// `tool_use`; a call still open is left for the assembler to reject.
+    /// Close the message. A completed call makes the stop reason `tool_use`,
+    /// unless the response stopped at `max_output_tokens`: that stop is
+    /// passed on as `max_tokens`, as Python does, because the limit may have
+    /// cut a later call off, and the assembler drops such a call and keeps
+    /// the ones that finished. On any other stop a call still open is left
+    /// for the assembler to reject.
     fn finish(
         &mut self,
         response: WireResponse,
         out: &mut VecDeque<ProviderEvent>,
     ) -> Result<(), ProviderError> {
+        let reason = response
+            .incomplete_details
+            .and_then(|details| details.reason);
+        let wire = stop_reason(response.status.as_deref(), reason.as_deref());
         let stop_reason = if self.completed_calls > 0 {
-            StopReason::ToolUse
+            match wire {
+                Ok(StopReason::MaxTokens) => StopReason::MaxTokens,
+                _ => StopReason::ToolUse,
+            }
         } else if self.refused {
             StopReason::Refusal
         } else {
-            let reason = response
-                .incomplete_details
-                .and_then(|details| details.reason);
-            stop_reason(response.status.as_deref(), reason.as_deref())?
+            wire?
         };
         let provider_metadata = metadata(response.id, response.output);
         out.push_back(ProviderEvent::MessageEnd(MessageEndEvent {
