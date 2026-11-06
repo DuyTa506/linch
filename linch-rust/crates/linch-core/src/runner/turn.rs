@@ -98,7 +98,7 @@ pub(super) struct Runner {
     pub(super) catalog: Option<Catalog>,
     /// The catalog version the run last diffed against (see
     /// [`crate::catalog::version`]).
-    pub(super) seen: Option<u64>,
+    pub(super) seen: Option<(u64, u64)>,
     /// Entries in the stored session log.
     pub(super) session_len: u64,
     pub(super) turn: u32,
@@ -155,11 +155,12 @@ impl Runner {
     fn narrow(&mut self) -> Option<String> {
         self.snapshot = self.agent.snapshot();
         self.narrowed = false;
-        if self.agent.overlays.is_empty() {
+        let set = self.agent.skill_set()?;
+        if set.overlays.is_empty() {
             return None;
         }
         let view = self.log.provider_view();
-        let overlay = skills::overlay(&view, &self.agent.overlays)?;
+        let overlay = skills::overlay(&view, &set.overlays)?;
         if let Some(allowed) = &overlay.allowed_tools {
             let keep = |name: &str| allowed.iter().any(|tool| tool == name);
             self.snapshot = Arc::new(self.snapshot.filtered(keep));

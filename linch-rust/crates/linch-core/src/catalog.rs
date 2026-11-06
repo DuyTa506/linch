@@ -55,6 +55,7 @@ pub(crate) struct Live {
 }
 
 /// One skill of the live catalog.
+#[derive(Debug, Clone)]
 pub(crate) struct LiveSkill {
     pub(crate) stamp: SkillStamp,
     /// The line a notice shows for it.
@@ -188,9 +189,11 @@ fn upsert(
 /// of `snapshot`, as they are now.
 pub(crate) fn prefix(agent: &AgentInner, snapshot: &ToolSnapshot) -> PrefixEntry {
     PrefixEntry {
-        system: agent.system.clone(),
+        system: agent.system(),
         tools: snapshot.definitions(),
-        skills: agent.skill_stamps.clone(),
+        skills: (agent.listed_skills().into_iter())
+            .map(|skill| skill.stamp)
+            .collect(),
     }
 }
 
@@ -198,22 +201,13 @@ pub(crate) fn prefix(agent: &AgentInner, snapshot: &ToolSnapshot) -> PrefixEntry
 pub(crate) fn live(agent: &AgentInner) -> Live {
     Live {
         tools: agent.snapshot().definitions(),
-        skills: live_skills(agent),
+        skills: agent.listed_skills(),
     }
-}
-
-/// The skills `agent` lets the model invoke now, sorted by name.
-pub(crate) fn live_skills(agent: &AgentInner) -> Vec<LiveSkill> {
-    (agent.skill_stamps.iter())
-        .map(|stamp| LiveSkill {
-            stamp: stamp.clone(),
-            description: String::new(),
-        })
-        .collect()
 }
 
 /// A version of what `agent` offers: it moves whenever a registration or
 /// a reload may have changed the live catalog.
-pub(crate) fn version(agent: &AgentInner) -> u64 {
-    agent.tools.generation()
+pub(crate) fn version(agent: &AgentInner) -> (u64, u64) {
+    let skills = (agent.skills.as_ref()).map_or(0, |versions| versions.revision());
+    (agent.tools.generation(), skills)
 }

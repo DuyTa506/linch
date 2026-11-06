@@ -24,7 +24,6 @@
 //! then goes on to the turn's primary call and never buys it again.
 
 use crate::agent::RunError;
-use crate::catalog;
 use crate::compaction::{self, estimate_tokens};
 use crate::events::Event;
 use crate::events::kinds::CompactionEvent;
@@ -115,13 +114,13 @@ impl Runner {
             return Ok(Some(DISPATCH));
         }
         let mut summary = compaction::summary_message(text);
-        if agent.skills {
+        if agent.skills.is_some() {
             // The bodies the model loaded, which the summary folds away.
             let reminders = skills::reminders(&self.log.full_history());
             (summary.content).extend(reminders.into_iter().map(ContentBlock::text));
         }
         if let Some(catalog) = &self.catalog {
-            let restated = catalog.restatement(&catalog::live_skills(&agent));
+            let restated = catalog.restatement(&agent.listed_skills());
             summary
                 .content
                 .extend(restated.map(ContentBlock::CatalogChange));

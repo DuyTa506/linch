@@ -3,7 +3,10 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{SKILL_TOOL, Skill, substitute};
+use std::sync::Arc;
+
+use super::{SKILL_TOOL, SkillSet, substitute};
+use crate::agent::Versions;
 use crate::events::Event;
 use crate::events::kinds::{SkillCompletedEvent, SkillInvokedEvent};
 use crate::json::{JsonObject, JsonValue};
@@ -18,12 +21,13 @@ The skill's body is returned to you so you can act on its instructions in the ne
 /// alongside other read calls; a rule with a `skill` condition can still
 /// deny or ask for one skill.
 pub(crate) struct SkillTool {
-    skills: Vec<Skill>,
+    /// The agent's skills; a reload changes the current set.
+    skills: Arc<Versions<SkillSet>>,
     schema: JsonObject,
 }
 
 impl SkillTool {
-    pub(crate) fn new(skills: Vec<Skill>) -> Self {
+    pub(crate) fn new(skills: Arc<Versions<SkillSet>>) -> Self {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -96,7 +100,8 @@ impl Tool for SkillTool {
 
 impl SkillTool {
     fn load(&self, name: &str, args: &str, ctx: &ToolContext) -> ToolResult {
-        let Some(skill) = self.skills.iter().find(|skill| skill.name == name) else {
+        let set = self.skills.current();
+        let Some(skill) = set.skills.iter().find(|skill| skill.name == name) else {
             return Err(ToolOutputError::new(format!("Unknown skill: {name}")));
         };
         if skill.disable_model_invocation {

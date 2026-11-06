@@ -160,7 +160,7 @@ pub(crate) async fn reattach(
     run: &RunIdentity,
     events: &[Envelope],
 ) {
-    let Some(roster) = &parent.subagents else {
+    let Some(roster) = parent.subagents.as_ref().map(|v| v.current()) else {
         return;
     };
     let prefix = format!("{}:", run.run_id);

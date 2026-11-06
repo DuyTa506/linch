@@ -56,7 +56,8 @@ impl Agent {
     ///         digested.
     pub fn subagent(&self, name: Option<&str>) -> Result<Agent, BuildError> {
         let roster = (self.inner.subagents.as_ref())
-            .ok_or_else(|| BuildError::Invalid("this agent has no subagents".into()))?;
+            .ok_or_else(|| BuildError::Invalid("this agent has no subagents".into()))?
+            .current();
         let definition = roster.get(name).ok_or_else(|| {
             let name = name.unwrap_or_default().trim();
             BuildError::Invalid(format!("unknown subagent type: {name}"))
@@ -102,11 +103,7 @@ impl AgentInner {
         let filter = ChildTools::of(definition);
         let tools = filter.apply(&self.tools.snapshot());
         let mut system = spec::prompt_block(&self.spec);
-        let mut skill_stamps = Vec::new();
-        if tools.resolve(SKILL_TOOL).is_some() {
-            system.extend(self.skill_listing.clone());
-            skill_stamps = self.skill_stamps.clone();
-        }
+        let listing_at = (tools.resolve(SKILL_TOOL).is_some()).then_some(system.len());
         system.push(SystemBlock {
             text: format!("User-provided instructions:\n\n{}", definition.body),
             cacheable: true,
@@ -129,11 +126,9 @@ impl AgentInner {
             namespace: self.namespace.clone(),
             contract,
             system,
-            skill_stamps,
+            listing_at,
             features,
-            skills: self.skills,
-            skill_listing: self.skill_listing.clone(),
-            overlays: Arc::clone(&self.overlays),
+            skills: self.skills.clone(),
             subagents: None,
             workers: Default::default(),
             worker_registry: Default::default(),

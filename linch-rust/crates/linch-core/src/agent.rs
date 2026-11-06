@@ -18,7 +18,7 @@ use crate::events::{Envelope, Persistence};
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
-use crate::message::{Message, SkillStamp, SystemBlock};
+use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
@@ -26,7 +26,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::run::RunStatus;
 use crate::runner::{self, Families, RunStream};
-use crate::skills::Overlays;
+use crate::skills::SkillSet;
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{Registry, Roster, Workers};
 use crate::usage::Usage;
@@ -35,7 +35,9 @@ mod builder;
 mod child;
 mod error;
 mod fork;
+mod reload;
 mod spec;
+mod versions;
 
 pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
@@ -43,6 +45,7 @@ pub use fork::ForkError;
 pub use spec::AgentSpec;
 
 pub(crate) use child::ChildTools;
+pub(crate) use versions::Versions;
 
 /// Per-call options for [`Agent::run`], [`Agent::resume`] and
 /// [`Agent::approve`].
@@ -106,22 +109,20 @@ pub(crate) struct AgentInner {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) namespace: String,
     pub(crate) contract: Digest,
-    /// The system blocks a new session's prefix takes: the system prompt,
-    /// then the skill listing.
+    /// The system blocks a new session's prefix takes, but for the skill
+    /// listing (see [`AgentInner::system`]).
     pub(crate) system: Vec<SystemBlock>,
-    /// The skills the listing in `system` holds, for the prefix.
-    pub(crate) skill_stamps: Vec<SkillStamp>,
+    /// Where the current skill listing goes in `system`; `None` when the
+    /// agent lists no skills.
+    pub(crate) listing_at: Option<usize>,
     /// What the contract covers beyond the spec, tools and hooks.
     pub(crate) features: JsonObject,
-    /// Whether skills are on: the agent registered the `Skill` tool.
-    pub(crate) skills: bool,
-    /// The skill listing block; `None` when skills are off or none is
-    /// visible to the model.
-    pub(crate) skill_listing: Option<SystemBlock>,
-    /// What each skill that sets one sets for the turn after it loads.
-    pub(crate) overlays: Arc<Overlays>,
-    /// The subagents the `Subagent` tool runs; `None` when they are off.
-    pub(crate) subagents: Option<Arc<Roster>>,
+    /// The agent's skills, which [`Agent::reload_skills`] replaces; `None`
+    /// when skills are off.
+    pub(crate) skills: Option<Arc<Versions<SkillSet>>>,
+    /// The subagents the `Subagent` tool runs, which
+    /// [`Agent::reload_subagents`] replaces; `None` when they are off.
+    pub(crate) subagents: Option<Arc<Versions<Roster>>>,
     /// How the `Subagent` tool keeps its workers.
     pub(crate) workers: Workers,
     /// The workers of each parent session.

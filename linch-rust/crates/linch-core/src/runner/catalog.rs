@@ -28,7 +28,7 @@ impl Runner {
     pub(super) fn request(&self, messages: Vec<Message>) -> ProviderRequest {
         let agent = &self.agent;
         let Some(catalog) = &self.catalog else {
-            let system = agent.system.clone();
+            let system = agent.system();
             return agent.request(system, self.snapshot.definitions(), messages);
         };
         let snapshot = &self.snapshot;
