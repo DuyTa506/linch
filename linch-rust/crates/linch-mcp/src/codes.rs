@@ -6,7 +6,8 @@
 //! [`TIMEOUT`], or because the caller dropped its future (the scheduler's
 //! call timeout), is cancelled on the server: `notifications/cancelled` is
 //! sent in the background, or over streamable HTTP the request's stream is
-//! closed.
+//! closed. Once 64 cancels wait to go out on one connection, as on a stdio
+//! server that stopped reading, further ones are not sent.
 
 /// `ToolContext::cancel` fired; the server is sent `notifications/cancelled`.
 pub const ABORTED: &str = "aborted";

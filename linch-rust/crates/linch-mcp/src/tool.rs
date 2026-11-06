@@ -12,7 +12,7 @@ use rmcp::model::{
     ServerResult,
 };
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient, ServiceError};
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::codes;
@@ -21,6 +21,12 @@ use crate::server::ServerStatus;
 
 /// Longest argument summary in [`Tool::summarize`], in characters.
 const SUMMARY_CHARS: usize = 80;
+
+/// Most `notifications/cancelled` waiting to go out on one connection. A
+/// cancel only waits while the transport takes no writes, as when a stdio
+/// server stopped reading; past this many, a new one is dropped, since it
+/// could not go out either.
+pub(crate) const MAX_WAITING_CANCELS: usize = 64;
 
 /// The registry name of MCP tool `tool` on server `server`.
 ///
@@ -49,6 +55,9 @@ pub(crate) struct Conn {
     /// supervisor reconnects. A stale connection's token cannot touch the
     /// next connection.
     pub(crate) lost: CancellationToken,
+    /// One permit per cancel waiting to go out, at most
+    /// [`MAX_WAITING_CANCELS`].
+    pub(crate) cancels: Arc<Semaphore>,
 }
 
 /// What every tool of one server shares with the server's supervisor.
@@ -214,6 +223,7 @@ impl Tool for McpTool {
         // (the scheduler's call timeout).
         let mut abandon = Abandon {
             peer: conn.peer.clone(),
+            cancels: Arc::clone(&conn.cancels),
             id: Some(handle.id.clone()),
             reason: "the caller stopped waiting",
         };
@@ -256,9 +266,11 @@ impl Tool for McpTool {
 /// Sends `notifications/cancelled` for request `id` when dropped while `id`
 /// is still set. Over modern streamable HTTP rmcp closes the request's
 /// stream instead. The send runs in the background: a server that stopped
-/// reading its stdin must not keep the call from returning.
+/// reading its stdin must not keep the call from returning. It is skipped
+/// when [`MAX_WAITING_CANCELS`] are already waiting on the connection.
 struct Abandon {
     peer: Peer<RoleClient>,
+    cancels: Arc<Semaphore>,
     id: Option<RequestId>,
     reason: &'static str,
 }
@@ -272,10 +284,14 @@ impl Drop for Abandon {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        let Ok(waiting) = Arc::clone(&self.cancels).try_acquire_owned() else {
+            return;
+        };
         let notice = CancelledNotificationParam::new(Some(id), Some(self.reason.to_owned()));
         let peer = self.peer.clone();
         runtime.spawn(async move {
             let _ = peer.notify_cancelled(notice).await;
+            drop(waiting);
         });
     }
 }
