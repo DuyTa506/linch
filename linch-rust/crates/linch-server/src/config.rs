@@ -84,7 +84,8 @@ pub struct AllowConfig {
     pub permission_modes: Option<Vec<PermissionMode>>,
     /// Directories a workspace and a project root may be or lie under.
     pub workspace_roots: Vec<PathBuf>,
-    /// Postgres servers, databases, users and options a store DSN may use.
+    /// Postgres servers, databases, users, options and TLS files a store
+    /// DSN may use.
     pub postgres_dsns: Vec<String>,
     /// MCP `stdio` servers a transport may start, each
     /// `{"command", "args"?, "env"?}`: the program and its arguments, and

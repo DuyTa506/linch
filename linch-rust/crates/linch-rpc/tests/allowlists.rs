@@ -305,6 +305,44 @@ async fn a_store_dsn_must_name_an_allowed_server() {
 }
 
 #[tokio::test]
+async fn a_store_dsn_must_name_an_entrys_tls_files_exactly() {
+    let address = hangs_up().await;
+    let two = "sslrootcert=/etc/linch/ca.pem&sslcert=/etc/linch/acme.crt";
+    let files = format!("{two}&sslkey=/etc/linch/acme.key");
+    let dsns = [
+        format!("postgres://acme@{address}/linch"),
+        format!("postgres://pinned@{address}/linch?{files}"),
+    ];
+    let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
+    let store = |dsn: String| config(json!({"stores": {"type": "postgres", "dsn": dsn}}));
+    // The same files, also under the other names the store reads them by.
+    for ours in [
+        format!("postgres://pinned@{address}/linch?sslmode=disable&{files}"),
+        format!(
+            "postgres://pinned@{address}/linch?sslmode=disable&ssl-ca=/etc/linch/ca.pem\
+             &ssl-cert=/etc/linch/acme.crt&ssl-key=/etc/linch/acme.key"
+        ),
+    ] {
+        let error = rpc.call(method::AGENT_OPEN, store(ours)).await.unwrap_err();
+        assert_eq!(refusal(error), (code::STORE_UNAVAILABLE, None));
+    }
+    let outside = [
+        // An entry without files refuses every one.
+        format!("postgres://acme@{address}/linch?sslrootcert=/srv/beta/ca.pem"),
+        format!("postgres://acme@{address}/linch?sslcert=/srv/beta/client.crt"),
+        format!("postgres://acme@{address}/linch?ssl-key=/srv/beta/client.key"),
+        // One missing, one other, or one named again later.
+        format!("postgres://pinned@{address}/linch?{two}"),
+        format!("postgres://pinned@{address}/linch?{two}&sslkey=/srv/beta/client.key"),
+        format!("postgres://pinned@{address}/linch?{files}&sslkey=/srv/beta/client.key"),
+    ];
+    for dsn in outside {
+        let kind = refused(&rpc, store(dsn.clone())).await;
+        assert_eq!(kind.as_deref(), Some("postgres"), "{dsn}");
+    }
+}
+
+#[tokio::test]
 async fn an_mcp_http_url_must_share_an_allowed_origin() {
     let address = hangs_up().await;
     let urls = strings(&[&format!("http://{address}/")]);
