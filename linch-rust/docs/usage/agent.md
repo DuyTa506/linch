@@ -187,6 +187,7 @@ absent, except `bash`.
 |---|---|---|
 | `model` | required | Model id sent with every request; not blank |
 | `system_prompt` | `""` | The system prompt; empty sends no system block |
+| `system_blocks` | `[]` | Your own system blocks, `{"text": str, "cacheable": bool}` (`cacheable` `False` when absent), sent in order before the system prompt ([below](#system-blocks)) |
 | `max_turns` | none: no limit | Most provider calls one run may make. A run that needs one more ends with a `loop_guard` event (`reason: "max_turns"`) and a `result` of subtype `error` |
 | `thinking` | none: the provider's default | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` or `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` is `summarized` or `omitted`. How each provider maps it is in the [architecture providers page](../architecture/providers.md#the-adapters) |
 | `effort` | none | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`, for providers that support it |
@@ -194,6 +195,32 @@ absent, except `bash`.
 | `max_tool_concurrency` | `4` | Most read-scope tool calls that run at once; `0` counts as 1 |
 | `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |
+
+### System blocks
+
+Every request sends the system blocks in this order: `system_blocks` as you
+wrote them, then `system_prompt` (never cacheable), then the skill listing
+when `skills` is on (cacheable). A session keeps the blocks of its first run
+for all its requests, and a subagent gets the same blocks followed by its
+definition's instructions. No block may be blank, and the blocks are part of
+the [run contract](#the-run-contract), flags included.
+
+Mark a block `cacheable` when it is stable: a provider that takes cache
+breakpoints (Anthropic) puts the system breakpoint on the last cacheable block,
+so everything up to it may be served from the prompt cache. Blocks after it,
+such as the system prompt when no skill listing follows, sit outside that
+breakpoint.
+
+```python
+spec = {
+    "model": "claude-sonnet-4-6",
+    "system_prompt": "Answer billing questions.",
+    "system_blocks": [
+        {"text": "Company policy: ...", "cacheable": True},
+        {"text": "Today's promotions: ..."},
+    ],
+}
+```
 
 ### `compaction`
 

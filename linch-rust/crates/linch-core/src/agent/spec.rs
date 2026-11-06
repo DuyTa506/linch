@@ -31,6 +31,11 @@ pub struct AgentSpec {
     /// System prompt; empty sends no system block.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub system_prompt: String,
+    /// The host's own system blocks, sent in order before the system
+    /// prompt, each with its `cacheable` flag (Python's
+    /// `SystemPromptConfig.blocks`). None may be blank.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_blocks: Vec<SystemBlock>,
     /// Most provider calls one run may make; `None` sets no limit. A run that
     /// would need one more call ends with status `failed` (Python's
     /// `max_turns` tail).
@@ -63,6 +68,7 @@ impl AgentSpec {
         Self {
             model: model.into(),
             system_prompt: String::new(),
+            system_blocks: Vec::new(),
             max_turns: None,
             thinking: None,
             effort: None,
@@ -103,15 +109,17 @@ impl AgentSpec {
     }
 }
 
-/// The system prompt as a system block; none when it is empty.
-pub(crate) fn prompt_block(spec: &AgentSpec) -> Vec<SystemBlock> {
-    if spec.system_prompt.is_empty() {
-        return Vec::new();
+/// The spec's system blocks: the host's in order, then the system prompt
+/// unless it is empty.
+pub(crate) fn system_blocks(spec: &AgentSpec) -> Vec<SystemBlock> {
+    let mut system = spec.system_blocks.clone();
+    if !spec.system_prompt.is_empty() {
+        system.push(SystemBlock {
+            text: spec.system_prompt.clone(),
+            cacheable: false,
+        });
     }
-    vec![SystemBlock {
-        text: spec.system_prompt.clone(),
-        cacheable: false,
-    }]
+    system
 }
 
 /// Digest of the run contract: the spec, each tool's definition and scope,
