@@ -81,12 +81,28 @@ pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error
 
 /// Begin a READ COMMITTED transaction whatever the server or role default.
 ///
-/// Every write locks its parent row with `FOR UPDATE` and must read the row
-/// again after waiting on another writer; REPEATABLE READ or SERIALIZABLE
-/// would fail that wait with a serialization error instead.
+/// A write of several statements (run create and claim, file edit) locks
+/// its parent row with `FOR UPDATE` and must read the row again after
+/// waiting on another writer; REPEATABLE READ or SERIALIZABLE would fail
+/// that wait with a serialization error instead.
 pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
         .await
+}
+
+/// Most times a single-statement write (run commit, session append) runs
+/// when its row keeps changing under it.
+pub(crate) const WRITE_TRIES: u32 = 3;
+
+/// Whether a single-statement write failed with a serialization error.
+///
+/// Such a write runs in autocommit, at the pool's default isolation. Above
+/// READ COMMITTED, a row changed after the statement's snapshot fails it
+/// with this error; it wrote nothing, and runs again on a fresh snapshot.
+/// Under READ COMMITTED it never happens.
+pub(crate) fn serialization_failure(error: &sqlx::Error) -> bool {
+    let code = error.as_database_error().and_then(|error| error.code());
+    code.as_deref() == Some("40001")
 }
 
 /// The migrations embedded in this crate, newest last.

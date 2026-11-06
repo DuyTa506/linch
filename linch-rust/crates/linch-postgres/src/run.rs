@@ -1,15 +1,17 @@
 //! [`PgRunStore`]: runs, checkpoints and the event journal in Postgres.
 //!
-//! Every write is one transaction that first locks the run row, then applies
-//! the lifecycle checks in Rust, in linch-core's order: not found, lease
-//! epoch, status, event run ids, then seqs. A rejected or interrupted write
-//! rolls back and changes nothing.
+//! A commit is one statement in autocommit: it moves the run row only when
+//! the lease epoch, the status and the last seq allow it, and inserts the
+//! events from the moved row. A refused commit reads the row once more and
+//! names the refusal in linch-core's order: not found, lease epoch, status,
+//! event run ids, then seqs. `create` and `claim` are transactions that
+//! lock the run row first. A rejected or interrupted write changes nothing.
 
 use async_trait::async_trait;
 use linch_core::{
     Commit, Envelope, Lease, NewRun, RunId, RunRecord, RunStatus, RunStore, StoreError,
 };
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 
 use crate::codec::{
     backend, check_events, decode_checkpoint, decode_event, encode_checkpoint, encode_events,
@@ -34,21 +36,26 @@ impl PgRunStore {
 
 type RecordRow = (String, Option<String>, String, String, i64, String, i64);
 
-/// Status, epoch and last seq of a locked run row.
-async fn lock_run(
-    tx: &mut Transaction<'static, Postgres>,
+const STATE: &str = "SELECT status, epoch, last_seq FROM linch_runs \
+                     WHERE namespace = $1 AND run_id = $2";
+
+const LOCK: &str = "SELECT status, epoch, last_seq FROM linch_runs \
+                    WHERE namespace = $1 AND run_id = $2 FOR UPDATE";
+
+/// Status, epoch and last seq of a run row, read with [`STATE`] or, in a
+/// transaction, locked with [`LOCK`].
+async fn run_state<'e>(
+    db: impl PgExecutor<'e>,
+    sql: &'static str,
     namespace: &str,
     run_id: &RunId,
 ) -> Result<(RunStatus, u64, u64), StoreError> {
-    let row: Option<(String, i64, i64)> = sqlx::query_as(
-        "SELECT status, epoch, last_seq FROM linch_runs \
-         WHERE namespace = $1 AND run_id = $2 FOR UPDATE",
-    )
-    .bind(namespace)
-    .bind(run_id.as_str())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(backend)?;
+    let row: Option<(String, i64, i64)> = sqlx::query_as(sql)
+        .bind(namespace)
+        .bind(run_id.as_str())
+        .fetch_optional(db)
+        .await
+        .map_err(backend)?;
     let (status, epoch, last_seq) =
         row.ok_or_else(|| not_found("run", namespace, run_id.as_str()))?;
     Ok((
@@ -56,6 +63,42 @@ async fn lock_run(
         to_u64(epoch, "epoch")?,
         to_u64(last_seq, "last_seq")?,
     ))
+}
+
+/// A commit in one statement. The run row moves only under the lease's
+/// epoch, while `running`, and, for a commit with events, when its last seq
+/// is `$6`, the one the events continue. The events are inserted from the
+/// moved row, so they land with it or not at all.
+const COMMIT: &str = "WITH moved AS ( \
+         UPDATE linch_runs SET status = COALESCE($4, status), \
+         checkpoint = COALESCE($5, checkpoint), \
+         last_seq = last_seq + cardinality($7::bigint[]) \
+         WHERE namespace = $1 AND run_id = $2 AND epoch = $3 AND status = 'running' \
+         AND ($6::bigint IS NULL OR last_seq = $6) RETURNING 1 \
+     ), inserted AS ( \
+         INSERT INTO linch_run_events (namespace, run_id, seq, envelope) \
+         SELECT $1, $2, seq, envelope \
+         FROM moved, unnest($7::bigint[], $8::text[]) AS e(seq, envelope) \
+     ) SELECT count(*) FROM moved";
+
+/// Why a run with this status, epoch and last seq refuses `commit` under
+/// `lease`, in linch-core's order; `Ok` when it would take it.
+fn refusal(
+    lease: &Lease,
+    commit: &Commit,
+    (from, epoch, last_seq): (RunStatus, u64, u64),
+) -> Result<(), StoreError> {
+    if lease.epoch != epoch {
+        return Err(StoreError::LeaseLost {
+            run_id: lease.run_id.clone(),
+            epoch: lease.epoch,
+        });
+    }
+    let to = commit.status.unwrap_or(from);
+    if from != RunStatus::Running || to == RunStatus::Pending {
+        return Err(StoreError::InvalidTransition { from, to });
+    }
+    check_events(&lease.run_id, last_seq, &commit.events)
 }
 
 async fn insert_events(
@@ -109,6 +152,32 @@ fn session_busy(error: &sqlx::Error) -> bool {
 }
 
 impl PgRunStore {
+    /// Run [`COMMIT`]; whether the run row took it.
+    async fn write(
+        &self,
+        lease: &Lease,
+        commit: &Commit,
+        checkpoint: Option<&str>,
+        (seqs, envelopes): &(Vec<i64>, Vec<String>),
+    ) -> Result<bool, sqlx::Error> {
+        // No row holds an epoch past i64::MAX; the refusal read names it.
+        let Ok(epoch) = i64::try_from(lease.epoch) else {
+            return Ok(false);
+        };
+        let moved: i64 = sqlx::query_scalar(COMMIT)
+            .bind(&lease.namespace)
+            .bind(lease.run_id.as_str())
+            .bind(epoch)
+            .bind(commit.status.map(status_name))
+            .bind(checkpoint)
+            .bind(seqs.first().map(|seq| seq - 1))
+            .bind(seqs.as_slice())
+            .bind(envelopes.as_slice())
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(moved == 1)
+    }
+
     /// Insert the run row and its first events in one transaction.
     async fn insert(&self, run: &NewRun, checkpoint: &str) -> Result<Insert, StoreError> {
         let events = encode_events(&run.events)?;
@@ -194,7 +263,7 @@ impl RunStore for PgRunStore {
         owner: &str,
     ) -> Result<Lease, StoreError> {
         let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
-        let (status, epoch, _) = lock_run(&mut tx, namespace, run_id).await?;
+        let (status, epoch, _) = run_state(&mut *tx, LOCK, namespace, run_id).await?;
         if status.is_terminal() {
             return Err(StoreError::InvalidTransition {
                 from: status,
@@ -255,37 +324,30 @@ impl RunStore for PgRunStore {
             .map(encode_checkpoint)
             .transpose()?;
         let events = encode_events(&commit.events)?;
+        // A commit that no run row takes skips the write; the read says why.
+        let after = (commit.events.first()).map_or(0, |event| event.seq.saturating_sub(1));
+        let fits = commit.status != Some(RunStatus::Pending)
+            && check_events(&lease.run_id, after, &commit.events).is_ok();
         let (namespace, run_id) = (&lease.namespace, &lease.run_id);
-        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
-        let (from, epoch, last_seq) = lock_run(&mut tx, namespace, run_id).await?;
-        if lease.epoch != epoch {
-            return Err(StoreError::LeaseLost {
-                run_id: run_id.clone(),
-                epoch: lease.epoch,
-            });
+        for _ in 0..crate::WRITE_TRIES {
+            let written = match fits {
+                true => (self.write(lease, &commit, checkpoint.as_deref(), &events)).await,
+                false => Ok(false),
+            };
+            match written {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    let state = run_state(&self.pool, STATE, namespace, run_id).await?;
+                    // `Ok`: the row moved after the refused write.
+                    refusal(lease, &commit, state)?;
+                }
+                Err(error) if crate::serialization_failure(&error) => {}
+                Err(error) => return Err(backend(error)),
+            }
         }
-        let to = commit.status.unwrap_or(from);
-        if from != RunStatus::Running || to == RunStatus::Pending {
-            return Err(StoreError::InvalidTransition { from, to });
-        }
-        check_events(run_id, last_seq, &commit.events)?;
-        let last_seq = last_seq + commit.events.len() as u64;
-        // The run row first, so a crash during the event insert still has a
-        // landed write to roll back.
-        sqlx::query(
-            "UPDATE linch_runs SET status = $3, checkpoint = COALESCE($4, checkpoint), \
-             last_seq = $5 WHERE namespace = $1 AND run_id = $2",
-        )
-        .bind(namespace)
-        .bind(run_id.as_str())
-        .bind(status_name(to))
-        .bind(checkpoint)
-        .bind(to_i64(last_seq, "last_seq")?)
-        .execute(&mut *tx)
-        .await
-        .map_err(backend)?;
-        insert_events(&mut tx, namespace, run_id, events).await?;
-        tx.commit().await.map_err(backend)
+        Err(StoreError::Conflict {
+            message: format!("run {} kept changing during a commit", lease.run_id),
+        })
     }
 
     async fn events(
