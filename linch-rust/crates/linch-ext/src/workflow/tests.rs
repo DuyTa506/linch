@@ -1,31 +1,61 @@
-//! The memory journal store and the content keys.
+//! Workflow tests on the memory journal store, plus shared fixtures.
 
-use serde_json::json;
+mod agent;
+mod resume;
+mod store;
 
-use super::conformance::journal_store_suite;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use linch_core::events::kinds::{WorkflowEvent, WorkflowKind};
+
 use super::*;
 
-#[tokio::test]
-async fn the_memory_store_passes_the_conformance_suite() {
-    journal_store_suite(&MemoryJournalStore::default()).await;
+pub const NS: &str = "wf";
+
+/// Workflow events in emission order.
+#[derive(Clone, Default)]
+pub struct Recorder(Arc<Mutex<Vec<WorkflowEvent>>>);
+
+impl Recorder {
+    pub fn kinds(&self) -> Vec<WorkflowKind> {
+        self.events().iter().map(|event| event.kind).collect()
+    }
+
+    pub fn events(&self) -> Vec<WorkflowEvent> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
-#[test]
-fn step_keys_separate_names_inputs_and_domains() {
-    let plain = step_key("fetch", None).unwrap();
-    assert_eq!(plain.len(), 64);
-    assert_eq!(plain, step_key("fetch", None).unwrap());
-    assert_ne!(plain, step_key("fetch", Some(&json!("a"))).unwrap());
-    assert_ne!(plain, step_key("publish", None).unwrap());
-    assert_ne!(plain, interrupt_key("fetch"));
+/// Options for `id` on `store`, recording events into `recorder`.
+pub fn options(store: &Arc<MemoryJournalStore>, id: &str, recorder: &Recorder) -> WorkflowOptions {
+    let mut options = WorkflowOptions::new(store.clone(), NS, id);
+    let events = recorder.0.clone();
+    options.on_event = Some(Arc::new(move |event: &WorkflowEvent| {
+        events.lock().unwrap().push(event.clone());
+    }));
+    options
 }
 
-#[test]
-fn step_keys_ignore_object_key_order_but_not_array_order() {
-    let ab = step_key("s", Some(&json!({"a": 1, "b": 2}))).unwrap();
-    let ba = step_key("s", Some(&json!({"b": 2, "a": 1}))).unwrap();
-    assert_eq!(ab, ba);
-    let forward = step_key("s", Some(&json!([1, 2]))).unwrap();
-    let backward = step_key("s", Some(&json!([2, 1]))).unwrap();
-    assert_ne!(forward, backward);
+/// How many times a step function ran.
+#[derive(Clone, Default)]
+pub struct Counter(Arc<AtomicUsize>);
+
+impl Counter {
+    pub fn bump(&self) -> usize {
+        self.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The stored run of `id`.
+pub async fn stored(store: &MemoryJournalStore, id: &str) -> WorkflowRun {
+    store
+        .load(NS, id)
+        .await
+        .unwrap()
+        .expect("the workflow exists")
 }
