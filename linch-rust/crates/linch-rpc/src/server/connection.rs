@@ -9,13 +9,15 @@ use std::io;
 use std::sync::Arc;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use linch::{JsonValue, PgPools};
+use linch::{JsonValue, PgPools, RunId};
 use serde::Serialize;
+use serde_json::value::RawValue;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 
+use super::outgoing::{Batch, Outgoing};
 use super::{Server, login};
 use crate::access::Access;
 use crate::error::{ErrorObject, code};
@@ -216,39 +218,59 @@ where
     }
 }
 
-async fn write_messages<K>(mut output: K, mut queue: mpsc::Receiver<String>) -> io::Result<()>
+/// Write each queued message, joining a run's consecutive envelopes (see
+/// [`outgoing`](super::outgoing)), and flush once nothing more waits.
+async fn write_messages<K>(mut output: K, mut queue: mpsc::Receiver<Outgoing>) -> io::Result<()>
 where
     K: Sink<String, Error = io::Error> + Unpin,
 {
-    while let Some(message) = queue.recv().await {
-        output.feed(message).await?;
-        if queue.is_empty() {
-            output.flush().await?;
+    let mut batch = Batch::default();
+    while let Some(first) = queue.recv().await {
+        let mut next = Some(first);
+        while let Some(item) = next {
+            match item {
+                Outgoing::Message(message) => {
+                    if let Some(line) = batch.take() {
+                        output.feed(line).await?;
+                    }
+                    output.feed(message).await?;
+                }
+                Outgoing::Envelope { run_id, envelope } => {
+                    if let Some(line) = batch.push(run_id, envelope) {
+                        output.feed(line).await?;
+                    }
+                }
+            }
+            next = queue.try_recv().ok();
         }
+        if let Some(line) = batch.take() {
+            output.feed(line).await?;
+        }
+        output.flush().await?;
     }
     output.close().await
 }
 
 /// Messages for the writer task.
 #[derive(Clone)]
-pub(super) struct Outbox(pub(super) mpsc::Sender<String>);
+pub(super) struct Outbox(pub(super) mpsc::Sender<Outgoing>);
 
 impl Outbox {
     /// Queue `message`; `false` when the writer has stopped (it failed, and
     /// serve reports that).
     pub(super) async fn send<T: Serialize>(&self, message: &T) -> bool {
-        self.0.send(encode(message)).await.is_ok()
+        (self.0.send(Outgoing::Message(encode(message))).await).is_ok()
     }
 
     /// Queue `message` without waiting, from code that cannot await (a
     /// drop). When the queue is full a task sends it later.
     pub(super) fn send_now<T: Serialize>(&self, message: &T) {
-        match self.0.try_send(encode(message)) {
+        match self.0.try_send(Outgoing::Message(encode(message))) {
             Ok(()) | Err(TrySendError::Closed(_)) => {}
-            Err(TrySendError::Full(line)) => {
+            Err(TrySendError::Full(item)) => {
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     let sender = self.0.clone();
-                    runtime.spawn(async move { sender.send(line).await });
+                    runtime.spawn(async move { sender.send(item).await });
                 }
             }
         }
@@ -256,6 +278,11 @@ impl Outbox {
 
     pub(super) async fn notify(&self, method: &str, params: JsonValue) {
         self.send(&Notification::new(method, params)).await;
+    }
+
+    /// Queue one encoded envelope of `run_id`, for a `run.event`.
+    pub(super) async fn envelope(&self, run_id: RunId, envelope: Box<RawValue>) {
+        let _ = self.0.send(Outgoing::Envelope { run_id, envelope }).await;
     }
 }
 

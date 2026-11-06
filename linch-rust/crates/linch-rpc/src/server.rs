@@ -6,8 +6,10 @@
 //! are in flight, and past that the loop waits. It hands the client's answers
 //! to server requests straight to their waiting calls. One writer task owns
 //! the output and writes every response, notification and server request
-//! from a bounded queue; when the client reads slowly the queue fills and
-//! the runs pause, since a run only advances while its stream is polled.
+//! from a bounded queue, joining a run's consecutive envelopes into one
+//! `run.event` ([`outgoing`]); when the client reads slowly the queue fills
+//! and the runs pause, since a run only advances while its stream is
+//! polled.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,6 +35,7 @@ mod callback;
 mod connection;
 mod host;
 mod login;
+mod outgoing;
 mod peer;
 mod run;
 

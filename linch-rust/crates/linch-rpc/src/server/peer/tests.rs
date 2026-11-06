@@ -4,15 +4,16 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::*;
+use crate::server::outgoing::Outgoing;
 
 /// A peer whose output lines land in the returned receiver.
-fn peer() -> (Peer, mpsc::Receiver<String>) {
+fn peer() -> (Peer, mpsc::Receiver<Outgoing>) {
     let (sender, lines) = mpsc::channel(16);
     (Peer::new(Outbox(sender)), lines)
 }
 
-async fn next(lines: &mut mpsc::Receiver<String>) -> JsonValue {
-    serde_json::from_str(&lines.recv().await.expect("a line")).unwrap()
+async fn next(lines: &mut mpsc::Receiver<Outgoing>) -> JsonValue {
+    serde_json::from_str(&lines.recv().await.expect("a line").into_line()).unwrap()
 }
 
 fn ok(id: &JsonValue, result: JsonValue) -> Response {
@@ -124,7 +125,7 @@ async fn a_cancel_token_or_a_dropped_call_sends_cancel() {
 #[tokio::test]
 async fn a_full_outbox_counts_against_the_timeout_and_the_cancel() {
     let (sender, _lines) = mpsc::channel(1);
-    sender.try_send("filler".into()).unwrap();
+    sender.try_send(Outgoing::Message("filler".into())).unwrap();
     let peer = Peer::new(Outbox(sender));
     let started = Instant::now();
     let limit = Some(Duration::from_millis(50));

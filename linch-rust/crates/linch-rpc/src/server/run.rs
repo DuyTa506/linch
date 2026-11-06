@@ -107,7 +107,8 @@ impl Server {
             .transpose()
     }
 
-    /// Forward every envelope as `run.event`, then send `run.end`.
+    /// Forward every envelope as soon as the stream yields it, for the
+    /// writer to send in `run.event`s, then send `run.end`.
     pub(super) async fn drive(&self, mut stream: RunStream) {
         let run_id = stream.run_id().clone();
         let error = loop {
@@ -121,8 +122,8 @@ impl Server {
             match next {
                 None => break None,
                 Some(Err(error)) => break Some(ErrorObject::from(&error)),
-                Some(Ok(envelope)) => match envelope.to_value() {
-                    Ok(value) => self.0.outbox.notify(method::RUN_EVENT, value).await,
+                Some(Ok(envelope)) => match serde_json::value::to_raw_value(&envelope) {
+                    Ok(raw) => self.0.outbox.envelope(run_id.clone(), raw).await,
                     Err(error) => {
                         let message = format!("envelope could not be encoded: {error}");
                         break Some(ErrorObject::new(code::INTERNAL_ERROR, message));

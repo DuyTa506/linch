@@ -158,7 +158,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let ctx = ToolContext::new("s".into(), "r".into(), "t", None, cancel, None);
         let call = tokio::spawn(async move { tool.execute(JsonObject::new(), ctx).await });
-        let request: JsonValue = serde_json::from_str(&lines.recv().await.unwrap()).unwrap();
+        let line = lines.recv().await.unwrap().into_line();
+        let request: JsonValue = serde_json::from_str(&line).unwrap();
         settle(&peer, request["id"].as_str().unwrap());
         call.await.unwrap().unwrap_err()
     }

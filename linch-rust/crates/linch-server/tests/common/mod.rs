@@ -81,7 +81,10 @@ pub async fn run(client: &Client, notifications: &mut Notifications, text: &str)
         let notification = notifications.recv().await.expect("connection open");
         assert_eq!(notification.params["run_id"], json!(accepted.run_id));
         match notification.method.as_str() {
-            method::RUN_EVENT => last = notification.params["event"].clone(),
+            method::RUN_EVENT => {
+                let envelopes = notification.params["envelopes"].as_array().unwrap();
+                last = envelopes.last().expect("an envelope")["event"].clone();
+            }
             method::RUN_END => break,
             other => panic!("unexpected {other}"),
         }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use linch::provider::scripted::TurnBuilder;
 use linch::{Envelope, Event, JsonObject, PgPools, RunId, ScriptedTurn};
-use linch_rpc::protocol::{AgentOpened, RunAccepted, RunEnd, method};
+use linch_rpc::protocol::{AgentOpened, RunAccepted, RunEnd, RunEvent, method};
 use linch_rpc::{
     Access, Allowlists, Client, ClientError, ErrorObject, Notifications, RequestHandler, Tenant,
 };
@@ -152,9 +152,13 @@ impl Rpc {
         let notification = self.notifications.recv().await.expect("server closed");
         match notification.method.as_str() {
             method::RUN_EVENT => {
-                let envelope: Envelope = serde_json::from_value(notification.params).unwrap();
-                let queue = self.events.entry(envelope.run_id.clone()).or_default();
-                queue.push_back(envelope);
+                let batch: RunEvent = serde_json::from_value(notification.params).unwrap();
+                assert!(!batch.envelopes.is_empty(), "an empty run.event");
+                let queue = self.events.entry(batch.run_id.clone()).or_default();
+                for envelope in batch.envelopes {
+                    assert_eq!(envelope.run_id, batch.run_id);
+                    queue.push_back(envelope);
+                }
             }
             method::RUN_END => {
                 let end: RunEnd = serde_json::from_value(notification.params).unwrap();

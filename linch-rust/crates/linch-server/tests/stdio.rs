@@ -74,7 +74,10 @@ impl Sidecar {
         loop {
             let notification = self.line().await;
             match notification["method"].as_str() {
-                Some("run.event") => events.push(notification["params"]["event"].clone()),
+                Some("run.event") => {
+                    let envelopes = notification["params"]["envelopes"].as_array().unwrap();
+                    events.extend(envelopes.iter().map(|e| e["event"].clone()));
+                }
                 Some("run.end") => {
                     assert!(
                         notification["params"].get("error").is_none(),

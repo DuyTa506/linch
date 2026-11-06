@@ -1,8 +1,9 @@
 """JSON-RPC 2.0 with the server over its stdin and stdout, one message per line.
 
 One reader task reads every server line: responses resolve pending calls,
-`run.event` and `run.end` go to the run's queue, and `tool.call` and
-`hook.call` run as tasks that `$/cancelRequest` cancels.
+`run.event` (consecutive envelopes of one run, as one list) and `run.end`
+go to the run's queue, and `tool.call` and `hook.call` run as tasks that
+`$/cancelRequest` cancels.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ class RunEnd:
     error: LinchError | None
 
 
-RunItem = JsonObject | RunEnd
+# A `run.event`'s envelopes, in order, or the end.
+RunItem = list[JsonObject] | RunEnd
 
 
 @dataclass(frozen=True)
@@ -147,7 +149,7 @@ class Connection:
         elif method == "run.event":
             queue = self._runs.get(params.get("run_id", ""))
             if queue is not None:
-                queue.put_nowait(params)
+                queue.put_nowait(params.get("envelopes") or [])
         elif method == "run.end":
             queue = self._runs.pop(params.get("run_id", ""), None)
             error = params.get("error")

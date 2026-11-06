@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 
-from ._rpc import Connection, RunEnd, RunItem
+from ._rpc import Connection, JsonObject, RunEnd, RunItem
 from .errors import LinchError
 from .events import Envelope, ResultEvent, SuspendedEvent, decode_envelope
 
@@ -26,6 +27,8 @@ class Run:
         self.id = run_id
         self._conn = conn
         self._queue = queue
+        # Envelopes received and not yet yielded, still raw.
+        self._received: deque[JsonObject] = deque()
         self._end: RunEnd | None = None
         self._terminal: ResultEvent | SuspendedEvent | None = None
 
@@ -66,14 +69,18 @@ class Run:
         return bool(answer["cancelled"])
 
     async def _next(self) -> Envelope | None:
-        if self._end is None:
+        while not self._received and self._end is None:
             item = await self._queue.get()
-            if not isinstance(item, RunEnd):
-                envelope = decode_envelope(item)
-                if isinstance(envelope.event, ResultEvent | SuspendedEvent):
-                    self._terminal = envelope.event
-                return envelope
-            self._end = item
+            if isinstance(item, RunEnd):
+                self._end = item
+            else:
+                self._received.extend(item)
+        if self._received:
+            envelope = decode_envelope(self._received.popleft())
+            if isinstance(envelope.event, ResultEvent | SuspendedEvent):
+                self._terminal = envelope.event
+            return envelope
+        assert self._end is not None
         if self._end.error is not None:
             raise self._end.error
         return None

@@ -72,7 +72,10 @@ async fn a_websocket_with_a_valid_token_runs_an_agent() {
     loop {
         let message = recv(&mut socket).await.unwrap();
         match message["method"].as_str() {
-            Some("run.event") => last = message["params"]["event"].clone(),
+            Some("run.event") => {
+                let envelopes = message["params"]["envelopes"].as_array().unwrap();
+                last = envelopes.last().expect("an envelope")["event"].clone();
+            }
             Some("run.end") => break,
             _ => panic!("unexpected {message}"),
         }

@@ -48,9 +48,10 @@ class Answering:
 
 async def test_events_read_with_the_run_answer_reach_the_run() -> None:
     envelope = {"v": 1, "seq": 1, "run_id": "r1", "event": {"type": "custom", "x": 1}}
+    batch = {"run_id": "r1", "envelopes": [envelope, {**envelope, "seq": 2}]}
     lines = [
         {"jsonrpc": "2.0", "result": {"run_id": "r1"}},
-        {"jsonrpc": "2.0", "method": "run.event", "params": envelope},
+        {"jsonrpc": "2.0", "method": "run.event", "params": batch},
         {"jsonrpc": "2.0", "method": "run.end", "params": {"run_id": "r1"}},
     ]
     reader = asyncio.StreamReader()
@@ -59,7 +60,7 @@ async def test_events_read_with_the_run_answer_reach_the_run() -> None:
     run_id, queue = await conn.request_run("run.start", {})
 
     assert run_id == "r1"
-    assert [queue.get_nowait(), queue.get_nowait()] == [envelope, RunEnd(None)]
+    assert [queue.get_nowait(), queue.get_nowait()] == [batch["envelopes"], RunEnd(None)]
     reader.feed_eof()
     await conn.finish()
 
