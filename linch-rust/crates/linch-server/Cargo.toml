@@ -1,6 +1,6 @@
 [package]
 name = "linch-server"
-description = "The Linch sidecar: serves the linch-rpc protocol over stdio."
+description = "The Linch sidecar: serves the linch-rpc protocol over stdio, a Unix socket, or HTTP with WebSocket."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,26 @@ publish = false
 workspace = true
 
 [dependencies]
+# The HTTP server and WebSocket upgrade; already in the lockfile for
+# linch-mcp's tests, `ws` adds tokio-tungstenite.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
+futures = "0.3.34"
+linch = { path = "../linch" }
 linch-rpc = { path = "../linch-rpc" }
-tokio = { version = "1.54.1", features = ["io-std", "macros", "rt-multi-thread"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["io-std", "macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Marks the process not dumpable, so a child cannot read its environment
+# (the provider keys) from /proc; already in the lockfile.
+rustix = { version = "1.1.6", features = ["process"] }
 
 [dev-dependencies]
-linch = { path = "../linch" }
 serde_json = "1.0.154"
-tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "time"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "process", "rt", "time"] }
+# The WebSocket client of the HTTP tests; the version axum's `ws` uses.
+tokio-tungstenite = "0.29.0"

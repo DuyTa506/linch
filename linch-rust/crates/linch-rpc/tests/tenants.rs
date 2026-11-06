@@ -155,7 +155,11 @@ async fn on_shared_postgres_a_tenant_reaches_only_its_own_runs() {
         config["stores"] = json!({"type": "postgres", "dsn": db.dsn});
         config
     };
-    let on_shared = || allow().postgres_dsns(std::slice::from_ref(&db.dsn)).unwrap();
+    let on_shared = || {
+        allow()
+            .postgres_dsns(std::slice::from_ref(&db.dsn))
+            .unwrap()
+    };
     let mut owner = Rpc::remote(tenant("acme", on_shared()));
     let agent = owner.open(on_db("acme")).await;
     let run_id = owner.start(&agent, "s1", "go").await;
