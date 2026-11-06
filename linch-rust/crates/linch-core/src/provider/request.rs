@@ -131,8 +131,8 @@ pub enum ReasoningEffort {
 ///   raw native override with no `type` tag (bare `thinking_budget`/
 ///   `thinking_level` keys) via its own adapter options
 ///   (`test_native_thinking_override`); that is untyped dynamic
-///   configuration the 9.1 ground rules exclude from this port — use a
-///   Gemini-specific adapter option instead (P5).
+///   configuration this port leaves out — use a Gemini-specific adapter
+///   option instead.
 /// - **DeepSeek** (`deepseek.py`, `_effective_thinking`): collapses to its
 ///   own on/off switch — [`Thinking::Disabled`] is `"disabled"`, every
 ///   other variant (including [`Thinking::Adaptive`]) is `"enabled"`;

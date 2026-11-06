@@ -2,7 +2,7 @@
 //!
 //! Records are keyed by a host-chosen namespace plus an id, so tenants never
 //! share a key space. The in-memory implementations are for tests and
-//! development; Postgres (P7) implements the same traits and must pass the
+//! development; linch-postgres implements the same traits and must pass the
 //! same conformance suite.
 //!
 //! [`RunStore::commit`] is the only write to a running run, so every store

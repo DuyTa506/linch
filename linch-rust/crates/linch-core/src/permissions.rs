@@ -21,7 +21,7 @@
 //!   target outside the project root never matches an allow rule, and
 //!   under `accept_edits` such a write asks instead of being allowed by
 //!   default. Symlinks are not resolved here; the execution-world file
-//!   layer (P6) confines what is really opened.
+//!   layer confines what is really opened.
 
 mod engine;
 mod glob;

@@ -176,7 +176,7 @@ impl AgentBuilder {
 
     /// Build the agent and compute its contract digest from the spec, the
     /// tools registered now, the hook policies, the skills and the
-    /// subagents (BLUEPRINT 13.1.2).
+    /// subagents.
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the

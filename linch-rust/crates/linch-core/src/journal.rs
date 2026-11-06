@@ -7,7 +7,7 @@
 //! - [`Journal::stage`] allocates the next seq to a durable event and holds
 //!   it. A stream-only event is never stored: it comes back at once, with the
 //!   last durable seq.
-//! - [`Journal::save`] applies the phase rule of BLUEPRINT 13.1.3:
+//! - [`Journal::save`] applies the phase rule:
 //!   `Started`, `AssistantReceived` and `Compacted` (a paid summary) write
 //!   through, `AwaitingApproval` writes through with status
 //!   `awaiting_approval`, and `ProviderPending`, `CompactionPending`,

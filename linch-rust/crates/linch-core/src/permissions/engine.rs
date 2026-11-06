@@ -15,7 +15,7 @@ use super::{
 /// One proposed tool call, as the permission engine sees it.
 ///
 /// Paths in `input` are judged lexically; resolving symlinks and confining
-/// what is really opened belongs to the execution-world file layer (P6).
+/// what is really opened belongs to the execution-world file layer.
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionCall<'a> {
     /// Name of the tool being called.

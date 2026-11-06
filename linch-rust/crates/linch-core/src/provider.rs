@@ -6,7 +6,7 @@
 //! it translates into [`ProviderEvent`], and everything downstream of that
 //! boundary — the loop, the session log, the run store — only ever sees the
 //! resulting [`AssistantAssembly`]. See
-//! `docs/architecture/provider-contract.md` for the full contract this
+//! `linch-rust/docs/architecture/providers.md` for the full contract this
 //! module enforces.
 
 mod assembler;
