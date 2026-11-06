@@ -6,6 +6,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{code, ctx, input, text};
+use linch_core::vfs::MAX_FILE_BYTES;
 use linch_core::{Tool, ToolResult, ToolScope};
 use linch_tools::vfs::{
     EditFile, Ls, MemorySessions, PROMPT, ReadFile, SessionFiles, WriteFile, vfs_tools,
@@ -181,6 +182,42 @@ async fn edit_replaces_and_reports_each_refusal() {
         "Made 2 replacements in '/f'."
     );
     assert_eq!(text(call(&t.read, json!({"path": "/f"})).await), "z Y z");
+}
+
+/// R3-sec 5: a virtual file holds at most `MAX_FILE_BYTES`, so neither a
+/// large write nor an edit that multiplies a file (`replace_all`) passes
+/// it; the file stays as it was.
+#[tokio::test]
+async fn a_file_cannot_grow_past_the_size_cap() {
+    let t = tools();
+    call(&t.write, json!({"path": "/f", "content": "a"}))
+        .await
+        .unwrap();
+    let times = |n: usize| {
+        let new = "a".repeat(n);
+        json!({"path": "/f", "old_string": "a", "new_string": new, "replace_all": true})
+    };
+    call(&t.edit, times(1000)).await.unwrap();
+    call(&t.edit, times(1000)).await.unwrap();
+    let grown = call(&t.edit, times(100)).await;
+    let error = grown.expect_err("100 MB is past the cap");
+    assert_eq!(error.code.as_deref(), Some("too_large"));
+    assert!(error.message.contains("'/f'"), "{}", error.message);
+    let same = text(call(&t.edit, times(1)).await);
+    assert_eq!(
+        same, "Made 1000000 replacements in '/f'.",
+        "the file stays as it was"
+    );
+
+    let big = "b".repeat(MAX_FILE_BYTES + 1);
+    let write = call(&t.write, json!({"path": "/g", "content": big})).await;
+    assert_eq!(code(write), "too_large");
+    let missing = call(&t.read, json!({"path": "/g"})).await;
+    assert_eq!(code(missing), "not_found", "nothing was written");
+    let full = "b".repeat(MAX_FILE_BYTES);
+    call(&t.write, json!({"path": "/g", "content": full}))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
