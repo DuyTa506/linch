@@ -36,6 +36,7 @@ pub mod scheduler;
 pub mod session_log;
 pub mod skills;
 pub mod store;
+pub mod subagents;
 pub mod tool;
 pub mod usage;
 
@@ -84,6 +85,7 @@ pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
 pub use skills::Skill;
 pub use store::memory::{MemoryRunStore, MemorySessionStore};
 pub use store::{Commit, Lease, NewRun, RunRecord, RunStore, SessionStore, StoreError};
+pub use subagents::SubagentDefinition;
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };

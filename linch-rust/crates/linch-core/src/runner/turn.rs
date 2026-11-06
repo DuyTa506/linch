@@ -158,7 +158,7 @@ impl Runner {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
         Self {
-            snapshot: agent.tools.snapshot(),
+            snapshot: agent.snapshot(),
             agent,
             journal,
             outbox,
@@ -258,7 +258,7 @@ impl Runner {
             self.max_turns(max).await?;
             return Ok(None);
         }
-        self.snapshot = self.agent.tools.snapshot();
+        self.snapshot = self.agent.snapshot();
         let view = self.log.provider_view();
         let mut messages: Vec<Message> =
             view.iter().map(|message| Message::clone(message)).collect();

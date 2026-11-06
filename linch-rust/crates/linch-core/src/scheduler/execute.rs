@@ -14,11 +14,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::canonical::to_canonical_string;
+use crate::events::Event;
 use crate::hooks::{HookRecord, Hooks, PostToolUseRequest};
 use crate::json::JsonValue;
 use crate::message::ToolResultBlock;
 use crate::registry::OutputContractError;
-use crate::tool::{ToolContext, ToolOutputError, ToolProgress, ToolResult};
+use crate::tool::{Report, ToolContext, ToolOutputError, ToolProgress, ToolResult};
 
 use super::RunIdentity;
 use super::plan::{BatchPlan, PlannedAction, PlannedCall};
@@ -56,6 +57,13 @@ pub trait ToolSink: Send + Sync {
     /// A progress report from the call's running tool. Best effort: reports
     /// sent after the tool returned are dropped.
     fn tool_progress(&self, call: &PlannedCall, progress: ToolProgress);
+
+    /// An event the call's running tool put in the run's log (a subagent's
+    /// wrapped event), before the call's [`Self::tool_finished`]. The
+    /// default drops it.
+    async fn tool_event(&self, call: &PlannedCall, event: Event) {
+        let _ = (call, event);
+    }
 }
 
 /// One call's result, as [`ToolSink::tool_finished`] sees it.
@@ -92,9 +100,9 @@ pub struct ExecuteOptions {
 
 /// Run a decided plan and return one result per call, in call order.
 ///
-/// A contiguous run of read-scope calls executes concurrently, in groups of
-/// at most [`ExecuteOptions::max_concurrency`]; a write or exec call runs
-/// alone, so a call after it waits for it. Calls that run no tool join a
+/// A contiguous run of read calls (see [`crate::Tool::parallel`]) executes
+/// concurrently, in groups of at most [`ExecuteOptions::max_concurrency`];
+/// any other call runs alone, so a call after it waits for it. Calls that run no tool join a
 /// read group. Each tool gets a child of the run's cancel token, cancelled
 /// when the call ends. The `post_tool_use` chain of `hooks` runs on every
 /// result of a run or served call, then a success value is checked against
@@ -143,11 +151,11 @@ pub async fn execute<S: ToolSink>(
     Ok(results)
 }
 
-/// Whether `call` may share a group with read calls: it runs a read-scope
-/// tool, or no tool at all.
+/// Whether `call` may share a group with read calls: its tool says the call
+/// is parallel ([`crate::Tool::parallel`]), or it runs no tool at all.
 fn in_read_group(call: &PlannedCall) -> bool {
     match (&call.action, &call.tool) {
-        (PlannedAction::Run, Some(tool)) => tool.tool().scope().is_parallel_safe(),
+        (PlannedAction::Run, Some(tool)) => tool.tool().parallel(&call.input),
         (PlannedAction::Run, None) => false,
         _ => true,
     }
@@ -240,15 +248,16 @@ impl<S: ToolSink> Runner<'_, S> {
             call.tool_use_id.clone(),
             self.run.principal.clone(),
             token,
-            Some(progress),
+            None,
         )
+        .with_reports(progress)
         .with_deadline(deadline);
         let execution = async { tool.tool().execute(call.input.clone(), ctx).await };
         let execution = self.timed(call, deadline, caught(&call.tool_name, execution));
         let result = {
             let forward = pin!(async {
                 while let Some(report) = reports.recv().await {
-                    self.sink.tool_progress(call, report);
+                    self.report(call, report).await;
                 }
                 future::pending::<Infallible>().await
             });
@@ -258,9 +267,16 @@ impl<S: ToolSink> Runner<'_, S> {
             }
         };
         while let Ok(report) = reports.try_recv() {
-            self.sink.tool_progress(call, report);
+            self.report(call, report).await;
         }
         result
+    }
+
+    async fn report(&self, call: &PlannedCall, report: Report) {
+        match report {
+            Report::Progress(progress) => self.sink.tool_progress(call, progress),
+            Report::Event(event) => self.sink.tool_event(call, *event).await,
+        }
     }
 
     /// `execution`, or a timeout error result at `deadline`.

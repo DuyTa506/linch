@@ -70,7 +70,7 @@ impl Runner {
         if tokens_before < spec.threshold_tokens {
             return Ok(Some(DISPATCH));
         }
-        self.snapshot = agent.tools.snapshot();
+        self.snapshot = agent.snapshot();
         let older = view[..keep_from]
             .iter()
             .map(|m| Message::clone(m))

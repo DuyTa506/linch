@@ -5,6 +5,10 @@
 //! runs nothing (served, refused, or aborted before it started) gets its
 //! start and end staged without a flush; they reach the store with the next
 //! barrier, which keeps a tool turn at `3 + 2k` run writes.
+//!
+//! An event a running tool puts in the run's log (a subagent's wrapped
+//! event) is staged the same way: it rides the next barrier, at the latest
+//! the call's end.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +118,15 @@ impl ToolSink for JournalSink<'_> {
             vec![start_event(call), end]
         };
         self.write(events, ran).await
+    }
+
+    /// Stage the event: a durable one rides the next barrier (at the latest
+    /// the call's end); a stream-only one goes to the caller at once.
+    async fn tool_event(&self, _call: &PlannedCall, event: Event) {
+        let now = self.journal.lock().await.stage(event);
+        if let Some(envelope) = now {
+            self.outbox.push(envelope);
+        }
     }
 
     fn tool_progress(&self, call: &PlannedCall, progress: ToolProgress) {

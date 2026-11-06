@@ -119,10 +119,36 @@ impl Stream for RunStream {
 
 /// Start a new run (see [`crate::agent::Agent::run`]).
 pub(crate) fn start(agent: Arc<AgentInner>, prompt: String, options: RunOptions) -> RunStream {
+    start_under(agent, prompt, options, None)
+}
+
+/// Start a subagent's child run of `parent` (see [`crate::subagents`]).
+pub(crate) fn start_child(
+    agent: Arc<AgentInner>,
+    prompt: String,
+    options: RunOptions,
+    parent: RunId,
+) -> RunStream {
+    start_under(agent, prompt, options, Some(parent))
+}
+
+fn start_under(
+    agent: Arc<AgentInner>,
+    prompt: String,
+    options: RunOptions,
+    parent: Option<RunId>,
+) -> RunStream {
     let run_id =
         (options.run_id.clone()).unwrap_or_else(|| RunId::new(uuid::Uuid::new_v4().to_string()));
     let outbox = Outbox::default();
-    let run = start::new_run(agent, run_id.clone(), prompt, options, outbox.clone());
+    let run = start::new_run(
+        agent,
+        run_id.clone(),
+        prompt,
+        options,
+        outbox.clone(),
+        parent,
+    );
     RunStream::new(run_id, outbox, Box::pin(run))
 }
 

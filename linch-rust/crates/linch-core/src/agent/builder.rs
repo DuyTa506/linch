@@ -1,6 +1,6 @@
 //! [`AgentBuilder`]: binds an [`AgentSpec`] to what an agent runs with.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
 use super::{Agent, AgentInner, BuildError, SessionClose};
@@ -14,12 +14,13 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{self, Skill, SkillTool};
 use crate::store::{RunStore, SessionStore};
+use crate::subagents::{Roster, SubagentDefinition, SubagentTool};
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
 ///
 /// The provider, the permission engine, both stores and a namespace are
-/// required; tools, hooks, skills and session-close callbacks default to
-/// none. Nothing here does I/O.
+/// required; tools, hooks, skills, subagents and session-close callbacks
+/// default to none. Nothing here does I/O.
 pub struct AgentBuilder {
     spec: AgentSpec,
     provider: Option<Arc<dyn Provider>>,
@@ -31,6 +32,7 @@ pub struct AgentBuilder {
     namespace: Option<String>,
     session_close: Vec<SessionClose>,
     skills: Option<Vec<Skill>>,
+    subagents: Option<Vec<SubagentDefinition>>,
 }
 
 impl AgentBuilder {
@@ -47,6 +49,7 @@ impl AgentBuilder {
             namespace: None,
             session_close: Vec::new(),
             skills: None,
+            subagents: None,
         }
     }
 
@@ -115,9 +118,21 @@ impl AgentBuilder {
         self
     }
 
+    /// Turn foreground subagents on with `definitions` (see
+    /// [`crate::subagents`]).
+    ///
+    /// The built-in `verification` agent joins them unless one has its name
+    /// (case-insensitively). [`Self::build`] registers the `Subagent` tool
+    /// in the tool registry, for as long as the agent lives. Every
+    /// definition is part of the run contract.
+    pub fn subagents(mut self, definitions: Vec<SubagentDefinition>) -> Self {
+        self.subagents = Some(definitions);
+        self
+    }
+
     /// Build the agent and compute its contract digest from the spec, the
-    /// tools registered now, the hook policies and the skills (BLUEPRINT
-    /// 13.1.2).
+    /// tools registered now, the hook policies, the skills and the
+    /// subagents (BLUEPRINT 13.1.2).
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
@@ -153,29 +168,45 @@ impl AgentBuilder {
             listing = listing_block(&skills);
             built_ins.register(&self.tools, Arc::new(SkillTool::new(skills)))?;
         }
+        let handle = Arc::new(OnceLock::new());
+        let mut subagents = None;
+        if let Some(definitions) = self.subagents {
+            let roster = Arc::new(Roster::new(definitions));
+            let value =
+                serde_json::to_value(&*roster).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            features.insert("subagents".into(), value);
+            let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle));
+            built_ins.register(&self.tools, Arc::new(tool))?;
+            subagents = Some(roster);
+        }
         let tools = self.tools.snapshot().contract_tools();
         let hooks = self.hooks.policy_digest();
         let contract = spec::contract_digest(&self.spec, &tools, hooks, &features)?;
         let mut system = spec::prompt_block(&self.spec);
-        system.extend(listing);
-        let inner = AgentInner {
+        system.extend(listing.clone());
+        let inner = Arc::new(AgentInner {
             provider,
             permissions,
             runs,
             sessions,
             spec: self.spec,
             tools: self.tools,
+            filter: None,
             hooks: self.hooks,
             namespace,
             contract,
             system,
+            features,
             skills: skills_on,
+            skill_listing: listing,
+            subagents,
+            child: false,
             session_close: self.session_close,
             registrations: built_ins.take(),
-        };
-        Ok(Agent {
-            inner: Arc::new(inner),
-        })
+        });
+        // Set once, here: nothing else holds the handle yet.
+        let _ = handle.set(Arc::downgrade(&inner));
+        Ok(Agent { inner })
     }
 }
 

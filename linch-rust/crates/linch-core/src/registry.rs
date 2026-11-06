@@ -181,6 +181,23 @@ impl ToolSnapshot {
         self.generation
     }
 
+    /// The tools of this snapshot whose name `keep` accepts, in the same
+    /// order, at the same generation.
+    pub(crate) fn filtered(&self, keep: impl Fn(&str) -> bool) -> Self {
+        let tools: Vec<_> = (self.tools.iter())
+            .filter(|tool| keep(tool.name()))
+            .cloned()
+            .collect();
+        let index = (tools.iter().enumerate())
+            .map(|(position, tool)| (tool.name().to_owned(), position))
+            .collect();
+        Self {
+            generation: self.generation,
+            tools,
+            index,
+        }
+    }
+
     /// The tool registered under `name`, if any.
     pub fn resolve(&self, name: &str) -> Option<&Arc<RegisteredTool>> {
         self.index.get(name).map(|&position| &self.tools[position])

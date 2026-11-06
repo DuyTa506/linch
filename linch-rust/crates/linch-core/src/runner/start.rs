@@ -19,12 +19,14 @@ use crate::store::{Lease, RunRecord, StoreError};
 use crate::usage::Usage;
 
 /// Create the run (the `Started` write-through), append the prompt, and go.
+/// `parent` is the parent run of a subagent's child run.
 pub(super) async fn new_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
     prompt: String,
     options: RunOptions,
     outbox: Outbox,
+    parent: Option<RunId>,
 ) -> Result<(), RunError> {
     let namespace = agent.namespace.clone();
     if options.run_id.is_some() {
@@ -55,11 +57,11 @@ pub(super) async fn new_run(
         epoch: 0,
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, 0);
-    let tools = agent.tools.snapshot().definitions();
+    let tools = agent.snapshot().definitions();
     journal.stage(Event::Init(InitEvent {
         session_id: session_id.clone(),
         run_id: run_id.clone(),
-        parent_run_id: None,
+        parent_run_id: parent.clone(),
         model: agent.spec.model.clone(),
         tools: tools.into_iter().map(|tool| tool.name).collect(),
         trace_id: None,
@@ -79,7 +81,7 @@ pub(super) async fn new_run(
     };
     let contract = agent.contract;
     let ready = match journal
-        .create(session_id.clone(), None, contract, checkpoint)
+        .create(session_id.clone(), parent, contract, checkpoint)
         .await
     {
         Ok(ready) => ready,

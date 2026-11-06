@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::events::Event;
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::policy::Principal;
@@ -93,6 +94,24 @@ pub struct ToolProgress {
     pub data: Option<JsonObject>,
 }
 
+/// What a call the scheduler runs reports while it runs.
+#[derive(Debug)]
+pub(crate) enum Report {
+    /// [`ToolContext::report_progress`].
+    Progress(ToolProgress),
+    /// An event for the run's log (a subagent's wrapped event).
+    Event(Box<Event>),
+}
+
+/// Where a context's reports go.
+#[derive(Debug, Clone)]
+enum Reports {
+    /// A host's progress sink ([`ToolContext::new`]).
+    Progress(mpsc::UnboundedSender<ToolProgress>),
+    /// The scheduler, which also takes events.
+    Run(mpsc::UnboundedSender<Report>),
+}
+
 /// Runtime data for one tool call. Built by the scheduler.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -112,7 +131,7 @@ pub struct ToolContext {
     /// timeout. A tool that can stop early with a useful partial result
     /// (Bash keeps the output so far) should finish a little before it.
     pub deadline: Option<Instant>,
-    progress: Option<mpsc::UnboundedSender<ToolProgress>>,
+    reports: Option<Reports>,
 }
 
 impl ToolContext {
@@ -133,8 +152,14 @@ impl ToolContext {
             principal,
             cancel,
             deadline: None,
-            progress,
+            reports: progress.map(Reports::Progress),
         }
+    }
+
+    /// This context with its progress and events going to `reports`.
+    pub(crate) fn with_reports(mut self, reports: mpsc::UnboundedSender<Report>) -> Self {
+        self.reports = Some(Reports::Run(reports));
+        self
     }
 
     /// This context with `deadline` as the call's deadline.
@@ -155,11 +180,26 @@ impl ToolContext {
 
     /// Report progress to observers. Best effort: never fails the tool.
     pub fn report_progress(&self, message: impl Into<String>, data: Option<JsonObject>) {
-        if let Some(sink) = &self.progress {
-            let _ = sink.send(ToolProgress {
-                message: message.into(),
-                data,
-            });
+        let progress = ToolProgress {
+            message: message.into(),
+            data,
+        };
+        match &self.reports {
+            Some(Reports::Progress(sink)) => {
+                let _ = sink.send(progress);
+            }
+            Some(Reports::Run(sink)) => {
+                let _ = sink.send(Report::Progress(progress));
+            }
+            None => {}
+        }
+    }
+
+    /// Put `event` in the run's log. Best effort: dropped outside a run,
+    /// and once the call has ended.
+    pub(crate) fn emit(&self, event: Event) {
+        if let Some(Reports::Run(sink)) = &self.reports {
+            let _ = sink.send(Report::Event(Box::new(event)));
         }
     }
 }
@@ -192,6 +232,15 @@ pub trait Tool: Send + Sync {
     /// a `pre_tool_use` hook rewrites the input. Returns the input to use.
     fn validate(&self, input: JsonObject) -> Result<JsonObject, ToolOutputError> {
         Ok(input)
+    }
+
+    /// Whether this call may run alongside other read calls. The default is
+    /// [`ToolScope::is_parallel_safe`]: only a read-scope tool's calls. A
+    /// tool says yes for a call that does only read work whatever its
+    /// scope (a subagent whose tools all read).
+    fn parallel(&self, input: &JsonObject) -> bool {
+        let _ = input;
+        self.scope().is_parallel_safe()
     }
 
     /// One-line summary of a call for events and approval prompts.

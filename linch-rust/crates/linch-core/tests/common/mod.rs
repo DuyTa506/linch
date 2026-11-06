@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod hooks;
+pub mod subagents;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

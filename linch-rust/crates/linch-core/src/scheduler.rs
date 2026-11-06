@@ -11,9 +11,10 @@
 //!    approval, [`BatchPlan::is_awaiting_approval`] says so and the loop
 //!    suspends the run.
 //! 2. [`execute`] runs a decided plan and returns one [`ToolResultBlock`] per
-//!    call, in call order. A contiguous run of read-scope calls executes
-//!    concurrently, up to [`ExecuteOptions::max_concurrency`]; a write or exec
-//!    call runs alone. Each tool start waits on [`ToolSink::tool_starting`],
+//!    call, in call order. A contiguous run of read calls (a read-scope tool,
+//!    or one whose [`crate::Tool::parallel`] says so) executes concurrently, up
+//!    to [`ExecuteOptions::max_concurrency`]; any other call runs alone. Each
+//!    tool start waits on [`ToolSink::tool_starting`],
 //!    the durability barrier, and each result goes to
 //!    [`ToolSink::tool_finished`] as soon as it exists.
 //!

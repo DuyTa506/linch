@@ -16,6 +16,7 @@ use crate::canonical::Digest;
 use crate::events::{Envelope, Persistence};
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
+use crate::json::JsonObject;
 use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
@@ -24,14 +25,18 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::runner::{self, RunStream};
 use crate::store::{RunStore, SessionStore};
+use crate::subagents::Roster;
 
 mod builder;
+mod child;
 mod error;
 mod spec;
 
 pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
 pub use spec::AgentSpec;
+
+pub(crate) use child::ChildTools;
 
 /// Per-call options for [`Agent::run`], [`Agent::resume`] and
 /// [`Agent::approve`].
@@ -82,6 +87,8 @@ pub(crate) struct AgentInner {
     pub(crate) spec: AgentSpec,
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) tools: Arc<ToolRegistry>,
+    /// The tools a subagent's run sees of `tools`; `None` for all.
+    pub(crate) filter: Option<ChildTools>,
     pub(crate) permissions: PermissionEngine,
     pub(crate) hooks: Arc<Hooks>,
     pub(crate) runs: Arc<dyn RunStore>,
@@ -91,8 +98,18 @@ pub(crate) struct AgentInner {
     /// The system blocks of every request: the system prompt, then the
     /// skill listing.
     pub(crate) system: Vec<SystemBlock>,
+    /// What the contract covers beyond the spec, tools and hooks.
+    pub(crate) features: JsonObject,
     /// Whether skills are on: the agent registered the `Skill` tool.
     pub(crate) skills: bool,
+    /// The skill listing block; `None` when skills are off or none is
+    /// visible to the model.
+    pub(crate) skill_listing: Option<SystemBlock>,
+    /// The subagents the `Subagent` tool runs; `None` when they are off.
+    pub(crate) subagents: Option<Arc<Roster>>,
+    /// Whether this is a subagent's agent: its runs cannot suspend, so a
+    /// call that needs approval is denied.
+    pub(crate) child: bool,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,

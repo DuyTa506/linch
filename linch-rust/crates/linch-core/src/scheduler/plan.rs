@@ -37,6 +37,18 @@ impl BatchPlan {
             .iter()
             .any(|call| matches!(call.action, PlannedAction::AwaitingApproval { .. }))
     }
+
+    /// Deny every call awaiting approval with `reason`, for a run that
+    /// cannot suspend (a subagent's).
+    pub(crate) fn refuse_asks(&mut self, reason: &str) {
+        for call in &mut self.calls {
+            if matches!(call.action, PlannedAction::AwaitingApproval { .. }) {
+                call.action = PlannedAction::Denied {
+                    reason: reason.to_owned(),
+                };
+            }
+        }
+    }
 }
 
 /// One tool call and what will happen to it.

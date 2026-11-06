@@ -17,6 +17,11 @@ use crate::message::{ContentBlock, Message, Role, ToolUseBlock};
 use crate::policy::PermissionDecision;
 use crate::run::{Phase, ToolDecisionRecord};
 use crate::scheduler::{self, BatchPlan, ExecuteOptions, PlannedAction, RecordedApproval};
+use crate::subagents::SUBAGENT_TOOL;
+
+/// Why a subagent's call that needs approval is denied.
+const CANNOT_ASK: &str = "it needs approval, which a subagent cannot ask for; allow it with a \
+     permission rule or a permission_request hook";
 
 impl Runner {
     /// Plan the calls still to decide; suspend if one needs approval,
@@ -28,6 +33,7 @@ impl Runner {
             approvals,
             after_seq,
         } = batch;
+        let calls = self.rerun_subagents(calls);
         let blocks: Vec<ToolUseBlock> = calls
             .iter()
             .filter_map(|call| match call {
@@ -58,10 +64,13 @@ impl Runner {
         );
         // A cancel, even one that came before approve or resume, aborts
         // without asking the hooks (again).
-        let Some(plan) = self.cancel.run_until_cancelled(plan).await else {
+        let Some(mut plan) = self.cancel.run_until_cancelled(plan).await else {
             self.abort().await?;
             return Ok(None);
         };
+        if self.agent.child {
+            plan.refuse_asks(CANNOT_ASK);
+        }
         for call in plan.calls() {
             let records = call.hook_records.clone();
             self.push_records(records, Some(&call.tool_use_id));
@@ -97,6 +106,29 @@ impl Runner {
             message,
             appended: false,
         }))
+    }
+
+    /// Plan again each `Subagent` call that started and has no end, instead
+    /// of standing in a placeholder: the call resumes its durable child run
+    /// (see [`crate::subagents`]).
+    fn rerun_subagents(&self, calls: Vec<ToolRecovery>) -> Vec<ToolRecovery> {
+        let resumable = |call: &ToolRecovery| matches!(call, ToolRecovery::Interrupted { tool_name, .. } if tool_name == SUBAGENT_TOOL);
+        if self.agent.subagents.is_none() || !calls.iter().any(resumable) {
+            return calls;
+        }
+        // The batch's calls are those of the response the view ends with,
+        // in order.
+        let Some(response) = self.log.last_visible() else {
+            return calls;
+        };
+        let blocks: Vec<&ToolUseBlock> = response.tool_uses().collect();
+        let calls = calls.into_iter().enumerate();
+        calls
+            .map(|(at, call)| match blocks.get(at) {
+                Some(block) if resumable(&call) => ToolRecovery::Replan((*block).clone()),
+                _ => call,
+            })
+            .collect()
     }
 
     /// Write through `AwaitingApproval` with the pending calls.
