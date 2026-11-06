@@ -129,8 +129,12 @@ struct Call<'a> {
     wire_id: Option<&'a str>,
 }
 
+/// Consecutive messages of one role go out as one turn. A compacted view
+/// opens with two user messages, and Gemini is reported to answer two
+/// user turns before a function call with a turn-order 400; AI Studio
+/// merges such turns the same way.
 fn contents(conversation: &[Message]) -> Result<Vec<JsonValue>, ProviderError> {
-    let mut out = Vec::with_capacity(conversation.len());
+    let mut out: Vec<JsonValue> = Vec::with_capacity(conversation.len());
     let mut calls: Vec<Call<'_>> = Vec::new();
     for message in conversation {
         let (role, parts) = match message.role {
@@ -140,7 +144,14 @@ fn contents(conversation: &[Message]) -> Result<Vec<JsonValue>, ProviderError> {
             }
             Role::User => ("user", user_parts(message, &calls)?),
         };
-        if !parts.is_empty() {
+        if parts.is_empty() {
+            continue;
+        }
+        if let Some(last) = out.last_mut().filter(|last| last["role"] == role)
+            && let Some(previous) = last["parts"].as_array_mut()
+        {
+            previous.extend(parts);
+        } else {
             out.push(json!({"role": role, "parts": parts}));
         }
     }

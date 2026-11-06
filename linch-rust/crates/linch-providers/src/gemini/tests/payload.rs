@@ -309,6 +309,31 @@ fn results_must_answer_the_previous_assistant_turn() {
     ])));
 }
 
+/// After compaction the view opens with two user messages (the first
+/// prompt, then the summary); Gemini gets them as one user turn.
+#[test]
+fn consecutive_same_role_messages_become_one_content() {
+    let result = ContentBlock::ToolResult(ToolResultBlock::text("gemini_0_0", "18C", false));
+    let body = build(&with_messages(vec![
+        Message::user_text("first"),
+        Message::user_text("summary"),
+        Message::new(Role::Assistant, vec![call("gemini_0_0", "Paris")]),
+        Message::new(Role::User, vec![result]),
+    ]));
+    assert_eq!(
+        body["contents"],
+        json!([
+            {"role": "user", "parts": [{"text": "first"}, {"text": "summary"}]},
+            {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}},
+            ]},
+            {"role": "user", "parts": [
+                {"functionResponse": {"name": "get_weather", "response": {"output": "18C"}}},
+            ]},
+        ])
+    );
+}
+
 #[test]
 fn misplaced_blocks_and_output_schema_fail_locally() {
     let misplaced = [
