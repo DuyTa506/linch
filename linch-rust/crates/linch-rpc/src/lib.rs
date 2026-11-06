@@ -341,7 +341,7 @@
 //! | -32022 | lease lost | `StoreError::LeaseLost` |
 //! | -32023 | conflict | `StoreError::Conflict`, such as a stored `run_id` |
 //! | -32024 | journal | `RunError::Journal` |
-//! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}` |
+//! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}`: the run's contract, then this agent's |
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
 //! | -32027 | not suspended | `RunError::NotSuspended`: `run.approve` on a run not awaiting approval; after a retried approve, `run.resume` it |
 //! | -32028 | reconcile | `RunError::Reconcile` |

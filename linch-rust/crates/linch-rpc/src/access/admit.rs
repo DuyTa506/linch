@@ -38,8 +38,10 @@ impl Tenant {
         allow.admit_provider(&config.provider)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
         if !allow.permission_modes.contains(&mode) {
-            let message =
-                format!("permission mode {mode:?} is not in the tenant's permission_modes");
+            // The config's spelling (`skip_dangerous`), not the variant's.
+            let name = json!(mode);
+            let name = name.as_str().unwrap_or_default();
+            let message = format!("permission mode {name} is not in the tenant's permission_modes");
             return Err(refused("permission_mode", message));
         }
         let unasked = config.tasks || config.deep_agent.is_some();

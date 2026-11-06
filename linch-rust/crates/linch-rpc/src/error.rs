@@ -77,7 +77,9 @@ pub mod code {
     pub const CONFLICT: i64 = -32023;
     /// `RunError::Journal`: a journal write failed.
     pub const JOURNAL: i64 = -32024;
-    /// `RunError::ContractMismatch`; `data` has `expected` and `found`.
+    /// `RunError::ContractMismatch`; `data.expected` is the contract the
+    /// run started under and `data.found` this agent's, in the order the
+    /// message names them.
     pub const CONTRACT_MISMATCH: i64 = -32025;
     /// `RunError::Terminal`; `data.status` is the final status.
     pub const TERMINAL: i64 = -32026;
@@ -150,11 +152,14 @@ impl From<&RunError> for ErrorObject {
             }
             RunError::Store(store) => Self::new(store_code(store), message),
             RunError::Journal(_) => Self::new(code::JOURNAL, message),
+            // The message names the run's contract first, then the agent's;
+            // the data reads the same way: the run expected its own contract
+            // and found this agent's. Core names them from the agent's side.
             RunError::ContractMismatch {
                 expected, found, ..
             } => Self::new(code::CONTRACT_MISMATCH, message).with_data(json!({
-                "expected": expected.to_string(),
-                "found": found.to_string(),
+                "expected": found.to_string(),
+                "found": expected.to_string(),
             })),
             RunError::Terminal { status, .. } => {
                 Self::new(code::TERMINAL, message).with_data(json!({ "status": status }))
@@ -205,5 +210,29 @@ fn build_code(error: &BuildError) -> i64 {
         BuildError::Missing(_) => code::BUILD_MISSING,
         BuildError::Invalid(_) => code::BUILD_INVALID,
         BuildError::Contract(_) => code::BUILD_CONTRACT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_contract_mismatch_names_its_digests_in_the_order_of_its_message() {
+        let run = "a".repeat(64);
+        let agent = "b".repeat(64);
+        let error = RunError::ContractMismatch {
+            run_id: "r1".into(),
+            expected: agent.parse().unwrap(),
+            found: run.parse().unwrap(),
+        };
+        let object = ErrorObject::from(&error);
+        assert_eq!(
+            object.message,
+            format!("run r1 has contract {run}, this agent has {agent}")
+        );
+        let data = object.data.unwrap();
+        assert_eq!(data["expected"], run, "the run's contract, which a resume needs");
+        assert_eq!(data["found"], agent, "the contract this agent has");
     }
 }
