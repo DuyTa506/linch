@@ -232,7 +232,11 @@ def main() -> None:
             self.send_header("content-type", "text/event-stream")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # A client that fails mid-stream hangs up; its side reports it.
+                self.close_connection = True
 
         def log_message(self, format: str, *args) -> None:  # noqa: A002
             pass
