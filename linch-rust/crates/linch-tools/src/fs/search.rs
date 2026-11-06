@@ -27,12 +27,13 @@ pub(super) fn grep(
 ) -> Result<GrepHits, FsError> {
     let target = fs.resolve(query.path.as_deref().unwrap_or("."))?;
     let matcher = matcher(query)?;
+    let content = query.mode == GrepMode::Content;
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
         .multi_line(query.multiline)
         .binary_detection(BinaryDetection::quit(0))
-        .before_context(query.before)
-        .after_context(query.after)
+        .before_context(if content { query.before } else { 0 })
+        .after_context(if content { query.after } else { 0 })
         .build();
     let mut walk = walker(&target, false);
     if let Some(glob) = &query.glob {
@@ -67,7 +68,8 @@ pub(super) fn grep(
         if searcher.search_path(&matcher, &path, &mut sink).is_err() || sink.binary {
             continue;
         }
-        if sink.count == 0 {
+        // Context lines alone mean the budget ran out before the match.
+        if sink.count == 0 && sink.lines.is_empty() {
             continue;
         }
         lines += sink.lines.len();

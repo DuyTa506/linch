@@ -148,6 +148,21 @@ async fn grep_stops_at_head_limit_and_says_so() {
 }
 
 #[tokio::test]
+async fn grep_says_truncated_when_context_lines_use_up_the_limit() {
+    let ws = Workspace::new();
+    ws.put("a.txt", "c1\nc2\nhit\n");
+    let tool = grep(&ws);
+    let before = json!({"pattern": "hit", "output_mode": "content", "-B": 2, "head_limit": 1});
+    assert_eq!(
+        text(call(&tool, before).await),
+        "a.txt-c1\n… (truncated at head_limit 1)"
+    );
+    // Context belongs to content mode only.
+    let files = json!({"pattern": "hit", "-C": 2, "head_limit": 1});
+    assert_eq!(text(call(&tool, files).await), "a.txt");
+}
+
+#[tokio::test]
 async fn grep_caps_long_lines_and_large_output() {
     let ws = Workspace::new();
     ws.put("long.txt", &format!("{}\n", "a".repeat(2_000)));

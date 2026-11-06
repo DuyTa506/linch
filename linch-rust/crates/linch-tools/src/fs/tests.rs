@@ -197,8 +197,12 @@ async fn writes_keep_an_existing_mode_and_leave_no_temp_files() {
         .await
         .unwrap();
     let fresh = fs::metadata(local.root().join("src/fresh.txt")).unwrap();
-    // A new file follows the umask instead of a private temp-file mode.
-    assert_ne!(fresh.permissions().mode() & 0o777, 0o600);
+    // A new file gets the mode any newly created file gets under the
+    // umask: neither the private temp-file mode nor an unmasked 0666.
+    let reference = local.root().join("reference");
+    fs::File::create(&reference).unwrap();
+    let expected = fs::metadata(&reference).unwrap().permissions().mode() & 0o777;
+    assert_eq!(fresh.permissions().mode() & 0o777, expected);
     let names: Vec<_> = fs::read_dir(local.root().join("src"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())

@@ -182,17 +182,20 @@ impl LocalFs {
             }
         }
         fs::create_dir_all(parent).map_err(fail)?;
-        let mode = current.map_or_else(|| Permissions::from_mode(0o666), |meta| meta.permissions());
+        // A new file gets 0666 masked by the umask, like any created file.
         let mut temp = tempfile::Builder::new()
             .prefix(".linch-")
             .suffix(".tmp")
-            .permissions(mode.clone())
+            .permissions(Permissions::from_mode(0o666))
             .tempfile_in(parent)
             .map_err(fail)?;
         temp.write_all(content).map_err(fail)?;
-        // `permissions` above is masked by the umask; an existing file keeps
-        // its exact mode.
-        temp.as_file().set_permissions(mode).map_err(fail)?;
+        if let Some(meta) = current {
+            // An existing file keeps its exact mode (not masked).
+            temp.as_file()
+                .set_permissions(meta.permissions())
+                .map_err(fail)?;
+        }
         temp.persist(&real).map_err(|error| fail(error.error))?;
         let meta = fs::metadata(&real).map_err(fail)?;
         stamp_of(&meta)
