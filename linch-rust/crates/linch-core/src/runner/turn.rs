@@ -204,6 +204,8 @@ impl Runner {
                     if !appended {
                         self.append(message).await?;
                     }
+                    // A cancel that cut it short aborts at the next turn's
+                    // start.
                     self.post_turn(self.stop_reason).await;
                     self.turn += 1;
                     Some(self.turn_start())
@@ -260,7 +262,11 @@ impl Runner {
         let view = self.log.provider_view();
         let mut messages: Vec<Message> =
             view.iter().map(|message| Message::clone(message)).collect();
-        add_context(&mut messages, self.context(view).await);
+        let Some(context) = self.context(view).await else {
+            self.abort().await?;
+            return Ok(None);
+        };
+        add_context(&mut messages, context);
         let request = (self.agent.spec).request(self.snapshot.definitions(), messages);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
@@ -346,7 +352,10 @@ impl Runner {
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),
                 Stopping::Ended => return Ok(None),
             }
-            self.post_turn(stop_reason).await;
+            if !self.post_turn(stop_reason).await {
+                self.abort().await?;
+                return Ok(None);
+            }
             let final_text = (!text.is_empty()).then_some(text);
             let status = RunStatus::Completed;
             (self.end(status, ResultSubtype::Success, stop_reason, final_text)).await?;

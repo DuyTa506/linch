@@ -55,8 +55,13 @@ impl Runner {
             &agent.hooks,
             run,
             &approvals,
-        )
-        .await;
+        );
+        // A cancel, even one that came before approve or resume, aborts
+        // without asking the hooks (again).
+        let Some(plan) = self.cancel.run_until_cancelled(plan).await else {
+            self.abort().await?;
+            return Ok(None);
+        };
         for call in plan.calls() {
             let records = call.hook_records.clone();
             self.push_records(records, Some(&call.tool_use_id));

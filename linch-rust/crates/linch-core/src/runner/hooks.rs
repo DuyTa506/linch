@@ -4,7 +4,8 @@
 //! [`HookRecord`] goes to the caller at once as a stream-only
 //! [`Event::Hook`] carrying the last durable seq. A chain with no hook is
 //! skipped before its request is built, so a run without hooks does no
-//! hook work.
+//! hook work. A run cancel drops a chain the run waits on (a dropped RPC
+//! callback is cancelled on the client), and the run aborts.
 
 use std::sync::Arc;
 
@@ -27,7 +28,8 @@ pub(super) enum Stopping {
     Stop,
     /// A hook kept the run going: this feedback step is next.
     Continue(Step),
-    /// The run already ended: a hook failed closed.
+    /// The run already ended: a hook failed closed, or the run cancel
+    /// interrupted the chain.
     Ended,
 }
 
@@ -127,20 +129,21 @@ impl Runner {
         push_records(&self.outbox, &self.run.run_id, seq, records, tool_use_id);
     }
 
-    /// The `context_build` blocks for a request over `messages`.
-    pub(super) async fn context(&self, messages: Arc<Vec<Arc<Message>>>) -> Vec<TextBlock> {
+    /// The `context_build` blocks for a request over `messages`; `None`
+    /// when the run cancel interrupted the chain.
+    pub(super) async fn context(&self, messages: Arc<Vec<Arc<Message>>>) -> Option<Vec<TextBlock>> {
         let chain = &self.agent.hooks.context_build;
         if chain.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
         let request = ContextBuildRequest {
             session_id: self.run.session_id.clone(),
             run_id: self.run.run_id.clone(),
             messages,
         };
-        let result = chain.run(&request).await;
+        let result = self.cancel.run_until_cancelled(chain.run(&request)).await?;
         self.push_records(result.records, None);
-        result.outcome
+        Some(result.outcome)
     }
 
     /// Run `stop` on a text-only response.
@@ -154,7 +157,10 @@ impl Runner {
             run_id: self.run.run_id.clone(),
             text: text.to_owned(),
         };
-        let result = chain.run(&request).await;
+        let Some(result) = self.cancel.run_until_cancelled(chain.run(&request)).await else {
+            self.abort().await?;
+            return Ok(Stopping::Ended);
+        };
         self.push_records(result.records, None);
         let feedback = match result.outcome {
             StopOutcome::Stop => return Ok(Stopping::Stop),
@@ -181,11 +187,12 @@ impl Runner {
         }))
     }
 
-    /// Run `post_turn` for the turn that just finished.
-    pub(super) async fn post_turn(&self, stop_reason: StopReason) {
+    /// Run `post_turn` for the turn that just finished. Returns false when
+    /// the run cancel interrupted the chain.
+    pub(super) async fn post_turn(&self, stop_reason: StopReason) -> bool {
         let chain = &self.agent.hooks.post_turn;
         if chain.is_empty() {
-            return;
+            return true;
         }
         let request = PostTurnRequest {
             session_id: self.run.session_id.clone(),
@@ -193,8 +200,11 @@ impl Runner {
             turn: self.turn,
             stop_reason,
         };
-        let result = chain.run(&request).await;
+        let Some(result) = self.cancel.run_until_cancelled(chain.run(&request)).await else {
+            return false;
+        };
         self.push_records(result.records, None);
+        true
     }
 }
 
