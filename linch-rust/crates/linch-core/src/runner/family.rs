@@ -298,6 +298,12 @@ impl Family {
         std::mem::take(&mut lock(&self.state).done)
     }
 
+    /// How many background children run.
+    pub(crate) fn background_count(&self) -> usize {
+        let state = lock(&self.state);
+        state.live.values().filter(|live| live.background).count()
+    }
+
     /// Whether a background child runs, or one ended undelivered.
     pub(super) fn has_background(&self) -> bool {
         let state = lock(&self.state);

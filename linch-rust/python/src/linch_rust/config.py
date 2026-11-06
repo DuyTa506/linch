@@ -24,10 +24,14 @@ class Workers(TypedDict, total=False):
         retain: Whether a foreground worker stays addressable once it
             answered, for `SubagentContinue`, which it adds. Its answer
             ends with its `[Worker ID: ...]`. Off when absent.
+        max_background: How many background workers one run may have
+            running at once; a `Subagent` call past it gets a tool error.
+            4 when absent.
     """
 
     background: bool
     retain: bool
+    max_background: int
 
 
 class Filesystem(TypedDict, total=False):

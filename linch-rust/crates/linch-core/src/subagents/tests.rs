@@ -30,3 +30,12 @@ fn the_roster_lists_the_builtin_unless_overridden_and_has_a_default() {
     assert_eq!(builtin.tools.unwrap(), ["Read", "Glob", "Grep", "Bash"]);
     assert!(builtin.body.ends_with("VERDICT: PARTIAL"));
 }
+
+#[test]
+fn a_run_may_have_four_background_children_unless_told_otherwise() {
+    assert_eq!(Workers::default().max_background, 4);
+    let parsed: Workers = serde_json::from_value(serde_json::json!({"background": true})).unwrap();
+    assert_eq!((parsed.background, parsed.max_background), (true, 4));
+    let one: Workers = serde_json::from_value(serde_json::json!({"max_background": 1})).unwrap();
+    assert_eq!(one.max_background, 1);
+}

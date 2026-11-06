@@ -98,7 +98,7 @@ pub(crate) use tool::SubagentTool;
 pub(crate) use workers::Registry;
 
 /// How the `Subagent` tool keeps its workers. Off by default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workers {
     /// Whether a call may run its child in the background
@@ -108,6 +108,26 @@ pub struct Workers {
     /// Whether a foreground worker stays addressable once it answered.
     #[serde(default)]
     pub retain: bool,
+    /// How many background children one run may have running at once;
+    /// a call past it gets a tool error. 4 when absent.
+    #[serde(default = "default_max_background")]
+    pub max_background: u32,
+}
+
+impl Default for Workers {
+    fn default() -> Self {
+        Self {
+            background: false,
+            retain: false,
+            max_background: default_max_background(),
+        }
+    }
+}
+
+/// Python Linch has no cap on background workers; 4 keeps a run's
+/// concurrent model streams at five.
+fn default_max_background() -> u32 {
+    4
 }
 
 /// Name of the tool that runs a subagent.

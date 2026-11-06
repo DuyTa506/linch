@@ -39,7 +39,7 @@ fn agent<S: RunStore + SessionStore + 'static>(
 ) -> Agent {
     let workers = Workers {
         background: true,
-        retain: false,
+        ..Workers::default()
     };
     AgentBuilder::new(spec())
         .provider(family.clone())

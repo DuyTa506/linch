@@ -152,6 +152,16 @@ async fn pick_up(
     }
     let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
+            // Only a call starts a new child, so only a call can pass the
+            // cap; a resumed run's children were admitted when they began.
+            let max = parent.workers.max_background;
+            if call.is_some() && family.background_count() >= max as usize {
+                return Err(ToolOutputError::new(format!(
+                    "This run already has {max} background subagents running, the most \
+                     it may have (max_background). Wait for a <task-notification>, or stop \
+                     one with TaskStop, then call again."
+                )));
+            }
             runner::start_child(child, prompt, options, parent_run.clone())
         }
         Ok(record) if record.status.is_terminal() => {

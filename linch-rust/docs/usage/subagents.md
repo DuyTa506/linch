@@ -236,6 +236,10 @@ replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', '
 - Closing the parent's session (`Agent.close_session`) or the agent while the
   parent waits cancels its workers: each ends `aborted`, and a later approve
   or resume of the parent hears that.
+- One run has at most `workers.max_background` workers running at once (4
+  unless set). A `run_in_background` call past it gets a tool error the model
+  reads, and starts nothing; a worker that ends frees its place. Python Linch
+  has no such cap.
 - The worker's durable events reach the parent's log wrapped, at the parent's
   next turn.
 

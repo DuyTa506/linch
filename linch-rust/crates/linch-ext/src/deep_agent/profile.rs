@@ -81,6 +81,7 @@ impl DeepAgentProfile {
         Workers {
             background: self.enable_background_subagents,
             retain: self.retain_subagents,
+            ..Workers::default()
         }
     }
 }

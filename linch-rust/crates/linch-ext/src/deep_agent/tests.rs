@@ -38,6 +38,7 @@ fn the_built_in_profiles_are_pythons() {
     let workers = Workers {
         background: true,
         retain: true,
+        ..Workers::default()
     };
     assert!(profiles.iter().all(|p| p.workers() == workers));
 }

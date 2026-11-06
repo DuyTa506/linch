@@ -165,7 +165,7 @@ async fn a_text_answer_waits_for_the_background_child_and_hears_of_it() {
     let stores = Arc::new(Stores::default());
     let workers = Workers {
         background: true,
-        retain: false,
+        ..Workers::default()
     };
     let agent = builder(provider.clone(), &stores, Vec::new())
         .workers(workers)
@@ -223,7 +223,7 @@ async fn a_background_child_that_ends_in_a_batch_joins_its_results() {
     };
     let workers = Workers {
         background: true,
-        retain: false,
+        ..Workers::default()
     };
     let agent = builder(family.clone(), &stores, vec![Arc::new(wait)])
         .workers(workers)
@@ -297,7 +297,7 @@ async fn a_parent_cancelled_while_it_waits_aborts_its_background_child() {
     let block = Block(started.clone(), object(json!({"type": "object"})));
     let workers = Workers {
         background: true,
-        retain: false,
+        ..Workers::default()
     };
     let agent = builder(family.clone(), &stores, vec![Arc::new(block)])
         .workers(workers)
@@ -479,4 +479,42 @@ async fn a_worker_the_parents_end_cancels_has_its_end_recorded() {
         (child, RunStatus::Aborted),
     ];
     assert_eq!(markers(&envelopes), expected);
+}
+
+/// R3-sec 2: a run has at most `max_background` background children
+/// running at once; a call past it gets a tool error the model reads, and
+/// starts nothing.
+#[tokio::test]
+async fn a_background_call_past_the_cap_is_refused() {
+    let parent = vec![
+        background_turn(&["a", "b"], &[]),
+        text_turn("waiting"),
+        text_turn("done"),
+    ];
+    let child = vec![tool_turn(0, 1, "Nap"), text_turn("held")];
+    let family = Arc::new(Family::new(parent, child));
+    let stores = Arc::new(Stores::default());
+    let workers = Workers {
+        background: true,
+        max_background: 1,
+        ..Workers::default()
+    };
+    let nap = Nap(object(json!({"type": "object"})));
+    let agent = builder(family.clone(), &stores, vec![Arc::new(nap)])
+        .workers(workers)
+        .build()
+        .unwrap();
+    let mut options = RunOptions::new("s1");
+    options.run_id = Some(RunId::new("r1"));
+    finish(agent.run("go", options)).await;
+
+    let log = messages(&*stores, "s1").await;
+    let results = result_texts(&log[2]);
+    assert_eq!(results[0], ack("r1:sub_0"));
+    assert!(results[1].contains("max_background"), "{}", results[1]);
+    assert!(family.requests_of("b").is_empty(), "b never started");
+    let b = stores.runs.load(NS, &RunId::new("r1:sub_1")).await;
+    assert!(b.is_err(), "no child run for b");
+    let a = stores.runs.load(NS, &RunId::new("r1:sub_0")).await.unwrap();
+    assert_eq!(a.status, RunStatus::Completed);
 }
