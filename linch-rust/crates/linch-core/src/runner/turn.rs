@@ -264,12 +264,12 @@ impl Runner {
             self.abort().await?;
             return Ok(None);
         };
-        add_context(&mut messages, context);
+        add_context(&mut messages, context.blocks);
         let mut request = self.request(messages);
         if let Some(model) = model {
             request.model = skills::model_override(&model, &request.model);
         }
-        self.stage_context(&request);
+        self.stage_context(&request, context.metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
@@ -291,6 +291,7 @@ impl Runner {
         let mut receipt = outcome.receipt;
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);
+        let served = receipt.actual_model.clone();
         let empty = matches!(&outcome.result, Ok(assembly) if cut_empty(assembly));
         if empty {
             receipt.disposition = CallDisposition::Rejected;
@@ -299,15 +300,15 @@ impl Runner {
         let failure = match outcome.result {
             // One terminal write: the paid receipt, usage, error and result.
             Ok(_) if empty => {
-                self.stage_usage(usage, cost);
+                self.stage_usage(usage, cost, served);
                 self.output_limit().await?;
                 return Ok(None);
             }
-            Ok(assembly) => return self.accept(assembly, cost).await.map(Some),
+            Ok(assembly) => return self.accept(assembly, cost, served).await.map(Some),
             Err(failure) => failure,
         };
         // A call that failed or was cancelled may still have been paid.
-        self.stage_usage(usage, cost);
+        self.stage_usage(usage, cost, served);
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);
@@ -319,12 +320,14 @@ impl Runner {
         Ok(None)
     }
 
-    /// Stage the response and its `Usage` (with the call's `cost`), and
-    /// write them through with `AssistantReceived`.
+    /// Stage the response and its `Usage` (with the call's `cost` and the
+    /// model that `served` it), and write them through with
+    /// `AssistantReceived`.
     async fn accept(
         &mut self,
         assembly: AssistantAssembly,
         cost: Option<f64>,
+        served: Option<String>,
     ) -> Result<Step, RunError> {
         let AssistantAssembly {
             message,
@@ -336,7 +339,7 @@ impl Runner {
             message: message.clone(),
             stop_reason,
         }));
-        self.stage_usage(usage, cost);
+        self.stage_usage(usage, cost, served);
         let phase = Phase::AssistantReceived {
             message: message.clone(),
             stop_reason,

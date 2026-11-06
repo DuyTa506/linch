@@ -85,9 +85,10 @@ impl ContinueTool {
             "properties": {
                 "to": {
                     "type": "string",
-                    "description": "Worker id (e.g. 'agent-a1b2') or display name of the \
-                                    retained worker to continue. Use the id returned in the \
-                                    original Subagent result.",
+                    "description": "Worker id ('<parent run id>:<tool_use_id>', e.g. \
+                                    'run-7:call_1') or display name of the retained worker to \
+                                    continue. Use the id returned in the original Subagent \
+                                    result.",
                 },
                 "message": {
                     "type": "string",
@@ -177,8 +178,9 @@ impl StopTool {
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "The worker id (e.g. 'agent-a1b2') or display name to stop. \
-                                    Stopped workers remain addressable via SubagentContinue.",
+                    "description": "The worker id ('<parent run id>:<tool_use_id>', e.g. \
+                                    'run-7:call_1') or display name to stop. Stopped workers \
+                                    remain addressable via SubagentContinue.",
                 },
                 "reason": {
                     "type": "string",
@@ -237,7 +239,12 @@ impl Tool for StopTool {
         let mut message = format!("Worker '{}' ({}) stopped.", worker.id, worker.display_name);
         let reason = input.get("reason").and_then(JsonValue::as_str);
         if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
-            message.push_str(&format!(" Reason: {reason}"));
+            let end = if reason.ends_with(['.', '!', '?']) {
+                ""
+            } else {
+                "."
+            };
+            message.push_str(&format!(" Reason: {reason}{end}"));
         }
         message.push_str(" Use SubagentContinue to re-engage if needed.");
         Ok(ToolOutput::new(message))

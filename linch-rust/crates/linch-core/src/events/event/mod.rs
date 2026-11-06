@@ -23,7 +23,7 @@ use super::kinds::*;
 use super::model_call::{
     ModelCallDeliveryEvent, ModelCallReceiptEvent, ModelCallUsageSettlementEvent,
 };
-use super::wire::{json_kind_name, reject_unknown_fields, take_object, take_string};
+use super::wire::{json_kind_name, reject_unknown_fields, take_object, take_string, take_u64};
 use crate::ids::RunId;
 use crate::json::{JsonObject, JsonValue};
 use serde::{Deserialize, Serialize};
@@ -118,25 +118,33 @@ pub enum Event {
 pub struct SubagentEvent {
     /// The subagent's run.
     pub child_run_id: RunId,
+    /// The parent's tool call that runs the child: the `Subagent` call
+    /// that spawned it, or the `SubagentContinue` call that continues it.
+    pub tool_use_id: String,
+    /// When the child emitted the event: its own envelope's `ts_ms`. A
+    /// background child's events reach the parent's log later.
+    pub ts_ms: u64,
     /// The event the subagent emitted.
     pub event: Box<Event>,
 }
 
-/// Serialize a payload, then inject the wire `type` tag.
+/// A payload with its wire `type` tag after its fields, as the wire has
+/// it; serialized in one pass, with no JSON tree in between.
 ///
 /// Fails if `payload`'s `Serialize` implementation does — the one way any
 /// of this crate's plain derived payload types do is a monetary
 /// `f64`/`Option<f64>` field rejecting a non-finite value (see
 /// `wire::serialize_finite_f64`).
-fn tagged<T: Serialize>(tag: &'static str, payload: &T) -> Result<JsonValue, EventError> {
-    let mut value = serde_json::to_value(payload).map_err(|source| EventError::EncodePayload {
-        type_name: tag.to_string(),
-        source,
-    })?;
-    if let JsonValue::Object(map) = &mut value {
-        map.insert("type".to_string(), JsonValue::String(tag.to_string()));
-    }
-    Ok(value)
+#[derive(Serialize)]
+struct Tagged<'a, T> {
+    #[serde(flatten)]
+    payload: &'a T,
+    #[serde(rename = "type")]
+    tag: &'static str,
+}
+
+fn tagged<'a, T>(tag: &'static str, payload: &'a T) -> Tagged<'a, T> {
+    Tagged { payload, tag }
 }
 
 /// Decode a known event's payload, stripping `type` first so the payload's
@@ -203,6 +211,8 @@ impl Event {
             "skill_completed" => Ok(Event::SkillCompleted(payload("skill_completed", obj)?)),
             "subagent" => {
                 let child_run_id = RunId::from(take_string(&mut obj, "child_run_id")?);
+                let tool_use_id = take_string(&mut obj, "tool_use_id")?;
+                let ts_ms = take_u64(&mut obj, "ts_ms")?;
                 let nested_value = obj
                     .remove("event")
                     .ok_or(EventError::MissingField("event"))?;
@@ -210,6 +220,8 @@ impl Event {
                 let nested = Event::decode(nested_value, ctx.nested()?)?;
                 Ok(Event::Subagent(SubagentEvent {
                     child_run_id,
+                    tool_use_id,
+                    ts_ms,
                     event: Box::new(nested),
                 }))
             }
@@ -253,50 +265,10 @@ impl Event {
     ///     EventError: If a payload field that must encode to a finite JSON
     ///         number (for example a monetary `f64`) does not.
     pub fn to_value(&self) -> Result<JsonValue, EventError> {
-        match self {
-            Event::Init(e) => tagged("init", e),
-            Event::User(e) => tagged("user", e),
-            Event::Assistant(e) => tagged("assistant", e),
-            Event::PartialAssistant(e) => tagged("partial_assistant", e),
-            Event::Usage(e) => tagged("usage", e),
-            Event::ToolCallStart(e) => tagged("tool_call_start", e),
-            Event::ToolCallEnd(e) => tagged("tool_call_end", e),
-            Event::ToolProgress(e) => tagged("tool_progress", e),
-            Event::PermissionRequest(e) => tagged("permission_request", e),
-            Event::InputRequest(e) => tagged("input_request", e),
-            Event::Suspended(e) => tagged("suspended", e),
-            Event::ContextBuild(e) => tagged("context_build", e),
-            Event::Compaction(e) => tagged("compaction", e),
-            Event::LoopGuard(e) => tagged("loop_guard", e),
-            Event::Budget(e) => tagged("budget", e),
-            Event::PromptCacheAdvisory(e) => tagged("prompt_cache_advisory", e),
-            Event::SkillsLoaded(e) => tagged("skills_loaded", e),
-            Event::SkillInvoked(e) => tagged("skill_invoked", e),
-            Event::SkillCompleted(e) => tagged("skill_completed", e),
-            Event::Subagent(e) => {
-                let mut obj = JsonObject::new();
-                obj.insert(
-                    "type".to_string(),
-                    JsonValue::String("subagent".to_string()),
-                );
-                obj.insert(
-                    "child_run_id".to_string(),
-                    JsonValue::String(e.child_run_id.as_str().to_string()),
-                );
-                obj.insert("event".to_string(), e.event.to_value()?);
-                Ok(JsonValue::Object(obj))
-            }
-            Event::ChildRunStatus(e) => tagged("child_run_status", e),
-            Event::Workflow(e) => tagged("workflow", e),
-            Event::Verification(e) => tagged("verification", e),
-            Event::Hook(e) => tagged("hook", e),
-            Event::Error(e) => tagged("error", e),
-            Event::Result(e) => tagged("result", e),
-            Event::ModelCallDelivery(e) => tagged("model_call_delivery", e),
-            Event::ModelCallReceipt(e) => tagged("model_call_receipt", e),
-            Event::ModelCallUsageSettlement(e) => tagged("model_call_usage_settlement", e),
-            Event::Ignorable(e) => Ok(JsonValue::Object(e.raw().clone())),
-        }
+        serde_json::to_value(self).map_err(|source| EventError::EncodePayload {
+            type_name: self.type_name().to_owned(),
+            source,
+        })
     }
 
     /// Where this event kind is durably persisted.
@@ -355,14 +327,60 @@ impl Event {
     }
 }
 
+/// The wire form, written in one pass: each payload's fields then its
+/// `type`, a `subagent` event's fields around its child's, an ignorable
+/// event's object as it came.
 impl Serialize for Event {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        self.to_value()
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
+        use serde::ser::SerializeMap;
+
+        match self {
+            Event::Init(e) => tagged("init", e).serialize(serializer),
+            Event::User(e) => tagged("user", e).serialize(serializer),
+            Event::Assistant(e) => tagged("assistant", e).serialize(serializer),
+            Event::PartialAssistant(e) => tagged("partial_assistant", e).serialize(serializer),
+            Event::Usage(e) => tagged("usage", e).serialize(serializer),
+            Event::ToolCallStart(e) => tagged("tool_call_start", e).serialize(serializer),
+            Event::ToolCallEnd(e) => tagged("tool_call_end", e).serialize(serializer),
+            Event::ToolProgress(e) => tagged("tool_progress", e).serialize(serializer),
+            Event::PermissionRequest(e) => tagged("permission_request", e).serialize(serializer),
+            Event::InputRequest(e) => tagged("input_request", e).serialize(serializer),
+            Event::Suspended(e) => tagged("suspended", e).serialize(serializer),
+            Event::ContextBuild(e) => tagged("context_build", e).serialize(serializer),
+            Event::Compaction(e) => tagged("compaction", e).serialize(serializer),
+            Event::LoopGuard(e) => tagged("loop_guard", e).serialize(serializer),
+            Event::Budget(e) => tagged("budget", e).serialize(serializer),
+            Event::PromptCacheAdvisory(e) => {
+                tagged("prompt_cache_advisory", e).serialize(serializer)
+            }
+            Event::SkillsLoaded(e) => tagged("skills_loaded", e).serialize(serializer),
+            Event::SkillInvoked(e) => tagged("skill_invoked", e).serialize(serializer),
+            Event::SkillCompleted(e) => tagged("skill_completed", e).serialize(serializer),
+            Event::Subagent(e) => {
+                let mut map = serializer.serialize_map(Some(5))?;
+                map.serialize_entry("type", "subagent")?;
+                map.serialize_entry("child_run_id", e.child_run_id.as_str())?;
+                map.serialize_entry("tool_use_id", &e.tool_use_id)?;
+                map.serialize_entry("ts_ms", &e.ts_ms)?;
+                map.serialize_entry("event", &*e.event)?;
+                map.end()
+            }
+            Event::ChildRunStatus(e) => tagged("child_run_status", e).serialize(serializer),
+            Event::Workflow(e) => tagged("workflow", e).serialize(serializer),
+            Event::Verification(e) => tagged("verification", e).serialize(serializer),
+            Event::Hook(e) => tagged("hook", e).serialize(serializer),
+            Event::Error(e) => tagged("error", e).serialize(serializer),
+            Event::Result(e) => tagged("result", e).serialize(serializer),
+            Event::ModelCallDelivery(e) => tagged("model_call_delivery", e).serialize(serializer),
+            Event::ModelCallReceipt(e) => tagged("model_call_receipt", e).serialize(serializer),
+            Event::ModelCallUsageSettlement(e) => {
+                tagged("model_call_usage_settlement", e).serialize(serializer)
+            }
+            Event::Ignorable(e) => e.raw().serialize(serializer),
+        }
     }
 }
 

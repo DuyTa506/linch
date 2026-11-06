@@ -51,6 +51,7 @@ impl Runner {
                     duration_ms: 0,
                     canonical_output: None,
                     metadata: None,
+                    error_code: None,
                 }));
             }
         }

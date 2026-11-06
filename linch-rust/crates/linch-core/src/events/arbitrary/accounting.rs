@@ -11,14 +11,16 @@ use proptest::prelude::*;
 
 pub(super) fn usage_event() -> impl Strategy<Value = UsageEvent> {
     let costs = (option::of(finite_f64()), option::of(finite_f64()));
-    (usage(), usage(), costs).prop_map(|(usage, cumulative, (cost_usd, cumulative_cost_usd))| {
-        UsageEvent {
+    let served = option::of(short_string());
+    (usage(), usage(), costs, served).prop_map(
+        |(usage, cumulative, (cost_usd, cumulative_cost_usd), actual_model)| UsageEvent {
             usage,
             cumulative,
             cost_usd,
             cumulative_cost_usd,
-        }
-    })
+            actual_model,
+        },
+    )
 }
 
 pub(super) fn tool_result_block() -> impl Strategy<Value = ToolResultBlock> {
@@ -34,14 +36,18 @@ pub(super) fn tool_call_end_event() -> impl Strategy<Value = ToolCallEndEvent> {
         any::<u64>(),
         option::of(json_value(1)),
         option::of(json_object(1).prop_map(Box::new)),
+        option::of(short_string()),
     )
         .prop_map(
-            |(tool_name, result, duration_ms, canonical_output, metadata)| ToolCallEndEvent {
-                tool_name,
-                result,
-                duration_ms,
-                canonical_output,
-                metadata,
+            |(tool_name, result, duration_ms, canonical_output, metadata, error_code)| {
+                ToolCallEndEvent {
+                    tool_name,
+                    result,
+                    duration_ms,
+                    canonical_output,
+                    metadata,
+                    error_code,
+                }
             },
         )
 }

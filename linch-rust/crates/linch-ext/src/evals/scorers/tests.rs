@@ -35,6 +35,7 @@ fn end(id: &str, tool: &str, is_error: bool) -> Event {
         duration_ms: 1,
         canonical_output: None,
         metadata: None,
+        error_code: None,
     })
 }
 
@@ -45,6 +46,7 @@ fn build(tools: &[&str], budget: JsonValue, metadata: JsonValue) -> Event {
         selected_tools: Some(tools.iter().map(|tool| tool.to_string()).collect()),
         budget: object(budget),
         metadata: object(metadata),
+        model: "m".into(),
     })
 }
 

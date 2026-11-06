@@ -10,7 +10,7 @@ use super::turn::{Batch, Runner, Step};
 use super::{Driving, Family, Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::catalog::{self, Catalog};
-use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
+use crate::events::kinds::{InitEvent, SkillsLoadedEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
@@ -82,9 +82,20 @@ pub(super) async fn new_run(
         run_id: run_id.clone(),
         parent_run_id: parent.clone(),
         model: agent.spec.model.clone(),
+        provider: agent.provider.id().to_owned(),
         tools: tools.into_iter().map(|tool| tool.name).collect(),
-        trace_id: None,
+        trace_id: options.trace_id.clone(),
+        resumed: false,
+        turn: 0,
     }));
+    // A session's first run tells which skills the model may load, as
+    // Python does once per session; it rides the create write.
+    if let (true, Some(skills)) = (entries.is_empty(), &agent.skills) {
+        let skills = skills.current().descriptors();
+        if !skills.is_empty() {
+            journal.stage(Event::SkillsLoaded(SkillsLoadedEvent { skills }));
+        }
+    }
     journal.stage(Event::User(UserEvent {
         message: prompt.clone(),
         subtype: UserEventSubtype::Prompt,
@@ -121,7 +132,7 @@ pub(super) async fn new_run(
     let family = drive_family(&agent, &driving, &run_id, &session_id);
     outbox.deliver(ready).await;
     let progress = Progress::first(started);
-    let run = identity(session_id, run_id, &options.principal);
+    let run = identity(session_id, run_id, &options.principal, options.trace_id);
     let mut runner = Runner::new(
         agent,
         journal,
@@ -250,9 +261,28 @@ pub(super) async fn continue_run(
             appended,
         },
     };
-    let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
+    let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     let progress = Progress::of(checkpoint, last_stop(&events), started);
-    let run = identity(record.session_id.clone(), run_id, &options.principal);
+    let trace_id = trace_of(&events);
+    // This call's start, for observers; it rides the first barrier.
+    let tools = agent.snapshot().definitions();
+    journal.stage(Event::Init(InitEvent {
+        session_id: record.session_id.clone(),
+        run_id: run_id.clone(),
+        parent_run_id: record.parent_run_id.clone(),
+        model: agent.spec.model.clone(),
+        provider: agent.provider.id().to_owned(),
+        tools: tools.into_iter().map(|tool| tool.name).collect(),
+        trace_id: trace_id.clone(),
+        resumed: true,
+        turn: u64::from(checkpoint.turn),
+    }));
+    let run = identity(
+        record.session_id.clone(),
+        run_id,
+        &options.principal,
+        trace_id,
+    );
     if let Some(family) = &family {
         crate::subagents::reattach(&agent, family, &run, &events).await;
     }
@@ -290,6 +320,14 @@ fn drive_family(
 fn duplicate(run_id: &RunId, namespace: &str) -> StoreError {
     let message = format!("run {run_id} already exists in {namespace}");
     StoreError::Conflict { message }
+}
+
+/// The trace id the run's `init` event stored; `None` when it has none.
+pub(super) fn trace_of(events: &[Envelope]) -> Option<String> {
+    events.iter().find_map(|envelope| match &envelope.event {
+        Event::Init(init) => Some(init.trace_id.clone()),
+        _ => None,
+    })?
 }
 
 /// Why the run's last durable response stopped; `end_turn` before any.
@@ -365,10 +403,12 @@ fn identity(
     session_id: SessionId,
     run_id: RunId,
     principal: &Option<crate::policy::Principal>,
+    trace_id: Option<String>,
 ) -> RunIdentity {
     RunIdentity {
         session_id,
         run_id,
         principal: principal.clone(),
+        trace_id,
     }
 }

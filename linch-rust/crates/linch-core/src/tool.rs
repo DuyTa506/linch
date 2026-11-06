@@ -131,12 +131,16 @@ pub struct ToolContext {
     /// timeout. A tool that can stop early with a useful partial result
     /// (Bash keeps the output so far) should finish a little before it.
     pub deadline: Option<Instant>,
+    /// The host's trace id of the run ([`crate::RunOptions::trace_id`]),
+    /// for a tool's own log lines and outbound calls; `None` when the run
+    /// has none.
+    pub trace_id: Option<String>,
     reports: Option<Reports>,
 }
 
 impl ToolContext {
-    /// Context for one call, with no deadline. `progress` receives
-    /// [`Self::report_progress`].
+    /// Context for one call, with no deadline and no trace id. `progress`
+    /// receives [`Self::report_progress`].
     pub fn new(
         session_id: SessionId,
         run_id: RunId,
@@ -152,6 +156,7 @@ impl ToolContext {
             principal,
             cancel,
             deadline: None,
+            trace_id: None,
             reports: progress.map(Reports::Progress),
         }
     }
@@ -165,6 +170,12 @@ impl ToolContext {
     /// This context with `deadline` as the call's deadline.
     pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// This context with `trace_id` as the run's trace id.
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
         self
     }
 

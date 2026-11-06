@@ -4,7 +4,10 @@
 use serde_json::{Value, json};
 
 pub fn init() -> Value {
-    json!({"type": "init", "session_id": "s1", "run_id": "r1", "model": "m", "tools": []})
+    json!({
+        "type": "init", "session_id": "s1", "run_id": "r1", "model": "m",
+        "provider": "scripted", "tools": [],
+    })
 }
 
 pub fn prompt() -> Value {
@@ -13,7 +16,10 @@ pub fn prompt() -> Value {
 }
 
 pub fn context_build() -> Value {
-    json!({"type": "context_build", "system_blocks": 1, "messages": 1, "budget": {}, "metadata": {}})
+    json!({
+        "type": "context_build", "model": "m", "system_blocks": 1, "messages": 1,
+        "budget": {}, "metadata": {},
+    })
 }
 
 pub fn assistant(stop_reason: &str) -> Value {

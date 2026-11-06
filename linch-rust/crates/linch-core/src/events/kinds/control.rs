@@ -32,12 +32,19 @@ pub struct UsageEvent {
         serialize_with = "serialize_finite_f64_option"
     )]
     pub cumulative_cost_usd: Option<f64>,
+    /// The model the provider reported serving the call; `None` when it
+    /// named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_model: Option<String>,
 }
 
 /// The context assembled for one provider request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextBuildEvent {
+    /// The model the call requests: the run's, or a loaded skill's for the
+    /// turn it narrows.
+    pub model: String,
     /// Number of system blocks selected.
     pub system_blocks: u64,
     /// Number of conversation messages selected.
@@ -65,6 +72,9 @@ pub struct CompactionEvent {
     pub tokens_after: u64,
     /// Compaction strategy used.
     pub strategy: String,
+    /// Wall time in milliseconds from the decision to compact to this
+    /// event: the summary call and building the projection.
+    pub duration_ms: u64,
 }
 
 /// Why a [`LoopGuardEvent`] tripped.

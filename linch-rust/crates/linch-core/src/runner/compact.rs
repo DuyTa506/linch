@@ -73,6 +73,7 @@ impl Runner {
         if tokens_before < spec.threshold_tokens {
             return Ok(Some(DISPATCH));
         }
+        let started = std::time::Instant::now();
         self.snapshot = agent.snapshot();
         let older = view[..keep_from]
             .iter()
@@ -96,9 +97,10 @@ impl Runner {
         let mut receipt = outcome.receipt;
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);
+        let served = receipt.actual_model.clone();
         self.journal.stage(Event::ModelCallReceipt(receipt));
         // Paid whether or not it gave a summary.
-        self.stage_usage(usage, cost);
+        self.stage_usage(usage, cost, served);
         let text = match outcome.result {
             Ok(assembly) => assembly.message.text(),
             Err(failure) if matches!(failure.error, ProviderError::Cancelled) => {
@@ -133,6 +135,7 @@ impl Runner {
             tokens_before,
             tokens_after: estimate_tokens(&compacted),
             strategy: compaction::STRATEGY.into(),
+            duration_ms: super::end::millis(started.elapsed()),
         }));
         let keep_from = keep_from as u64;
         self.save(Phase::Compacted {

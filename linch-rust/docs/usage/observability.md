@@ -192,14 +192,15 @@ ends at its closing event's. The instrumentation scope is `linch`.
 |---|---|
 | `invoke_agent` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.conversation.id` (the session), `linch.run_id`, `linch.resumed`; at the end the four `gen_ai.usage.*` token counts, `linch.stop_reason`, `linch.cost_usd` |
 | `step` | The same identity attributes and `linch.turn_index` |
-| `chat {model}` | Identity attributes and turn, `gen_ai.response.finish_reasons`, the four token counts, `linch.cost_usd` |
+| `chat {model}` | Identity attributes and turn, with `gen_ai.request.model` (and the name's `{model}`) the call's own from its `context_build` event; `gen_ai.response.finish_reasons`, `gen_ai.response.model` (the `usage` event's `actual_model`), the four token counts, `linch.cost_usd` |
 | `compaction` | Identity attributes and turn, `linch.compaction.strategy` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.conversation.id`, `linch.run_id`, `linch.turn_index` |
 
 `gen_ai.provider.name` comes from the config's provider id (`openai-chat` and
 `openai-responses` report `openai`, `gemini` reports `gcp.gemini`), and
 `gen_ai.request.model` from `spec.model` until the run's `init` event names
-it. `linch.cost_usd` is set when the model has a price.
+it. A chat, and its two metrics, carry the model its call requested, which a
+loaded skill can change for one turn. `linch.cost_usd` is set when the model has a price.
 
 `gen_ai.usage.input_tokens` counts every input token, cached ones included,
 as the GenAI semantic convention says: the uncached input plus
@@ -219,14 +220,16 @@ Each model call records two histograms with the SDK's default buckets:
 | Cause | `error.type` |
 |---|---|
 | An `error` event, such as a failed provider call | Its `name`; it marks the chat, the step and the run |
-| A tool call that ended in error | `tool_error` |
+| A tool call that ended in error | Its `tool_call_end` `error_code`, else `tool_error` |
 | A tool end whose start was in an earlier stream (a call a crash interrupted) | `interrupted` |
 | A `result` that is not `success`, with no `error` event | Its subtype, such as `aborted` |
 | A stream that failed | The exception's class name, such as `RunError` or `ConnectionClosed` |
 
-A resumed or approved call has no `init` event: its spans have
-`linch.resumed: true` and no session id or turn index. A subagent's child run
-reaches the parent's stream as wrapped events and gets no spans of its own.
+A resumed or approved call starts with a `resumed` `init` event: its spans
+have `linch.resumed: true`, and its session id and turn index come from that
+event. A subagent's child run reaches the parent's stream as wrapped events
+(with the child's own times and the parent's call id) and gets no spans of
+its own yet.
 
 ---
 
@@ -254,8 +257,13 @@ Values are JSON text, and are built only for spans that record.
 a log line or a response header. The run span starts with the first envelope,
 so read it after that; before it, `run.trace_id` is the trace of the span
 current at the call, or `None` outside any span. It is `None` for a run that
-is not traced. `InitEvent.trace_id` and `ResultEvent.trace_id` stay `None`:
-the server does not set them.
+is not traced.
+
+`agent.run(..., trace_id=...)` gives a run a trace id of your own, such as
+your request's: the run stores it, and every `InitEvent` and `ResultEvent` of
+it carries it, a resume or approve included, as do its subagents' runs and
+the context of its tool calls. Without it they carry `None`; the server
+never makes one up.
 
 ```python
 import asyncio

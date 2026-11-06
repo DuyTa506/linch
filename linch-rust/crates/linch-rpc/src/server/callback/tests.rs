@@ -56,7 +56,10 @@ fn context_build_carries_the_messages_and_reads_blocks() {
         text: "fact".into(),
     };
     assert_eq!(blocks.blocks, [fact]);
-    assert!(ContextBuild::decode(json!({})).unwrap().blocks.is_empty());
+    let empty = ContextBuild::decode(json!({})).unwrap();
+    assert!(empty.blocks.is_empty() && empty.metadata.is_empty());
+    let tagged = ContextBuild::decode(json!({"metadata": {"rag": "p1"}})).unwrap();
+    assert_eq!(tagged.metadata["rag"], "p1");
 }
 
 #[test]

@@ -126,6 +126,10 @@ pub struct ContextBuildAnswer {
     /// Blocks to add; absent or empty adds nothing.
     #[serde(default)]
     pub blocks: Vec<TextBlock>,
+    /// Details for observers, merged into the call's `context_build`
+    /// event; never shown to the model.
+    #[serde(default)]
+    pub metadata: JsonObject,
 }
 
 /// A `stop` answer, by `action`.

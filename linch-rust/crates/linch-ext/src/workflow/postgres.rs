@@ -24,7 +24,9 @@ use super::journal::{
 ///
 /// ```no_run
 /// # async fn start(dsn: &str) -> Result<(), Box<dyn std::error::Error>> {
-/// let pool = linch_ext::PgPool::connect(dsn).await?;
+/// use linch_postgres::{CONNECT_TIMEOUT, MAX_CONNECTIONS};
+///
+/// let pool = linch_postgres::connect(dsn, CONNECT_TIMEOUT, MAX_CONNECTIONS).await?;
 /// linch_ext::migrate(&pool).await?;
 /// let journal = std::sync::Arc::new(linch_ext::workflow::PgJournalStore::new(pool));
 /// let options = linch_ext::workflow::WorkflowOptions::new(journal, "tenant-a", "review-42");

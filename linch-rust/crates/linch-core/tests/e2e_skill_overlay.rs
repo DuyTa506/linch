@@ -128,6 +128,70 @@ async fn a_skill_narrows_the_next_turn_to_its_tools_and_model() {
     assert!(runs.lock().unwrap().is_empty(), "Write never ran");
 }
 
+#[tokio::test]
+async fn a_sessions_first_run_lists_its_skills_after_init() {
+    let provider = Arc::new(ScriptedProvider::new([text_turn("one"), text_turn("two")]));
+    let stores = Arc::new(Stores::default());
+    let agent = agent(provider, &Runs::default(), stores.clone());
+    let first = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let second = finish(agent.run("again", RunOptions::new("s1"))).await;
+
+    let kinds: Vec<&str> = first.iter().map(|e| e.event.type_name()).collect();
+    assert_eq!(kinds[..3], ["init", "skills_loaded", "user"]);
+    let Event::SkillsLoaded(loaded) = &first[1].event else {
+        unreachable!()
+    };
+    let verify = linch_core::skills::verify();
+    let expected = [
+        json!({"name": "plain", "description": "Plain."}),
+        json!({"name": "review", "description": "Review."}),
+        json!({
+            "name": "verify", "description": verify.description,
+            "when_to_use": verify.when_to_use, "argument_hint": verify.argument_hint,
+        }),
+    ];
+    let skills: Vec<Value> = (loaded.skills.iter())
+        .map(|s| Value::Object(s.clone()))
+        .collect();
+    assert_eq!(skills, expected, "every skill, sorted by name");
+    let listed = |envelopes: &[linch_core::Envelope]| {
+        (envelopes.iter()).any(|e| matches!(e.event, Event::SkillsLoaded(_)))
+    };
+    assert!(!listed(&second), "once per session");
+
+    let plain = AgentBuilder::new(spec())
+        .provider(Arc::new(ScriptedProvider::new([text_turn("hi")])))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .build()
+        .unwrap();
+    let envelopes = finish(plain.run("go", RunOptions::new("s2"))).await;
+    assert!(!listed(&envelopes), "an agent without skills lists none");
+}
+
+#[tokio::test]
+async fn each_call_names_the_model_it_requests_on_its_context_build() {
+    let turns = [
+        skill_call("review"),
+        text_turn("checked"),
+        text_turn("done"),
+    ];
+    let provider = Arc::new(ScriptedProvider::new(turns));
+    let stores = Arc::new(Stores::default());
+    let agent = agent(provider, &Runs::default(), stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    let models: Vec<&str> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::ContextBuild(build) => Some(build.model.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(models, [MODEL, "other-model"]);
+}
+
 #[test]
 fn a_skill_model_keeps_the_one_million_token_suffix() {
     use linch_core::skills::model_override;

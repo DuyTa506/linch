@@ -50,6 +50,10 @@ pub struct RunIdentity {
     /// Caller identity, when the host supplied one. Permission rules match
     /// on its roles.
     pub principal: Option<Principal>,
+    /// The run's trace id, for each [`ToolContext::trace_id`].
+    ///
+    /// [`ToolContext::trace_id`]: crate::ToolContext::trace_id
+    pub trace_id: Option<String>,
 }
 
 /// A host's answer to a call that was awaiting approval, kept so a resumed

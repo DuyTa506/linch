@@ -26,8 +26,11 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             run_id: RunId::new("r1"),
             parent_run_id: None,
             model: "claude".into(),
+            provider: "anthropic".into(),
             tools: vec![],
             trace_id: None,
+            resumed: true,
+            turn: 3,
         }),
         Event::User(UserEvent {
             message: crate::message::Message::user_text("hi"),
@@ -45,6 +48,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             cumulative: Usage::default(),
             cost_usd: Some(0.25),
             cumulative_cost_usd: Some(1.5),
+            actual_model: Some("claude-served".into()),
         }),
         Event::ToolCallStart(ToolCallStartEvent {
             tool_use_id: "c1".into(),
@@ -58,6 +62,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             duration_ms: 1,
             canonical_output: None,
             metadata: None,
+            error_code: Some("not_found".into()),
         }),
         Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),
@@ -81,6 +86,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             selected_tools: None,
             budget: JsonObject::new(),
             metadata: JsonObject::new(),
+            model: "m".into(),
         }),
         Event::Compaction(CompactionEvent {
             messages_before: 10,
@@ -88,6 +94,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             tokens_before: 100,
             tokens_after: 10,
             strategy: "summarize".into(),
+            duration_ms: 7,
         }),
         Event::LoopGuard(LoopGuardEvent {
             reason: LoopGuardReason::MaxTurns,
@@ -121,6 +128,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             event: Box::new(Event::Error(ErrorEvent {
                 error: JsonObject::new(),
             })),
+            tool_use_id: "call-1".into(),
+            ts_ms: 7,
         }),
         Event::ChildRunStatus(ChildRunStatusEvent {
             child_run_id: RunId::new("child-1"),

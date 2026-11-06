@@ -125,6 +125,9 @@ async fn a_kept_worker_continues_on_its_own_session() {
         .map(|t| t.name.clone())
         .collect();
     assert_eq!(names, ["Block", "Subagent", "SubagentContinue"]);
+    let continue_tool = &family.requests_of("parent")[0].tools[2];
+    let to = continue_tool.input_schema["properties"]["to"]["description"].to_string();
+    assert!(to.contains("'<parent run id>:<tool_use_id>'"), "{to}");
     let child_names: Vec<String> = (family.requests_of("check x")[0].tools.iter())
         .map(|t| t.name.clone())
         .collect();
@@ -189,8 +192,8 @@ async fn task_stop_stops_a_background_worker_without_a_notification() {
     assert_eq!(
         result_texts(&log[4]),
         [
-            "Worker 'r1:sub_0' (Agent #1) stopped. Reason: enough Use SubagentContinue to re-engage \
-          if needed."
+            "Worker 'r1:sub_0' (Agent #1) stopped. Reason: enough. Use SubagentContinue to \
+          re-engage if needed."
         ]
     );
     assert_eq!(log.last().unwrap().text(), "done");
@@ -198,6 +201,10 @@ async fn task_stop_stops_a_background_worker_without_a_notification() {
         log.iter()
             .all(|m| !m.text().contains("<task-notification>"))
     );
+    let tools = &family.requests_of("parent")[0].tools;
+    let stop = tools.iter().find(|t| t.name == "TaskStop").unwrap();
+    let id = stop.input_schema["properties"]["task_id"]["description"].to_string();
+    assert!(id.contains("'<parent run id>:<tool_use_id>'"), "{id}");
     let child = stores.runs.load(NS, &RunId::new("r1:sub_0")).await.unwrap();
     assert_eq!(child.status, RunStatus::Aborted);
     let ends: Vec<RunStatus> = (envelopes.iter())

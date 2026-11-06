@@ -30,8 +30,8 @@ Content (the prompt, answers, tool input and results) is left out unless
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`.
 
 The run span is a child of the context current when `Agent.run`,
-`resume` or `approve` is called. A resumed or approved call has no `init`
-event, so its spans carry no session id or turn. A run whose stream is
+`resume` or `approve` is called. A resumed or approved call starts with a
+`resumed` `init` naming its session and turn. A run whose stream is
 left before its end keeps its spans open, and they are never exported:
 read every run to its end, or `Run.result()`. `Run.trace_id` is the trace
 id of its spans, for log lines.
@@ -84,6 +84,7 @@ CAPTURE_CONTENT_ENV = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 OPERATION = "gen_ai.operation.name"
 PROVIDER = "gen_ai.provider.name"
 MODEL = "gen_ai.request.model"
+RESPONSE_MODEL = "gen_ai.response.model"
 FINISH_REASONS = "gen_ai.response.finish_reasons"
 INPUT_TOKENS = "gen_ai.usage.input_tokens"
 OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
@@ -179,8 +180,10 @@ class Telemetry:
         Args:
             provider: The Linch provider id, reported through `provider_name`.
             model: The model; a run's `init` event overrides it.
-            session_id: The session, for a resumed call; `init` overrides it.
-            turn: The turn a resumed call starts in; `init` starts at 0.
+            session_id: The session, for a stream without `init`; `init`
+                overrides it.
+            turn: The turn a stream without `init` starts in; `init` names
+                its own.
             parent: The context the run span is a child of; the current
                 context when absent.
             capture_content: Whether to keep content on the spans;
@@ -278,19 +281,15 @@ class _Open:
 class _Chat:
     """An open model call; `answered` is when its response arrived."""
 
-    def __init__(self, open: _Open) -> None:
+    def __init__(self, open: _Open, model: str | None) -> None:
         self.open = open
+        # The model the call requested; the run's when unknown.
+        self.model = model
         self.usage: JsonObject | None = None
         self.cost: float | None = None
+        # The model the provider reported serving the call.
+        self.served: str | None = None
         self.answered: int | None = None
-
-
-class _Compaction:
-    """An open compaction, and the last time its summary call was seen."""
-
-    def __init__(self, open: _Open, last: int) -> None:
-        self.open = open
-        self.last = last
 
 
 class RunObserver:
@@ -332,7 +331,9 @@ class RunObserver:
         # When the next turn begins: the prompt, or the end of the last turn.
         self._turn_opened: int | None = None
         self._chat: _Chat | None = None
-        self._compaction: _Compaction | None = None
+        # The turn's summary call (its usage and time), until its compaction
+        # event, or the turn's primary call when none follows, places it.
+        self._summary: tuple[UsageEvent, int] | None = None
         self._tools: list[tuple[str, _Open]] = []
         # Whether an `error` event already marked the run.
         self._errored = False
@@ -363,7 +364,7 @@ class RunObserver:
         if isinstance(event, UserEvent):
             self._user(event, at)
         elif isinstance(event, ContextBuildEvent):
-            self._context_build(at)
+            self._context_build(event, at)
         elif isinstance(event, AssistantEvent):
             self._assistant(event, at)
         elif isinstance(event, UsageEvent):
@@ -425,8 +426,9 @@ class RunObserver:
         if isinstance(event, InitEvent):
             self._session_id = event.session_id
             self._model = event.model
-            self._turn = 0
-            resumed = False
+            self._provider = provider_name(event.provider)
+            self._turn = event.turn
+            resumed = event.resumed
         attributes = self._attributes(INVOKE_AGENT, False)
         attributes[RESUMED] = resumed
         self._run = self._start(self._parent, INVOKE_AGENT, SpanKind.INTERNAL, at, attributes)
@@ -485,10 +487,8 @@ class RunObserver:
         if self._chat is not None:
             chat, self._chat = self._chat, None
             self._finish_chat(chat, at, error)
+        self._flush_summary(error)
         ending: list[tuple[_Open, int]] = []
-        if self._compaction is not None:
-            ending.append((self._compaction.open, self._compaction.last))
-            self._compaction = None
         ending.extend((open, at) for _, open in self._tools)
         self._tools.clear()
         if self._step is not None:
@@ -509,21 +509,22 @@ class RunObserver:
             self._run = None
         self._ended = True
 
-    def _context_build(self, at: int) -> None:
-        # A summary call that gave no compaction ends where it was last seen.
-        if self._compaction is not None:
-            self._compaction.open.end(self._compaction.last)
-            self._compaction = None
+    def _context_build(self, event: ContextBuildEvent, at: int) -> None:
+        self._flush_summary(None)
         if self._chat is not None:
             chat, self._chat = self._chat, None
             self._finish_chat(chat, at, None)
         step, _ = self._open_step(at)
-        self._chat = self._open_chat(step, at)
+        self._chat = self._open_chat(step, at, event.model)
 
-    def _open_chat(self, parent: Context, at: int) -> _Chat:
-        name = CHAT if self._model is None else f"{CHAT} {self._model}"
+    def _open_chat(self, parent: Context, at: int, model: str | None = None) -> _Chat:
+        """A chat on `model`, its call's requested model; the run's when absent."""
+        model = self._model if model is None else model
+        name = CHAT if model is None else f"{CHAT} {model}"
         attributes = self._attributes(CHAT, True)
-        return _Chat(self._start(parent, name, SpanKind.CLIENT, at, attributes))
+        if model is not None:
+            attributes[MODEL] = model
+        return _Chat(self._start(parent, name, SpanKind.CLIENT, at, attributes), model)
 
     def _assistant(self, event: AssistantEvent, at: int) -> None:
         chat = self._chat
@@ -538,43 +539,46 @@ class RunObserver:
         if self._chat is not None:
             self._chat.usage = event.usage
             self._chat.cost = event.cost_usd
+            self._chat.served = event.actual_model
             self._close_answered_chat()
             return
         # No primary call is open, so this is the turn's summary call.
-        parent, start = self._open_compaction(at)
-        self._summary_call(parent, start, at, event)
-        if self._compaction is not None:
-            self._compaction.last = at
+        self._summary = (event, at)
 
-    def _open_compaction(self, at: int) -> tuple[Context, int]:
-        if self._compaction is not None:
-            return self._compaction.open.context, self._compaction.open.start_ms
-        step, start = self._open_step(at)
+    def _summary_span(self, start: int, end: int, usage: UsageEvent | None) -> _Open:
+        """A compaction span from `start` holding the summary call, which ended at `end`."""
+        step, step_start = self._open_step(start)
+        start = max(start, step_start)
         attributes = self._attributes(COMPACTION, True)
-        open = self._start(step, COMPACTION, SpanKind.INTERNAL, start, attributes)
-        self._compaction = _Compaction(open, at)
-        return open.context, start
-
-    def _summary_call(
-        self, parent: Context, start: int, end: int, usage: UsageEvent | None
-    ) -> None:
-        """The compaction's summary call, from the turn's start to `end`."""
-        chat = self._open_chat(parent, start)
+        compaction = self._start(step, COMPACTION, SpanKind.INTERNAL, start, attributes)
+        chat = self._open_chat(compaction.context, start)
         if usage is not None:
             chat.usage = usage.usage
             chat.cost = usage.cost_usd
+            chat.served = usage.actual_model
         self._finish_chat(chat, end, None)
+        return compaction
+
+    def _flush_summary(self, error: str | None) -> None:
+        """A summary call that gave no compaction: a span from the turn's start to the call."""
+        if self._summary is None:
+            return
+        (usage, at), self._summary = self._summary, None
+        _, start = self._open_step(at)
+        compaction = self._summary_span(start, at, usage)
+        if error is not None:
+            compaction.set_error(error)
+        compaction.end(at)
 
     def _compacted(self, event: CompactionEvent, at: int) -> None:
-        if self._compaction is None:
-            # Its summary call reported no usage.
-            parent, start = self._open_compaction(at)
-            self._summary_call(parent, start, at, None)
-        compaction = self._compaction
-        if compaction is not None:
-            self._compaction = None
-            compaction.open.set(COMPACTION_STRATEGY, event.strategy)
-            compaction.open.end(at)
+        # The span starts `duration_ms` before its event; a summary call
+        # that reported no usage ends with it.
+        summary, self._summary = self._summary, None
+        end = at if summary is None else summary[1]
+        usage = None if summary is None else summary[0]
+        compaction = self._summary_span(max(at - event.duration_ms, 0), end, usage)
+        compaction.set(COMPACTION_STRATEGY, event.strategy)
+        compaction.end(at)
 
     def _close_answered_chat(self) -> None:
         """Close a chat whose response arrived and whose usage did not follow."""
@@ -589,8 +593,8 @@ class RunObserver:
         attributes: dict[str, AttributeValue] = {OPERATION: CHAT}
         if self._provider is not None:
             attributes[PROVIDER] = self._provider
-        if self._model is not None:
-            attributes[MODEL] = self._model
+        if chat.model is not None:
+            attributes[MODEL] = chat.model
         if error is not None:
             open.set_error(error)
             attributes[ERROR_TYPE] = error
@@ -598,6 +602,8 @@ class RunObserver:
             open.set_usage(chat.usage)
         if chat.cost is not None:
             open.set(COST_USD, chat.cost)
+        if chat.served is not None:
+            open.set(RESPONSE_MODEL, chat.served)
         seconds = max(at - open.start_ms, 0) / 1000
         open.end(at)
         histograms = self._histograms
@@ -647,7 +653,7 @@ class RunObserver:
             start = max(at - event.duration_ms, 0)
             open, error = self._open_tool(step, event.tool_name, call_id, start), "interrupted"
         if event.is_error:
-            open.set_error(error)
+            open.set_error(event.error_code or error)
         if self._capture and open.recording():
             open.set(TOOL_RESULT, _result_text(event.result))
         open.end(at)

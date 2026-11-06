@@ -354,20 +354,26 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             base_url,
             reasoning_summary,
             store,
+            native_catalog_changes,
         } => {
             let api_key = key("openai-responses", openai::API_KEY_ENV)?;
             let mut options = ResponsesOptions::new(api_key);
             override_url(&mut options.base_url, base_url);
             options.reasoning_summary = reasoning_summary.map(summary);
             options.store = store;
+            options.native_catalog_changes = native_catalog_changes;
             Arc::new(OpenAiResponses::new(options).map_err(OpenError::Provider)?)
         }
-        ProviderConfig::Anthropic { base_url } => {
+        ProviderConfig::Anthropic {
+            base_url,
+            native_catalog_changes,
+        } => {
             let mut options = AnthropicOptions::from_env().ok_or(OpenError::MissingKey {
                 provider: "anthropic",
                 env: anthropic::API_KEY_ENV,
             })?;
             override_url(&mut options.base_url, base_url);
+            options.native_catalog_changes = native_catalog_changes;
             Arc::new(Anthropic::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Gemini { base_url } => {

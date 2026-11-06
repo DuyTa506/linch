@@ -14,7 +14,6 @@ use crate::events::kinds::{ChildRunStatusEvent, ResultSubtype};
 use crate::events::{Envelope, Event, Persistence, SubagentEvent};
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
-use crate::policy::Principal;
 use crate::run::RunStatus;
 use crate::runner::{self, Family, RunStream};
 use crate::scheduler::RunIdentity;
@@ -105,32 +104,27 @@ pub(super) async fn launch(
         return Err(ToolOutputError::new(message));
     };
     let id = worker.id.clone();
-    let principal = ctx.principal.clone();
-    let call = Some(ctx);
-    pick_up(
-        parent,
-        &family,
-        worker,
-        prompt,
-        principal,
-        &ctx.run_id,
-        call,
-    )
-    .await?;
+    let run = RunIdentity {
+        session_id: ctx.session_id.clone(),
+        run_id: ctx.run_id.clone(),
+        principal: ctx.principal.clone(),
+        trace_id: ctx.trace_id.clone(),
+    };
+    pick_up(parent, &family, worker, prompt, &run, Some(ctx)).await?;
     Ok(started(ctx, &id))
 }
 
-/// Have `family` drive the child run of `worker`: start it on `prompt`,
-/// resume it, or put the end of one that finished in the inbox. `call` is
-/// the model's call that asks for it, which may not take an earlier call's
-/// child; `None` when a resumed run picks its children up.
+/// Have `family` drive the child run of `worker` for the parent `run`:
+/// start it on `prompt`, resume it, or put the end of one that finished in
+/// the inbox. The child acts for the parent's principal under its trace
+/// id. `call` is the model's call that asks for it, which may not take an
+/// earlier call's child; `None` when a resumed run picks its children up.
 async fn pick_up(
     parent: &AgentInner,
     family: &Arc<Family>,
     worker: Worker,
     prompt: String,
-    principal: Option<Principal>,
-    parent_run: &RunId,
+    run: &RunIdentity,
     call: Option<&ToolContext>,
 ) -> Result<(), ToolOutputError> {
     let child = match parent.child(&worker.definition) {
@@ -142,9 +136,10 @@ async fn pick_up(
     let options = RunOptions {
         session_id: SessionId::new(id.as_str()),
         run_id: Some(id.clone()),
-        principal,
+        principal: run.principal.clone(),
         owner: "subagent".into(),
         cancel: cancel.clone(),
+        trace_id: run.trace_id.clone(),
     };
     let loaded = child.runs.load(&child.namespace, &id).await;
     if let (Ok(_), Some(ctx)) = (&loaded, call) {
@@ -162,7 +157,7 @@ async fn pick_up(
                      one with TaskStop, then call again."
                 )));
             }
-            runner::start_child(child, prompt, options, parent_run.clone())
+            runner::start_child(child, prompt, options, run.run_id.clone())
         }
         Ok(record) if record.status.is_terminal() => {
             let outcome = finished(&child, &id).await?;
@@ -177,7 +172,11 @@ async fn pick_up(
         Ok(_) => runner::resume(child, id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
-    let drive = drive(stream, worker, Arc::downgrade(family));
+    // A background worker's id is `<parent run id>:<tool_use_id>` of the
+    // call that spawned it.
+    let spawned_by = id.as_str().strip_prefix(&format!("{}:", run.run_id));
+    let spawned_by = spawned_by.unwrap_or_default().to_owned();
+    let drive = drive(stream, worker, spawned_by, Arc::downgrade(family));
     family.adopt(id, cancel, true, drive);
     Ok(())
 }
@@ -238,8 +237,7 @@ pub(crate) async fn reattach(
         let worker = registry.enlist(&run.session_id, id, definition, general, true);
         let name = worker.display_name.clone();
         let prompt = text("prompt").unwrap_or_default().to_owned();
-        let principal = run.principal.clone();
-        let picked = pick_up(parent, family, worker, prompt, principal, &run.run_id, None).await;
+        let picked = pick_up(parent, family, worker, prompt, run, None).await;
         if let Err(error) = picked {
             family.complete(Completion {
                 child: id.clone(),
@@ -278,7 +276,7 @@ fn started(ctx: &ToolContext, id: &RunId) -> ToolOutput {
 /// Drive the child's stream to its end: its durable events go into the
 /// parent's log, wrapped, at the parent's next turn; its end becomes a
 /// completion in the family's inbox.
-async fn drive(mut stream: RunStream, worker: Worker, family: Weak<Family>) {
+async fn drive(mut stream: RunStream, worker: Worker, tool_use_id: String, family: Weak<Family>) {
     let mut outcome = Outcome::default();
     while let Some(item) = stream.next().await {
         let envelope = match item {
@@ -295,6 +293,8 @@ async fn drive(mut stream: RunStream, worker: Worker, family: Weak<Family>) {
         if let Some(family) = family.upgrade() {
             family.report(Event::Subagent(SubagentEvent {
                 child_run_id: worker.id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                ts_ms: envelope.ts_ms,
                 event: Box::new(envelope.event),
             }));
         }

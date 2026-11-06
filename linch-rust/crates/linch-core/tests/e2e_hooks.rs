@@ -17,6 +17,7 @@ use linch_core::{
     PermissionMode, Role, RunError, RunOptions, RunStore, ScriptedProvider, SessionId,
     SessionStore, StoreError, TextBlock, ToolScope,
 };
+use serde_json::json;
 
 fn hooked(provider: Arc<ScriptedProvider>, hooks: Hooks, stores: Arc<Stores>) -> Agent {
     let runs = Runs::default();
@@ -161,7 +162,10 @@ async fn context_blocks_reach_the_request_and_not_the_log() {
         let blocks = vec![TextBlock {
             text: format!("CTX-{n}"),
         }];
-        Ok(linch_core::hooks::ContextBuildResponse { blocks })
+        Ok(linch_core::hooks::ContextBuildResponse {
+            blocks,
+            ..Default::default()
+        })
     });
     let _ = hooks.context_build.register(context.arc()).unwrap();
     let failing = hook::<ContextBuild>("down", |_| Err("index offline".into()));
@@ -208,6 +212,39 @@ async fn context_blocks_reach_the_request_and_not_the_log() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn context_metadata_of_every_hook_is_merged_on_the_context_build_event() {
+    let hooks = Hooks::default();
+    for (id, metadata) in [
+        ("rag", json!({"rag": "p1", "hits": 1})),
+        ("profile", json!({"hits": 2})),
+    ] {
+        let metadata = metadata.as_object().unwrap().clone();
+        let context = hook::<ContextBuild>(id, move |_| {
+            Ok(linch_core::hooks::ContextBuildResponse {
+                blocks: Vec::new(),
+                metadata: metadata.clone(),
+            })
+        });
+        let _ = hooks.context_build.register(context.arc()).unwrap();
+    }
+    let provider = Arc::new(ScriptedProvider::new([text_turn("done")]));
+    let agent = hooked(provider, hooks, Arc::new(Stores::default()));
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    let builds: Vec<_> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::ContextBuild(build) => Some(serde_json::Value::Object(build.metadata.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        builds,
+        [json!({"rag": "p1", "hits": 2})],
+        "a later hook wins"
+    );
 }
 
 #[tokio::test]

@@ -77,7 +77,9 @@
 //!
 //! A tenant also has caps, counted across all its connections: at most
 //! `max_runs` runs driven at once (default [`DEFAULT_MAX_RUNS`]; a run
-//! holds its place until its `run.end`), `max_agents` agents open (default
+//! holds its place until its `run.end`, or, when it suspends with
+//! background subagents still running, until they end or an approve or
+//! resume of it takes the place over), `max_agents` agents open (default
 //! [`DEFAULT_MAX_AGENTS`]; until `agent.close` or the connection's end has
 //! closed its MCP servers) and `max_connections` connections (default
 //! [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is refused with
@@ -198,7 +200,7 @@
 //! again. Nothing is written; the session and its runs stay, and a run of
 //! it still in progress just has to read again before it writes.
 //!
-//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?}`
+//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
 //! created when missing. `run_id` names the new run (a fresh uuid when
 //! absent), so a client can resume it even if it never saw the answer; an
@@ -206,7 +208,9 @@
 //! session has at most one run that is not terminal: a start on a session
 //! whose run is still going or waiting for approval ends with `-32030`,
 //! naming that run, and writes nothing. `principal` is
-//! `{tenant, user, roles?}`.
+//! `{tenant, user, roles?}`. `trace_id` is the host's trace id: stored with
+//! the run and echoed on every `init` and `result` of it, its tool calls'
+//! context and its subagents' runs, a resume or approve included.
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash
@@ -278,7 +282,7 @@
 //! | `permission_request` | `tool_use_id, tool_name, input, reason?, principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
 //! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 //! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
-//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}]}` |
+//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning |
 //! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 //! | `post_turn` | `turn, stop_reason` | `{}` |
 //!

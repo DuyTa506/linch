@@ -164,12 +164,15 @@ The run started.
 |---|---|
 | `session_id`, `run_id` | The session and run |
 | `model` | `spec.model` |
+| `provider` | The provider's id: `anthropic`, `openai-chat`, `scripted`, ... |
 | `tools` | Names of the tools offered, in order |
 | `parent_run_id` | The parent run, for a subagent's run; `None` otherwise |
-| `trace_id` | Trace id, when one is set; always `None` from the server. Use `Run.trace_id` ([Observability](./observability.md#correlate-logs-and-traces)) |
+| `trace_id` | The `trace_id` given to `agent.run`, kept for the whole run and its subagents' runs; `None` when none was given ([Observability](./observability.md#correlate-logs-and-traces)) |
+| `resumed` | `True` on the `init` that starts a resume or approve of the run, with the run's current tools; `False` on the run's first |
+| `turn` | The turn the call continues in: the run checkpoint's, for a resumed `init`; `0` on the run's first |
 
-A resumed or approved stream does not start with `init`; it starts where the
-run continues.
+Every `run`, `resume` and `approve` stream starts with `init`. A resumed one
+is durable, so replayed events show each call's start.
 
 ### `UserEvent` (`user`)
 
@@ -208,10 +211,12 @@ The request for the next model call was assembled; the call starts.
 
 | Field | What it is |
 |---|---|
+| `model` | The model the call requests: `spec.model`, or a loaded skill's `model` for the turn the skill narrows |
 | `system_blocks` | Number of system blocks |
 | `messages` | Number of conversation messages sent |
 | `selected_tools` | Tool names offered in this request |
-| `budget`, `metadata` | Context accounting and builder details, as dicts |
+| `budget` | Context accounting; `{}`, as the server trims no context |
+| `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any |
 
 ### `UsageEvent` (`usage`)
 
@@ -223,6 +228,7 @@ Token usage of one model call. See [Usage and cost](#usage-and-cost).
 | `cumulative` | The run so far, same keys |
 | `cost_usd` | This call's cost in USD; `None` when the model has no price |
 | `cumulative_cost_usd` | The run's priced calls so far; `None` until one is priced |
+| `actual_model` | The model the provider reported serving this call (it can differ from the one asked for, for example a dated id); `None` when it named none |
 
 ### `ToolCallStartEvent` (`tool_call_start`)
 
@@ -247,6 +253,7 @@ A tool call finished.
 | `duration_ms` | How long the call took |
 | `canonical_output` | The structured value, for tools that declare an output schema; `None` otherwise |
 | `metadata` | Details for the host only, never shown to the model: what a host tool returned in [`ToolOutput.metadata`](./tools.md#metadata-for-the-host), or where an offloaded result went; `None` for an error or a tool that set none |
+| `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise |
 | `tool_use_id` | Property: `result["tool_use_id"]` |
 | `is_error` | Property: whether the result is a tool error |
 
@@ -279,7 +286,9 @@ The run stopped to wait; its stream ends here.
 
 The older part of the conversation was summarized
 ([`spec.compaction`](./agent.md#compaction)): `messages_before`,
-`messages_after`, `tokens_before`, `tokens_after` (estimates) and `strategy`.
+`messages_after`, `tokens_before`, `tokens_after` (estimates), `strategy`,
+and `duration_ms`, the time from the decision to compact to this event (the
+summary call and the projection).
 
 ### `LoopGuardEvent` (`loop_guard`)
 
@@ -321,10 +330,19 @@ The run finished; its stream ends here.
 | `final_text` | The last answer's text; `None` when there is none |
 | `total_usage` | Usage summed over every call whose usage is known |
 | `usage_complete` | `False` when some call's usage was unknown and is not in the sum |
-| `duration_ms` | Wall time of the `run`, `resume` or `approve` call that ended the run. The whole run's span is this envelope's `ts_ms` minus the `init` envelope's |
+| `duration_ms` | Wall time of the `run`, `resume` or `approve` call that ended the run. The whole run's span is this envelope's `ts_ms` minus the first `init` envelope's (the one not `resumed`) |
 | `total_cost_usd` | Cost of the run's priced calls; `None` when none was priced |
 | `structured_output`, `structured_error` | For runs with an output schema; `None` with this client |
-| `trace_id` | Trace id, when one is set; always `None` from the server |
+| `trace_id` | The run's `trace_id`, as on `InitEvent` |
+
+### `SkillsLoadedEvent` (`skills_loaded`)
+
+The skills the model may load, on a session's first run of an agent with
+skills, between `init` and the prompt's `user` event. `skills` holds one
+dict per skill, the built-in `verify` included, sorted by name: `name`,
+`description`, and `when_to_use` and `argument_hint` when the skill sets
+them. Python Linch sends it once per session object, so again after a
+restart; here a session's later runs never do.
 
 ### `SkillInvokedEvent` (`skill_invoked`)
 
@@ -339,21 +357,41 @@ not be loaded).
 
 ### `SubagentEvent` (`subagent`)
 
-An event of a subagent's child run. `child_run_id` is the child run
-(`<parent run id>:<tool_use_id>`) and `event` the child's event, decoded into
-its own class (an `InitEvent`, a `ToolCallEndEvent`, another `SubagentEvent`
-for a grandchild, ...). A subagent's events, its stream-only ones included,
-reach the parent's stream this way. See [Subagents](./subagents.md).
+An event of a subagent's child run.
+
+| Field | What it is |
+|---|---|
+| `child_run_id` | The child run: `<parent run id>:<tool_use_id>` of the call that runs it |
+| `tool_use_id` | The parent's call that runs the child: the `Subagent` call, or the `SubagentContinue` call that continues a worker |
+| `ts_ms` | When the child emitted the event, from the child's own envelope. A background child's events reach the parent's log at its next turn, so the outer envelope's `ts_ms` is later |
+| `event` | The child's event, decoded into its own class (an `InitEvent`, a `ToolCallEndEvent`, another `SubagentEvent` for a grandchild, ...) |
+
+A foreground subagent's events, its stream-only ones included, reach the
+parent's stream this way; a background worker's durable ones do. See
+[Subagents](./subagents.md).
 
 ### `ChildRunStatusEvent` (`child_run_status`)
 
 A background worker's child run changed status: `child_run_id` and `status`
 (`running`, then `completed`, `failed` or `aborted`).
 
+### Kinds the server does not emit yet
+
+The core declares these kinds and the client decodes each into its class,
+but no run emits them today:
+
+| Class (`type`) | Fields |
+|---|---|
+| `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` or `workflow_interrupt`), `prompt` |
+| `BudgetEvent` (`budget`) | `kind` (`warning` or `exceeded`), `spent_tokens`, `spent_usd`, `max_tokens`, `max_cost_usd` |
+| `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
+| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt` |
+| `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
+
 ### `UnknownEvent`
 
-A type this client has no class for, such as `budget` or `workflow`. `type`
-is the wire type and `raw` the payload without it.
+A type this client has no class for, from a newer server. `type` is the
+wire type and `raw` the payload without it.
 
 ## Usage and cost
 

@@ -114,14 +114,11 @@ async fn a_suspended_run_ends_its_spans_and_the_approve_is_a_resumed_run() {
     assert_eq!(error_type(run), None);
     assert_eq!(span(&spans, "step").end_time, run.end_time);
 
-    // The approve continues the trace under a host-held parent span.
+    // The approve continues the trace under a host-held parent span; its
+    // `init` names the session, model and turn.
     let parent_span = sdk.host_span();
     let parent = Context::new().with_span(parent_span);
-    let mut second = sdk
-        .observer()
-        .parent(parent.clone())
-        .session_id("s1")
-        .turn(0);
+    let mut second = sdk.observer().parent(parent.clone());
     let allow = HashMap::from([("call_0_0".to_string(), ApprovalResponse::Allow)]);
     let stream = agent.approve(run_id, allow, RunOptions::new("s1"));
     let resumed = observe(stream, &mut second).await;
@@ -140,6 +137,7 @@ async fn a_suspended_run_ends_its_spans_and_the_approve_is_a_resumed_run() {
     assert_eq!(again.parent_span_id, parent.span().span_context().span_id());
     assert_eq!(again.start_time, at(resumed[0].ts_ms));
     assert_eq!(text(again, "gen_ai.conversation.id").unwrap(), "s1");
+    assert_eq!(text(again, "gen_ai.request.model").unwrap(), MODEL);
     let steps: Vec<_> = all(&spans, "step")
         .into_iter()
         .filter(|s| is_child(s, again))
@@ -175,8 +173,8 @@ fn a_resume_without_setters_leaves_unknown_attributes_out() {
     let step = span(&spans, "step");
     assert_eq!(attr(step, "linch.turn_index"), None);
     assert_eq!(step.start_time, at(200));
-    // A chat whose model is unknown is just `chat`.
-    assert_eq!(span(&spans, "chat").end_time, at(210));
+    // The chat's model comes from its `context_build`.
+    assert_eq!(span(&spans, "chat m").end_time, at(210));
 }
 
 #[test]
@@ -220,7 +218,7 @@ fn events_in_an_order_no_run_produces_never_panic_and_every_span_ends() {
     });
     let compaction = json!({
         "type": "compaction", "messages_before": 5, "messages_after": 2,
-        "tokens_before": 50, "tokens_after": 20, "strategy": "summary",
+        "tokens_before": 50, "tokens_after": 20, "strategy": "summary", "duration_ms": 3,
     });
     let error = json!({"type": "error", "error": {}});
     let events = [

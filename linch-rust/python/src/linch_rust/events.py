@@ -17,15 +17,22 @@ JsonObject = dict[str, Any]
 
 @dataclass(frozen=True)
 class InitEvent:
-    """The run started: its session, model and tool names."""
+    """A call of the run started: its session, model, provider id and tools.
+
+    A new run starts with one; each resume or approve starts with another,
+    `resumed` and naming the `turn` it continues in.
+    """
 
     type: ClassVar[str] = "init"
     session_id: str
     run_id: str
     model: str
+    provider: str
     tools: list[str]
     parent_run_id: str | None = None
     trace_id: str | None = None
+    resumed: bool = False
+    turn: int = 0
 
 
 @dataclass(frozen=True)
@@ -59,7 +66,8 @@ class UsageEvent:
     """Token usage of one provider call, and the run's running total.
 
     `cost_usd` and `cumulative_cost_usd` are in USD, `None` when the model
-    has no price.
+    has no price. `actual_model` is the model the provider reported
+    serving the call, `None` when it named none.
     """
 
     type: ClassVar[str] = "usage"
@@ -67,6 +75,7 @@ class UsageEvent:
     cumulative: JsonObject
     cost_usd: float | None = None
     cumulative_cost_usd: float | None = None
+    actual_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +95,8 @@ class ToolCallEndEvent:
 
     `metadata` is what the tool returned for the host only, never shown to
     the model (a host tool's `ToolOutput.metadata`, or where an offloaded
-    result went); `None` for an error or a tool that set none.
+    result went); `None` for an error or a tool that set none. `error_code`
+    is a failed call's machine-readable code, `None` without one.
     """
 
     type: ClassVar[str] = "tool_call_end"
@@ -95,6 +105,7 @@ class ToolCallEndEvent:
     duration_ms: int
     canonical_output: Any = None
     metadata: JsonObject | None = None
+    error_code: str | None = None
 
     @property
     def tool_use_id(self) -> str:
@@ -127,6 +138,16 @@ class PermissionRequestEvent:
 
 
 @dataclass(frozen=True)
+class InputRequestEvent:
+    """The run asks for input (`ask_user` or `workflow_interrupt`); `request_id` names it."""
+
+    type: ClassVar[str] = "input_request"
+    request_id: str
+    kind: str
+    prompt: str
+
+
+@dataclass(frozen=True)
 class SuspendedEvent:
     """The run stopped to wait; answer `pending_request_ids` with `Agent.approve`."""
 
@@ -140,6 +161,7 @@ class ContextBuildEvent:
     """The context of the next provider request was assembled; the call starts."""
 
     type: ClassVar[str] = "context_build"
+    model: str
     system_blocks: int
     messages: int
     budget: JsonObject
@@ -149,7 +171,7 @@ class ContextBuildEvent:
 
 @dataclass(frozen=True)
 class CompactionEvent:
-    """The provider view was compacted into a summary."""
+    """The provider view was compacted into a summary, in `duration_ms`."""
 
     type: ClassVar[str] = "compaction"
     messages_before: int
@@ -157,6 +179,7 @@ class CompactionEvent:
     tokens_before: int
     tokens_after: int
     strategy: str
+    duration_ms: int
 
 
 @dataclass(frozen=True)
@@ -167,6 +190,46 @@ class LoopGuardEvent:
     reason: str
     detail: str
     action: str
+
+
+@dataclass(frozen=True)
+class BudgetEvent:
+    """A run budget crossed its warning ratio (`warning`) or ran out (`exceeded`)."""
+
+    type: ClassVar[str] = "budget"
+    kind: str
+    spent_tokens: int
+    spent_usd: float
+    max_tokens: int | None = None
+    max_cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
+class PromptCacheAdvisoryEvent:
+    """A change broke the provider's prompt cache (`tool_set_changed`, `model_changed`)."""
+
+    type: ClassVar[str] = "prompt_cache_advisory"
+    reason: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class VerificationEvent:
+    """A closed-loop gate acted on a would-be-final answer (`retry`, `stop`, `exhausted`)."""
+
+    type: ClassVar[str] = "verification"
+    verifier: str
+    action: str
+    feedback: str = ""
+    attempt: int = 0
+
+
+@dataclass(frozen=True)
+class SkillsLoadedEvent:
+    """The skills the model can load: one descriptor dict per skill."""
+
+    type: ClassVar[str] = "skills_loaded"
+    skills: list[JsonObject]
 
 
 @dataclass(frozen=True)
@@ -190,11 +253,33 @@ class SkillCompletedEvent:
 
 
 @dataclass(frozen=True)
+class WorkflowEvent:
+    """A workflow engine record: a phase, a step's start, end or replay, or an interrupt."""
+
+    type: ClassVar[str] = "workflow"
+    kind: str
+    title: str = ""
+    call_key: str = ""
+    occurrence: int = 0
+    subagent_type: str = ""
+    result_text: str | None = None
+    structured_output: JsonObject | None = None
+    structured_error: str | None = None
+
+
+@dataclass(frozen=True)
 class SubagentEvent:
-    """An event of a subagent's child run, decoded like the parent's own."""
+    """An event of a subagent's child run, decoded like the parent's own.
+
+    `tool_use_id` is the parent's call that runs the child, and `ts_ms` is
+    when the child emitted the event: a background child's events reach the
+    parent's log later.
+    """
 
     type: ClassVar[str] = "subagent"
     child_run_id: str
+    tool_use_id: str
+    ts_ms: int
     event: Event
 
 
@@ -267,12 +352,18 @@ Event = (
     | ToolCallEndEvent
     | ToolProgressEvent
     | PermissionRequestEvent
+    | InputRequestEvent
     | SuspendedEvent
     | ContextBuildEvent
     | CompactionEvent
     | LoopGuardEvent
+    | BudgetEvent
+    | PromptCacheAdvisoryEvent
+    | VerificationEvent
+    | SkillsLoadedEvent
     | SkillInvokedEvent
     | SkillCompletedEvent
+    | WorkflowEvent
     | SubagentEvent
     | ChildRunStatusEvent
     | HookEvent
@@ -293,12 +384,18 @@ _KINDS: dict[str, type[Any]] = {
         ToolCallEndEvent,
         ToolProgressEvent,
         PermissionRequestEvent,
+        InputRequestEvent,
         SuspendedEvent,
         ContextBuildEvent,
         CompactionEvent,
         LoopGuardEvent,
+        BudgetEvent,
+        PromptCacheAdvisoryEvent,
+        VerificationEvent,
+        SkillsLoadedEvent,
         SkillInvokedEvent,
         SkillCompletedEvent,
+        WorkflowEvent,
         SubagentEvent,
         ChildRunStatusEvent,
         HookEvent,
@@ -339,7 +436,12 @@ def decode_event(raw: JsonObject) -> Event:
     if cls is None:
         return UnknownEvent(kind, {key: value for key, value in raw.items() if key != "type"})
     if cls is SubagentEvent:
-        return SubagentEvent(str(raw.get("child_run_id", "")), decode_event(raw.get("event", {})))
+        return SubagentEvent(
+            child_run_id=str(raw.get("child_run_id", "")),
+            tool_use_id=str(raw.get("tool_use_id", "")),
+            ts_ms=int(raw.get("ts_ms", 0)),
+            event=decode_event(raw.get("event", {})),
+        )
     names = _FIELDS[kind]
     event: Event = cls(**{key: value for key, value in raw.items() if key in names})
     return event

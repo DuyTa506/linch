@@ -54,6 +54,10 @@ pub struct ToolCallEndEvent {
     /// the tool end is not the largest event every envelope pays for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Box<JsonObject>>,
+    /// The [`crate::ToolOutputError::code`] of a failed call, after
+    /// `post_tool_use`; `None` for a success or an error without a code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// Decode a present `canonical_output` field as `Some`, including when its
@@ -138,6 +142,7 @@ mod tests {
             duration_ms: 12,
             canonical_output: None,
             metadata: None,
+            error_code: None,
         };
         assert_eq!(end.tool_use_id(), "c1");
         assert!(!end.is_error());
@@ -158,6 +163,7 @@ mod tests {
             duration_ms: 12,
             canonical_output,
             metadata: None,
+            error_code: None,
         }
     }
 

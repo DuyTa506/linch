@@ -85,6 +85,7 @@ class Agent:
         *,
         run_id: str | None = None,
         principal: Principal | None = None,
+        trace_id: str | None = None,
     ) -> Run:
         """Start a run of `prompt` in a session, which is created when missing.
 
@@ -99,6 +100,10 @@ class Agent:
                 already stored ends the run with a `RunError` (-32023).
             principal: Who the run acts for, matched by permission rules
                 with `role` or `unless_role`; none when absent.
+            trace_id: Your trace id for the run, such as the current span's;
+                stored with the run and echoed on every `InitEvent` and
+                `ResultEvent` of it, a resume or approve included, and on its
+                subagents' runs. None when absent.
 
         Returns:
             The started run; iterate it or await `Run.result()`.
@@ -109,6 +114,8 @@ class Agent:
         params: dict[str, Any] = {"agent": self.handle, "session_id": session_id, "prompt": prompt}
         if run_id is not None:
             params["run_id"] = run_id
+        if trace_id is not None:
+            params["trace_id"] = trace_id
         return await self._start("run.start", params, principal)
 
     async def resume(self, run_id: str, *, principal: Principal | None = None) -> Run:

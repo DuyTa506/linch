@@ -252,7 +252,8 @@ impl<S: ToolSink> Runner<'_, S> {
             None,
         )
         .with_reports(progress)
-        .with_deadline(deadline);
+        .with_deadline(deadline)
+        .with_trace_id(self.run.trace_id.clone());
         let execution = async { tool.tool().execute(call.input.clone(), ctx).await };
         let execution = self.timed(call, deadline, caught(&call.tool_name, execution));
         let result = {

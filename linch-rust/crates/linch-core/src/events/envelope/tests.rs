@@ -64,7 +64,10 @@ fn unexpected_envelope_field_is_rejected() {
 #[test]
 fn nested_subagent_unknown_type_obeys_the_same_ignorable_rule() {
     let nested = json!({"type": "mystery"});
-    let subagent = json!({"type": "subagent", "child_run_id": "child-1", "event": nested});
+    let subagent = json!({
+        "type": "subagent", "child_run_id": "child-1", "tool_use_id": "call-1", "ts_ms": 5,
+        "event": nested,
+    });
 
     let strict =
         json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": subagent.clone()});
@@ -87,6 +90,8 @@ fn subagent_nesting_past_the_limit_is_rejected() {
         event = json!({
             "type": "subagent",
             "child_run_id": format!("child-{depth}"),
+            "tool_use_id": "call-1",
+            "ts_ms": 5,
             "event": event,
         });
     }
@@ -102,6 +107,8 @@ fn subagent_nesting_at_the_limit_is_accepted() {
         event = json!({
             "type": "subagent",
             "child_run_id": format!("child-{depth}"),
+            "tool_use_id": "call-1",
+            "ts_ms": 5,
             "event": event,
         });
     }
@@ -233,6 +240,8 @@ fn ignorable_flag_is_forced_true_for_a_nested_subagent_ignorable_event() {
     let event = Event::Subagent(SubagentEvent {
         child_run_id: RunId::new("child-1"),
         event: Box::new(child),
+        tool_use_id: "call-1".into(),
+        ts_ms: 7,
     });
     let envelope = Envelope {
         v: WIRE_VERSION,
@@ -247,7 +256,61 @@ fn ignorable_flag_is_forced_true_for_a_nested_subagent_ignorable_event() {
     assert_eq!(decoded.event, envelope.event);
 }
 
+#[test]
+fn an_envelope_encodes_in_one_pass_with_type_after_the_payload() {
+    let envelope = |event: Event| Envelope {
+        v: WIRE_VERSION,
+        seq: 3,
+        run_id: RunId::new("r1"),
+        ts_ms: 7,
+        ignorable: false,
+        event,
+    };
+    let error = Event::Error(crate::events::kinds::ErrorEvent {
+        error: JsonObject::new(),
+    });
+    let wrapped = Event::Subagent(SubagentEvent {
+        child_run_id: RunId::new("r1:c1"),
+        tool_use_id: "c1".into(),
+        ts_ms: 5,
+        event: Box::new(error.clone()),
+    });
+    let future = IgnorableEvent::new("future_kind", JsonObject::new()).unwrap();
+    let texts = [error, wrapped, Event::Ignorable(future)]
+        .map(|event| serde_json::to_string(&envelope(event)).unwrap());
+    let head = r#"{"v":1,"seq":3,"run_id":"r1","ts_ms":7,"#;
+    let error = r#"{"error":{},"type":"error"}"#;
+    assert_eq!(texts[0], format!(r#"{head}"event":{error}}}"#));
+    let subagent = r#"{"type":"subagent","child_run_id":"r1:c1","tool_use_id":"c1","ts_ms":5,"#;
+    assert_eq!(
+        texts[1],
+        format!(r#"{head}"event":{subagent}"event":{error}}}}}"#)
+    );
+    let ignorable = r#""ignorable":true,"event":{"type":"future_kind"}}"#;
+    assert_eq!(texts[2], format!("{head}{ignorable}"));
+}
+
 proptest::proptest! {
+    /// Writing an envelope's text in one pass gives the text of its
+    /// [`Envelope::to_value`] tree.
+    #[test]
+    fn one_pass_text_is_the_text_of_the_value(
+        seq in proptest::prelude::any::<u64>(),
+        declared in proptest::prelude::any::<bool>(),
+        event in super::super::arbitrary::event(3),
+    ) {
+        let envelope = Envelope {
+            v: WIRE_VERSION,
+            seq,
+            run_id: RunId::new("r1"),
+            ts_ms: 7,
+            ignorable: declared,
+            event,
+        };
+        let text = serde_json::to_string(&envelope).unwrap();
+        proptest::prop_assert_eq!(text, envelope.to_value().unwrap().to_string());
+    }
+
     /// The actual wire boundary the card describes: an arbitrary event,
     /// wrapped in an [`Envelope`], serialized to JSON text, and parsed
     /// back, round-trips — not just `Event::decode` on a bare value, which

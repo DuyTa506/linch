@@ -230,8 +230,8 @@ impl Wire for ContextBuild {
     }
 
     fn decode(value: JsonValue) -> Result<ContextBuildResponse, serde_json::Error> {
-        let ContextBuildAnswer { blocks } = answer(value)?;
-        Ok(ContextBuildResponse { blocks })
+        let ContextBuildAnswer { blocks, metadata } = answer(value)?;
+        Ok(ContextBuildResponse { blocks, metadata })
     }
 }
 

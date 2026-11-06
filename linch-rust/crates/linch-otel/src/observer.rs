@@ -13,7 +13,7 @@ use linch_core::{Envelope, Event, JsonValue};
 use opentelemetry::trace::SpanKind;
 use opentelemetry::{Context, KeyValue};
 
-use self::calls::{Chat, Compaction};
+use self::calls::{Chat, Summary};
 use crate::span::{Open, count, json, now_ms, wire_name};
 use crate::{Telemetry, keys, provider_name, span_trace_id};
 
@@ -27,13 +27,14 @@ use crate::{Telemetry, keys, provider_name, span_trace_id};
 /// the error's type name, or drop the observer: either ends every open
 /// span at the wall clock.
 ///
-/// A stream that does not start with `init` is a resumed call
-/// (`linch.resumed` is true). It carries no session, model or turn, so give
-/// those with [`RunObserver::session_id`], [`RunObserver::model`] and
-/// [`RunObserver::turn`] when the host knows them; otherwise the attributes
-/// are left out. Events in an order no run produces are traced as far as
-/// they make sense and never panic; an envelope of another run, or anything
-/// after the run's end, is ignored.
+/// Every call starts with `init`: a resume or approve's is `resumed`
+/// (`linch.resumed` is true) and names the turn it continues in. A stream
+/// that starts with anything else is traced as resumed too; give its
+/// session, model and turn with [`RunObserver::session_id`],
+/// [`RunObserver::model`] and [`RunObserver::turn`] when the host knows
+/// them, otherwise the attributes are left out. Events in an order no run
+/// produces are traced as far as they make sense and never panic; an
+/// envelope of another run, or anything after the run's end, is ignored.
 pub struct RunObserver {
     telemetry: Telemetry,
     parent: Context,
@@ -49,7 +50,9 @@ pub struct RunObserver {
     /// When the next turn begins: the prompt, or the end of the last turn.
     turn_opened: Option<u64>,
     chat: Option<Chat>,
-    compaction: Option<Compaction>,
+    /// The turn's summary call, until its `compaction` event (or the
+    /// turn's primary call, when none follows) places its span.
+    summary: Option<Summary>,
     tools: Vec<(String, Open)>,
     /// Whether an `error` event already marked the run.
     errored: bool,
@@ -73,7 +76,7 @@ impl RunObserver {
             step: None,
             turn_opened: None,
             chat: None,
-            compaction: None,
+            summary: None,
             tools: Vec::new(),
             errored: false,
             prompt_captured: false,
@@ -82,28 +85,29 @@ impl RunObserver {
     }
 
     /// The Linch provider id (`openai-chat`, `anthropic`, ...), reported as
-    /// `gen_ai.provider.name` through [`provider_name`]. The stream does
-    /// not carry it.
+    /// `gen_ai.provider.name` through [`provider_name`]; a run's `init`
+    /// event overrides it.
     pub fn provider(mut self, id: &str) -> Self {
         self.provider = Some(provider_name(id).to_owned());
         self
     }
 
-    /// The model, for a resumed call; a run's `init` event overrides it.
+    /// The model, for a stream without `init`; an `init` event overrides
+    /// it.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    /// The session id, for a resumed call; a run's `init` event overrides
-    /// it.
+    /// The session id, for a stream without `init`; an `init` event
+    /// overrides it.
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
     }
 
-    /// The turn a resumed call starts in (the run checkpoint's turn); a
-    /// run's `init` event starts at 0.
+    /// The turn a stream without `init` starts in (the run checkpoint's
+    /// turn); an `init` event names its own.
     pub fn turn(mut self, turn: u64) -> Self {
         self.turn = Some(turn);
         self
@@ -149,7 +153,7 @@ impl RunObserver {
         }
         match event {
             Event::User(user) => self.user(user, at),
-            Event::ContextBuild(_) => self.context_build(at),
+            Event::ContextBuild(build) => self.context_build(build, at),
             Event::Assistant(response) => self.assistant(response, at),
             Event::Usage(usage) => self.usage(usage, at),
             Event::Compaction(compaction) => self.compaction(compaction, at),
@@ -207,8 +211,9 @@ impl RunObserver {
             Event::Init(init) => {
                 self.session_id = Some(init.session_id.as_str().to_owned());
                 self.model = Some(init.model.clone());
-                self.turn = Some(0);
-                false
+                self.provider = Some(provider_name(&init.provider).to_owned());
+                self.turn = Some(init.turn);
+                init.resumed
             }
             _ => true,
         };
@@ -297,10 +302,10 @@ impl RunObserver {
         if let Some(chat) = self.chat.take() {
             self.finish_chat(chat, at, error);
         }
-        let compaction = self.compaction.take().map(|c| (c.open, c.last));
+        self.flush_summary(error);
         let tools = self.tools.drain(..).map(|(_, open)| (open, at));
         let step = self.step.take().map(|open| (open, at));
-        for (open, end) in compaction.into_iter().chain(tools).chain(step) {
+        for (open, end) in tools.chain(step) {
             if let Some(error) = error {
                 open.set_error(error);
             }

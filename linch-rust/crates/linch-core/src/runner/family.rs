@@ -326,6 +326,17 @@ impl Family {
         }
     }
 
+    /// While the run is suspended with children running, a future that
+    /// resolves once none runs; `None` otherwise.
+    pub(crate) fn parked_children(
+        self: &Arc<Self>,
+    ) -> Option<impl Future<Output = ()> + Send + use<>> {
+        let parked = lock(&self.drive).parked;
+        let running = !lock(&self.state).live.is_empty();
+        let family = Arc::clone(self);
+        (parked && running).then_some(async move { family.idle().await })
+    }
+
     /// Wait until no child runs.
     pub(super) async fn idle(&self) {
         self.wait(|state| state.live.is_empty()).await;

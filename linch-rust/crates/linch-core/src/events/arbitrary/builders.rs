@@ -16,17 +16,22 @@ pub(super) fn init_event() -> impl Strategy<Value = InitEvent> {
         run_id(),
         option::of(run_id()),
         short_string(),
+        short_string(),
         vec(short_string(), 0..3),
         option::of(short_string()),
+        (any::<bool>(), any::<u64>()),
     )
         .prop_map(
-            |(session_id, run_id, parent_run_id, model, tools, trace_id)| InitEvent {
+            |(session_id, run_id, parent_run_id, model, provider, tools, trace_id, at)| InitEvent {
                 session_id,
                 run_id,
                 parent_run_id,
                 model,
+                provider,
                 tools,
                 trace_id,
+                resumed: at.0,
+                turn: at.1,
             },
         )
 }
@@ -142,6 +147,7 @@ pub(super) fn suspended_event() -> impl Strategy<Value = SuspendedEvent> {
 
 pub(super) fn context_build_event() -> impl Strategy<Value = ContextBuildEvent> {
     (
+        short_string(),
         any::<u64>(),
         any::<u64>(),
         option::of(vec(short_string(), 0..3)),
@@ -149,12 +155,15 @@ pub(super) fn context_build_event() -> impl Strategy<Value = ContextBuildEvent> 
         json_object(1),
     )
         .prop_map(
-            |(system_blocks, messages, selected_tools, budget, metadata)| ContextBuildEvent {
-                system_blocks,
-                messages,
-                selected_tools,
-                budget,
-                metadata,
+            |(model, system_blocks, messages, selected_tools, budget, metadata)| {
+                ContextBuildEvent {
+                    model,
+                    system_blocks,
+                    messages,
+                    selected_tools,
+                    budget,
+                    metadata,
+                }
             },
         )
 }
@@ -166,15 +175,24 @@ pub(super) fn compaction_event() -> impl Strategy<Value = CompactionEvent> {
         any::<u64>(),
         any::<u64>(),
         short_string(),
+        any::<u64>(),
     )
         .prop_map(
-            |(messages_before, messages_after, tokens_before, tokens_after, strategy)| {
+            |(
+                messages_before,
+                messages_after,
+                tokens_before,
+                tokens_after,
+                strategy,
+                duration_ms,
+            )| {
                 CompactionEvent {
                     messages_before,
                     messages_after,
                     tokens_before,
                     tokens_after,
                     strategy,
+                    duration_ms,
                 }
             },
         )

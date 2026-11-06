@@ -50,6 +50,24 @@ async fn a_run_streams_every_envelope_then_ends() {
 }
 
 #[tokio::test]
+async fn run_start_stores_the_trace_id_and_echoes_it() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("done")], None, "")).await;
+    let params =
+        json!({"agent": agent, "session_id": "s1", "prompt": "go", "trace_id": "4bf92f35"});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    let Event::Init(init) = &ended.envelopes[0].event else {
+        panic!("{:?}", ended.envelopes[0])
+    };
+    assert_eq!(init.trace_id.as_deref(), Some("4bf92f35"));
+    let Event::Result(result) = ended.last() else {
+        panic!("{:?}", ended.last())
+    };
+    assert_eq!(result.trace_id.as_deref(), Some("4bf92f35"));
+}
+
+#[tokio::test]
 async fn runs_of_two_agents_progress_concurrently() {
     let mut rpc = Rpc::new();
     let first = rpc.open(scripted(vec![text_turn("one")], None, "")).await;

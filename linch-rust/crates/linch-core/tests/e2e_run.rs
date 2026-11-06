@@ -261,6 +261,55 @@ async fn a_provider_error_fails_the_run_with_an_error_result() {
     assert_eq!(record.status, RunStatus::Failed);
 }
 
+/// A response that names one tool-use id twice is refused whole, as
+/// Python's protocol error does: no call of it runs and the run fails.
+#[tokio::test]
+async fn a_response_that_repeats_a_tool_use_id_fails_the_run_before_any_call() {
+    let runs = Runs::default();
+    let stores = Arc::new(Stores::default());
+    let repeated = TurnBuilder::new(MODEL)
+        .tool_call("c1", "Echo", &serde_json::json!({"value": "a"}))
+        .tool_call("c1", "Echo", &serde_json::json!({"value": "b"}))
+        .build();
+    let provider = Arc::new(ScriptedProvider::new([repeated, text_turn("unused")]));
+    let agent = agent(
+        provider,
+        registry(vec![Echo::new("Echo", ToolScope::Read, &runs)]),
+        policy(PermissionMode::SkipDangerous),
+        stores.clone(),
+    );
+    let stream = agent.run("hi", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+
+    let expected = [
+        "init",
+        "user",
+        "context_build",
+        "partial_assistant",
+        "usage",
+        "error",
+        "result",
+    ];
+    assert_eq!(kinds(&envelopes), expected, "no tool call starts");
+    let error = (envelopes.iter())
+        .find_map(|e| match &e.event {
+            Event::Error(error) => Some(serde_json::Value::Object(error.error.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains(r#"duplicate tool-use id \"c1\""#),
+        "{error}"
+    );
+    assert_eq!(result(&envelopes).subtype, ResultSubtype::Error);
+    assert!(runs.lock().unwrap().is_empty(), "no call ran");
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+}
+
 #[tokio::test]
 async fn max_turns_ends_the_run_with_a_loop_guard_and_an_error() {
     let runs = Runs::default();

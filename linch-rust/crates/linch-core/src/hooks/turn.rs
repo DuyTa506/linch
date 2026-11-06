@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::ids::{RunId, SessionId};
+use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, TextBlock};
 use crate::policy::HookPoint;
 use crate::run::StopReason;
@@ -124,6 +125,9 @@ pub struct ContextBuildRequest {
 pub struct ContextBuildResponse {
     /// Blocks to add; empty adds nothing.
     pub blocks: Vec<TextBlock>,
+    /// Details for observers, merged into the call's `context_build` event
+    /// (a later hook's key wins); never shown to the model.
+    pub metadata: JsonObject,
 }
 
 impl Sealed for ContextBuild {}
@@ -143,9 +147,11 @@ impl Point for ContextBuild {
 }
 
 impl HookChain<ContextBuild> {
-    /// Run every hook in order and return their blocks in that order. A
-    /// failing hook adds nothing; this point cannot fail closed.
-    pub async fn run(&self, request: &ContextBuildRequest) -> ChainResult<Vec<TextBlock>> {
+    /// Run every hook in order and return their blocks in that order, and
+    /// their metadata merged, a later hook's key winning as Python's
+    /// `dict.update`. A failing hook adds nothing; this point cannot fail
+    /// closed.
+    pub async fn run(&self, request: &ContextBuildRequest) -> ChainResult<ContextBuildResponse> {
         let mut records = Vec::new();
         let outcome = self.run_into(request, &mut records).await;
         ChainResult { outcome, records }
@@ -157,16 +163,17 @@ impl HookChain<ContextBuild> {
         &self,
         request: &ContextBuildRequest,
         records: &mut Vec<HookRecord>,
-    ) -> Vec<TextBlock> {
-        let mut blocks = Vec::new();
+    ) -> ContextBuildResponse {
+        let mut merged = ContextBuildResponse::default();
         for entry in self.entries().iter() {
             // `Closed` cannot occur: registration rejects a closed fail mode
             // here.
             if let Step::Answer(response) = entry.invoke(request, records).await {
-                blocks.extend(response.blocks);
+                merged.blocks.extend(response.blocks);
+                merged.metadata.extend(response.metadata);
             }
         }
-        blocks
+        merged
     }
 }
 

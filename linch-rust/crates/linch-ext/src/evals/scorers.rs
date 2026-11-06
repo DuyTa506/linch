@@ -16,8 +16,11 @@ mod tests;
 /// `{"type": "text_contains", "substring": "{expected}"}`. Unknown types and
 /// unknown fields are rejected.
 ///
-/// The `context_*` scorers read `context_build` events, which the Rust
-/// runner does not emit yet: on its runs they return `None`.
+/// The `context_*` scorers read the `context_build` event the runner
+/// stages before every primary call: its offered tools, and the metadata
+/// its `context_build` hooks returned. The runner trims no context, so
+/// `context_not_trimmed` passes on its runs. Each returns `None` for a run
+/// without the event, as Python's do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Scorer {

@@ -168,6 +168,11 @@ pub enum ProviderConfig {
         /// Whether OpenAI stores each response (default `true`).
         #[serde(default = "yes")]
         store: bool,
+        /// Whether a tool added or removed mid-session goes in the input as
+        /// `additional_tools`, keeping the prompt cache (gpt-5.4 and later;
+        /// off by default, not verified against the live API).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        native_catalog_changes: bool,
     },
     /// The Anthropic Messages API.
     #[serde(rename = "anthropic")]
@@ -175,6 +180,12 @@ pub enum ProviderConfig {
         /// API root; `ANTHROPIC_BASE_URL` or the public endpoint when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
+        /// Whether a tool added or removed mid-session goes in the
+        /// conversation as a tool block, keeping the prompt cache (beta
+        /// `inline-tools-2026-09-15`, on `api.anthropic.com` with the models
+        /// that take it; off by default, not verified against the live API).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        native_catalog_changes: bool,
     },
     /// Gemini `streamGenerateContent`.
     #[serde(rename = "gemini")]

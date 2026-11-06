@@ -140,8 +140,9 @@ tool result: Re-raise it as ParseError.
   it as in [Runs](./runs.md). It runs alongside other read calls only when its
   type lists its tools and each one is a registered read-scoped tool.
 - Each event of the child reaches the parent's stream wrapped in a
-  `SubagentEvent` before the call ends: `child_run_id`, and `event`, the
-  child's event decoded into its own class. The durable ones are replayed by
+  `SubagentEvent` before the call ends: `child_run_id`, `tool_use_id` (the
+  parent's call), `ts_ms` (the child's own time) and `event`, the child's
+  event decoded into its own class. The durable ones are replayed by
   `Agent.events` on the parent run.
 - The child's run is an ordinary run in the same stores:
   `agent.events("review-1:c1")` reads its own journal, and its `init` event
@@ -241,7 +242,8 @@ replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', '
   reads, and starts nothing; a worker that ends frees its place. Python Linch
   has no such cap.
 - The worker's durable events reach the parent's log wrapped, at the parent's
-  next turn.
+  next turn; each keeps the child's own `ts_ms` and the spawning call's
+  `tool_use_id`.
 
 ---
 
@@ -328,7 +330,7 @@ asyncio.run(main())
 ```text
 status: running
 Subagent: Worker 'ci-2:c1' started in background. You will receive a <task-notification> when it finishes.
-TaskStop: Worker 'ci-2:c1' (Agent #1) stopped. Reason: build cancelled Use SubagentContinue to re-engage if needed.
+TaskStop: Worker 'ci-2:c1' (Agent #1) stopped. Reason: build cancelled. Use SubagentContinue to re-engage if needed.
 status: aborted
 final: Stopped the CI watcher.
 ```
@@ -443,7 +445,7 @@ before resuming the parent) cannot continue: resuming the parent ends it
 
 | Python Linch | linch-rust |
 |---|---|
-| Worker ids look like `agent-a1b2` | `<parent run id>:<tool_use_id>`; the tool descriptions still show the Python form |
+| Worker ids look like `agent-a1b2` | `<parent run id>:<tool_use_id>`, as the tool descriptions say |
 | A background worker can outlive the run and notify a later one | The run waits for its workers before it ends |
 | A running worker is marked `killed` after a restart | It is resumed with its parent run (Postgres) |
 | `Correlator`, `MailboxPlugin`, durable inbox | Mailbox in process only; `Correlator` in Rust only |

@@ -4,13 +4,14 @@
 
 mod common;
 
-use std::future::pending;
+use std::future::{Future, pending};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use linch::PgPools;
+use linch::provider::scripted::TurnBuilder;
+use linch::{PermissionMode, PgPools};
 use linch_rpc::protocol::{Cancelled, method};
 use linch_rpc::{Access, Allowlists, ErrorObject, Tenant, Tokens, code};
 use serde_json::{Value, json};
@@ -98,6 +99,120 @@ async fn a_local_connection_has_no_run_cap() {
         rpc.start(&agent, session, "wait").await;
         calls.recv().await.expect("the run waits in its tool");
     }
+}
+
+/// A tenant agent with `subagents` and background workers, its host tools
+/// `wait`, `gate` and `hold` (read) and `save` (write), and `turns`, its
+/// project at `root`.
+fn family_config(turns: Vec<linch::ScriptedTurn>, root: &std::path::Path) -> Value {
+    let tools = [
+        host_tool("wait", "read"),
+        host_tool("gate", "read"),
+        host_tool("hold", "read"),
+        host_tool("save", "write"),
+    ];
+    let mut config = hosted(turns, "default", json!({"tools": tools}));
+    config["namespace"] = json!("acme");
+    config["subagents"] = json!(true);
+    config["workers"] = json!({"background": true});
+    config["permissions"]["project_root"] = json!(root);
+    config["permissions"]["auto_allow"] = json!(["Subagent"]);
+    config
+}
+
+/// `f` within ten seconds.
+async fn soon<T>(what: &str, f: impl Future<Output = T>) -> T {
+    let limit = Duration::from_secs(10);
+    tokio::time::timeout(limit, f)
+        .await
+        .unwrap_or_else(|_| panic!("{what} took over 10 s"))
+}
+
+#[tokio::test]
+async fn a_suspended_run_holds_one_place_until_its_background_workers_end() {
+    // `auto_allow` lets the `Subagent` calls run without asking.
+    let modes = [PermissionMode::Default, PermissionMode::SkipDangerous];
+    let dir = tempfile::tempdir().unwrap();
+    let roots = [dir.path().to_path_buf()];
+    let allow = Allowlists::new().max_runs(2).permission_modes(&modes);
+    let acme = acme(allow.workspace_roots(&roots).unwrap());
+    let (arrived, mut calls) = mpsc::unbounded_channel();
+    let (waiting, mut waiters) = tokio::sync::watch::channel(0_usize);
+    let (release, released) = tokio::sync::watch::channel(false);
+    let waiters_seen = waiters.clone();
+    // `wait` answers once released, `gate` once both workers wait, and
+    // `hold` never.
+    let mut rpc = Rpc::remote_with(
+        connected(&acme),
+        handler(move |_, params, _| {
+            let (arrived, waiting) = (arrived.clone(), waiting.clone());
+            let (mut released, mut waiters) = (released.clone(), waiters_seen.clone());
+            async move {
+                let name = params["name"].as_str().unwrap_or_default().to_owned();
+                let _ = arrived.send(name.clone());
+                match name.as_str() {
+                    "wait" => {
+                        waiting.send_modify(|n| *n += 1);
+                        drop(released.wait_for(|on| *on).await);
+                    }
+                    "gate" => drop(waiters.wait_for(|n| *n == 2).await),
+                    _ => pending::<()>().await,
+                }
+                Ok(json!({"value": "done"}))
+            }
+        }),
+    );
+    let mut spawn = TurnBuilder::new(MODEL);
+    for id in ["sub_0", "sub_1"] {
+        let input = json!({"description": "look", "prompt": id, "run_in_background": true});
+        spawn = spawn.tool_call(id, "Subagent", &input);
+    }
+    // The workers make their first calls while the gate holds the parent,
+    // so every call takes the turn meant for it.
+    let turns = vec![
+        spawn.tool_call("g_0", "gate", &json!({})).build(),
+        tool_turn("w_0", "wait", json!({})),
+        tool_turn("w_0", "wait", json!({})),
+        tool_turn("s_0", "save", json!({})),
+        text_turn("seen"),
+        text_turn("seen"),
+    ];
+    let lead = rpc.open(family_config(turns, dir.path())).await;
+    let holds = (0..3).map(|n| tool_turn(&format!("h_{n}"), "hold", json!({})));
+    let other = rpc.open(family_config(holds.collect(), dir.path())).await;
+
+    let suspended = rpc.start(&lead, "s1", "look twice").await;
+    let ended = soon("the suspend", rpc.until_end(&suspended)).await;
+    assert!(
+        matches!(ended.last(), linch::Event::Suspended(_)),
+        "{:?}",
+        ended.last()
+    );
+    assert_eq!(*waiters.borrow_and_update(), 2, "both workers wait");
+    // The suspended run holds one place, its two workers none of their own.
+    rpc.start(&other, "s2", "hold").await;
+    let hold = async { while calls.recv().await.as_deref() != Some("hold") {} };
+    soon("the hold call", hold).await;
+    let params = json!({"agent": other, "session_id": "s3", "prompt": "hold"});
+    let error = rpc.call(method::RUN_START, params.clone()).await;
+    let (code, data) = limit(error.unwrap_err());
+    assert_eq!(
+        (code, data),
+        (code::LIMIT_REACHED, json!({"kind": "runs", "max": 2}))
+    );
+
+    // The workers end: the place is free again.
+    release.send(true).unwrap();
+    let started = async {
+        loop {
+            match rpc.call(method::RUN_START, params.clone()).await {
+                Ok(_) => break,
+                Err(error) => assert_eq!(limit(error).0, code::LIMIT_REACHED),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    soon("the freed place", started).await;
 }
 
 /// One connection's raw lines, and the task serving it.
