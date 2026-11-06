@@ -211,9 +211,11 @@ agent = Agent(model="gpt-5", provider=my_provider, context=host_context)
 
 Nếu `Context` không có provider, Linch dùng provider toàn cục của
 OpenTelemetry. `trace.set_tracer_provider()` và `metrics.set_meter_provider()`
-có hiệu lực bất cứ lúc nào được gọi. Hai biến `OTEL_PYTHON_TRACER_PROVIDER` và
-`OTEL_PYTHON_METER_PROVIDER` chỉ được đọc một lần khi import Linch, nên hãy đặt
-chúng trước lần import đó.
+có hiệu lực bất cứ lúc nào được gọi. Linch kiểm tra một lần, khi được import,
+xem hai biến `OTEL_PYTHON_TRACER_PROVIDER` và `OTEL_PYTHON_METER_PROVIDER` có
+được đặt hay không. Biến chỉ được đặt sau lần import đó sẽ bị bỏ qua, nên hãy
+đặt chúng trước lần import. Giá trị của biến do OpenTelemetry tự đọc khi nạp
+provider lần đầu.
 
 Mã đo đạc tại nguồn tạo các span `invoke_agent`, `step`, `chat`,
 `execute_tool` và nén ngữ cảnh. Thuộc tính GenAI bao gồm thao tác,
