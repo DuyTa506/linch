@@ -16,7 +16,9 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
                 "tokens": [{"env": "ACME_TOKEN"}, {"value": "tok-acme-inline-0001"}],
                 "allow": {"provider_base_urls": ["http://10.0.0.5:8000/v1"],
                           "permission_modes": ["skip_dangerous"],
-                          "mcp_commands": ["/usr/local/bin/git-mcp"]}
+                          "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
+                                            "args": ["--read-only"],
+                                            "env": ["GIT_TOKEN"]}]}
             },
             "beta": {"tokens": [{"value": "tok-beta-inline-0001"}]}
         }
@@ -50,6 +52,12 @@ fn bad_configs_are_refused_without_echoing_tokens() {
             json!({"http": "127.0.0.1:1", "tenants": {"a": {"tokens": [{"file": "x"}]}}}),
             "unknown variant",
         ),
+        // An MCP entry is an object: a program alone names no arguments.
+        (
+            json!({"http": "127.0.0.1:1", "tenants": {"a": {"tokens": [],
+                   "allow": {"mcp_commands": ["/usr/local/bin/git-mcp"]}}}}),
+            "invalid type",
+        ),
     ];
     for (text, expected) in cases {
         let error = ServerConfig::from_json(&text.to_string()).unwrap_err();
@@ -76,4 +84,8 @@ fn bad_configs_are_refused_without_echoing_tokens() {
     let error = built(json!({"acme": {"tokens": [{"value": "t"}],
                                       "allow": {"workspace_roots": ["/nonexistent/p11c"]}}}));
     assert!(error.to_string().contains("/nonexistent/p11c"), "{error}");
+    let error = built(json!({"acme": {"tokens": [{"value": "t"}],
+                                      "allow": {"mcp_commands": [{"command": "/bin/x",
+                                                                  "env": ["LD_PRELOAD"]}]}}}));
+    assert!(error.to_string().contains("LD_PRELOAD"), "{error}");
 }

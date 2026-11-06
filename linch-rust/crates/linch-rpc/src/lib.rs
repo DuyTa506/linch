@@ -48,12 +48,14 @@
 //!   in the allowed list (by default `default` and `accept_edits`, not
 //!   `skip_dangerous`); a `workspace` that is an existing directory under
 //!   an allowed root, replaced by its canonical path; a Postgres DSN only
-//!   for an allowed host, port, socket and database; MCP stdio commands
-//!   exactly as listed and MCP HTTP URLs at allowed origins.
+//!   with an allowed host, port, socket, database, user and options; an
+//!   MCP stdio server only with the `command` and `args` of an entry,
+//!   setting only the `env` names that entry lists ([`McpCommand`]); MCP
+//!   HTTP URLs only at allowed origins.
 //!
 //! A refusal is `-32004` with `data.kind` naming the check: `namespace`,
 //! `principal`, `provider`, `provider_base_url`, `permission_mode`,
-//! `workspace`, `postgres`, `mcp_command` or `mcp_url`.
+//! `workspace`, `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
 //!
 //! # Framing
 //!
@@ -326,7 +328,7 @@ mod message;
 pub mod protocol;
 mod server;
 
-pub use access::{Access, AccessError, Allowlists, Tenant, Tokens};
+pub use access::{Access, AccessError, Allowlists, McpCommand, Tenant, Tokens};
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};

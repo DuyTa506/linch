@@ -9,7 +9,7 @@ use linch::{
 };
 use serde_json::json;
 
-use super::allowlists::{PgTarget, allows};
+use super::allowlists::{McpCommand, PgTarget, allows};
 use super::{Allowlists, Tenant};
 use crate::error::{ErrorObject, code};
 
@@ -48,15 +48,26 @@ impl Tenant {
             return Err(refused("postgres", message.into()));
         }
         for server in &config.mcp_servers {
-            let (kind, allowed) = match &server.transport {
-                McpTransportConfig::Stdio { command, .. } => {
-                    ("mcp_command", allow.mcp_commands.contains(command))
+            let refusal = match &server.transport {
+                McpTransportConfig::Stdio { command, args, env } => {
+                    let entries: Vec<_> = (allow.mcp_commands.iter())
+                        .filter(|entry| entry.command == *command && entry.args == *args)
+                        .collect();
+                    let env_allowed =
+                        |entry: &&McpCommand| env.keys().all(|name| entry.env.contains(name));
+                    if entries.is_empty() {
+                        Some("mcp_command")
+                    } else if !entries.iter().any(env_allowed) {
+                        Some("mcp_env")
+                    } else {
+                        None
+                    }
                 }
                 McpTransportConfig::Http { url, .. } => {
-                    ("mcp_url", allows(&allow.mcp_origins, url))
+                    (!allows(&allow.mcp_origins, url)).then_some("mcp_url")
                 }
             };
-            if !allowed {
+            if let Some(kind) = refusal {
                 let message = format!(
                     "MCP server {:?}: its transport is not in the tenant's allowlists ({kind})",
                     server.name

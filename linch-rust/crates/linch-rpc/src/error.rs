@@ -44,8 +44,8 @@ pub mod code {
     /// the connection.
     pub const UNAUTHENTICATED: i64 = -32003;
     /// Outside the tenant's allowlists, or naming another tenant;
-    /// `data.kind` says which check refused: `namespace`, `principal`,
-    /// `provider_base_url`, `workspace` or `mcp_command`.
+    /// `data.kind` names the check that refused (the crate docs list
+    /// them).
     pub const NOT_ALLOWED: i64 = -32004;
     /// `BuildError::Missing`: a required binding was not set.
     pub const BUILD_MISSING: i64 = -32010;

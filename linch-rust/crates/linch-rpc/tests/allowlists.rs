@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use common::*;
 use linch_rpc::protocol::method;
-use linch_rpc::{Access, Allowlists, code};
+use linch_rpc::{Access, Allowlists, McpCommand, code};
 use serde_json::{Value, json};
 
 /// `cargo test` builds the examples next to the test binaries' `deps`
@@ -133,21 +133,43 @@ async fn a_workspace_must_lie_under_an_allowed_root() {
 }
 
 #[tokio::test]
-async fn an_mcp_stdio_command_must_be_listed() {
+async fn an_mcp_stdio_server_must_match_an_entry_exactly() {
     let program = example("mcp_server");
     assert!(program.exists(), "{} was not built", program.display());
     let listed = program.to_str().unwrap();
-    let commands = strings(&[listed]);
-    let rpc = Rpc::remote(acme(|allow| allow.mcp_commands(&commands)));
-    let stdio = |command: &str| {
-        json!({"mcp_servers": [{"name": "tools", "transport": {"type": "stdio",
-                                                               "command": command}}]})
+    let entry = McpCommand {
+        command: listed.into(),
+        args: strings(&["--tenant", "acme"]),
+        env: strings(&["MCP_GREETING"]),
     };
-    for command in ["/bin/sh", "mcp_server", &format!("{listed} ")] {
-        let kind = refused(&rpc, config(stdio(command))).await;
-        assert_eq!(kind.as_deref(), Some("mcp_command"), "{command:?}");
+    let entries = [entry];
+    let rpc = Rpc::remote(acme(|allow| allow.mcp_commands(&entries).unwrap()));
+    let stdio = |command: &str, args: &[&str], env: Value| {
+        json!({"mcp_servers": [{"name": "tools", "transport": {"type": "stdio",
+                                "command": command, "args": args, "env": env}}]})
+    };
+    let listed_args = ["--tenant", "acme"];
+    let commands = [
+        ("/bin/sh", &listed_args[..]),
+        ("mcp_server", &listed_args),
+        (&format!("{listed} "), &listed_args),
+        (listed, &[]),
+        (listed, &["--tenant", "beta"]),
+        (listed, &["--tenant", "acme", "-c"]),
+    ];
+    for (command, args) in commands {
+        let kind = refused(&rpc, config(stdio(command, args, json!({})))).await;
+        assert_eq!(kind.as_deref(), Some("mcp_command"), "{command:?} {args:?}");
     }
-    let agent = rpc.open(config(stdio(listed))).await;
+    for env in [
+        json!({"PATH": "/tmp"}),
+        json!({"MCP_GREETING": "hi", "X": "1"}),
+    ] {
+        let kind = refused(&rpc, config(stdio(listed, &listed_args, env.clone()))).await;
+        assert_eq!(kind.as_deref(), Some("mcp_env"), "{env}");
+    }
+    let open = config(stdio(listed, &listed_args, json!({"MCP_GREETING": "hi"})));
+    let agent = rpc.open(open).await;
     let closed = rpc.call(method::AGENT_CLOSE, json!({"agent": agent})).await;
     assert_eq!(closed.unwrap(), json!({}));
 }
@@ -194,18 +216,33 @@ async fn skip_dangerous_needs_the_servers_consent() {
 #[tokio::test]
 async fn a_store_dsn_must_name_an_allowed_server() {
     let address = hangs_up().await;
-    let listed = format!("postgres://{address}/linch");
-    let dsns = [listed];
+    let dsns = [
+        format!("postgres://acme@{address}/linch"),
+        format!("postgres://pinned@{address}/linch?options=-c%20search_path%3Dacme"),
+    ];
     let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
     let store = |dsn: String| config(json!({"stores": {"type": "postgres", "dsn": dsn}}));
     // Allowed: the open goes on and fails on the fake server.
-    let ours = format!("postgres://acme:secret@{address}/linch?sslmode=disable");
-    let error = rpc.call(method::AGENT_OPEN, store(ours)).await.unwrap_err();
-    assert_eq!(refusal(error), (code::STORE_UNAVAILABLE, None));
+    for ours in [
+        format!("postgres://acme:secret@{address}/linch?sslmode=disable"),
+        format!("postgres://{address}/linch?user=pinned&options=-c%20search_path%3Dacme"),
+    ] {
+        let error = rpc.call(method::AGENT_OPEN, store(ours)).await.unwrap_err();
+        assert_eq!(refusal(error), (code::STORE_UNAVAILABLE, None));
+    }
     let outside = [
-        format!("postgres://{address}/other"),
-        "postgres://127.0.0.1:1/linch".to_owned(),
-        format!("postgres://{address}/linch?host=10.255.255.1"),
+        format!("postgres://acme@{address}/other"),
+        "postgres://acme@127.0.0.1:1/linch".to_owned(),
+        format!("postgres://acme@{address}/linch?host=10.255.255.1"),
+        // Another role, or the server's own (no user named).
+        format!("postgres://beta:secret@{address}/linch"),
+        format!("postgres://acme@{address}/linch?user=postgres"),
+        format!("postgres://{address}/linch"),
+        // Startup options the entry does not have.
+        format!("postgres://acme@{address}/linch?options=-c%20role%3Dpostgres"),
+        format!("postgres://acme@{address}/linch?options[search_path]=beta"),
+        format!("postgres://pinned@{address}/linch"),
+        format!("postgres://pinned@{address}/linch?options=-c%20search_path%3Dbeta"),
         "not a dsn".to_owned(),
     ];
     for dsn in outside {

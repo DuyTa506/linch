@@ -95,3 +95,33 @@ fn allowlists_take_only_web_urls_and_existing_roots() {
     let allow = Allowlists::new().workspace_roots(&roots[..1]).unwrap();
     assert_eq!(allow.workspace_roots, [dir.path().canonicalize().unwrap()]);
 }
+
+#[test]
+fn an_mcp_entry_never_lets_a_client_choose_what_code_loads() {
+    let entry = |name: &str| McpCommand {
+        command: "/usr/local/bin/git-mcp".into(),
+        args: vec![],
+        env: vec!["GIT_TOKEN".into(), name.into()],
+    };
+    for name in [
+        "PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "PYTHONPATH",
+        "NODE_OPTIONS",
+    ] {
+        let error = Allowlists::new()
+            .mcp_commands(&[entry("LDAP_URL"), entry(name)])
+            .unwrap_err();
+        assert!(
+            matches!(error, AccessError::McpEnv { index: 1, .. }),
+            "{name}: {error}"
+        );
+        assert!(error.to_string().contains(name), "{error}");
+    }
+    let allow = Allowlists::new()
+        .mcp_commands(&[entry("LDAP_URL")])
+        .unwrap();
+    assert_eq!(allow.mcp_commands, [entry("LDAP_URL")]);
+}

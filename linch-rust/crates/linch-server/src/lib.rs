@@ -31,8 +31,9 @@
 //!        "provider_base_urls": ["http://vllm.internal:8000/v1"],
 //!        "permission_modes": ["default", "accept_edits"],
 //!        "workspace_roots": ["/srv/linch/acme"],
-//!        "postgres_dsns": ["postgres://db.internal:5432/linch"],
-//!        "mcp_commands": ["/usr/local/bin/git-mcp"],
+//!        "postgres_dsns": ["postgres://linch_acme@db.internal:5432/linch"],
+//!        "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
+//!                          "args": ["--read-only"], "env": ["GIT_TOKEN"]}],
 //!        "mcp_urls": ["https://mcp.internal"]}}}}
 //! ```
 //!

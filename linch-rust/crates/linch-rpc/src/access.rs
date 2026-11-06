@@ -14,7 +14,7 @@ use thiserror::Error;
 mod admit;
 mod allowlists;
 
-pub use allowlists::Allowlists;
+pub use allowlists::{Allowlists, McpCommand};
 
 /// How a connection's client is trusted.
 #[derive(Debug, Clone)]
@@ -148,6 +148,15 @@ pub enum AccessError {
         list: &'static str,
         /// Its position in the list.
         index: usize,
+    },
+    /// An `mcp_commands` entry lets a client set `PATH` or a variable that
+    /// decides what code a program loads.
+    #[error("mcp_commands[{index}].env may not list {name}: it decides what code the server runs")]
+    McpEnv {
+        /// The entry's position in the list.
+        index: usize,
+        /// The refused variable.
+        name: String,
     },
     /// A workspace root does not exist or cannot be resolved.
     #[error("workspace root {} cannot be resolved: {source}", root.display())]

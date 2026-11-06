@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use linch::PermissionMode;
-use linch_rpc::{AccessError, Allowlists, Tenant, Tokens};
+use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -74,10 +74,12 @@ pub struct AllowConfig {
     pub permission_modes: Option<Vec<PermissionMode>>,
     /// Directories a workspace may be or lie under.
     pub workspace_roots: Vec<PathBuf>,
-    /// Postgres servers a store DSN may connect to.
+    /// Postgres servers, databases, users and options a store DSN may use.
     pub postgres_dsns: Vec<String>,
-    /// Programs an MCP `stdio` transport may run.
-    pub mcp_commands: Vec<String>,
+    /// MCP `stdio` servers a transport may start, each
+    /// `{"command", "args"?, "env"?}`: the program and its arguments, and
+    /// the names of the variables a transport may set.
+    pub mcp_commands: Vec<McpCommand>,
     /// Endpoints an MCP `http` transport may name.
     pub mcp_urls: Vec<String>,
 }
@@ -183,7 +185,7 @@ impl AllowConfig {
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?
-            .mcp_commands(&self.mcp_commands)
+            .mcp_commands(&self.mcp_commands)?
             .mcp_urls(&self.mcp_urls)?;
         if let Some(modes) = &self.permission_modes {
             allow = allow.permission_modes(modes);
