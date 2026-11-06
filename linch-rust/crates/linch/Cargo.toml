@@ -22,6 +22,9 @@ linch-providers = { path = "../linch-providers" }
 linch-tools = { path = "../linch-tools" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# Reads a DSN as the store connects with it, to key its pool on where it
+# connects; the sqlx linch-postgres already builds, with its features.
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "sync"] }
 # Replaces only the password of a DSN when a config is serialized (already
@@ -40,8 +43,6 @@ futures = "0.3.34"
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
 # The `bench_driver` example reads the process CPU-time clock.
 rustix = { version = "1.1.6", features = ["time"] }
-# Creates the Postgres test schema and counts its connections.
-sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
 tempfile = "3.27.0"
 # The `bench_driver` example's worker case: the queue and its shutdown token.
 linch-worker = { path = "../linch-worker" }

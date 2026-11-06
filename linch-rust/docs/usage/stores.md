@@ -133,9 +133,12 @@ Schema details, write paths and the refusal rules are in the
 
 ### Connections and pools
 
-- One server process keeps one pool per DSN, shared by every agent opened on
-  it. DSNs are matched as written, so two spellings of one database get two
-  pools.
+- One server process keeps one pool per connection target, shared by every
+  agent opened on it. The target is the host or socket, port, database,
+  user, password, startup `options`, `sslmode` and TLS files, as the store
+  reads the DSN. DSNs that differ only in the order of their parameters, or
+  in others such as `application_name`, share one pool, and its connections
+  keep the `application_name` of the open that connected it.
 - Opening gives up after 5 seconds when the database cannot be reached
   (`OpenError`, code -32014, naming the host and port it tried), instead of
   retrying for longer.
