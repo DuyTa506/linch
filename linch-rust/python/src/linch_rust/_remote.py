@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import socket
 from typing import TYPE_CHECKING, Protocol
 
+import orjson
+
 from ._rpc import Connection, StreamTransport
-from .errors import ConnectionClosed, LimitReached, Unauthenticated
+from .errors import ConnectionClosed, LimitReached, Unauthenticated, error_from
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
@@ -66,8 +70,11 @@ async def open_link(address: str, token: str) -> Link:
 
 
 class _SocketLink:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, tenant: str
+    ) -> None:
         self.connection = Connection(StreamTransport(reader, writer))
+        self.tenant = tenant
         self._writer = writer
 
     async def close(self) -> None:
@@ -84,14 +91,50 @@ class _SocketLink:
 
 
 async def _socket(path: str, token: str) -> Link:
-    reader, writer = await asyncio.open_unix_connection(path, limit=LINE_LIMIT)
-    link = _SocketLink(reader, writer)
+    loop = asyncio.get_running_loop()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.setblocking(False)
     try:
-        await link.connection.request("connection.auth", {"token": token})
+        await loop.sock_connect(sock, path)
+        tenant = await login(loop, sock, token)
+        reader, writer = await asyncio.open_unix_connection(sock=sock, limit=LINE_LIMIT)
     except BaseException:
-        await link.close()
+        sock.close()
         raise
-    return link
+    return _SocketLink(reader, writer, tenant)
+
+
+async def login(loop: asyncio.AbstractEventLoop, sock: socket.socket, token: str) -> str:
+    """Send `connection.auth` on the bare socket and return the tenant it names.
+
+    It runs before the line reader takes the socket. Past its pending-login
+    cap the server answers (with a null id) and closes before it reads, so
+    the write can fail; the answer is still queued here, where an asyncio
+    stream would have dropped it with the failed write. The server sends
+    nothing else until asked, so its answer is the first line.
+
+    Raises:
+        Unauthenticated: The server does not know the token.
+        LimitReached: The tenant holds all its connections, or too many
+            connections wait to log in.
+        ConnectionClosed: The server closed or reset the socket first.
+    """
+    request = {"jsonrpc": "2.0", "id": 0, "method": "connection.auth", "params": {"token": token}}
+    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+        await loop.sock_sendall(sock, json.dumps(request).encode() + b"\n")
+    answer = b""
+    while b"\n" not in answer:
+        try:
+            chunk = await loop.sock_recv(sock, 4096)
+        except OSError as error:
+            raise ConnectionClosed(f"reading the server failed: {error!r}") from error
+        if not chunk:
+            raise ConnectionClosed("the server closed the connection before answering the login")
+        answer += chunk
+    message = orjson.loads(answer.split(b"\n", 1)[0])
+    if "error" in message:
+        raise error_from(message["error"])
+    return str(message["result"]["tenant"])
 
 
 class _WebSocketTransport:

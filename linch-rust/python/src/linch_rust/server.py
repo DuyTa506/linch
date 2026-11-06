@@ -119,7 +119,8 @@ class Server:
 
         Raises:
             Unauthenticated: A remote server does not know the token.
-            LimitReached: The tenant holds all its connections.
+            LimitReached: The tenant holds all its connections, or too many
+                connections wait to log in to a remote socket.
             ConnectionClosed: A WebSocket upgrade was refused otherwise.
             OSError: Nothing listens at a remote address.
         """
