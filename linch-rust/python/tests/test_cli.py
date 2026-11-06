@@ -43,9 +43,19 @@ def bare_project(tmp_path: Path, name: str, packages: list[str], dependency: str
     return root
 
 
-def test_the_console_script_is_declared() -> None:
+def test_the_console_script_ships_as_a_wheel_data_script() -> None:
     pyproject = tomllib.loads((PYTHON_DIR / "pyproject.toml").read_text(encoding="utf-8"))
-    assert pyproject["project"]["scripts"] == {"linch-rust": "linch_rust.cli:main"}
+    script = PYTHON_DIR / pyproject["tool"]["maturin"]["data"] / "scripts" / "linch-rust"
+    assert script.read_text(encoding="utf-8").startswith("#!python\n"), "installers rewrite it"
+    proc = subprocess.run(
+        [sys.executable, str(script), "docs", "path"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(SRC)},
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (Path(proc.stdout.strip()) / "architecture" / "README.md").is_file()
 
 
 def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
