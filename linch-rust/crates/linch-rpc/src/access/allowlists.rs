@@ -198,8 +198,9 @@ impl Allowlists {
 
     /// The permission modes a config may choose, replacing the default
     /// `default` and `accept_edits`. Only with `skip_dangerous` among them
-    /// may a config carry `auto_allow` entries or rules that allow, since
-    /// either lets calls run without asking, as `skip_dangerous` does.
+    /// may a config carry `auto_allow` entries or rules that allow, or turn
+    /// on `tasks` or `deep_agent` (which auto-allow the task tools), since
+    /// each lets calls run without asking, as `skip_dangerous` does.
     pub fn permission_modes(mut self, modes: &[PermissionMode]) -> Self {
         self.permission_modes = modes.to_vec();
         self
