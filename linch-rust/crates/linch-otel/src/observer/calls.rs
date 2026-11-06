@@ -162,10 +162,13 @@ impl RunObserver {
         let seconds = at.saturating_sub(open.start_ms()) as f64 / 1000.0;
         open.end(at);
         self.telemetry.record_duration(seconds, &attributes);
-        for (kind, tokens) in usage
-            .iter()
-            .flat_map(|u| [("input", u.input_tokens), ("output", u.output_tokens)])
-        {
+        let tokens = usage.map(|u| {
+            [
+                ("input", u.total_input_tokens()),
+                ("output", u.output_tokens),
+            ]
+        });
+        for (kind, tokens) in tokens.into_iter().flatten() {
             let mut attributes = attributes.clone();
             attributes.push(KeyValue::new(keys::TOKEN_TYPE, kind));
             self.telemetry.record_tokens(tokens, &attributes);

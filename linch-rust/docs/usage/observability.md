@@ -201,12 +201,18 @@ ends at its closing event's. The instrumentation scope is `linch`.
 `gen_ai.request.model` from `spec.model` until the run's `init` event names
 it. `linch.cost_usd` is set when the model has a price.
 
+`gen_ai.usage.input_tokens` counts every input token, cached ones included,
+as the GenAI semantic convention says: the uncached input plus
+`gen_ai.usage.cache_read.input_tokens` plus
+`gen_ai.usage.cache_creation.input_tokens`. For the uncached count, take the
+two cache counts away from `input_tokens`.
+
 Each model call records two histograms with the SDK's default buckets:
 
 | Metric | Unit | Attributes |
 |---|---|---|
 | `gen_ai.client.operation.duration` | `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `error.type` on failure |
-| `gen_ai.client.token.usage` | `{token}` | The same, and `gen_ai.token.type` (`input` or `output`) |
+| `gen_ai.client.token.usage` | `{token}` | The same, and `gen_ai.token.type` (`input` or `output`); the `input` bucket includes the cached tokens, as `gen_ai.usage.input_tokens` does |
 
 `error.type` holds a name, never a message:
 
@@ -301,6 +307,7 @@ one span of yours.
 | `linch.store.duration` | Not built: the stream carries no store calls |
 | `gen_ai.response.model`, `gen_ai.input.messages` on `chat` | Not set: the stream does not carry them |
 | No cost attribute | `linch.cost_usd` on `chat` and `invoke_agent` |
+| `gen_ai.usage.input_tokens` and the `input` token bucket count uncached input only | Both include the cached tokens, as the GenAI convention says |
 | `trace_id` on run events and `ToolContext.trace_id` | `None`; read `Run.trace_id` |
 | `TraceIdFilter` for log records | Not available |
 | Child runs get spans of their own | A child run has no spans |

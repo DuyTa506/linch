@@ -96,9 +96,10 @@ pub(crate) fn count(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
+/// The convention's input count includes the cached tokens.
 fn usage_attributes(usage: &Usage) -> [KeyValue; 4] {
     [
-        KeyValue::new(keys::INPUT_TOKENS, count(usage.input_tokens)),
+        KeyValue::new(keys::INPUT_TOKENS, count(usage.total_input_tokens())),
         KeyValue::new(keys::OUTPUT_TOKENS, count(usage.output_tokens)),
         KeyValue::new(keys::CACHE_READ_TOKENS, count(usage.cache_read_tokens)),
         KeyValue::new(

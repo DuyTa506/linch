@@ -4,7 +4,8 @@
 mod common;
 
 use common::*;
-use linch_core::{AgentSpec, CompactionSpec, PermissionMode, RunOptions, ToolScope};
+use linch_core::provider::scripted::TurnBuilder;
+use linch_core::{AgentSpec, CompactionSpec, PermissionMode, RunOptions, ToolScope, Usage};
 use opentelemetry::trace::{SpanKind, Status};
 use opentelemetry::{Array, Value};
 
@@ -100,6 +101,40 @@ async fn each_model_call_records_its_tokens_and_duration() {
     assert_eq!(durations[0].count, 1);
     assert_eq!(durations[0].sum, elapsed as f64 / 1000.0);
     assert_eq!(durations[0].attributes.len(), 3, "{:?}", durations[0]);
+}
+
+#[tokio::test]
+async fn input_tokens_include_the_cached_ones_as_the_convention_says() {
+    let sdk = Sdk::new();
+    let usage = Usage {
+        input_tokens: 100,
+        output_tokens: 5,
+        cache_read_tokens: 90_000,
+        cache_creation_tokens: 400,
+    };
+    let turn = TurnBuilder::new(MODEL).text("hello").usage(usage).build();
+    let agent = agent(vec![turn], vec![]);
+    let mut observer = sdk.observer();
+    observe(agent.run("hi", RunOptions::new("s1")), &mut observer).await;
+    drop(observer);
+
+    let spans = sdk.spans();
+    for span in [
+        span(&spans, "invoke_agent"),
+        span(&spans, "chat scripted-model"),
+    ] {
+        assert_eq!(int(span, "gen_ai.usage.input_tokens"), Some(90_500));
+        assert_eq!(int(span, "gen_ai.usage.output_tokens"), Some(5));
+        let cache_read = int(span, "gen_ai.usage.cache_read.input_tokens");
+        assert_eq!(cache_read, Some(90_000));
+        let cache_creation = int(span, "gen_ai.usage.cache_creation.input_tokens");
+        assert_eq!(cache_creation, Some(400));
+    }
+    let tokens = sdk.points("gen_ai.client.token.usage");
+    let input = (tokens.iter())
+        .find(|point| point.attr("gen_ai.token.type").as_deref() == Some("input"))
+        .unwrap();
+    assert_eq!((input.count, input.sum), (1, 90_500.0));
 }
 
 #[tokio::test]
