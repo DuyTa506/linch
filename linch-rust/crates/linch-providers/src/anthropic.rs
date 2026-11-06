@@ -136,4 +136,4 @@ impl Provider for Anthropic {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

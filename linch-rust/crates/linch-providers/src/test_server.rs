@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::thread::{self, JoinHandle};
 
-/// Serve one canned HTTP response on a local port; the handle returns the
-/// raw request it read.
+/// Serve one canned HTTP response on a local port. Returns the base URL and
+/// a handle that yields the raw request (head and body) it read.
 pub(crate) fn serve_once(response: String) -> (String, JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());

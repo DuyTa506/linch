@@ -5,10 +5,9 @@ use linch_core::{Message, OutputSchema, ProviderError, ProviderRequest, assemble
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+use crate::test_server::serve_once;
 
 mod payload;
-pub(crate) mod server;
-use server::serve_once;
 
 const SECRET: &str = "sk-ant-unit-test-secret-4b5c";
 

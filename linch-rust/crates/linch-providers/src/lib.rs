@@ -15,6 +15,8 @@ mod openai_compat;
 pub mod responses;
 pub mod servers;
 mod sse;
+#[cfg(test)]
+mod test_server;
 
 pub use anthropic::{Anthropic, AnthropicOptions};
 pub use api_key::ApiKey;

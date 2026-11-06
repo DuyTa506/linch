@@ -5,7 +5,7 @@ use linch_core::{Message, OutputSchema, ProviderError, ProviderRequest, assemble
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::anthropic::tests::server::serve_once;
+use crate::test_server::serve_once;
 
 mod payload;
 
