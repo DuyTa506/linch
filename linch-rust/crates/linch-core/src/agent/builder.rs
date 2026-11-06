@@ -203,9 +203,11 @@ impl AgentBuilder {
         let mut features = JsonObject::new();
         let mut built_ins = BuiltIns::default();
         let mut listing = None;
+        let mut overlays = skills::Overlays::new();
         let skills_on = self.skills.is_some();
         if let Some(skills) = self.skills {
             let skills = skills::with_builtins(skills);
+            overlays = skills::overlays(&skills);
             let value =
                 serde_json::to_value(&skills).map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("skills".into(), value);
@@ -264,6 +266,7 @@ impl AgentBuilder {
             features,
             skills: skills_on,
             skill_listing: listing,
+            overlays: Arc::new(overlays),
             subagents,
             workers,
             worker_registry: Default::default(),

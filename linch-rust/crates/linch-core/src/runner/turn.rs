@@ -22,6 +22,7 @@ use crate::registry::ToolSnapshot;
 use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
+use crate::skills;
 use crate::usage::Usage;
 
 /// What the run does next.
@@ -132,7 +133,7 @@ impl Runner {
     ) -> Self {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
-        Self {
+        let mut runner = Self {
             snapshot: agent.snapshot(),
             agent,
             journal,
@@ -148,7 +149,25 @@ impl Runner {
             stop_reason: progress.stop_reason,
             started: progress.started,
             family: None,
+        };
+        runner.narrow();
+        runner
+    }
+
+    /// Take this turn's tools, and return its model, when a skill the
+    /// model just loaded sets them (see [`crate::skills`]).
+    fn narrow(&mut self) -> Option<String> {
+        self.snapshot = self.agent.snapshot();
+        if self.agent.overlays.is_empty() {
+            return None;
         }
+        let view = self.log.provider_view();
+        let overlay = skills::overlay(&view, &self.agent.overlays)?;
+        if let Some(allowed) = &overlay.allowed_tools {
+            let keep = |name: &str| allowed.iter().any(|tool| tool == name);
+            self.snapshot = Arc::new(self.snapshot.filtered(keep));
+        }
+        overlay.model.clone()
     }
 
     /// Run steps until the run ends or suspends.
@@ -237,7 +256,7 @@ impl Runner {
             return Ok(None);
         }
         self.stage_children();
-        self.snapshot = self.agent.snapshot();
+        let model = self.narrow();
         let view = self.log.provider_view();
         let mut messages: Vec<Message> =
             view.iter().map(|message| Message::clone(message)).collect();
@@ -246,7 +265,10 @@ impl Runner {
             return Ok(None);
         };
         add_context(&mut messages, context);
-        let request = self.agent.request(self.snapshot.definitions(), messages);
+        let mut request = self.agent.request(self.snapshot.definitions(), messages);
+        if let Some(model) = model {
+            request.model = skills::model_override(&model, &request.model);
+        }
         self.stage_context(&request);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal

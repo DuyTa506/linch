@@ -129,6 +129,7 @@ impl AgentInner {
             features,
             skills: self.skills,
             skill_listing: self.skill_listing.clone(),
+            overlays: Arc::clone(&self.overlays),
             subagents: None,
             workers: Default::default(),
             worker_registry: Default::default(),

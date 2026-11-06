@@ -12,8 +12,16 @@
 //! compaction that folds that result away puts the body back as a
 //! `<system-reminder>` in the summary message, which is part of the logged
 //! projection: it reaches the provider view and never the full history.
+//!
+//! A call reports a `skill_invoked` and a `skill_completed` event, with its
+//! end. A skill whose frontmatter names `allowed_tools` or a `model` sets
+//! them for the next model turn only: that turn offers only those tools (a
+//! call of another is refused as not registered) and uses that model. The
+//! overlay only narrows: it never allows a call the permission policy
+//! would ask about.
 
 mod listing;
+mod overlay;
 mod substitute;
 #[cfg(test)]
 mod tests;
@@ -26,6 +34,8 @@ use serde::Serialize;
 use crate::message::{ContentBlock, Message, Role, ToolResultPart};
 
 pub use listing::listing;
+pub use overlay::model_override;
+pub(crate) use overlay::{Overlays, overlay, overlays};
 pub use substitute::{split_args, substitute};
 pub(crate) use tool::SkillTool;
 
@@ -47,11 +57,11 @@ pub struct Skill {
     pub argument_hint: Option<String>,
     /// Names of positional arguments, each substituted as `$name`.
     pub arguments: Vec<String>,
-    /// Tools the skill's frontmatter names. Recorded and part of the run
-    /// contract; this kernel does not restrict the next turn to them yet.
+    /// The only tools the model turn after a load of the skill offers;
+    /// `None` or empty for all of them. Part of the run contract.
     pub allowed_tools: Option<Vec<String>>,
-    /// Model the skill's frontmatter names. Recorded and part of the run
-    /// contract; this kernel does not switch models for it yet.
+    /// The model of the turn after a load of the skill (see
+    /// [`model_override`]). Part of the run contract.
     pub model: Option<String>,
     /// Version metadata.
     pub version: Option<String>,

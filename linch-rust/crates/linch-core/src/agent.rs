@@ -26,6 +26,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::run::RunStatus;
 use crate::runner::{self, Families, RunStream};
+use crate::skills::Overlays;
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{Registry, Roster, Workers};
 use crate::usage::Usage;
@@ -115,6 +116,8 @@ pub(crate) struct AgentInner {
     /// The skill listing block; `None` when skills are off or none is
     /// visible to the model.
     pub(crate) skill_listing: Option<SystemBlock>,
+    /// What each skill that sets one sets for the turn after it loads.
+    pub(crate) overlays: Arc<Overlays>,
     /// The subagents the `Subagent` tool runs; `None` when they are off.
     pub(crate) subagents: Option<Arc<Roster>>,
     /// How the `Subagent` tool keeps its workers.
