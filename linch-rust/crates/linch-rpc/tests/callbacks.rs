@@ -1,4 +1,4 @@
-//! Intercept callbacks at the tool points: declared in `agent.open`,
+//! Intercept callbacks at the tool and turn points: declared in `agent.open`,
 //! answered by the client through `hook.call`, filtered by matchers in the
 //! server, bounded by timeouts and fail modes, and part of the contract.
 
@@ -247,7 +247,7 @@ async fn the_contract_changes_with_a_callback_policy() {
     assert_eq!(v1, contract(&rpc, policy("pre_tool_use", "p", 1)).await);
     assert_ne!(v1, contract(&rpc, policy("pre_tool_use", "p", 2)).await);
     assert_ne!(v1, contract(&rpc, policy("pre_tool_use", "q", 1)).await);
-    // A turn point registers now and counts too; P6-C makes the loop call it.
+    // A turn point counts too.
     assert_ne!(v1, contract(&rpc, policy("post_turn", "p", 1)).await);
 }
 
@@ -282,4 +282,53 @@ async fn a_callback_declaration_is_checked_at_open() {
             "{text}: {error:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn turn_point_callbacks_cross_the_connection() {
+    let (mut rpc, log) = client(json!({
+        "user_prompt_submit": {"action": "rewrite",
+                               "content": [{"type": "text", "text": "Go, politely."}]},
+        "stop": {"action": "allow"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "user_prompt_submit", "policy_id": "polite", "policy_version": 1},
+        {"point": "stop", "policy_id": "done", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("Done.")], extra).await;
+    assert!(finished(&ended));
+    assert_eq!(
+        log.methods(),
+        ["hook.call:user_prompt_submit", "hook.call:stop"]
+    );
+    assert_eq!(log.params(0)["request"]["content"][0]["text"], "Go.");
+    assert_eq!(log.params(1)["request"]["text"], "Done.");
+    let prompt = (ended.envelopes.iter())
+        .find_map(|envelope| match &envelope.event {
+            Event::User(user) => Some(serde_json::to_string(&user.message).unwrap()),
+            _ => None,
+        })
+        .expect("the prompt is recorded");
+    assert!(prompt.contains("Go, politely."), "{prompt}");
+    // Each callback's record arrives as a stream-only `hook` envelope.
+    let hooks = ended.kinds().iter().filter(|kind| *kind == "hook").count();
+    assert_eq!(hooks, 2, "{:?}", ended.kinds());
+
+    let (mut rpc, _) = client(json!({
+        "user_prompt_submit": {"action": "block", "reason": "no prompts today"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "user_prompt_submit", "policy_id": "closed", "policy_version": 1},
+    ]});
+    let agent = rpc
+        .open(hosted(vec![text_turn("Done.")], "default", extra))
+        .await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let error = rpc
+        .until_end(&run_id)
+        .await
+        .error
+        .expect("the prompt is blocked");
+    assert_eq!(error.code, code::PROMPT_BLOCKED);
+    assert_eq!(error.data.unwrap()["reason"], "no prompts today");
 }

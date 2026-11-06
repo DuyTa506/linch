@@ -1,5 +1,5 @@
-//! The wire shapes of the turn points, which the loop does not call yet
-//! (card P6-C), checked against the protocol document.
+//! The wire shapes of the turn points, checked against the protocol
+//! document.
 
 use std::sync::Arc;
 

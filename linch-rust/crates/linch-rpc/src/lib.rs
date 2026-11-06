@@ -1,21 +1,70 @@
-//! The Linch JSON-RPC 2.0 protocol, with a [`serve`] function for any byte
-//! stream pair and a [`Client`].
+//! The Linch JSON-RPC 2.0 protocol, with servers for byte streams
+//! ([`serve`], [`serve_lines`]) and message transports
+//! ([`serve_messages`]), and a [`Client`].
 //!
 //! A process (the `linch-server` sidecar) opens agents from configs and
 //! drives their runs; the client starts, approves, cancels and replays runs
 //! and receives every envelope as a notification. Everything inside a turn
 //! runs in the server; it calls back into the client, on the same
 //! connection, only for what the client declared: host tools, and
-//! intercept callbacks at the occurrences their matchers accept. There is
-//! no socket or HTTP transport and no auth yet.
+//! intercept callbacks at the occurrences their matchers accept.
+//!
+//! # Transports and access
+//!
+//! Each connection has its own agents, runs and server requests; a handle
+//! from one connection is unknown on another (`-32001`), and `run.cancel`
+//! reaches only the runs its own connection drives.
+//!
+//! - **stdio** ([`serve`]): `linch-server` with no arguments. The client
+//!   started the server and is trusted ([`Access::Local`]): no login, no
+//!   tenant, no allowlists.
+//! - **Unix socket** ([`serve_lines`] with [`Access::Login`]): one message
+//!   per line, as on stdio. The first message must be
+//!   **`connection.auth`** `{token}` ([`AuthParams`](protocol::AuthParams)),
+//!   answered with [`Authenticated`](protocol::Authenticated)
+//!   `{"tenant": "acme"}`. Any other first message or an unknown token gets
+//!   `-32003` and the connection closes; so does silence for 10 s.
+//! - **HTTP** ([`serve_messages`] with [`Access::Tenant`]): `GET /rpc` with
+//!   `Authorization: Bearer <token>` upgrades to a WebSocket carrying one
+//!   message per text frame (a binary frame that is not UTF-8 ends the
+//!   connection). A missing or unknown token gets `401` before the upgrade.
+//!
+//! `connection.auth` anywhere but first on the socket is `-32600`. Tokens
+//! are compared in constant time and never logged or echoed. A remote
+//! connection acts for the token's [`Tenant`], and every request passes
+//! its checks before anything runs (no key is read, no process started, no
+//! database connected for a refused one):
+//!
+//! - `agent.open`: the `namespace` is the tenant's name or starts with
+//!   `<tenant>/`. Stores are scoped by namespace, so on a shared Postgres
+//!   another tenant's runs and sessions look missing (`-32021`).
+//! - `run.start`, `run.resume`, `run.approve`: a `principal`, if given, has
+//!   the tenant's name as its `tenant`. The server does not fill one in.
+//! - `agent.open`: the config passes the tenant's [`Allowlists`]: the
+//!   scripted provider only if allowed; a client-chosen provider
+//!   `base_url` (always present for vllm, sglang and llama.cpp) only at an
+//!   allowed origin, since the server's key goes there; a permission mode
+//!   in the allowed list (by default `default` and `accept_edits`, not
+//!   `skip_dangerous`); a `workspace` that is an existing directory under
+//!   an allowed root, replaced by its canonical path; a Postgres DSN only
+//!   for an allowed host, port, socket and database; MCP stdio commands
+//!   exactly as listed and MCP HTTP URLs at allowed origins.
+//!
+//! A refusal is `-32004` with `data.kind` naming the check: `namespace`,
+//! `principal`, `provider`, `provider_base_url`, `permission_mode`,
+//! `workspace`, `postgres`, `mcp_command` or `mcp_url`.
 //!
 //! # Framing
 //!
 //! One JSON-RPC message per line, UTF-8, ending in `\n`; blank lines are
-//! skipped. A request line may be at most [`MAX_LINE_BYTES`] long. Batches
-//! (arrays) are not supported and get one `-32600` error. `params` must be
-//! an object (by-name); an absent `params` reads as `{}`. A request without
-//! an `id` is a notification: the protocol defines none from client to
+//! skipped. A line over [`MAX_LINE_BYTES`] is discarded and reading goes
+//! on: a request gets `-32600` under its `id` when the `id` is in its first
+//! 64 KiB, else under a null id; an answer fails the server request it
+//! names. A line that is not UTF-8 gets `-32700` and reading goes on.
+//! Message transports apply the same limit per message. Batches (arrays)
+//! are not supported and get one `-32600` error. `params` must be an
+//! object (by-name); an absent `params` reads as `{}`. A request without an
+//! `id` is a notification: the protocol defines none from client to
 //! server, and JSON-RPC forbids answering one, so it is dropped silently.
 //!
 //! Reading is strict. A request object with a member other than
@@ -23,13 +72,15 @@
 //! or an `id` that is not a string, number or null is `-32600`. Params with
 //! an unknown, missing or mistyped field are `-32602`. Every result is an
 //! object. Calls run concurrently, so responses may arrive in any order;
-//! match them by `id`.
+//! match them by `id`. At most 64 requests run at once per connection;
+//! past that, reading waits until one is answered.
 //!
 //! Both directions carry requests. The server reads a line with a `method`
 //! as a request and a line with no `method` but a `result` or `error` as
 //! the answer to one of its own requests; it never answers an answer. The
 //! client reads each server line as exactly one of a response, a
-//! notification or a request ([`Message`]).
+//! notification or a request ([`Message`]); it keeps at most
+//! [`NOTIFICATION_CAPACITY`] unread notifications, then stops reading.
 //!
 //! # Methods
 //!
@@ -56,16 +107,16 @@
 //! ```
 //!
 //! `stores` defaults to `{"type": "memory"}`: stores owned by this agent
-//! handle, so resume and approve must use the same handle. Provider keys are
-//! read from the server's environment (`DEEPSEEK_API_KEY`, ...; see
+//! handle, so resume and approve must use the same handle. A Postgres
+//! connect gives up after 5 s. Provider keys are read from the server's
+//! environment (`DEEPSEEK_API_KEY`, ...; see
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
-//! config's `mcp_servers` are connected in order before the result is sent
-//! and disconnected when the server stops. The result is
-//! [`AgentOpened`](protocol::AgentOpened):
+//! config's `mcp_servers` are connected in order before the result is sent.
+//! The result is [`AgentOpened`](protocol::AgentOpened):
 //! `{"agent": "agent-1", "contract": "<hex digest>"}`. The contract covers
 //! the spec, every tool registered at open (host, workspace, then MCP) and
-//! the hook policies; a tool an MCP server adds later is outside it.
-//! Handles live as long as the server.
+//! the hook policies; a tool an MCP server adds later is outside it. A
+//! handle lives until `agent.close` or the end of its connection.
 //!
 //! Each of `tools` ([`HostToolSpec`](protocol::HostToolSpec)) is
 //! `{name, description, input_schema, scope, timeout_ms?}`. `scope` is
@@ -89,11 +140,15 @@
 //! `permission_request` and `open` elsewhere; `context_build` and
 //! `post_turn` cannot fail closed. Each `(point, policy_id,
 //! policy_version)` enters the contract, so bump `policy_version` whenever
-//! a callback's behaviour, matcher, timeout or fail mode changes. The
-//! loop runs the tool points now; the turn points register and count in
-//! the contract but are not called until the loop runs them (card P6-C).
+//! a callback's behaviour, matcher, timeout or fail mode changes.
 //!
 //! Invalid `tools` or `callbacks` entries are `-32602`.
+//!
+//! **`agent.close`** `{agent}` ([`CloseParams`](protocol::CloseParams))
+//! frees a handle: its stores and its MCP servers, which are disconnected
+//! and awaited before the result `{}`. While the connection drives a run of
+//! that agent it is refused with `-32002`; cancel the run or wait for its
+//! `run.end`.
 //!
 //! **`run.start`** `{agent, session_id, prompt, principal?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
@@ -112,13 +167,13 @@
 //! These three answer [`RunAccepted`](protocol::RunAccepted)
 //! `{"run_id": "..."}` at once, before any notification of that run; the
 //! run's outcome, errors included, then arrives as notifications. A
-//! `run_id` the server already drives is refused with `-32002`.
+//! `run_id` the connection already drives is refused with `-32002`.
 //!
 //! **`run.cancel`** `{run_id}` ([`CancelParams`](protocol::CancelParams))
-//! aborts a run the server drives: it ends with a `result` envelope of
+//! aborts a run the connection drives: it ends with a `result` envelope of
 //! subtype `aborted`. The result is `{"cancelled": true}`, or
-//! `{"cancelled": false}` when the server does not drive that run (it may
-//! have just ended); that is not an error.
+//! `{"cancelled": false}` when the connection does not drive that run (it
+//! may have just ended); that is not an error.
 //!
 //! **`run.events`** `{agent, run_id, after_seq?}`
 //! ([`EventsParams`](protocol::EventsParams)) returns
@@ -131,13 +186,15 @@
 //! The server sends these to the client, which answers each with a
 //! response carrying the same `id`. Their ids are strings `srv-<n>`, so
 //! they never equal the numeric ids [`Client`] uses. Each request has a
-//! timeout; when the server stops waiting (the timeout, a run cancel, or
-//! the call being dropped) it sends the notification
-//! **`$/cancelRequest`** `{id}`
+//! timeout, which also covers waiting for room in the output queue; when
+//! the server stops waiting (the timeout, a run cancel, or the call being
+//! dropped) it sends the notification **`$/cancelRequest`** `{id}`
 //! ([`CancelRequestParams`](protocol::CancelRequestParams)). The client may
 //! then stop work and need not answer; an answer that still arrives is
-//! ignored. When the connection closes, every request still waiting fails
-//! at once.
+//! ignored. An answer the server cannot read (malformed, or over
+//! [`MAX_LINE_BYTES`]) fails the request it names: a `tool.call` with code
+//! `host_protocol_error`, a `hook.call` by its `fail_mode`. When the
+//! connection closes, every request still waiting fails at once.
 //!
 //! **`tool.call`** `{agent, name, input, session_id, run_id, tool_use_id,
 //! principal?}` ([`ToolCallParams`](protocol::ToolCallParams)) runs a host
@@ -171,7 +228,8 @@
 //! and permission still applies to a resolved call. At
 //! `permission_request`, a deny stops the chain and an allow does not, so
 //! a later deny wins; with no answer the call asks the host as usual
-//! (`suspended`, then `run.approve`).
+//! (`suspended`, then `run.approve`). A blocked `user_prompt_submit` ends
+//! the run with `-32029` in `run.end` before anything is written.
 //!
 //! # Notifications
 //!
@@ -179,9 +237,10 @@
 //! `{"v": 1, "seq": 7, "run_id": "...", "event": {"type": "...", ...}}`,
 //! in the run's order. Durable kinds arrive once they are durable, so a
 //! client that saw seq `n` replays with `run.events(after_seq = n)`.
-//! Stream-only kinds (`partial_assistant`, `tool_progress`) arrive at once,
-//! carry the last durable seq, and are never replayed. A run's envelopes
-//! end with `result` (finished) or `suspended` (waiting for `run.approve`).
+//! Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) arrive
+//! at once, carry the last durable seq, and are never replayed. A run's
+//! envelopes end with `result` (finished) or `suspended` (waiting for
+//! `run.approve`).
 //!
 //! **`run.end`** `{run_id, error?}` ([`RunEnd`](protocol::RunEnd)): the
 //! server stopped driving the run; it is the run's last notification.
@@ -192,22 +251,24 @@
 //! # Errors
 //!
 //! Error objects are `{code, message, data?}` ([`ErrorObject`]); `message`
-//! includes the causes and never holds a provider key or a DSN.
+//! includes the causes and never holds a provider key, a token or a DSN.
 //!
 //! | Code | Meaning | From |
 //! |---|---|---|
-//! | -32700 | parse error | the line is not JSON |
-//! | -32600 | invalid request | bad request object, batch, line too long, malformed answer |
+//! | -32700 | parse error | the line is not JSON, or not UTF-8 |
+//! | -32600 | invalid request | bad request object, batch, line too long, unreadable answer without an `id`, `connection.auth` after login or off the socket |
 //! | -32601 | method not found | |
 //! | -32602 | invalid params | unknown, missing or mistyped field; invalid host tool or callback |
-//! | -32603 | internal error | a result or envelope did not encode |
-//! | -32001 | agent not found | unknown `agent` handle |
-//! | -32002 | run busy | the server already drives that run |
+//! | -32603 | internal error | a result or envelope did not encode; a request or a run (in `run.end`) panicked |
+//! | -32001 | agent not found | unknown `agent` handle, or one of another connection |
+//! | -32002 | run busy | the connection already drives that run; `agent.close` of an agent with a driven run |
+//! | -32003 | unauthenticated | the socket's first message is not `connection.auth` with a known token |
+//! | -32004 | not allowed | a tenant check refused the request; `data: {kind}` |
 //! | -32010 | missing binding | `BuildError::Missing` |
 //! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash |
 //! | -32012 | contract not digestible | `BuildError::Contract` |
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
-//! | -32014 | store unavailable | Postgres connect or migrate |
+//! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate |
 //! | -32015 | MCP server unavailable | first connect failed; `data.server` names it |
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |
@@ -221,16 +282,17 @@
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
-//! come in `run.end` for a run and as the error of `run.events`. A
-//! malformed answer to a server request with a readable `id` fails that
-//! request with `-32600` instead of being answered.
+//! come in `run.end` for a run and as the error of `run.events`.
 //!
 //! # End of input
 //!
-//! When the input ends, [`serve`] drops every active run where it stands,
-//! like a crash, so a durable (Postgres) run stays resumable; it fails the
-//! server requests still waiting, disconnects every agent's MCP servers,
-//! writes the queued output and returns.
+//! When the input ends (or a remote server stops), the connection stops
+//! reading. Requests already read finish and are answered; an
+//! `agent.open` among them still registers its agent. Every active run is
+//! dropped where it stands, like a crash, so a durable (Postgres) run stays
+//! resumable. Then the server requests still waiting fail, every agent's
+//! MCP servers are disconnected and awaited, the queued output is written,
+//! and the server returns.
 
 #![forbid(unsafe_code)]
 
