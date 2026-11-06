@@ -124,7 +124,7 @@ pub fn config(name: &str, connector: Arc<dyn Connector>) -> McpServerConfig {
         attempts: 3,
         initial_delay: Duration::from_millis(20),
         max_delay: Duration::from_millis(100),
-        attempt_timeout: Duration::from_secs(5),
+        attempt_timeout: Duration::from_secs(30),
     };
     config
 }
