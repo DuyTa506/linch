@@ -8,7 +8,8 @@ use linch_core::{
     JsonObject, JsonValue, Tool, ToolContext, ToolOutputError, ToolResult, ToolScope,
 };
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientRequest, ServerResult,
+    CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientRequest, RequestId,
+    ServerResult,
 };
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient, ServiceError};
 use tokio::sync::watch;
@@ -86,13 +87,6 @@ impl Link {
                     codes::UNAVAILABLE,
                 )
             }
-            ServiceError::Timeout { timeout } => coded(
-                format!(
-                    "MCP server {server:?} did not answer within {} s; the call was cancelled",
-                    timeout.as_secs_f64()
-                ),
-                codes::TIMEOUT,
-            ),
             ServiceError::McpError(error) => coded(
                 format!(
                     "MCP server {server:?} rejected the call: {} (code {})",
@@ -203,40 +197,80 @@ impl Tool for McpTool {
         };
         let params = CallToolRequestParams::new(self.spec.remote.clone()).with_arguments(input);
         let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
-        let options = PeerRequestOptions::with_timeout(self.link.call_timeout);
+        // The timeout is ours, not rmcp's: rmcp's awaits the cancel's send,
+        // which a server that stopped reading never lets finish.
+        let options = PeerRequestOptions::no_options();
         let handle = match conn.peer.send_request_with_option(request, options).await {
             Ok(handle) => handle,
             Err(error) => return Err(self.link.call_failed(&conn, error)),
         };
-        let id = handle.id.clone();
+        // Covers a cancel, the timeout, and the caller dropping this future
+        // (the scheduler's call timeout).
+        let mut abandon = Abandon {
+            peer: conn.peer.clone(),
+            id: Some(handle.id.clone()),
+            reason: "the caller stopped waiting",
+        };
         tokio::select! {
             biased;
             () = ctx.cancel.cancelled() => {
-                // Over stdio this sends `notifications/cancelled`; over modern
-                // streamable HTTP rmcp closes the request's stream instead.
-                // Sent in the background: a server that stopped reading its
-                // stdin must not keep the cancelled call from returning.
-                let reason = Some("cancelled by the caller".to_owned());
-                let notice = CancelledNotificationParam::new(Some(id), reason);
-                let peer = conn.peer.clone();
-                tokio::spawn(async move {
-                    let _ = peer.notify_cancelled(notice).await;
-                });
+                abandon.reason = "cancelled by the caller";
                 Err(coded("[aborted; the MCP request was cancelled]", codes::ABORTED))
             }
-            response = handle.await_response() => match response {
-                Ok(ServerResult::CallToolResult(result)) => tool_result(result),
-                Ok(_) => Err(coded(
+            response = handle.await_response() => {
+                abandon.id = None;
+                match response {
+                    Ok(ServerResult::CallToolResult(result)) => tool_result(result),
+                    Ok(_) => Err(coded(
+                        format!(
+                            "MCP server {:?} asked for input or started a task; \
+                             this client supports neither",
+                            self.link.server
+                        ),
+                        codes::PROTOCOL_ERROR,
+                    )),
+                    Err(error) => Err(self.link.call_failed(&conn, error)),
+                }
+            }
+            () = tokio::time::sleep(self.link.call_timeout) => {
+                abandon.reason = "the call timed out";
+                Err(coded(
                     format!(
-                        "MCP server {:?} asked for input or started a task; \
-                         this client supports neither",
-                        self.link.server
+                        "MCP server {:?} did not answer within {} s; the call was cancelled",
+                        self.link.server,
+                        self.link.call_timeout.as_secs_f64()
                     ),
-                    codes::PROTOCOL_ERROR,
-                )),
-                Err(error) => Err(self.link.call_failed(&conn, error)),
-            },
+                    codes::TIMEOUT,
+                ))
+            }
         }
+    }
+}
+
+/// Sends `notifications/cancelled` for request `id` when dropped while `id`
+/// is still set. Over modern streamable HTTP rmcp closes the request's
+/// stream instead. The send runs in the background: a server that stopped
+/// reading its stdin must not keep the call from returning.
+struct Abandon {
+    peer: Peer<RoleClient>,
+    id: Option<RequestId>,
+    reason: &'static str,
+}
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        // Outside a runtime there is nothing to send on.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let notice = CancelledNotificationParam::new(Some(id), Some(self.reason.to_owned()));
+        let peer = self.peer.clone();
+        runtime.spawn(async move {
+            let _ = peer.notify_cancelled(notice).await;
+        });
     }
 }
 

@@ -1,10 +1,17 @@
 //! Codes on the [`ToolOutputError`](linch_core::ToolOutputError)s an MCP tool
 //! returns. The message is always readable by the model; the code is for the
 //! host.
+//!
+//! A call that ends without the server's result, with [`ABORTED`], with
+//! [`TIMEOUT`], or because the caller dropped its future (the scheduler's
+//! call timeout), is cancelled on the server: `notifications/cancelled` is
+//! sent in the background, or over streamable HTTP the request's stream is
+//! closed.
 
-/// `ToolContext::cancel` fired; the server got `notifications/cancelled`.
+/// `ToolContext::cancel` fired; the server is sent `notifications/cancelled`.
 pub const ABORTED: &str = "aborted";
-/// No result within the call timeout; the server got `notifications/cancelled`.
+/// No result within the call timeout; the server is sent
+/// `notifications/cancelled`.
 pub const TIMEOUT: &str = "timeout";
 /// The server is reconnecting, unavailable or disconnected, or the
 /// connection dropped during the call.

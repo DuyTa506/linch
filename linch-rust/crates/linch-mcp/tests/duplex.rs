@@ -311,6 +311,54 @@ async fn the_call_timeout_cancels_the_request() {
 }
 
 #[tokio::test]
+async fn a_dropped_call_still_cancels_the_request() {
+    let fixture = Fixture::new(standard_tools());
+    let (server, _duplex, registry) = connect(fixture.clone()).await;
+    // What the scheduler's call timeout does: drop the call's future.
+    let slow = call(&registry, "mcp__t__slow", JsonObject::new());
+    let dropped = tokio::time::timeout(Duration::from_millis(100), slow).await;
+    assert!(dropped.is_err(), "the slow call never answers");
+    tokio::time::timeout(PATIENCE, fixture.cancelled.notified())
+        .await
+        .expect("the server saw notifications/cancelled");
+    assert_eq!(server.status(), ServerStatus::Connected);
+    server.disconnect().await;
+}
+
+#[tokio::test]
+async fn the_call_timeout_returns_while_the_server_reads_nothing() {
+    let duplex = Duplex::new(Fixture::new(standard_tools()));
+    let registry = Arc::new(ToolRegistry::new());
+    let mut short = config("t", duplex.clone());
+    short.call_timeout = Duration::from_millis(200);
+    let server = McpServer::connect(short, Arc::clone(&registry))
+        .await
+        .unwrap();
+    duplex.stall();
+    // Larger than the pipe, so this request's write, and every write after
+    // it, waits for a reader that never comes.
+    let big = text_input(&"x".repeat(256 * 1024));
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(PATIENCE, call(&registry, "mcp__t__echo", big))
+        .await
+        .expect("the call returned")
+        .unwrap_err();
+    assert_eq!(
+        error.code.as_deref(),
+        Some(codes::TIMEOUT),
+        "{}",
+        error.message
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    // A stalled server cannot be closed gracefully; drop it.
+    drop(server);
+}
+
+#[tokio::test]
 async fn disconnect_disposes_only_this_servers_registrations() {
     let registry = Arc::new(ToolRegistry::new());
     let first = McpServer::connect(

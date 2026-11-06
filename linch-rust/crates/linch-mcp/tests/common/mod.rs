@@ -30,7 +30,14 @@ pub struct Duplex {
     pub connects: AtomicUsize,
     /// Whether new connects fail.
     pub refuse: AtomicBool,
-    live: Mutex<Option<CancellationToken>>,
+    live: Mutex<Option<Relay>>,
+}
+
+/// The live connection's relay controls.
+#[derive(Clone)]
+struct Relay {
+    stop: CancellationToken,
+    stall: CancellationToken,
 }
 
 impl Duplex {
@@ -45,10 +52,24 @@ impl Duplex {
 
     /// Cut the live connection, as if the server crashed.
     pub fn kill(&self) {
-        let live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(stop) = live.as_ref() {
-            stop.cancel();
+        if let Some(relay) = self.relay() {
+            relay.stop.cancel();
         }
+    }
+
+    /// Stop moving bytes but keep the connection open, as if the server
+    /// hung and stopped reading: once a pipe fills, every write waits.
+    pub fn stall(&self) {
+        if let Some(relay) = self.relay() {
+            relay.stall.cancel();
+        }
+    }
+
+    fn relay(&self) -> Option<Relay> {
+        self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn connects(&self) -> usize {
@@ -72,8 +93,11 @@ impl Connector for Duplex {
         // both pipes at once, like a crashed server or a dropped network.
         let (client, mut near) = tokio::io::duplex(64 * 1024);
         let (mut far, server) = tokio::io::duplex(64 * 1024);
-        let stop = CancellationToken::new();
-        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = Some(stop.clone());
+        let relay = Relay {
+            stop: CancellationToken::new(),
+            stall: CancellationToken::new(),
+        };
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
         let fixture = self.fixture.clone();
         tokio::spawn(async move {
             if let Ok(service) = TestServer(fixture).serve(server).await {
@@ -83,7 +107,9 @@ impl Connector for Duplex {
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::io::copy_bidirectional(&mut near, &mut far) => {}
-                () = stop.cancelled() => {}
+                () = relay.stop.cancelled() => {}
+                // Hold both pipes open, moving nothing, until killed.
+                () = relay.stall.cancelled() => relay.stop.cancelled().await,
             }
         });
         handler.serve(client).await
