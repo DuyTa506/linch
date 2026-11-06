@@ -71,7 +71,7 @@ sequenceDiagram
         S->>P: stream ProviderRequest
         P-->>S: normalized text/tool events
         alt tool calls
-            Note over S,R: tool_batch_pending is held, not written
+            Note over S,R: tool_batch_pending is held, but exact-input runs write it at once
             S->>R: commit tool_executing + pending events
             S->>T: resolve, authorize, execute tools
             T-->>S: ToolCallStart/End events
