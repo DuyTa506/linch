@@ -63,7 +63,8 @@
 //!
 //! The journal lives in a [`JournalStore`]: [`MemoryJournalStore`] for
 //! tests and development, or `PgJournalStore` behind the `postgres`
-//! feature. Every store passes [`conformance::journal_store_suite`].
+//! feature (run `linch_ext::migrate` once at startup). Every store passes
+//! [`conformance::journal_store_suite`].
 
 pub mod conformance;
 mod context;
@@ -74,6 +75,8 @@ mod interrupt;
 mod journal;
 mod memory;
 mod policy;
+#[cfg(feature = "postgres")]
+mod postgres;
 mod step;
 #[cfg(test)]
 mod tests;
@@ -87,4 +90,6 @@ pub use journal::{
 };
 pub use memory::MemoryJournalStore;
 pub use policy::Retry;
+#[cfg(feature = "postgres")]
+pub use postgres::PgJournalStore;
 pub use step::StepOptions;

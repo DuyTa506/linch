@@ -10,12 +10,24 @@
 //! Every run here goes through [`Agent::run`](linch_core::Agent::run); for
 //! offline, deterministic evals bind the agent to a
 //! [`ScriptedProvider`](linch_core::ScriptedProvider) and memory stores.
+//!
+//! The `postgres` feature adds the durable workflow journal
+//! (`workflow::PgJournalStore`) and `migrate`, which creates its tables.
 
 #![forbid(unsafe_code)]
 
 pub mod evals;
+#[cfg(feature = "postgres")]
+mod postgres;
 pub mod reports;
 pub mod workflow;
+
+#[cfg(feature = "postgres")]
+pub use postgres::{MIGRATIONS_TABLE, migrate};
+#[cfg(feature = "postgres")]
+pub use sqlx::PgPool;
+#[cfg(feature = "postgres")]
+pub use sqlx::migrate::MigrateError;
 
 #[cfg(test)]
 mod test_support;
