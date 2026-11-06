@@ -85,6 +85,10 @@ fn escape(text: &str) -> String {
 pub struct MailboxError(#[source] pub Box<dyn std::error::Error + Send + Sync>);
 
 /// Where peer messages wait for their recipient.
+///
+/// An agent built with [`crate::AgentBuilder::mailbox`] drains the inbox
+/// of a run's session at the run's start and at the end of each tool
+/// batch.
 #[async_trait]
 pub trait Mailbox: Send + Sync {
     /// Queue `message` in its recipient's inbox. Returns once the message

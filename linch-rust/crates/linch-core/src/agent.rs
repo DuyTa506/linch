@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::canonical::Digest;
+use crate::coordination::Mailbox;
 use crate::events::{Envelope, Persistence};
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
@@ -118,6 +119,8 @@ pub(crate) struct AgentInner {
     pub(crate) child: bool,
     /// Prices each paid call; `None` reports no cost.
     pub(crate) pricing: Option<Pricing>,
+    /// The inbox each run of a session drains; `None` without one.
+    pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,

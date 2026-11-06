@@ -88,6 +88,7 @@ impl AgentInner {
             subagents: None,
             child: true,
             pricing: self.pricing.clone(),
+            mailbox: self.mailbox.clone(),
             session_close: Vec::new(),
             registrations: Vec::new(),
         })

@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
 use super::{Agent, AgentInner, BuildError, Pricing, SessionClose};
+use crate::coordination::{Mailbox, SendMessageTool};
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
 use crate::json::JsonObject;
@@ -20,8 +21,8 @@ use crate::usage::Usage;
 /// Binds an [`AgentSpec`] to the values an agent runs with.
 ///
 /// The provider, the permission engine, both stores and a namespace are
-/// required; tools, hooks, skills, subagents, pricing and session-close
-/// callbacks default to none. Nothing here does I/O.
+/// required; tools, hooks, skills, subagents, a mailbox, pricing and
+/// session-close callbacks default to none. Nothing here does I/O.
 pub struct AgentBuilder {
     spec: AgentSpec,
     provider: Option<Arc<dyn Provider>>,
@@ -35,6 +36,7 @@ pub struct AgentBuilder {
     skills: Option<Vec<Skill>>,
     subagents: Option<Vec<SubagentDefinition>>,
     pricing: Option<Pricing>,
+    mailbox: Option<Arc<dyn Mailbox>>,
 }
 
 impl AgentBuilder {
@@ -53,6 +55,7 @@ impl AgentBuilder {
             skills: None,
             subagents: None,
             pricing: None,
+            mailbox: None,
         }
     }
 
@@ -149,6 +152,18 @@ impl AgentBuilder {
         self
     }
 
+    /// Give the agent a mailbox for peer messages (see
+    /// [`crate::coordination`]).
+    ///
+    /// [`Self::build`] registers the `send_message` tool in the tool
+    /// registry, for as long as the agent lives, and every run (a
+    /// subagent's too) drains its session's inbox at its start and at the
+    /// end of each tool batch. Several agents may share one mailbox.
+    pub fn mailbox(mut self, mailbox: Arc<dyn Mailbox>) -> Self {
+        self.mailbox = Some(mailbox);
+        self
+    }
+
     /// Build the agent and compute its contract digest from the spec, the
     /// tools registered now, the hook policies, the skills and the
     /// subagents (BLUEPRINT 13.1.2).
@@ -187,6 +202,10 @@ impl AgentBuilder {
             listing = listing_block(&skills);
             built_ins.register(&self.tools, Arc::new(SkillTool::new(skills)))?;
         }
+        if let Some(mailbox) = &self.mailbox {
+            let tool = SendMessageTool::new(Arc::clone(mailbox));
+            built_ins.register(&self.tools, Arc::new(tool))?;
+        }
         let handle = Arc::new(OnceLock::new());
         let mut subagents = None;
         if let Some(definitions) = self.subagents {
@@ -221,6 +240,7 @@ impl AgentBuilder {
             subagents,
             child: false,
             pricing: self.pricing,
+            mailbox: self.mailbox,
             session_close: self.session_close,
             registrations: built_ins.take(),
         });

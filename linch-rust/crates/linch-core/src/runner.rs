@@ -58,6 +58,7 @@ mod compact;
 mod end;
 mod fail;
 mod hooks;
+mod inbox;
 mod progress;
 mod sink;
 mod start;

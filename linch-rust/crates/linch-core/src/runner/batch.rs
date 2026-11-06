@@ -94,7 +94,9 @@ impl Runner {
             ToolRecovery::Done(block) | ToolRecovery::Interrupted { result: block, .. } => block,
             ToolRecovery::Replan(_) => fresh.next().expect("execute returns one result per call"),
         });
-        let message = Message::new(Role::User, results.map(ContentBlock::ToolResult).collect());
+        let mut blocks: Vec<ContentBlock> = results.map(ContentBlock::ToolResult).collect();
+        blocks.extend(self.notes().await?);
+        let message = Message::new(Role::User, blocks);
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::ToolResult,

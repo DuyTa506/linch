@@ -7,7 +7,7 @@ use std::time::Instant;
 use super::batch::{answer_decision, approvals, turn_events, upsert};
 use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
-use super::{Outbox, hooks};
+use super::{Outbox, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
@@ -52,6 +52,10 @@ pub(super) async fn new_run(
         },
         Err(error) => return Err(error.into()),
     };
+    // Peer messages that waited for the session join the prompt.
+    let peers = inbox::drain(&agent, &session_id).await?;
+    let mut prompt = prompt;
+    prompt.content.extend(inbox::blocks(&peers));
     let lease = Lease {
         namespace,
         run_id: run_id.clone(),
@@ -83,17 +87,23 @@ pub(super) async fn new_run(
         },
     };
     let contract = agent.contract;
-    let ready = match journal
+    let created = journal
         .create(session_id.clone(), parent, contract, checkpoint)
-        .await
-    {
+        .await;
+    let ready = match created {
         Ok(ready) => ready,
-        // Another start with the same id created it first, or the session
-        // already has a run that is not terminal: nothing was written.
-        Err(JournalError::Store(
-            error @ (StoreError::Conflict { .. } | StoreError::SessionBusy { .. }),
-        )) => return Err(error.into()),
-        Err(error) => return Err(error.into()),
+        // Nothing of this run is logged, so the drained messages go back.
+        Err(error) => {
+            inbox::redeliver(&agent, peers).await;
+            return Err(match error {
+                // Another start with the same id created it first, or the
+                // session already has a run that is not terminal.
+                JournalError::Store(
+                    error @ (StoreError::Conflict { .. } | StoreError::SessionBusy { .. }),
+                ) => error.into(),
+                error => error.into(),
+            });
+        }
     };
     outbox.deliver(ready).await;
     let progress = Progress::first(started);
