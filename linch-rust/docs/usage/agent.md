@@ -76,7 +76,10 @@ where the server binary is found, and `env` is the server's whole environment,
 where it reads provider keys (this process's environment when absent). Use it
 as an async context manager: leaving the block closes the server's input, the
 server drops its runs where they stand and exits, and it is killed if it has
-not exited after 10 seconds.
+not exited after 10 seconds. `Server.connect(address, token=...)` reaches a
+server that is already running for many clients instead
+([Server](./server.md#connect-from-python)); everything below works the same
+on it.
 
 `server.open_agent(config, tools=(), callbacks=(), *, telemetry=None)` opens
 one agent:
@@ -88,10 +91,64 @@ one agent:
 | `callbacks` | Intercept callbacks made with `@callback`, answered in this process ([below](#callbacks)) |
 | `telemetry` | OpenTelemetry providers for this agent's runs ([Observability](./observability.md)) |
 
-It returns an `Agent` with two attributes: `handle` (the server's name for it,
-such as `agent-1`) and `contract` (a digest of what its runs depend on; see
-[The run contract](#the-run-contract)). One server holds many agents; open
-them once and reuse them for every session.
+It returns an `Agent` with three attributes: `handle` (the server's name for
+it, such as `agent-1`), `contract` (a digest of what its runs depend on; see
+[The run contract](#the-run-contract)) and `skipped` ([below](#skipped-definitions)).
+One server holds many agents; open them once and reuse them for every
+session. `await agent.close()` frees one on the server: its stores and its
+MCP servers, which are disconnected and waited for. With memory stores its
+runs and sessions are gone; with Postgres stores they stay for another agent
+of the same config. A closed agent raises `AgentNotFound`, and closing an
+agent while one of its runs is still going raises `RunBusy`.
+
+### Skipped definitions
+
+With `skills` or `subagents` on, a skill directory or subagent file that
+cannot be used is left out and the others load. `agent.skipped` lists each
+one as a `Skipped(path, reason, detail)`:
+
+```python
+import asyncio
+import tempfile
+from pathlib import Path
+
+from linch_rust import AgentConfig, Server
+from linch_rust.scripted import MODEL
+
+root = Path(tempfile.mkdtemp()).resolve()
+(root / "skills" / "notes").mkdir(parents=True)  # no SKILL.md
+(root / "agents").mkdir()
+(root / "agents" / "reviewer.md").write_text("Review the code.")  # no frontmatter
+
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": MODEL},
+    "provider": {"id": "scripted", "turns": []},
+    "skills": True,
+    "subagents": True,
+    "config_dir": str(root),
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config)
+        for skipped in agent.skipped:
+            print(Path(skipped.path).relative_to(root), skipped.reason)
+
+
+asyncio.run(main())
+```
+
+```text
+skills/notes missing_skill_md
+agents/reviewer.md missing_frontmatter
+```
+
+`reason` is one of `missing_skill_md`, `missing_frontmatter`,
+`invalid_frontmatter`, `io_error` (a symlink, or a file that could not be
+read), `name_collision_tool`, `name_collision_skill` and `name_collision` (a
+second subagent of the same name); `detail` says exactly what is wrong.
 
 The server reads the config strictly. An unknown field at any level is a
 `ProtocolError` (code -32602) naming the fields it accepts, so a misspelt or
@@ -155,7 +212,7 @@ and the run reports it with a `compaction` [event](./events.md).
 | Field | Default | What it controls |
 |---|---|---|
 | `mode` | `default` | The decision when no rule matches: `default` (write and exec calls ask), `accept_edits` (writes inside the project root run; exec asks), `skip_dangerous` (every call runs) |
-| `project_root` | required when `permissions` is given | Absolute path that relative paths and path patterns resolve against |
+| `project_root` | required when `permissions` is given | An absolute path (a relative one is refused at open, unlike `workspace`) that relative paths and path patterns resolve against |
 | `layers` | `[]` | Named lists of rules, from least to most specific |
 | `auto_allow` | `[]` | Tool names allowed in every mode (rules still apply first) |
 | `path_fields` | built in | Which input field holds the path, per tool, added to the built-in table |

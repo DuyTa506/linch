@@ -24,8 +24,9 @@ exception class tells you its family:
 
 `Server()` finds `linch-server` in this order:
 
-1. the binary installed with the `linch-rust` wheel;
-2. the path in `LINCH_SERVER_BIN`;
+1. the path in `LINCH_SERVER_BIN`, so a build of your own replaces the
+   bundled one;
+2. the binary installed with the `linch-rust` wheel;
 3. in a checkout, the newer of `target/debug/linch-server` and
    `target/release/linch-server` under `CARGO_TARGET_DIR` or the cargo
    workspace's `target/`.
@@ -36,7 +37,6 @@ exception class tells you its family:
 |---|---|---|
 | ``no linch-server binary: install the linch-rust wheel, set LINCH_SERVER_BIN, or run `cargo build -p linch-server` in <workspace> (looked in <target dir>)`` (`FileNotFoundError`) | No wheel is installed, the variable is unset, and no cargo build exists | Install the wheel, or build the server in the checkout, or set `LINCH_SERVER_BIN` |
 | `[Errno 2] No such file or directory: <path>` (`FileNotFoundError`) | `LINCH_SERVER_BIN` or `binary=` names a file that does not exist | Point it at the built binary |
-| `LINCH_SERVER_BIN` seems to be ignored | The wheel's own binary comes first | Pass `Server(binary=...)` to use another binary while the wheel is installed |
 | A field documented here is refused as unknown (`ProtocolError`, -32602) | The server binary is older than the client: an old wheel, or a stale cargo build that the search still prefers | Reinstall the wheel, or rebuild with `cargo build -p linch-server` |
 
 ## The `Server` object
@@ -47,6 +47,21 @@ exception class tells you its family:
 | `the server is already started` (`LinchError`) | `start()` called twice | Start each `Server` once |
 | `the server closed its output` (`ConnectionClosed`) | The server process exited: it was killed, crashed, or the `Server` block ended while a run was streaming | Start a new `Server`. With Postgres stores, resume the run ([Runs](./runs.md#resume)); memory runs are gone |
 | fragment: `reading the server failed:` (`ConnectionClosed`) | A server line could not be read or parsed | Report it with the server's stderr |
+
+### A remote server (`Server.connect`)
+
+| Message | Cause | Fix |
+|---|---|---|
+| `a server address is unix:PATH, ws://HOST:PORT/rpc or wss://...` (`ValueError`) | Another scheme, such as `http://`, or a bare path | Copy the address the server printed at startup |
+| `[Errno 2] No such file or directory` or `[Errno 111] Connect call failed` (`OSError`) | Nothing listens there | Start `linch-server --config`, or fix the path or port |
+| `authentication required: the first message must be connection.auth with a valid token (code -32003)` on the socket, `the server refused the token (HTTP 401) (code -32003)` on the WebSocket (`Unauthenticated`) | The token is not in the server's config | Use a token of the config; the server read its variables at startup |
+| `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | The tenant holds `max_connections` connections | Close one, or raise the tenant's `max_connections` |
+| `Server.connect over WebSocket needs the websocket extra` (`ImportError`) | `websockets` is not installed | `pip install 'linch-rust[websocket]'`, or use the socket |
+| `a server reached with Server.connect has no process here` (`LinchError`) | `server.pid` on a remote server | Only a spawned server has a process here |
+
+Refusals of `open_agent` and `run` on a remote server are `NotAllowed`
+(-32004), whose `kind` names the check, and `LimitReached` (-32005) for
+`max_runs`; [Server](./server.md#what-admission-refuses-and-why) lists them.
 
 ## Opening an agent
 
@@ -83,7 +98,7 @@ on a DSN. The message never holds the DSN.
 
 | Message (fragment) | Cause | Fix |
 |---|---|---|
-| `Postgres stores could not be opened: pool timed out while waiting for an open connection` | Nothing answered within 5 seconds: wrong host or port, the database is down, or a firewall | Check that the server's host can reach the database |
+| `Postgres stores could not be opened: error communicating with database: cannot reach Postgres at <host>:<port> within 5s` | Nothing answered within 5 seconds: wrong host or port, the database is down, or a firewall | Check that the server's host can reach that host and port |
 | `password authentication failed for user "<user>"` | Wrong user or password | Fix the credentials in the DSN |
 | `database "<name>" does not exist` | The database in the DSN is missing | Create it; linch-rust creates tables, not databases |
 | `error with configuration: relative URL without a base` | The DSN is not a URL | Use `postgres://user:pass@host:port/db` |
@@ -104,7 +119,7 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | No such run in the agent's stores; with memory stores, a different `Agent` handle started it, or the server restarted | With memory stores use the handle that started the run; with Postgres check the namespace and DSN |
 | `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume` or `approve` of a finished run; `data["status"]` is its status | Start a new run in the session |
-| `ContractMismatch` (-32025) | `run <id> has contract <found>, this agent has <expected>` | The agent's spec, tools or callbacks differ from the ones the run started with | Reopen with the original config, or let the run finish first ([The run contract](./agent.md#the-run-contract)) |
+| `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (the names of `data`'s keys) | The agent's spec, tools or callbacks differ from the ones the run started with | Reopen with the original config, or let the run finish first ([The run contract](./agent.md#the-run-contract)) |
 | `NotSuspended` (-32027) | `run <id> is not awaiting approval; if an approve already committed its answers, continue the run with resume` | An approve sent again after its answers were committed (your process or the connection died) | Call `agent.resume(run_id)` ([Runs](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | the callback's reason, in `.reason` | A `user_prompt_submit` callback blocked the prompt | Nothing was written; change the prompt or the callback |
 

@@ -11,6 +11,7 @@ server owns the stores; your process never connects to them.
 ```python
 {"type": "memory"}                                            # the default
 {"type": "postgres", "dsn": "postgres://user:pass@db:5432/linch"}
+{"type": "postgres", "dsn": "postgres://user:pass@db:5432/linch", "max_connections": 32}
 ```
 
 ---
@@ -136,11 +137,13 @@ Schema details, write paths and the refusal rules are in the
   it. DSNs are matched as written, so two spellings of one database get two
   pools.
 - Opening gives up after 5 seconds when the database cannot be reached
-  (`OpenError`, code -32014), instead of retrying for longer.
-- A pool holds at most 10 connections. A run that commits back to back uses
-  about two, so plan about two connections per run in flight at once, per
-  server process. Several server processes on one database each have their
-  own pools.
+  (`OpenError`, code -32014, naming the host and port it tried), instead of
+  retrying for longer.
+- A pool holds at most `max_connections` connections, 10 when absent (at
+  least 1). A run that commits back to back uses about two, so plan about two
+  connections per run in flight at once, per server process. The open that
+  connects a DSN's pool sets its size; agents that share the pool share that
+  size. Several server processes on one database each have their own pools.
 - A connection the database dropped while idle fails the next write instead
   of being replaced first; the run stops at its last durable state and can be
   resumed.

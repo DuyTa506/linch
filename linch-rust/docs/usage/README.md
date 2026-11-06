@@ -6,8 +6,10 @@ find the page for each feature.
 linch-rust has the same concepts as Python Linch (agents, sessions, runs,
 events, tools, permissions, durable runs) with a faster kernel written in
 Rust. The kernel runs in `linch-server`, a sidecar the `linch_rust` client
-starts and drives over stdio. You write Python only; the Rust side is
-described in the [architecture pages](../architecture/README.md).
+starts and drives over stdio, or one running for many clients that it reaches
+over a Unix socket or WebSocket ([Server](./server.md)). You write Python
+only; the Rust side is described in the
+[architecture pages](../architecture/README.md).
 
 The docs ship with the package: `linch-rust docs path` prints where they are
 installed, so you can read or search them offline.
@@ -19,6 +21,7 @@ installed, so you can read or search them offline.
 ```bash
 pip install linch-rust              # the client and the linch-server binary
 pip install 'linch-rust[otel]'      # with OpenTelemetry spans and metrics
+pip install 'linch-rust[websocket]' # to reach a remote server over WebSocket
 ```
 
 Python 3.11 or newer. The only other runtime dependency is `orjson`. From a
@@ -27,7 +30,7 @@ checkout, see [Quickstart](./quickstart.md#1-install).
 ## Core concepts
 
 ```text
-Server ─────── one linch-server child process; many agents and runs
+Server ─────── one linch-server child process, or a connection to a running one; many agents and runs
   └── Agent ── opened from an AgentConfig (plain data) plus host tools and callbacks
         └── session id ── one conversation; at most one live run
               └── Run ── one prompt: an async stream of Envelopes
@@ -60,7 +63,7 @@ Server ─────── one linch-server child process; many agents and run
 | [Deep agent](./deep-agent.md) | The `deep_agent` preset and its profiles |
 | [Profiles](./profiles.md) | Versioned domain profiles for an agent's runs |
 | [Observability](./observability.md) | OpenTelemetry spans and metrics from the client |
-| [Server](./server.md) | Running `linch-server` for remote tenants: tokens, allowlists, limits |
+| [Server](./server.md) | Running `linch-server` for remote tenants, and `Server.connect`: tokens, allowlists, limits |
 
 Coming later:
 

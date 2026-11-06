@@ -7,7 +7,8 @@ decodes, its fields, and how sequence numbers and replay work.
 
 Iterating a `Run` yields `Envelope`s. Each holds one event, decoded into a
 frozen dataclass from `linch_rust`. Nested values (messages, usage, tool
-results) stay as the JSON dicts the server sends. Decoding is tolerant: a
+results) stay as the JSON dicts the server sends; the child event a
+`subagent` event wraps is decoded like any other. Decoding is tolerant: a
 field this client does not know is dropped, and a type it has no class for
 becomes `UnknownEvent`.
 
@@ -165,7 +166,7 @@ The run started.
 | `model` | `spec.model` |
 | `tools` | Names of the tools offered, in order |
 | `parent_run_id` | The parent run, for a subagent's run; `None` otherwise |
-| `trace_id` | Trace id, when one is set; `None` with this client |
+| `trace_id` | Trace id, when one is set; always `None` from the server. Use `Run.trace_id` ([Observability](./observability.md#correlate-logs-and-traces)) |
 
 A resumed or approved stream does not start with `init`; it starts where the
 run continues.
@@ -245,14 +246,13 @@ A tool call finished.
 | `result` | The tool result block the model reads: `{"tool_use_id", "content": [blocks], "is_error"?}` |
 | `duration_ms` | How long the call took |
 | `canonical_output` | The structured value, for tools that declare an output schema; `None` otherwise |
+| `metadata` | Details for the host only, never shown to the model: what a host tool returned in [`ToolOutput.metadata`](./tools.md#metadata-for-the-host), or where an offloaded result went; `None` for an error or a tool that set none |
 | `tool_use_id` | Property: `result["tool_use_id"]` |
 | `is_error` | Property: whether the result is a tool error |
 
 A refused, denied or blocked call also ends with a `tool_call_end` whose
 `is_error` is true. A call interrupted by a crash gets no `tool_call_end`;
 its placeholder result is in the next `user` event of subtype `tool_result`.
-The server also sends a `metadata` dict for some calls (an offloaded result's
-path, for example); this client does not decode it.
 
 ### `ToolProgressEvent` (`tool_progress`), stream-only
 
@@ -324,22 +324,36 @@ The run finished; its stream ends here.
 | `duration_ms` | Wall time of the `run`, `resume` or `approve` call that ended the run. The whole run's span is this envelope's `ts_ms` minus the `init` envelope's |
 | `total_cost_usd` | Cost of the run's priced calls; `None` when none was priced |
 | `structured_output`, `structured_error` | For runs with an output schema; `None` with this client |
-| `trace_id` | Trace id, when one is set |
+| `trace_id` | Trace id, when one is set; always `None` from the server |
+
+### `SkillInvokedEvent` (`skill_invoked`)
+
+The `Skill` tool loaded a skill. `name` is the skill and `args` the argument
+text it was given, or `None`. `model_override` and `allowed_tools` are
+always `None` today. See [Skills](./skills.md).
+
+### `SkillCompletedEvent` (`skill_completed`)
+
+That skill's call ended: `name`, and `is_error` (`True` when the skill could
+not be loaded).
+
+### `SubagentEvent` (`subagent`)
+
+An event of a subagent's child run. `child_run_id` is the child run
+(`<parent run id>:<tool_use_id>`) and `event` the child's event, decoded into
+its own class (an `InitEvent`, a `ToolCallEndEvent`, another `SubagentEvent`
+for a grandchild, ...). A subagent's events, its stream-only ones included,
+reach the parent's stream this way. See [Subagents](./subagents.md).
+
+### `ChildRunStatusEvent` (`child_run_status`)
+
+A background worker's child run changed status: `child_run_id` and `status`
+(`running`, then `completed`, `failed` or `aborted`).
 
 ### `UnknownEvent`
 
-A type this client has no class for. `type` is the wire type and `raw` the
-payload without it. These arrive as `UnknownEvent` today:
-
-| `type` | When | `raw` keys |
-|---|---|---|
-| `skill_invoked` | The `Skill` tool loads a skill | `name`, `args?`, `model_override?`, `allowed_tools?` |
-| `skill_completed` | That skill's call ends | `name`, `is_error?` |
-| `subagent` | A subagent's run emits an event | `child_run_id`, `event` (the child's event, as a raw dict) |
-| `child_run_status` | A background worker starts or ends | `child_run_id`, `status` |
-
-A subagent's events, its stream-only ones included, reach the parent's stream
-wrapped in `subagent`. See [Subagents](./subagents.md).
+A type this client has no class for, such as `budget` or `workflow`. `type`
+is the wire type and `raw` the payload without it.
 
 ## Usage and cost
 

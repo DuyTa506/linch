@@ -13,16 +13,15 @@ Unix socket, on HTTP with WebSocket, or both, for many clients at once. Each
 connection logs in with a bearer token and acts for that token's tenant, and
 every `agent.open` passes the tenant's allowlists before anything runs.
 
-The `linch_rust` client speaks stdio only: it cannot connect to a listening
-server yet. A remote client speaks the JSON-RPC protocol itself, as the
-socket example below does. The methods are documented in the `linch-rpc`
-crate docs (`crates/linch-rpc/src/lib.rs`); Rust programs can use
-`linch_rpc::Client`.
+From Python, `Server.connect(address, token=...)` reaches such a server and is
+used like `Server()` ([below](#connect-from-python)). Clients in other
+languages speak the JSON-RPC protocol documented in the `linch-rpc` crate docs
+(`crates/linch-rpc/src/lib.rs`); Rust programs can use `linch_rpc::Client`.
 
 | | `linch-server` (stdio) | `linch-server --config FILE` |
 |---|---|---|
 | Started by | `Server()` in your process | You, as a service |
-| Clients | The one that started it | Many, over a socket or WebSocket |
+| Clients | The one that started it | Many: `Server.connect(...)`, over a socket or WebSocket |
 | Login | None | `connection.auth` or `Authorization: Bearer` |
 | Allowlists and limits | None | Per tenant |
 | Stops | When its stdin closes | On SIGINT or SIGTERM |
@@ -129,111 +128,113 @@ server's `PATH`; prefer absolute paths.
 
 ---
 
-## Connect over the socket
+## Connect from Python
 
-One JSON-RPC 2.0 message per line, as on stdio. The first line must be
-`connection.auth` with a token; after that the connection takes the same
-methods as stdio: `agent.open` with an [agent config](./agent.md),
-`run.start`, `run.resume`, `run.approve`, `run.cancel`, `run.events`,
-`session.close`, `agent.close`. Run events arrive as `run.event`
-notifications and end with `run.end`.
+`Server.connect(address, token=...)` takes the address the server printed at
+startup: `unix:/run/linch/linch.sock` for the socket, `ws://127.0.0.1:8731/rpc`
+for the WebSocket (`wss://` when TLS is in front of it). Use it as an async
+context manager, like `Server()`: entering logs in, and leaving closes the
+connection, which drops the runs it drives where they stand (a Postgres run
+stays resumable). Host tools, callbacks, approvals and the event stream work
+as over stdio. The WebSocket needs the `websocket` extra, which adds
+`websockets`; the socket needs nothing more:
+
+```bash
+pip install 'linch-rust[websocket]'
+```
 
 ```python
 import asyncio
-import itertools
-import json
 import os
 
-SOCKET = os.environ.get("LINCH_SOCKET", "/run/linch/linch.sock")
+from linch_rust import AgentConfig, Allow, NotAllowed, Server, SuspendedEvent, tool
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+SOCKET = os.environ.get("LINCH_SOCKET", "unix:/run/linch/linch.sock")
+WEBSOCKET = os.environ.get("LINCH_WEBSOCKET", "ws://127.0.0.1:8731/rpc")
 TOKEN = os.environ["LINCH_TOKEN_ACME"]
 
 
-class Rpc:
-    """One JSON-RPC 2.0 message per line; notifications are kept for later."""
+@tool(scope="write")
+async def save_note(text: str) -> str:
+    """Save a note for the support team."""
+    return f"saved: {text}"
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self.reader, self.writer = reader, writer
-        self.ids = itertools.count(1)
-        self.notifications: list[dict] = []
 
-    async def call(self, method: str, params: dict) -> dict:
-        id = next(self.ids)
-        message = {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
-        self.writer.write((json.dumps(message) + "\n").encode())
-        await self.writer.drain()
-        while True:
-            answer = json.loads(await self.reader.readline())
-            if answer.get("id") != id:
-                self.notifications.append(answer)
-            elif "error" in answer:
-                raise RuntimeError(answer["error"])
-            else:
-                return answer["result"]
-
-    async def notification(self) -> dict:
-        if self.notifications:
-            return self.notifications.pop(0)
-        return json.loads(await self.reader.readline())
+def support(turns: list[dict]) -> AgentConfig:
+    return {
+        "namespace": "acme/support",
+        "spec": {"model": MODEL},
+        "provider": {"id": "scripted", "turns": turns},
+    }
 
 
 async def main() -> None:
-    reader, writer = await asyncio.open_unix_connection(SOCKET, limit=64 * 1024 * 1024)
-    rpc = Rpc(reader, writer)
-    print(await rpc.call("connection.auth", {"token": TOKEN}))
+    async with Server.connect(SOCKET, token=TOKEN) as server:
+        try:
+            await server.open_agent({**support([]), "tasks": True})
+        except NotAllowed as refused:
+            print("refused:", refused.kind)
 
-    config = {
-        "namespace": "acme/support",
-        "spec": {"model": "scripted-model"},
-        "provider": {"id": "scripted", "turns": [{"events": [
-            {"type": "message_start", "model": "scripted-model"},
-            {"type": "text_delta", "text": "Hello from the server."},
-            {"type": "message_end", "stop_reason": "end_turn"},
-        ]}]},
-    }
-    try:
-        await rpc.call("agent.open", {**config, "tasks": True})
-    except RuntimeError as refused:
-        print("refused:", refused)
+        turns = [tool_turn("c1", "save_note", {"text": "call back"}), text_turn("Saved.")]
+        agent = await server.open_agent(support(turns), tools=[save_note])
+        run = await agent.run("s1", "Note: call back")
+        stopped = await run.result()
+        assert isinstance(stopped, SuspendedEvent)
+        print("asks:", stopped.pending_request_ids)
+        result = await (await agent.approve(run.id, {"c1": Allow()})).result()
+        print("final:", result.final_text)
 
-    agent = (await rpc.call("agent.open", config))["agent"]
-    run = await rpc.call("run.start", {"agent": agent, "session_id": "s1", "prompt": "hi"})
-    while True:
-        message = await rpc.notification()
-        if message["method"] == "run.event":
-            for envelope in message["params"]["envelopes"]:
-                if envelope["event"]["type"] == "result":
-                    print("final:", envelope["event"]["final_text"])
-        elif message["method"] == "run.end" and message["params"]["run_id"] == run["run_id"]:
-            break
-    writer.close()
-    await writer.wait_closed()
+    async with Server.connect(WEBSOCKET, token=TOKEN) as server:
+        agent = await server.open_agent(support([text_turn("Hello over WebSocket.")]))
+        print("final:", (await (await agent.run("s2", "hi")).result()).final_text)
 
 
 asyncio.run(main())
 ```
 
 ```text
-{'tenant': 'acme'}
-refused: {'code': -32004, 'message': "tasks and deep_agent auto-allow the task tools, so they need skip_dangerous in the tenant's permission_modes", 'data': {'kind': 'auto_allow'}}
-final: Hello from the server.
+refused: auto_allow
+asks: ['c1']
+final: Saved.
+final: Hello over WebSocket.
 ```
 
-- A first message other than `connection.auth`, or an unknown token, gets
-  `-32003` and the connection closes; so does 10 seconds of silence.
-- Host tools and callbacks work as on stdio: the server sends `tool.call` and
-  `hook.call` requests on the same connection, and the client answers them.
-  This minimal client declares none.
+| Raised | When |
+|---|---|
+| `ValueError` by `Server.connect` | The address is not `unix:`, `ws://` or `wss://` |
+| `OSError` on entering | Nothing listens at the address |
+| `Unauthenticated` (-32003) on entering | The token is not in the config (an HTTP `401` on the WebSocket) |
+| `LimitReached` (-32005) on entering | The tenant holds `max_connections` connections (`kind == "connections"`; an HTTP `429` on the WebSocket), or 32 logins wait at once (`kind == "logins"`) |
+| `NotAllowed` (-32004) | `open_agent` or a run call failed a [check](#what-admission-refuses-and-why); `.kind` names it |
+| `LimitReached` (-32005) by `run`, `resume` or `approve` | The tenant drives `max_runs` runs; nothing started (`kind == "runs"`, `.max` the cap) |
+
+- A remote server owns the provider keys: they come from its environment, and
+  `Server.connect` takes no `env`. `server.pid` raises `LinchError`.
 - Each connection has its own agent handles (`agent-1` is always the
   connection's own) and can cancel only the runs it drives. A Postgres run
-  can be resumed from another connection that opens the same config.
+  can be resumed or approved from another connection that opens the same
+  config.
 
 ---
 
-## Connect over HTTP
+## The protocol on each transport
 
-`GET /rpc` with `Authorization: Bearer <token>` upgrades to a WebSocket that
-carries one JSON-RPC message per text frame, with the same methods as the
-socket and no `connection.auth`. The server answers before the upgrade:
+- **Socket:** one JSON-RPC 2.0 message per line, as on stdio. The first line
+  must be `connection.auth` with a token, answered with `{"tenant": "acme"}`;
+  after that the connection takes the same methods as stdio: `agent.open`
+  with an [agent config](./agent.md), `run.start`, `run.resume`,
+  `run.approve`, `run.cancel`, `run.events`, `session.close`, `agent.close`.
+  A first message other than `connection.auth`, or an unknown token, gets
+  `-32003` and the connection closes; so does 10 seconds of silence.
+- **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades to a
+  WebSocket that carries one JSON-RPC message per text frame, with the same
+  methods and no `connection.auth`.
+- On both, run events arrive as `run.event` notifications and end with
+  `run.end`, and the server sends `tool.call` and `hook.call` requests on the
+  same connection for the client to answer.
+
+The HTTP server answers before the upgrade:
 
 | Request | Answer |
 |---|---|
@@ -256,8 +257,10 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
   `<tenant>/` (`acme`, `acme/support`). Stores are keyed by namespace, so on
   a shared Postgres database another tenant's runs and sessions look missing
   (`-32021`).
-- A `principal` passed to `run.start`, `run.resume` or `run.approve` must
-  name the connection's tenant. The server does not fill one in.
+- A `principal` passed to `run.start`, `run.resume` or `run.approve`
+  (`agent.run(..., principal=...)` from Python) must name the connection's
+  tenant, or the call raises `NotAllowed` (`kind == "principal"`). The server
+  does not fill one in.
 - Tokens are kept only as SHA-256 digests and compared in constant time. No
   token is written to any output.
 
@@ -272,6 +275,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Logins waiting at once | 32, across the server | `-32005` (`kind: logins`) and the connection closes |
 | Login wait | 10 seconds | `-32003` and the connection closes |
 | One message | 16 MiB | The request gets `-32600` |
+| A Postgres pool | One per DSN across the server, `stores.max_connections` connections (10 unless set) | Queries wait for a connection; the open that connects a DSN sets its size and later opens share it ([Stores](./stores.md#connections-and-pools)) |
 | Requests in flight per connection | 64 | Reading waits until one is answered |
 
 The defaults bound what one tenant spends: each run streams from a provider
@@ -283,7 +287,8 @@ on the server's key, and each connection may buffer a large message.
 
 Every check runs before anything happens: for a refused `agent.open` no key
 is read, no MCP process starts and no database is connected. A refusal is
-`-32004` with `data.kind` naming the check.
+`-32004` with `data.kind` naming the check: `NotAllowed` in Python, whose
+`kind` is that name.
 
 | `kind` | Refused when | Why |
 |---|---|---|
