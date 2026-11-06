@@ -12,7 +12,9 @@
 //!
 //! ```no_run
 //! # async fn start(dsn: &str) -> Result<(), Box<dyn std::error::Error>> {
-//! let pool = linch_postgres::connect(dsn, linch_postgres::CONNECT_TIMEOUT).await?;
+//! use linch_postgres::{CONNECT_TIMEOUT, MAX_CONNECTIONS};
+//!
+//! let pool = linch_postgres::connect(dsn, CONNECT_TIMEOUT, MAX_CONNECTIONS).await?;
 //! linch_postgres::migrate(&pool).await?;
 //! let runs = linch_postgres::PgRunStore::new(pool.clone());
 //! let sessions = linch_postgres::PgSessionStore::new(pool);
@@ -26,10 +28,13 @@
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;
+use std::io;
+use std::num::NonZeroU32;
+use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::migrate::{Migration, MigrationType, Migrator};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
 mod codec;
@@ -54,6 +59,10 @@ pub const MIGRATIONS_TABLE: &str = "linch_migrations";
 /// How long [`connect`] waits for the first connection by default.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The most connections a [`connect`] pool opens by default (sqlx's own
+/// default).
+pub const MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::new(10).unwrap();
+
 /// Connect a pool, failing after `timeout` when no first connection can
 /// be opened.
 ///
@@ -72,19 +81,39 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Args:
 ///     dsn: Connection string, for example `postgres://user:pass@host/db`.
 ///     timeout: Longest wait for the first connection.
+///     max_connections: The most connections the pool opens at once
+///         ([`MAX_CONNECTIONS`] unless the host needs more).
 ///
 /// Returns:
 ///     A pool holding one open connection.
 ///
 /// Raises:
-///     sqlx::Error: `PoolTimedOut` when no connection opened in time,
-///         `Configuration` for a malformed DSN, or the server's refusal
+///     sqlx::Error: `Io` of kind `TimedOut` when no connection opened in
+///         time, naming the host and port (or socket) it tried;
+///         `Configuration` for a malformed DSN; or the server's refusal
 ///         (bad password, unknown database). No message holds the DSN.
-pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error> {
-    let pool = PgPoolOptions::new().test_before_acquire(false);
-    match tokio::time::timeout(timeout, pool.connect(dsn)).await {
+pub async fn connect(
+    dsn: &str,
+    timeout: Duration,
+    max_connections: NonZeroU32,
+) -> Result<PgPool, sqlx::Error> {
+    let options = PgConnectOptions::from_str(dsn)?;
+    let target = match options.get_socket() {
+        Some(socket) => format!("{} (port {})", socket.display(), options.get_port()),
+        None if options.get_host().contains(':') => {
+            format!("[{}]:{}", options.get_host(), options.get_port())
+        }
+        None => format!("{}:{}", options.get_host(), options.get_port()),
+    };
+    let pool = PgPoolOptions::new()
+        .test_before_acquire(false)
+        .max_connections(max_connections.get());
+    match tokio::time::timeout(timeout, pool.connect_with(options)).await {
         Ok(connected) => connected,
-        Err(_) => Err(sqlx::Error::PoolTimedOut),
+        Err(_) => {
+            let message = format!("cannot reach Postgres at {target} within {timeout:?}");
+            Err(sqlx::Error::Io(io::Error::new(io::ErrorKind::TimedOut, message)))
+        }
     }
 }
 

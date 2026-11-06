@@ -1,6 +1,7 @@
 //! [`AgentConfig`]: an agent as one strict serde value.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, ToolSearch, Workers};
@@ -244,6 +245,12 @@ pub enum StoreConfig {
         /// Connection string, for example `postgres://user:pass@host/db`.
         #[serde(serialize_with = "redact::dsn")]
         dsn: String,
+        /// The most connections the pool opens at once;
+        /// [`linch_postgres::MAX_CONNECTIONS`] (10) when absent. Only the
+        /// open that connects the DSN's pool sets it: agents that share
+        /// that pool share its size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_connections: Option<NonZeroU32>,
     },
 }
 
@@ -257,9 +264,12 @@ impl fmt::Debug for StoreConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory {} => f.write_str("Memory"),
-            Self::Postgres { .. } => f
+            Self::Postgres {
+                max_connections, ..
+            } => f
                 .debug_struct("Postgres")
                 .field("dsn", &"[redacted]")
+                .field("max_connections", max_connections)
                 .finish(),
         }
     }

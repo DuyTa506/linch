@@ -319,8 +319,11 @@ async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenErro
             let runs = Arc::new(MemoryRunStore::default());
             Ok((runs, sessions.clone(), sessions, None))
         }
-        StoreConfig::Postgres { dsn } => {
-            let (shared, pool) = pools.get(&dsn).await?;
+        StoreConfig::Postgres {
+            dsn,
+            max_connections,
+        } => {
+            let (shared, pool) = pools.get(&dsn, max_connections).await?;
             let sessions = Arc::new(PgSessionStore::new(pool.clone()));
             let runs = Arc::new(PgRunStore::new(pool));
             Ok((runs, sessions.clone(), sessions, Some(shared)))

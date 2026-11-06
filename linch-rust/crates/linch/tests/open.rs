@@ -205,7 +205,10 @@ async fn a_postgres_failure_never_shows_the_password() {
         "postgres://linch:hunter2-secret@127.0.0.1:5432/db?sslmode=bogus",
     ] {
         let mut config = scripted(json!([]), None);
-        config.stores = StoreConfig::Postgres { dsn: dsn.into() };
+        config.stores = StoreConfig::Postgres {
+            dsn: dsn.into(),
+            max_connections: None,
+        };
         assert!(!format!("{config:?}").contains("hunter2"));
         let error = config.open().await.expect_err("no database there");
         assert!(matches!(error, OpenError::Store(_)), "{error:?}");

@@ -93,7 +93,7 @@ impl AgentConfig {
     ///         which the config types never cause.
     pub fn to_value_with_secrets(&self) -> Result<JsonValue, serde_json::Error> {
         let mut value = serde_json::to_value(self)?;
-        if let StoreConfig::Postgres { dsn } = &self.stores {
+        if let StoreConfig::Postgres { dsn, .. } = &self.stores {
             value["stores"]["dsn"] = JsonValue::from(dsn.as_str());
         }
         for (index, server) in self.mcp_servers.iter().enumerate() {
