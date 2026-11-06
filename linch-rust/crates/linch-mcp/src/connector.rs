@@ -2,11 +2,15 @@
 //! handler every connection runs.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::pin::Pin;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, ProcessGroup};
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::service::{
     ClientInitializeError, NotificationContext, RoleClient, RunningService, ServiceError,
@@ -141,8 +145,56 @@ impl Connector for Stdio {
             }
         }
         command.envs(&self.env);
+        // The server leads its own process group, so what it starts itself
+        // (`npx`, `uvx`, `sh -c`) is killed with it.
+        let mut command = CommandWrap::from(command);
+        command.wrap(ProcessGroup::leader()).wrap(KillGroup);
         let transport = TokioChildProcess::new(command).map_err(ConnectError::Spawn)?;
         handler.serve(transport).await
+    }
+}
+
+/// Sends `SIGKILL` to a [`ProcessGroup`] child's whole group once the
+/// child has exited. rmcp signals the group only when the server outlives
+/// its grace period; a server that exits on stdin EOF would otherwise leave
+/// its own children running. The group id could in principle be reused in
+/// the instant after the server is reaped, as with Python's `killpg`.
+#[derive(Debug)]
+struct KillGroup;
+
+impl CommandWrapper for KillGroup {
+    fn wrap_child(
+        &mut self,
+        child: Box<dyn ChildWrapper>,
+        _: &CommandWrap,
+    ) -> std::io::Result<Box<dyn ChildWrapper>> {
+        Ok(Box::new(GroupChild(child)))
+    }
+}
+
+#[derive(Debug)]
+struct GroupChild(Box<dyn ChildWrapper>);
+
+impl ChildWrapper for GroupChild {
+    fn inner(&self) -> &dyn ChildWrapper {
+        self.0.as_ref()
+    }
+
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self.0.as_mut()
+    }
+
+    fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+        self.0
+    }
+
+    fn wait(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<ExitStatus>> + Send + '_>> {
+        Box::pin(async move {
+            let status = self.0.wait().await?;
+            // The group's `start_kill`; fails harmlessly once it is empty.
+            let _ = self.0.start_kill();
+            Ok(status)
+        })
     }
 }
 

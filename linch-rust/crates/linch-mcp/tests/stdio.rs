@@ -22,8 +22,8 @@ fn example(name: &str) -> PathBuf {
     dir.join("examples").join(name)
 }
 
-#[tokio::test]
-async fn stdio_round_trip_and_clean_exit() {
+/// The example server, which must have been built.
+fn stdio_server() -> PathBuf {
     let program = example("stdio_server");
     assert!(
         program.exists(),
@@ -31,6 +31,12 @@ async fn stdio_round_trip_and_clean_exit() {
          or `cargo build -p linch-mcp --example stdio_server` first",
         program.display()
     );
+    program
+}
+
+#[tokio::test]
+async fn stdio_round_trip_and_clean_exit() {
+    let program = stdio_server();
     let registry = Arc::new(ToolRegistry::new());
     let config = McpServerConfig::new(
         "stdio",
@@ -74,4 +80,34 @@ async fn stdio_round_trip_and_clean_exit() {
         !std::path::Path::new(&format!("/proc/{pid}")).exists(),
         "the server process {pid} is still running"
     );
+}
+
+#[tokio::test]
+async fn disconnect_kills_what_the_server_started() {
+    let marker = std::env::temp_dir().join(format!("linch-mcp-orphan-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    // Like `npx` or `uvx`: a launcher leaves a child behind, here one that
+    // would write the marker after 2 s, then becomes the server.
+    let script = r#"(sleep 2; touch "$0") & exec "$1""#;
+    let args = vec![
+        "-c".to_owned(),
+        script.to_owned(),
+        marker.to_string_lossy().into_owned(),
+        stdio_server().to_string_lossy().into_owned(),
+    ];
+    let registry = Arc::new(ToolRegistry::new());
+    let config = McpServerConfig::new("launched", McpTransport::stdio("/bin/sh", args));
+    let server = McpServer::connect(config, Arc::clone(&registry))
+        .await
+        .expect("connect through sh");
+    let echoed = call(&registry, "mcp__launched__echo", text_input("up"))
+        .await
+        .unwrap();
+    assert_eq!(echoed.value, json!("up"));
+    server.disconnect().await;
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let survived = marker.exists();
+    let _ = std::fs::remove_file(&marker);
+    assert!(!survived, "the server's child outlived the disconnect");
 }

@@ -1672,6 +1672,7 @@ dependencies = [
  "axum",
  "http",
  "linch-core",
+ "process-wrap",
  "rmcp",
  "serde_json",
  "thiserror",

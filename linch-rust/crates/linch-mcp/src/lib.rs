@@ -22,6 +22,9 @@
 //! Built on [`rmcp`], the official Rust SDK, speaking protocol 2026-07-28
 //! with a fallback to the 2025-11-25 `initialize` handshake. Legacy SSE,
 //! resources, prompts, sampling, elicitation and OAuth are not supported.
+//!
+//! The crate is Unix-only: a stdio server leads its own process group, which
+//! is killed as a whole when the server closes.
 
 mod catalog;
 pub mod codes;
