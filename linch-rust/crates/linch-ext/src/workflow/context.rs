@@ -21,7 +21,8 @@ pub type EventSink = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
 /// The orchestration handle passed to a workflow function.
 ///
 /// Cheap to clone; clones share one journal. Only journaled calls
-/// ([`step`](Self::step), [`interrupt`](Self::interrupt)) replay on
+/// ([`step`](Self::step), [`interrupt`](Self::interrupt),
+/// [`agent`](Self::agent)) replay on
 /// resume: everything else in the workflow function runs again, so its
 /// control flow must not depend on anything the journal never saw
 /// (randomness, the clock, the environment). Put such values inside a

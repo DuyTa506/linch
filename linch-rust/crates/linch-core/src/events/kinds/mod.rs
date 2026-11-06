@@ -24,7 +24,7 @@ pub use tooling::*;
 
 /// Shared `skip_serializing_if` helper: omit a count field when it is zero,
 /// matching this crate's "empty/false/zero defaults may be omitted" wire
-/// rule (`BLUEPRINT.md` 9.1).
+/// rule.
 pub(super) fn is_zero(value: &u64) -> bool {
     *value == 0
 }

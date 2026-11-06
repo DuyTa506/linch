@@ -18,7 +18,7 @@ use crate::read::MAX_READ_BYTES;
 /// Files on this host under one root directory.
 ///
 /// Every path is resolved with symlinks followed and must stay under the
-/// root (W-B decision 5); `..`, absolute paths and symlinks that lead out
+/// root; `..`, absolute paths and symlinks that lead out
 /// are refused with [`FsError::Escape`]. The check guards path arguments,
 /// not a concurrent process swapping symlinks between the check and the
 /// use. Blocking file work runs on tokio's blocking pool.

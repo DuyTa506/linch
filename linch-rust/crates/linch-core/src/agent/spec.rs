@@ -114,7 +114,7 @@ pub(crate) fn prompt_block(spec: &AgentSpec) -> Vec<SystemBlock> {
 }
 
 /// Digest of the run contract: the spec, each tool's definition and scope,
-/// the hook policy digest (BLUEPRINT 13.1.2), and the `features` that shape
+/// the hook policy digest, and the `features` that shape
 /// requests beyond the spec (the skills, a subagent's definition). A run
 /// stores it at creation; resume and approve refuse an agent whose
 /// contract differs. With no features the digest is the one an agent

@@ -14,8 +14,8 @@
 //! - [`kinds`] and [`model_call`] hold the per-kind payload structs/enums;
 //!   most callers only need the re-exports here.
 //!
-//! Out of scope here: hook points/dispatch (P3), durable storage (P7), and
-//! RPC framing (P11) — this module only defines the wire vocabulary.
+//! Out of scope here: hook points and dispatch, durable storage, and RPC
+//! framing — this module only defines the wire vocabulary.
 
 #[cfg(test)]
 mod arbitrary;

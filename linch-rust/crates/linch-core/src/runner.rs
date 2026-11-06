@@ -1,4 +1,4 @@
-//! The run state machine (card P4-D) and the caller-driven [`RunStream`].
+//! The run state machine and the caller-driven [`RunStream`].
 //!
 //! One turn:
 //! 1. when compaction is on and the provider view passed its threshold,
