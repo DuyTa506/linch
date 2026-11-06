@@ -113,7 +113,7 @@ impl PgRunStore {
     async fn insert(&self, run: &NewRun, checkpoint: &str) -> Result<Insert, StoreError> {
         let events = encode_events(&run.events)?;
         let last_seq = run.events.len() as u64;
-        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
         // Only an existing id is skipped here; a live run on the session
         // fails the statement through the partial unique index.
         let inserted = sqlx::query(
@@ -193,7 +193,7 @@ impl RunStore for PgRunStore {
         run_id: &RunId,
         owner: &str,
     ) -> Result<Lease, StoreError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
         let (status, epoch, _) = lock_run(&mut tx, namespace, run_id).await?;
         if status.is_terminal() {
             return Err(StoreError::InvalidTransition {
@@ -256,7 +256,7 @@ impl RunStore for PgRunStore {
             .transpose()?;
         let events = encode_events(&commit.events)?;
         let (namespace, run_id) = (&lease.namespace, &lease.run_id);
-        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
         let (from, epoch, last_seq) = lock_run(&mut tx, namespace, run_id).await?;
         if lease.epoch != epoch {
             return Err(StoreError::LeaseLost {

@@ -65,7 +65,7 @@ pub(crate) async fn dequeue(
     timeout: Duration,
 ) -> Result<Option<JobLease>, WorkerError> {
     let since = Instant::now();
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin(pool).await?;
     if limit > 0 {
         // Serialize the count-then-take of this queue across the fleet.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")

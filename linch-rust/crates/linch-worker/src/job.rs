@@ -66,7 +66,7 @@ pub(crate) async fn insert(
 }
 
 async fn enqueue(pool: &PgPool, job: NewJob<'_>) -> Result<JobId, WorkerError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin(pool).await?;
     let id = insert(&mut tx, job).await?;
     tx.commit().await?;
     id.ok_or_else(|| WorkerError::Invalid("a job without a dedupe key was skipped".into()))

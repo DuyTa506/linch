@@ -40,8 +40,8 @@
 use std::borrow::Cow;
 
 use linch_postgres::{MigrateError, PgPool};
-use sqlx::SqlSafeStr;
 use sqlx::migrate::{Migration, MigrationType, Migrator};
+use sqlx::{Postgres, SqlSafeStr, Transaction};
 
 mod error;
 mod execute;
@@ -64,6 +64,16 @@ pub const MIGRATIONS_TABLE: &str = "linch_worker_migrations";
 /// The `LISTEN/NOTIFY` channel that every enqueue notifies; the payload is
 /// the queue name.
 pub const CHANNEL: &str = "linch_worker";
+
+/// Begin a READ COMMITTED transaction whatever the server or role default.
+///
+/// The queue's row locks, and the count taken after a limited queue's lock,
+/// must see what other workers committed while this one waited; REPEATABLE
+/// READ would keep the snapshot from before the wait.
+pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await
+}
 
 fn migrator() -> Migrator {
     let migrations = vec![Migration::new(

@@ -84,7 +84,7 @@ impl SessionStore for PgSessionStore {
             .iter()
             .map(encode_entry)
             .collect::<Result<Vec<_>, _>>()?;
-        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
         let len: Option<i64> = sqlx::query_scalar(
             "SELECT len FROM linch_sessions WHERE namespace = $1 AND session_id = $2 FOR UPDATE",
         )

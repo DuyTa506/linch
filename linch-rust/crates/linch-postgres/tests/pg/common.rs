@@ -24,6 +24,8 @@ pub struct TestDb {
     pub admin: PgPool,
     /// The test's schema.
     pub schema: String,
+    /// Connect options of `pool`.
+    pub options: PgConnectOptions,
 }
 
 impl TestDb {
@@ -51,13 +53,14 @@ impl TestDb {
             .options([("search_path", schema.as_str())]);
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect_with(options)
+            .connect_with(options.clone())
             .await
             .expect("connect to the test schema");
         Some(Self {
             pool,
             admin,
             schema,
+            options,
         })
     }
 

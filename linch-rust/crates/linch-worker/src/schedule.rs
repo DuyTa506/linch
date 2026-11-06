@@ -85,7 +85,7 @@ pub async fn create_schedule(
     non_blank(&schedule.id, "the schedule id")?;
     non_blank(&schedule.queue, "the queue")?;
     let cron = parse(&schedule.cron)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin(pool).await?;
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
         .fetch_one(&mut *tx)
         .await?;
@@ -163,7 +163,7 @@ type DueRow = (
 /// Raises:
 ///     WorkerError: If a query fails; nothing of the call is kept then.
 pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin(pool).await?;
     let due: Vec<DueRow> = sqlx::query_as(
         "SELECT namespace, id, queue, session_id, prompt, cron, next_fire, now() \
          FROM linch_worker_schedules WHERE enabled AND next_fire <= now() \

@@ -24,8 +24,8 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use sqlx::SqlSafeStr;
 use sqlx::migrate::{Migration, MigrationType, Migrator};
+use sqlx::{Postgres, SqlSafeStr, Transaction};
 
 mod codec;
 mod run;
@@ -70,6 +70,16 @@ pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error
         Ok(connected) => connected,
         Err(_) => Err(sqlx::Error::PoolTimedOut),
     }
+}
+
+/// Begin a READ COMMITTED transaction whatever the server or role default.
+///
+/// Every write locks its parent row with `FOR UPDATE` and must read the row
+/// again after waiting on another writer; REPEATABLE READ or SERIALIZABLE
+/// would fail that wait with a serialization error instead.
+pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await
 }
 
 /// The migrations embedded in this crate, newest last.

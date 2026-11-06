@@ -5,4 +5,5 @@ mod claim;
 mod common;
 mod conformance;
 mod crash;
+mod isolation;
 mod migrations;

@@ -3,6 +3,7 @@
 mod common;
 mod exclusive;
 mod fixtures;
+mod isolation;
 mod schedule;
 mod session;
 mod suspend;
