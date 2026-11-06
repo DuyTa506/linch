@@ -59,9 +59,10 @@ pub use permissions::{
     PolicyError, permission_decision_key,
 };
 pub use policy::{FailMode, HookPoint, PermissionDecision, Principal, PrincipalError};
+pub use provider::scripted::{ScriptedFixture, ScriptedProvider, ScriptedTurn};
 pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
-    ProviderRequest, ReasoningEffort, StreamError, ToolChoice, ToolDefinition, assemble,
+    ProviderRequest, ReasoningEffort, StreamError, Thinking, ToolChoice, ToolDefinition, assemble,
 };
 pub use provider::{Provider, ProviderError, ProviderStream};
 pub use registration::Registration;
