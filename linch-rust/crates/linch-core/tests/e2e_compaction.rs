@@ -270,8 +270,8 @@ async fn a_failed_summary_leaves_the_turn_uncompacted() {
         !result.usage_complete,
         "the failed summaries reported no usage"
     );
-    // A failed summary's receipt rides the primary call's barrier.
-    assert_eq!(stores.runs.writes().commit, 18 + 2);
+    // A failed summary costs two writes: its delivery, then its receipt.
+    assert_eq!(stores.runs.writes().commit, 18 + 2 * 2);
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn strip(value: &mut serde_json::Value) {
 }
 
 /// Every logical call has one accepted receipt, and every extra provider
-/// call was settled by an abandoned one.
+/// call was settled by an abandoned receipt of its own kind.
 fn check_paid_once(provider: &Keyed, events: &[Envelope], context: &str) {
     let mut accepted: HashMap<String, u32> = HashMap::new();
     let mut abandoned: HashMap<String, u32> = HashMap::new();
@@ -333,12 +333,20 @@ fn check_paid_once(provider: &Keyed, events: &[Envelope], context: &str) {
         "{context}: {accepted:?}"
     );
     assert_eq!(accepted.len(), 6, "{context}: four turns, two summaries");
-    let calls: u32 = provider.calls.lock().unwrap().values().sum();
-    let spare: u32 = abandoned.values().sum();
-    assert!(
-        calls <= 6 + spare,
-        "{context}: {calls} calls, {spare} abandoned"
-    );
+    // An abandoned primary call never excuses a second summary (R1-core 2).
+    for (key, kind, logical) in [("summary", ":compaction:", 2), ("primary", ":primary:", 4)] {
+        let calls = provider.calls.lock().unwrap().clone().into_iter();
+        let calls: u32 = calls
+            .filter(|(k, _)| k.starts_with(key))
+            .map(|(_, n)| n)
+            .sum();
+        let spare = abandoned.iter().filter(|(id, _)| id.contains(kind));
+        let spare: u32 = spare.map(|(_, n)| n).sum();
+        assert!(
+            calls <= logical + spare,
+            "{context}: {key} {calls} calls, {spare} abandoned"
+        );
+    }
 }
 
 #[tokio::test]

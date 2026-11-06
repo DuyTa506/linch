@@ -29,7 +29,7 @@ fn projection(summary: &Message) -> LogEntry {
 }
 
 #[test]
-fn a_pending_summary_is_asked_again_and_a_paid_one_is_never_lost() {
+fn a_pending_summary_is_asked_again_and_a_settled_one_never_is() {
     let cp = checkpoint(Phase::CompactionPending { attempt: 1 });
     let log = session(LEN, None);
     let Event::ModelCallDelivery(d) = summary_delivery(2, "c1") else {
@@ -41,6 +41,11 @@ fn a_pending_summary_is_asked_again_and_a_paid_one_is_never_lost() {
             abandoned,
         })
     };
+    // A summary that failed or gave no text: on to the primary call.
+    let dispatch = Ok(Recovery::Redispatch {
+        attempt: 1,
+        abandoned: None,
+    });
     let cases: Vec<(Vec<Event>, Vec<LogEntry>, Outcome)> = vec![
         (
             vec![delivery(2, "p1")],
@@ -63,7 +68,7 @@ fn a_pending_summary_is_asked_again_and_a_paid_one_is_never_lost() {
                 summary_receipt("c1", CallDisposition::Failed),
             ],
             log.clone(),
-            recompact(None),
+            dispatch.clone(),
         ),
         (
             vec![
@@ -71,9 +76,7 @@ fn a_pending_summary_is_asked_again_and_a_paid_one_is_never_lost() {
                 summary_receipt("c1", CallDisposition::Accepted),
             ],
             log.clone(),
-            Err(ReconcileError::MissingSummary {
-                delivery_attempt_id: "c1".into(),
-            }),
+            dispatch,
         ),
     ];
     for (events, log, expected) in cases {

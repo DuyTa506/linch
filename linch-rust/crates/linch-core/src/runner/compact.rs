@@ -10,7 +10,10 @@
 //!    primary call follows as usual.
 //!
 //! A summary call that fails, or answers with no text, is not fatal: the
-//! turn goes on uncompacted and the receipt lands with the next barrier.
+//! turn goes on uncompacted. Its receipt and `Usage` are written at once,
+//! with a `CompactionPending` checkpoint that counts them (one more run
+//! write), because a paid response is durable as soon as it exists: resume
+//! then goes on to the turn's primary call and never buys it again.
 
 use crate::agent::RunError;
 use crate::compaction::{self, estimate_tokens};
@@ -88,10 +91,13 @@ impl Runner {
                 self.abort().await?;
                 return Ok(None);
             }
-            Err(_) => return Ok(Some(DISPATCH)),
+            Err(_) => String::new(),
         };
         let text = text.trim();
         if text.is_empty() {
+            self.save(Phase::CompactionPending { attempt }).await?;
+            let ready = self.journal.flush().await?;
+            self.outbox.deliver(ready).await;
             return Ok(Some(DISPATCH));
         }
         let summary = compaction::summary_message(text);

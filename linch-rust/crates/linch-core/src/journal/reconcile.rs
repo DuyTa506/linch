@@ -38,7 +38,9 @@ pub enum Recovery {
         appended: bool,
     },
     /// `ProviderPending` without an accepted receipt: write `abandoned`, if
-    /// any, then dispatch `attempt`.
+    /// any, then dispatch `attempt`. Also `CompactionPending` whose summary
+    /// call settled without a summary (it failed, or gave no text): the turn
+    /// goes on uncompacted with its primary call, attempt 1.
     Redispatch {
         /// The new delivery attempt number.
         attempt: u32,
@@ -77,14 +79,12 @@ pub enum Recovery {
         /// Whether the message is already in the session.
         appended: bool,
     },
-    /// `CompactionPending` without a receipt, or with a failed or
-    /// cancelled one: write `abandoned`, if any, then dispatch summary
-    /// `attempt`.
+    /// `CompactionPending` without a receipt: write `abandoned`, then
+    /// dispatch summary `attempt`.
     Recompact {
         /// The new delivery attempt number.
         attempt: u32,
-        /// A cancelled receipt for the unsettled delivery; `None` when the
-        /// delivery already has a receipt.
+        /// A cancelled receipt for the unsettled delivery.
         abandoned: Option<ModelCallReceiptEvent>,
     },
     /// `Compacted`: append the projection unless `appended`, then dispatch
@@ -139,13 +139,6 @@ pub enum ReconcileError {
     /// A tool phase whose session does not end with an assistant tool call.
     #[error("the session does not end with the batch's assistant tool calls")]
     MissingToolCalls,
-    /// `CompactionPending` with an accepted receipt: the summary should have
-    /// landed with it in a `Compacted` checkpoint, so the store lost a write.
-    #[error("accepted compaction receipt {delivery_attempt_id} has no summary")]
-    MissingSummary {
-        /// Delivery attempt of the receipt.
-        delivery_attempt_id: String,
-    },
 }
 
 /// Decide how a run resumes from its durable state. Pure: reads only its
@@ -210,20 +203,19 @@ pub fn reconcile(
             message: message.clone(),
         }),
         Phase::CompactionPending { attempt } => {
-            let (delivery, later, receipt) =
-                delivery(checkpoint, ModelCallKind::Compaction, events)?;
-            if let Some(i) = receipt
-                && matches!(&later[i].event, Event::ModelCallReceipt(r)
-                    if r.disposition == CallDisposition::Accepted)
-            {
-                return Err(ReconcileError::MissingSummary {
-                    delivery_attempt_id: delivery.delivery_attempt_id.clone(),
+            let (delivery, _, receipt) = delivery(checkpoint, ModelCallKind::Compaction, events)?;
+            unchanged(checkpoint, session)?;
+            // A summary lands with its `Compacted` checkpoint, so a receipt
+            // here settled a call that gave none: it is not bought again.
+            if receipt.is_some() {
+                return Ok(Recovery::Redispatch {
+                    attempt: 1,
+                    abandoned: None,
                 });
             }
-            unchanged(checkpoint, session)?;
             Ok(Recovery::Recompact {
                 attempt: attempt + 1,
-                abandoned: receipt.is_none().then(|| abandoned(delivery)),
+                abandoned: Some(abandoned(delivery)),
             })
         }
         Phase::Compacted { summary, keep_from } => Ok(Recovery::Compacted {
