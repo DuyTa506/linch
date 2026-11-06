@@ -15,6 +15,9 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# The release binaries ship in the linch-rust wheel and the server archives.
+# Strip symbols to shrink them; panics still unwind (the core catches them).
 [profile.release]
 lto = "fat"
 codegen-units = 1
+strip = true
