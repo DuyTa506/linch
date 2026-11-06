@@ -144,6 +144,14 @@ pub struct Checkpoint {
     pub usage: Usage,
     /// Whether every call so far reported usage.
     pub usage_complete: bool,
+    /// Cost in USD of the calls so far that had a price; `None` until one
+    /// had. Encoding a NaN or infinite value is an error.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::events::serialize_finite_f64_option"
+    )]
+    pub cost_usd: Option<f64>,
     /// Session log length this checkpoint expects.
     pub session_len: u64,
     /// Position inside the turn.
@@ -192,6 +200,7 @@ mod tests {
             turn: 1,
             usage: Usage::default(),
             usage_complete: true,
+            cost_usd: None,
             session_len: 3,
             phase: Phase::ToolBatch {
                 decisions: vec![ToolDecisionRecord {

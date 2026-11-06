@@ -31,6 +31,7 @@ fn checkpoint(turn: u32, session_len: u64, phase: Phase) -> Checkpoint {
         turn,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len,
         phase,
     }
@@ -269,6 +270,7 @@ async fn finish_commits_the_held_state_before_the_result() {
         total_usage: Usage::default(),
         usage_complete: true,
         duration_ms: 0,
+        total_cost_usd: None,
         final_text: Some("done".into()),
         structured_output: None,
         structured_error: None,
@@ -305,6 +307,7 @@ async fn finish_with_nothing_held_writes_the_pending_events_with_the_result() {
         total_usage: Usage::default(),
         usage_complete: false,
         duration_ms: 0,
+        total_cost_usd: None,
         final_text: None,
         structured_output: None,
         structured_error: None,

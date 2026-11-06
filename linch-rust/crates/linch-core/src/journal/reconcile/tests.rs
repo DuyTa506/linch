@@ -23,6 +23,7 @@ fn checkpoint(phase: Phase) -> Checkpoint {
         turn: 2,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: LEN,
         phase,
     }

@@ -10,7 +10,15 @@ use proptest::option;
 use proptest::prelude::*;
 
 pub(super) fn usage_event() -> impl Strategy<Value = UsageEvent> {
-    (usage(), usage()).prop_map(|(usage, cumulative)| UsageEvent { usage, cumulative })
+    let costs = (option::of(finite_f64()), option::of(finite_f64()));
+    (usage(), usage(), costs).prop_map(|(usage, cumulative, (cost_usd, cumulative_cost_usd))| {
+        UsageEvent {
+            usage,
+            cumulative,
+            cost_usd,
+            cumulative_cost_usd,
+        }
+    })
 }
 
 pub(super) fn tool_result_block() -> impl Strategy<Value = ToolResultBlock> {
@@ -48,6 +56,7 @@ pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
         usage(),
         any::<bool>(),
         any::<u64>(),
+        option::of(finite_f64()),
         option::of(short_string()),
         option::of(json_object(1)),
         option::of(short_string()),
@@ -60,6 +69,7 @@ pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
                 total_usage,
                 usage_complete,
                 duration_ms,
+                total_cost_usd,
                 final_text,
                 structured_output,
                 structured_error,
@@ -71,6 +81,7 @@ pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
                     total_usage,
                     usage_complete,
                     duration_ms,
+                    total_cost_usd,
                     final_text,
                     structured_output,
                     structured_error,

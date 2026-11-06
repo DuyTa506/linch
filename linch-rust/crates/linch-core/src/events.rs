@@ -28,3 +28,4 @@ mod wire;
 pub(crate) use envelope::now_ms;
 pub use envelope::{Envelope, EventError, WIRE_VERSION};
 pub use event::{Event, IgnorableEvent, Persistence, SubagentEvent};
+pub(crate) use wire::serialize_finite_f64_option;

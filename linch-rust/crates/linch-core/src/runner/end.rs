@@ -28,6 +28,7 @@ impl Runner {
             total_usage: self.usage,
             usage_complete: self.usage_complete,
             duration_ms: millis(self.started.elapsed()),
+            total_cost_usd: self.cost,
             final_text,
             structured_output: None,
             structured_error: None,

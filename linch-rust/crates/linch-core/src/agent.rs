@@ -26,6 +26,7 @@ use crate::registry::ToolRegistry;
 use crate::runner::{self, RunStream};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::Roster;
+use crate::usage::Usage;
 
 mod builder;
 mod child;
@@ -78,6 +79,9 @@ impl RunOptions {
 /// A callback that [`Agent::close_session`] runs.
 type SessionClose = Arc<dyn Fn(&SessionId) + Send + Sync>;
 
+/// The host's price of a model call (see [`AgentBuilder::pricing`]).
+type Pricing = Arc<dyn Fn(&str, &Usage) -> Option<f64> + Send + Sync>;
+
 /// A built agent. Cheap to clone; clones share every binding.
 #[derive(Clone)]
 pub struct Agent {
@@ -112,6 +116,8 @@ pub(crate) struct AgentInner {
     /// Whether this is a subagent's agent: its runs cannot suspend, so a
     /// call that needs approval is denied.
     pub(crate) child: bool,
+    /// Prices each paid call; `None` reports no cost.
+    pub(crate) pricing: Option<Pricing>,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
@@ -127,6 +133,14 @@ impl AgentInner {
         let mut request = self.spec.request(tools, messages);
         request.system = self.system.clone();
         request
+    }
+
+    /// What `usage` on `model` cost in USD, by the host's pricing; `None`
+    /// without pricing, for a model it has no price for, or for a price
+    /// that is not finite.
+    pub(crate) fn price(&self, model: &str, usage: &Usage) -> Option<f64> {
+        let price = (self.pricing.as_ref()?)(model, usage)?;
+        price.is_finite().then_some(price)
     }
 }
 

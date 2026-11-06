@@ -3,7 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
-use super::{Agent, AgentInner, BuildError, SessionClose};
+use super::{Agent, AgentInner, BuildError, Pricing, SessionClose};
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
 use crate::json::JsonObject;
@@ -15,12 +15,13 @@ use crate::registry::ToolRegistry;
 use crate::skills::{self, Skill, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{Roster, SubagentDefinition, SubagentTool};
+use crate::usage::Usage;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
 ///
 /// The provider, the permission engine, both stores and a namespace are
-/// required; tools, hooks, skills, subagents and session-close callbacks
-/// default to none. Nothing here does I/O.
+/// required; tools, hooks, skills, subagents, pricing and session-close
+/// callbacks default to none. Nothing here does I/O.
 pub struct AgentBuilder {
     spec: AgentSpec,
     provider: Option<Arc<dyn Provider>>,
@@ -33,6 +34,7 @@ pub struct AgentBuilder {
     session_close: Vec<SessionClose>,
     skills: Option<Vec<Skill>>,
     subagents: Option<Vec<SubagentDefinition>>,
+    pricing: Option<Pricing>,
 }
 
 impl AgentBuilder {
@@ -50,6 +52,7 @@ impl AgentBuilder {
             session_close: Vec::new(),
             skills: None,
             subagents: None,
+            pricing: None,
         }
     }
 
@@ -103,6 +106,22 @@ impl AgentBuilder {
         callback: impl Fn(&SessionId) + Send + Sync + 'static,
     ) -> Self {
         self.session_close.push(Arc::new(callback));
+        self
+    }
+
+    /// Price every paid model call with `pricing`, which gets the model
+    /// that served the call (the requested one when the provider named
+    /// none) and the call's usage, and gives its cost in USD, or `None`
+    /// when it has no price for that model. A non-finite cost counts as
+    /// `None`. The cost goes on the call's receipt and `usage` event, and
+    /// the run's priced calls add up to the result's `total_cost_usd`;
+    /// without pricing every cost is `None`. Pricing is not part of the
+    /// run contract. A host wires `linch_providers::cost` here.
+    pub fn pricing(
+        mut self,
+        pricing: impl Fn(&str, &Usage) -> Option<f64> + Send + Sync + 'static,
+    ) -> Self {
+        self.pricing = Some(Arc::new(pricing));
         self
     }
 
@@ -201,6 +220,7 @@ impl AgentBuilder {
             skill_listing: listing,
             subagents,
             child: false,
+            pricing: self.pricing,
             session_close: self.session_close,
             registrations: built_ins.take(),
         });

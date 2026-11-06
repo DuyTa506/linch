@@ -54,6 +54,7 @@ pub(crate) async fn fail(
         total_usage: checkpoint.usage,
         usage_complete: checkpoint.usage_complete && !unsettled,
         duration_ms: millis(started.elapsed()),
+        total_cost_usd: checkpoint.cost_usd,
         final_text: None,
         structured_output: None,
         structured_error: None,

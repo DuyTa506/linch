@@ -40,6 +40,7 @@ fn result(subtype: ResultSubtype, usage: Usage) -> Event {
         total_usage: usage,
         usage_complete: true,
         duration_ms: 0,
+        total_cost_usd: None,
         final_text: Some("all done".into()),
         structured_output: None,
         structured_error: None,
@@ -320,6 +321,8 @@ fn usage_falls_back_to_the_last_usage_event() {
         Event::Usage(UsageEvent {
             usage: Usage::default(),
             cumulative,
+            cost_usd: None,
+            cumulative_cost_usd: None,
         })
     };
     let fallback = report(vec![usage(Usage::default()), usage(cached)]);

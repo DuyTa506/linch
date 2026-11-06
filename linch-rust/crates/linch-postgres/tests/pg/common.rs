@@ -99,6 +99,7 @@ pub fn checkpoint(turn: u32) -> Checkpoint {
         turn,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: 0,
         phase: Phase::Started {
             prompt: Message::user_text("hi"),

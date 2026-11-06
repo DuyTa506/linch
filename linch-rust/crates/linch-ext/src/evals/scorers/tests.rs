@@ -54,6 +54,7 @@ fn result(subtype: ResultSubtype) -> Event {
         total_usage: Usage::default(),
         usage_complete: true,
         duration_ms: 0,
+        total_cost_usd: None,
         final_text: None,
         structured_output: None,
         structured_error: None,

@@ -1,6 +1,7 @@
 //! Run lifecycle kinds: init, user/assistant messages, error, and the
 //! terminal result.
 
+use crate::events::wire::serialize_finite_f64_option;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::Message;
@@ -114,6 +115,16 @@ pub struct ResultEvent {
     /// result. The whole run's span is this envelope's `ts_ms` minus the
     /// `init` envelope's.
     pub duration_ms: u64,
+    /// Cost of the run's priced calls in USD; `None` when no call was
+    /// priced. A call with no price adds nothing, so with several models
+    /// this can be a partial sum. Encoding a NaN or infinite value is an
+    /// error.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
+    pub total_cost_usd: Option<f64>,
     /// Optional final textual answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_text: Option<String>,

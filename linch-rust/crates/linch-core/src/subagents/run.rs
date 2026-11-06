@@ -149,6 +149,7 @@ mod tests {
             total_usage: Usage::default(),
             usage_complete: true,
             duration_ms: 0,
+            total_cost_usd: None,
             final_text: final_text.map(str::to_owned),
             structured_output: None,
             structured_error: None,

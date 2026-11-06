@@ -110,6 +110,8 @@ pub(super) struct Runner {
     pub(super) turn: u32,
     pub(super) usage: Usage,
     pub(super) usage_complete: bool,
+    /// Cost of the priced calls so far; `None` until one was priced.
+    pub(super) cost: Option<f64>,
     /// Why the last response stopped, for `post_turn`.
     pub(super) stop_reason: StopReason,
     /// When this call of the run started, for the result's `duration_ms`.
@@ -140,6 +142,7 @@ impl Runner {
             turn: progress.turn,
             usage: progress.usage,
             usage_complete: progress.usage_complete,
+            cost: progress.cost,
             stop_reason: progress.stop_reason,
             started: progress.started,
         }
@@ -216,8 +219,8 @@ impl Runner {
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
     ) -> Result<Option<Step>, RunError> {
-        if let Some(receipt) = abandoned {
-            self.settle(&receipt);
+        if let Some(mut receipt) = abandoned {
+            self.settle(&mut receipt);
             self.journal.stage(Event::ModelCallReceipt(receipt));
         }
         if self.cancel.is_cancelled() {
@@ -259,8 +262,8 @@ impl Runner {
                 .await
         };
         let mut receipt = outcome.receipt;
-        self.settle(&receipt);
-        let usage = receipt.usage;
+        self.settle(&mut receipt);
+        let (usage, cost) = (receipt.usage, receipt.cost_usd);
         let empty = matches!(&outcome.result, Ok(assembly) if cut_empty(assembly));
         if empty {
             receipt.disposition = CallDisposition::Rejected;
@@ -269,15 +272,15 @@ impl Runner {
         let failure = match outcome.result {
             // One terminal write: the paid receipt, usage, error and result.
             Ok(_) if empty => {
-                self.stage_usage(usage);
+                self.stage_usage(usage, cost);
                 self.output_limit().await?;
                 return Ok(None);
             }
-            Ok(assembly) => return self.accept(assembly).await.map(Some),
+            Ok(assembly) => return self.accept(assembly, cost).await.map(Some),
             Err(failure) => failure,
         };
         // A call that failed or was cancelled may still have been paid.
-        self.stage_usage(usage);
+        self.stage_usage(usage, cost);
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);
@@ -289,7 +292,13 @@ impl Runner {
         Ok(None)
     }
 
-    async fn accept(&mut self, assembly: AssistantAssembly) -> Result<Step, RunError> {
+    /// Stage the response and its `Usage` (with the call's `cost`), and
+    /// write them through with `AssistantReceived`.
+    async fn accept(
+        &mut self,
+        assembly: AssistantAssembly,
+        cost: Option<f64>,
+    ) -> Result<Step, RunError> {
         let AssistantAssembly {
             message,
             stop_reason,
@@ -300,7 +309,7 @@ impl Runner {
             message: message.clone(),
             stop_reason,
         }));
-        self.stage_usage(usage);
+        self.stage_usage(usage, cost);
         let phase = Phase::AssistantReceived {
             message: message.clone(),
             stop_reason,

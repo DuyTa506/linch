@@ -85,6 +85,7 @@ pub(super) fn checkpoint(turn: u32) -> Checkpoint {
         turn,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: u64::from(turn),
         phase: Phase::ProviderPending { attempt: 1 },
     }

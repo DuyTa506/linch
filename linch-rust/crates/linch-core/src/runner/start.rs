@@ -76,6 +76,7 @@ pub(super) async fn new_run(
         turn: 0,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: entries.len() as u64,
         phase: Phase::Started {
             prompt: prompt.clone(),

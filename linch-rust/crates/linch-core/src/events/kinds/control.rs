@@ -7,7 +7,7 @@ use crate::json::JsonObject;
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 
-/// Per-call and cumulative token usage.
+/// Per-call and cumulative token usage, and their cost when known.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageEvent {
@@ -15,6 +15,23 @@ pub struct UsageEvent {
     pub usage: Usage,
     /// Usage accumulated across the run.
     pub cumulative: Usage,
+    /// Cost of the current call in USD; `None` when the agent has no price
+    /// for its model. Encoding a NaN or infinite value is an error.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
+    pub cost_usd: Option<f64>,
+    /// Cost of the run's priced calls so far in USD; `None` until a call is
+    /// priced. A call with no price adds nothing, so with several models
+    /// this can be a partial sum.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
+    pub cumulative_cost_usd: Option<f64>,
 }
 
 /// The context assembled for one provider request.

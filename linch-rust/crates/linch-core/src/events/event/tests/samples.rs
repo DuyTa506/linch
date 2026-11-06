@@ -43,6 +43,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
         Event::Usage(UsageEvent {
             usage: Usage::default(),
             cumulative: Usage::default(),
+            cost_usd: Some(0.25),
+            cumulative_cost_usd: Some(1.5),
         }),
         Event::ToolCallStart(ToolCallStartEvent {
             tool_use_id: "c1".into(),
@@ -157,6 +159,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             total_usage: Usage::default(),
             usage_complete: true,
             duration_ms: 0,
+            total_cost_usd: Some(1.5),
             final_text: None,
             structured_output: None,
             structured_error: None,

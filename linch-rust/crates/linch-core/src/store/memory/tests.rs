@@ -33,6 +33,7 @@ fn new_run(run_id: &str) -> NewRun {
             turn: 0,
             usage: Usage::default(),
             usage_complete: true,
+            cost_usd: None,
             session_len: 0,
             phase: Phase::ProviderPending { attempt: 1 },
         },
