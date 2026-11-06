@@ -72,7 +72,9 @@ pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
         RunError::NotSuspended { .. }
         // A user_prompt_submit hook refused the prompt; a retry sends the same prompt.
         | RunError::PromptBlocked { .. } => Outcome::Fail(chain(error)),
-        // Includes a lost run lease and a session append conflict.
+        // Includes a lost run lease, a session append conflict, and a start
+        // on a session whose run is not terminal yet (SessionBusy, nothing
+        // written): it waits for that run.
         RunError::Store(_) | RunError::Journal(_) => Outcome::Retry(chain(error)),
     }
 }
@@ -281,6 +283,11 @@ mod tests {
             message: "session".into(),
         });
         assert!(matches!(classify(&conflict), Outcome::Retry(_)));
+        let busy = RunError::Store(StoreError::SessionBusy {
+            session_id: SessionId::new("s1"),
+            run_id: RunId::new("r0"),
+        });
+        assert!(matches!(classify(&busy), Outcome::Retry(text) if text.contains("busy")));
         let reconcile = RunError::Reconcile(ReconcileError::MissingToolCalls);
         assert!(fails_run(classify(&reconcile)));
     }
