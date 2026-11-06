@@ -18,8 +18,10 @@
 //!   rule denies it, any other applicable bash deny rule makes it ask, and
 //!   bash rules never allow it.
 //! - Path rules match globs against the lexically normalized target. A
-//!   target outside the project root never matches an allow rule. Symlinks
-//!   are not resolved here; the tool that opens the file must confine it.
+//!   target outside the project root never matches an allow rule, and
+//!   under `accept_edits` such a write asks instead of being allowed by
+//!   default. Symlinks are not resolved here; the execution-world file
+//!   layer (P6) confines what is really opened.
 
 mod engine;
 mod glob;
@@ -59,7 +61,8 @@ pub enum PermissionMode {
     /// Ask for write and exec calls.
     #[default]
     Default,
-    /// Allow write calls; ask for exec calls.
+    /// Allow write calls, except a write whose path target is outside the
+    /// project root, which asks; ask for exec calls.
     AcceptEdits,
     /// Allow every call.
     SkipDangerous,
@@ -125,6 +128,13 @@ pub struct PathRule {
 /// Match shell command segments. A pattern matches a segment when it matches
 /// the whole segment as a glob (`*`, `?`, `[...]`, with `*` spanning
 /// anything) or when its words are a prefix of the segment's words.
+///
+/// Word-prefix matching accepts any further arguments: `npm install`
+/// matches `npm install lodash`, and `rm -rf /tmp` matches
+/// `rm -rf /tmp /`. Words are compared after shell quote and escape
+/// removal, and redirections in the segment are part of its words, so
+/// `echo` also matches `echo x > file`. Write allow patterns with that in
+/// mind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BashRule {

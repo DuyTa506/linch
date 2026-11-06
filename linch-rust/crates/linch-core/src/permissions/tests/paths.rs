@@ -113,3 +113,39 @@ fn field_tables_extend_the_builtins() {
     );
     assert_eq!(bash(&engine, "rm x"), "deny");
 }
+
+#[test]
+fn accept_edits_asks_for_a_write_outside_the_root() {
+    let engine = flat(PermissionMode::AcceptEdits, vec![]);
+    assert_eq!(write(&engine, "src/main.rs"), "allow");
+    assert_eq!(write(&engine, "../etc/passwd"), "ask");
+    assert_eq!(write(&engine, "/etc/passwd"), "ask");
+    let args = json!({"path": "/../../etc/passwd"});
+    assert_eq!(
+        decide(&engine, "write_file", ToolScope::Write, args, None),
+        "ask"
+    );
+    // Reads outside the root, and writes with no known path field, keep the
+    // mode default.
+    let read = json!({"file_path": "/etc/passwd"});
+    assert_eq!(
+        decide(&engine, "Read", ToolScope::Read, read, None),
+        "allow"
+    );
+    let opaque = json!({"to": "/etc/passwd"});
+    assert_eq!(
+        decide(&engine, "save", ToolScope::Write, opaque, None),
+        "allow"
+    );
+
+    let args = input(json!({"file_path": "x"}));
+    let mut call = PermissionCall::new("Write", ToolScope::Write, &args);
+    call.cwd = Some("/tmp");
+    assert_eq!(kind(&engine.evaluate(&call, None)), "ask");
+
+    // Only the accept_edits default changes; rules still decide first.
+    let skip = flat(PermissionMode::SkipDangerous, vec![]);
+    assert_eq!(write(&skip, "/etc/passwd"), "allow");
+    let trusted = flat(PermissionMode::AcceptEdits, vec![tool("Write", Allow)]);
+    assert_eq!(write(&trusted, "/etc/passwd"), "allow");
+}

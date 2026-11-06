@@ -13,6 +13,9 @@ use super::{
 };
 
 /// One proposed tool call, as the permission engine sees it.
+///
+/// Paths in `input` are judged lexically; resolving symlinks and confining
+/// what is really opened belongs to the execution-world file layer (P6).
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionCall<'a> {
     /// Name of the tool being called.
@@ -268,15 +271,11 @@ impl<'a> Eval<'a> {
             })
     }
 
-    fn path_matches(&self, rule: &PathRule) -> bool {
+    /// The call's normalized path target and the root's segments, when the
+    /// tool has a path field and the input names (or defaults to) a path.
+    fn target(&self) -> Option<(Vec<&'a str>, Vec<&'a str>)> {
         let call = &self.call;
-        let covered = match &rule.tools {
-            Some(tools) => tools.iter().any(|t| t == call.tool_name),
-            None => call.scope == ToolScope::Write,
-        };
-        let Some(spec) = path::field(self.policy, call.tool_name).filter(|_| covered) else {
-            return false;
-        };
+        let spec = path::field(self.policy, call.tool_name)?;
         let given = call
             .input
             .get(spec.field)
@@ -286,12 +285,26 @@ impl<'a> Eval<'a> {
             Some(raw) if spec.virtual_root => raw.trim_start_matches('/'),
             Some(raw) => raw,
             None if spec.default_to_cwd => "",
-            None => return false,
+            None => return None,
         };
         let root_text = self.policy.project_root.as_str();
         let mut root = Vec::new();
         path::push_segments(&mut root, root_text);
-        let target = path::resolve(root_text, call.cwd, raw);
+        Some((path::resolve(root_text, call.cwd, raw), root))
+    }
+
+    fn path_matches(&self, rule: &PathRule) -> bool {
+        let call = &self.call;
+        let covered = match &rule.tools {
+            Some(tools) => tools.iter().any(|t| t == call.tool_name),
+            None => call.scope == ToolScope::Write,
+        };
+        if !covered {
+            return false;
+        }
+        let Some((target, root)) = self.target() else {
+            return false;
+        };
         if rule.decision == RuleDecision::Allow && !target.starts_with(&root) {
             return false;
         }
@@ -302,24 +315,26 @@ impl<'a> Eval<'a> {
 
     fn mode_default(&self) -> PermissionDecision {
         let scope = self.call.scope;
-        let mode = self.policy.mode;
-        let allowed = scope == ToolScope::Read
-            || self.policy.auto_allow.contains(self.call.tool_name)
-            || mode == PermissionMode::SkipDangerous
-            || (mode == PermissionMode::AcceptEdits && scope == ToolScope::Write);
-        if allowed {
-            return PermissionDecision::Allow {};
-        }
-        let mode = match mode {
-            PermissionMode::Default => "default",
-            PermissionMode::AcceptEdits => "accept_edits",
-            PermissionMode::SkipDangerous => "skip_dangerous",
+        let tool = self.call.tool_name;
+        let reason = match self.policy.mode {
+            _ if scope == ToolScope::Read || self.policy.auto_allow.contains(tool) => None,
+            PermissionMode::SkipDangerous => None,
+            PermissionMode::AcceptEdits if scope == ToolScope::Write => {
+                let escapes = self
+                    .target()
+                    .is_some_and(|(target, root)| !target.starts_with(&root));
+                escapes.then(|| format!("{tool} writes outside the project root"))
+            }
+            PermissionMode::AcceptEdits => {
+                Some(format!("{tool} needs approval in accept_edits mode"))
+            }
+            PermissionMode::Default => Some(format!("{tool} needs approval in default mode")),
         };
-        PermissionDecision::Ask {
-            reason: Some(format!(
-                "{} needs approval in {mode} mode",
-                self.call.tool_name
-            )),
+        match reason {
+            None => PermissionDecision::Allow {},
+            Some(reason) => PermissionDecision::Ask {
+                reason: Some(reason),
+            },
         }
     }
 }
