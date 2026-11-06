@@ -166,3 +166,63 @@ async fn disconnect_kills_what_the_server_started() {
     let _ = std::fs::remove_file(&marker);
     assert!(!survived, "the server's child outlived the disconnect");
 }
+
+#[tokio::test]
+async fn a_server_that_closed_its_stdin_is_reconnected() {
+    // The launcher passes the client's lines to the server until one says
+    // `close-stdin`. Then it closes the client's pipe, passes that line on
+    // and holds the server's input open, so the server keeps running and
+    // answers on stdout, but nothing the client writes is read any more.
+    let script = r#"exec 3<&0 0</dev/null
+{
+    while IFS= read -r line <&3; do
+        case $line in
+            *close-stdin*) exec 3<&-; printf '%s\n' "$line"; exec sleep 120 ;;
+        esac
+        printf '%s\n' "$line"
+    done
+} | "$1" 3<&- &
+exec 3<&-
+wait"#;
+    let args = vec![
+        "-c".to_owned(),
+        script.to_owned(),
+        "sh".to_owned(),
+        stdio_server().to_string_lossy().into_owned(),
+    ];
+    let registry = Arc::new(ToolRegistry::new());
+    let config = McpServerConfig::new("half", McpTransport::stdio("/bin/sh", args));
+    let server = McpServer::connect(config, Arc::clone(&registry))
+        .await
+        .expect("connect through sh");
+    let pid =
+        |output: linch_core::ToolOutput| -> u32 { output.value.as_str().unwrap().parse().unwrap() };
+    let first = pid(call(&registry, "mcp__half__pid", JsonObject::new())
+        .await
+        .unwrap());
+
+    let closing = call(&registry, "mcp__half__echo", text_input("close-stdin"))
+        .await
+        .unwrap();
+    assert_eq!(closing.value, json!("close-stdin"));
+    let failed = call(&registry, "mcp__half__echo", text_input("unread"))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code.as_deref(), Some(codes::UNAVAILABLE));
+
+    // The first server is closed and a fresh one started.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let second = loop {
+        match call(&registry, "mcp__half__pid", JsonObject::new()).await {
+            Ok(output) => break pid(output),
+            Err(error) => assert!(
+                Instant::now() < deadline,
+                "never reconnected: {}",
+                error.message
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_ne!(second, first);
+    server.disconnect().await;
+}

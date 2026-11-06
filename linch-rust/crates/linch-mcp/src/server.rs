@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{Catalog, SkippedTool};
-use crate::config::{ConfigError, McpServerConfig, ReconnectPolicy};
+use crate::config::{ConfigError, McpServerConfig, McpTransport, ReconnectPolicy};
 use crate::connector::{ConnectError, Connector, Handler, connector};
 use crate::listener::Listener;
 use crate::tool::{Conn, Link, MAX_WAITING_CANCELS, ToolSpec};
@@ -88,6 +88,7 @@ impl McpServer {
         let link = Arc::new(Link {
             server: config.name.clone(),
             call_timeout: config.call_timeout,
+            stdio: matches!(config.transport, McpTransport::Stdio { .. }),
             conn: watch::Sender::new(None),
             status: watch::Sender::new(ServerStatus::Connected),
         });

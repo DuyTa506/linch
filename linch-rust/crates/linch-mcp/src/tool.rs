@@ -64,6 +64,9 @@ pub(crate) struct Conn {
 pub(crate) struct Link {
     pub(crate) server: String,
     pub(crate) call_timeout: Duration,
+    /// Whether the server is a stdio child. There a failed write means its
+    /// stdin is closed, so the connection is gone even if stdout is open.
+    pub(crate) stdio: bool,
     /// `None` while the server is reconnecting, unavailable or closed.
     pub(crate) conn: watch::Sender<Option<Conn>>,
     pub(crate) status: watch::Sender<ServerStatus>,
@@ -86,10 +89,20 @@ impl Link {
         coded(message, codes::UNAVAILABLE)
     }
 
+    /// Whether `error` means the connection is gone, so the supervisor
+    /// reconnects.
+    fn is_lost(&self, error: &ServiceError) -> bool {
+        match error {
+            ServiceError::TransportClosed => true,
+            ServiceError::TransportSend(_) => self.stdio,
+            _ => false,
+        }
+    }
+
     fn call_failed(&self, conn: &Conn, error: ServiceError) -> ToolOutputError {
         let server = &self.server;
         match error {
-            ServiceError::TransportClosed => {
+            error if self.is_lost(&error) => {
                 conn.lost.cancel();
                 coded(
                     format!("MCP server {server:?} connection lost during the call: {error}"),
