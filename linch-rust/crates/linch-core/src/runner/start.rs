@@ -10,7 +10,7 @@ use super::turn::{Batch, Runner, Step};
 use super::{Driving, Family, Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::catalog::{self, Catalog};
-use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
+use crate::events::kinds::{InitEvent, SkillsLoadedEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
@@ -88,6 +88,14 @@ pub(super) async fn new_run(
         resumed: false,
         turn: 0,
     }));
+    // A session's first run tells which skills the model may load, as
+    // Python does once per session; it rides the create write.
+    if let (true, Some(skills)) = (entries.is_empty(), &agent.skills) {
+        let skills = skills.current().descriptors();
+        if !skills.is_empty() {
+            journal.stage(Event::SkillsLoaded(SkillsLoadedEvent { skills }));
+        }
+    }
     journal.stage(Event::User(UserEvent {
         message: prompt.clone(),
         subtype: UserEventSubtype::Prompt,

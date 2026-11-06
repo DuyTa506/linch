@@ -334,6 +334,15 @@ The run finished; its stream ends here.
 | `structured_output`, `structured_error` | For runs with an output schema; `None` with this client |
 | `trace_id` | The run's `trace_id`, as on `InitEvent` |
 
+### `SkillsLoadedEvent` (`skills_loaded`)
+
+The skills the model may load, on a session's first run of an agent with
+skills, between `init` and the prompt's `user` event. `skills` holds one
+dict per skill, the built-in `verify` included, sorted by name: `name`,
+`description`, and `when_to_use` and `argument_hint` when the skill sets
+them. Python Linch sends it once per session object, so again after a
+restart; here a session's later runs never do.
+
 ### `SkillInvokedEvent` (`skill_invoked`)
 
 The `Skill` tool loaded a skill. `name` is the skill and `args` the argument
@@ -376,7 +385,6 @@ but no run emits them today:
 | `BudgetEvent` (`budget`) | `kind` (`warning` or `exceeded`), `spent_tokens`, `spent_usd`, `max_tokens`, `max_cost_usd` |
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
 | `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt` |
-| `SkillsLoadedEvent` (`skills_loaded`) | `skills`, one descriptor dict per skill |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

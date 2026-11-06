@@ -4,6 +4,7 @@
 use super::{Overlays, Skill, listing, overlays, with_builtins};
 use crate::canonical::{self, CanonicalError};
 use crate::catalog::LiveSkill;
+use crate::json::{JsonObject, JsonValue};
 use crate::message::{SkillStamp, SystemBlock};
 
 /// The skills an agent has at one moment, with what is derived from them.
@@ -46,6 +47,32 @@ impl SkillSet {
             listed,
             skills,
         })
+    }
+}
+
+impl SkillSet {
+    /// What a `skills_loaded` event says of each skill, sorted by name as
+    /// Python sorts them: its name and description, and its `when_to_use`
+    /// and `argument_hint` when set.
+    pub(crate) fn descriptors(&self) -> Vec<JsonObject> {
+        let mut skills: Vec<&Skill> = self.skills.iter().collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        let descriptor = |skill: &Skill| {
+            let mut descriptor = JsonObject::new();
+            let text = |value: &str| JsonValue::String(value.to_owned());
+            descriptor.insert("name".into(), text(&skill.name));
+            descriptor.insert("description".into(), text(&skill.description));
+            for (key, value) in [
+                ("when_to_use", &skill.when_to_use),
+                ("argument_hint", &skill.argument_hint),
+            ] {
+                if let Some(value) = value.as_deref().filter(|value| !value.is_empty()) {
+                    descriptor.insert(key.into(), text(value));
+                }
+            }
+            descriptor
+        };
+        skills.into_iter().map(descriptor).collect()
     }
 }
 

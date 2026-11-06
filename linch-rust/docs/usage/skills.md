@@ -202,7 +202,9 @@ the turn after that offered every tool again.
 
 ## Events
 
-Each `Skill` call adds a `SkillInvokedEvent` (`name`, and `args` when given)
+A session's first run lists the skills in a `SkillsLoadedEvent` right after
+`init`: each skill's `name`, `description`, `when_to_use` and
+`argument_hint`, sorted by name. Each `Skill` call adds a `SkillInvokedEvent` (`name`, and `args` when given)
 and a `SkillCompletedEvent` (`name`, and `is_error` true when the load
 failed) between its `tool_call_start` and `tool_call_end`, as in the loop
 above. Both are durable, so `Agent.events(run_id)` replays them. See
@@ -256,6 +258,7 @@ without asking. `"skill": "*"` matches every skill.
 | The listing is a reminder in the first prompt | A cached block of the system prompt |
 | The `Skill` tool is exec-scoped with auto-allow rules | Read-scoped |
 | `skill_invoked` comes before the call's `tool_call_start` | It comes after `tool_call_start`, followed by `skill_completed` |
+| `skills_loaded` once per session object, so again after a restart | Only on the session's first run |
 | PyYAML: `yes` is `true`, a repeated key keeps the last value | YAML 1.2: `yes` is a string, a repeated key is invalid |
 
 ---
