@@ -247,7 +247,8 @@
 //! principal?}` ([`ToolCallParams`](protocol::ToolCallParams)) runs a host
 //! tool on input already checked against its schema. The result is a
 //! `ToolOutput`, `{"value": <any>, "metadata"?: {...}}`; `value` is what the
-//! model sees and `metadata` is for the host only. An error object is a
+//! model sees and `metadata` is for the host only (the call's
+//! `tool_call_end` event carries it). An error object is a
 //! tool error the model reads: its `message` is shown and its `data` kept
 //! as details. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
@@ -275,15 +276,20 @@
 //! and permission still applies to a resolved call. At
 //! `permission_request`, a deny stops the chain and an allow does not, so
 //! a later deny wins; with no answer the call asks the host as usual
-//! (`suspended`, then `run.approve`). A blocked `user_prompt_submit` ends
-//! the run with `-32029` in `run.end` before anything is written.
+//! (`suspended`, then `run.approve`). A tool's `output_schema`, when it
+//! has one, checks the value the tool returned before `post_tool_use`, so
+//! a violation reaches the chain as an error result and a `replace` is
+//! not checked. A blocked `user_prompt_submit` ends the run with `-32029`
+//! in `run.end` before anything is written.
 //!
 //! # Notifications
 //!
 //! **`run.event`**: params are one [`Envelope`](linch::Envelope),
-//! `{"v": 1, "seq": 7, "run_id": "...", "event": {"type": "...", ...}}`,
-//! in the run's order. Durable kinds arrive once they are durable, so a
-//! client that saw seq `n` replays with `run.events(after_seq = n)`.
+//! `{"v": 1, "seq": 7, "run_id": "...", "ts_ms": 1762400000000, "event":
+//! {"type": "...", ...}}`, in the run's order; `ts_ms` is when the server
+//! made the envelope, in Unix milliseconds. Durable kinds arrive once they
+//! are durable, so a client that saw seq `n` replays with
+//! `run.events(after_seq = n)`.
 //! Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) arrive
 //! at once, carry the last durable seq, and are never replayed. A run's
 //! envelopes end with `result` (finished) or `suspended` (waiting for
