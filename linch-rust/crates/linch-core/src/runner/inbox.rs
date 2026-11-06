@@ -48,18 +48,21 @@ pub(super) async fn redeliver(agent: &AgentInner, messages: Vec<MailboxMessage>)
 
 impl Runner {
     /// The blocks to add to the user message this turn ends with: the
-    /// notification of each background child that ended, whose
-    /// `child_run_status` this stages, then the session's peer messages.
+    /// notification of each background child that ended (none for one
+    /// `TaskStop` stopped), whose `child_run_status` this stages, then the
+    /// session's peer messages.
     pub(super) async fn notes(&mut self) -> Result<Vec<ContentBlock>, RunError> {
         let mut notes = Vec::new();
         let done = (self.family.as_ref()).map(|family| family.take_done());
         for completion in done.into_iter().flatten() {
-            self.journal
-                .stage(Event::ChildRunStatus(ChildRunStatusEvent {
-                    child_run_id: completion.child.clone(),
-                    status: completion.status,
-                }));
-            notes.push(ContentBlock::text(completion.notification()));
+            let mark = ChildRunStatusEvent {
+                child_run_id: completion.child.clone(),
+                status: completion.status,
+            };
+            self.journal.stage(Event::ChildRunStatus(mark));
+            if !completion.stopped {
+                notes.push(ContentBlock::text(completion.notification()));
+            }
         }
         let peers = drain(&self.agent, &self.run.session_id).await?;
         notes.extend(blocks(&peers));

@@ -59,8 +59,20 @@
 //! A worker's display name is its definition's name, or `Agent #N` for
 //! the N-th general-purpose worker of the parent session (kept in process
 //! memory).
+//!
+//! A background worker, and with [`Workers::retain`] a foreground one
+//! (whose result then ends with `[Worker ID: <id>]`), stays addressable by
+//! id or unique display name:
+//! - `SubagentContinue` runs it again on its own session, history intact,
+//!   as a new foreground child run of the calling run;
+//! - `TaskStop` (with background on) stops a background worker; its end is
+//!   recorded with no notification.
+//!
+//! [`crate::Agent::close_session`] closes the sessions of a session's
+//! workers with it; an unaddressable child's session closes when it ends.
 
 mod background;
+mod control;
 mod run;
 #[cfg(test)]
 mod tests;
@@ -70,6 +82,7 @@ mod workers;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use background::{Completion, reattach};
+pub(crate) use control::{ContinueTool, StopTool};
 pub(crate) use tool::SubagentTool;
 pub(crate) use workers::Registry;
 
@@ -88,6 +101,12 @@ pub struct Workers {
 
 /// Name of the tool that runs a subagent.
 pub const SUBAGENT_TOOL: &str = "Subagent";
+
+/// Name of the tool that runs a kept worker again.
+pub const CONTINUE_TOOL: &str = "SubagentContinue";
+
+/// Name of the tool that stops a background worker.
+pub const STOP_TOOL: &str = "TaskStop";
 
 /// A kind of subagent the model can ask for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -12,7 +12,7 @@
 //! A background child also leaves its durable events, wrapped, for the
 //! run's next turn, and its end as a [`Completion`] in the family's inbox.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +52,8 @@ struct State {
     done: Vec<Completion>,
     /// Wrapped events of background children, for the run's log.
     log: Vec<Event>,
+    /// Children `TaskStop` stopped, whose end needs no notification.
+    stopped: HashSet<RunId>,
 }
 
 struct Live {
@@ -124,9 +126,27 @@ impl Family {
     }
 
     /// Put a background child's end in the inbox.
-    pub(crate) fn complete(&self, completion: Completion) {
-        lock(&self.state).done.push(completion);
+    pub(crate) fn complete(&self, mut completion: Completion) {
+        let mut state = lock(&self.state);
+        completion.stopped = state.stopped.remove(&completion.child);
+        state.done.push(completion);
+        drop(state);
         self.changed.notify_waiters();
+    }
+
+    /// Whether the child `child` runs.
+    pub(crate) fn is_running(&self, child: &RunId) -> bool {
+        lock(&self.state).live.contains_key(child)
+    }
+
+    /// Stop the running child `child`: cancel it, and record its end
+    /// without a notification.
+    pub(crate) fn stop(&self, child: &RunId) {
+        let mut state = lock(&self.state);
+        if let Some(live) = state.live.get(child) {
+            live.cancel.cancel();
+            state.stopped.insert(child.clone());
+        }
     }
 
     /// Poll every child once it can go on.

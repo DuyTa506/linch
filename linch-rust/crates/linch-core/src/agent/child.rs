@@ -7,10 +7,11 @@ use super::{AgentInner, BuildError};
 use crate::message::SystemBlock;
 use crate::registry::ToolSnapshot;
 use crate::skills::SKILL_TOOL;
-use crate::subagents::{SUBAGENT_TOOL, SubagentDefinition};
+use crate::subagents::{CONTINUE_TOOL, STOP_TOOL, SUBAGENT_TOOL, SubagentDefinition};
 
 /// Which of the parent's tools a child run sees: never `Subagent` (a child
-/// cannot spawn), and only the named ones when the definition names any.
+/// cannot spawn) nor the worker tools (it has no workers), and only the
+/// named ones when the definition names any.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildTools {
     only: Option<Vec<String>>,
@@ -25,7 +26,7 @@ impl ChildTools {
     }
 
     fn keeps(&self, name: &str) -> bool {
-        name != SUBAGENT_TOOL
+        ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL].contains(&name)
             && (self.only.as_ref()).is_none_or(|only| only.iter().any(|n| n == name))
     }
 
@@ -86,6 +87,7 @@ impl AgentInner {
             skills: self.skills,
             skill_listing: self.skill_listing.clone(),
             subagents: None,
+            workers: Default::default(),
             worker_registry: Default::default(),
             child: true,
             pricing: self.pricing.clone(),

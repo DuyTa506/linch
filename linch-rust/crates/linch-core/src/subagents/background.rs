@@ -5,7 +5,9 @@ use std::sync::{Arc, Weak};
 
 use futures::StreamExt;
 
+use super::SUBAGENT_TOOL;
 use super::run::{Outcome, failed, finished};
+use super::tool::in_background;
 use super::workers::Worker;
 use crate::agent::{AgentInner, RunOptions};
 use crate::events::kinds::{ChildRunStatusEvent, ResultSubtype};
@@ -30,6 +32,8 @@ pub(crate) struct Completion {
     pub(crate) text: String,
     /// The last error, as `name: message`.
     pub(crate) error: Option<String>,
+    /// `TaskStop` stopped it: its end is recorded, not notified.
+    pub(crate) stopped: bool,
 }
 
 impl Completion {
@@ -45,6 +49,7 @@ impl Completion {
             status,
             text: outcome.text,
             error: outcome.error,
+            stopped: false,
         }
     }
 
@@ -158,6 +163,25 @@ pub(crate) async fn reattach(
     let Some(roster) = &parent.subagents else {
         return;
     };
+    let prefix = format!("{}:", run.run_id);
+    // Know this run's workers again, in call order: a new process forgot
+    // them.
+    for envelope in events {
+        let Event::ToolCallStart(start) = &envelope.event else {
+            continue;
+        };
+        let requested = start.input.get("subagent_type").and_then(JsonValue::as_str);
+        let definition = (start.tool_name == SUBAGENT_TOOL)
+            .then(|| roster.get(requested))
+            .flatten();
+        if let Some(definition) = definition {
+            let id = RunId::new(format!("{prefix}{}", start.tool_use_id));
+            let general = std::ptr::eq(definition, roster.general());
+            let addressable = in_background(&start.input) || parent.workers.retain;
+            let registry = &parent.worker_registry;
+            registry.enlist(&run.session_id, &id, definition, general, addressable);
+        }
+    }
     let mut running: Vec<&RunId> = Vec::new();
     for envelope in events {
         if let Event::ChildRunStatus(mark) = &envelope.event {
@@ -167,7 +191,6 @@ pub(crate) async fn reattach(
             }
         }
     }
-    let prefix = format!("{}:", run.run_id);
     for id in running {
         let Some(input) = call_input(events, id.as_str().strip_prefix(&prefix)) else {
             continue;
@@ -178,7 +201,7 @@ pub(crate) async fn reattach(
         };
         let general = std::ptr::eq(definition, roster.general());
         let registry = &parent.worker_registry;
-        let worker = registry.enlist(&run.session_id, id, definition, general);
+        let worker = registry.enlist(&run.session_id, id, definition, general, true);
         let name = worker.display_name.clone();
         let prompt = text("prompt").unwrap_or_default().to_owned();
         let principal = run.principal.clone();
@@ -190,6 +213,7 @@ pub(crate) async fn reattach(
                 status: RunStatus::Failed,
                 text: String::new(),
                 error: Some(error.message),
+                stopped: false,
             });
         }
     }
@@ -258,6 +282,7 @@ mod tests {
             status: RunStatus::Completed,
             text: "a < \"b\"".into(),
             error: None,
+            stopped: false,
         };
         assert_eq!(
             completion.notification(),

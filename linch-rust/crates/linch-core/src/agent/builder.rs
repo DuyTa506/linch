@@ -15,7 +15,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{self, Skill, SkillTool};
 use crate::store::{RunStore, SessionStore};
-use crate::subagents::{Roster, SubagentDefinition, SubagentTool, Workers};
+use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
 use crate::usage::Usage;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
@@ -234,6 +234,14 @@ impl AgentBuilder {
             features.insert("subagents".into(), value);
             let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle), workers);
             built_ins.register(&self.tools, Arc::new(tool))?;
+            if workers.background || workers.retain {
+                let tool = ContinueTool::new(Arc::clone(&handle));
+                built_ins.register(&self.tools, Arc::new(tool))?;
+            }
+            if workers.background {
+                let tool = StopTool::new(Arc::clone(&handle));
+                built_ins.register(&self.tools, Arc::new(tool))?;
+            }
             subagents = Some(roster);
         }
         let tools = self.tools.snapshot().contract_tools();
@@ -257,6 +265,7 @@ impl AgentBuilder {
             skills: skills_on,
             skill_listing: listing,
             subagents,
+            workers,
             worker_registry: Default::default(),
             child: false,
             pricing: self.pricing,

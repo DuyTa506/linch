@@ -26,7 +26,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::runner::{self, Families, RunStream};
 use crate::store::{RunStore, SessionStore};
-use crate::subagents::{Registry, Roster};
+use crate::subagents::{Registry, Roster, Workers};
 use crate::usage::Usage;
 
 mod builder;
@@ -114,6 +114,8 @@ pub(crate) struct AgentInner {
     pub(crate) skill_listing: Option<SystemBlock>,
     /// The subagents the `Subagent` tool runs; `None` when they are off.
     pub(crate) subagents: Option<Arc<Roster>>,
+    /// How the `Subagent` tool keeps its workers.
+    pub(crate) workers: Workers,
     /// The workers of each parent session.
     pub(crate) worker_registry: Registry,
     /// Whether this is a subagent's agent: its runs cannot suspend, so a
@@ -140,6 +142,13 @@ impl AgentInner {
         let mut request = self.spec.request(tools, messages);
         request.system = self.system.clone();
         request
+    }
+
+    /// Run every session-close callback for `session`.
+    pub(crate) fn close(&self, session: &SessionId) {
+        for callback in &self.session_close {
+            callback(session);
+        }
     }
 
     /// What `usage` on `model` cost in USD, by the host's pricing; `None`
@@ -262,14 +271,18 @@ impl Agent {
     }
 
     /// Tell the agent the host is done with `session_id`: run every
-    /// [`AgentBuilder::on_session_close`] callback, in the order added.
+    /// [`AgentBuilder::on_session_close`] callback, in the order added,
+    /// first for the session of each subagent worker the session started
+    /// (in this process), then for the session itself. The workers are
+    /// forgotten: `SubagentContinue` no longer finds them.
     ///
-    /// Nothing is written: the session log and its runs stay, and a later
-    /// run on the session works as before.
+    /// Nothing is written: the session logs and runs stay, and a later run
+    /// on the session works as before.
     pub fn close_session(&self, session_id: &SessionId) {
-        for callback in &self.inner.session_close {
-            callback(session_id);
+        for worker in self.inner.worker_registry.close(session_id) {
+            self.inner.close(&worker);
         }
+        self.inner.close(session_id);
     }
 
     /// The run's durable envelopes with seq greater than `after_seq`,

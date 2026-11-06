@@ -17,7 +17,7 @@ use crate::message::{ContentBlock, Message, Role, ToolUseBlock};
 use crate::policy::PermissionDecision;
 use crate::run::{Phase, ToolDecisionRecord};
 use crate::scheduler::{self, BatchPlan, ExecuteOptions, PlannedAction, RecordedApproval};
-use crate::subagents::SUBAGENT_TOOL;
+use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 
 /// Why a subagent's call that needs approval is denied.
 const CANNOT_ASK: &str = "it needs approval, which a subagent cannot ask for; allow it with a \
@@ -111,11 +111,11 @@ impl Runner {
         }))
     }
 
-    /// Plan again each `Subagent` call that started and has no end, instead
-    /// of standing in a placeholder: the call resumes its durable child run
-    /// (see [`crate::subagents`]).
+    /// Plan again each `Subagent` or `SubagentContinue` call that started
+    /// and has no end, instead of standing in a placeholder: the call
+    /// resumes its durable child run (see [`crate::subagents`]).
     fn rerun_subagents(&self, calls: Vec<ToolRecovery>) -> Vec<ToolRecovery> {
-        let resumable = |call: &ToolRecovery| matches!(call, ToolRecovery::Interrupted { tool_name, .. } if tool_name == SUBAGENT_TOOL);
+        let resumable = |call: &ToolRecovery| matches!(call, ToolRecovery::Interrupted { tool_name, .. } if tool_name == SUBAGENT_TOOL || tool_name == CONTINUE_TOOL);
         if self.agent.subagents.is_none() || !calls.iter().any(resumable) {
             return calls;
         }

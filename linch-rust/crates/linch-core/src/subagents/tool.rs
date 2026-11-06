@@ -1,13 +1,14 @@
 //! The `Subagent` tool: one foreground child run per call.
 
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use serde_json::json;
 
+use super::control::Handle;
 use super::{Roster, SUBAGENT_TOOL, Workers, background, run};
 use crate::agent::AgentInner;
-use crate::ids::RunId;
+use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::tool::{Tool, ToolContext, ToolOutputError, ToolResult, ToolScope};
 
@@ -32,18 +33,14 @@ pub(crate) struct SubagentTool {
     roster: Arc<Roster>,
     /// The agent this tool belongs to, set once it is built. Weak, since
     /// the agent holds the registry that holds this tool.
-    agent: Arc<OnceLock<Weak<AgentInner>>>,
+    agent: Handle,
     workers: Workers,
     description: String,
     schema: JsonObject,
 }
 
 impl SubagentTool {
-    pub(crate) fn new(
-        roster: Arc<Roster>,
-        agent: Arc<OnceLock<Weak<AgentInner>>>,
-        workers: Workers,
-    ) -> Self {
+    pub(crate) fn new(roster: Arc<Roster>, agent: Handle, workers: Workers) -> Self {
         let mut description = HEADER.to_owned();
         if !roster.listed().is_empty() {
             description.push_str("\n\nAvailable subagent types:");
@@ -102,7 +99,7 @@ fn text<'a>(input: &'a JsonObject, field: &str) -> Option<&'a str> {
     input.get(field).and_then(JsonValue::as_str)
 }
 
-fn in_background(input: &JsonObject) -> bool {
+pub(super) fn in_background(input: &JsonObject) -> bool {
     (input.get("run_in_background")).is_some_and(|value| value.as_bool() == Some(true))
 }
 
@@ -194,11 +191,23 @@ impl Tool for SubagentTool {
         let prompt = text(&input, "prompt").unwrap_or("").to_owned();
         let id = RunId::new(ctx.idempotency_key());
         let general = std::ptr::eq(definition, self.roster.general());
+        let addressable = background || self.workers.retain;
         let registry = &agent.worker_registry;
-        let worker = registry.enlist(&ctx.session_id, &id, definition, general);
-        match background {
-            true => background::launch(&agent, worker, prompt, &ctx).await,
-            false => run::run(&agent, definition, prompt, &ctx).await,
+        let worker = registry.enlist(&ctx.session_id, &id, definition, general, addressable);
+        if background {
+            return background::launch(&agent, worker, prompt, &ctx).await;
         }
+        let session = SessionId::new(id.as_str());
+        let outcome = run::run(&agent, definition, session.clone(), prompt, &ctx).await?;
+        if !addressable {
+            // No one can address it again: free its session now.
+            agent.close(&session);
+            agent.worker_registry.forget(&ctx.session_id, &id);
+        }
+        let mut output = outcome.result("Subagent")?;
+        if let (true, JsonValue::String(text)) = (addressable, &mut output.value) {
+            text.push_str(&format!("\n\n[Worker ID: {id}]"));
+        }
+        Ok(output)
     }
 }

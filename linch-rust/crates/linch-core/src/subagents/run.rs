@@ -16,9 +16,10 @@ use crate::store::StoreError;
 use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 
 /// Run the `definition` subagent on `prompt` as the child run of the call
-/// in `ctx`: start it, resume it if a crash left it unfinished, or read
-/// the result of one that finished. Each event of the child goes into the
-/// parent's log wrapped in a `subagent` event.
+/// in `ctx`, in `session` (the child run's own id for a new worker, a
+/// worker's for a continuation): start it, resume it if a crash left it
+/// unfinished, or read the end of one that finished. Each event of the
+/// child goes into the parent's log wrapped in a `subagent` event.
 ///
 /// The parent run's [`Family`](crate::runner::Family) drives the child, so
 /// a call cut short (by its timeout or the run's cancel, which cancel the
@@ -26,9 +27,10 @@ use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 pub(super) async fn run(
     parent: &AgentInner,
     definition: &SubagentDefinition,
+    session: SessionId,
     prompt: String,
     ctx: &ToolContext,
-) -> ToolResult {
+) -> Result<Outcome, ToolOutputError> {
     let child = match parent.child(definition) {
         Ok(child) => Arc::new(child),
         Err(error) => return Err(failed("could not be built", error)),
@@ -36,7 +38,7 @@ pub(super) async fn run(
     let child_id = RunId::new(ctx.idempotency_key());
     let cancel = ctx.cancel.child_token();
     let options = RunOptions {
-        session_id: SessionId::new(child_id.as_str()),
+        session_id: session,
         run_id: Some(child_id.clone()),
         principal: ctx.principal.clone(),
         owner: "subagent".into(),
@@ -46,9 +48,7 @@ pub(super) async fn run(
         Err(StoreError::NotFound { .. }) => {
             runner::start_child(child, prompt, options, ctx.run_id.clone())
         }
-        Ok(record) if record.status.is_terminal() => {
-            return finished(&child, &child_id).await?.result();
-        }
+        Ok(record) if record.status.is_terminal() => return finished(&child, &child_id).await,
         Ok(_) => runner::resume(child, child_id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
@@ -76,7 +76,11 @@ pub(super) async fn finished(
     Ok(outcome)
 }
 
-async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) -> ToolResult {
+async fn drive(
+    mut stream: RunStream,
+    child_run_id: RunId,
+    ctx: &ToolContext,
+) -> Result<Outcome, ToolOutputError> {
     let mut outcome = Outcome::default();
     while let Some(item) = stream.next().await {
         let envelope = item.map_err(|error| failed("could not continue", error))?;
@@ -86,7 +90,7 @@ async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) ->
             event: Box::new(envelope.event),
         }));
     }
-    outcome.result()
+    Ok(outcome)
 }
 
 pub(super) fn failed(what: &str, error: impl std::fmt::Display) -> ToolOutputError {
@@ -119,8 +123,9 @@ impl Outcome {
     }
 
     /// The tool result: the text of a successful child, else an error that
-    /// keeps any partial output.
-    pub(super) fn result(self) -> ToolResult {
+    /// keeps any partial output and names the child as `who` (`Subagent`,
+    /// or `Worker` for a continuation).
+    pub(super) fn result(self, who: &str) -> ToolResult {
         let partial = |message: String| {
             let message = match self.text.is_empty() {
                 true => message,
@@ -130,18 +135,16 @@ impl Outcome {
         };
         match self.ended {
             Some(ResultSubtype::Success) if !self.text.is_empty() => Ok(ToolOutput::new(self.text)),
-            Some(ResultSubtype::Success) => partial("Subagent produced no text output.".into()),
+            Some(ResultSubtype::Success) => partial(format!("{who} produced no text output.")),
             Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) => {
-                partial("Subagent aborted.".into())
+                partial(format!("{who} aborted."))
             }
             Some(ResultSubtype::Error) => {
                 let error = self.error.as_ref().map(|e| format!(": {e}"));
-                partial(format!(
-                    "Subagent encountered an error{}.",
-                    error.unwrap_or_default()
-                ))
+                let error = error.unwrap_or_default();
+                partial(format!("{who} encountered an error{error}."))
             }
-            None => partial("Subagent stopped without a result.".into()),
+            None => partial(format!("{who} stopped without a result.")),
         }
     }
 }
@@ -181,7 +184,7 @@ mod tests {
     fn outcome(events: &[Event]) -> ToolResult {
         let mut outcome = Outcome::default();
         events.iter().for_each(|event| outcome.see(event));
-        outcome.result()
+        outcome.result("Subagent")
     }
 
     fn message(result: ToolResult) -> String {
