@@ -6,9 +6,12 @@ use serde_json::json;
 
 use crate::codes;
 
+/// Longest result text, in bytes: Python's `OUTPUT_CAP`.
+const OUTPUT_CAP: usize = 30_000;
+
 /// Map one result: the text blocks become the output, images go to
 /// `metadata.images`, and an `isError` result becomes a [`ToolOutputError`]
-/// carrying the same text.
+/// carrying the same text. The text is cut at [`OUTPUT_CAP`].
 pub(crate) fn tool_result(result: CallToolResult) -> ToolResult {
     let mut parts = Vec::new();
     let mut images = Vec::new();
@@ -35,11 +38,19 @@ pub(crate) fn tool_result(result: CallToolResult) -> ToolResult {
     {
         parts.push(structured.to_string());
     }
-    let text = if parts.is_empty() {
+    let mut text = if parts.is_empty() {
         "(no content)".to_owned()
     } else {
         parts.join("\n")
     };
+    if text.len() > OUTPUT_CAP {
+        let mut cut = OUTPUT_CAP;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str(&format!("\n… (output capped at {OUTPUT_CAP} bytes)"));
+    }
 
     if result.is_error == Some(true) {
         return Err(ToolOutputError {
@@ -98,6 +109,22 @@ mod tests {
             output.metadata["images"],
             json!([{"mime_type": "image/png", "data": "aGk="}])
         );
+    }
+
+    #[test]
+    fn long_text_is_capped_on_a_char_boundary() {
+        // One byte, then two per char, so byte 30000 falls inside a char.
+        let long = format!("a{}", "é".repeat(20_000));
+        let output = tool_result(CallToolResult::success(vec![ContentBlock::text(
+            long.clone(),
+        )]))
+        .unwrap();
+        let text = output.value.as_str().unwrap();
+        let note = "\n… (output capped at 30000 bytes)";
+        assert_eq!(text, format!("a{}{note}", "é".repeat(14_999)));
+        let error = tool_result(CallToolResult::error(vec![ContentBlock::text(long)])).unwrap_err();
+        assert!(error.message.ends_with(note), "{}", error.message);
+        assert!(error.message.len() <= 30_000 + note.len());
     }
 
     #[test]
