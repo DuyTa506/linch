@@ -13,6 +13,10 @@ use super::error::WorkflowError;
 use super::journal::{JournalStore, JournalStoreError, WorkflowStatus};
 
 /// How one [`run_workflow`] call journals and runs.
+///
+/// Timeouts, the deadline and retry backoff use `tokio::time`, so a
+/// workflow that sets any of them must run on a Tokio runtime with the time
+/// driver enabled.
 #[derive(Clone)]
 pub struct WorkflowOptions {
     /// Where the journal lives. Pass a durable store, and the same
