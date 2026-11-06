@@ -1,6 +1,6 @@
 [package]
 name = "linch-ext"
-description = "Extensions on the Linch agent kernel: the eval harness and run reports."
+description = "Extensions on the Linch agent kernel: the eval harness, run reports and workflows."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,8 @@ publish = false
 workspace = true
 
 [dependencies]
+# The JournalStore trait.
+async-trait = "0.1.92"
 futures = { version = "0.3.34", default-features = false, features = ["std"] }
 # The schema_valid scorer (already used by linch-core for tool schemas).
 jsonschema = { version = "0.60.2", default-features = false }
@@ -22,6 +24,5 @@ thiserror = "2.0.21"
 uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
-async-trait = "0.1.92"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "macros"] }
