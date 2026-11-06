@@ -82,7 +82,15 @@ struct Tables {
     agents: HashMap<String, Opened>,
     /// Runs this server drives now.
     runs: HashMap<RunId, Driven>,
+    /// The places of runs this server drove that suspended with background
+    /// workers still running here: each is held until the workers end, or
+    /// until an approve or resume of the run takes it over.
+    parked: HashMap<RunId, Parked>,
 }
+
+/// A suspended run's place, shared with the task that frees it once the
+/// run's workers end; whoever takes it first has it.
+type Parked = Arc<Mutex<Option<OwnedSemaphorePermit>>>;
 
 /// An agent this connection opened.
 struct Opened {

@@ -336,6 +336,28 @@ impl Agent {
         self.inner.close(session_id);
     }
 
+    /// Whether `run_id` is suspended in this process with subagent children
+    /// still running: a future that resolves once none of them runs, else
+    /// `None`.
+    ///
+    /// A run that suspends for approval keeps its background workers
+    /// running after its stream ends. A host that counts live runs (one
+    /// place per run) holds the run's place until this resolves, or until
+    /// an approve or resume of the run takes the children over.
+    ///
+    /// Args:
+    ///     run_id: The run, as its stream named it.
+    ///
+    /// Returns:
+    ///     The wait for its children, when it is suspended here with any
+    ///     running; `None` for any other run.
+    pub fn parked_children(
+        &self,
+        run_id: &RunId,
+    ) -> Option<impl Future<Output = ()> + Send + use<>> {
+        self.inner.family(run_id)?.parked_children()
+    }
+
     /// The status of `run_id`, from its record alone.
     ///
     /// Raises:

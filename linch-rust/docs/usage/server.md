@@ -288,7 +288,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 
 | Limit | Value | Past it |
 |---|---|---|
-| `max_runs` | 16 per tenant unless set | `run.start`, `run.resume` or `run.approve` gets `-32005`, `data: {"kind": "runs", "max": ...}`; nothing starts. A run holds its place until its `run.end` |
+| `max_runs` | 16 per tenant unless set | `run.start`, `run.resume` or `run.approve` gets `-32005`, `data: {"kind": "runs", "max": ...}`; nothing starts. A run holds its place until its `run.end`; one that suspends with background subagents still running keeps it until they end, or until its approve or resume takes it over |
 | `max_agents` | 16 per tenant unless set | `agent.open` gets `-32005` (`kind: agents`) after its checks pass, before any MCP server starts. An agent holds its place until `agent.close`, or the end of its connection, has stopped its MCP servers |
 | `max_connections` | 8 per tenant unless set | The socket login gets `-32005` (`kind: connections`) and closes; HTTP gets `429` |
 | Logins waiting at once | 32, across the server | `-32005` (`kind: logins`) and the connection closes |
@@ -308,10 +308,9 @@ up to its `workers.max_background` (4 unless set) at once, so one tenant's
 running runs have at most `max_runs × (1 + max_background)` provider streams
 open: 80 with the defaults. Read-only foreground subagents that run in
 parallel count up to the spec's `max_tool_concurrency` in place of the
-parent's one. A run awaiting approval holds no place but keeps its
-background subagents running until it is approved or resumed, or its
-session or agent closes, so those streams are not counted against
-`max_runs`.
+parent's one. A run awaiting approval keeps its background subagents
+running until it is approved or resumed, or its session or agent closes,
+and keeps its one place while any of them runs, so the bound holds.
 
 ---
 

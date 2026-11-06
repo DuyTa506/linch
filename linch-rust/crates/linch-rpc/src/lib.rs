@@ -77,7 +77,9 @@
 //!
 //! A tenant also has caps, counted across all its connections: at most
 //! `max_runs` runs driven at once (default [`DEFAULT_MAX_RUNS`]; a run
-//! holds its place until its `run.end`), `max_agents` agents open (default
+//! holds its place until its `run.end`, or, when it suspends with
+//! background subagents still running, until they end or an approve or
+//! resume of it takes the place over), `max_agents` agents open (default
 //! [`DEFAULT_MAX_AGENTS`]; until `agent.close` or the connection's end has
 //! closed its MCP servers) and `max_connections` connections (default
 //! [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is refused with

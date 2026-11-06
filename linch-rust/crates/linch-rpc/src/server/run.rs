@@ -1,12 +1,13 @@
 //! The run methods and the task that drives one run's stream.
 
 use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex};
 
 use futures::{FutureExt, StreamExt};
 use linch::{Principal, RunId, RunOptions, RunStream};
 use tokio::sync::OwnedSemaphorePermit;
 
-use super::{Driven, Reply, Server, Tables, lock, to_value};
+use super::{Driven, Parked, Reply, Server, Tables, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
     ApproveParams, CancelParams, Cancelled, ResumeParams, RunEnd, StartParams, method,
@@ -80,7 +81,12 @@ impl Server {
         let mut tables = lock(&self.0.tables);
         let agent = tables.agent(&handle)?;
         tables.not_driven(run_id)?;
-        let place = self.run_place()?;
+        // A suspended run that kept its place for its workers takes it back.
+        let kept = (tables.parked.remove(run_id)).and_then(|held| lock(&held).take());
+        let place = match kept {
+            Some(place) => Some(place),
+            None => self.run_place()?,
+        };
         // Resume and approve use the session stored with the run.
         let mut options = RunOptions::new("");
         options.principal = principal;
@@ -92,6 +98,48 @@ impl Server {
         };
         tables.runs.insert(run_id.clone(), driven);
         Ok(Reply::Run(continue_run(&agent, options)))
+    }
+
+    /// Hold the place of `run_id`, whose stream ended, while it is
+    /// suspended with background workers running here; they take no place
+    /// of their own. An approve or resume takes the place over in
+    /// [`Self::claim`]; else it is freed once the workers end. The task
+    /// holds the server and the place weakly, so a closed connection frees
+    /// both as before.
+    fn keep_place(&self, tables: &mut Tables, run_id: &RunId, driven: Driven) {
+        let Driven {
+            agent,
+            _place: Some(place),
+            ..
+        } = driven
+        else {
+            return;
+        };
+        let Ok(agent) = tables.agent(&agent) else {
+            return;
+        };
+        let Some(workers) = agent.parked_children(run_id) else {
+            return;
+        };
+        let held: Parked = Arc::new(Mutex::new(Some(place)));
+        tables.parked.insert(run_id.clone(), Arc::clone(&held));
+        let (state, held) = (Arc::downgrade(&self.0), Arc::downgrade(&held));
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            workers.await;
+            let Some(held) = held.upgrade() else {
+                return;
+            };
+            drop(lock(&held).take());
+            if let Some(state) = state.upgrade() {
+                let mut tables = lock(&state.tables);
+                let ours =
+                    (tables.parked.get(&run_id)).is_some_and(|kept| Arc::ptr_eq(kept, &held));
+                if ours {
+                    tables.parked.remove(&run_id);
+                }
+            }
+        });
     }
 
     fn admit_principal(&self, principal: Option<&Principal>) -> Result<(), ErrorObject> {
@@ -135,7 +183,13 @@ impl Server {
         // Dropping the stream first leaves the run at its last durable
         // state before a client can resume it.
         drop(stream);
-        lock(&self.0.tables).runs.remove(&run_id);
+        // Under one lock, so an approve cannot claim the run in between.
+        {
+            let mut tables = lock(&self.0.tables);
+            if let Some(driven) = tables.runs.remove(&run_id) {
+                self.keep_place(&mut tables, &run_id, driven);
+            }
+        }
         let end = RunEnd { run_id, error };
         let params = to_value(&end).expect("run.end params encode");
         self.0.outbox.notify(method::RUN_END, params).await;
