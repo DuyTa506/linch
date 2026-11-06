@@ -164,7 +164,7 @@ where
             }
         },
     };
-    let server = Server::new(outbox, tenant);
+    let server = Server::new(outbox, tenant, &stop);
     let mut failed = None;
     loop {
         let inbound = tokio::select! {

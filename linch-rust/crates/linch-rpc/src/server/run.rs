@@ -1,6 +1,8 @@
 //! The run methods and the task that drives one run's stream.
 
-use futures::StreamExt;
+use std::panic::AssertUnwindSafe;
+
+use futures::{FutureExt, StreamExt};
 use linch::{Principal, RunId, RunOptions, RunStream};
 
 use super::{Driven, Reply, Server, lock, to_value};
@@ -99,7 +101,14 @@ impl Server {
     pub(super) async fn drive(&self, mut stream: RunStream) {
         let run_id = stream.run_id().clone();
         let error = loop {
-            match stream.next().await {
+            // A panic inside the run (a tool, a hook) ends it like an error:
+            // it stays at its last durable state and can be resumed.
+            let Ok(next) = AssertUnwindSafe(stream.next()).catch_unwind().await else {
+                let message = "the run failed inside the server (a panic); \
+                               it stays at its last durable state";
+                break Some(ErrorObject::new(code::INTERNAL_ERROR, message));
+            };
+            match next {
                 None => break None,
                 Some(Err(error)) => break Some(ErrorObject::from(&error)),
                 Some(Ok(envelope)) => match envelope.to_value() {

@@ -2,7 +2,8 @@
 //! [`connection`].
 //!
 //! One read loop parses messages and spawns a task per call, so a slow
-//! `agent.open` never holds up `run.cancel`; it hands the client's answers
+//! `agent.open` never holds up `run.cancel`; at most [`MAX_REQUESTS`] calls
+//! are in flight, and past that the loop waits. It hands the client's answers
 //! to server requests straight to their waiting calls. One writer task owns
 //! the output and writes every response, notification and server request
 //! from a bounded queue; when the client reads slowly the queue fills and
@@ -10,12 +11,15 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use futures::FutureExt;
 use linch::{JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -37,6 +41,10 @@ use connection::Outbox;
 pub use connection::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};
 use peer::Peer;
 
+/// Calls one connection may have in flight; the read loop waits for one
+/// to finish before it reads past that.
+const MAX_REQUESTS: usize = 64;
+
 /// Server state shared by every task. Cheap to clone.
 #[derive(Clone)]
 struct Server(Arc<State>);
@@ -52,8 +60,15 @@ struct State {
     outbox: Outbox,
     /// Requests from the server to the client.
     peer: Peer,
+    /// Drops the runs: cancelled at the end of input, or with the
+    /// connection's stop token.
     shutdown: CancellationToken,
-    tasks: TaskTracker,
+    /// The tasks driving runs; dropped at shutdown.
+    runs: TaskTracker,
+    /// The tasks answering calls; they finish at shutdown.
+    calls: TaskTracker,
+    /// One permit per call in flight.
+    permits: Arc<Semaphore>,
 }
 
 #[derive(Default)]
@@ -79,27 +94,33 @@ enum Reply {
 }
 
 impl Server {
-    fn new(outbox: Outbox, tenant: Option<Arc<Tenant>>) -> Self {
+    fn new(outbox: Outbox, tenant: Option<Arc<Tenant>>, stop: &CancellationToken) -> Self {
         Self(Arc::new(State {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),
             tenant,
             peer: Peer::new(outbox.clone()),
             outbox,
-            shutdown: CancellationToken::new(),
-            tasks: TaskTracker::new(),
+            shutdown: stop.child_token(),
+            runs: TaskTracker::new(),
+            calls: TaskTracker::new(),
+            permits: Arc::new(Semaphore::new(MAX_REQUESTS)),
         }))
     }
 
-    /// The input ended: drop the runs first, so none sees the closed
-    /// connection as a tool or hook failure, then fail what still waits on
-    /// the client, then disconnect every agent's MCP servers, so no server
-    /// process outlives the connection.
+    /// The input ended. Calls already read finish and are answered (an
+    /// `agent.open` among them registers its agent); runs are dropped
+    /// where they stand. Only once both are gone does the peer close, so
+    /// no run sees the closed connection as a tool or hook failure. Then
+    /// every agent's MCP servers are disconnected and awaited, so no
+    /// server process outlives the connection.
     async fn stop(&self) {
         self.0.shutdown.cancel();
+        self.0.calls.close();
+        self.0.calls.wait().await;
+        self.0.runs.close();
+        self.0.runs.wait().await;
         self.0.peer.close();
-        self.0.tasks.close();
-        self.0.tasks.wait().await;
         let agents: Vec<OpenedAgent> = (lock(&self.0.tables).agents.drain())
             .map(|(_, agent)| agent)
             .collect();
@@ -133,8 +154,17 @@ impl Server {
         // This protocol defines no client notifications; JSON-RPC forbids
         // answering one, so it is dropped.
         let Some(id) = request.id else { return };
+        let permits = Arc::clone(&self.0.permits);
+        let permit = tokio::select! {
+            biased;
+            () = self.0.shutdown.cancelled() => return,
+            permit = permits.acquire_owned() => permit.expect("the semaphore is never closed"),
+        };
         let server = self.clone();
-        self.spawn(async move { server.handle(id, &request.method, request.params).await });
+        self.0.calls.spawn(async move {
+            server.handle(id, &request.method, request.params).await;
+            drop(permit);
+        });
     }
 
     /// Hand the client's answer to the server request it names. A
@@ -181,10 +211,10 @@ impl Server {
         }
     }
 
-    /// Run `task` until it ends or the server shuts down.
-    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+    /// Drive a run until it ends or the server shuts down.
+    fn spawn_run(&self, task: impl Future<Output = ()> + Send + 'static) {
         let shutdown = self.0.shutdown.clone();
-        self.0.tasks.spawn(async move {
+        self.0.runs.spawn(async move {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => {}
@@ -194,7 +224,15 @@ impl Server {
     }
 
     async fn handle(&self, id: Id, method: &str, params: JsonObject) {
-        match self.dispatch(method, params).await {
+        // A panic answers the call instead of leaving it unanswered.
+        let reply = AssertUnwindSafe(self.dispatch(method, params))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                let message = format!("{method} failed inside the server (a panic)");
+                Err(ErrorObject::new(code::INTERNAL_ERROR, message))
+            });
+        match reply {
             Ok(Reply::Value(result)) => {
                 self.0.outbox.send(&Response::ok(id, result)).await;
             }
@@ -206,7 +244,7 @@ impl Server {
                 let result = serde_json::to_value(&accepted).expect("a run id encodes");
                 self.0.outbox.send(&Response::ok(id, result)).await;
                 let server = self.clone();
-                self.spawn(async move { server.drive(stream).await });
+                self.spawn_run(async move { server.drive(stream).await });
             }
             Err(error) => {
                 self.0.outbox.send(&Response::err(id, error)).await;
@@ -261,3 +299,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // No code panics while holding these locks.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+#[cfg(test)]
+mod tests;

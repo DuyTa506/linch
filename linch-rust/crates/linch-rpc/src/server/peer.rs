@@ -87,7 +87,8 @@ impl Peer {
     /// Send `method` to the client and wait for its result.
     ///
     /// Stops waiting after `timeout`, when `cancel` fires, or when the
-    /// future is dropped; the client then gets `$/cancelRequest`.
+    /// future is dropped, also while the request waits for room in the
+    /// outbox; the client then gets `$/cancelRequest`.
     pub(crate) async fn call(
         &self,
         method: &str,
@@ -115,12 +116,17 @@ impl Peer {
             method: method.into(),
             params,
         };
-        if !self.0.outbox.send(&request).await {
-            return Err(CallError::Closed);
-        }
+        // Waiting for room in a full outbox counts against the timeout and
+        // the cancel too.
+        let exchange = async {
+            if !self.0.outbox.send(&request).await {
+                return Err(CallError::Closed);
+            }
+            answered.await.map_err(|_| CallError::Closed)
+        };
         let answer = tokio::select! {
             biased;
-            answer = answered => answer.map_err(|_| CallError::Closed)?,
+            answer = exchange => answer?,
             () = fired(cancel) => return Err(CallError::Cancelled),
             () = elapsed(timeout) => {
                 return Err(CallError::Timeout(timeout.unwrap_or_default()));
@@ -149,6 +155,12 @@ impl Peer {
         if let Some(waiter) = waiter {
             let _ = waiter.send(Answer::Malformed(reason));
         }
+    }
+
+    /// Whether [`Self::close`] has run.
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        lock(&self.0.calls).closed
     }
 
     /// The connection closed: fail every waiting call with

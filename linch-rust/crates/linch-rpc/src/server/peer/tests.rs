@@ -120,3 +120,23 @@ async fn a_cancel_token_or_a_dropped_call_sends_cancel() {
     assert_eq!(cancel["method"], "$/cancelRequest");
     assert_eq!(cancel["params"]["id"], request["id"]);
 }
+
+#[tokio::test]
+async fn a_full_outbox_counts_against_the_timeout_and_the_cancel() {
+    let (sender, _lines) = mpsc::channel(1);
+    sender.try_send("filler".into()).unwrap();
+    let peer = Peer::new(Outbox(sender));
+    let started = Instant::now();
+    let limit = Some(Duration::from_millis(50));
+    let timed = peer.call("tool.call", JsonObject::new(), limit, None).await;
+    assert!(matches!(timed, Err(CallError::Timeout(_))), "{timed:?}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let cancelled = peer.call("tool.call", JsonObject::new(), None, Some(&cancel));
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), cancelled).await;
+    assert!(
+        matches!(cancelled, Ok(Err(CallError::Cancelled))),
+        "{cancelled:?}"
+    );
+}
