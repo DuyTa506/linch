@@ -206,27 +206,42 @@ impl SessionLog {
     /// A stable SHA-256 fingerprint of `full_history`.
     ///
     /// Equals [`canonical::digest`] of the JSON array of historical
-    /// messages, but folds only the tail added since the previous call, so
-    /// repeated calls cost `O(new historical messages)`. A visible-only
-    /// append or a projection never changes this value; only `historical`
-    /// appends do. It cannot fail: `Message` holds only valid JSON, unlike
-    /// Python's `_history_fingerprint`, which rejects `NaN` metadata.
-    pub fn history_fingerprint(&mut self) -> Digest {
+    /// messages for any message within the depth ceiling (the incremental
+    /// path below encodes each message at depth 0, one level shallower than
+    /// its position inside that array, so a message whose own containers
+    /// reach exactly [`canonical::MAX_ENCODE_DEPTH`] is the one case where
+    /// this succeeds while `digest`-of-the-array would not). It folds only
+    /// the tail added since the previous call, so repeated calls cost
+    /// `O(new historical messages)`. A visible-only append or a projection
+    /// never changes this value; only `historical` appends do.
+    ///
+    /// # Errors
+    ///
+    /// This can fail: returns [`canonical::CanonicalError::DepthExceeded`]
+    /// if a message's JSON nests deeper than [`canonical::MAX_ENCODE_DEPTH`],
+    /// the same way Python's `_history_fingerprint` raises past its own
+    /// (smaller) depth limit of 100 (`_STRICT_JSON_MAX_DEPTH` in
+    /// `src/linch/durability.py`). A failed call encodes nothing into the
+    /// running hash and advances no counter, so a later call retries the
+    /// same pending messages from scratch.
+    pub fn history_fingerprint(&mut self) -> Result<Digest, canonical::CanonicalError> {
         let pending: Vec<Arc<Message>> = self.full[self.fingerprint.hashed_count..].to_vec();
         for message in &pending {
+            let value = serde_json::to_value(message.as_ref())
+                .expect("Message always serializes to valid JSON");
+            // Encode before touching `self.fingerprint`: a failure here
+            // must not leave a separator hashed in for a message that was
+            // never actually counted.
+            let encoded = canonical::to_canonical_string(&value)?;
             if self.fingerprint.hashed_count > 0 {
                 self.fingerprint.hasher.update(b",");
             }
-            let value = serde_json::to_value(message.as_ref())
-                .expect("Message always serializes to valid JSON");
-            self.fingerprint
-                .hasher
-                .update(canonical::to_canonical_string(&value).as_bytes());
+            self.fingerprint.hasher.update(encoded.as_bytes());
             self.fingerprint.hashed_count += 1;
         }
         let mut complete = self.fingerprint.hasher.clone();
         complete.update(b"]");
-        Digest::from_bytes(complete.finalize().into())
+        Ok(Digest::from_bytes(complete.finalize().into()))
     }
 }
 

@@ -221,12 +221,12 @@ fn history_fingerprint_matches_pinned_vectors() {
     // Computed with Python hashlib over the canonical JSON array of messages.
     let mut log = SessionLog::new();
     assert_eq!(
-        log.history_fingerprint().to_string(),
+        log.history_fingerprint().unwrap().to_string(),
         "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
     );
     log.append(Message::user_text("hi"), true, true);
     assert_eq!(
-        log.history_fingerprint().to_string(),
+        log.history_fingerprint().unwrap().to_string(),
         "4047097b2648d6b400be8a670f467110f9366f7b79e3b450d3eb138e36acdab4"
     );
 }
@@ -239,8 +239,8 @@ fn history_fingerprint_is_the_digest_of_the_history_array() {
     log.append(make_message(2), false, true);
     let history = serde_json::to_value(history_as_messages(&log)).unwrap();
     assert_eq!(
-        log.history_fingerprint(),
-        crate::canonical::digest(&history)
+        log.history_fingerprint().unwrap(),
+        crate::canonical::digest(&history).unwrap()
     );
 }
 
@@ -248,8 +248,8 @@ fn history_fingerprint_is_the_digest_of_the_history_array() {
 fn history_fingerprint_is_stable_without_new_appends() {
     let mut log = SessionLog::new();
     log.append(make_message(0), true, true);
-    let first = log.history_fingerprint();
-    let second = log.history_fingerprint();
+    let first = log.history_fingerprint().unwrap();
+    let second = log.history_fingerprint().unwrap();
     assert_eq!(first, second);
 }
 
@@ -257,25 +257,25 @@ fn history_fingerprint_is_stable_without_new_appends() {
 fn history_fingerprint_changes_only_on_historical_append() {
     let mut log = SessionLog::new();
     log.append(make_message(0), true, true);
-    let before = log.history_fingerprint();
+    let before = log.history_fingerprint().unwrap();
 
     log.append(make_message(1), true, false); // visible-only
     assert_eq!(
-        log.history_fingerprint(),
+        log.history_fingerprint().unwrap(),
         before,
         "visible-only append must not move the digest"
     );
 
     log.record_projection(Vec::new(), "compact");
     assert_eq!(
-        log.history_fingerprint(),
+        log.history_fingerprint().unwrap(),
         before,
         "a projection must not move the digest"
     );
 
     log.append(make_message(2), false, true); // historical
     assert_ne!(
-        log.history_fingerprint(),
+        log.history_fingerprint().unwrap(),
         before,
         "a historical append must move the digest"
     );
@@ -307,7 +307,10 @@ fn history_fingerprint_is_insensitive_to_metadata_key_order() {
     log_a.append(first, true, true);
     let mut log_b = SessionLog::new();
     log_b.append(second, true, true);
-    assert_eq!(log_a.history_fingerprint(), log_b.history_fingerprint());
+    assert_eq!(
+        log_a.history_fingerprint().unwrap(),
+        log_b.history_fingerprint().unwrap()
+    );
 }
 
 proptest! {
@@ -316,15 +319,15 @@ proptest! {
         let mut log_queried_every_step = SessionLog::new();
         for (tag, visible, historical) in &tags {
             log_queried_every_step.append(make_message(*tag), *visible, *historical);
-            let _ = log_queried_every_step.history_fingerprint();
+            let _ = log_queried_every_step.history_fingerprint().unwrap();
         }
-        let final_from_every_step = log_queried_every_step.history_fingerprint();
+        let final_from_every_step = log_queried_every_step.history_fingerprint().unwrap();
 
         let mut log_queried_once = SessionLog::new();
         for (tag, visible, historical) in &tags {
             log_queried_once.append(make_message(*tag), *visible, *historical);
         }
-        let final_from_once = log_queried_once.history_fingerprint();
+        let final_from_once = log_queried_once.history_fingerprint().unwrap();
 
         prop_assert_eq!(final_from_every_step, final_from_once);
     }

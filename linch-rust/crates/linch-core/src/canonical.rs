@@ -19,26 +19,41 @@
 //!   `serde_json`'s default (compact, non-`ensure_ascii`) string encoder
 //!   already does, so [`to_canonical_string`] delegates to it rather than
 //!   re-implementing an escape table.
-//! - **Numbers** are serialized exactly as `serde_json` prints the
-//!   [`JsonValue`](crate::JsonValue) number it was given. Common float
-//!   literals match Python's `repr`-based formatting (`1e16` prints as
-//!   `1e+16` under both). The crate enables `serde_json`'s
-//!   `float_roundtrip` feature, so every finite float parsed back from
-//!   canonical output is bit-identical to the value that produced it; the
-//!   default parser is only best-effort and is off by one ULP near `1e269`.
+//! - **Integers** inside `i64`/`u64` print as plain decimal digits, which
+//!   `serde_json` already does exactly as Python would. An integer outside
+//!   that range is a **documented limit**: it round-trips through `f64`
+//!   (lossily, once it exceeds `f64`'s 53-bit mantissa) rather than keeping
+//!   full precision, because this crate does not enable `serde_json`'s
+//!   `arbitrary_precision` feature. That feature changes how `Number`
+//!   deserializes in a way that breaks the internally tagged enums
+//!   (`#[serde(tag = "type")]`) used throughout this crate, so it is off by
+//!   choice, not oversight.
+//! - **Finite floats** are formatted to match Python's `repr` byte for
+//!   byte — shortest round-trip digits, fixed notation when
+//!   `1e-4 <= |x| < 1e16`, otherwise scientific notation with a signed,
+//!   at-least-two-digit exponent (`1e16` prints as `1e+16` under both,
+//!   `1e-5` as `1e-05`) — which is *not* what `serde_json`'s own float
+//!   formatter produces (see `canonical::float`'s module docs). The crate
+//!   also enables `serde_json`'s `float_roundtrip` feature when *parsing* a
+//!   canonical string back, so every finite float survives the round trip
+//!   bit-identically; the default parser is only best-effort and is off by
+//!   one ULP near `1e269`.
 //!
-//! [`check_depth`] bounds container nesting before encoding; it is a
-//! separate, explicit step — [`to_canonical_string`] itself recurses without
-//! a limit, so callers that accept untrusted input must call it first.
+//! [`to_canonical_string`] (and therefore [`digest`] and
+//! [`digest_with_domain`]) never recurses past [`MAX_ENCODE_DEPTH`] — it
+//! enforces that ceiling itself, so it is safe to call on untrusted input
+//! directly. [`check_depth`] is a separate, *stricter* pre-check for
+//! callers with a smaller business limit, such as [`JOURNAL_MAX_DEPTH`].
 
 mod depth;
 mod digest;
 mod encode;
+mod float;
 
 #[cfg(test)]
 mod tests;
 
-pub use depth::{JOURNAL_MAX_DEPTH, check_depth};
+pub use depth::{JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth};
 pub use digest::{Digest, digest, digest_with_domain};
 pub use encode::to_canonical_string;
 

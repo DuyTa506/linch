@@ -80,8 +80,13 @@ impl From<Digest> for String {
 }
 
 /// The SHA-256 digest of `value`'s canonical JSON encoding.
-pub fn digest(value: &JsonValue) -> Digest {
-    hash(&[to_canonical_string(value).as_bytes()])
+///
+/// # Errors
+///
+/// Returns [`CanonicalError::DepthExceeded`] if `value` nests deeper than
+/// [`super::MAX_ENCODE_DEPTH`] (see [`to_canonical_string`]).
+pub fn digest(value: &JsonValue) -> Result<Digest, CanonicalError> {
+    Ok(hash(&[to_canonical_string(value)?.as_bytes()]))
 }
 
 /// The SHA-256 digest of `domain`, a NUL separator, then `value`'s canonical
@@ -90,14 +95,24 @@ pub fn digest(value: &JsonValue) -> Digest {
 /// Mirrors the `domain\x00rest` separator `linch`'s workflow journal
 /// (`src/linch/ext/workflow/journal.py`) uses to keep its key namespaces
 /// (subagent calls, steps, interrupts) from colliding even when their
-/// payloads happen to match. `domain` must not itself contain a NUL byte, or
-/// two domains could be made to collide.
-pub fn digest_with_domain(domain: &str, value: &JsonValue) -> Digest {
-    hash(&[
+/// payloads happen to match. A NUL byte *inside* `domain` cannot create such
+/// a collision: canonical JSON escapes every `U+0000` it encodes as the
+/// six-byte sequence `\u0000`, so `value`'s canonical encoding never
+/// contributes a raw `0x00` byte to the hashed bytes. The *last* raw NUL in
+/// `domain || 0x00 || canonical(value)` is therefore always the separator
+/// inserted here, never one embedded in `domain`, so the two parts can
+/// always be told apart.
+///
+/// # Errors
+///
+/// Returns [`CanonicalError::DepthExceeded`] if `value` nests deeper than
+/// [`super::MAX_ENCODE_DEPTH`] (see [`to_canonical_string`]).
+pub fn digest_with_domain(domain: &str, value: &JsonValue) -> Result<Digest, CanonicalError> {
+    Ok(hash(&[
         domain.as_bytes(),
         b"\0",
-        to_canonical_string(value).as_bytes(),
-    ])
+        to_canonical_string(value)?.as_bytes(),
+    ]))
 }
 
 fn hash(parts: &[&[u8]]) -> Digest {
@@ -116,7 +131,7 @@ mod tests {
 
     #[test]
     fn digest_displays_as_lowercase_hex_and_round_trips() {
-        let d = digest(&json!({"a": 1}));
+        let d = digest(&json!({"a": 1})).unwrap();
         let text = d.to_string();
         assert_eq!(text.len(), 64);
         assert!(
@@ -167,11 +182,35 @@ mod tests {
     #[test]
     fn domain_separation_changes_the_digest() {
         let value = json!({"name": "x"});
-        assert_ne!(digest(&value), digest_with_domain("step", &value));
         assert_ne!(
-            digest_with_domain("step", &value),
-            digest_with_domain("agent", &value)
+            digest(&value).unwrap(),
+            digest_with_domain("step", &value).unwrap()
         );
+        assert_ne!(
+            digest_with_domain("step", &value).unwrap(),
+            digest_with_domain("agent", &value).unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_json_never_contains_a_raw_nul_byte() {
+        // The premise `digest_with_domain`'s doc rests on: a NUL inside a
+        // JSON string is always escaped as `\u0000`, never written raw.
+        let encoded = to_canonical_string(&json!("a\u{0}b")).unwrap();
+        assert!(!encoded.as_bytes().contains(&0));
+        assert_eq!(encoded, "\"a\\u0000b\"");
+    }
+
+    #[test]
+    fn nul_inside_domain_cannot_be_confused_with_the_separator() {
+        // If the separator could be confused with a NUL embedded in
+        // `domain`, splitting the same byte sequence differently between
+        // `domain` and `value` could collide. It cannot: canonical JSON
+        // never emits a raw NUL, so the last NUL in the hashed bytes is
+        // always the real separator.
+        let a = digest_with_domain("x\u{0}y", &json!("z")).unwrap();
+        let b = digest_with_domain("x", &json!("y\u{0}z")).unwrap();
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -179,38 +218,42 @@ mod tests {
         // Computed with Python's hashlib against the same canonical bytes,
         // independently of this crate's own implementation.
         assert_eq!(
-            digest(&json!({})).to_string(),
+            digest(&json!({})).unwrap().to_string(),
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
         );
         assert_eq!(
-            digest(&json!([])).to_string(),
+            digest(&json!([])).unwrap().to_string(),
             "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
         );
         assert_eq!(
-            digest(&json!(null)).to_string(),
+            digest(&json!(null)).unwrap().to_string(),
             "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
         );
         assert_eq!(
-            digest(&json!({"b": 1, "a": [2, "é"]})).to_string(),
+            digest(&json!({"b": 1, "a": [2, "é"]})).unwrap().to_string(),
             "2db0b9da091c3e5533b64b892d5ff09a608ab67e3a978160d9fe6fd2aef5f167"
         );
         assert_eq!(
-            digest(&json!({"x": true, "y": false})).to_string(),
+            digest(&json!({"x": true, "y": false})).unwrap().to_string(),
             "be43c656e6ca2d6beccfda71b2d9a696b2b434c77f43f74bd451c441713568ed"
         );
         // Exercises the escape table end-to-end: the five short forms, a
         // lowercase \u00xx control escape, and DEL (0x7f) left raw.
         assert_eq!(
-            digest(&json!({"k": "\u{1}\u{1f}\u{7f}\n\t\r\u{8}\u{c}\"\\"})).to_string(),
+            digest(&json!({"k": "\u{1}\u{1f}\u{7f}\n\t\r\u{8}\u{c}\"\\"}))
+                .unwrap()
+                .to_string(),
             "5e9458bd35f2eb25eeb85f87ed3f1392925f953efb93e0bb1faae214d6c9f019"
         );
         // Pins sign-of-zero, which `JsonValue`'s `PartialEq` would hide.
         assert_eq!(
-            digest(&json!(-0.0)).to_string(),
+            digest(&json!(-0.0)).unwrap().to_string(),
             "c26617c7ccbcaa6631b45d851b8cf56e21d2ca624bdb1193afdbd4b560702cec"
         );
         assert_eq!(
-            digest_with_domain("step", &json!({"name": "x"})).to_string(),
+            digest_with_domain("step", &json!({"name": "x"}))
+                .unwrap()
+                .to_string(),
             "fd800022434ad5111c8aa595d91ee01aaf3c3bba94d7e3d8aed749b3d51dd194"
         );
     }

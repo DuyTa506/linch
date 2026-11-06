@@ -76,6 +76,9 @@ proptest! {
         // the visible-only entries/projections above) must fingerprint the
         // same as the original.
         let mut reseeded = SessionLog::seed(ref_full, None);
-        prop_assert_eq!(log.history_fingerprint(), reseeded.history_fingerprint());
+        prop_assert_eq!(
+            log.history_fingerprint().unwrap(),
+            reseeded.history_fingerprint().unwrap()
+        );
     }
 }

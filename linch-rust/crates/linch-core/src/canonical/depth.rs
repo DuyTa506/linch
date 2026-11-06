@@ -9,6 +9,23 @@ use super::CanonicalError;
 /// which this crate's journal-record callers reuse as their limit.
 pub const JOURNAL_MAX_DEPTH: usize = 64;
 
+/// Deepest container nesting [`check_depth`] or the canonical encoder
+/// (`to_canonical_string`, `digest`, `digest_with_domain`) will ever
+/// recurse into, no matter what limit a caller asks for.
+///
+/// `serde_json`'s own parser already refuses JSON text nested 128 levels
+/// deep (pinned by `canonical::tests::serde_json_parse_limit_is_127_deep_but_not_128`),
+/// so any [`JsonValue`] built by parsing untrusted text is already shallower
+/// than that. 256 doubles that limit, leaving headroom for the handful of
+/// extra levels Linch's own wrapping adds on top of a parsed value (a tool
+/// input nested in a content block, a block in a message, a message in an
+/// envelope, ...), while staying far below any depth that could threaten a
+/// real thread's native stack: a few hundred frames of a small,
+/// non-allocating recursive function is negligible next to a multi-megabyte
+/// stack, unlike the multi-million-deep adversarial inputs this ceiling
+/// exists to reject.
+pub const MAX_ENCODE_DEPTH: usize = 256;
+
 /// Reject `value` if any object or array nests deeper than `max_depth`.
 ///
 /// The root is depth 0; only containers (objects, arrays) count toward the
@@ -16,8 +33,14 @@ pub const JOURNAL_MAX_DEPTH: usize = 64;
 /// is rejected, without descending into its children, as soon as its own
 /// depth exceeds `max_depth`, so the recursion depth itself never exceeds
 /// `max_depth + 1` even on adversarially deep input.
+///
+/// The effective limit is capped at [`MAX_ENCODE_DEPTH`]: a `max_depth`
+/// above it is lowered to it before checking, so this function's own
+/// recursion never exceeds `MAX_ENCODE_DEPTH + 1` stack frames no matter
+/// what the caller passes, and the returned error reports the limit that
+/// was actually enforced.
 pub fn check_depth(value: &JsonValue, max_depth: usize) -> Result<(), CanonicalError> {
-    visit(value, 0, max_depth)
+    visit(value, 0, max_depth.min(MAX_ENCODE_DEPTH))
 }
 
 fn visit(value: &JsonValue, depth: usize, max_depth: usize) -> Result<(), CanonicalError> {
@@ -138,5 +161,28 @@ mod tests {
             let actual_depth = depth_of(&value);
             prop_assert_eq!(check_depth(&value, limit).is_ok(), limit >= actual_depth);
         }
+    }
+
+    #[test]
+    fn check_depth_never_recurses_past_the_ceiling_whatever_max_depth_is() {
+        // Built iteratively, not via `json!` (which would recurse while
+        // expanding the macro and could overflow just constructing this).
+        let mut value = json!(0);
+        for _ in 0..2_000_000 {
+            value = JsonValue::Array(vec![value]);
+        }
+
+        // A caller-supplied limit far above any real ceiling must not make
+        // `check_depth` itself recurse 2,000,000 levels deep.
+        assert_eq!(
+            check_depth(&value, 1 << 30),
+            Err(CanonicalError::DepthExceeded {
+                max_depth: super::MAX_ENCODE_DEPTH
+            })
+        );
+
+        // Dropping a 2,000,000-deep `Value` recurses in `Vec<Value>`'s own
+        // `Drop`, which would itself overflow the stack on teardown.
+        std::mem::forget(value);
     }
 }
