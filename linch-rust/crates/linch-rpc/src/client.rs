@@ -13,17 +13,24 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio_util::codec::FramedRead;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ErrorObject, code};
+use crate::lines::{Frame, Head, LineCodec};
 use crate::message::{Id, Message, Notification, Request, Response, Version};
 use crate::protocol::{CancelRequestParams, method};
+use crate::server::MAX_LINE_BYTES;
 
 /// Bytes buffered each way by [`Client::in_process`].
 const PIPE_BYTES: usize = 64 * 1024;
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
+/// Notifications held for the caller before the client stops reading.
+pub const NOTIFICATION_CAPACITY: usize = 1024;
+
+/// Calls waiting for their answer by id; `None` once the connection has
+/// closed, so a later call fails at once.
+type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Response>>>>>;
 
 /// Server requests being answered, by id, so `$/cancelRequest` finds them.
 type Serving = Arc<Mutex<HashMap<Id, CancellationToken>>>;
@@ -95,7 +102,12 @@ pub struct Client {
 
 /// The server's notifications, in the order it sent them. `$/cancelRequest`
 /// is handled by the client and not delivered here.
-pub struct Notifications(mpsc::UnboundedReceiver<Notification>);
+///
+/// At most [`NOTIFICATION_CAPACITY`] wait here. When that many are
+/// unreceived the client stops reading the connection, so the server's
+/// output backs up and its runs pause; answers to calls wait behind them
+/// too, so keep receiving while calls are in flight.
+pub struct Notifications(mpsc::Receiver<Notification>);
 
 impl Notifications {
     /// The next notification; `None` once the connection has closed.
@@ -121,7 +133,11 @@ impl Client {
     ///
     /// Spawns a reader and a writer task on the current runtime. A line
     /// from the server that is not a valid response, notification or
-    /// request closes the connection.
+    /// request closes the connection; so does the end of the server's
+    /// output. Once closed, waiting and later calls fail with
+    /// [`ClientError::Closed`] and the output is shut down. A line over
+    /// [`MAX_LINE_BYTES`] is skipped; when it answers a call, that call
+    /// fails.
     pub fn connect_with<R, W>(
         reader: R,
         writer: W,
@@ -132,16 +148,17 @@ impl Client {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (outbox, queue) = mpsc::channel::<String>(64);
-        let (notify, notifications) = mpsc::unbounded_channel();
-        let pending = Pending::default();
-        tokio::spawn(write_lines(writer, queue));
+        let (notify, notifications) = mpsc::channel(NOTIFICATION_CAPACITY);
+        let pending = Arc::new(Mutex::new(Some(HashMap::new())));
+        let closed = CancellationToken::new();
+        tokio::spawn(write_lines(writer, queue, closed.clone()));
         let reading = Reader {
             pending: Arc::clone(&pending),
             notify,
             outbox: outbox.downgrade(),
             handler,
             serving: Serving::default(),
-            closed: CancellationToken::new(),
+            closed,
         };
         tokio::spawn(reading.run(reader));
         let client = Self {
@@ -191,11 +208,16 @@ impl Client {
             method: method.into(),
             params,
         };
-        let (answer, answered) = oneshot::channel();
-        lock(&self.pending).insert(id, answer);
         let line = serde_json::to_string(&request)?;
+        let (answer, answered) = oneshot::channel();
+        match lock(&self.pending).as_mut() {
+            Some(pending) => pending.insert(id, answer),
+            None => return Err(ClientError::Closed),
+        };
         if self.outbox.send(line).await.is_err() {
-            lock(&self.pending).remove(&id);
+            if let Some(pending) = lock(&self.pending).as_mut() {
+                pending.remove(&id);
+            }
             return Err(ClientError::Closed);
         }
         let response = answered.await.map_err(|_| ClientError::Closed)?;
@@ -203,8 +225,20 @@ impl Client {
     }
 }
 
-async fn write_lines<W: AsyncWrite + Unpin>(mut writer: W, mut queue: mpsc::Receiver<String>) {
-    while let Some(mut line) = queue.recv().await {
+/// Write queued lines until the client is dropped or the connection
+/// closes, then shut the output down.
+async fn write_lines<W: AsyncWrite + Unpin>(
+    mut writer: W,
+    mut queue: mpsc::Receiver<String>,
+    closed: CancellationToken,
+) {
+    loop {
+        let line = tokio::select! {
+            biased;
+            () = closed.cancelled() => break,
+            line = queue.recv() => line,
+        };
+        let Some(mut line) = line else { break };
         line.push('\n');
         if writer.write_all(line.as_bytes()).await.is_err() || writer.flush().await.is_err() {
             return;
@@ -218,7 +252,7 @@ async fn write_lines<W: AsyncWrite + Unpin>(mut writer: W, mut queue: mpsc::Rece
 /// server requests.
 struct Reader {
     pending: Pending,
-    notify: mpsc::UnboundedSender<Notification>,
+    notify: mpsc::Sender<Notification>,
     /// Weak, so dropping the client still closes its output.
     outbox: mpsc::WeakSender<String>,
     handler: Arc<dyn RequestHandler>,
@@ -229,9 +263,16 @@ struct Reader {
 
 impl Reader {
     async fn run<R: AsyncRead + Unpin>(self, reader: R) {
-        let mut lines = FramedRead::new(reader, LinesCodec::new());
-        while let Some(Ok(line)) = lines.next().await {
-            match serde_json::from_str::<Message>(&line) {
+        let mut lines = FramedRead::new(reader, LineCodec::new(MAX_LINE_BYTES));
+        while let Some(Ok(frame)) = lines.next().await {
+            let line = match frame {
+                Frame::Line(line) => line,
+                Frame::TooLong(head) => {
+                    self.too_long(&head);
+                    continue;
+                }
+            };
+            match serde_json::from_slice::<Message>(&line) {
                 Ok(Message::Notification(notification))
                     if notification.method == method::CANCEL_REQUEST =>
                 {
@@ -239,16 +280,10 @@ impl Reader {
                 }
                 Ok(Message::Notification(notification)) => {
                     // The caller may have dropped its receiver; that is fine.
-                    let _ = self.notify.send(notification);
+                    let _ = self.notify.send(notification).await;
                 }
                 Ok(Message::Response(response)) => {
-                    let waiter = match &response.id {
-                        Id::Number(id) => {
-                            id.as_u64().and_then(|id| lock(&self.pending).remove(&id))
-                        }
-                        _ => None,
-                    };
-                    if let Some(waiter) = waiter {
+                    if let Some(waiter) = self.waiter(&response.id) {
                         let _ = waiter.send(response);
                     }
                 }
@@ -256,9 +291,30 @@ impl Reader {
                 Err(_) => break,
             }
         }
-        // Waiting calls see `Closed`; requests being answered are dropped.
-        lock(&self.pending).clear();
+        // Waiting and later calls see `Closed`; requests being answered
+        // are dropped, and the writer shuts the output down.
+        lock(&self.pending).take();
         self.closed.cancel();
+    }
+
+    /// The call waiting for the answer `id`, removed from the table.
+    fn waiter(&self, id: &Id) -> Option<oneshot::Sender<Response>> {
+        let Id::Number(id) = id else { return None };
+        let id = id.as_u64()?;
+        lock(&self.pending).as_mut()?.remove(&id)
+    }
+
+    /// A skipped oversized line: fail the call it answers, if the kept
+    /// head shows one.
+    fn too_long(&self, head: &[u8]) {
+        let head = Head::read(head);
+        if let (Some(id), true, false) = (head.id, head.answer, head.method)
+            && let Some(waiter) = self.waiter(&id)
+        {
+            let message = format!("the answer is longer than {MAX_LINE_BYTES} bytes");
+            let error = ErrorObject::new(code::INVALID_REQUEST, message);
+            let _ = waiter.send(Response::err(id, error));
+        }
     }
 
     /// Answer one server request in its own task.

@@ -28,14 +28,13 @@ mod agents;
 mod callback;
 mod connection;
 mod host;
-mod lines;
 mod login;
 mod peer;
 mod run;
 
+use crate::lines::Head;
 use connection::Outbox;
 pub use connection::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};
-use lines::Head;
 use peer::Peer;
 
 /// Server state shared by every task. Cheap to clone.

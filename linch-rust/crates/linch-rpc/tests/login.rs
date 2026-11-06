@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use common::*;
 use linch_rpc::protocol::{Authenticated, method};
-use linch_rpc::{Access, Allowlists, Tenant, Tokens, code};
+use linch_rpc::{Access, Allowlists, ClientError, Tenant, Tokens, code};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -97,6 +97,17 @@ async fn anything_but_a_valid_login_is_refused_and_closes_the_connection() {
         assert_eq!(lines.len(), 1, "{first}: {lines:?}");
         assert_eq!(lines[0]["error"]["code"], code::UNAUTHENTICATED, "{first}");
     }
+}
+
+#[tokio::test]
+async fn a_closed_login_connection_fails_later_calls() {
+    let rpc = Rpc::remote(login());
+    let wrong = json!({"token": "wrong-token-value"});
+    let error = rpc.call(method::CONNECTION_AUTH, wrong).await.unwrap_err();
+    assert_eq!(code_of(error), code::UNAUTHENTICATED);
+    let after = rpc.call(method::RUN_CANCEL, json!({"run_id": "r"}));
+    let after = tokio::time::timeout(Duration::from_secs(5), after).await;
+    assert!(matches!(after.expect("no hang"), Err(ClientError::Closed)));
 }
 
 #[tokio::test]

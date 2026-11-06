@@ -237,12 +237,13 @@
 mod access;
 mod client;
 mod error;
+mod lines;
 mod message;
 pub mod protocol;
 mod server;
 
 pub use access::{Access, AccessError, Allowlists, Tenant, Tokens};
-pub use client::{Client, ClientError, Notifications, RequestHandler};
+pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};
 pub use server::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};

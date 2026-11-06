@@ -15,10 +15,10 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 
-use super::lines::{Frame, HEAD_BYTES, LineCodec};
 use super::{Server, login};
 use crate::access::Access;
 use crate::error::{ErrorObject, code};
+use crate::lines::{Frame, HEAD_BYTES, LineCodec};
 use crate::message::{Id, Notification, Response};
 
 /// Longest request line the server reads, in bytes.

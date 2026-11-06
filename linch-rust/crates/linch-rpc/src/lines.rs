@@ -15,10 +15,10 @@ use tokio_util::codec::Decoder;
 use crate::message::Id;
 
 /// Bytes kept from the start of an oversized message.
-pub(super) const HEAD_BYTES: usize = 64 * 1024;
+pub(crate) const HEAD_BYTES: usize = 64 * 1024;
 
 /// One frame of input.
-pub(super) enum Frame {
+pub(crate) enum Frame {
     /// A complete line, without its `\n` (and `\r`).
     Line(Vec<u8>),
     /// A line over the limit, already discarded; its first bytes.
@@ -26,7 +26,7 @@ pub(super) enum Frame {
 }
 
 /// Newline-delimited frames of at most `max` bytes.
-pub(super) struct LineCodec {
+pub(crate) struct LineCodec {
     max: usize,
     /// Where to resume looking for `\n` in the buffer.
     next_index: usize,
@@ -35,7 +35,7 @@ pub(super) struct LineCodec {
 }
 
 impl LineCodec {
-    pub(super) fn new(max: usize) -> Self {
+    pub(crate) fn new(max: usize) -> Self {
         Self {
             max,
             next_index: 0,
@@ -104,18 +104,18 @@ impl Decoder for LineCodec {
 
 /// What the first bytes of an oversized message say about it.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct Head {
+pub(crate) struct Head {
     /// Its `id`, when it comes before the cut.
-    pub(super) id: Option<Id>,
+    pub(crate) id: Option<Id>,
     /// Whether a `method` member came before the cut: a request.
-    pub(super) method: bool,
+    pub(crate) method: bool,
     /// Whether a `result` or `error` member came before the cut: an answer.
-    pub(super) answer: bool,
+    pub(crate) answer: bool,
 }
 
 impl Head {
     /// Read the top-level members of `bytes` up to where they are cut.
-    pub(super) fn read(bytes: &[u8]) -> Self {
+    pub(crate) fn read(bytes: &[u8]) -> Self {
         let mut head = Self::default();
         let mut reader = serde_json::Deserializer::from_slice(bytes);
         // The cut always ends in an error; what was read before it counts.
