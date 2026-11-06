@@ -63,6 +63,15 @@ class RunTerminal(RunError):
     """The run has already finished (-32026)."""
 
 
+class NotSuspended(RunError):
+    """`Agent.approve` on a run that is not waiting for an approval (-32027).
+
+    An approve sent again after its answers were committed (after a crash
+    or a dropped connection) gets this and writes nothing; continue the
+    run with `Agent.resume`, which keeps the committed decisions.
+    """
+
+
 class PromptBlocked(RunError):
     """A `user_prompt_submit` callback refused the prompt (-32029).
 
@@ -108,6 +117,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32021: RunNotFound,
     -32025: ContractMismatch,
     -32026: RunTerminal,
+    -32027: NotSuspended,
     -32029: PromptBlocked,
     -32030: SessionBusy,
 }

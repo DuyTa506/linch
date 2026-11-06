@@ -15,6 +15,7 @@ from linch_rust import (
     ResultEvent,
     RunNotFound,
     Server,
+    UsageEvent,
 )
 
 STREAM_ONLY = {"partial_assistant", "tool_progress", "hook"}
@@ -38,6 +39,22 @@ async def test_a_run_streams_its_envelopes_then_its_result() -> None:
     assert isinstance(result, ResultEvent)
     assert result.subtype == "success"
     assert result.final_text == "Hello there."
+    assert all(envelope.ts_ms > 1_700_000_000_000 for envelope in envelopes)
+    assert result.duration_ms >= 0
+    assert result.total_cost_usd is None, "the scripted model has no price"
+
+
+async def test_a_priced_model_reports_what_the_run_cost() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("Hi.", model="claude-opus-4-8")]))
+        run = await agent.run("s1", "Say hi")
+        envelopes = [envelope async for envelope in run]
+        result = await run.result()
+
+    [usage] = [e.event for e in envelopes if isinstance(e.event, UsageEvent)]
+    assert usage.cost_usd is not None and usage.cost_usd > 0
+    assert isinstance(result, ResultEvent)
+    assert result.total_cost_usd == usage.cumulative_cost_usd == usage.cost_usd
 
 
 async def test_events_replays_the_durable_envelopes_after_a_seq() -> None:

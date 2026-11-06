@@ -33,7 +33,7 @@ pub(super) fn tool_call_end_event() -> impl Strategy<Value = ToolCallEndEvent> {
         tool_result_block(),
         any::<u64>(),
         option::of(json_value(1)),
-        json_object(1),
+        option::of(json_object(1).prop_map(Box::new)),
     )
         .prop_map(
             |(tool_name, result, duration_ms, canonical_output, metadata)| ToolCallEndEvent {

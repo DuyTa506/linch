@@ -30,7 +30,7 @@ fn end(id: &str, tool: &str, text: &str, is_error: bool, duration_ms: u64) -> Ev
         result: ToolResultBlock::text(id, text, is_error),
         duration_ms,
         canonical_output: None,
-        metadata: JsonObject::new(),
+        metadata: None,
     })
 }
 

@@ -75,7 +75,7 @@ async fn a_tools_metadata_rides_its_end_event_and_not_the_request() {
     for envelopes in [&streamed, &stored] {
         let ends: Vec<&JsonObject> = (envelopes.iter())
             .filter_map(|e| match &e.event {
-                Event::ToolCallEnd(end) => Some(&end.metadata),
+                Event::ToolCallEnd(end) => end.metadata.as_deref(),
                 _ => None,
             })
             .collect();

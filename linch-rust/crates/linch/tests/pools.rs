@@ -12,8 +12,10 @@ use std::sync::Arc;
 
 const DSN_VAR: &str = "LINCH_TEST_PG_DSN";
 
-/// A fresh schema `p11d_<name>` and a DSN that uses it, tagged with an
-/// `application_name` so its connections can be counted.
+/// A fresh schema `p11d_<name>_<pid>` and a DSN that uses it, tagged with
+/// that name as its `application_name` so its connections can be counted.
+/// `pg_stat_activity` covers the whole cluster, so the process id keeps a
+/// concurrent run of this test, on any database, out of the count.
 struct TestDb {
     admin: PgPool,
     schema: String,
@@ -26,7 +28,7 @@ impl TestDb {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p11d_{name}");
+        let schema = format!("p11d_{name}_{}", std::process::id());
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&dsn)

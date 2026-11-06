@@ -16,7 +16,18 @@ from typing import Any
 import pytest
 from scripted import config, text_turn, tool_turn
 
-from linch_rust import ConnectionClosed, ResultEvent, Server, ToolCallStartEvent, UserEvent, tool
+from linch_rust import (
+    Allow,
+    ConnectionClosed,
+    NotSuspended,
+    ResultEvent,
+    Scope,
+    Server,
+    SuspendedEvent,
+    ToolCallStartEvent,
+    UserEvent,
+    tool,
+)
 
 
 @pytest.fixture
@@ -38,10 +49,10 @@ def pg_dsn() -> Iterator[str]:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
-def blocking_tool() -> tuple[Any, asyncio.Event]:
+def blocking_tool(scope: Scope = "read") -> tuple[Any, asyncio.Event]:
     started = asyncio.Event()
 
-    @tool(scope="read")
+    @tool(scope=scope)
     async def wait(q: str) -> str:
         started.set()
         await asyncio.Event().wait()
@@ -82,3 +93,34 @@ async def test_a_run_resumes_on_a_new_server_after_a_kill(pg_dsn: str) -> None:
     [block] = placeholder.message["content"]
     assert block["tool_use_id"] == "call_1" and block["is_error"]
     assert "interrupted" in block["content"][0]["text"]
+
+
+async def test_an_approve_sent_again_after_a_kill_points_to_resume(pg_dsn: str) -> None:
+    stores = {"type": "postgres", "dsn": pg_dsn}
+    wait, started = blocking_tool(scope="write")
+    first = config([tool_turn("call_1", "wait", {"q": "x"})], stores=stores)
+    async with Server() as server:
+        agent = await server.open_agent(first, tools=[wait])
+        run = await agent.run("s1", "Wait for x")
+        assert isinstance(await run.result(), SuspendedEvent)
+        approved = await agent.approve(run.id, {"call_1": Allow()})
+        await asyncio.wait_for(started.wait(), 10)
+        os.kill(server.pid, signal.SIGKILL)
+        with pytest.raises(ConnectionClosed):
+            await approved.result()
+
+    # The answer is committed, so the run no longer waits for one: the
+    # host that sends the approve again is told to resume instead.
+    wait, started = blocking_tool(scope="write")
+    second = config([text_turn("Recovered.")], stores=stores)
+    async with Server() as server:
+        agent = await server.open_agent(second, tools=[wait])
+        again = await agent.approve(run.id, {"call_1": Allow()})
+        with pytest.raises(NotSuspended) as refused:
+            await again.result()
+        resumed = await agent.resume(run.id)
+        result = await resumed.result()
+
+    assert "resume" in refused.value.message
+    assert not started.is_set(), "a started tool call is never run twice"
+    assert isinstance(result, ResultEvent) and result.final_text == "Recovered."

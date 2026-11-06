@@ -49,10 +49,11 @@ pub struct ToolCallEndEvent {
     )]
     pub canonical_output: Option<JsonValue>,
     /// The host-facing [`crate::ToolOutput::metadata`] of a successful
-    /// result, after `post_tool_use`; never shown to the model. Empty, and
-    /// absent on the wire, for an error or a tool that set none.
-    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
-    pub metadata: JsonObject,
+    /// result, after `post_tool_use`; never shown to the model. `None`, and
+    /// absent on the wire, for an error or a tool that set none. Boxed so
+    /// the tool end is not the largest event every envelope pays for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Box<JsonObject>>,
 }
 
 /// Decode a present `canonical_output` field as `Some`, including when its
@@ -136,7 +137,7 @@ mod tests {
             result: ToolResultBlock::text("c1", "done", false),
             duration_ms: 12,
             canonical_output: None,
-            metadata: JsonObject::new(),
+            metadata: None,
         };
         assert_eq!(end.tool_use_id(), "c1");
         assert!(!end.is_error());
@@ -156,7 +157,7 @@ mod tests {
             result: ToolResultBlock::text("c1", "done", false),
             duration_ms: 12,
             canonical_output,
-            metadata: JsonObject::new(),
+            metadata: None,
         }
     }
 
@@ -165,7 +166,9 @@ mod tests {
         let mut end = end_with(None);
         let value = serde_json::to_value(&end).unwrap();
         assert!(value.get("metadata").is_none(), "empty metadata is absent");
-        end.metadata.insert("rows".into(), json!(3));
+        let mut rows = JsonObject::new();
+        rows.insert("rows".into(), json!(3));
+        end.metadata = Some(Box::new(rows));
         let value = serde_json::to_value(&end).unwrap();
         assert_eq!(value["metadata"], json!({"rows": 3}));
         assert_eq!(

@@ -55,11 +55,17 @@ class PartialAssistantEvent:
 
 @dataclass(frozen=True)
 class UsageEvent:
-    """Token usage of one provider call, and the run's running total."""
+    """Token usage of one provider call, and the run's running total.
+
+    `cost_usd` and `cumulative_cost_usd` are in USD, `None` when the model
+    has no price.
+    """
 
     type: ClassVar[str] = "usage"
     usage: JsonObject
     cumulative: JsonObject
+    cost_usd: float | None = None
+    cumulative_cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -166,17 +172,24 @@ class ErrorEvent:
 
 @dataclass(frozen=True)
 class ResultEvent:
-    """The run finished; `subtype` is `success`, `error`, `aborted` or `interrupted`."""
+    """The run finished; `subtype` is `success`, `error`, `aborted` or `interrupted`.
+
+    `duration_ms` is the wall time of the start, resume or approve call that
+    ended the run. `total_cost_usd` is what its priced calls cost in USD,
+    `None` when none was priced.
+    """
 
     type: ClassVar[str] = "result"
     subtype: str
     stop_reason: str
     total_usage: JsonObject
     usage_complete: bool
+    duration_ms: int
     final_text: str | None = None
     structured_output: JsonObject | None = None
     structured_error: str | None = None
     trace_id: str | None = None
+    total_cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -236,11 +249,13 @@ class Envelope:
         seq: The run's durable sequence number; a stream-only event carries
             the last durable seq. Replay with `Agent.events(run_id, after_seq=seq)`.
         run_id: The run the event belongs to.
+        ts_ms: When the server made the envelope, in Unix milliseconds.
         event: The decoded event.
     """
 
     seq: int
     run_id: str
+    ts_ms: int
     event: Event
 
 
@@ -257,5 +272,10 @@ def decode_event(raw: JsonObject) -> Event:
 
 
 def decode_envelope(raw: JsonObject) -> Envelope:
-    """Decode one envelope `{"v", "seq", "run_id", "event", "ignorable"?}`."""
-    return Envelope(int(raw["seq"]), str(raw["run_id"]), decode_event(raw["event"]))
+    """Decode one envelope `{"v", "seq", "run_id", "ts_ms", "event", "ignorable"?}`."""
+    return Envelope(
+        seq=int(raw["seq"]),
+        run_id=str(raw["run_id"]),
+        ts_ms=int(raw["ts_ms"]),
+        event=decode_event(raw["event"]),
+    )

@@ -5,7 +5,7 @@ use std::error::Error;
 
 use futures::StreamExt;
 use linch::provider::scripted::TurnBuilder;
-use linch::{AgentConfig, BuildError, Event, OpenError, RunOptions, StoreConfig};
+use linch::{AgentConfig, BuildError, Event, OpenError, RunOptions, StoreConfig, Usage};
 use serde_json::{Value, json};
 
 fn config(value: Value) -> AgentConfig {
@@ -64,6 +64,37 @@ fn a_config_reads_strictly_with_defaults() {
             serde_json::from_value::<AgentConfig>(value).is_err(),
             "{text}"
         );
+    }
+}
+
+/// The facade prices each paid call with `linch_providers::cost`, so a
+/// model in the price table reports what the run cost.
+#[tokio::test]
+async fn a_run_on_a_priced_model_reports_its_cost() {
+    let model = "claude-opus-4-8";
+    let usage = Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000,
+        ..Usage::default()
+    };
+    let expected = linch_providers::cost(model, &usage).expect("a priced model");
+    let turns = json!([TurnBuilder::new(model).text("hi").usage(usage).build()]);
+    let mut value = serde_json::to_value(scripted(turns, None)).unwrap();
+    value["spec"]["model"] = json!(model);
+    let opened = config(value).open().await.unwrap();
+    let mut stream = opened.agent().run("go", RunOptions::new("s1"));
+    let mut events = Vec::new();
+    while let Some(item) = stream.next().await {
+        events.push(item.unwrap().event);
+    }
+    let usage_cost = events.iter().find_map(|event| match event {
+        Event::Usage(usage) => Some(usage.cost_usd),
+        _ => None,
+    });
+    assert_eq!(usage_cost, Some(Some(expected)));
+    match events.last().unwrap() {
+        Event::Result(result) => assert_eq!(result.total_cost_usd, Some(expected)),
+        other => panic!("last event {other:?}"),
     }
 }
 

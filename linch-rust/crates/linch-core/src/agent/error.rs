@@ -68,8 +68,13 @@ pub enum RunError {
         /// Its terminal status.
         status: RunStatus,
     },
-    /// Approve on a run that is not waiting for an approval.
-    #[error("run {run_id} is not awaiting approval")]
+    /// Approve on a run that is not waiting for an approval, such as a
+    /// retried approve whose answers were already committed: the host
+    /// continues that run with a resume.
+    #[error(
+        "run {run_id} is not awaiting approval; if an approve already committed \
+         its answers, continue the run with resume"
+    )]
     NotSuspended {
         /// The run.
         run_id: RunId,

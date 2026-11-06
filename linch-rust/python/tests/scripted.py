@@ -9,11 +9,11 @@ MODEL = "scripted-model"
 _USAGE = {"input_tokens": 3, "output_tokens": 1, "cache_read_tokens": 0, "cache_creation_tokens": 0}
 
 
-def text_turn(text: str) -> dict[str, Any]:
-    """A provider turn that answers `text` and ends the run."""
+def text_turn(text: str, model: str = MODEL) -> dict[str, Any]:
+    """A provider turn from `model` that answers `text` and ends the run."""
     return {
         "events": [
-            {"type": "message_start", "model": MODEL},
+            {"type": "message_start", "model": model},
             {"type": "text_delta", "text": text},
             {"type": "message_end", "stop_reason": "end_turn", "usage": _USAGE},
         ]

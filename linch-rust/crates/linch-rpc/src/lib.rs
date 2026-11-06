@@ -209,7 +209,11 @@
 //! ([`ApproveParams`](protocol::ApproveParams)) answers a suspended run's
 //! pending calls and continues it. `decisions` maps each `tool_use_id` (from
 //! the `suspended` envelope's `pending_request_ids`) to
-//! `{"decision": "allow"}` or `{"decision": "deny", "reason": "..."}`.
+//! `{"decision": "allow"}` or `{"decision": "deny", "reason": "..."}`. Only
+//! a run awaiting approval takes it: once an approve has committed its
+//! answers, the same approve sent again (after a dropped connection or a
+//! crash) ends with `-32027` in `run.end` and writes nothing. Continue
+//! that run with `run.resume`, which keeps the committed decisions.
 //!
 //! These three answer [`RunAccepted`](protocol::RunAccepted)
 //! `{"run_id": "..."}` at once, before any notification of that run; the
@@ -247,7 +251,8 @@
 //! principal?}` ([`ToolCallParams`](protocol::ToolCallParams)) runs a host
 //! tool on input already checked against its schema. The result is a
 //! `ToolOutput`, `{"value": <any>, "metadata"?: {...}}`; `value` is what the
-//! model sees and `metadata` is for the host only. An error object is a
+//! model sees and `metadata` is for the host only (the call's
+//! `tool_call_end` event carries it). An error object is a
 //! tool error the model reads: its `message` is shown and its `data` kept
 //! as details. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
@@ -275,15 +280,20 @@
 //! and permission still applies to a resolved call. At
 //! `permission_request`, a deny stops the chain and an allow does not, so
 //! a later deny wins; with no answer the call asks the host as usual
-//! (`suspended`, then `run.approve`). A blocked `user_prompt_submit` ends
-//! the run with `-32029` in `run.end` before anything is written.
+//! (`suspended`, then `run.approve`). A tool's `output_schema`, when it
+//! has one, checks the value the tool returned before `post_tool_use`, so
+//! a violation reaches the chain as an error result and a `replace` is
+//! not checked. A blocked `user_prompt_submit` ends the run with `-32029`
+//! in `run.end` before anything is written.
 //!
 //! # Notifications
 //!
 //! **`run.event`**: params are one [`Envelope`](linch::Envelope),
-//! `{"v": 1, "seq": 7, "run_id": "...", "event": {"type": "...", ...}}`,
-//! in the run's order. Durable kinds arrive once they are durable, so a
-//! client that saw seq `n` replays with `run.events(after_seq = n)`.
+//! `{"v": 1, "seq": 7, "run_id": "...", "ts_ms": 1762400000000, "event":
+//! {"type": "...", ...}}`, in the run's order; `ts_ms` is when the server
+//! made the envelope, in Unix milliseconds. Durable kinds arrive once they
+//! are durable, so a client that saw seq `n` replays with
+//! `run.events(after_seq = n)`.
 //! Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) arrive
 //! at once, carry the last durable seq, and are never replayed. A run's
 //! envelopes end with `result` (finished) or `suspended` (waiting for
@@ -325,7 +335,7 @@
 //! | -32024 | journal | `RunError::Journal` |
 //! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}` |
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
-//! | -32027 | not suspended | `RunError::NotSuspended` |
+//! | -32027 | not suspended | `RunError::NotSuspended`: `run.approve` on a run not awaiting approval; after a retried approve, `run.resume` it |
 //! | -32028 | reconcile | `RunError::Reconcile` |
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |

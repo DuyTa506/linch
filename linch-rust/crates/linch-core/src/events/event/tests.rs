@@ -265,3 +265,18 @@ fn type_name_is_the_wire_type_tag() {
         assert_eq!(tag(&event), event.type_name(), "{event:?}");
     }
 }
+
+/// Every envelope moves an `Event`, so its largest variant sets the cost
+/// of all of them: the tool end keeps its optional metadata boxed and is
+/// no larger than the result.
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn the_tool_end_is_no_larger_than_the_result() {
+    use std::mem::size_of;
+    assert!(
+        size_of::<ToolCallEndEvent>() <= size_of::<ResultEvent>(),
+        "tool end {} bytes, result {} bytes",
+        size_of::<ToolCallEndEvent>(),
+        size_of::<ResultEvent>()
+    );
+}
