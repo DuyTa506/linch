@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .callbacks import Callback
-from .errors import ConnectionClosed, LinchError, error_from
+from .errors import ConnectionClosed, LinchError, error_from, run_end_error
 from .tools import HostTool
 
 JsonObject = dict[str, Any]
@@ -152,7 +152,7 @@ class Connection:
             queue = self._runs.pop(params.get("run_id", ""), None)
             error = params.get("error")
             if queue is not None:
-                queue.put_nowait(RunEnd(error_from(error) if error else None))
+                queue.put_nowait(RunEnd(run_end_error(error) if error else None))
         elif method == "$/cancelRequest":
             task = self._served.get(params.get("id"))
             if task is not None:

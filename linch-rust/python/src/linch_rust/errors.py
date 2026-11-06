@@ -47,7 +47,8 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32030)."""
+    """The run could not continue durably (-32020 to -32030), or failed
+    inside the server (-32603 in `run.end`); it stays resumable."""
 
 
 class RunNotFound(RunError):
@@ -126,3 +127,16 @@ def error_from(obj: dict[str, Any]) -> RpcError:
         else:
             cls = RpcError
     return cls(code, str(obj.get("message", "")), obj.get("data"))
+
+
+def run_end_error(obj: dict[str, Any]) -> RunError:
+    """Build the exception for the `error` of a `run.end`.
+
+    A run that stopped with an error always ends with a `RunError`, so a
+    run that failed inside the server (-32603), which `error_from` reads as
+    a `ProtocolError`, is caught and resumed like any other.
+    """
+    error = error_from(obj)
+    if isinstance(error, RunError):
+        return error
+    return RunError(error.code, error.message, error.data)

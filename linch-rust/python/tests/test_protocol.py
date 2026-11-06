@@ -61,6 +61,27 @@ async def test_events_read_with_the_run_answer_reach_the_run() -> None:
     await conn.finish()
 
 
+async def test_a_run_that_failed_inside_the_server_ends_with_a_run_error() -> None:
+    panic = {"code": -32603, "message": "the run failed inside the server (a panic)"}
+    lines = [
+        {"jsonrpc": "2.0", "result": {"run_id": "r1"}},
+        {"jsonrpc": "2.0", "method": "run.end", "params": {"run_id": "r1", "error": panic}},
+    ]
+    reader = asyncio.StreamReader()
+    conn = Connection(reader, cast(asyncio.StreamWriter, Answering(reader, lines)))
+
+    _, queue = await conn.request_run("run.start", {})
+    end = queue.get_nowait()
+
+    assert isinstance(end, RunEnd)
+    assert type(end.error) is RunError
+    assert (end.error.code, end.error.message) == (-32603, panic["message"])
+    # Answering a request, the same code is still a protocol error.
+    assert type(error_from(panic)) is ProtocolError
+    reader.feed_eof()
+    await conn.finish()
+
+
 def test_events_decode_tolerantly_and_keep_unknown_kinds() -> None:
     end = decode_envelope(
         {
