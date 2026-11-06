@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, Envelope, Event, JsonObject, JsonValue, MemoryRunStore,
-    MemorySessionStore, PermissionEngine, PermissionMode, PermissionPolicy, RunId,
+    MemorySessionStore, PermissionEngine, PermissionMode, PermissionPolicy, RunId, RunStream,
     ScriptedProvider, ScriptedTurn, Tool, ToolContext, ToolOutput, ToolOutputError, ToolRegistry,
     ToolResult, ToolScope, Usage, WIRE_VERSION,
 };
@@ -86,6 +87,7 @@ impl Tool for Probe {
 pub struct Fixture {
     pub agent: Agent,
     pub provider: Arc<ScriptedProvider>,
+    pub runs: Arc<MemoryRunStore>,
     /// How many sessions the agent was told to close.
     pub closed: Arc<AtomicUsize>,
 }
@@ -101,13 +103,14 @@ pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
         let _ = tools.register(Arc::new(tool)).unwrap();
     }
     let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let runs = Arc::new(MemoryRunStore::default());
     let closed = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&closed);
     let agent = AgentBuilder::new(AgentSpec::new(MODEL))
         .provider(provider.clone())
         .tools(Arc::new(tools))
         .permissions(PermissionEngine::new(policy).unwrap())
-        .run_store(Arc::new(MemoryRunStore::default()))
+        .run_store(runs.clone())
         .session_store(Arc::new(MemorySessionStore::default()))
         .namespace(NS)
         .on_session_close(move |_| {
@@ -118,6 +121,7 @@ pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
     Fixture {
         agent,
         provider,
+        runs,
         closed,
     }
 }
@@ -135,4 +139,13 @@ pub fn envelopes(events: Vec<Event>) -> Vec<Envelope> {
             event,
         })
         .collect()
+}
+
+/// Every envelope of a run that must not end with a `RunError`.
+pub async fn drain(mut stream: RunStream) -> Vec<Envelope> {
+    let mut envelopes = Vec::new();
+    while let Some(item) = stream.next().await {
+        envelopes.push(item.unwrap());
+    }
+    envelopes
 }
