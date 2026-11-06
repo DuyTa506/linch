@@ -64,7 +64,10 @@ fn unexpected_envelope_field_is_rejected() {
 #[test]
 fn nested_subagent_unknown_type_obeys_the_same_ignorable_rule() {
     let nested = json!({"type": "mystery"});
-    let subagent = json!({"type": "subagent", "child_run_id": "child-1", "event": nested});
+    let subagent = json!({
+        "type": "subagent", "child_run_id": "child-1", "tool_use_id": "call-1", "ts_ms": 5,
+        "event": nested,
+    });
 
     let strict =
         json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": subagent.clone()});
@@ -87,6 +90,8 @@ fn subagent_nesting_past_the_limit_is_rejected() {
         event = json!({
             "type": "subagent",
             "child_run_id": format!("child-{depth}"),
+            "tool_use_id": "call-1",
+            "ts_ms": 5,
             "event": event,
         });
     }
@@ -102,6 +107,8 @@ fn subagent_nesting_at_the_limit_is_accepted() {
         event = json!({
             "type": "subagent",
             "child_run_id": format!("child-{depth}"),
+            "tool_use_id": "call-1",
+            "ts_ms": 5,
             "event": event,
         });
     }
@@ -233,6 +240,8 @@ fn ignorable_flag_is_forced_true_for_a_nested_subagent_ignorable_event() {
     let event = Event::Subagent(SubagentEvent {
         child_run_id: RunId::new("child-1"),
         event: Box::new(child),
+        tool_use_id: "call-1".into(),
+        ts_ms: 7,
     });
     let envelope = Envelope {
         v: WIRE_VERSION,

@@ -172,7 +172,11 @@ async fn pick_up(
         Ok(_) => runner::resume(child, id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
-    let drive = drive(stream, worker, Arc::downgrade(family));
+    // A background worker's id is `<parent run id>:<tool_use_id>` of the
+    // call that spawned it.
+    let spawned_by = id.as_str().strip_prefix(&format!("{}:", run.run_id));
+    let spawned_by = spawned_by.unwrap_or_default().to_owned();
+    let drive = drive(stream, worker, spawned_by, Arc::downgrade(family));
     family.adopt(id, cancel, true, drive);
     Ok(())
 }
@@ -272,7 +276,7 @@ fn started(ctx: &ToolContext, id: &RunId) -> ToolOutput {
 /// Drive the child's stream to its end: its durable events go into the
 /// parent's log, wrapped, at the parent's next turn; its end becomes a
 /// completion in the family's inbox.
-async fn drive(mut stream: RunStream, worker: Worker, family: Weak<Family>) {
+async fn drive(mut stream: RunStream, worker: Worker, tool_use_id: String, family: Weak<Family>) {
     let mut outcome = Outcome::default();
     while let Some(item) = stream.next().await {
         let envelope = match item {
@@ -289,6 +293,8 @@ async fn drive(mut stream: RunStream, worker: Worker, family: Weak<Family>) {
         if let Some(family) = family.upgrade() {
             family.report(Event::Subagent(SubagentEvent {
                 child_run_id: worker.id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                ts_ms: envelope.ts_ms,
                 event: Box::new(envelope.event),
             }));
         }

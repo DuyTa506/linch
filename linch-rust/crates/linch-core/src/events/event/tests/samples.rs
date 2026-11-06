@@ -128,6 +128,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             event: Box::new(Event::Error(ErrorEvent {
                 error: JsonObject::new(),
             })),
+            tool_use_id: "call-1".into(),
+            ts_ms: 7,
         }),
         Event::ChildRunStatus(ChildRunStatusEvent {
             child_run_id: RunId::new("child-1"),

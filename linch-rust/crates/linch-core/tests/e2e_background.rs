@@ -201,10 +201,25 @@ async fn a_text_answer_waits_for_the_background_child_and_hears_of_it() {
         (child.clone(), RunStatus::Completed),
     ];
     assert_eq!(markers(&envelopes), expected);
-    let wrapped = (envelopes.iter())
-        .filter(|e| matches!(&e.event, Event::Subagent(sub) if sub.child_run_id == child))
-        .count();
-    assert!(wrapped > 0, "the child's events are in the parent's log");
+    let wrapped: Vec<_> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::Subagent(sub) if sub.child_run_id == child => Some(sub),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !wrapped.is_empty(),
+        "the child's events are in the parent's log"
+    );
+    // Each keeps the child's own time and names the call that spawned it.
+    assert!(wrapped.iter().all(|sub| sub.tool_use_id == "sub_0"));
+    let stored = stores.runs.events(NS, &child, 0).await.unwrap();
+    let stored: Vec<u64> = (stored.iter())
+        .filter(|e| e.event.persistence() == linch_core::Persistence::Both)
+        .map(|e| e.ts_ms)
+        .collect();
+    let times: Vec<u64> = wrapped.iter().map(|sub| sub.ts_ms).collect();
+    assert_eq!(times, stored);
 }
 
 #[tokio::test]

@@ -227,8 +227,9 @@ Each model call records two histograms with the SDK's default buckets:
 
 A resumed or approved call starts with a `resumed` `init` event: its spans
 have `linch.resumed: true`, and its session id and turn index come from that
-event. A subagent's child run
-reaches the parent's stream as wrapped events and gets no spans of its own.
+event. A subagent's child run reaches the parent's stream as wrapped events
+(with the child's own times and the parent's call id) and gets no spans of
+its own yet.
 
 ---
 

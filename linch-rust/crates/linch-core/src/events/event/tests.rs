@@ -75,12 +75,14 @@ fn known_event_types_matches_decode_exhaustively() {
 fn subagent_persistence_recurses_into_the_wrapped_event() {
     let wrapped_progress = Event::Subagent(SubagentEvent {
         child_run_id: RunId::new("child-1"),
+        tool_use_id: "call-1".into(),
         event: Box::new(Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),
             tool_name: "Read".into(),
             message: "working".into(),
             data: None,
         })),
+        ts_ms: 7,
     });
     assert_eq!(wrapped_progress.persistence(), Persistence::StreamOnly);
 
@@ -98,6 +100,8 @@ fn subagent_persistence_recurses_into_the_wrapped_event() {
             cost_usd: None,
             duration_ms: 0,
         })),
+        tool_use_id: "call-1".into(),
+        ts_ms: 7,
     });
     assert_eq!(wrapped_receipt.persistence(), Persistence::JournalOnly);
 }
@@ -128,6 +132,8 @@ fn to_value_surfaces_a_non_finite_field_nested_inside_a_subagent() {
             max_tokens: None,
             max_cost_usd: None,
         })),
+        tool_use_id: "call-1".into(),
+        ts_ms: 7,
     });
     assert!(event.to_value().is_err());
 }
@@ -167,6 +173,8 @@ fn subagent_round_trips_and_boxes_its_child() {
     });
     let event = Event::Subagent(SubagentEvent {
         child_run_id: RunId::new("child-1"),
+        tool_use_id: "call-1".into(),
+        ts_ms: 1_700_000_000_123,
         event: Box::new(child),
     });
     let value = event.to_value().unwrap();
@@ -175,6 +183,8 @@ fn subagent_round_trips_and_boxes_its_child() {
         json!({
             "type": "subagent",
             "child_run_id": "child-1",
+            "tool_use_id": "call-1",
+            "ts_ms": 1_700_000_000_123u64,
             "event": {"type": "error", "error": {}},
         })
     );

@@ -152,6 +152,8 @@ async fn drive(
         outcome.see(&envelope.event);
         ctx.emit(Event::Subagent(SubagentEvent {
             child_run_id: child_run_id.clone(),
+            tool_use_id: ctx.tool_use_id.clone(),
+            ts_ms: envelope.ts_ms,
             event: Box::new(envelope.event),
         }));
     }

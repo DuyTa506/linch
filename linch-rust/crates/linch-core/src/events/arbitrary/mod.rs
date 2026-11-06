@@ -256,10 +256,17 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
     ];
     if depth_budget > 0 {
         variants.push(
-            (run_id(), event(depth_budget - 1))
-                .prop_map(|(child_run_id, inner)| {
+            (
+                run_id(),
+                short_string(),
+                any::<u64>(),
+                event(depth_budget - 1),
+            )
+                .prop_map(|(child_run_id, tool_use_id, ts_ms, inner)| {
                     Event::Subagent(SubagentEvent {
                         child_run_id,
+                        tool_use_id,
+                        ts_ms,
                         event: Box::new(inner),
                     })
                 })

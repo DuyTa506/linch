@@ -204,10 +204,17 @@ class SkillCompletedEvent:
 
 @dataclass(frozen=True)
 class SubagentEvent:
-    """An event of a subagent's child run, decoded like the parent's own."""
+    """An event of a subagent's child run, decoded like the parent's own.
+
+    `tool_use_id` is the parent's call that runs the child, and `ts_ms` is
+    when the child emitted the event: a background child's events reach the
+    parent's log later.
+    """
 
     type: ClassVar[str] = "subagent"
     child_run_id: str
+    tool_use_id: str
+    ts_ms: int
     event: Event
 
 
@@ -352,7 +359,12 @@ def decode_event(raw: JsonObject) -> Event:
     if cls is None:
         return UnknownEvent(kind, {key: value for key, value in raw.items() if key != "type"})
     if cls is SubagentEvent:
-        return SubagentEvent(str(raw.get("child_run_id", "")), decode_event(raw.get("event", {})))
+        return SubagentEvent(
+            child_run_id=str(raw.get("child_run_id", "")),
+            tool_use_id=str(raw.get("tool_use_id", "")),
+            ts_ms=int(raw.get("ts_ms", 0)),
+            event=decode_event(raw.get("event", {})),
+        )
     names = _FIELDS[kind]
     event: Event = cls(**{key: value for key, value in raw.items() if key in names})
     return event

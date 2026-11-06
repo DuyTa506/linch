@@ -23,7 +23,7 @@ use super::kinds::*;
 use super::model_call::{
     ModelCallDeliveryEvent, ModelCallReceiptEvent, ModelCallUsageSettlementEvent,
 };
-use super::wire::{json_kind_name, reject_unknown_fields, take_object, take_string};
+use super::wire::{json_kind_name, reject_unknown_fields, take_object, take_string, take_u64};
 use crate::ids::RunId;
 use crate::json::{JsonObject, JsonValue};
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,12 @@ pub enum Event {
 pub struct SubagentEvent {
     /// The subagent's run.
     pub child_run_id: RunId,
+    /// The parent's tool call that runs the child: the `Subagent` call
+    /// that spawned it, or the `SubagentContinue` call that continues it.
+    pub tool_use_id: String,
+    /// When the child emitted the event: its own envelope's `ts_ms`. A
+    /// background child's events reach the parent's log later.
+    pub ts_ms: u64,
     /// The event the subagent emitted.
     pub event: Box<Event>,
 }
@@ -203,6 +209,8 @@ impl Event {
             "skill_completed" => Ok(Event::SkillCompleted(payload("skill_completed", obj)?)),
             "subagent" => {
                 let child_run_id = RunId::from(take_string(&mut obj, "child_run_id")?);
+                let tool_use_id = take_string(&mut obj, "tool_use_id")?;
+                let ts_ms = take_u64(&mut obj, "ts_ms")?;
                 let nested_value = obj
                     .remove("event")
                     .ok_or(EventError::MissingField("event"))?;
@@ -210,6 +218,8 @@ impl Event {
                 let nested = Event::decode(nested_value, ctx.nested()?)?;
                 Ok(Event::Subagent(SubagentEvent {
                     child_run_id,
+                    tool_use_id,
+                    ts_ms,
                     event: Box::new(nested),
                 }))
             }
@@ -283,6 +293,11 @@ impl Event {
                     "child_run_id".to_string(),
                     JsonValue::String(e.child_run_id.as_str().to_string()),
                 );
+                obj.insert(
+                    "tool_use_id".to_string(),
+                    JsonValue::String(e.tool_use_id.clone()),
+                );
+                obj.insert("ts_ms".to_string(), JsonValue::from(e.ts_ms));
                 obj.insert("event".to_string(), e.event.to_value()?);
                 Ok(JsonValue::Object(obj))
             }

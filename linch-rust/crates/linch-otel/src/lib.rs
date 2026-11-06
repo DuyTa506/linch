@@ -109,9 +109,9 @@
 //! the model that served a call (`gen_ai.response.model`) from its `usage`.
 //! A resume or approve starts with a `resumed` `init` naming its session,
 //! model and turn; for a stream without one they come from the host through
-//! the observer's setters. Subagent events reach the
-//! parent's stream wrapped, after the fact and without their own times, so
-//! they are not traced.
+//! the observer's setters. Subagent events reach the parent's stream
+//! wrapped, with the child's own `ts_ms` and the parent's `tool_use_id`, but
+//! the observer does not trace them yet.
 
 pub mod keys;
 mod observer;

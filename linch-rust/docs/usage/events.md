@@ -347,11 +347,18 @@ not be loaded).
 
 ### `SubagentEvent` (`subagent`)
 
-An event of a subagent's child run. `child_run_id` is the child run
-(`<parent run id>:<tool_use_id>`) and `event` the child's event, decoded into
-its own class (an `InitEvent`, a `ToolCallEndEvent`, another `SubagentEvent`
-for a grandchild, ...). A subagent's events, its stream-only ones included,
-reach the parent's stream this way. See [Subagents](./subagents.md).
+An event of a subagent's child run.
+
+| Field | What it is |
+|---|---|
+| `child_run_id` | The child run: `<parent run id>:<tool_use_id>` of the call that runs it |
+| `tool_use_id` | The parent's call that runs the child: the `Subagent` call, or the `SubagentContinue` call that continues a worker |
+| `ts_ms` | When the child emitted the event, from the child's own envelope. A background child's events reach the parent's log at its next turn, so the outer envelope's `ts_ms` is later |
+| `event` | The child's event, decoded into its own class (an `InitEvent`, a `ToolCallEndEvent`, another `SubagentEvent` for a grandchild, ...) |
+
+A foreground subagent's events, its stream-only ones included, reach the
+parent's stream this way; a background worker's durable ones do. See
+[Subagents](./subagents.md).
 
 ### `ChildRunStatusEvent` (`child_run_status`)
 

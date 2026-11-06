@@ -68,8 +68,9 @@ What differs from Python:
 | `gen_ai.provider.name` | From the `init` event's `provider`, mapped by `provider_name`; `RunObserver::provider` sets it for a stream without one |
 | `gen_ai.usage.input_tokens`, the `input` token bucket | Cached tokens included, where Python counts uncached input only |
 
-Subagent events reach the parent's stream wrapped, after the fact and without
-their own times, so they are not traced (`lib.rs:104-113`).
+Subagent events reach the parent's stream wrapped, with the child's own
+`ts_ms` and the parent's `tool_use_id`, but the observer does not trace them
+yet (`lib.rs:104-115`).
 
 `provider_name(id)` (`lib.rs:220`) maps a Linch provider id as Python does:
 `openai-chat` and `openai-responses` are `openai`, `gemini` is `gcp.gemini`,

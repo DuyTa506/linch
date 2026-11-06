@@ -140,8 +140,9 @@ tool result: Re-raise it as ParseError.
   it as in [Runs](./runs.md). It runs alongside other read calls only when its
   type lists its tools and each one is a registered read-scoped tool.
 - Each event of the child reaches the parent's stream wrapped in a
-  `SubagentEvent` before the call ends: `child_run_id`, and `event`, the
-  child's event decoded into its own class. The durable ones are replayed by
+  `SubagentEvent` before the call ends: `child_run_id`, `tool_use_id` (the
+  parent's call), `ts_ms` (the child's own time) and `event`, the child's
+  event decoded into its own class. The durable ones are replayed by
   `Agent.events` on the parent run.
 - The child's run is an ordinary run in the same stores:
   `agent.events("review-1:c1")` reads its own journal, and its `init` event
@@ -241,7 +242,8 @@ replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', '
   reads, and starts nothing; a worker that ends frees its place. Python Linch
   has no such cap.
 - The worker's durable events reach the parent's log wrapped, at the parent's
-  next turn.
+  next turn; each keeps the child's own `ts_ms` and the spawning call's
+  `tool_use_id`.
 
 ---
 

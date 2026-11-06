@@ -52,16 +52,20 @@ def test_a_child_run_status_names_the_child_and_its_status() -> None:
 
 
 def test_a_subagent_event_wraps_the_childs_event_decoded() -> None:
-    wrapped = decode_event({"type": "subagent", "child_run_id": "r1:c1", "event": END})
+    call = {"tool_use_id": "c1", "ts_ms": 1_700_000_000_123}
+    wrapped = decode_event({"type": "subagent", "child_run_id": "r1:c1", **call, "event": END})
+    inner = {"type": "subagent", "child_run_id": "r1:c1:c2", "tool_use_id": "c2", "ts_ms": 9}
     nested = decode_event(
         {
             "type": "subagent",
             "child_run_id": "r1:c1",
-            "event": {"type": "subagent", "child_run_id": "r1:c1:c2", "event": {"type": "x"}},
+            **call,
+            "event": {**inner, "event": {"type": "x"}},
         }
     )
 
     assert isinstance(wrapped, SubagentEvent) and wrapped.child_run_id == "r1:c1"
+    assert (wrapped.tool_use_id, wrapped.ts_ms) == ("c1", 1_700_000_000_123)
     assert isinstance(wrapped.event, ToolCallEndEvent) and wrapped.event.tool_use_id == "c1"
     assert isinstance(nested, SubagentEvent) and isinstance(nested.event, SubagentEvent)
     assert nested.event.event == UnknownEvent("x", {})

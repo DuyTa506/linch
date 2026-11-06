@@ -13,9 +13,9 @@ use linch_core::events::kinds::{CompactionEvent, InitEvent, ToolCallEndEvent, Us
 use linch_core::hooks::ApprovalResponse;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    CompactionSpec, Envelope, Event, JsonObject, PermissionMode, Provider, ProviderError,
-    ProviderRequest, ProviderStream, RunOptions, ScriptedProvider, Tool, ToolChoice, ToolContext,
-    ToolOutputError, ToolRegistry, ToolResult, ToolScope,
+    CompactionSpec, Envelope, Event, JsonObject, PermissionMode, Persistence, Provider,
+    ProviderError, ProviderRequest, ProviderStream, RunOptions, RunStore, ScriptedProvider, Tool,
+    ToolChoice, ToolContext, ToolOutputError, ToolRegistry, ToolResult, ToolScope,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -353,4 +353,42 @@ async fn a_subagent_run_inherits_its_parents_trace_id() {
     });
     assert_eq!(child_inits.len(), 1);
     assert_eq!(child_inits[0].trace_id.as_deref(), Some("trace-9"));
+}
+
+#[tokio::test]
+async fn a_subagent_event_keeps_its_childs_time_and_names_the_parents_call() {
+    let parent = vec![
+        common::subagents::spawn_turn(None, &["look"]),
+        text_turn("done"),
+    ];
+    let family = common::subagents::Family::new(parent, vec![text_turn("seen")]);
+    let stores = Arc::new(Stores::default());
+    let agent = linch_core::AgentBuilder::new(spec())
+        .provider(Arc::new(family))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .subagents(vec![])
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+
+    let wrapped: Vec<_> = events(&envelopes, |e| match e {
+        Event::Subagent(sub) => Some(sub),
+        _ => None,
+    });
+    assert!(wrapped.iter().all(|sub| sub.tool_use_id == "sub_0"));
+    let child = linch_core::RunId::new(format!("{run_id}:sub_0"));
+    let durable = |event: &Event| event.persistence() == Persistence::Both;
+    let stored = stores.runs.events(NS, &child, 0).await.unwrap();
+    let stored: Vec<u64> = (stored.iter().filter(|e| durable(&e.event)))
+        .map(|e| e.ts_ms)
+        .collect();
+    let times: Vec<u64> = (wrapped.iter().filter(|sub| durable(&sub.event)))
+        .map(|sub| sub.ts_ms)
+        .collect();
+    assert_eq!(times, stored);
 }
