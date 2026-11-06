@@ -13,16 +13,18 @@ from linch_rust import (
     OpenError,
     PromptBlocked,
     ProtocolError,
+    ResultEvent,
     RpcError,
     RunError,
     RunTerminal,
     SessionBusy,
     ToolCallEndEvent,
     UnknownEvent,
+    UsageEvent,
 )
 from linch_rust._rpc import Connection, RunEnd
 from linch_rust.errors import error_from
-from linch_rust.events import decode_envelope
+from linch_rust.events import decode_envelope, decode_event
 
 
 class Answering:
@@ -88,6 +90,7 @@ def test_events_decode_tolerantly_and_keep_unknown_kinds() -> None:
             "v": 1,
             "seq": 9,
             "run_id": "r1",
+            "ts_ms": 1_762_400_000_000,
             "event": {
                 "type": "tool_call_end",
                 "tool_name": "lookup",
@@ -98,13 +101,67 @@ def test_events_decode_tolerantly_and_keep_unknown_kinds() -> None:
         }
     )
     other = decode_envelope(
-        {"v": 1, "seq": 9, "run_id": "r1", "ignorable": True, "event": {"type": "x", "a": 1}}
+        {
+            "v": 1,
+            "seq": 9,
+            "run_id": "r1",
+            "ts_ms": 0,
+            "ignorable": True,
+            "event": {"type": "x", "a": 1},
+        }
     )
 
     assert end.seq == 9 and end.run_id == "r1"
     assert isinstance(end.event, ToolCallEndEvent)
     assert end.event.tool_use_id == "c1" and end.event.is_error
     assert other.event == UnknownEvent("x", {"a": 1})
+
+
+def test_envelopes_and_results_carry_their_time_and_cost() -> None:
+    usage = {"input_tokens": 3, "output_tokens": 1}
+    result = decode_envelope(
+        {
+            "v": 1,
+            "seq": 4,
+            "run_id": "r1",
+            "ts_ms": 1_762_400_000_123,
+            "event": {
+                "type": "result",
+                "subtype": "success",
+                "stop_reason": "end_turn",
+                "total_usage": usage,
+                "usage_complete": True,
+                "duration_ms": 42,
+                "total_cost_usd": 0.25,
+            },
+        }
+    )
+    unpriced = decode_event(
+        {
+            "type": "result",
+            "subtype": "success",
+            "stop_reason": "end_turn",
+            "total_usage": usage,
+            "usage_complete": True,
+            "duration_ms": 7,
+        }
+    )
+    spent = decode_event(
+        {
+            "type": "usage",
+            "usage": usage,
+            "cumulative": usage,
+            "cost_usd": 0.25,
+            "cumulative_cost_usd": 0.5,
+        }
+    )
+
+    assert result.ts_ms == 1_762_400_000_123
+    assert isinstance(result.event, ResultEvent)
+    assert (result.event.duration_ms, result.event.total_cost_usd) == (42, 0.25)
+    assert isinstance(unpriced, ResultEvent) and unpriced.total_cost_usd is None
+    assert isinstance(spent, UsageEvent)
+    assert (spent.cost_usd, spent.cumulative_cost_usd) == (0.25, 0.5)
 
 
 @pytest.mark.parametrize(
