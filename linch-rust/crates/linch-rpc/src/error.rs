@@ -67,7 +67,8 @@ pub mod code {
     pub const NOT_FOUND: i64 = -32021;
     /// `StoreError::LeaseLost`: another claim fenced this run out.
     pub const LEASE_LOST: i64 = -32022;
-    /// `StoreError::Conflict`, for example two runs on one session.
+    /// `StoreError::Conflict`, for example a chosen run id that is already
+    /// stored.
     pub const CONFLICT: i64 = -32023;
     /// `RunError::Journal`: a journal write failed.
     pub const JOURNAL: i64 = -32024;
@@ -82,6 +83,11 @@ pub mod code {
     /// `RunError::PromptBlocked`: a `user_prompt_submit` hook refused the
     /// prompt; `data.reason` says why. Nothing was written.
     pub const PROMPT_BLOCKED: i64 = -32029;
+    /// `StoreError::SessionBusy`: the session already has a run that is
+    /// not terminal, so this one was not created. `data` is
+    /// `{session_id, run_id}`, where `run_id` names that live run: resume,
+    /// approve or cancel it first.
+    pub const SESSION_BUSY: i64 = -32030;
 }
 
 impl ErrorObject {
@@ -126,6 +132,10 @@ impl From<&RunError> for ErrorObject {
     fn from(error: &RunError) -> Self {
         let message = chain(error);
         match error {
+            RunError::Store(StoreError::SessionBusy { session_id, run_id }) => {
+                Self::new(code::SESSION_BUSY, message)
+                    .with_data(json!({ "session_id": session_id, "run_id": run_id }))
+            }
             RunError::Store(store) => Self::new(store_code(store), message),
             RunError::Journal(_) => Self::new(code::JOURNAL, message),
             RunError::ContractMismatch {

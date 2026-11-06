@@ -162,8 +162,11 @@
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
 //! created when missing. `run_id` names the new run (a fresh uuid when
 //! absent), so a client can resume it even if it never saw the answer; an
-//! id already stored ends the run with `-32023` and writes nothing.
-//! `principal` is `{tenant, user, roles?}`.
+//! id already stored ends the run with `-32023` and writes nothing. A
+//! session has at most one run that is not terminal: a start on a session
+//! whose run is still going or waiting for approval ends with `-32030`,
+//! naming that run, and writes nothing. `principal` is
+//! `{tenant, user, roles?}`.
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash
@@ -284,13 +287,14 @@
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |
 //! | -32022 | lease lost | `StoreError::LeaseLost` |
-//! | -32023 | conflict | `StoreError::Conflict` |
+//! | -32023 | conflict | `StoreError::Conflict`, such as a stored `run_id` |
 //! | -32024 | journal | `RunError::Journal` |
 //! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}` |
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
 //! | -32027 | not suspended | `RunError::NotSuspended` |
 //! | -32028 | reconcile | `RunError::Reconcile` |
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
+//! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.

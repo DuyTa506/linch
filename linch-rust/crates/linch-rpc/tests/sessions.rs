@@ -1,8 +1,10 @@
-//! Sessions over RPC: `session.close` forgets what the session read.
+//! Sessions over RPC: `session.close` forgets what the session read, and a
+//! second live run on a session is refused with the session-busy code.
 
 mod common;
 
 use common::*;
+use linch::Event;
 use linch_rpc::code;
 use linch_rpc::protocol::method;
 use serde_json::json;
@@ -43,4 +45,28 @@ async fn session_close_forgets_what_the_session_read() {
     let unknown = json!({"agent": "agent-99", "session_id": "s1"});
     let error = rpc.call(method::SESSION_CLOSE, unknown).await.unwrap_err();
     assert_eq!(code_of(error), code::AGENT_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_second_live_run_on_a_session_is_session_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rpc = Rpc::new();
+    let input = json!({"file_path": "new.txt", "content": "written\n"});
+    let turns = vec![tool_turn("call_1", "Write", input), text_turn("Done.")];
+    let agent = rpc.open(scripted(turns, Some(dir.path()), "default")).await;
+    let waiting = rpc.start(&agent, "s1", "Write new.txt").await;
+    let ended = rpc.until_end(&waiting).await;
+    assert!(
+        matches!(ended.last(), Event::Suspended(_)),
+        "{:?}",
+        ended.last()
+    );
+
+    let second = rpc.start(&agent, "s1", "Something else").await;
+    let ended = rpc.until_end(&second).await;
+    assert!(ended.envelopes.is_empty());
+    let error = ended.error.expect("session busy");
+    assert_eq!(error.code, code::SESSION_BUSY, "{error:?}");
+    let data = json!({"session_id": "s1", "run_id": waiting});
+    assert_eq!(error.data, Some(data));
 }
