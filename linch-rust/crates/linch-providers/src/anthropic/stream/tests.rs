@@ -226,6 +226,15 @@ async fn broken_streams_are_transport_errors() {
 }
 
 #[tokio::test]
+async fn a_completed_tool_call_forces_tool_use() {
+    let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"now","input":{}}}"#;
+    let stop = r#"{"type":"content_block_stop","index":0}"#;
+    let end = r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#;
+    let turn = assemble(run_ok(&frames(&[START, start, stop, end, STOP])).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+}
+
+#[tokio::test]
 async fn blank_model_falls_back_to_the_requested_one() {
     let start = r#"{"type":"message_start","message":{"model":" "}}"#;
     let end = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#;
