@@ -8,7 +8,7 @@
 //! every binding is a value the host passes in.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio_util::sync::CancellationToken;
 
@@ -149,6 +149,9 @@ pub(crate) struct AgentInner {
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
+    /// The reloads of this agent not disposed yet, undone when it goes,
+    /// before its built-in tools.
+    reloads: Mutex<Vec<Arc<Registration>>>,
 }
 
 impl AgentInner {
@@ -184,6 +187,14 @@ impl Drop for AgentInner {
     fn drop(&mut self) {
         // The children of a suspended run stop and write their aborts.
         self.close_all_families();
+        let reloads = std::mem::take(
+            self.reloads
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for reload in reloads.iter().rev() {
+            reload.dispose();
+        }
         for registration in &self.registrations {
             registration.dispose();
         }

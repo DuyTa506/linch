@@ -296,6 +296,7 @@ impl AgentBuilder {
             families: Default::default(),
             session_close: self.session_close,
             registrations: built_ins.take(),
+            reloads: Default::default(),
         });
         // Set once, here: nothing else holds the handle yet.
         let _ = handle.set(Arc::downgrade(&inner));
