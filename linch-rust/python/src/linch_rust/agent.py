@@ -44,17 +44,28 @@ class Agent:
         self.contract = contract
         self._conn = conn
 
-    async def run(self, session_id: str, prompt: str) -> Run:
+    async def run(self, session_id: str, prompt: str, *, run_id: str | None = None) -> Run:
         """Start a run of `prompt` in a session, which is created when missing.
+
+        A session has at most one run that is not terminal; starting another
+        ends it with `SessionBusy`, naming the live run.
 
         Args:
             session_id: The conversation the prompt continues.
             prompt: The user's text.
+            run_id: The new run's id, so it can be resumed even if this call
+                never returns; the server picks one when absent. An id
+                already stored ends the run with a `RunError` (-32023).
 
         Returns:
             The started run; iterate it or await `Run.result()`.
+
+        Raises:
+            RunBusy: This server already drives a run with `run_id`.
         """
-        params = {"agent": self.handle, "session_id": session_id, "prompt": prompt}
+        params: dict[str, Any] = {"agent": self.handle, "session_id": session_id, "prompt": prompt}
+        if run_id is not None:
+            params["run_id"] = run_id
         return await self._start("run.start", params)
 
     async def resume(self, run_id: str) -> Run:
@@ -79,6 +90,18 @@ class Agent:
         wire = {call: _decision(decision) for call, decision in decisions.items()}
         params = {"agent": self.handle, "run_id": run_id, "decisions": wire}
         return await self._start("run.approve", params)
+
+    async def close_session(self, session_id: str) -> None:
+        """Tell the agent this client is done with a session.
+
+        Its workspace tools forget what the session read, so a later write
+        there must read the file again. Nothing is written: the session and
+        its runs stay.
+
+        Raises:
+            AgentNotFound: The agent handle is unknown to the server.
+        """
+        await self._conn.request("session.close", {"agent": self.handle, "session_id": session_id})
 
     async def events(self, run_id: str, after_seq: int = 0) -> list[Envelope]:
         """Return a run's durable envelopes with a seq above `after_seq`, in order.

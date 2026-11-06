@@ -47,7 +47,7 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32029)."""
+    """The run could not continue durably (-32020 to -32030)."""
 
 
 class RunNotFound(RunError):
@@ -77,6 +77,30 @@ class PromptBlocked(RunError):
             return ""
 
 
+class SessionBusy(RunError):
+    """The session already has a run that is not terminal (-32030).
+
+    The new run was not created; resume, approve or cancel the live run
+    first.
+    """
+
+    @property
+    def session_id(self) -> str:
+        """The busy session."""
+        return self._field("session_id")
+
+    @property
+    def run_id(self) -> str:
+        """The session's live run."""
+        return self._field("run_id")
+
+    def _field(self, name: str) -> str:
+        try:
+            return str(self.data[name])
+        except (TypeError, KeyError):
+            return ""
+
+
 _BY_CODE: dict[int, type[RpcError]] = {
     -32001: AgentNotFound,
     -32002: RunBusy,
@@ -84,6 +108,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32025: ContractMismatch,
     -32026: RunTerminal,
     -32029: PromptBlocked,
+    -32030: SessionBusy,
 }
 
 
@@ -96,7 +121,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = ProtocolError
         elif -32015 <= code <= -32010:
             cls = OpenError
-        elif -32029 <= code <= -32020:
+        elif -32030 <= code <= -32020:
             cls = RunError
         else:
             cls = RpcError

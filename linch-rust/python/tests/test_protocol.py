@@ -16,6 +16,7 @@ from linch_rust import (
     RpcError,
     RunError,
     RunTerminal,
+    SessionBusy,
     ToolCallEndEvent,
     UnknownEvent,
 )
@@ -93,6 +94,7 @@ def test_events_decode_tolerantly_and_keep_unknown_kinds() -> None:
         (-32013, OpenError),
         (-32026, RunTerminal),
         (-32024, RunError),
+        (-32030, SessionBusy),
         (-1, RpcError),
     ],
 )
@@ -108,3 +110,13 @@ def test_a_blocked_prompt_carries_its_reason() -> None:
 
     assert isinstance(error, PromptBlocked) and isinstance(error, RunError)
     assert error.reason == "secret"
+
+
+def test_a_busy_session_names_its_live_run() -> None:
+    data = {"session_id": "s1", "run_id": "live-1"}
+    error = error_from({"code": -32030, "message": "busy", "data": data})
+
+    assert isinstance(error, SessionBusy) and isinstance(error, RunError)
+    assert (error.session_id, error.run_id) == ("s1", "live-1")
+    bare = error_from({"code": -32030, "message": "busy"})
+    assert isinstance(bare, SessionBusy) and bare.run_id == ""

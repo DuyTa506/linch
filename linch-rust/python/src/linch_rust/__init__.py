@@ -27,6 +27,7 @@ from .errors import (
     RunError,
     RunNotFound,
     RunTerminal,
+    SessionBusy,
 )
 from .events import (
     AssistantEvent,
@@ -87,6 +88,7 @@ __all__ = [
     "RunTerminal",
     "Scope",
     "Server",
+    "SessionBusy",
     "SuspendedEvent",
     "ToolCallEndEvent",
     "ToolCallStartEvent",
