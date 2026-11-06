@@ -330,7 +330,7 @@ asyncio.run(main())
 ```text
 status: running
 Subagent: Worker 'ci-2:c1' started in background. You will receive a <task-notification> when it finishes.
-TaskStop: Worker 'ci-2:c1' (Agent #1) stopped. Reason: build cancelled Use SubagentContinue to re-engage if needed.
+TaskStop: Worker 'ci-2:c1' (Agent #1) stopped. Reason: build cancelled. Use SubagentContinue to re-engage if needed.
 status: aborted
 final: Stopped the CI watcher.
 ```
@@ -445,7 +445,7 @@ before resuming the parent) cannot continue: resuming the parent ends it
 
 | Python Linch | linch-rust |
 |---|---|
-| Worker ids look like `agent-a1b2` | `<parent run id>:<tool_use_id>`; the tool descriptions still show the Python form |
+| Worker ids look like `agent-a1b2` | `<parent run id>:<tool_use_id>`, as the tool descriptions say |
 | A background worker can outlive the run and notify a later one | The run waits for its workers before it ends |
 | A running worker is marked `killed` after a restart | It is resumed with its parent run (Postgres) |
 | `Correlator`, `MailboxPlugin`, durable inbox | Mailbox in process only; `Correlator` in Rust only |

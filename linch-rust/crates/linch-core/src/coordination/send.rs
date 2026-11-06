@@ -33,8 +33,9 @@ impl SendMessageTool {
             "properties": {
                 "to": {
                     "type": "string",
-                    "description": "Address of the recipient (a worker display name or session \
-                                    handle).",
+                    "description": "Session id of the recipient: the message waits in that \
+                                    session's inbox until its next turn. A worker's session id \
+                                    is its worker id.",
                 },
                 "content": {
                     "type": "string",
@@ -169,5 +170,8 @@ mod tests {
         assert_eq!(sent[0].kind, "plan");
         assert_eq!(sent[0].request_id.as_deref(), Some("r1"));
         assert_eq!(sent[0].in_reply_to, None, "an empty string is no value");
+        let to = tool.input_schema()["properties"]["to"]["description"].to_string();
+        assert!(to.contains("session id"), "delivered by session id: {to}");
+        assert!(!to.contains("display name"), "{to}");
     }
 }
