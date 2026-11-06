@@ -54,6 +54,13 @@ struct OpenCall {
 /// `stop_reason` is `tool_use` if and only if at least one tool call
 /// completed.
 ///
+/// A `max_tokens` stop is the exception: the output limit may cut a call
+/// off, so a call still open, or whose input is not a whole JSON object, is
+/// dropped instead. The turn then stops with `max_tokens` when no call is
+/// left, and with `tool_use` when calls that finished remain. So a provider
+/// reports `max_tokens` as it came and keeps streaming tool input; on any
+/// other stop such a call fails the stream at `message_end`.
+///
 /// # Coalescing
 ///
 /// Consecutive `text_delta`s merge into one [`TextBlock`]; consecutive
@@ -83,6 +90,9 @@ pub struct Assembler {
     thinking_buf: String,
     thinking_sig: Option<String>,
     open_calls: HashMap<String, OpenCall>,
+    /// Why the first closed call with broken input is invalid; reported at
+    /// `message_end` unless the output limit cut it off.
+    broken_call: Option<StreamError>,
     seen_tool_ids: HashSet<String>,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
@@ -223,19 +233,24 @@ impl Assembler {
                 event: "tool_use_end",
             });
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&call.input).map_err(|source| StreamError::InvalidToolInput {
-                id: end.id.clone(),
-                source,
-            })?;
-        let serde_json::Value::Object(input) = parsed else {
-            return Err(StreamError::NonObjectToolInput { id: end.id });
-        };
-        self.content.push(ContentBlock::ToolUse(ToolUseBlock {
-            id: end.id,
-            name: call.name,
-            input,
-        }));
+        let id = end.id;
+        match serde_json::from_str(&call.input) {
+            Ok(serde_json::Value::Object(input)) => {
+                let name = call.name;
+                self.content
+                    .push(ContentBlock::ToolUse(ToolUseBlock { id, name, input }));
+            }
+            // Judged at `message_end`, whose stop reason says whether the
+            // output limit cut the call off.
+            Ok(_) => {
+                self.broken_call
+                    .get_or_insert(StreamError::NonObjectToolInput { id });
+            }
+            Err(source) => {
+                self.broken_call
+                    .get_or_insert(StreamError::InvalidToolInput { id, source });
+            }
+        }
         Ok(())
     }
 
@@ -248,6 +263,14 @@ impl Assembler {
             usage,
             provider_metadata,
         } = end;
+        if stop_reason == StopReason::MaxTokens {
+            // Calls the output limit cut off.
+            self.open_calls.clear();
+            self.broken_call = None;
+        }
+        if let Some(error) = self.broken_call.take() {
+            return Err(error);
+        }
         if !self.open_calls.is_empty() {
             let mut ids: Vec<String> = self.open_calls.keys().cloned().collect();
             ids.sort();
@@ -263,6 +286,10 @@ impl Assembler {
             .content
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolUse(_)));
+        let stop_reason = match stop_reason {
+            StopReason::MaxTokens if has_tool_use => StopReason::ToolUse,
+            other => other,
+        };
         if stop_reason == StopReason::ToolUse && !has_tool_use {
             return Err(StreamError::ToolUseWithoutCalls { usage, stop_reason });
         }

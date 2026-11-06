@@ -1,7 +1,9 @@
 use std::convert::Infallible;
 
 use futures::{StreamExt, stream};
-use linch_core::{ContentBlock, ProviderError, ProviderEvent, StopReason, Usage, assemble};
+use linch_core::{
+    ContentBlock, ProviderError, ProviderEvent, StopReason, StreamError, Usage, assemble,
+};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -231,6 +233,55 @@ async fn finish_reasons_map_to_stop_reasons() {
             stop
         );
     }
+}
+
+/// One tool-call piece for call `index`.
+fn call_piece(index: u32, id: &str, arguments: &str) -> serde_json::Value {
+    json!({"index": index, "id": id, "type": "function",
+        "function": {"name": "get_weather", "arguments": arguments}})
+}
+
+/// R1-prov 5: a call cut off by `length` is dropped and the turn reports
+/// MaxTokens; arguments still stream as they arrive.
+#[tokio::test]
+async fn a_length_stop_drops_a_cut_off_call_and_keeps_max_tokens() {
+    for arguments in ["{\"city\": \"Par", ""] {
+        let sse = chunk(json!({"delta": {"content": "Checking."}}))
+            + &chunk(json!({"delta": {"tool_calls": [call_piece(0, "c1", arguments)]}}))
+            + &chunk(json!({"delta": {}, "finish_reason": "length"}))
+            + "data: [DONE]\n\n";
+        let turn = assemble(run_ok(&sse, 4096).await).unwrap();
+        assert_eq!(turn.stop_reason, StopReason::MaxTokens, "{arguments:?}");
+        assert_eq!(turn.message.tool_uses().count(), 0);
+        assert_eq!(turn.message.text(), "Checking.");
+    }
+}
+
+#[tokio::test]
+async fn a_length_stop_keeps_the_calls_that_finished() {
+    let sse =
+        chunk(json!({"delta": {"tool_calls": [call_piece(0, "c1", "{\"city\": \"Paris\"}")]}}))
+            + &chunk(json!({"delta": {"tool_calls": [call_piece(1, "c2", "{\"city\": \"Tok")]}}))
+            + &chunk(json!({"delta": {}, "finish_reason": "length"}))
+            + "data: [DONE]\n\n";
+    let turn = assemble(run_ok(&sse, 4096).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    let ids: Vec<_> = (turn.message.tool_uses())
+        .map(|call| call.id.as_str())
+        .collect();
+    assert_eq!(ids, ["c1"]);
+}
+
+#[tokio::test]
+async fn a_cut_off_call_without_a_length_stop_is_still_invalid() {
+    let sse = chunk(json!({"delta": {"tool_calls": [call_piece(0, "c1", "{\"city\": \"Par")]}}))
+        + &chunk(json!({"delta": {}, "finish_reason": "tool_calls"}))
+        + "data: [DONE]\n\n";
+    let err = assemble(run_ok(&sse, 4096).await).unwrap_err();
+    assert!(
+        matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "c1"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

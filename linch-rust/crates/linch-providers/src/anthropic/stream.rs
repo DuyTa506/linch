@@ -254,12 +254,14 @@ impl Translator {
     }
 
     /// Close the response at `message_stop`. Any completed tool call makes
-    /// the stop reason `tool_use`.
+    /// the stop reason `tool_use`, except on a `max_tokens` stop, which is
+    /// passed on as it came: the limit may have cut a call off, and the
+    /// assembler drops such a call.
     fn finish(&mut self, out: &mut VecDeque<ProviderEvent>) -> Result<(), ProviderError> {
         let Some(stop) = self.stop else {
             return Err(transport("message_stop arrived without a stop_reason"));
         };
-        let stop_reason = if self.tool_calls > 0 {
+        let stop_reason = if self.tool_calls > 0 && stop != StopReason::MaxTokens {
             StopReason::ToolUse
         } else {
             stop

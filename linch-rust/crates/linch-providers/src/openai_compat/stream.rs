@@ -148,7 +148,9 @@ impl Translator {
     /// Close the response at `[DONE]`: end every call, then the message.
     ///
     /// Any tool call makes the stop reason `tool_use`, even when the server
-    /// said `stop`. A call with no arguments gets `{}`.
+    /// said `stop`. A call with no arguments gets `{}`. A `length` stop is
+    /// passed on as it came and no `{}` is added: the output limit may have
+    /// cut a call off, and the assembler drops such a call.
     pub(crate) fn finish(
         &mut self,
         out: &mut VecDeque<ProviderEvent>,
@@ -159,14 +161,15 @@ impl Translator {
         let Some(finish) = self.finish else {
             return Err(transport("stream ended at [DONE] without a finish_reason"));
         };
-        let stop_reason = if self.calls.is_empty() {
+        let cut = finish == StopReason::MaxTokens;
+        let stop_reason = if self.calls.is_empty() || cut {
             finish
         } else {
             StopReason::ToolUse
         };
         for mut call in std::mem::take(&mut self.calls) {
             open(&mut call, out);
-            if !call.has_arguments {
+            if !call.has_arguments && !cut {
                 out.push_back(ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
                     id: call.id.clone(),
                     json_delta: "{}".into(),

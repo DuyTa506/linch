@@ -210,6 +210,7 @@ fn malformed_tool_input_is_rejected() {
             json_delta: "{not json".into(),
         }),
         ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
+        end(StopReason::ToolUse),
     ])
     .unwrap_err();
     assert!(matches!(err, StreamError::InvalidToolInput { id, .. } if id == "c1"));
@@ -228,9 +229,76 @@ fn non_object_tool_input_is_rejected() {
             json_delta: "[1,2,3]".into(),
         }),
         ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
+        end(StopReason::EndTurn),
     ])
     .unwrap_err();
     assert!(matches!(err, StreamError::NonObjectToolInput { id } if id == "c1"));
+}
+
+/// A call with `input`, closed unless `input` is `None`.
+fn call(id: &str, input: Option<&str>) -> Vec<ProviderEvent> {
+    let mut events = vec![ProviderEvent::ToolUseStart(ToolUseStartEvent {
+        id: id.into(),
+        name: "Read".into(),
+    })];
+    events.push(ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
+        id: id.into(),
+        json_delta: input.unwrap_or(r#"{"path": "a"#).into(),
+    }));
+    if input.is_some() {
+        events.push(ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: id.into() }));
+    }
+    events
+}
+
+/// R1-prov 5: the output limit cut the call off, so the turn reports
+/// MaxTokens instead of failing on the broken input.
+#[test]
+fn a_max_tokens_stop_drops_a_call_the_limit_cut_off() {
+    let usage = Usage {
+        input_tokens: 9,
+        ..Usage::default()
+    };
+    for cut in [call("c1", Some(r#"{"path": "a"#)), call("c1", None)] {
+        let mut events = vec![
+            start("m"),
+            ProviderEvent::TextDelta(TextDeltaEvent {
+                text: "Reading.".into(),
+            }),
+        ];
+        events.extend(cut);
+        events.push(end_with_usage(StopReason::MaxTokens, usage));
+        let assembly = assemble(events).unwrap();
+        assert_eq!(assembly.stop_reason, StopReason::MaxTokens);
+        assert_eq!(assembly.message, Message::assistant_text("Reading."));
+        assert_eq!(assembly.usage, Some(usage));
+    }
+}
+
+#[test]
+fn a_max_tokens_stop_keeps_the_calls_that_finished() {
+    let mut events = vec![start("m")];
+    events.extend(call("c1", Some(r#"{"path": "a"}"#)));
+    events.extend(call("c2", Some("[1")));
+    events.push(end(StopReason::MaxTokens));
+    let assembly = assemble(events).unwrap();
+    // A turn with calls stops for them, as the adapters already report.
+    assert_eq!(assembly.stop_reason, StopReason::ToolUse);
+    let ids: Vec<&str> = (assembly.message.tool_uses())
+        .map(|call| call.id.as_str())
+        .collect();
+    assert_eq!(ids, ["c1"]);
+}
+
+#[test]
+fn a_broken_call_fails_any_other_stop() {
+    for stop in [StopReason::ToolUse, StopReason::EndTurn] {
+        let mut events = vec![start("m")];
+        events.extend(call("c1", Some(r#"{"path": "a"#)));
+        events.push(end(stop));
+        let err = assemble(events).unwrap_err();
+        assert!(matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "c1"));
+    }
 }
 
 #[test]

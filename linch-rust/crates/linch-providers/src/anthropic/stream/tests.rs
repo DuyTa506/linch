@@ -2,8 +2,8 @@ use std::convert::Infallible;
 
 use futures::{StreamExt, stream};
 use linch_core::{
-    ContentBlock, ProviderError, ProviderEvent, RedactedThinkingBlock, StopReason, ThinkingBlock,
-    Usage, assemble,
+    ContentBlock, ProviderError, ProviderEvent, RedactedThinkingBlock, StopReason, StreamError,
+    ThinkingBlock, Usage, assemble,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -232,6 +232,63 @@ async fn a_completed_tool_call_forces_tool_use() {
     let end = r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#;
     let turn = assemble(run_ok(&frames(&[START, start, stop, end, STOP])).await).unwrap();
     assert_eq!(turn.stop_reason, StopReason::ToolUse);
+}
+
+fn tool_block(index: u64, id: &str, partial_json: &str) -> [String; 3] {
+    [
+        format!(
+            r#"{{"type":"content_block_start","index":{index},"content_block":{{"type":"tool_use","id":"{id}","name":"get_weather","input":{{}}}}}}"#
+        ),
+        json!({"type": "content_block_delta", "index": index,
+            "delta": {"type": "input_json_delta", "partial_json": partial_json}})
+        .to_string(),
+        format!(r#"{{"type":"content_block_stop","index":{index}}}"#),
+    ]
+}
+
+fn tool_frames(blocks: &[[String; 3]], stop: &str) -> String {
+    let delta = format!(r#"{{"type":"message_delta","delta":{{"stop_reason":"{stop}"}}}}"#);
+    let mut payloads = vec![START];
+    payloads.extend(blocks.iter().flatten().map(String::as_str));
+    payloads.extend([delta.as_str(), STOP]);
+    frames(&payloads)
+}
+
+/// R1-prov 5: a call cut off by `max_tokens` is dropped and the turn
+/// reports MaxTokens; input still streams as it arrives.
+#[tokio::test]
+async fn a_max_tokens_stop_drops_a_cut_off_call_and_keeps_max_tokens() {
+    let sse = tool_frames(&[tool_block(0, "t1", r#"{"city": "Par"#)], "max_tokens");
+    let turn = assemble(run_ok(&sse).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::MaxTokens);
+    assert_eq!(turn.message.tool_uses().count(), 0);
+}
+
+#[tokio::test]
+async fn a_max_tokens_stop_keeps_the_calls_that_finished() {
+    let sse = tool_frames(
+        &[
+            tool_block(0, "t1", r#"{"city": "Paris"}"#),
+            tool_block(1, "t2", r#"{"city": "Tok"#),
+        ],
+        "max_tokens",
+    );
+    let turn = assemble(run_ok(&sse).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    let ids: Vec<_> = (turn.message.tool_uses())
+        .map(|call| call.id.as_str())
+        .collect();
+    assert_eq!(ids, ["t1"]);
+}
+
+#[tokio::test]
+async fn a_cut_off_call_without_a_max_tokens_stop_is_still_invalid() {
+    let sse = tool_frames(&[tool_block(0, "t1", r#"{"city": "Par"#)], "tool_use");
+    let err = assemble(run_ok(&sse).await).unwrap_err();
+    assert!(
+        matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "t1"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
