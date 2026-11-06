@@ -119,8 +119,9 @@
 //! config's `mcp_servers` are connected in order before the result is sent.
 //! The result is [`AgentOpened`](protocol::AgentOpened):
 //! `{"agent": "agent-1", "contract": "<hex digest>"}`. The contract covers
-//! the spec, every tool registered at open (host, workspace, then MCP) and
-//! the hook policies; a tool an MCP server adds later is outside it. A
+//! the spec, every tool registered at open (host, workspace, then MCP),
+//! each with its scope, and the hook policies; a tool an MCP server adds
+//! later is outside it. A
 //! handle lives until `agent.close` or the end of its connection.
 //!
 //! Each of `tools` ([`HostToolSpec`](protocol::HostToolSpec)) is
@@ -140,12 +141,14 @@
 //! rejects never crosses the connection. `timeout_ms` defaults to 30 000. A
 //! callback that errors, answers badly or times out is handled by its
 //! `fail_mode`: `closed` turns it into the point's blocking answer (the
-//! call is blocked or denied, the result withheld, the stop refused),
+//! call is blocked or denied, the result withheld; at `stop` the run ends
+//! failed with a hook error),
 //! `open` skips it. The default is `closed` at `pre_tool_use` and
 //! `permission_request` and `open` elsewhere; `context_build` and
 //! `post_turn` cannot fail closed. Each `(point, policy_id,
-//! policy_version)` enters the contract, so bump `policy_version` whenever
-//! a callback's behaviour, matcher, timeout or fail mode changes.
+//! policy_version)` enters the contract in declaration order, duplicates
+//! included, so reordering callbacks changes it too; bump `policy_version`
+//! whenever a callback's behaviour, matcher, timeout or fail mode changes.
 //!
 //! Invalid `tools` or `callbacks` entries are `-32602`.
 //!
