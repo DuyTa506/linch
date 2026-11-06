@@ -1,11 +1,11 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.13' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version < '3.12' or (python_full_version == '3.12.*' and sys_platform != 'emscripten')",
 ]
 
 [[package]]
@@ -608,8 +608,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "python_full_version != '3.12.*' or sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "python_full_version != '3.12.*' or sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -798,6 +798,7 @@ version = "3.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
+    { name = "linch-native" },
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "pyyaml" },
@@ -835,8 +836,9 @@ worker = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.30.0" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.32" },
-    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.39.0" },
+    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.39.0,<3" },
     { name = "jsonschema", specifier = ">=4,<5" },
+    { name = "linch-native", specifier = ">=0.1,<0.2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "opentelemetry-api", specifier = ">=1.20" },
@@ -853,6 +855,19 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.10" },
 ]
 provides-extras = ["mcp", "anthropic", "gemini", "worker", "postgres", "dev"]
+
+[[package]]
+name = "linch-native"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/ab/a7c915246c20dccbd852a056fc35de85d4a968e3d351dcde9253229d5cab/linch_native-0.1.0.tar.gz", hash = "sha256:fb9cf8de716eb8c2362c256a3092ce29b2aecf2ff7cd3baa9d88854eadd1b61e", size = 13976, upload-time = "2026-11-06T10:31:43.905Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/8d/718e42fa1e656abb45103ba3d1b38da37be0268af65611e2cea60cea6c29/linch_native-0.1.0-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:620a90b02c4115c13e4ec81d299487f1f01fa590d42843a0f4820b7545a7a079", size = 249967, upload-time = "2026-11-06T10:31:38.409Z" },
+    { url = "https://files.pythonhosted.org/packages/99/13/4013d1bf81ff0991144cd1fdc37d631dcc4fcd325bd1d21ddcd5c07ceb0a/linch_native-0.1.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:8b9b335701553bdcaa60b0d314f0d29d1b0ac738ffaa6cb1e7a5618cb01fe210", size = 245090, upload-time = "2026-11-06T10:31:39.65Z" },
+    { url = "https://files.pythonhosted.org/packages/56/b8/6ed69c59cf0647623403355f36b332a7a01b18be3359c7ffb30c02d8691c/linch_native-0.1.0-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:a148fc4f21a07880f4ceecdffc2dd12a1ae240e6c3170616d4f28bccc280d2c0", size = 262503, upload-time = "2026-11-06T10:31:40.837Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/a1/84a992d52d01d836d805a610c5062516580bdfb536f2177f02d10ba1a5eb/linch_native-0.1.0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:face96694157ca3625e52a5d6c257260f711e42256c243c3cffe1357e818bba7", size = 264677, upload-time = "2026-11-06T10:31:41.913Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/a2/80e40df8da3f624fe8ed600e671f45e8ef7175c160c66083fffb118478e0/linch_native-0.1.0-cp311-abi3-win_amd64.whl", hash = "sha256:a37282f2a296124b8835a937eb331a2cdb81abeae499f5728b9ea54700470c93", size = 156145, upload-time = "2026-11-06T10:31:42.94Z" },
+]
 
 [[package]]
 name = "markdown-it-py"
@@ -1764,8 +1779,8 @@ name = "uvicorn"
 version = "0.49.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version != '3.12.*' or sys_platform != 'emscripten'" },
-    { name = "h11", marker = "python_full_version != '3.12.*' or sys_platform != 'emscripten'" },
+    { name = "click" },
+    { name = "h11" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/1f/fa18009dea8469069cca78a4e877a008ab78f08b064bfc9ab891579077ff/uvicorn-0.49.0.tar.gz", hash = "sha256:ebf4271aa580d9de97f93192d4595176df6e91f9aae919ca73e4fc07df1e66a3", size = 91284, upload-time = "2026-06-03T22:01:30.448Z" }
 wheels = [
