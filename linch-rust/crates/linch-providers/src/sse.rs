@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 
 use eventsource_stream::{Event, EventStreamError, Eventsource};
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use linch_core::{ProviderError, ProviderEvent, ProviderStream};
 use tokio_util::sync::CancellationToken;
 
@@ -54,8 +54,13 @@ where
     B: AsRef<[u8]> + Send + 'static,
     E: Display + Send + 'static,
 {
+    // eventsource-stream drops an event with no blank line after it at the
+    // end of the body; a closing blank line dispatches it.
+    let body = bytes
+        .map_ok(Piece::Body)
+        .chain(futures::stream::once(async { Ok(Piece::End) }));
     let state = State {
-        sse: Box::pin(bytes.eventsource()),
+        sse: Box::pin(body.eventsource()),
         decoder,
         pending: VecDeque::new(),
         cancel,
@@ -69,6 +74,21 @@ where
     .boxed()
 }
 
+/// A chunk of the response body, or the blank line added after it.
+enum Piece<B> {
+    Body(B),
+    End,
+}
+
+impl<B: AsRef<[u8]>> AsRef<[u8]> for Piece<B> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Body(bytes) => bytes.as_ref(),
+            Self::End => b"\n\n",
+        }
+    }
+}
+
 async fn next<S, D, E>(state: &mut State<S, D>) -> Option<Result<ProviderEvent, ProviderError>>
 where
     S: Stream<Item = Result<Event, EventStreamError<E>>> + Unpin,
@@ -76,8 +96,10 @@ where
     E: Display,
 {
     loop {
-        if state.done && state.pending.is_empty() {
-            return None;
+        // A finished response is queued whole, its end and usage included;
+        // a cancel that arrives now does not drop what is already known.
+        if state.done {
+            return state.pending.pop_front().map(Ok);
         }
         if state.cancel.is_cancelled() {
             return Some(Err(stop(state, ProviderError::Cancelled)));

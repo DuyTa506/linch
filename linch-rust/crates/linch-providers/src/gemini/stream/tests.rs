@@ -169,6 +169,20 @@ async fn server_call_ids_are_used_and_kept() {
 }
 
 #[tokio::test]
+async fn a_last_chunk_with_no_blank_line_after_it_is_read() {
+    let sse = frames(&[candidate(json!([{"text": "hi"}]), Some("STOP"))]);
+    for end in ["\n", "\r\n", ""] {
+        let cut = format!("{}{end}", sse.trim_end());
+        let turn = assemble(run_ok(&cut).await).unwrap();
+        assert_eq!(
+            (turn.message.text().as_str(), turn.stop_reason),
+            ("hi", StopReason::EndTurn),
+            "{end:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn unsigned_turns_keep_no_metadata_and_fall_back_to_the_requested_model() {
     let chunk = candidate(json!([{"text": "hi"}]), Some("STOP"));
     let turn = assemble(run_ok(&frames(&[chunk])).await).unwrap();

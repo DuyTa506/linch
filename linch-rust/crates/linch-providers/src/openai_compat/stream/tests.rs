@@ -156,6 +156,39 @@ async fn eof_before_done_is_a_transport_error() {
 }
 
 #[tokio::test]
+async fn a_last_done_with_no_blank_line_after_it_is_read() {
+    let sse = chunk(json!({"delta": {"content": "hi"}, "finish_reason": "stop"}));
+    for done in ["data: [DONE]\n", "data: [DONE]"] {
+        let turn = assemble(run_ok(&(sse.clone() + done), 4096).await).unwrap();
+        assert_eq!(turn.stop_reason, StopReason::EndTurn, "{done:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_finished_response_is_drained_before_a_cancel() {
+    // The tool call and the end are both queued at [DONE]; a cancel that
+    // comes while they wait must not lose the end and its usage.
+    let tool = json!({"index": 0, "id": "c1", "function": {"name": "f", "arguments": "{}"}});
+    let sse = chunk(json!({"delta": {"tool_calls": [tool]}, "finish_reason": "tool_calls"}))
+        + &format!(
+            "data: {}\n\n",
+            json!({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
+        )
+        + "data: [DONE]\n\n";
+    let bytes = stream::iter([Ok::<_, Infallible>(sse.into_bytes())]).chain(stream::pending());
+    let cancel = CancellationToken::new();
+    let mut events = events(bytes, translator(), cancel.clone(), key());
+    while !matches!(events.next().await, Some(Ok(ProviderEvent::ToolUseEnd(_)))) {}
+    cancel.cancel();
+    let rest: Vec<_> = events.collect().await;
+    assert!(
+        matches!(rest.as_slice(), [Ok(ProviderEvent::MessageEnd(end))]
+            if end.usage.is_some_and(|usage| usage.output_tokens == 2)),
+        "{rest:?}"
+    );
+}
+
+#[tokio::test]
 async fn done_without_finish_reason_is_a_transport_error() {
     let sse = chunk(json!({"delta": {"content": "hi"}})) + "data: [DONE]\n\n";
     let err = last_error(run(&sse, 4096).await);
