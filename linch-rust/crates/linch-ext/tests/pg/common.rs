@@ -4,7 +4,9 @@
 //! Each test gets its own schema (`p10w_<name>`, reset at start and dropped
 //! at the end) through the pool's `search_path`, so tests run in parallel.
 
+use std::future::Future;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use linch_ext::PgPool;
 use sqlx::AssertSqlSafe;
@@ -61,13 +63,57 @@ impl TestDb {
 
     /// A new pool on the test schema: one per simulated process.
     pub async fn pool(&mut self) -> PgPool {
+        self.pool_with(self.options.clone()).await
+    }
+
+    /// A pool like [`Self::pool`] whose transactions default to REPEATABLE
+    /// READ, as a host's role may set.
+    pub async fn repeatable_read(&mut self) -> PgPool {
+        let isolation = ("default_transaction_isolation", "repeatable read");
+        self.pool_with(self.options.clone().options([isolation]))
+            .await
+    }
+
+    async fn pool_with(&mut self, options: PgConnectOptions) -> PgPool {
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect_with(self.options.clone())
+            .connect_with(options)
             .await
             .expect("connect to the test schema");
         self.pools.push(pool.clone());
         pool
+    }
+
+    /// Run `write` while another transaction holds `update`, and commit
+    /// that transaction once `write` waits on its row lock.
+    pub async fn behind_an_update<T>(&self, update: &str, write: impl Future<Output = T>) -> T {
+        let mut holder = self.admin.begin().await.unwrap();
+        let sql = format!("SET LOCAL search_path TO {}", self.schema);
+        let query = sqlx::query(AssertSqlSafe(sql));
+        query.execute(&mut *holder).await.unwrap();
+        let query = sqlx::query(AssertSqlSafe(update.to_owned()));
+        let updated = query.execute(&mut *holder).await.unwrap();
+        assert_eq!(updated.rows_affected(), 1, "{update}");
+        let release = async {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // pg_locks, unlike pg_stat_activity, is not a snapshot per
+            // transaction.
+            while sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_locks \
+                 WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))",
+            )
+            .fetch_optional(&mut *holder)
+            .await
+            .unwrap()
+            .is_none()
+            {
+                assert!(Instant::now() < deadline, "the write never waited");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            holder.commit().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(write, release);
+        result
     }
 
     /// Close the pools and drop the schema.

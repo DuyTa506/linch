@@ -190,7 +190,7 @@ process can read its question with `load`.
 | Store | Notes |
 |---|---|
 | `MemoryJournalStore` | Tests and development |
-| `PgJournalStore` (feature `postgres`) | Tables `linch_ext_workflows` and `linch_ext_workflow_records`; migrations recorded in `linch_ext_migrations` (`crates/linch-ext/src/postgres.rs:14`). Every write is one statement; a record append locks the workflow row `FOR SHARE` under the lease's epoch, so it lands before a competing claim or writes nothing (`crates/linch-ext/src/workflow/postgres.rs:1-6`). JSON is `TEXT` so a replayed value reads back exactly |
+| `PgJournalStore` (feature `postgres`) | Tables `linch_ext_workflows` and `linch_ext_workflow_records`; migrations recorded in `linch_ext_migrations` (`crates/linch-ext/src/postgres.rs:14`). Every write is one statement; a record append locks the workflow row `FOR SHARE` under the lease's epoch, so it lands before a competing claim or writes nothing (`crates/linch-ext/src/workflow/postgres.rs:1-7`). Writes run at the pool's default isolation; above `READ COMMITTED` a write that waited on a claim fails with a serialization error (`40001`) once the claim commits, wrote nothing, and runs again, up to three tries in all, so a claim still wins and a fenced write is `LeaseLost` (`postgres.rs:45-74`). JSON is `TEXT` so a replayed value reads back exactly |
 
 Every store passes `workflow::conformance::journal_store_suite`
 (`crates/linch-ext/src/workflow/conformance.rs:25`).

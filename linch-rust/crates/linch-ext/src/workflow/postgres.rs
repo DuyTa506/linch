@@ -3,7 +3,10 @@
 //! Every write is one statement. A record append locks the workflow row
 //! `FOR SHARE` under the lease's epoch, so it either lands before a
 //! competing claim (whose update then waits for it, and whose load then
-//! sees it) or finds the new epoch and writes nothing.
+//! sees it) or finds the new epoch and writes nothing. A write that fails
+//! with a serialization error runs again (`retried`).
+
+use std::future::Future;
 
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -39,6 +42,37 @@ impl PgJournalStore {
     }
 }
 
+/// Most times a write runs while it fails with a serialization error, as
+/// linch-postgres runs its single-statement writes.
+const WRITE_TRIES: u32 = 3;
+
+/// Run `write` again while it fails with a serialization error (40001), up
+/// to [`WRITE_TRIES`] times in all.
+///
+/// Every write is one autocommit statement at the pool's default isolation.
+/// Above READ COMMITTED, a statement that waited on a row another
+/// transaction then changed fails this way. It wrote nothing, and runs again
+/// on a fresh snapshot: a claim then wins, and a write under an older epoch
+/// sees the new one and is fenced. Under READ COMMITTED it never happens.
+async fn retried<T, F, Fut>(mut write: F) -> Result<T, sqlx::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, sqlx::Error>>,
+{
+    let mut tries = 1;
+    loop {
+        match write().await {
+            Err(error) if serialization_failure(&error) && tries < WRITE_TRIES => tries += 1,
+            outcome => return outcome,
+        }
+    }
+}
+
+fn serialization_failure(error: &sqlx::Error) -> bool {
+    let code = error.as_database_error().and_then(|error| error.code());
+    code.as_deref() == Some("40001")
+}
+
 fn backend(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> JournalStoreError {
     JournalStoreError::Backend(error.into())
 }
@@ -71,16 +105,18 @@ impl JournalStore for PgJournalStore {
         namespace: &str,
         workflow_id: &str,
     ) -> Result<JournalLease, JournalStoreError> {
-        let epoch: i64 = sqlx::query_scalar(
-            "INSERT INTO linch_ext_workflows (namespace, workflow_id, status, epoch) \
-             VALUES ($1, $2, 'running', 1) \
-             ON CONFLICT (namespace, workflow_id) DO UPDATE \
-             SET epoch = linch_ext_workflows.epoch + 1, status = 'running', interrupt = NULL \
-             RETURNING epoch",
-        )
-        .bind(namespace)
-        .bind(workflow_id)
-        .fetch_one(&self.pool)
+        let epoch: i64 = retried(|| {
+            sqlx::query_scalar(
+                "INSERT INTO linch_ext_workflows (namespace, workflow_id, status, epoch) \
+                 VALUES ($1, $2, 'running', 1) \
+                 ON CONFLICT (namespace, workflow_id) DO UPDATE \
+                 SET epoch = linch_ext_workflows.epoch + 1, status = 'running', interrupt = NULL \
+                 RETURNING epoch",
+            )
+            .bind(namespace)
+            .bind(workflow_id)
+            .fetch_one(&self.pool)
+        })
         .await
         .map_err(backend)?;
         Ok(JournalLease {
@@ -138,24 +174,28 @@ impl JournalStore for PgJournalStore {
         record: JournalRecord,
     ) -> Result<(), JournalStoreError> {
         let value = serde_json::to_string(&record.value).map_err(backend)?;
-        let (leased, inserted): (i64, i64) = sqlx::query_as(
-            "WITH lease AS ( \
-                 SELECT 1 FROM linch_ext_workflows \
-                 WHERE namespace = $1 AND workflow_id = $2 AND epoch = $3 FOR SHARE), \
-             inserted AS ( \
-                 INSERT INTO linch_ext_workflow_records \
-                     (namespace, workflow_id, call_key, occurrence, value) \
-                 SELECT $1, $2, $4, $5, $6 FROM lease \
-                 ON CONFLICT DO NOTHING RETURNING 1) \
-             SELECT (SELECT count(*) FROM lease), (SELECT count(*) FROM inserted)",
-        )
-        .bind(&lease.namespace)
-        .bind(&lease.workflow_id)
-        .bind(to_i64(lease.epoch, "epoch")?)
-        .bind(&record.call_key)
-        .bind(to_i64(record.occurrence, "occurrence")?)
-        .bind(value)
-        .fetch_one(&self.pool)
+        let epoch = to_i64(lease.epoch, "epoch")?;
+        let occurrence = to_i64(record.occurrence, "occurrence")?;
+        let (leased, inserted): (i64, i64) = retried(|| {
+            sqlx::query_as(
+                "WITH lease AS ( \
+                     SELECT 1 FROM linch_ext_workflows \
+                     WHERE namespace = $1 AND workflow_id = $2 AND epoch = $3 FOR SHARE), \
+                 inserted AS ( \
+                     INSERT INTO linch_ext_workflow_records \
+                         (namespace, workflow_id, call_key, occurrence, value) \
+                     SELECT $1, $2, $4, $5, $6 FROM lease \
+                     ON CONFLICT DO NOTHING RETURNING 1) \
+                 SELECT (SELECT count(*) FROM lease), (SELECT count(*) FROM inserted)",
+            )
+            .bind(&lease.namespace)
+            .bind(&lease.workflow_id)
+            .bind(epoch)
+            .bind(&record.call_key)
+            .bind(occurrence)
+            .bind(&value)
+            .fetch_one(&self.pool)
+        })
         .await
         .map_err(backend)?;
         match (leased, inserted) {
@@ -184,16 +224,19 @@ impl JournalStore for PgJournalStore {
             }
             _ => None,
         };
-        let updated = sqlx::query(
-            "UPDATE linch_ext_workflows SET status = $4, interrupt = $5 \
-             WHERE namespace = $1 AND workflow_id = $2 AND epoch = $3",
-        )
-        .bind(&lease.namespace)
-        .bind(&lease.workflow_id)
-        .bind(to_i64(lease.epoch, "epoch")?)
-        .bind(status.name())
-        .bind(interrupt)
-        .execute(&self.pool)
+        let epoch = to_i64(lease.epoch, "epoch")?;
+        let updated = retried(|| {
+            sqlx::query(
+                "UPDATE linch_ext_workflows SET status = $4, interrupt = $5 \
+                 WHERE namespace = $1 AND workflow_id = $2 AND epoch = $3",
+            )
+            .bind(&lease.namespace)
+            .bind(&lease.workflow_id)
+            .bind(epoch)
+            .bind(status.name())
+            .bind(&interrupt)
+            .execute(&self.pool)
+        })
         .await
         .map_err(backend)?
         .rows_affected();
