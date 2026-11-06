@@ -69,6 +69,10 @@ pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
 };
 pub use run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
+pub use scheduler::{
+    BatchPlan, CallOutcome, ExecuteOptions, PlannedAction, PlannedCall, RecordedApproval,
+    RunIdentity, ToolSink,
+};
 pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
 pub use store::{Commit, Lease, NewRun, RunRecord, RunStore, SessionStore, StoreError};
 pub use tool::{
