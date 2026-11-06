@@ -362,7 +362,9 @@ fn the_digest_covers_the_policy_set_and_pins_its_encoding() {
         &hooks.pre_tool_use,
         Scripted::new("cache", &log, |_| Act::Answer(PreToolUseResponse::Continue)),
     );
-    let expected = json!([["pre_tool_use", "cache", 1], ["post_tool_use", "redact", 2]]);
+    // Sorted by wire name: `post_tool_use` before `pre_tool_use`, unlike the
+    // variants' declaration order.
+    let expected = json!([["post_tool_use", "redact", 2], ["pre_tool_use", "cache", 1]]);
     assert_eq!(
         hooks.policy_digest(),
         digest_with_domain(POLICY_DOMAIN, &expected).unwrap()

@@ -75,23 +75,37 @@ impl Hooks {
     /// Digest of the registered policies, for the run contract.
     ///
     /// Covers the set of `(point, policy_id, policy_version)` triples, sorted
-    /// by point, then id, then version, so it does not depend on
-    /// registration order and a policy registered twice at one point counts
-    /// once. A resumed run compares it with the digest it started with.
+    /// by the point's wire name, then id, then version. So it does not
+    /// depend on registration order or on the order of [`HookPoint`]'s
+    /// variants, and a policy registered twice at one point counts once. A
+    /// resumed run compares it with the digest it started with.
     pub fn policy_digest(&self) -> Digest {
-        let mut set: BTreeSet<(HookPoint, Arc<str>, u32)> = BTreeSet::new();
-        set.extend(self.user_prompt_submit.policies());
-        set.extend(self.context_build.policies());
-        set.extend(self.pre_tool_use.policies());
-        set.extend(self.permission_request.policies());
-        set.extend(self.post_tool_use.policies());
-        set.extend(self.stop.policies());
-        set.extend(self.post_turn.policies());
+        let set: BTreeSet<(String, Arc<str>, u32)> = [
+            self.user_prompt_submit.policies(),
+            self.context_build.policies(),
+            self.pre_tool_use.policies(),
+            self.permission_request.policies(),
+            self.post_tool_use.policies(),
+            self.stop.policies(),
+            self.post_turn.policies(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(point, id, version)| (point_name(point), id, version))
+        .collect();
         let triples = set
             .into_iter()
             .map(|(point, id, version)| json!([point, &*id, version]))
             .collect();
         digest_with_domain(POLICY_DOMAIN, &JsonValue::Array(triples))
             .expect("an array of flat triples is far below the depth limit")
+    }
+}
+
+/// The point's wire name (`pre_tool_use`, ...).
+fn point_name(point: HookPoint) -> String {
+    match serde_json::to_value(point) {
+        Ok(JsonValue::String(name)) => name,
+        other => unreachable!("HookPoint serializes as a string, got {other:?}"),
     }
 }
