@@ -29,6 +29,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use sqlx::migrate::{Migration, MigrationType, Migrator};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
 mod codec;
@@ -61,6 +62,13 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// that long. Only this first connect is bounded; later waits for a pooled
 /// connection keep sqlx's defaults.
 ///
+/// The pool does not ping a connection before handing it out (sqlx's
+/// `test_before_acquire`): a run commit or session append is one round
+/// trip, and the ping would make it two. A connection the server dropped
+/// while idle fails the next query on it with a backend error instead of
+/// being replaced first; sqlx's idle timeout and lifetime still recycle
+/// connections.
+///
 /// Args:
 ///     dsn: Connection string, for example `postgres://user:pass@host/db`.
 ///     timeout: Longest wait for the first connection.
@@ -73,7 +81,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///         `Configuration` for a malformed DSN, or the server's refusal
 ///         (bad password, unknown database). No message holds the DSN.
 pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error> {
-    match tokio::time::timeout(timeout, PgPool::connect(dsn)).await {
+    let pool = PgPoolOptions::new().test_before_acquire(false);
+    match tokio::time::timeout(timeout, pool.connect(dsn)).await {
         Ok(connected) => connected,
         Err(_) => Err(sqlx::Error::PoolTimedOut),
     }
@@ -81,12 +90,28 @@ pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error
 
 /// Begin a READ COMMITTED transaction whatever the server or role default.
 ///
-/// Every write locks its parent row with `FOR UPDATE` and must read the row
-/// again after waiting on another writer; REPEATABLE READ or SERIALIZABLE
-/// would fail that wait with a serialization error instead.
+/// A write of several statements (run create and claim, file edit) locks
+/// its parent row with `FOR UPDATE` and must read the row again after
+/// waiting on another writer; REPEATABLE READ or SERIALIZABLE would fail
+/// that wait with a serialization error instead.
 pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
         .await
+}
+
+/// Most times a single-statement write (run commit, session append) runs
+/// when its row keeps changing under it.
+pub(crate) const WRITE_TRIES: u32 = 3;
+
+/// Whether a single-statement write failed with a serialization error.
+///
+/// Such a write runs in autocommit, at the pool's default isolation. Above
+/// READ COMMITTED, a row changed after the statement's snapshot fails it
+/// with this error; it wrote nothing, and runs again on a fresh snapshot.
+/// Under READ COMMITTED it never happens.
+pub(crate) fn serialization_failure(error: &sqlx::Error) -> bool {
+    let code = error.as_database_error().and_then(|error| error.code());
+    code.as_deref() == Some("40001")
 }
 
 /// The migrations embedded in this crate, newest last.
