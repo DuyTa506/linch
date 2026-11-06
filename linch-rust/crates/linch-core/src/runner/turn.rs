@@ -281,21 +281,23 @@ impl Runner {
                 .await
         };
         self.settle(&outcome.receipt);
+        let usage = outcome.receipt.usage;
         self.journal.stage(Event::ModelCallReceipt(outcome.receipt));
-        match outcome.result {
-            Ok(assembly) => self.accept(assembly).await.map(Some),
-            Err(failure) if matches!(failure.error, ProviderError::Cancelled) => {
-                self.abort().await?;
-                Ok(None)
-            }
-            Err(failure) => {
-                // One terminal write: receipt, error, status and result.
-                self.journal.stage(Event::Error(failure.event));
-                let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
-                self.end(RunStatus::Failed, subtype, stop, None).await?;
-                Ok(None)
-            }
+        let failure = match outcome.result {
+            Ok(assembly) => return self.accept(assembly).await.map(Some),
+            Err(failure) => failure,
+        };
+        // A call that failed or was cancelled may still have been paid.
+        self.stage_usage(usage);
+        if matches!(failure.error, ProviderError::Cancelled) {
+            self.abort().await?;
+            return Ok(None);
         }
+        // One terminal write: receipt, usage, error, status and result.
+        self.journal.stage(Event::Error(failure.event));
+        let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
+        self.end(RunStatus::Failed, subtype, stop, None).await?;
+        Ok(None)
     }
 
     async fn accept(&mut self, assembly: AssistantAssembly) -> Result<Step, RunError> {

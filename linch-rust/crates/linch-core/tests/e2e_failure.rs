@@ -38,10 +38,18 @@ fn failing_agent<S: linch_core::SessionStore + RunStore + 'static>(stores: Arc<S
 #[tokio::test]
 async fn a_provider_failure_ends_the_run_in_one_write() {
     let stores = Arc::new(Stores::default());
-    finish(failing_agent(stores.clone()).run("go", RunOptions::new("s1"))).await;
+    let envelopes = finish(failing_agent(stores.clone()).run("go", RunOptions::new("s1"))).await;
     let writes = stores.log.lock().unwrap().clone();
-    let terminal = ["model_call_receipt", "error", "result"].map(String::from);
+    let terminal = ["model_call_receipt", "usage", "error", "result"].map(String::from);
     assert_eq!(writes.last(), Some(&Write::Commit(terminal.to_vec())));
+    // The failed call was paid: its usage is reported like any other.
+    let paid: Vec<_> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::Usage(paid) => Some((paid.usage, paid.cumulative)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(paid, [(usage(7, 3), usage(7, 3))]);
 }
 
 /// Continue whatever a crash left: resume, or run again if never created.

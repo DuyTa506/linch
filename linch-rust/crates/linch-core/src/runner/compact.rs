@@ -80,6 +80,8 @@ impl Runner {
         self.settle(&outcome.receipt);
         let usage = outcome.receipt.usage;
         self.journal.stage(Event::ModelCallReceipt(outcome.receipt));
+        // Paid whether or not it gave a summary.
+        self.stage_usage(usage);
         let text = match outcome.result {
             Ok(assembly) => assembly.message.text(),
             Err(failure) if matches!(failure.error, ProviderError::Cancelled) => {
@@ -93,7 +95,6 @@ impl Runner {
             return Ok(Some(DISPATCH));
         }
         let summary = compaction::summary_message(text);
-        self.stage_usage(usage);
         let compacted = compaction::replacement(&view, summary.clone(), keep_from);
         self.journal.stage(Event::Compaction(CompactionEvent {
             messages_before: view.len() as u64,
