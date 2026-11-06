@@ -1,13 +1,11 @@
-//! One proptest strategy per [`super::super::Event`] kind, plus the model-
-//! call journal kinds. Split out from `arbitrary/mod.rs` to stay near this
+//! One proptest strategy per [`super::super::Event`] kind but the accounting
+//! kinds (in `accounting`). Split out from `arbitrary/mod.rs` to stay near this
 //! crate's per-file line target; the shared leaf strategies these build on
 //! (`short_string`, `json_object`, `usage`, ...) live there.
 #![cfg(test)]
 
 use super::*;
 use crate::events::kinds::*;
-use crate::events::model_call::*;
-use crate::message::ToolResultBlock;
 use proptest::collection::vec;
 use proptest::option;
 use proptest::prelude::*;
@@ -57,10 +55,6 @@ pub(super) fn partial_assistant_event() -> impl Strategy<Value = PartialAssistan
     json_object(1).prop_map(|delta| PartialAssistantEvent { delta })
 }
 
-pub(super) fn usage_event() -> impl Strategy<Value = UsageEvent> {
-    (usage(), usage()).prop_map(|(usage, cumulative)| UsageEvent { usage, cumulative })
-}
-
 pub(super) fn tool_call_start_event() -> impl Strategy<Value = ToolCallStartEvent> {
     (
         short_string(),
@@ -74,29 +68,6 @@ pub(super) fn tool_call_start_event() -> impl Strategy<Value = ToolCallStartEven
                 tool_name,
                 input,
                 summary,
-            },
-        )
-}
-
-pub(super) fn tool_result_block() -> impl Strategy<Value = ToolResultBlock> {
-    (short_string(), short_string(), any::<bool>()).prop_map(|(tool_use_id, text, is_error)| {
-        ToolResultBlock::text(tool_use_id, text, is_error)
-    })
-}
-
-pub(super) fn tool_call_end_event() -> impl Strategy<Value = ToolCallEndEvent> {
-    (
-        short_string(),
-        tool_result_block(),
-        any::<u64>(),
-        option::of(json_value(1)),
-    )
-        .prop_map(
-            |(tool_name, result, duration_ms, canonical_output)| ToolCallEndEvent {
-                tool_name,
-                result,
-                duration_ms,
-                canonical_output,
             },
         )
 }
@@ -360,146 +331,4 @@ pub(super) fn verification_event() -> impl Strategy<Value = VerificationEvent> {
 
 pub(super) fn error_event() -> impl Strategy<Value = ErrorEvent> {
     json_object(1).prop_map(|error| ErrorEvent { error })
-}
-
-pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
-    (
-        prop_oneof![
-            Just(ResultSubtype::Success),
-            Just(ResultSubtype::Error),
-            Just(ResultSubtype::Aborted),
-            Just(ResultSubtype::Interrupted),
-        ],
-        stop_reason(),
-        usage(),
-        any::<bool>(),
-        option::of(short_string()),
-        option::of(json_object(1)),
-        option::of(short_string()),
-        option::of(short_string()),
-    )
-        .prop_map(
-            |(
-                subtype,
-                stop_reason,
-                total_usage,
-                usage_complete,
-                final_text,
-                structured_output,
-                structured_error,
-                trace_id,
-            )| {
-                ResultEvent {
-                    subtype,
-                    stop_reason,
-                    total_usage,
-                    usage_complete,
-                    final_text,
-                    structured_output,
-                    structured_error,
-                    trace_id,
-                }
-            },
-        )
-}
-
-pub(super) fn model_call_kind() -> impl Strategy<Value = ModelCallKind> {
-    prop_oneof![
-        Just(ModelCallKind::Primary),
-        Just(ModelCallKind::Compaction)
-    ]
-}
-
-pub(super) fn model_call_delivery_event() -> impl Strategy<Value = ModelCallDeliveryEvent> {
-    (
-        run_id(),
-        short_string(),
-        short_string(),
-        model_call_kind(),
-        option::of(any::<u64>()),
-        short_string(),
-    )
-        .prop_map(
-            |(run_id, logical_call_id, delivery_attempt_id, kind, turn_index, requested_model)| {
-                ModelCallDeliveryEvent {
-                    run_id,
-                    logical_call_id,
-                    delivery_attempt_id,
-                    kind,
-                    turn_index,
-                    requested_model,
-                }
-            },
-        )
-}
-
-pub(super) fn call_disposition() -> impl Strategy<Value = CallDisposition> {
-    prop_oneof![
-        Just(CallDisposition::Accepted),
-        Just(CallDisposition::Rejected),
-        Just(CallDisposition::Cancelled),
-        Just(CallDisposition::Failed),
-        Just(CallDisposition::NotDispatched),
-    ]
-}
-
-pub(super) fn model_call_receipt_event() -> impl Strategy<Value = ModelCallReceiptEvent> {
-    (
-        run_id(),
-        short_string(),
-        short_string(),
-        model_call_kind(),
-        option::of(short_string()),
-        call_disposition(),
-        option::of(usage()),
-        option::of(finite_f64()),
-        any::<u64>(),
-    )
-        .prop_map(
-            |(
-                run_id,
-                logical_call_id,
-                delivery_attempt_id,
-                kind,
-                actual_model,
-                disposition,
-                usage,
-                cost_usd,
-                duration_ms,
-            )| {
-                ModelCallReceiptEvent {
-                    run_id,
-                    logical_call_id,
-                    delivery_attempt_id,
-                    kind,
-                    actual_model,
-                    disposition,
-                    usage,
-                    cost_usd,
-                    duration_ms,
-                }
-            },
-        )
-}
-
-pub(super) fn model_call_usage_settlement_event()
--> impl Strategy<Value = ModelCallUsageSettlementEvent> {
-    (
-        run_id(),
-        option::of(short_string()),
-        short_string(),
-        usage(),
-        option::of(finite_f64()),
-    )
-        .prop_map(
-            |(run_id, budget_owner_id, logical_call_id, usage, cost_usd)| {
-                ModelCallUsageSettlementEvent {
-                    run_id,
-                    budget_owner_id,
-                    logical_call_id,
-                    usage,
-                    cost_usd,
-                }
-            },
-        )
 }

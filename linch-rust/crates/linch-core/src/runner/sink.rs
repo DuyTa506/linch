@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use super::Outbox;
 use super::hooks::push_records;
 use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent};
-use crate::events::{Envelope, Event, Persistence, WIRE_VERSION};
+use crate::events::{Envelope, Event, Persistence, WIRE_VERSION, now_ms};
 use crate::ids::RunId;
 use crate::journal::{Journal, JournalError};
 use crate::scheduler::{CallOutcome, PlannedCall, ToolSink};
@@ -85,6 +85,7 @@ impl<'a> JournalSink<'a> {
             v: WIRE_VERSION,
             seq: self.durable.load(Ordering::SeqCst),
             run_id: self.run_id.clone(),
+            ts_ms: now_ms(),
             ignorable: false,
             event,
         }

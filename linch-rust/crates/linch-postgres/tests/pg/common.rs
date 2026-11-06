@@ -88,6 +88,7 @@ pub fn envelope(run_id: &RunId, seq: u64) -> Envelope {
         v: WIRE_VERSION,
         seq,
         run_id: run_id.clone(),
+        ts_ms: 1_762_400_000_000 + seq,
         ignorable: false,
         event: Event::Error(ErrorEvent { error }),
     }

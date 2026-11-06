@@ -57,6 +57,7 @@ mod compact;
 mod end;
 mod fail;
 mod hooks;
+mod progress;
 mod sink;
 mod start;
 mod turn;

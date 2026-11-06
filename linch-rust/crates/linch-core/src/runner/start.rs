@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::batch::{answer_decision, approvals, turn_events, upsert};
-use super::turn::{Batch, Progress, Runner, Step};
+use super::progress::Progress;
+use super::turn::{Batch, Runner, Step};
 use super::{Outbox, hooks};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
@@ -27,6 +29,7 @@ pub(super) async fn new_run(
     outbox: Outbox,
     parent: Option<RunId>,
 ) -> Result<(), RunError> {
+    let started = Instant::now();
     let namespace = agent.namespace.clone();
     if options.run_id.is_some() {
         // A caller-chosen id may be taken: refuse it before any write.
@@ -92,7 +95,7 @@ pub(super) async fn new_run(
         Err(error) => return Err(error.into()),
     };
     outbox.deliver(ready).await;
-    let progress = Progress::FIRST;
+    let progress = Progress::first(started);
     let run = identity(session_id, run_id, &options.principal);
     let runner = Runner::new(
         agent,
@@ -122,6 +125,7 @@ pub(super) async fn continue_run(
     options: RunOptions,
     outbox: Outbox,
 ) -> Result<(), RunError> {
+    let started = Instant::now();
     if options.cancel.is_cancelled() {
         return Ok(());
     }
@@ -216,7 +220,7 @@ pub(super) async fn continue_run(
         },
     };
     let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
-    let progress = Progress::of(checkpoint, last_stop(&events));
+    let progress = Progress::of(checkpoint, last_stop(&events), started);
     let run = identity(record.session_id.clone(), run_id, &options.principal);
     let mut runner = Runner::new(
         agent,

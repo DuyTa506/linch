@@ -148,6 +148,7 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             total_usage: Usage::default(),
             usage_complete: true,
+            duration_ms: 0,
             final_text: final_text.map(str::to_owned),
             structured_output: None,
             structured_error: None,

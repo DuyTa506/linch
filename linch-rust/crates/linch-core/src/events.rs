@@ -4,7 +4,11 @@
 //! - [`Event`] is the sum type; see its module (`events/event/mod.rs`) for
 //!   why it hand-writes `Serialize`/`Deserialize` instead of deriving them.
 //! - [`Envelope`] carries the wire version, a monotonic `seq`, the owning
-//!   run, and the producer-declared `ignorable` compatibility flag.
+//!   run, the producer's wall-clock `ts_ms`, and the producer-declared
+//!   `ignorable` compatibility flag:
+//!   `{"v": 1, "seq": 7, "run_id": "...", "ts_ms": 1762400000000,
+//!   "ignorable": true, "event": {"type": "...", ...}}`, with `ignorable`
+//!   left out when false. Every field but `ignorable` is required.
 //! - [`EventError`] is the one typed error for every decode failure in this
 //!   module.
 //! - [`kinds`] and [`model_call`] hold the per-kind payload structs/enums;
@@ -21,5 +25,6 @@ pub mod kinds;
 pub mod model_call;
 mod wire;
 
+pub(crate) use envelope::now_ms;
 pub use envelope::{Envelope, EventError, WIRE_VERSION};
 pub use event::{Event, IgnorableEvent, Persistence, SubagentEvent};

@@ -7,10 +7,12 @@
 //! `json_value`) are candidates for a shared test-support module if W2
 //! (session log) or W3 (provider stream) need the same ones — see W1 notes.
 //!
-//! One strategy per [`super::Event`] kind lives in [`builders`], split out
+//! One strategy per [`super::Event`] kind lives in [`builders`] or, for the
+//! accounting kinds, [`accounting`], split out
 //! to stay near this crate's per-file line target.
 #![cfg(test)]
 
+mod accounting;
 mod builders;
 
 use super::event::{Event, IgnorableEvent, SubagentEvent};
@@ -190,11 +192,11 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
         builders::partial_assistant_event()
             .prop_map(Event::PartialAssistant)
             .boxed(),
-        builders::usage_event().prop_map(Event::Usage).boxed(),
+        accounting::usage_event().prop_map(Event::Usage).boxed(),
         builders::tool_call_start_event()
             .prop_map(Event::ToolCallStart)
             .boxed(),
-        builders::tool_call_end_event()
+        accounting::tool_call_end_event()
             .prop_map(Event::ToolCallEnd)
             .boxed(),
         builders::tool_progress_event()
@@ -240,14 +242,14 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
             .boxed(),
         hook_event().prop_map(Event::Hook).boxed(),
         builders::error_event().prop_map(Event::Error).boxed(),
-        builders::result_event().prop_map(Event::Result).boxed(),
-        builders::model_call_delivery_event()
+        accounting::result_event().prop_map(Event::Result).boxed(),
+        accounting::model_call_delivery_event()
             .prop_map(Event::ModelCallDelivery)
             .boxed(),
-        builders::model_call_receipt_event()
+        accounting::model_call_receipt_event()
             .prop_map(Event::ModelCallReceipt)
             .boxed(),
-        builders::model_call_usage_settlement_event()
+        accounting::model_call_usage_settlement_event()
             .prop_map(Event::ModelCallUsageSettlement)
             .boxed(),
         ignorable_event().boxed(),

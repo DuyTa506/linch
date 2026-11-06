@@ -53,6 +53,7 @@ fn result(subtype: ResultSubtype) -> Event {
         stop_reason: StopReason::EndTurn,
         total_usage: Usage::default(),
         usage_complete: true,
+        duration_ms: 0,
         final_text: None,
         structured_output: None,
         structured_error: None,

@@ -39,6 +39,7 @@ fn result(subtype: ResultSubtype, usage: Usage) -> Event {
         stop_reason: StopReason::EndTurn,
         total_usage: usage,
         usage_complete: true,
+        duration_ms: 0,
         final_text: Some("all done".into()),
         structured_output: None,
         structured_error: None,

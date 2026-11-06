@@ -14,7 +14,7 @@ use super::Outbox;
 use super::turn::{Runner, Step};
 use crate::agent::{AgentInner, RunError};
 use crate::events::kinds::{HookEvent, HookOutcome, UserEvent, UserEventSubtype};
-use crate::events::{Envelope, Event, WIRE_VERSION};
+use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
     ContextBuildRequest, HookRecord, HookStatus, PostTurnRequest, StopOutcome, StopRequest,
     UserPromptOutcome, UserPromptRequest,
@@ -47,6 +47,7 @@ pub(super) fn push_records(
             v: WIRE_VERSION,
             seq,
             run_id: run_id.clone(),
+            ts_ms: now_ms(),
             ignorable: false,
             event: Event::Hook(hook_event(record, tool_use_id)),
         });

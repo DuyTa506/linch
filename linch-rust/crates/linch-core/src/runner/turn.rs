@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
 use super::Outbox;
 use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
+use super::progress::Progress;
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
@@ -17,7 +19,7 @@ use crate::message::Message;
 use crate::provider::call::ModelCall;
 use crate::provider::{AssistantAssembly, ProviderError};
 use crate::registry::ToolSnapshot;
-use crate::run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
+use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
 use crate::usage::Usage;
@@ -77,40 +79,6 @@ pub(super) struct Batch {
     pub(super) after_seq: Option<u64>,
 }
 
-/// Turn index, usage and last stop reason carried over from durable state.
-#[derive(Clone, Copy)]
-pub(super) struct Progress {
-    pub(super) turn: u32,
-    pub(super) usage: Usage,
-    pub(super) usage_complete: bool,
-    /// Why the last response stopped, for `post_turn`.
-    pub(super) stop_reason: StopReason,
-}
-
-impl Progress {
-    /// A new run: turn 0, nothing spent.
-    pub(super) const FIRST: Self = Self {
-        turn: 0,
-        usage: Usage {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-        },
-        usage_complete: true,
-        stop_reason: StopReason::EndTurn,
-    };
-
-    pub(super) fn of(checkpoint: &Checkpoint, stop_reason: StopReason) -> Self {
-        Self {
-            turn: checkpoint.turn,
-            usage: checkpoint.usage,
-            usage_complete: checkpoint.usage_complete,
-            stop_reason,
-        }
-    }
-}
-
 /// The in-memory log of the stored session `entries`.
 pub(super) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
     let mut log = SessionLog::new();
@@ -144,6 +112,8 @@ pub(super) struct Runner {
     pub(super) usage_complete: bool,
     /// Why the last response stopped, for `post_turn`.
     pub(super) stop_reason: StopReason,
+    /// When this call of the run started, for the result's `duration_ms`.
+    pub(super) started: Instant,
 }
 
 impl Runner {
@@ -171,6 +141,7 @@ impl Runner {
             usage: progress.usage,
             usage_complete: progress.usage_complete,
             stop_reason: progress.stop_reason,
+            started: progress.started,
         }
     }
 

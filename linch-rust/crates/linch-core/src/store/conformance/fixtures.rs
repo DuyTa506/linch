@@ -73,6 +73,8 @@ pub(super) fn envelope(run_id: &str, seq: u64) -> Envelope {
         v: WIRE_VERSION,
         seq,
         run_id: RunId::new(run_id),
+        // Distinct per event, so a store that drops or mixes it up fails.
+        ts_ms: 1_762_400_000_000 + seq,
         ignorable: false,
         event: Event::Error(ErrorEvent { error }),
     }

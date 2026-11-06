@@ -1,5 +1,7 @@
 //! The run's terminals: completed, failed, aborted and the turn limit.
 
+use std::time::Duration;
+
 use serde_json::json;
 
 use super::turn::Runner;
@@ -25,6 +27,7 @@ impl Runner {
             stop_reason,
             total_usage: self.usage,
             usage_complete: self.usage_complete,
+            duration_ms: millis(self.started.elapsed()),
             final_text,
             structured_output: None,
             structured_error: None,
@@ -84,6 +87,11 @@ impl Runner {
         let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
         self.end(RunStatus::Failed, subtype, stop, None).await
     }
+}
+
+/// `elapsed` in whole milliseconds, saturating.
+pub(super) fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Whether `assembly` stopped at the output limit with no text and no tool
