@@ -126,23 +126,26 @@ async fn a_cancel_interrupts_the_hook_a_run_waits_on() {
 }
 
 /// Approve with an answer for one of two calls, or resume, with a token
-/// that is already cancelled: the run aborts, and the hooks are not asked
-/// again.
+/// that is already cancelled, with or without a tool hook: the run aborts
+/// instead of suspending again, and the hooks are not asked again.
 #[tokio::test]
 async fn approve_or_resume_with_a_cancelled_token_aborts_before_planning() {
-    for approving in [true, false] {
+    for (approving, counted) in [(true, true), (false, true), (true, false), (false, false)] {
         let calls = Arc::new(AtomicU32::new(0));
         let hooks = Hooks::default();
-        let _ = (hooks.pre_tool_use)
-            .register(Arc::new(Counts(Arc::clone(&calls))))
-            .unwrap();
+        if counted {
+            let _ = (hooks.pre_tool_use)
+                .register(Arc::new(Counts(Arc::clone(&calls))))
+                .unwrap();
+        }
         let hooks = Arc::new(hooks);
         let stores = Arc::new(Stores::default());
         let agent = hooked(script(1, 2, "Write"), hooks, stores.clone());
         let stream = agent.run("go", RunOptions::new("s1"));
         let run_id = stream.run_id().clone();
         finish(stream).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "both calls planned");
+        let planned = if counted { 2 } else { 0 };
+        assert_eq!(calls.load(Ordering::SeqCst), planned, "both calls planned");
         let options = RunOptions::new("s1");
         options.cancel.cancel();
         let stream = if approving {
@@ -155,9 +158,9 @@ async fn approve_or_resume_with_a_cancelled_token_aborts_before_planning() {
         assert_eq!(
             subtype(&envelopes),
             ResultSubtype::Aborted,
-            "approve {approving}"
+            "approve {approving}, hooked {counted}"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "no hook asked again");
+        assert_eq!(calls.load(Ordering::SeqCst), planned, "no hook asked again");
         let record = stores.runs.load(NS, &run_id).await.unwrap();
         assert_eq!(record.status, RunStatus::Aborted);
     }
