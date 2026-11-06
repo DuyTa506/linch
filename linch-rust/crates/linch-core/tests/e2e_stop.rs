@@ -1,6 +1,6 @@
 //! The `stop` and `post_turn` points in a run: feedback that keeps a run
-//! going, a closed failure bounded by the turn limit, and a crash at every
-//! write of a continued run.
+//! going, a closed failure bounded by the turn limit, open failures that
+//! leave the run alone, and a crash at every write of a continued run.
 
 mod common;
 
@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use common::hooks::hook;
 use common::*;
-use linch_core::events::kinds::{ResultSubtype, UserEventSubtype};
+use linch_core::events::kinds::{HookOutcome, ResultSubtype, UserEventSubtype};
 use linch_core::hooks::{PostTurn, Stop, StopResponse};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
@@ -99,6 +99,37 @@ async fn a_stop_hook_that_fails_closed_runs_until_the_turn_limit() {
     };
     assert_eq!(result.subtype, ResultSubtype::Error);
     assert!(kinds(&envelopes).contains(&"loop_guard".to_owned()));
+}
+
+#[tokio::test]
+async fn stop_and_post_turn_failures_are_open_by_default() {
+    let hooks = Hooks::default();
+    let judge = hook::<Stop>("judge", |_| Err("judge down".into()));
+    let _ = hooks.stop.register(judge.arc()).unwrap();
+    let watch = hook::<PostTurn>("watch", |_| Err("sink down".into()));
+    let _ = hooks.post_turn.register(watch.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(spec(), answers(), hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let want = [Message::user_text("go"), Message::assistant_text("first")];
+    assert_eq!(messages(&*stores, "s1").await, want, "the run ends");
+    let failed: Vec<_> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::Hook(record) => Some((record.policy_id.as_str(), &record.outcome)),
+            _ => None,
+        })
+        .collect();
+    let open = |error: &str| HookOutcome::Failed {
+        error: error.into(),
+        fail_mode: FailMode::Open,
+    };
+    let (judge, watch) = (open("judge down"), open("sink down"));
+    assert_eq!(failed, [("judge", &judge), ("watch", &watch)]);
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert_eq!(result.subtype, ResultSubtype::Success);
+    assert_eq!(stores.runs.writes().commit, 3, "one text turn");
 }
 
 #[tokio::test]
