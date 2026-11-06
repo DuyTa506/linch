@@ -19,6 +19,7 @@ under `tests/`; examples under `examples/`; docs under `docs/`.
 ## Commands
 
 ```bash
+pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'   # dev install
 pytest                                          # all tests
 pytest tests/test_budget.py::test_name          # one test
@@ -100,9 +101,13 @@ These hold for *every* change, regardless of subsystem:
   `tests/test_public_api.py` guards this surface; changing it is allowed in 3.0, silently drifting is not.
 - **Only read work runs in parallel** — write/exec tools stay serialized; a
   subagent runs in parallel only when every tool it can use is read-scoped.
-- **Durable before side effects** — a checkpoint guarding a tool call is
-  written through to the store before the tool runs; no write-back caching of
-  sessions, checkpoints, events, or permission decisions.
+- **Durable before side effects** — run state is group-committed at barriers:
+  every pending event and checkpoint is durable before the next external
+  effect (provider dispatch, each tool start, session-store write, terminal);
+  paid receipts/projections and tool ends are durable as soon as they exist.
+  A held checkpoint is a snapshot of its save, so every committed state is one
+  write-through would also have produced. Never defer a write past a barrier,
+  and never flush on a timer.
 
 **3.0 compatibility policy:** the owner is the only 2.x user, so 3.0 breaks
 freely. Remove deprecated APIs, legacy hook forms, shims, and readers for

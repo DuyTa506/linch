@@ -207,6 +207,13 @@ host_context.register("meter_provider", MeterProvider())
 agent = Agent(model="gpt-5", provider=my_provider, context=host_context)
 ```
 
+Without a provider in the `Context`, Linch uses the OpenTelemetry global
+provider. `trace.set_tracer_provider()` and `metrics.set_meter_provider()` take
+effect whenever they are called. Linch checks once, when it is imported,
+whether `OTEL_PYTHON_TRACER_PROVIDER` and `OTEL_PYTHON_METER_PROVIDER` are set.
+A variable first set after that import is ignored, so set them before it.
+OpenTelemetry reads the value itself when it first loads the provider.
+
 The source instrumentation creates `invoke_agent`, `step`, `chat`,
 `execute_tool`, and compaction spans. GenAI attributes include operation,
 provider, model, finish reasons, token/cache usage, conversation id, tool name

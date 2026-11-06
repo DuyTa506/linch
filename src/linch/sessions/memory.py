@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+
+from _linch_native import deepcopy
 
 from linch.durability import InboxDelivery, decode_inbox_message, encode_inbox_delivery
 from linch.errors import ConfigError

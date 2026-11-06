@@ -166,7 +166,7 @@ async def save_checkpoint(
     *,
     status: str = "running",
     lease: RunLease | None = None,
-) -> RunRecord
+) -> None
 
 async def save_checkpoint_with_events(
     run_id: str,
@@ -175,7 +175,7 @@ async def save_checkpoint_with_events(
     *,
     status: str = "running",
     lease: RunLease | None = None,
-) -> tuple[RunRecord, list[int]]
+) -> list[int]
 
 async def append_event(
     run_id: str,
@@ -195,7 +195,7 @@ async def mark_completed(
     checkpoint: RunCheckpoint,
     *,
     lease: RunLease | None = None,
-) -> RunRecord
+) -> None
 
 async def mark_failed(
     run_id: str,
@@ -204,7 +204,7 @@ async def mark_failed(
     *,
     events: Sequence[Event] = (),
     lease: RunLease | None = None,
-) -> tuple[RunRecord, list[int]]
+) -> list[int]
 ~~~
 
 Implement each method as follows:
@@ -220,7 +220,9 @@ Implement each method as follows:
   new row is invalid; a lease on adoption fences the existing pending row.
 - `load_run` returns a detached record or `None` for an unknown ID.
 - `save_checkpoint` replaces the checkpoint, stores the supplied `status`
-  (default `"running"`), updates `updated_at`, and returns the detached record.
+  (default `"running"`) and updates `updated_at`. The checkpoint writes
+  (`save_checkpoint`, `save_checkpoint_with_events`, `mark_completed`,
+  `mark_failed`) return no record; read the stored state with `load_run`.
   An unknown run raises `KeyError`.
 - `save_checkpoint_with_events` commits the checkpoint/status and all supplied
   events as one phase boundary. Events retain input order. The returned

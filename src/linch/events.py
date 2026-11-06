@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, TypeAlias, cast
+
+from _linch_native import deepcopy
 
 from ._json import walk_json
 from ._wire import WIRE_VERSION, require_wire_version
@@ -278,6 +279,29 @@ class ModelCallEvent:
                 self.schema_version,
             ),
         )
+
+    @classmethod
+    def _trusted(
+        cls,
+        run_id: str,
+        record_kind: Literal["intent", "dispatch_started", "receipt", "abandoned", "projection"],
+        record: dict[str, Any],
+        *,
+        budget_owner_id: str | None,
+    ) -> ModelCallEvent:
+        """Build an event from a record the ledger has already validated and owns."""
+
+        event = object.__new__(cls)
+        for name, value in (
+            ("run_id", run_id),
+            ("record_kind", record_kind),
+            ("record", record),
+            ("budget_owner_id", budget_owner_id),
+            ("schema_version", WIRE_VERSION),
+            ("type", "model_call"),
+        ):
+            object.__setattr__(event, name, value)
+        return event
 
 
 @dataclass(slots=True)

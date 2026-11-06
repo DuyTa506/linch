@@ -224,9 +224,10 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
         "mark_failed": 2,
     }
     assert writes["total"] == 9
-    assert payloads["total"] == initial_bytes + first_bytes + terminal_bytes + 2 * failed_bytes
+    # The checkpoint-less mark_failed writes no checkpoint bytes.
+    assert payloads["total"] == initial_bytes + first_bytes + terminal_bytes + failed_bytes
     assert payloads["by_phase"]["completed"]["total"] == terminal_bytes
-    assert payloads["by_phase"]["failed"]["total"] == 2 * failed_bytes
+    assert payloads["by_phase"]["failed"]["total"] == failed_bytes
     assert not hasattr(benchmark.MeasuredStore(object(), "run", metrics), "append_events")
 
 

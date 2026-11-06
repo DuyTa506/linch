@@ -83,11 +83,16 @@ flowchart LR
 - Một run có lease chỉ có tối đa một worker đang hoạt động nắm quyền sở hữu.
   `RunLease.epoch` là một fencing token. `claim()` tăng epoch khi quyền sở hữu
   thay đổi; `renew()` giữ nguyên epoch; thao tác ghi với epoch cũ sẽ phát sinh `LeaseLostError`.
-- Vòng lặp ghi checkpoint trước một thao tác bên ngoài mà kết quả của nó phải
-  có thể khôi phục được. `provider_pending` được lưu trước một luồng provider,
-  còn `tool_batch_pending`/`tool_executing` được lưu trước khi thực thi tool. Các kho
-  lưu trữ có thể commit các event của run đang chờ cùng với checkpoint thông qua
-  `save_checkpoint_with_events()`.
+- Trạng thái run được group-commit tại các barrier. Checkpoint và event được
+  giữ trong bộ đệm của run và commit trong một lần ghi
+  `save_checkpoint_with_events()` trước tác động bên ngoài kế tiếp: gửi
+  provider, mỗi lần tool bắt đầu, mỗi lần ghi session store, và khi kết thúc
+  run. Receipt đã trả tiền, projection và event kết thúc của tool được ghi ngay
+  khi có. Event kết thúc của tool được flush ngay sau khi tool trả về, nên nếu
+  crash trước lần flush đó, lời gọi được resume với kết quả "bị gián đoạn" và
+  không chạy lại, dù tác động của nó đã xảy ra. Một checkpoint đang giữ là
+  snapshot tại thời điểm lưu, nên mọi trạng thái đã commit đều là trạng thái mà
+  cách ghi xuyên (write-through) cũng tạo ra.
 - Các event của run được lưu bền vững có số thứ tự riêng cho từng run. Bên đọc kết nối lại
   bằng `PostgresRunStore.load_events(run_id, after_seq=...)`; thông báo chỉ dùng để
   đánh thức bên đọc, không phải nguồn dữ liệu chuẩn.

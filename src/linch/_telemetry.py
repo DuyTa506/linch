@@ -15,6 +15,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from opentelemetry import metrics, trace
+from opentelemetry.metrics import _internal as _metrics_api
 
 try:  # Private API; without it the default provider counts as active (slower, still correct).
     from opentelemetry.metrics._internal import _ProxyMeter, _ProxyMeterProvider
@@ -23,6 +24,36 @@ except ImportError:  # pragma: no cover
     _ProxyMeterProvider = metrics.NoOpMeterProvider
 
 from .types import Usage
+
+# ``get_tracer_provider``/``get_meter_provider`` test an environment variable
+# on every call while no global provider is set, which made provider lookup a
+# measurable share of each store call. Read the API's own globals first; only
+# defer to the public getter when they are absent or the variable was set at
+# import (the getter then installs the provider, so later reads are direct).
+# A variable set after import is not seen; docs/usage/events.md says so.
+_ENV_TRACER = "OTEL_PYTHON_TRACER_PROVIDER" in os.environ
+_ENV_METER = "OTEL_PYTHON_METER_PROVIDER" in os.environ
+
+
+def _global_tracer_provider() -> trace.TracerProvider:
+    provider = getattr(trace, "_TRACER_PROVIDER", None)
+    if provider is not None:
+        return provider
+    proxy = getattr(trace, "_PROXY_TRACER_PROVIDER", None)
+    if proxy is None or _ENV_TRACER:
+        return trace.get_tracer_provider()
+    return proxy
+
+
+def _global_meter_provider() -> metrics.MeterProvider:
+    provider = getattr(_metrics_api, "_METER_PROVIDER", None)
+    if provider is not None:
+        return provider
+    proxy = getattr(_metrics_api, "_PROXY_METER_PROVIDER", None)
+    if proxy is None or _ENV_METER:
+        return metrics.get_meter_provider()
+    return proxy
+
 
 if TYPE_CHECKING:
     from .kernel.context import Context
@@ -149,7 +180,7 @@ class Telemetry:
         meter = context.get("meter")
         meter_provider = context.get("meter_provider")
         global_tracer = (
-            trace.get_tracer_provider()
+            _global_tracer_provider()
             if isinstance(tracer, trace.ProxyTracer)
             or (
                 tracer is None
@@ -161,7 +192,7 @@ class Telemetry:
             else None
         )
         global_meter = (
-            metrics.get_meter_provider()
+            _global_meter_provider()
             if isinstance(meter, _ProxyMeter)
             or (
                 meter is None
@@ -202,7 +233,7 @@ class Telemetry:
             return False
         if isinstance(self.tracer, trace.ProxyTracer):
             return not isinstance(
-                trace.get_tracer_provider(), trace.NoOpTracerProvider | trace.ProxyTracerProvider
+                _global_tracer_provider(), trace.NoOpTracerProvider | trace.ProxyTracerProvider
             )
         return True
 
@@ -213,7 +244,7 @@ class Telemetry:
             return not isinstance(meter, metrics.NoOpMeter)
         provider = self._context.get("meter_provider")
         if provider is None or isinstance(provider, _ProxyMeterProvider) or meter is not None:
-            provider = metrics.get_meter_provider()
+            provider = _global_meter_provider()
         # The API has no instrument enabled flag. Its deferred default provider
         # is inactive until a host installs one; recheck so late setup still works.
         return not isinstance(provider, metrics.NoOpMeterProvider | _ProxyMeterProvider)

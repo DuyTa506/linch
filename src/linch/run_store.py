@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import errno
 import hashlib
 import inspect
@@ -8,16 +7,14 @@ import json
 import math
 import time
 from collections.abc import Awaitable, Mapping, Sequence
-from copy import deepcopy
-from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import date, datetime
-from decimal import Decimal
-from enum import Enum
-from pathlib import Path
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal, Protocol, TypeVar, cast
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from ._json import walk_json
+from _linch_native import deepcopy
+from _linch_native import json_safe as _native_json_safe
+
+from ._json import canonical_dumps, walk_json
 from ._telemetry import store_call
 from ._wire import WIRE_VERSION, require_wire_version
 from .errors import ConfigError, LinchError
@@ -316,9 +313,13 @@ _T = TypeVar("_T")
 async def durable_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
     """Measure a durable operation and preserve active runs on transient failure.
 
+    A session-store write is a group-commit barrier: the session's held run
+    checkpoint, with the events it covers, is committed first, so no stored
+    session record is durable before run state that preceded it.
+
     Args:
         session: Session whose configured run store and active run govern recovery.
-        op: Measurement label; it does not affect failure classification.
+        op: Measurement label; ``session.*`` labels also mark a barrier.
         awaitable: Durable operation to execute, excluding run creation.
 
     Returns:
@@ -327,6 +328,15 @@ async def durable_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
     Raises:
         _StoreUnavailableError: A transient store failure interrupts an active durable run.
     """
+    journal = getattr(session, "_event_journal", None)
+    if journal is not None and op.startswith("session."):
+        try:
+            await journal.flush_checkpoint()
+        except BaseException:
+            close = getattr(awaitable, "close", None)
+            if close is not None:
+                close()
+            raise
     try:
         return await store_call(session, op, awaitable)
     except Exception as exc:
@@ -599,7 +609,7 @@ class RunStore(Protocol):
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> RunRecord:
+    ) -> None:
         """Persist a checkpoint and update the run status.
 
         Args:
@@ -607,9 +617,6 @@ class RunStore(Protocol):
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            The detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -627,7 +634,7 @@ class RunStore(Protocol):
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Persist a checkpoint and its pending events as one phase boundary.
 
         Args:
@@ -638,8 +645,7 @@ class RunStore(Protocol):
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached updated record and 1-based sequence numbers parallel to
-            ``events``.
+            1-based sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -685,16 +691,13 @@ class RunStore(Protocol):
 
     async def mark_completed(
         self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
-    ) -> RunRecord:
+    ) -> None:
         """Persist a terminal completed status and checkpoint.
 
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            The detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -711,7 +714,7 @@ class RunStore(Protocol):
         *,
         events: Sequence[Event] = (),
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Persist a failed status, optional checkpoint, error, and events.
 
         Args:
@@ -722,7 +725,7 @@ class RunStore(Protocol):
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached failed record and 1-based sequence numbers for ``events``.
+            1-based sequence numbers for ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -861,104 +864,17 @@ def _json_safe(value: Any, *, strict: bool = False) -> Any:
     Persistence uses the permissive mode so an otherwise useful event is not
     lost because extension-owned metadata contains a ``Path`` or dataclass.
     Run-contract construction uses strict mode: an unstable ``repr`` must
-    never silently become part of a durability fingerprint.
+    never silently become part of a durability fingerprint. The walk runs in
+    the native extension (``linch-rust/crates/linch-python``).
     """
 
-    return _json_safe_inner(value, strict=strict, seen=frozenset(), depth=0)
-
-
-def _json_safe_inner(
-    value: Any,
-    *,
-    strict: bool,
-    seen: frozenset[int],
-    depth: int,
-) -> Any:
-    if value is None or isinstance(value, str | bool | int):
-        return value
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return value
-        return str(value)
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, Enum):
-        return _json_safe_inner(value.value, strict=strict, seen=seen, depth=depth)
-    if isinstance(value, datetime | date):
-        return value.isoformat()
-    if isinstance(value, Path | UUID):
-        return str(value)
-    if isinstance(value, bytes | bytearray | memoryview):
-        return {"$bytes_base64": base64.b64encode(bytes(value)).decode("ascii")}
-
-    is_recursive_value = (is_dataclass(value) and not isinstance(value, type)) or isinstance(
-        value, Mapping | set | frozenset | Sequence
-    )
-    if is_recursive_value:
-        if id(value) in seen:
-            if strict:
-                raise TypeError("run contract contains a recursive value")
-            return "<recursion>"
-        if depth >= _JSON_SAFE_MAX_DEPTH:
-            if strict:
-                raise TypeError(
-                    f"run contract exceeds maximum nesting depth {_JSON_SAFE_MAX_DEPTH}"
-                )
-            return "<max-depth>"
-        seen = seen | {id(value)}
-        depth += 1
-
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            item.name: _json_safe_inner(
-                getattr(value, item.name), strict=strict, seen=seen, depth=depth
-            )
-            for item in fields(value)
-        }
-    if isinstance(value, Mapping):
-        out: dict[str, Any] = {}
-        reserved_string_keys = {key for key in value if isinstance(key, str)}
-        for key, item in value.items():
-            if strict and not isinstance(key, str):
-                raise TypeError(f"run contract mapping key must be str, got {type(key).__name__}")
-            name = str(key)
-            if name in out or (not isinstance(key, str) and name in reserved_string_keys):
-                if strict:
-                    raise TypeError(
-                        f"run contract mapping keys collide after normalization: {name!r}"
-                    )
-                base = f"{name}~{type(key).__name__}"
-                name = base
-                discriminator = 2
-                while name in out or name in reserved_string_keys:
-                    name = f"{base}~{discriminator}"
-                    discriminator += 1
-            out[name] = _json_safe_inner(item, strict=strict, seen=seen, depth=depth)
-        return out
-    if isinstance(value, set | frozenset):
-        items = [_json_safe_inner(item, strict=strict, seen=seen, depth=depth) for item in value]
-        return sorted(items, key=canonical_json)
-    if isinstance(value, Sequence):
-        return [_json_safe_inner(item, strict=strict, seen=seen, depth=depth) for item in value]
-    if strict:
-        raise TypeError(
-            f"run contract value of type {type(value).__name__} "
-            "is not deterministically serializable"
-        )
-    return str(value)
+    return _native_json_safe(value, strict=strict, max_depth=_JSON_SAFE_MAX_DEPTH)
 
 
 def canonical_json(value: Any) -> str:
     """Serialize ``value`` deterministically for signatures and snapshots."""
 
-    safe = _json_safe(value, strict=True)
-    return json.dumps(
-        safe,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    return canonical_dumps(_json_safe(value, strict=True))
 
 
 _MODEL_INPUT_REQUEST_FIELDS = frozenset(
@@ -1140,13 +1056,7 @@ def create_model_input_snapshot(
     if not isinstance(snapshot_id, str) or not snapshot_id:
         raise ValueError("snapshot id must be a non-empty string")
     payload = _provider_request_payload(request)
-    request_json = json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    request_json = canonical_dumps(payload)
     snapshot = ModelInputSnapshot(
         id=snapshot_id,
         run_id=run_id,
@@ -2190,7 +2100,7 @@ class InMemoryRunStore:
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> RunRecord:
+    ) -> None:
         """Persist a checkpoint and update the run status.
 
         Args:
@@ -2198,9 +2108,6 @@ class InMemoryRunStore:
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            A detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2213,7 +2120,6 @@ class InMemoryRunStore:
         rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
         rec.updated_at = now_iso()
-        return _copy_record(rec)
 
     async def save_checkpoint_with_events(
         self,
@@ -2223,7 +2129,7 @@ class InMemoryRunStore:
         *,
         status: str = "running",
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Atomically publish a checkpoint and its pending event prefix.
 
         Args:
@@ -2234,7 +2140,7 @@ class InMemoryRunStore:
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached updated record and sequence numbers parallel to ``events``.
+            Sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2257,7 +2163,7 @@ class InMemoryRunStore:
             StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
             for seq, event in zip(seqs, event_copies, strict=True)
         )
-        return _copy_record(rec), seqs
+        return seqs
 
     async def append_event(
         self, run_id: str, event: Event, *, lease: RunLease | None = None
@@ -2443,16 +2349,13 @@ class InMemoryRunStore:
 
     async def mark_completed(
         self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
-    ) -> RunRecord:
+    ) -> None:
         """Persist a terminal completed status and checkpoint.
 
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
             lease: Explicit owner/epoch token; omit for an unleased mutation.
-
-        Returns:
-            A detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2461,7 +2364,7 @@ class InMemoryRunStore:
 
         self._check_lease(run_id, lease)
         checkpoint.phase = "completed"
-        return await self.save_checkpoint(
+        await self.save_checkpoint(
             run_id,
             checkpoint,
             status="completed",
@@ -2476,7 +2379,7 @@ class InMemoryRunStore:
         *,
         events: Sequence[Event] = (),
         lease: RunLease | None = None,
-    ) -> tuple[RunRecord, list[int]]:
+    ) -> list[int]:
         """Persist a failed status, optional checkpoint, error, and events.
 
         Args:
@@ -2487,7 +2390,7 @@ class InMemoryRunStore:
             lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
-            The detached failed record and sequence numbers parallel to ``events``.
+            Sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
@@ -2515,7 +2418,7 @@ class InMemoryRunStore:
             StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
             for seq, event in zip(seqs, event_copies, strict=True)
         )
-        return _copy_record(rec), seqs
+        return seqs
 
     async def close(self) -> None:
         """Close the in-memory store; no resources require cleanup."""

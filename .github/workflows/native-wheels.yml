@@ -1,0 +1,106 @@
+# Builds linch-native wheels and the sdist. Adapted from the template that
+# `maturin generate-ci github` (maturin 1.16) writes.
+#
+# Pull requests that touch the extension get the wheels as run artifacts. A
+# `linch-native-v<version>` tag also creates a GitHub release with every file
+# and, when the PYPI_API_TOKEN secret is set, publishes them to PyPI.
+name: Native wheels
+
+on:
+  pull_request:
+    paths:
+      - linch-rust/Cargo.toml
+      - linch-rust/Cargo.lock
+      - linch-rust/crates/linch-python/**
+      - .github/workflows/native-wheels.yml
+  push:
+    tags:
+      - linch-native-v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MANIFEST: linch-rust/crates/linch-python/Cargo.toml
+
+jobs:
+  wheels:
+    name: ${{ matrix.platform.os }} ${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: linux, runner: ubuntu-22.04, target: x86_64, manylinux: "2014" }
+          - { os: linux, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2014" }
+          - { os: macos, runner: macos-15-intel, target: x86_64 }
+          - { os: macos, runner: macos-latest, target: aarch64 }
+          - { os: windows, runner: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --locked --out dist -m ${{ env.MANIFEST }}
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: ${{ matrix.platform.manylinux }}
+      - name: Smoke test
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links dist linch-native
+          python -c "import _linch_native as n; assert n.deepcopy({'a': [1]}) == {'a': [1]}"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist -m ${{ env.MANIFEST }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-sdist
+          path: dist
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/linch-native-v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+    env:
+      UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
+          --notes "linch-native wheels and sdist."
+      - uses: astral-sh/setup-uv@v7
+        if: env.UV_PUBLISH_TOKEN != ''
+      - name: Publish to PyPI
+        if: env.UV_PUBLISH_TOKEN != ''
+        run: uv publish dist/*

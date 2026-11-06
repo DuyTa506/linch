@@ -128,19 +128,33 @@ async def _close_terminal_processes(session: Session) -> None:
 async def _complete_with_pending_events(
     session: Session, run_id: str, checkpoint: Any, *, lease: Any = None
 ) -> None:
-    """Write through a successful terminal and its pending result together."""
-    await _close_terminal_processes(session)
+    """Write through a successful terminal and its pending result together.
+
+    Run state held before the result commits first, so a crash at the terminal
+    leaves the state the write-through order left (the final assistant turn
+    and its usage durable) rather than rolling them back with the terminal.
+    """
     store = session.agent.run_store
     assert store is not None
     buf = session._event_journal
     if (
         buf is not None
         and (lease is None or _same_lease_identity(buf.lease, lease))
-        and buf._pending
+        and (buf._pending or buf._dirty is not None)
     ):
+        # The result was recorded last, just before this call. Hold it out of
+        # the buffer across cleanup's awaits, so an event or barrier from
+        # another task cannot commit it while the run is still running.
+        result, buf._pending = buf._pending[-1:], buf._pending[:-1]
+        try:
+            await _close_terminal_processes(session)
+            await buf.flush()
+        finally:
+            buf._pending.extend(result)
         checkpoint.phase = "completed"
         await buf.flush_with_checkpoint(checkpoint, status="completed")
         return
+    await _close_terminal_processes(session)
     if buf is not None and lease is not None and not _same_lease_identity(buf.lease, lease):
         method = store.mark_completed
         await durable_call(

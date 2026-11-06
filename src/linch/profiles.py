@@ -8,10 +8,12 @@ import json
 import math
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from copy import copy, deepcopy
+from copy import copy
 from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
+
+from _linch_native import deepcopy
 
 from .errors import ConfigError
 from .kernel import Disposable, Plugin

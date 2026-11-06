@@ -10,14 +10,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
-from copy import deepcopy
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args, get_type_hints
 from uuid import uuid4
 
-from ._json import walk_json
+from _linch_native import check_journal_json, deepcopy
+
 from ._telemetry import ChatCall, in_span
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
@@ -195,10 +196,14 @@ def intent_from_dict(raw: Mapping[str, Any]) -> ModelCallIntent:
     return ModelCallIntent(**{name: raw[name] for name in _INTENT_FIELDS})
 
 
-def intent_to_dict(intent: ModelCallIntent) -> dict[str, Any]:
+def _intent_raw(intent: ModelCallIntent) -> dict[str, Any]:
     if not isinstance(intent, ModelCallIntent):
         raise _invalid("intent must be ModelCallIntent")
-    raw = {"version": _VERSION, **{name: getattr(intent, name) for name in _INTENT_FIELDS}}
+    return {"version": _VERSION, **{name: getattr(intent, name) for name in _INTENT_FIELDS}}
+
+
+def intent_to_dict(intent: ModelCallIntent) -> dict[str, Any]:
+    raw = _intent_raw(intent)
     intent_from_dict(raw)
     return raw
 
@@ -244,33 +249,38 @@ def receipt_from_dict(raw: Mapping[str, Any]) -> ModelCallReceipt:
     return ModelCallReceipt(**values)
 
 
-def receipt_to_dict(receipt: ModelCallReceipt) -> dict[str, Any]:
+def _receipt_raw(receipt: ModelCallReceipt) -> dict[str, Any]:
     if not isinstance(receipt, ModelCallReceipt):
         raise _invalid("receipt must be ModelCallReceipt")
     raw = {"version": _VERSION, **{name: getattr(receipt, name) for name in _RECEIPT_FIELDS}}
     raw["usage"] = _usage_dict(receipt.usage) if receipt.usage is not None else None
+    return raw
+
+
+def receipt_to_dict(receipt: ModelCallReceipt) -> dict[str, Any]:
+    raw = _receipt_raw(receipt)
     receipt_from_dict(raw)
     return raw
+
+
+def _detached(receipt: ModelCallReceipt) -> ModelCallReceipt:
+    """Return a receipt that shares nothing mutable with the ledger's copy.
+
+    Receipts are frozen and already validated; only ``usage`` is mutable, and
+    ``replace`` re-runs ``__post_init__``, which copies it.
+    """
+    return receipt if receipt.usage is None else replace(receipt)
 
 
 def _copy_json_object(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise _invalid("journal record must be an object")
-    walk_json(raw, check_node=_check_journal_json_node, copy_containers=False)
+    # Bounded (64 levels), finite JSON with string keys and no cycles; the
+    # native walker reports the first violation in visit order.
+    error = check_journal_json(raw)
+    if error is not None:
+        raise _invalid(error)
     return deepcopy(raw)
-
-
-def _check_journal_json_node(value: Any, path: str, active: set[int], depth: int) -> int | None:
-    if value is None or type(value) in (str, bool, int):
-        return None
-    if type(value) is float and math.isfinite(value):
-        return None
-    if not isinstance(value, list | dict) or depth > 64 or id(value) in active:
-        raise _invalid("journal record must be bounded, finite JSON without cycles")
-    # Check every key before visiting children, preserving journal error order.
-    if isinstance(value, dict) and any(not isinstance(key, str) for key in value):
-        raise _invalid("journal object keys must be strings")
-    return depth + 1
 
 
 def _copy_model_call_record(
@@ -347,9 +357,12 @@ _COMPACTION_SOURCE_FIELDS = (
 ) | {"run_id", "logical_call_id", "delivery_attempt_id", "turn_index", "request_fingerprint"}
 
 
+_SHA256_HEX = re.compile("[0-9a-f]{64}")
+
+
 def _digest(value: Any, name: str) -> str:
     result = _string(value, name)
-    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+    if _SHA256_HEX.fullmatch(result) is None:
         raise _invalid(f"{name} must be a SHA-256 digest")
     return result
 
@@ -640,7 +653,7 @@ class _ModelCallLedger:
                 raise _ModelCallError("budget_exceeded", "model-call budget is exhausted")
 
     def _intent(self, intent: ModelCallIntent) -> ModelCallIntent:
-        owned = intent_from_dict(intent_to_dict(intent))
+        owned = intent_from_dict(_intent_raw(intent))
         if owned.run_id != self.run_id:
             raise _ModelCallError("identity_mismatch", "intent belongs to another run")
         return owned
@@ -655,7 +668,9 @@ class _ModelCallLedger:
     async def _write(self, kind: str, record: dict[str, Any]) -> None:
         from .events import ModelCallEvent
 
-        event = ModelCallEvent(
+        # The ledger built and validated ``record`` itself and never retains it,
+        # so the public constructor's copy-and-validate pass is skipped.
+        event = ModelCallEvent._trusted(
             self.run_id, cast(Any, kind), record, budget_owner_id=self._budget_owner_id
         )
         if self._persist is not None:
@@ -680,7 +695,7 @@ class _ModelCallLedger:
             if delivery_id in self._intents or delivery_id in self._receipts:
                 raise _ModelCallError("conflicting_delivery", "delivery intent already exists")
             self._bind_budget()
-            await self._write("intent", intent_to_dict(owned))
+            await self._write("intent", _intent_raw(owned))
             self._intents[delivery_id] = owned
 
     async def mark_dispatch_started(self, intent: ModelCallIntent) -> None:
@@ -690,17 +705,17 @@ class _ModelCallLedger:
             delivery_id = owned.delivery_attempt_id
             if delivery_id in self._started or delivery_id in self._abandoned:
                 raise _ModelCallError("invalid_state", "delivery dispatch already started or ended")
-            await self._write("dispatch_started", intent_to_dict(owned))
+            await self._write("dispatch_started", _intent_raw(owned))
             self._started.add(delivery_id)
 
     async def settle(self, receipt: ModelCallReceipt) -> bool:
         async with self._lock:
             self._healthy()
-            owned = receipt_from_dict(receipt_to_dict(receipt))
+            owned = receipt_from_dict(_receipt_raw(receipt))
             _require_dispatched_receipt(owned)
             delivery_id = owned.delivery_attempt_id
             if delivery_id in self._receipts:
-                if receipt_to_dict(self._receipts[delivery_id]) != receipt_to_dict(owned):
+                if self._receipts[delivery_id] != owned:
                     raise _ModelCallError(
                         "conflicting_delivery", "duplicate receipt payload differs"
                     )
@@ -725,7 +740,7 @@ class _ModelCallLedger:
                     self._budget._register_unresolved_delivery(delivery_id)
             self._total_usage, self._total_cost_usd = next_usage, next_cost
             self._has_unknown_usage |= owned.usage_status == "unknown"
-            await self._write("receipt", receipt_to_dict(owned))
+            await self._write("receipt", _receipt_raw(owned))
             self._receipts[delivery_id] = owned
             self._started.remove(delivery_id)
             return True
@@ -754,7 +769,7 @@ class _ModelCallLedger:
             )
             record = {
                 "version": _VERSION,
-                "intent": intent_to_dict(owned),
+                "intent": _intent_raw(owned),
                 "reason": reason,
                 "usage_status": status,
             }
@@ -771,7 +786,7 @@ class _ModelCallLedger:
             self._abandoned.add(delivery_id)
 
     def receipts(self) -> list[ModelCallReceipt]:
-        return [receipt_from_dict(receipt_to_dict(value)) for value in self._receipts.values()]
+        return [_detached(value) for value in self._receipts.values()]
 
     def projections(self, kind: str) -> list[dict[str, Any]]:
         return [
@@ -782,7 +797,7 @@ class _ModelCallLedger:
 
     def receipt_for(self, delivery_id: str) -> ModelCallReceipt | None:
         value = self._receipts.get(delivery_id)
-        return receipt_from_dict(receipt_to_dict(value)) if value is not None else None
+        return _detached(value) if value is not None else None
 
     def intent_for(self, delivery_id: str) -> ModelCallIntent | None:
         value = self._intents.get(delivery_id)
@@ -806,7 +821,8 @@ class _ModelCallLedger:
             ):
                 raise _invalid("compaction source must be durable before dispatch starts")
             _check_projection_conflict(owned, self._projections)
-            await self._write("projection", owned)
+            # The ledger keeps ``owned``, so the event gets its own copy.
+            await self._write("projection", deepcopy(owned))
             self._projections[key] = owned
 
     def consume_auxiliary_receipts(self) -> list[ModelCallReceipt]:
@@ -823,7 +839,7 @@ class _ModelCallLedger:
             if receipt.kind != "compaction" or delivery_id in self._consumed_auxiliary_receipt_ids:
                 continue
             self._consumed_auxiliary_receipt_ids.add(delivery_id)
-            result.append(receipt_from_dict(receipt_to_dict(receipt)))
+            result.append(_detached(receipt))
         return result
 
     async def restore(

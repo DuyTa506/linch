@@ -162,6 +162,7 @@ async def test_deepseek_background_worker_notification():
         features=FeatureFlags(skills=False, subagents=True, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
+        enable_background_subagents=True,
     )
     session = await agent.session()
 
@@ -239,6 +240,8 @@ async def test_deepseek_fork_continue_worker():
         features=FeatureFlags(skills=False, subagents=True, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
+        enable_worker_tools=True,
+        retain_subagents=True,
     )
     session = await agent.session()
 

@@ -14,6 +14,8 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from tests.support.agents import make_agent
 from tests.support.tools import StubTool, tool_registry
 
@@ -117,25 +119,31 @@ async def test_idempotency_key_is_run_scoped_and_call_scoped() -> None:
 
 
 async def test_idempotency_key_stable_across_resume() -> None:
-    """Crash after the ``tool_executing`` checkpoint but before the start event is
-    durable, then resume: the re-executed tool must see a key built from the
-    *original* run's identity (run_id + tool_use_id), not a fresh run."""
+    """Crash at the tool-start commit, before the tool runs, then resume: the
+    re-executed tool must see a key built from the *original* run's identity
+    (run_id + tool_use_id), not a fresh run."""
     from linch.config import FeatureFlags
     from linch.run_store import InMemoryRunStore
     from tests.support.stores import memory_session_store
 
-    class DropStartStore(InMemoryRunStore):
+    class Crash(BaseException):
+        pass
+
+    class CrashStartCommitStore(InMemoryRunStore):
         def __init__(self) -> None:
             super().__init__()
-            self.drop_starts = True
+            self.crash_start = True
 
-        async def append_event(self, run_id: str, event: Any) -> int:
-            if self.drop_starts and getattr(event, "type", None) == "tool_call_start":
-                return 0
-            return await super().append_event(run_id, event)
+        async def save_checkpoint_with_events(
+            self, run_id: str, checkpoint: Any, events: list[Any], **kwargs: Any
+        ) -> Any:
+            if self.crash_start and any(e.type == "tool_call_start" for e in events):
+                self.crash_start = False
+                raise Crash("tool-start commit")
+            return await super().save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
 
     session_store = memory_session_store()
-    run_store = DropStartStore()
+    run_store = CrashStartCommitStore()
     seen: list[str] = []
 
     def build_agent() -> Any:
@@ -149,20 +157,18 @@ async def test_idempotency_key_stable_across_resume() -> None:
             result_offload=None,
         )
 
-    # Run until the tool starts, then "crash" (stop consuming) before it executes.
+    # The process dies at the tool-start commit, before the tool executes.
     agent = build_agent()
     session = await agent.session(id="s1")
     run_id = ""
-    async for event in session.run("go"):
-        if event.type == "system":
-            run_id = event.run_id
-        if event.type == "tool_call_start":
-            break
+    with pytest.raises(Crash):
+        async for event in session.run("go"):
+            if event.type == "system":
+                run_id = event.run_id
     assert run_id
-    assert seen == []  # stopped before the tool ran
+    assert seen == []  # died before the tool ran
 
     # Restart the process: a fresh agent resumes the same run_id.
-    run_store.drop_starts = False
     resumed = await build_agent().session(id="s1")
     resume_events = [e async for e in resumed.resume(run_id)]
 

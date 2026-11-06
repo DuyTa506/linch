@@ -392,7 +392,8 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             turn_index=1,
             total_usage=Usage(),
         )
-        assert (await first.save_checkpoint(run_id, checkpoint, lease=peer_lease)).checkpoint
+        assert await first.save_checkpoint(run_id, checkpoint, lease=peer_lease) is None
+        assert (await first.load_run(run_id)).checkpoint.prompt == "current owner"
 
         renewed = await peer.renew(peer_lease)
         checkpoint = RunCheckpoint(
@@ -401,7 +402,9 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             turn_index=1,
             total_usage=Usage(),
         )
-        saved = await peer.save_checkpoint(run_id, checkpoint, lease=renewed)
+        await peer.save_checkpoint(run_id, checkpoint, lease=renewed)
+        saved = await peer.load_run(run_id)
+        assert saved is not None
         assert saved.checkpoint is not None
         assert saved.checkpoint.prompt == "live owner"
         await peer.release(renewed)
@@ -499,7 +502,7 @@ async def test_atomic_checkpoint_events_share_one_statement_and_visibility(pg_ds
         inspected = _InspectPool(real_pool, before_update=before_update)
         store._pool = inspected
         checkpoint = _atomic_checkpoint("after")
-        record, seqs = await store.save_checkpoint_with_events(
+        seqs = await store.save_checkpoint_with_events(
             run_id,
             checkpoint,
             [_atomic_event("one"), _atomic_event("two")],
@@ -508,8 +511,9 @@ async def test_atomic_checkpoint_events_share_one_statement_and_visibility(pg_ds
         assert inspected.transactions == 0
         assert observations == [("before", 1)]
         assert seqs == [2, 3]
-        assert record.status == "completed"
-        assert (await peer.load_run(run_id)).checkpoint.prompt == "after"
+        stored = await peer.load_run(run_id)
+        assert stored.status == "completed"
+        assert stored.checkpoint.prompt == "after"
         assert [row.seq for row in await peer.load_events(run_id)] == [1, 2, 3]
         assert await peer.append_event(run_id, _atomic_event("next")) == 4
     finally:

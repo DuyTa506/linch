@@ -4,9 +4,10 @@ resume recovery, and message-identity checks used on resume."""
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from html import escape
 from typing import Any
+
+from _linch_native import deepcopy
 
 from .._tracing import trace_id_for
 from .._wire import WIRE_VERSION, require_wire_version
@@ -24,6 +25,7 @@ from ..model_calls import _context_fingerprint, _model_call_fingerprint
 from ..run_store import (
     RunCheckpoint,
     RunLease,
+    _copy_checkpoint,
     _lease_kwargs,
     _require_tool_recovery_cursor,
     durable_call,
@@ -194,12 +196,15 @@ def _primary_control_message(
 
 
 class RunEventBuffer:
-    """Per-run event buffer.
+    """Per-run group-commit buffer for events and the running checkpoint.
 
-    Observational events are appended and flushed in batches (fewer store round
-    trips); recovery-critical tool start/end events are flushed immediately by
-    the runner so they stay durable at the yield boundary. Per-run (attached to
-    the session for one run), never process-global.
+    Events and running-status checkpoints stay in memory until a barrier
+    commits them in one store write: :meth:`flush` before provider dispatch,
+    each tool start and end, and terminal writes; :meth:`flush_checkpoint`
+    before session-store writes. A held checkpoint is a snapshot taken when it
+    was saved, together with the events pending then, so every committed state
+    is one the write-through order also produced. Per-run (attached to the
+    session for one run), never process-global.
     """
 
     __slots__ = (
@@ -210,6 +215,9 @@ class RunEventBuffer:
         "_last_seq",
         "session",
         "_atomic_write_failed",
+        "_dirty",
+        "_dirty_covers",
+        "_commit_lock",
     )
 
     def __init__(
@@ -237,6 +245,12 @@ class RunEventBuffer:
         self._pending: list[Event] = []
         self._last_seq = max(0, initial_seq)
         self._atomic_write_failed = False
+        # Held checkpoint snapshot and how many pending events it covers.
+        self._dirty: RunCheckpoint | None = None
+        self._dirty_covers = 0
+        # A session-store barrier can start in another task (a durable notify
+        # from a background tool), so commits run one at a time, in order.
+        self._commit_lock = asyncio.Lock()
 
     @property
     def last_seq(self) -> int:
@@ -247,6 +261,11 @@ class RunEventBuffer:
         if self.store is not None:
             self._pending.append(event)
 
+    def defer_checkpoint(self, checkpoint: RunCheckpoint) -> None:
+        """Hold a snapshot of a running-status checkpoint until the next barrier."""
+        self._dirty = _copy_checkpoint(checkpoint)
+        self._dirty_covers = len(self._pending)
+
     async def flush_with_checkpoint(
         self,
         checkpoint: RunCheckpoint,
@@ -255,9 +274,24 @@ class RunEventBuffer:
         error: dict[str, object] | None = None,
     ) -> None:
         """Commit a pending prefix with its checkpoint."""
-        if not self._pending and status == "running":
+        async with self._commit_lock:
+            await self._commit(checkpoint, status=status, error=error)
+
+    async def _commit(
+        self,
+        checkpoint: RunCheckpoint,
+        *,
+        count: int | None = None,
+        status: str = "running",
+        error: dict[str, object] | None = None,
+    ) -> None:
+        if not self._pending and status == "running" and self._dirty is None:
             return
-        pending, self._pending = self._pending, []
+        held = self._dirty
+        # Take the first ``count`` events in place: anything appended while the
+        # write is in flight lands after the events still pending.
+        split = len(self._pending) if count is None else count
+        pending, self._pending = self._pending[:split], self._pending[split:]
         try:
             operation = "mark_failed" if status == "failed" else "save_checkpoint_with_events"
             if status == "failed":
@@ -278,17 +312,43 @@ class RunEventBuffer:
                     status=status,
                     **_lease_kwargs(method, self.lease),
                 )
-            _, seqs = await durable_call(self.session, f"run.{operation}", write)
+            seqs = await durable_call(self.session, f"run.{operation}", write)
         except BaseException:
             self._pending = pending + self._pending
             self._atomic_write_failed = True
             raise
         self._atomic_write_failed = False
+        # The committed checkpoint supersedes the snapshot held when the write
+        # began; one deferred while the write was in flight is newer and stays.
+        if self._dirty is held:
+            self._dirty = None
         if seqs:
             self._last_seq = max(self._last_seq, *seqs)
 
+    async def flush_checkpoint(self) -> None:
+        """Session-write barrier: commit the held checkpoint and the events it covers.
+
+        Events recorded after the held save stay pending, as they did when
+        every checkpoint was written through.
+        """
+        async with self._commit_lock:
+            checkpoint = self._dirty
+            if self.store is None or self._atomic_write_failed or checkpoint is None:
+                return
+            await self._commit(checkpoint, count=self._dirty_covers)
+
     async def flush(self) -> int:
-        if self.store is None or not self._pending or self._atomic_write_failed:
+        """Barrier: commit pending events and any held checkpoint in one write."""
+        async with self._commit_lock:
+            return await self._flush()
+
+    async def _flush(self) -> int:
+        if self.store is None or self._atomic_write_failed:
+            return self._last_seq
+        if self._dirty is not None:
+            await self._commit(self._dirty)
+            return self._last_seq
+        if not self._pending:
             return self._last_seq
         pending = self._pending
         self._pending = []

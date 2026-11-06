@@ -9,6 +9,7 @@ Rules, conventions, and workflow for contributors. Read this before opening a PR
 ```bash
 git clone https://github.com/DuyTa506/linch.git
 cd linch
+pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'
 ```
 
@@ -25,6 +26,26 @@ Auto-fix most style issues:
 ```bash
 ruff check --fix . && ruff format .
 ```
+
+---
+
+## The native extension (`linch-native`)
+
+`linch-rust/crates/linch-python` is a PyO3 extension, imported as
+`_linch_native` and published as `linch-native`. It holds private helpers
+that `linch` imports. After editing it, reinstall it and run its parity tests:
+
+```bash
+pip install ./linch-rust/crates/linch-python
+pytest tests/_native
+```
+
+`.github/workflows/native-wheels.yml` builds wheels for Linux, macOS and
+Windows plus the sdist; a pull request that touches the extension gets them
+as run artifacts. To release, bump `version` in `linch-rust/Cargo.toml` and
+push a `linch-native-v<version>` tag. The workflow attaches the files to a
+GitHub release and publishes them to PyPI when the `PYPI_API_TOKEN` secret is
+set. Publish `linch-native` before any `linch` release that needs it.
 
 ---
 

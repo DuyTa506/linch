@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "linch-native"
+description = "Native internals for the linch Python package"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "CallMeZuy", email = "duyfaker01@gmail.com" }]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/DuyTa506/linch"
+Repository = "https://github.com/DuyTa506/linch"
+
+[tool.maturin]
+module-name = "_linch_native"
+features = ["pyo3/extension-module"]

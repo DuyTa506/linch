@@ -18,6 +18,7 @@ from functools import partial
 from typing import Any, cast
 
 from .. import lifecycle
+from .._json import dumps
 from .._telemetry import end_step, start_step
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
@@ -168,7 +169,7 @@ def checkpoint_extension_state(
         if not state:
             continue
         try:
-            serialized = json.dumps(state, allow_nan=False)
+            serialized = dumps(state)
             restored = json.loads(serialized)
         except (TypeError, ValueError) as exc:
             raise ConfigError(
@@ -845,6 +846,12 @@ class RunRuntime:
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
         await _persist_event(self.session, self.run_id, event, lease=self.lease)
+        if event.record_kind not in ("dispatch_started", "receipt", "projection"):
+            # Intent and abandonment records ride the next barrier. The dispatch
+            # marker is durable before the call; a paid receipt and its accepted
+            # projection are durable as soon as they exist, so a crash never
+            # loses spend or re-pays for a response the caller already saw.
+            return
         buf = self.event_buffer
         if self.checkpoint.phase == "started" and buf is not None:
             # Preserve startup progress without snapshotting a partially run hook.
@@ -1151,8 +1158,6 @@ class RunRuntime:
             and _same_lease_identity(buf.lease, self.lease)
         )
         has_pending_events = bool(buf._pending) if buffer_matches and buf is not None else False
-        if buf is not None and buffer_matches and not has_pending_events:
-            await buf.flush()
         completed_snapshot_id = (
             self.checkpoint.model_input_snapshot_id
             if self.exact_model_input
@@ -1201,7 +1206,7 @@ class RunRuntime:
         self.checkpoint.extension_state["linch.reads"] = self.session.file_read_tracker.snapshot()
         if self.session._extensions:
             self.checkpoint.extension_state["linch.session"] = json.loads(
-                json.dumps(self.session._extensions, allow_nan=False)
+                dumps(self.session._extensions)
             )
         else:
             self.checkpoint.extension_state.pop("linch.session", None)
@@ -1243,7 +1248,22 @@ class RunRuntime:
                 )
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
-        if has_pending_events:
+        if (
+            buffer_matches
+            and status == "running"
+            and phase != "started"
+            and not self.exact_model_input
+            and not self.checkpoint.pending_alignment
+        ):
+            # Group commit: the next barrier (provider dispatch, tool start,
+            # session write, terminal) writes this state with pending events.
+            # Write through instead: startup preparation, which records startup
+            # hook results before they are yielded; exact-input runs, which
+            # prune snapshots after each save and must keep the durable
+            # checkpoint pointing at a live one; and queued host alignment.
+            assert buf is not None
+            buf.defer_checkpoint(self.checkpoint)
+        elif has_pending_events or (buffer_matches and buf is not None and buf._dirty is not None):
             assert buf is not None
             await buf.flush_with_checkpoint(self.checkpoint, status=status)
         else:

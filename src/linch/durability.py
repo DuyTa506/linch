@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
+from _linch_native import canonical_dumps as _native_canonical_dumps
+
 from linch._wire import WIRE_VERSION
 from linch.errors import ConfigError
 from linch.types import Message, message_from_dict, message_to_dict
@@ -52,6 +54,9 @@ def _strict_json(value: object, *, label: str) -> str:
         finally:
             seen.remove(identity)
 
+    encoded = _native_canonical_dumps(value, max_depth=_STRICT_JSON_MAX_DEPTH)
+    if encoded is not None:
+        return encoded
     validate(value, set())
     try:
         return json.dumps(

@@ -2,7 +2,9 @@
 
 Read this page when upgrading a Linch 2.x application to Linch 3.0.
 
-Linch 3.0 is a headless agent kernel. Python 3.11+ is required. There are no
+Linch 3.0 is a headless agent kernel. Python 3.11+ is required, and so is
+`linch-native`, a compiled extension that `pip install linch` pulls in;
+building it from source needs a Rust toolchain. There are no
 compatibility shims or readers for pre-3.0 persisted data. Start new runs and
 use fresh Postgres schemas; built-in stores reject incompatible existing
 schemas rather than upgrading them.
@@ -140,10 +142,21 @@ Custom store implementations must follow these changed contracts:
   checkpoint with creation or adoption. An existing ID is adopted only for a
   same-session `pending` run, with metadata merging and contract checking;
   other existing IDs raise `ValueError`.
-- `mark_failed(..., events=())` returns `(run_record, event_seqs)` so a failed
-  status and pending terminal events commit together.
+- `mark_failed(..., events=())` commits a failed status and pending terminal
+  events together and returns only the event seqs.
+- The checkpoint writes no longer return a `RunRecord`: `save_checkpoint` and
+  `mark_completed` return `None`, `save_checkpoint_with_events` and
+  `mark_failed` return the event seqs. Use `load_run` to read stored state.
 - `RunStore.save_checkpoint_with_events(...)` atomically commits a checkpoint
   and its pending events; this is required when a phase has pending events.
+- Run state is group-committed at barriers instead of written through per
+  phase: provider dispatch, paid receipts and projections, each tool start and
+  end, session-store writes, and terminals. A tool turn makes 7 store writes
+  instead of 14. Intermediate checkpoint phases (`assistant_appended`,
+  `tool_batch_pending`, `tool_results_appended`, `turn_complete`) usually reach
+  the store only inside the next barrier's write, so a crash between barriers
+  resumes from the last barrier. A crash before a tool-start commit asks the
+  permission callback again.
 - `ModelInputSnapshotStore.delete` requires `run_id` for fenced cleanup.
 - Postgres schemas require durable event/message sequence counters. Lease
   capabilities fence writes with owner/epoch; workers drive renewal. Import

@@ -38,14 +38,21 @@ class _FaultStore:
     async def save_checkpoint_with_events(
         self, run_id: str, checkpoint: Any, events: list[Any], **kw: Any
     ) -> Any:
+        # One atomic group commit: a crash at any part of it writes none of it.
+        for event in events:
+            self._check(f"event:{self._kind(event)}")
         self._check(f"checkpoint:{checkpoint.phase}")
         return await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kw)
 
-    async def append_event(self, run_id: str, event: Any) -> int:
+    @staticmethod
+    def _kind(event: Any) -> str:
         kind = getattr(event, "record_kind", event.type)
         if kind == "projection" and event.record.get("projection_kind") == "compaction_source":
             kind = "compaction_source"
-        self._check(f"event:{kind}")
+        return kind
+
+    async def append_event(self, run_id: str, event: Any) -> int:
+        self._check(f"event:{self._kind(event)}")
         return await self.store.append_event(run_id, event)
 
     async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
@@ -664,14 +671,10 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         assert len(provider.calls) == 1
         assert events[-1].total_usage == Usage(22, 4)
         complete = await runs.load_run(run_id)
-        # A combined checkpoint write rolls back its pending event prefix when
-        # the checkpoint boundary crashes; the next run then emits that
-        # projection once. A separately consumed marker remains suppressed.
-        expected_compaction_events = 0 if consumed else 1
-        assert (
-            sum(event.type == "usage" and event.source == "compaction" for event in events)
-            == expected_compaction_events
-        )
+        # The paid compaction's usage is durable exactly once across the crash:
+        # committed before it, or emitted once by the resumed run.
+        durable = [row.event for row in await runs.load_events(run_id)]
+        assert sum(event.type == "usage" and event.source == "compaction" for event in durable) == 1
         assert complete.checkpoint.extension_state["host.extension"] == {"owner": "host"}
         assert complete.checkpoint.extension_state["host.unrelated"] == {
             "version": 1,
