@@ -113,7 +113,8 @@ pub(super) async fn new_run(
 
 /// Claim an existing run, check it may continue, reconcile its durable
 /// state, and go on from there. `answers` is set for an approve, which is
-/// accepted only on a run awaiting approval.
+/// accepted only on a run awaiting approval. With a token that is already
+/// cancelled, nothing is claimed or written and the stream ends empty.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
@@ -121,6 +122,9 @@ pub(super) async fn continue_run(
     options: RunOptions,
     outbox: Outbox,
 ) -> Result<(), RunError> {
+    if options.cancel.is_cancelled() {
+        return Ok(());
+    }
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
     // Check before claiming, so a mistaken call does not fence a live owner;
     // check again after, against the state the claim fixed.

@@ -55,7 +55,9 @@ pub struct RunOptions {
     pub principal: Option<Principal>,
     /// Lease owner name written with the claim, for diagnostics.
     pub owner: String,
-    /// Aborts the run: it ends with `Result{subtype: aborted}`.
+    /// Aborts the run: it ends with `Result{subtype: aborted}`. A resume or
+    /// approve given a token that is already cancelled does nothing: it
+    /// claims and writes nothing, and its stream ends with no item.
     pub cancel: CancellationToken,
 }
 

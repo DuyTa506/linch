@@ -64,7 +64,9 @@ mod write;
 /// Durable kinds arrive only after the write that made them durable; deltas
 /// and tool progress arrive at once and carry the last durable seq. The
 /// stream ends after the `Result` or `Suspended` envelope. When the run
-/// cannot continue durably, the last item is `Err(RunError)`.
+/// cannot continue durably, the last item is `Err(RunError)`. A resume or
+/// approve whose cancel token is already cancelled ends with no item at
+/// all: it leaves the run as it was.
 ///
 /// Dropping the stream drops the run where it stands, like a crash: the run
 /// keeps its last durable state and [`crate::agent::Agent::resume`] continues

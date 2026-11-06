@@ -126,10 +126,11 @@ async fn a_cancel_interrupts_the_hook_a_run_waits_on() {
 }
 
 /// Approve with an answer for one of two calls, or resume, with a token
-/// that is already cancelled, with or without a tool hook: the run aborts
-/// instead of suspending again, and the hooks are not asked again.
+/// that is already cancelled, with or without a tool hook (R1-core 7,
+/// R2-core 3): the stream ends empty, nothing is claimed or written, the
+/// run stays suspended, and the hooks are not asked again.
 #[tokio::test]
-async fn approve_or_resume_with_a_cancelled_token_aborts_before_planning() {
+async fn approve_or_resume_with_a_cancelled_token_touches_nothing() {
     for (approving, counted) in [(true, true), (false, true), (true, false), (false, false)] {
         let calls = Arc::new(AtomicU32::new(0));
         let hooks = Hooks::default();
@@ -146,6 +147,8 @@ async fn approve_or_resume_with_a_cancelled_token_aborts_before_planning() {
         finish(stream).await;
         let planned = if counted { 2 } else { 0 };
         assert_eq!(calls.load(Ordering::SeqCst), planned, "both calls planned");
+        let before = stores.runs.load(NS, &run_id).await.unwrap();
+        let writes = stores.log.lock().unwrap().len();
         let options = RunOptions::new("s1");
         options.cancel.cancel();
         let stream = if approving {
@@ -155,13 +158,45 @@ async fn approve_or_resume_with_a_cancelled_token_aborts_before_planning() {
             agent.resume(run_id.clone(), options)
         };
         let envelopes = finish(stream).await;
-        assert_eq!(
-            subtype(&envelopes),
-            ResultSubtype::Aborted,
-            "approve {approving}, hooked {counted}"
-        );
+        let case = format!("approve {approving}, hooked {counted}");
+        assert!(envelopes.is_empty(), "{case}: {envelopes:?}");
         assert_eq!(calls.load(Ordering::SeqCst), planned, "no hook asked again");
+        assert_eq!(stores.log.lock().unwrap().len(), writes, "{case}: no write");
         let record = stores.runs.load(NS, &run_id).await.unwrap();
-        assert_eq!(record.status, RunStatus::Aborted);
+        assert_eq!(record.status, RunStatus::AwaitingApproval, "{case}");
+        assert_eq!(record.epoch, before.epoch, "{case}: no claim");
     }
+}
+
+/// A resume with a cancelled token of a run whose prompt is not in the
+/// session yet writes nothing either: not the prompt, not an abort.
+#[tokio::test]
+async fn a_cancelled_resume_of_a_started_run_appends_no_prompt() {
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(
+        vec![text_turn("done")],
+        Arc::new(Hooks::default()),
+        stores.clone(),
+    );
+    // Drop the stream after its first envelope: created, prompt not appended.
+    let mut stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let first = futures::StreamExt::next(&mut stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(first.event, Event::Init(_)));
+    drop(stream);
+    let writes = stores.log.lock().unwrap().len();
+    let options = RunOptions::new("s1");
+    options.cancel.cancel();
+    let envelopes = finish(agent.resume(run_id.clone(), options)).await;
+    assert!(envelopes.is_empty());
+    assert_eq!(stores.log.lock().unwrap().len(), writes, "no write");
+    assert!(messages(&*stores, "s1").await.is_empty(), "no prompt");
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Running);
+
+    let envelopes = finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
+    assert_eq!(subtype(&envelopes), ResultSubtype::Success);
 }
