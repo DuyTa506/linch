@@ -1,10 +1,10 @@
-//! Two workers never run one job at once, and a queue limit holds across
-//! the fleet.
+//! Two workers never run one job at once, and a queue's limit, stored with
+//! the queue, holds across the fleet.
 
 use std::time::Duration;
 
 use linch_core::{RunStatus, SessionId, ToolScope};
-use linch_worker::{QueueLimit, enqueue_run};
+use linch_worker::{enqueue_run, set_queue_limit};
 
 use crate::common::*;
 
@@ -83,12 +83,11 @@ async fn a_queue_limit_holds_across_workers() {
             .await
             .unwrap();
     }
+    // The limit is the queue's: neither worker is configured with it.
+    set_queue_limit(&db.pool, "narrow", 1).await.unwrap();
     let narrow = |owner: &str| {
         let mut config = config(owner);
-        config.queues = vec![QueueLimit {
-            name: "narrow".into(),
-            limit: 1,
-        }];
+        config.queues = vec!["narrow".into()];
         config
     };
     let workers = [

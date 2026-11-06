@@ -9,7 +9,7 @@ use linch_core::{RunId, SessionId};
 use linch_postgres::PgPool;
 use tokio::time::Instant;
 
-use crate::error::WorkerError;
+use crate::error::{WorkerError, non_blank};
 use crate::job::{Approvals, JobId};
 
 /// Key space of the per-queue advisory locks that serialize dequeues on a
@@ -55,20 +55,54 @@ fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// Set how many jobs of `queue` may be held at once across every worker.
+///
+/// The limit is stored with the queue, so every worker that serves it
+/// enforces it, and a change applies from each worker's next dequeue. Jobs
+/// already held when the limit is lowered keep running.
+///
+/// Args:
+///     pool: Pool for the queue's database.
+///     queue: Queue name.
+///     limit: Most jobs held at once; 0 means no limit.
+///
+/// Raises:
+///     WorkerError: If the name is blank, the limit does not fit an
+///         `INTEGER`, or the write fails.
+pub async fn set_queue_limit(pool: &PgPool, queue: &str, limit: u32) -> Result<(), WorkerError> {
+    non_blank(queue, "the queue")?;
+    let limit = i32::try_from(limit)
+        .map_err(|_| WorkerError::Invalid(format!("queue limit {limit} is too large")))?;
+    sqlx::query(
+        "INSERT INTO linch_worker_queues (name, max_held) VALUES ($1, $2) \
+         ON CONFLICT (name) DO UPDATE SET max_held = EXCLUDED.max_held",
+    )
+    .bind(queue)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Take the oldest visible job of `queue` in one of `namespaces`, hiding it
-/// for `timeout`. With `limit > 0`, take none while `limit` jobs of the
-/// queue are held by live workers anywhere.
+/// for `timeout`. When the queue has a limit, take none while that many of
+/// its jobs are held by live workers anywhere.
 pub(crate) async fn dequeue(
     pool: &PgPool,
     queue: &str,
-    limit: u32,
     namespaces: &[String],
     owner: &str,
     timeout: Duration,
 ) -> Result<Option<JobLease>, WorkerError> {
     let since = Instant::now();
     let mut tx = crate::begin(pool).await?;
-    if limit > 0 {
+    let limit: Option<i32> = sqlx::query_scalar(
+        "SELECT max_held FROM linch_worker_queues WHERE name = $1 AND max_held > 0",
+    )
+    .bind(queue)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(limit) = limit {
         // Serialize the count-then-take of this queue across the fleet.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{QUEUE_LOCK}{queue}"))

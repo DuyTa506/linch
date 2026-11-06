@@ -10,7 +10,9 @@
 //!   woken by `LISTEN/NOTIFY` (with polling as the fallback). A dequeued job
 //!   is hidden for a visibility timeout that its worker's heartbeat extends,
 //!   so a crashed worker's job becomes visible again and another worker
-//!   takes it over. The run's lease epoch fences the old worker out.
+//!   takes it over. The run's lease epoch fences the old worker out. A
+//!   queue's concurrency limit ([`set_queue_limit`]) is stored with it and
+//!   counted across the fleet.
 //! - **Runs.** A worker starts a run with [`linch_core::Agent::run`] and
 //!   continues it with `resume` or `approve`. A run has at most one active
 //!   job, and a job whose run another owner claimed is dropped, so two
@@ -59,8 +61,9 @@ mod worker;
 
 pub use error::WorkerError;
 pub use job::{JobId, enqueue_approve, enqueue_resume, enqueue_run};
+pub use lease::set_queue_limit;
 pub use schedule::{Schedule, cancel_schedule, create_schedule, fire_due_schedules};
-pub use worker::{QueueLimit, Worker, WorkerConfig};
+pub use worker::{Worker, WorkerConfig};
 
 /// Table that records which worker migrations have been applied.
 ///
@@ -104,6 +107,11 @@ fn migrator() -> Migrator {
             3,
             "job failures",
             include_str!("../migrations/0003_job_failures.sql"),
+        ),
+        simple(
+            4,
+            "queue limits",
+            include_str!("../migrations/0004_queue_limits.sql"),
         ),
     ];
     Migrator {

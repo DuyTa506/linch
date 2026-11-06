@@ -21,34 +21,15 @@ use crate::schedule::fire_due_schedules;
 /// Pause after a failed `LISTEN` receive before trying again.
 const LISTEN_RETRY: Duration = Duration::from_secs(1);
 
-/// One queue a worker serves.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueueLimit {
-    /// Queue name.
-    pub name: String,
-    /// Most jobs of this queue held at once across every worker, counted in
-    /// the database; 0 means no limit. Give every worker the same value.
-    pub limit: u32,
-}
-
-impl QueueLimit {
-    /// A queue without a concurrency limit.
-    pub fn unlimited(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            limit: 0,
-        }
-    }
-}
-
 /// How a [`Worker`] takes and holds jobs.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     /// Owner name written with every run claim and job hold; unique per
     /// worker.
     pub owner: String,
-    /// Queues to serve, one job from each in turn.
-    pub queues: Vec<QueueLimit>,
+    /// Queues to serve, one job from each in turn. A queue's concurrency
+    /// limit is stored with the queue ([`crate::set_queue_limit`]).
+    pub queues: Vec<String>,
     /// Most jobs this worker runs at once.
     pub max_jobs: usize,
     /// How long a dequeued job stays hidden without a heartbeat. The
@@ -65,12 +46,12 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
-    /// Settings for `owner`: queue `default` without a limit, 32 jobs at
-    /// once, a 30 s visibility timeout, a 1 s poll and a 5 s retry delay.
+    /// Settings for `owner`: queue `default`, 32 jobs at once, a 30 s
+    /// visibility timeout, a 1 s poll and a 5 s retry delay.
     pub fn new(owner: impl Into<String>) -> Self {
         Self {
             owner: owner.into(),
-            queues: vec![QueueLimit::unlimited("default")],
+            queues: vec!["default".into()],
             max_jobs: 32,
             visibility_timeout: Duration::from_secs(30),
             poll_interval: Duration::from_secs(1),
@@ -84,7 +65,7 @@ impl WorkerConfig {
             return Err(WorkerError::Invalid("a worker needs a queue".into()));
         }
         for queue in &self.queues {
-            non_blank(&queue.name, "a queue name")?;
+            non_blank(queue, "a queue name")?;
         }
         if self.max_jobs == 0 {
             return Err(WorkerError::Invalid("max_jobs must be at least 1".into()));
@@ -186,7 +167,7 @@ async fn poll(
     if let Err(error) = fire_due_schedules(&shared.pool).await {
         tracing::warn!(error = chain(&error), "firing schedules failed");
     }
-    let mut queues: Vec<&QueueLimit> = config.queues.iter().collect();
+    let mut queues: Vec<&String> = config.queues.iter().collect();
     while !queues.is_empty() {
         let mut i = 0;
         while i < queues.len() {
@@ -196,8 +177,7 @@ async fn poll(
             let queue = queues[i];
             let taken = dequeue(
                 &shared.pool,
-                &queue.name,
-                queue.limit,
+                queue,
                 namespaces,
                 &config.owner,
                 config.visibility_timeout,
@@ -212,7 +192,7 @@ async fn poll(
                     queues.remove(i);
                 }
                 Err(error) => {
-                    tracing::warn!(queue = %queue.name, error = chain(&error), "dequeue failed");
+                    tracing::warn!(%queue, error = chain(&error), "dequeue failed");
                     return;
                 }
             }

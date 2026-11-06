@@ -18,7 +18,7 @@ use linch_core::{
     SessionStore, ToolResultPart,
 };
 use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
-use linch_worker::{QueueLimit, Worker, WorkerConfig, WorkerError};
+use linch_worker::{Worker, WorkerConfig, WorkerError};
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::task::JoinHandle;
@@ -191,7 +191,7 @@ where
 /// Fast settings for tests: 1 s visibility, 50 ms poll, 200 ms retry.
 pub fn config(owner: &str) -> WorkerConfig {
     let mut config = WorkerConfig::new(owner);
-    config.queues = vec![QueueLimit::unlimited("default")];
+    config.queues = vec!["default".into()];
     config.max_jobs = 4;
     config.visibility_timeout = TIMEOUT;
     config.poll_interval = Duration::from_millis(50);

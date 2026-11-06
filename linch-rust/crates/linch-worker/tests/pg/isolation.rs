@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use linch_core::{SessionId, ToolScope};
-use linch_worker::{QueueLimit, enqueue_run};
+use linch_worker::{enqueue_run, set_queue_limit};
 use sqlx::postgres::PgPoolOptions;
 
 use crate::common::*;
@@ -16,6 +16,7 @@ async fn a_queue_limit_holds_under_repeatable_read() {
     let Some(db) = TestDb::new("rr_limit").await else {
         return;
     };
+    set_queue_limit(&db.pool, "narrow", 1).await.unwrap();
     for session in ["s1", "s2"] {
         let session = SessionId::new(session);
         enqueue_run(&db.pool, "narrow", NS, &session, "go")
@@ -45,10 +46,7 @@ async fn a_queue_limit_holds_under_repeatable_read() {
         .await
         .unwrap();
     let mut narrow = config("w1");
-    narrow.queues = vec![QueueLimit {
-        name: "narrow".into(),
-        limit: 1,
-    }];
+    narrow.queues = vec!["narrow".into()];
     let probe = Probe::new("Lookup", ToolScope::Read, Hold::None);
     let worker = Running::spawn(&pool, narrow, agent(&pool, probe.clone()));
     let deadline = Instant::now() + Duration::from_secs(10);
