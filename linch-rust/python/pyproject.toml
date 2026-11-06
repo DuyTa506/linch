@@ -25,13 +25,15 @@ python-source = "src"
 module-name = "linch_rust"
 # The `linch-rust` console script (`linch_rust.cli:main`). maturin refuses
 # `[project.scripts]` next to a binary, so it ships as a wheel data script
-# whose `#!python` line the installer points at its interpreter.
+# whose `#!python` line the installer points at its interpreter (the sdist
+# carries it by the `data/**/*` include below).
 data = "data"
 # `src/linch_rust/_docs` links to linch-rust/docs, which maturin does not walk
 # into: the globs copy its files, as files, into the sdist and the wheel.
 include = [
     { path = "linch_rust/_docs/**/*", format = "sdist" },
     { path = "linch_rust/_docs/**/*", format = "wheel" },
+    { path = "data/**/*", format = "sdist" },
 ]
 
 [dependency-groups]
