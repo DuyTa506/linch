@@ -79,9 +79,26 @@ struct State {
 #[derive(Default)]
 struct Tables {
     /// Open agents by handle.
-    agents: HashMap<String, OpenedAgent>,
+    agents: HashMap<String, Opened>,
     /// Runs this server drives now.
     runs: HashMap<RunId, Driven>,
+}
+
+/// An agent this connection opened.
+struct Opened {
+    agent: OpenedAgent,
+    /// Its place among the tenant's open agents, freed once the agent is
+    /// closed (its MCP servers gone), not when it leaves the table.
+    place: Option<OwnedSemaphorePermit>,
+}
+
+impl Opened {
+    /// Disconnect the agent's MCP servers and wait for them, then free
+    /// its place.
+    async fn close(self) {
+        self.agent.close().await;
+        drop(self.place);
+    }
 }
 
 /// A run this server drives.
@@ -134,7 +151,7 @@ impl Server {
         self.0.runs.close();
         self.0.runs.wait().await;
         self.0.peer.close();
-        let agents: Vec<OpenedAgent> = (lock(&self.0.tables).agents.drain())
+        let agents: Vec<Opened> = (lock(&self.0.tables).agents.drain())
             .map(|(_, agent)| agent)
             .collect();
         for agent in agents {

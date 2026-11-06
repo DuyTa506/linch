@@ -109,6 +109,7 @@ token names exactly one tenant: the same token twice is refused.
 | `scripted_provider` | `false` | The `scripted` provider, for tests and evals |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands as the server's user |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
+| `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |
 | `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host and port |
 | `permission_modes` | `default`, `accept_edits` | The modes a config may choose |
@@ -207,6 +208,7 @@ final: Hello over WebSocket.
 | `Unauthenticated` (-32003) on entering | The token is not in the config (an HTTP `401` on the WebSocket) |
 | `LimitReached` (-32005) on entering | The tenant holds `max_connections` connections (`kind == "connections"`; an HTTP `429` on the WebSocket), or 32 logins wait at once (`kind == "logins"`) |
 | `NotAllowed` (-32004) | `open_agent` or a run call failed a [check](#what-admission-refuses-and-why); `.kind` names it |
+| `LimitReached` (-32005) by `open_agent` | The tenant keeps `max_agents` agents open; nothing started (`kind == "agents"`) |
 | `LimitReached` (-32005) by `run`, `resume` or `approve` | The tenant drives `max_runs` runs; nothing started (`kind == "runs"`, `.max` the cap) |
 
 - A remote server owns the provider keys: they come from its environment, and
@@ -275,6 +277,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Limit | Value | Past it |
 |---|---|---|
 | `max_runs` | 16 per tenant unless set | `run.start`, `run.resume` or `run.approve` gets `-32005`, `data: {"kind": "runs", "max": ...}`; nothing starts. A run holds its place until its `run.end` |
+| `max_agents` | 16 per tenant unless set | `agent.open` gets `-32005` (`kind: agents`) after its checks pass, before any MCP server starts. An agent holds its place until `agent.close`, or the end of its connection, has stopped its MCP servers |
 | `max_connections` | 8 per tenant unless set | The socket login gets `-32005` (`kind: connections`) and closes; HTTP gets `429` |
 | Logins waiting at once | 32, across the server | `-32005` (`kind: logins`) and the connection closes |
 | Login wait | 10 seconds | `-32003` and the connection closes |
@@ -285,7 +288,12 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Requests in flight per connection | 64 | Reading waits until one is answered |
 
 The defaults bound what one tenant spends: each run streams from a provider
-on the server's key, and each connection may buffer a large message.
+on the server's key, each open agent holds its config in memory and runs its
+MCP stdio servers as child processes, and each connection may buffer a large
+message. A run's background subagents stream too, up to its
+`workers.max_background` (4 unless set) at once, so one tenant has at most
+`max_runs × (1 + max_background)` provider streams open: 80 with the
+defaults.
 
 ---
 

@@ -20,17 +20,23 @@ pub const DEFAULT_MAX_RUNS: usize = 16;
 /// so this bounds one tenant to about 1 GiB of buffers.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
 
+/// Agents a tenant keeps open at once unless its allowlists say
+/// otherwise: each holds its config and tools in the server's memory and
+/// runs its MCP stdio servers as child processes until it is closed.
+pub const DEFAULT_MAX_AGENTS: usize = 16;
+
 /// What a tenant may ask for, built with the methods below. A new value
 /// allows the memory stores, the permission modes `default` and
 /// `accept_edits`, the live providers at their public endpoints, and
 /// nothing else: no `Bash`, no workspace; and at most
-/// [`DEFAULT_MAX_RUNS`] live runs and [`DEFAULT_MAX_CONNECTIONS`]
-/// connections at once.
+/// [`DEFAULT_MAX_RUNS`] live runs, [`DEFAULT_MAX_AGENTS`] open agents and
+/// [`DEFAULT_MAX_CONNECTIONS`] connections at once.
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
     pub(super) exec_tools: bool,
     pub(super) max_runs: usize,
+    pub(super) max_agents: usize,
     pub(super) max_connections: usize,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
@@ -145,6 +151,7 @@ impl Allowlists {
             scripted_provider: false,
             exec_tools: false,
             max_runs: DEFAULT_MAX_RUNS,
+            max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
@@ -177,6 +184,15 @@ impl Allowlists {
     /// refused with `-32005`. A run holds its place until its `run.end`.
     pub fn max_runs(mut self, max: usize) -> Self {
         self.max_runs = max;
+        self
+    }
+
+    /// How many agents the tenant's connections may keep open at once, all
+    /// together: an `agent.open` past it is refused with `-32005` before
+    /// anything starts. An agent holds its place until `agent.close`, or
+    /// its connection's end, has closed its MCP servers.
+    pub fn max_agents(mut self, max: usize) -> Self {
+        self.max_agents = max;
         self
     }
 

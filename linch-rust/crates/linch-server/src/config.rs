@@ -76,6 +76,9 @@ pub struct AllowConfig {
     /// Connections that may act for the tenant at once, at least 1;
     /// [`linch_rpc::DEFAULT_MAX_CONNECTIONS`] when absent.
     pub max_connections: Option<usize>,
+    /// Agents the tenant's connections may keep open at once, together,
+    /// at least 1; [`linch_rpc::DEFAULT_MAX_AGENTS`] when absent.
+    pub max_agents: Option<usize>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
@@ -111,7 +114,7 @@ pub enum ConfigError {
     /// No tenant has a token, so every connection would be refused.
     #[error("the config gives no tenant a token")]
     NoToken,
-    /// A tenant's `max_runs` or `max_connections` is 0.
+    /// A tenant's `max_runs`, `max_connections` or `max_agents` is 0.
     #[error(
         "tenant {tenant:?}: {field} is 0, which lets it do nothing; \
          set at least 1, or leave it out for the default"
@@ -119,7 +122,7 @@ pub enum ConfigError {
     ZeroCap {
         /// The tenant.
         tenant: String,
-        /// `max_runs` or `max_connections`.
+        /// `max_runs`, `max_connections` or `max_agents`.
         field: &'static str,
     },
     /// A token's environment variable is unset or not UTF-8.
@@ -157,6 +160,7 @@ impl ServerConfig {
             let caps = [
                 ("max_runs", allow.max_runs),
                 ("max_connections", allow.max_connections),
+                ("max_agents", allow.max_agents),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
@@ -219,6 +223,7 @@ impl AllowConfig {
             .exec_tools(self.exec_tools)
             .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
             .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
+            .max_agents(self.max_agents.unwrap_or(linch_rpc::DEFAULT_MAX_AGENTS))
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?

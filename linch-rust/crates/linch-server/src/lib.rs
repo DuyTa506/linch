@@ -30,6 +30,7 @@
 //!        "scripted_provider": false,
 //!        "exec_tools": false,
 //!        "max_runs": 16,
+//!        "max_agents": 16,
 //!        "max_connections": 8,
 //!        "provider_base_urls": ["http://vllm.internal:8000/v1"],
 //!        "permission_modes": ["default", "accept_edits"],
@@ -46,10 +47,10 @@
 //! is empty when absent (it allows nothing), except `permission_modes`,
 //! which defaults to `default` and `accept_edits`; `scripted_provider`
 //! and `exec_tools` (`Bash` for workspace agents) are off when absent;
-//! `max_runs` and `max_connections`, the tenant's caps across all its
-//! connections, default to 16 and 8, and a 0 is refused when the config
-//! loads. See [`linch_rpc::Allowlists`] for
-//! how each entry matches.
+//! `max_runs`, `max_agents` and `max_connections`, the tenant's caps
+//! across all its connections, default to 16, 16 and 8, and a 0 is
+//! refused when the config loads. See [`linch_rpc::Allowlists`] for how
+//! each entry matches.
 //!
 //! # Transports
 //!

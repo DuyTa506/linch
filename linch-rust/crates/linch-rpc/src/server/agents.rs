@@ -3,9 +3,9 @@
 
 use std::sync::atomic::Ordering;
 
-use linch::{Agent, JsonObject, JsonValue, OpenedAgent};
+use linch::{Agent, JsonObject, JsonValue};
 
-use super::{Server, Tables, callback, host, lock, to_value};
+use super::{Opened, Server, Tables, callback, host, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
     AgentOpened, CloseParams, Events, EventsParams, OpenParams, SessionCloseParams, Skipped,
@@ -14,11 +14,16 @@ use crate::protocol::{
 impl Server {
     /// Open an agent whose host tools and callbacks call back over this
     /// connection. They are bound before the agent is built, so the
-    /// contract covers them.
+    /// contract covers them. A tenant's agent takes its place after the
+    /// checks and before anything starts.
     pub(super) async fn open(&self, mut params: OpenParams) -> Result<JsonValue, ErrorObject> {
-        if let Some(tenant) = &self.0.tenant {
-            tenant.admit(&mut params.config).await?;
-        }
+        let place = match &self.0.tenant {
+            Some(tenant) => {
+                tenant.admit(&mut params.config).await?;
+                Some(tenant.agent_place()?)
+            }
+            None => None,
+        };
         // The handle is named first: tools and callbacks carry it per call.
         let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
         let handle = format!("agent-{number}");
@@ -31,6 +36,10 @@ impl Server {
             .map_err(|error| ErrorObject::from(&error))?;
         let contract = opened.agent().contract().to_string();
         let skipped = opened.skipped().iter().map(Skipped::from).collect();
+        let opened = Opened {
+            agent: opened,
+            place,
+        };
         lock(&self.0.tables).agents.insert(handle.clone(), opened);
         to_value(&AgentOpened {
             agent: handle,
@@ -40,9 +49,10 @@ impl Server {
     }
 
     /// Free the handle, then disconnect the agent's MCP servers and wait
-    /// for them. Refused while this server drives a run of the agent.
+    /// for them, then free its place. Refused while this server drives a
+    /// run of the agent.
     pub(super) async fn close(&self, params: CloseParams) -> Result<JsonValue, ErrorObject> {
-        let opened: OpenedAgent = {
+        let opened: Opened = {
             let mut tables = lock(&self.0.tables);
             tables.agent(&params.agent)?;
             if tables.runs.values().any(|run| run.agent == params.agent) {
@@ -90,6 +100,6 @@ impl Tables {
         let opened = self.agents.get(handle).ok_or_else(|| {
             ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
         })?;
-        Ok(opened.agent().clone())
+        Ok(opened.agent.agent().clone())
     }
 }
