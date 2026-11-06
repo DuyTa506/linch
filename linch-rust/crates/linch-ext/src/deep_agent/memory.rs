@@ -79,7 +79,10 @@ impl Hook<ContextBuild> for FileMemoryContext {
             let text = format!("{MEMORY_INDEX}:\n{shown}");
             blocks.push(TextBlock { text });
         }
-        Ok(ContextBuildResponse { blocks })
+        Ok(ContextBuildResponse {
+            blocks,
+            ..ContextBuildResponse::default()
+        })
     }
 }
 

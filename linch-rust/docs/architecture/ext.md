@@ -47,12 +47,14 @@ unknown types and fields rejected.
 | `run_completed` | The run ended with a successful `result`; unknown when it has none |
 
 The `context_*` scorers return `None` only for a run with no `context_build`
-event. The Rust runner stages one before every dispatch, with `selected_tools`
-set and `budget` and `metadata` empty
-(`crates/linch-core/src/runner/hooks.rs:161-170`). So on a Rust run
+event, as Python's do. The Rust runner stages one before every primary call,
+with `selected_tools` set, `budget` empty and `metadata` merged from what
+its `context_build` hooks returned, a later hook's key winning as Python's
+`dict.update` (`crates/linch-core/src/hooks/turn.rs`,
+`crates/linch-core/src/runner/hooks.rs`). So on a Rust run
 `context_selected_tool` reports whether the tool was offered,
-`context_not_trimmed` always passes, and `context_metadata_contains` always
-fails.
+`context_metadata_contains` reads the hooks' metadata, and
+`context_not_trimmed` always passes: the kernel trims no context.
 
 ### Suites and benchmarks
 

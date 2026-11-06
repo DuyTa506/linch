@@ -213,6 +213,7 @@ async fn context_blocks_accumulate_in_order_and_failures_add_nothing() {
             Scripted::new(id, &log, move |_| {
                 Act::Answer(ContextBuildResponse {
                     blocks: vec![TextBlock { text: text.into() }],
+                    ..ContextBuildResponse::default()
                 })
             }),
         );
@@ -227,7 +228,9 @@ async fn context_blocks_accumulate_in_order_and_failures_add_nothing() {
         messages: Arc::new(Vec::new()),
     };
     let done = hooks.context_build.run(&request).await;
-    let texts: Vec<_> = done.outcome.iter().map(|b| b.text.as_str()).collect();
+    let texts: Vec<_> = (done.outcome.blocks.iter())
+        .map(|b| b.text.as_str())
+        .collect();
     assert_eq!(texts, ["user: ada", "doc 7"]);
     assert_eq!(done.records.len(), 3);
 }

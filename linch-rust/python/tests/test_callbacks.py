@@ -8,6 +8,7 @@ import pytest
 from scripted import config, text_turn, tool_turn
 
 from linch_rust import (
+    ContextBuildEvent,
     HookEvent,
     PromptBlocked,
     ResultEvent,
@@ -50,6 +51,20 @@ async def test_a_pre_tool_use_callback_blocks_a_call() -> None:
     ]
     result = envelopes[-1].event
     assert isinstance(result, ResultEvent) and result.subtype == "success"
+
+
+async def test_context_build_metadata_lands_on_the_event_not_the_request() -> None:
+    @callback("context_build", "rag", 1)
+    async def rag(request: dict[str, Any]) -> dict[str, Any]:
+        return {"blocks": [{"text": "doc 7"}], "metadata": {"rag": "p1"}}
+
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("ok")]), callbacks=[rag])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    [build] = [e.event for e in envelopes if isinstance(e.event, ContextBuildEvent)]
+    assert build.metadata == {"rag": "p1"}
 
 
 async def test_a_user_prompt_submit_block_raises_prompt_blocked() -> None:

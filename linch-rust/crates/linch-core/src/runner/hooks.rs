@@ -18,8 +18,8 @@ use crate::events::kinds::{
 };
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
-    ContextBuildRequest, HookRecord, HookStatus, PostTurnRequest, StopOutcome, StopRequest,
-    UserPromptOutcome, UserPromptRequest,
+    ContextBuildRequest, ContextBuildResponse, HookRecord, HookStatus, PostTurnRequest,
+    StopOutcome, StopRequest, UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
@@ -137,10 +137,13 @@ impl Runner {
 
     /// The `context_build` blocks for a request over `messages`; `None`
     /// when the run cancel interrupted the chain.
-    pub(super) async fn context(&self, messages: Arc<Vec<Arc<Message>>>) -> Option<Vec<TextBlock>> {
+    pub(super) async fn context(
+        &self,
+        messages: Arc<Vec<Arc<Message>>>,
+    ) -> Option<ContextBuildResponse> {
         let chain = &self.agent.hooks.context_build;
         if chain.is_empty() {
-            return Some(Vec::new());
+            return Some(ContextBuildResponse::default());
         }
         let request = ContextBuildRequest {
             session_id: self.run.session_id.clone(),
@@ -149,16 +152,16 @@ impl Runner {
         };
         let mut records = Vec::new();
         let run = chain.run_into(&request, &mut records);
-        let blocks = self.cancel.run_until_cancelled(run).await;
+        let context = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
-        blocks
+        context
     }
 
     /// Stage the `context_build` event of the primary `request`: what it
-    /// was built from. It rides the call's `ProviderPending` barrier. The
-    /// kernel keeps no context budget and trims nothing, so `budget` and
-    /// `metadata` are empty.
-    pub(super) fn stage_context(&mut self, request: &ProviderRequest) {
+    /// was built from, with the context hooks' `metadata`. It rides the
+    /// call's `ProviderPending` barrier. The kernel keeps no context budget
+    /// and trims nothing, so `budget` is empty.
+    pub(super) fn stage_context(&mut self, request: &ProviderRequest, metadata: JsonObject) {
         let tools = request.tools.iter().map(|tool| tool.name.clone());
         self.journal.stage(Event::ContextBuild(ContextBuildEvent {
             model: request.model.clone(),
@@ -166,7 +169,7 @@ impl Runner {
             messages: request.messages.len() as u64,
             selected_tools: Some(tools.collect()),
             budget: JsonObject::new(),
-            metadata: JsonObject::new(),
+            metadata,
         }));
     }
 

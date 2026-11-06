@@ -264,12 +264,12 @@ impl Runner {
             self.abort().await?;
             return Ok(None);
         };
-        add_context(&mut messages, context);
+        add_context(&mut messages, context.blocks);
         let mut request = self.request(messages);
         if let Some(model) = model {
             request.model = skills::model_override(&model, &request.model);
         }
-        self.stage_context(&request);
+        self.stage_context(&request, context.metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));

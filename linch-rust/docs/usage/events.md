@@ -215,7 +215,8 @@ The request for the next model call was assembled; the call starts.
 | `system_blocks` | Number of system blocks |
 | `messages` | Number of conversation messages sent |
 | `selected_tools` | Tool names offered in this request |
-| `budget`, `metadata` | Context accounting and builder details, as dicts |
+| `budget` | Context accounting; `{}`, as the server trims no context |
+| `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any |
 
 ### `UsageEvent` (`usage`)
 

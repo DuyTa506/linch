@@ -280,7 +280,7 @@
 //! | `permission_request` | `tool_use_id, tool_name, input, reason?, principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
 //! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 //! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
-//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}]}` |
+//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning |
 //! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 //! | `post_turn` | `turn, stop_reason` | `{}` |
 //!

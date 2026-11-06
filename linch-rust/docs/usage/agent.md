@@ -363,7 +363,7 @@ request has `session_id` and `run_id`:
 | `permission_request` | `tool_use_id`, `tool_name`, `input`, `reason?`, `principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
 | `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
-| `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}]}` |
+| `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
 | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
