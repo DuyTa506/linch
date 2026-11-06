@@ -5,6 +5,7 @@
 use std::future::ready;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -15,14 +16,32 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures::{SinkExt, StreamExt};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use linch::PgPools;
 use linch_rpc::{Access, MAX_LINE_BYTES, Tokens};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 /// The one route.
 pub const PATH: &str = "/rpc";
+
+/// How long a connection not yet upgraded may take to send a whole
+/// request head, counted from when the server starts reading it; past it
+/// the server closes the connection without an answer (hyper sends none
+/// for a timeout), as the socket closes a connection that does not log
+/// in within 10 seconds.
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// HTTP connections that may wait for their upgrade at once, across the
+/// server; one more is closed unread. Each holds a descriptor and up to
+/// hyper's ~400 KiB head buffer until it is upgraded or closed, so this
+/// bounds them to about 13 MiB; an upgraded WebSocket gives its place
+/// back and counts against its tenant's `max_connections` instead.
+pub const MAX_PENDING_UPGRADES: usize = 32;
 
 /// Largest WebSocket message read. Messages over [`MAX_LINE_BYTES`] are
 /// refused by the core like an oversized line; past this one the socket
@@ -47,20 +66,66 @@ struct Http {
 }
 
 /// Serve HTTP on `listener` until `stop` fires; each upgraded connection
-/// is tracked by `shared.connections` and ends with `stop`.
-pub(crate) async fn serve(
-    listener: TcpListener,
-    shared: Shared,
-    stop: CancellationToken,
-) -> io::Result<()> {
+/// is tracked by `shared.connections` and ends with `stop`. A connection
+/// not yet upgraded holds one of [`MAX_PENDING_UPGRADES`] places, has
+/// [`HEADER_READ_TIMEOUT`] for each request head, and is dropped at
+/// `stop`.
+pub(crate) async fn serve(listener: TcpListener, shared: Shared, stop: CancellationToken) {
     let state = Http {
         shared,
         stop: stop.clone(),
     };
     let app = Router::new().route(PATH, get(upgrade)).with_state(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(stop.cancelled_owned())
-        .await
+    let pending = Arc::new(Semaphore::new(MAX_PENDING_UPGRADES));
+    let handshakes = TaskTracker::new();
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            accepted = listener.accept() => accepted,
+        };
+        let stream = match accepted {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                // Out of descriptors, say: wait a moment rather than spin.
+                eprintln!("linch-server: HTTP accept failed: {error}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        // Past the cap the stream is dropped, which closes it unread.
+        let Ok(place) = Arc::clone(&pending).try_acquire_owned() else {
+            continue;
+        };
+        let (app, stop) = (app.clone(), stop.clone());
+        handshakes.spawn(async move {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => {}
+                () = handshake(stream, app) => {}
+            }
+            drop(place);
+        });
+    }
+    handshakes.close();
+    handshakes.wait().await;
+}
+
+/// Serve one connection until it is upgraded or closed: the future ends
+/// once the `101` is written and the socket is handed to the upgrade.
+async fn handshake(stream: TcpStream, app: Router) {
+    let mut builder = Builder::new(TokioExecutor::new());
+    // The deadline runs for every head, so a kept-alive connection that
+    // falls silent after a refusal closes too.
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
+    let service = TowerToHyperService::new(app);
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
+    // A connection's error (a timeout, a bad request) ends only that
+    // connection.
+    let _ = connection.await;
 }
 
 /// Check the bearer token and take a place among its tenant's

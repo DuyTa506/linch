@@ -12,7 +12,7 @@
 //! let tokens = config.tokens(|name| std::env::var(name).ok())?;
 //! let listeners = Listeners::bind(&config, tokens).await?;
 //! let stop = tokio_util::sync::CancellationToken::new();
-//! listeners.serve(stop).await?;
+//! listeners.serve(stop).await;
 //! # Ok(()) }
 //! ```
 //!
@@ -61,7 +61,10 @@
 //!   to a WebSocket carrying one JSON-RPC message per text frame. A
 //!   missing or unknown token gets `401` with `WWW-Authenticate: Bearer`;
 //!   a tenant already holding its `max_connections` gets `429`, both
-//!   before the upgrade.
+//!   before the upgrade. Until it is upgraded a connection has
+//!   [`HEADER_READ_TIMEOUT`] for each request head (then it is closed
+//!   without an answer), and at most [`MAX_PENDING_UPGRADES`] wait at
+//!   once across the server; one more is closed unread.
 //!   The server speaks plain HTTP: put TLS in front of it, or listen on
 //!   loopback only.
 //!
@@ -76,5 +79,5 @@ mod http;
 mod listen;
 
 pub use config::{AllowConfig, ConfigError, ServerConfig, TenantConfig, TokenSource};
-pub use http::PATH;
+pub use http::{HEADER_READ_TIMEOUT, MAX_PENDING_UPGRADES, PATH};
 pub use listen::Listeners;

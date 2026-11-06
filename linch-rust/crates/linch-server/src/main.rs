@@ -70,7 +70,10 @@ async fn serve(config: Option<PathBuf>) -> ExitCode {
             linch_rpc::serve(reader, writer).await
         }
         Some(path) => match listen(&path).await {
-            Ok(listeners) => listeners.serve(on_signal()).await,
+            Ok(listeners) => {
+                listeners.serve(on_signal()).await;
+                Ok(())
+            }
             Err(code) => return code,
         },
     };

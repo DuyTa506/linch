@@ -245,6 +245,7 @@ The HTTP server answers before the upgrade:
 | The tenant already holds `max_connections` | `429`, the body naming the cap |
 | A valid token without WebSocket headers | `400` |
 | A valid WebSocket upgrade | `101 Switching Protocols` |
+| A request head not complete within 10 seconds | No answer: the connection closes |
 
 ```bash
 curl -i http://127.0.0.1:8731/rpc                     # HTTP/1.1 401 Unauthorized
@@ -277,6 +278,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | `max_connections` | 8 per tenant unless set | The socket login gets `-32005` (`kind: connections`) and closes; HTTP gets `429` |
 | Logins waiting at once | 32, across the server | `-32005` (`kind: logins`) and the connection closes |
 | Login wait | 10 seconds | `-32003` and the connection closes |
+| HTTP connections waiting for their upgrade | 32, across the server; an upgraded one gives its place back | The connection is closed unread |
+| HTTP request head | 10 seconds for each head before the upgrade | The connection closes without an answer |
 | One message | 16 MiB | The request gets `-32600` |
 | A Postgres pool | One per DSN across the server, `stores.max_connections` connections (10 unless set) | Queries wait for a connection; the open that connects a DSN sets its size and later opens share it ([Stores](./stores.md#connections-and-pools)) |
 | Requests in flight per connection | 64 | Reading waits until one is answered |
