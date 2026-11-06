@@ -10,6 +10,7 @@ from scripted import config, text_turn
 from linch_rust import (
     AssistantEvent,
     InitEvent,
+    OpenError,
     ProtocolError,
     ResultEvent,
     RunNotFound,
@@ -76,3 +77,24 @@ async def test_closing_the_server_stops_its_process() -> None:
         await server.open_agent(config([]))
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+async def test_the_server_reads_keys_only_from_the_env_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fake key; opening builds the client offline and no run is started.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-p11e-not-a-real-key")
+    deepseek = {
+        "namespace": "p12",
+        "spec": {"model": "deepseek-chat"},
+        "provider": {"id": "deepseek"},
+    }
+    async with Server() as inheriting:
+        await inheriting.open_agent(deepseek)
+    async with Server(env={"DEEPSEEK_API_KEY": "sk-p11e-given"}) as given:
+        await given.open_agent(deepseek)
+    async with Server(env={}) as bare:
+        with pytest.raises(OpenError) as raised:
+            await bare.open_agent(deepseek)
+    assert raised.value.code == -32013
+    assert raised.value.data == {"env": "DEEPSEEK_API_KEY"}
