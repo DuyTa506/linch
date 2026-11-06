@@ -12,6 +12,10 @@ workspace = true
 
 [dependencies]
 linch-core = { path = "../linch-core" }
+# Re-exported as `linch::ext`. Its `postgres` feature (the durable workflow
+# journal) adds nothing to the build: linch-postgres already pulls in the
+# same sqlx with the same features.
+linch-ext = { path = "../linch-ext", features = ["postgres"] }
 linch-mcp = { path = "../linch-mcp" }
 linch-postgres = { path = "../linch-postgres" }
 linch-providers = { path = "../linch-providers" }

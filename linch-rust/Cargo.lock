@@ -1649,6 +1649,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "linch-core",
+ "linch-ext",
  "linch-mcp",
  "linch-postgres",
  "linch-providers",
