@@ -9,8 +9,10 @@
 
 mod harness;
 mod scorers;
+mod suite;
 #[cfg(test)]
 mod tests;
 
 pub use harness::{CaseResult, EvalCase, EvalResult, Score, run_eval};
 pub use scorers::Scorer;
+pub use suite::{EvalSuite, SuiteError, load_eval_suite};
