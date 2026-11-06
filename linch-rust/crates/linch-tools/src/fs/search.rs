@@ -61,7 +61,7 @@ pub(super) fn grep(
             continue;
         };
         let budget = match query.mode {
-            GrepMode::Content => query.limit + 1 - lines,
+            GrepMode::Content => (query.limit - lines).saturating_add(1),
             _ => usize::MAX,
         };
         let mut sink = Collect::new(query.mode, budget);

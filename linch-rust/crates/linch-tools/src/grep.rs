@@ -17,6 +17,10 @@ const DEFAULT_HEAD_LIMIT: u64 = 250;
 /// Largest output, in bytes.
 const OUTPUT_CAP: usize = 30_000;
 
+/// Most entries, and context lines on each side, a call may ask for. Every
+/// entry takes at least two bytes of output, so more could never be shown.
+const MAX_LINES: u64 = (OUTPUT_CAP / 2) as u64;
+
 /// Search file contents by regex with ripgrep's engine, in-process. Scope
 /// `read`.
 pub struct Grep {
@@ -97,9 +101,11 @@ impl Tool for Grep {
             } else {
                 optional_count(&input, key)?.unwrap_or(0)
             };
-            Ok(usize::try_from(lines).unwrap_or(usize::MAX))
+            Ok(usize::try_from(lines.min(MAX_LINES)).unwrap_or(usize::MAX))
         };
-        let limit = optional_count(&input, "head_limit")?.unwrap_or(DEFAULT_HEAD_LIMIT);
+        let limit = optional_count(&input, "head_limit")?
+            .unwrap_or(DEFAULT_HEAD_LIMIT)
+            .clamp(1, MAX_LINES);
         let query = GrepQuery {
             pattern: pattern.to_owned(),
             path: optional_string(&input, "path")?.map(str::to_owned),
@@ -110,7 +116,7 @@ impl Tool for Grep {
             multiline: flag(&input, "multiline")?,
             before: side("-B")?,
             after: side("-A")?,
-            limit: usize::try_from(limit.max(1)).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
         };
         let hits = self.fs.grep(&query, &ctx.cancel).await?;
         if hits.files.is_empty() {
