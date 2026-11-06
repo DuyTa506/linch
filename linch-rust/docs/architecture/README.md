@@ -43,6 +43,10 @@ comments until they are):
 | Skills and subagents | The `Skill` and `Subagent` tools and child runs | [skills and subagents](../../../docs/architecture/skills-subagents.md) |
 | RPC protocol and server | `linch-rpc` (JSON-RPC 2.0 protocol, server and client) and `linch-server` (the sidecar over stdio, a Unix socket, or HTTP with WebSocket) | none |
 
+The Python pages describe the shared concepts only. Each Rust page will say
+where Rust differs; until then the Rust source is the reference. The main
+difference in the kernel is under [Shared invariants](#shared-invariants).
+
 ## Crates
 
 | Crate | Role | Page |
