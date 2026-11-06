@@ -1,5 +1,5 @@
 //! Fixtures shared by the unit tests: an agent on a scripted provider and
-//! memory stores, and a test tool.
+//! memory stores, a test tool, and synthetic envelopes.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, JsonObject, JsonValue, MemoryRunStore, MemorySessionStore,
-    PermissionEngine, PermissionMode, PermissionPolicy, ScriptedProvider, ScriptedTurn, Tool,
-    ToolContext, ToolOutput, ToolOutputError, ToolRegistry, ToolResult, ToolScope, Usage,
+    Agent, AgentBuilder, AgentSpec, Envelope, Event, JsonObject, JsonValue, MemoryRunStore,
+    MemorySessionStore, PermissionEngine, PermissionMode, PermissionPolicy, RunId,
+    ScriptedProvider, ScriptedTurn, Tool, ToolContext, ToolOutput, ToolOutputError, ToolRegistry,
+    ToolResult, ToolScope, Usage, WIRE_VERSION,
 };
 use serde_json::json;
 
@@ -119,4 +120,19 @@ pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
         provider,
         closed,
     }
+}
+
+/// `events` as envelopes of run `r1`, numbered from seq 1.
+pub fn envelopes(events: Vec<Event>) -> Vec<Envelope> {
+    events
+        .into_iter()
+        .zip(1..)
+        .map(|(event, seq)| Envelope {
+            v: WIRE_VERSION,
+            seq,
+            run_id: RunId::new("r1"),
+            ignorable: false,
+            event,
+        })
+        .collect()
 }
