@@ -6,5 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+mod api_key;
 pub mod deepseek;
-pub mod openai_compat;
+mod openai_compat;
+
+pub use api_key::ApiKey;
+pub use deepseek::{DeepSeek, DeepSeekOptions};
