@@ -13,7 +13,9 @@
 //! `parent_run_id`:
 //! - its id, and its session's, is the call's
 //!   [`idempotency_key`](crate::ToolContext::idempotency_key), so the
-//!   parent finds it again;
+//!   parent finds it again; a call in a later response with an id the run
+//!   already used (a provider that repeats ids) gets a tool error instead of
+//!   the earlier call's child;
 //! - its session starts empty, and its system prompt is the parent's (with
 //!   the skill listing when the child has the `Skill` tool), then the
 //!   definition's body;

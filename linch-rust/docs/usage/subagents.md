@@ -250,7 +250,7 @@ display name when only one worker has it.
 
 | | Value |
 |---|---|
-| Worker id | `<parent run id>:<tool_use_id>`; pass `run_id=` to `Agent.run` to know it in advance |
+| Worker id | `<parent run id>:<tool_use_id>`; pass `run_id=` to `Agent.run` to know it in advance. A later call with a `tool_use_id` the run already used (a provider that repeats ids) gets a tool error and starts nothing |
 | Display name | The definition's name, or `Agent #N` for the N-th general-purpose worker of the session |
 | `SubagentContinue` input | `{"to": <id or display name>, "message": ...}` |
 

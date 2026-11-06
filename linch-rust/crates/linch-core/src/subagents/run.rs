@@ -44,7 +44,11 @@ pub(super) async fn run(
         owner: "subagent".into(),
         cancel: cancel.clone(),
     };
-    let stream = match child.runs.load(&child.namespace, &child_id).await {
+    let loaded = child.runs.load(&child.namespace, &child_id).await;
+    if loaded.is_ok() {
+        first_use(parent, ctx, &child_id).await?;
+    }
+    let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
             runner::start_child(child, prompt, options, ctx.run_id.clone())
         }
@@ -65,6 +69,41 @@ pub(super) async fn run(
     });
     let result = result.await;
     result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
+}
+
+/// Refuse the call in `ctx` when its child run `child_id`, which exists,
+/// is an earlier call's: the provider sent this call's id before, so the
+/// parent's log holds events of that child before its last response. A
+/// call that a resumed parent runs again finds none there.
+///
+/// Raises:
+///     ToolOutputError: The model-facing refusal, or the read's failure.
+pub(super) async fn first_use(
+    parent: &AgentInner,
+    ctx: &ToolContext,
+    child_id: &RunId,
+) -> Result<(), ToolOutputError> {
+    let events = parent.runs.events(&parent.namespace, &ctx.run_id, 0).await;
+    let events = events.map_err(|error| failed("could not be read", error))?;
+    let last = events
+        .iter()
+        .rposition(|e| matches!(e.event, Event::Assistant(_)));
+    let earlier = events[..last.unwrap_or(0)]
+        .iter()
+        .any(|envelope| match &envelope.event {
+            Event::Subagent(sub) => sub.child_run_id == *child_id,
+            Event::ChildRunStatus(mark) => mark.child_run_id == *child_id,
+            _ => false,
+        });
+    if !earlier {
+        return Ok(());
+    }
+    Err(ToolOutputError::new(format!(
+        "The tool call id '{}' was already used by an earlier call of this run, whose \
+         subagent run has that id, so this call started none. The provider repeated a \
+         tool call id.",
+        ctx.tool_use_id
+    )))
 }
 
 /// End the unfinished child run `record`, whose contract is not `child`'s

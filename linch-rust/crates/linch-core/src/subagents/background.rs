@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use futures::StreamExt;
 
 use super::SUBAGENT_TOOL;
-use super::run::{Outcome, failed, finished, mismatched};
+use super::run::{Outcome, failed, finished, first_use, mismatched};
 use super::tool::in_background;
 use super::workers::Worker;
 use crate::agent::{AgentInner, RunOptions};
@@ -106,12 +106,24 @@ pub(super) async fn launch(
     };
     let id = worker.id.clone();
     let principal = ctx.principal.clone();
-    pick_up(parent, &family, worker, prompt, principal, &ctx.run_id).await?;
+    let call = Some(ctx);
+    pick_up(
+        parent,
+        &family,
+        worker,
+        prompt,
+        principal,
+        &ctx.run_id,
+        call,
+    )
+    .await?;
     Ok(started(ctx, &id))
 }
 
 /// Have `family` drive the child run of `worker`: start it on `prompt`,
-/// resume it, or put the end of one that finished in the inbox.
+/// resume it, or put the end of one that finished in the inbox. `call` is
+/// the model's call that asks for it, which may not take an earlier call's
+/// child; `None` when a resumed run picks its children up.
 async fn pick_up(
     parent: &AgentInner,
     family: &Arc<Family>,
@@ -119,6 +131,7 @@ async fn pick_up(
     prompt: String,
     principal: Option<Principal>,
     parent_run: &RunId,
+    call: Option<&ToolContext>,
 ) -> Result<(), ToolOutputError> {
     let child = match parent.child(&worker.definition) {
         Ok(child) => Arc::new(child),
@@ -133,7 +146,11 @@ async fn pick_up(
         owner: "subagent".into(),
         cancel: cancel.clone(),
     };
-    let stream = match child.runs.load(&child.namespace, &id).await {
+    let loaded = child.runs.load(&child.namespace, &id).await;
+    if let (Ok(_), Some(ctx)) = (&loaded, call) {
+        first_use(parent, ctx, &id).await?;
+    }
+    let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
             runner::start_child(child, prompt, options, parent_run.clone())
         }
@@ -212,7 +229,7 @@ pub(crate) async fn reattach(
         let name = worker.display_name.clone();
         let prompt = text("prompt").unwrap_or_default().to_owned();
         let principal = run.principal.clone();
-        let picked = pick_up(parent, family, worker, prompt, principal, &run.run_id).await;
+        let picked = pick_up(parent, family, worker, prompt, principal, &run.run_id, None).await;
         if let Err(error) = picked {
             family.complete(Completion {
                 child: id.clone(),
