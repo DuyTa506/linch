@@ -259,6 +259,10 @@ impl Agent {
 
     /// Answer the pending tool calls of a suspended run and continue it.
     ///
+    /// Retrying an approve that failed after its answers were committed is
+    /// safe: when the run's batch already decided every call answered, the
+    /// run continues like a resume and the committed decisions stand.
+    ///
     /// Args:
     ///     run_id: A run whose checkpoint is awaiting approval.
     ///     decisions: The host's answer per pending `tool_use_id`. Answers

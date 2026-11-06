@@ -12,6 +12,7 @@ use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, reconcile};
+use crate::policy::PermissionDecision;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
@@ -110,7 +111,9 @@ pub(super) async fn new_run(
 }
 
 /// Claim an existing run, check it may continue, reconcile its durable
-/// state, and go on from there. `answers` is set for an approve.
+/// state, and go on from there. `answers` is set for an approve; on a run
+/// whose answers are already committed (an approve that failed after its
+/// first commit) they are ignored and the run continues like a resume.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
@@ -124,7 +127,7 @@ pub(super) async fn continue_run(
     check(
         &runs.load(namespace, &run_id).await?,
         &agent,
-        answers.is_some(),
+        answers.as_ref(),
     )?;
     let lease = match runs.claim(namespace, &run_id, &options.owner).await {
         Ok(lease) => lease,
@@ -137,7 +140,7 @@ pub(super) async fn continue_run(
         Err(error) => return Err(error.into()),
     };
     let record = runs.load(namespace, &run_id).await?;
-    check(&record, &agent, answers.is_some())?;
+    check(&record, &agent, answers.as_ref())?;
     let events = runs.events(namespace, &run_id, 0).await?;
     let entries = agent.sessions.load(namespace, &record.session_id).await?;
     let checkpoint = &record.checkpoint;
@@ -245,8 +248,13 @@ fn last_stop(events: &[Envelope]) -> StopReason {
 }
 
 /// Refuse a terminal run, a run of another contract, and an approve on a
-/// run that is not suspended.
-fn check(record: &RunRecord, agent: &AgentInner, approving: bool) -> Result<(), RunError> {
+/// run that is neither suspended nor in a batch that already decided every
+/// call the approve answers.
+fn check(
+    record: &RunRecord,
+    agent: &AgentInner,
+    answers: Option<&HashMap<String, ApprovalResponse>>,
+) -> Result<(), RunError> {
     if record.status.is_terminal() {
         return Err(RunError::Terminal {
             run_id: record.run_id.clone(),
@@ -260,8 +268,18 @@ fn check(record: &RunRecord, agent: &AgentInner, approving: bool) -> Result<(), 
             found: record.contract,
         });
     }
-    let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
-    if approving && !suspended {
+    let approvable = |answers: &HashMap<String, ApprovalResponse>| match &record.checkpoint.phase {
+        Phase::AwaitingApproval { .. } => true,
+        // An approve that failed after committing its answers.
+        Phase::ToolBatch { decisions, .. } => answers.keys().all(|id| {
+            decisions.iter().any(|recorded| {
+                &recorded.tool_use_id == id
+                    && !matches!(recorded.decision, PermissionDecision::Ask { .. })
+            })
+        }),
+        _ => false,
+    };
+    if answers.is_some_and(|answers| !approvable(answers)) {
         return Err(RunError::NotSuspended {
             run_id: record.run_id.clone(),
         });

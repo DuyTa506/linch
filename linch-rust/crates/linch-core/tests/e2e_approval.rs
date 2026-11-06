@@ -10,9 +10,10 @@ use common::*;
 use linch_core::events::kinds::ResultSubtype;
 use linch_core::hooks::ApprovalResponse;
 use linch_core::permissions::{Rule, RuleDecision, ToolRule};
+use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, Envelope, Event, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy,
-    RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider, ToolScope,
+    Phase, RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider, ToolScope,
 };
 
 struct Fixture {
@@ -265,4 +266,52 @@ async fn a_tool_of_another_scope_is_another_contract() {
         "{error:?}"
     );
     assert!(fixture.runs.lock().unwrap().is_empty(), "nothing ran");
+}
+
+/// R1-core 6: an approve that failed after its answers were committed, and
+/// before the call started, can be retried. The retry continues like a
+/// resume and the call runs once; an approve that answers a call without a
+/// committed decision is still refused, before the claim.
+#[tokio::test]
+async fn an_approve_retried_after_its_answers_were_committed_continues() {
+    let fixture = Fixture::new(1);
+    let (run_id, _) = fixture.suspend().await;
+    let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
+    // The approve writes: claim (1), the answers with the batch checkpoint
+    // (2), the call's start (3). Fail before 3: the answers are durable and
+    // the call never started.
+    let faulty = Arc::new(Faulty::new(fixture.stores.clone(), 3, FaultTiming::Before));
+    let tools = registry(vec![Echo::new("Write", ToolScope::Write, &fixture.runs)]);
+    let crashing = agent(
+        fixture.provider.clone(),
+        tools,
+        policy(PermissionMode::Default),
+        faulty,
+    );
+    let options = RunOptions::new("s1");
+    let (_, error) = drain(crashing.approve(run_id.clone(), allow.clone(), options)).await;
+    assert!(error.is_some(), "the approve must fail");
+    let record = fixture.stores.runs.load(NS, &run_id).await.unwrap();
+    let phase = &record.checkpoint.phase;
+    assert!(matches!(phase, Phase::ToolBatch { .. }), "{phase:?}");
+    assert!(fixture.runs.lock().unwrap().is_empty());
+
+    let agent = fixture.agent(policy(PermissionMode::Default));
+    let unknown = answers(&[
+        ("call_0_0", ApprovalResponse::Allow),
+        ("other", ApprovalResponse::Allow),
+    ]);
+    let (_, error) = drain(agent.approve(run_id.clone(), unknown, RunOptions::new("s1"))).await;
+    assert!(
+        matches!(error, Some(RunError::NotSuspended { .. })),
+        "{error:?}"
+    );
+    let epoch = fixture.stores.runs.load(NS, &run_id).await.unwrap().epoch;
+    assert_eq!(epoch, record.epoch, "refused before the claim");
+
+    let envelopes = finish(agent.approve(run_id.clone(), allow, RunOptions::new("s1"))).await;
+    assert_eq!(subtype(&envelopes), ResultSubtype::Success);
+    assert_eq!(fixture.results().await, ["v0.0"]);
+    assert_eq!(fixture.runs.lock().unwrap()["call_0_0"], 1);
+    assert_eq!(fixture.status(&run_id).await, RunStatus::Completed);
 }
