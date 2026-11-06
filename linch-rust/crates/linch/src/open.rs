@@ -66,7 +66,9 @@ impl AgentConfig {
     /// Returns:
     ///     The built agent with the MCP servers it connected. Its contract
     ///     digest covers the spec (with the filesystem's system text), every
-    ///     tool registered at that point and the hook policies.
+    ///     tool registered at that point and the hook policies. It prices
+    ///     each paid call with [`linch_providers::cost`], so a model in that
+    ///     table fills the cost fields of usage and result events.
     ///
     /// Raises:
     ///     OpenError: If the key is unset, the workspace is not a directory,
@@ -120,6 +122,7 @@ impl AgentConfig {
             .run_store(runs)
             .session_store(sessions)
             .namespace(self.namespace)
+            .pricing(linch_providers::cost)
             .on_session_close(move |session| {
                 reads.forget(session);
                 forget(session);
