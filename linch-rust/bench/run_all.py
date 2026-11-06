@@ -524,12 +524,29 @@ class Runner:
                 self.sse.wait()
         self.write(sides)
 
+    def py_linch(self) -> dict:
+        """Where the py side's `linch` comes from, and that checkout's commit."""
+        probe = "import json, linch; print(json.dumps([linch.__file__, linch.__version__]))"
+        try:
+            proc = subprocess.run(
+                [self.args.py_python, "-I", "-c", probe],
+                capture_output=True,
+                text=True,
+                env=scrubbed_env(),
+                timeout=60,
+            )
+            path, version = json.loads(proc.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return {}
+        return {"file": path, "version": version, "commit": git_head(Path(path).parent)}
+
     def provenance(self) -> dict:
         return {
             "quick": self.args.quick,
             "iterations": self.iterations,
             "warmup": self.warmup,
             "bench_commit": git_head(HERE),
+            "py_linch": self.py_linch(),
             "py_python": self.args.py_python,
             "client_python": self.args.client_python,
             "server_bin": self.args.server_bin,
@@ -594,7 +611,9 @@ def table(results: dict, sides: list[str], prov: dict, args: argparse.Namespace)
         if args.quick
         else f"{prov['iterations']} timed iterations after {prov['warmup']} warm-up per cell.",
         "",
-        f"Bench commit {prov['bench_commit']}, {prov['date']}, {prov['cpus']} CPUs, "
+        f"Bench (linch-rust) commit {prov['bench_commit']}; py side Linch "
+        f"{prov['py_linch'].get('version')} at {prov['py_linch'].get('commit')}.",
+        f"{prov['date']}, {prov['cpus']} CPUs, "
         f"load average {', '.join(f'{x:.1f}' for x in prov['loadavg'])}.",
         "",
         "Wall is the median per iteration, CPU the mean per iteration (rs-client includes the "
