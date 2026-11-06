@@ -53,6 +53,11 @@
 //!   - a `workspace` and a `permissions.project_root` only as existing
 //!     directories under an allowed root, each replaced by its canonical
 //!     path (without a root, a config keeps the default policy);
+//!   - with skills or subagents on, a `config_dir` (relative to the
+//!     workspace) only as an existing directory under an allowed root, and
+//!     the default `.linch` only there or missing, so neither leads, by an
+//!     absolute path, `..` or a symlink, to another tenant's files; it is
+//!     replaced by the checked path;
 //!   - `Bash` only when the tenant allows exec tools; otherwise the config's
 //!     `bash` is turned off and the agent opens without it;
 //!   - a Postgres DSN only with an allowed host, port, socket, database,
@@ -64,7 +69,7 @@
 //! A refusal is `-32004` with `data.kind` naming the check: `namespace`,
 //! `principal`, `provider`, `provider_base_url`, `permission_mode`,
 //! `auto_allow`, `permission_rule`, `workspace`, `project_root`,
-//! `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
+//! `config_dir`, `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
 //!
 //! A tenant also has caps, counted across all its connections: at most
 //! `max_runs` runs driven at once (default [`DEFAULT_MAX_RUNS`]; a run

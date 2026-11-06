@@ -119,6 +119,66 @@ async fn a_workspace_must_lie_under_an_allowed_root() {
 }
 
 #[tokio::test]
+async fn a_config_dir_must_lie_under_an_allowed_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tenants").join("acme");
+    let beta = dir.path().join("tenants/beta/.linch");
+    for skill in [
+        root.join("project/.linch/skills/notes"),
+        beta.join("skills/secret"),
+    ] {
+        std::fs::create_dir_all(&skill).unwrap();
+        let text = "---\ndescription: Notes.\n---\nNotes.";
+        std::fs::write(skill.join("SKILL.md"), text).unwrap();
+    }
+    for sub in ["empty", "escape", "dangles"] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    std::os::unix::fs::symlink(&beta, root.join("link")).unwrap();
+    std::os::unix::fs::symlink(&beta, root.join("escape/.linch")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("gone"), root.join("dangles/.linch")).unwrap();
+    let roots = [root.clone()];
+    let rpc = Rpc::remote(acme(|allow| allow.workspace_roots(&roots).unwrap()));
+    let project = root.join("project");
+    let inside = [
+        json!({"skills": true, "workspace": project}),
+        json!({"subagents": true, "workspace": project, "config_dir": ".linch"}),
+        json!({"skills": true, "workspace": root, "config_dir": "project/.linch"}),
+        json!({"skills": true, "config_dir": project.join(".linch")}),
+        // No `.linch` at all: only the built-in skill loads.
+        json!({"skills": true, "workspace": root.join("empty")}),
+        json!({"skills": true}),
+        // Unused while skills and subagents are off.
+        json!({"workspace": project, "config_dir": beta}),
+    ];
+    for extra in inside {
+        assert_eq!(refused(&rpc, config(extra.clone())).await, None, "{extra}");
+    }
+    // The checked path still loads: the `notes` skill changes the contract.
+    let contract = |extra: Value| async {
+        let opened = rpc.call(method::AGENT_OPEN, config(extra)).await.unwrap();
+        opened["contract"].clone()
+    };
+    let notes = contract(json!({"skills": true, "config_dir": project.join(".linch")}));
+    assert_ne!(notes.await, contract(json!({"skills": true})).await);
+    let outside = [
+        json!({"skills": true, "workspace": project, "config_dir": beta}),
+        json!({"skills": true, "workspace": project, "config_dir": "../../beta/.linch"}),
+        json!({"skills": true, "workspace": root, "config_dir": "link"}),
+        json!({"subagents": true, "workspace": root, "config_dir": "link"}),
+        json!({"skills": true, "workspace": root.join("escape")}),
+        json!({"skills": true, "workspace": root.join("dangles")}),
+        json!({"skills": true, "workspace": project, "config_dir": "missing"}),
+        json!({"skills": true, "config_dir": beta}),
+        json!({"skills": true, "config_dir": "/"}),
+    ];
+    for extra in outside {
+        let kind = refused(&rpc, config(extra.clone())).await;
+        assert_eq!(kind.as_deref(), Some("config_dir"), "{extra}");
+    }
+}
+
+#[tokio::test]
 async fn an_mcp_stdio_server_must_match_an_entry_exactly() {
     let program = example("mcp_server");
     assert!(program.exists(), "{} was not built", program.display());

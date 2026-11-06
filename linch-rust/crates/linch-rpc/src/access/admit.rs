@@ -2,7 +2,8 @@
 //! read, no MCP process is started and no database is connected for a
 //! refused request.
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use linch::permissions::RuleDecision;
 use linch::{
@@ -18,9 +19,9 @@ use crate::error::{ErrorObject, code};
 impl Tenant {
     /// Refuse `config` unless its namespace is this tenant's and its
     /// provider, endpoints, permissions, workspace, store and MCP servers
-    /// are all allowed. The workspace and the project root are replaced by
-    /// the canonical paths that were checked, and `bash` is turned off
-    /// unless the tenant may run exec tools.
+    /// are all allowed. The workspace, the project root and the config
+    /// directory are replaced by the paths that were checked, and `bash` is
+    /// turned off unless the tenant may run exec tools.
     pub(crate) async fn admit(&self, config: &mut AgentConfig) -> Result<(), ErrorObject> {
         let namespace = &config.namespace;
         let own = namespace == &self.name
@@ -53,6 +54,11 @@ impl Tenant {
         }
         if let Some(root) = config.workspace.take() {
             config.workspace = Some(allow.admit_dir(root, "workspace").await?);
+        }
+        if config.skills || config.subagents {
+            let workspace = config.workspace.as_deref();
+            let dir = allow.admit_config_dir(config.config_dir.take(), workspace);
+            config.config_dir = Some(dir.await?);
         }
         config.bash &= allow.exec_tools;
         if let StoreConfig::Postgres { dsn } = &config.stores
@@ -135,6 +141,34 @@ impl Allowlists {
         let message =
             format!("{kind} is not an existing directory under the tenant's workspace_roots");
         Err(refused(kind, message))
+    }
+
+    /// The directory skills and subagents load from, resolved as the
+    /// facade does: a relative one against the workspace, else the server's
+    /// working directory. One the config names must pass
+    /// [`Self::admit_dir`]. The default `.linch` may be missing, as nothing
+    /// then loads, but when anything is there, a symlink included, it must
+    /// pass too; the client did not choose that path, so this probes
+    /// nothing.
+    async fn admit_config_dir(
+        &self,
+        dir: Option<PathBuf>,
+        workspace: Option<&Path>,
+    ) -> Result<PathBuf, ErrorObject> {
+        let resolve = |dir: &Path| match workspace {
+            Some(root) => root.join(dir),
+            None => std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()),
+        };
+        match dir {
+            Some(dir) => self.admit_dir(resolve(&dir), "config_dir").await,
+            None => {
+                let default = resolve(Path::new(".linch"));
+                match tokio::fs::symlink_metadata(&default).await {
+                    Err(error) if error.kind() == ErrorKind::NotFound => Ok(default),
+                    _ => self.admit_dir(default, "config_dir").await,
+                }
+            }
+        }
     }
 
     /// Refuse what lets calls run without asking, `auto_allow` entries and

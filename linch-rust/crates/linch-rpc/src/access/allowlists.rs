@@ -184,10 +184,11 @@ impl Allowlists {
         self
     }
 
-    /// Directories a `workspace` and a `permissions.project_root` may be,
-    /// or lie under, compared on the canonical path. Without one a config
-    /// can name neither, so it keeps the default policy. Blocks on the file
-    /// system, so call it at startup.
+    /// Directories a `workspace`, a `permissions.project_root` and, with
+    /// skills or subagents on, a `config_dir` may be, or lie under,
+    /// compared on the canonical path. Without one a config can name none
+    /// of them, so it keeps the default policy. Blocks on the file system,
+    /// so call it at startup.
     ///
     /// Raises:
     ///     AccessError: If a root does not exist or cannot be resolved.
