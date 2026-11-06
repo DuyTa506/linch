@@ -29,7 +29,7 @@ def _text(message: Message) -> TextBlock:
     return block
 
 
-@pytest.mark.parametrize("mode", ["historical_only"])
+@pytest.mark.parametrize("mode", ["visible_only", "historical_only"])
 def test_append_visibility_projection(mode: str) -> None:
     log = SessionLog()
     normal = _msg("normal")
@@ -140,6 +140,26 @@ def test_seed_takes_defensive_ownership_of_both_input_graphs() -> None:
 
     assert log.full_history == (_msg("history"),)
     assert log.provider_view == (_msg("summary"),)
+
+
+def test_session_provider_projection_is_logged() -> None:
+    # Every message in the session-owned provider projection is traceable to a
+    # logged entry. Ephemeral request context is intentionally outside this log.
+    log = SessionLog()
+    log.append_many([_msg("1"), _msg("2")])
+    log.append(_msg("reminder"), historical=False)
+    summary = _msg("summary")
+    log.record_projection([summary, _msg("kept")])
+    log.append(_msg("after"))
+
+    logged: list[Message] = []
+    for entry in log.entries:
+        if isinstance(entry, MessageEntry) and entry.visible:
+            logged.append(entry.message)
+        elif isinstance(entry, ProjectionEntry):
+            logged.extend(entry.replacement)
+    for message in log.provider_view:
+        assert message in logged
 
 
 def test_history_fingerprint_defers_cyclic_metadata() -> None:

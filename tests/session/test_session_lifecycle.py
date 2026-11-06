@@ -119,6 +119,19 @@ async def test_async_context_manager_releases_on_exit() -> None:
     assert "s1" not in agent._sessions
 
 
+async def test_completed_background_tasks_unregister_themselves() -> None:
+    agent = _agent()
+    session = await agent.session()
+    tasks = [asyncio.create_task(asyncio.sleep(0)) for _ in range(100)]
+    for task in tasks:
+        session.background_tasks.append(task)
+
+    await asyncio.gather(*tasks)
+
+    assert session.background_tasks == []
+    await agent.close()
+
+
 async def test_agent_awaits_provider_prepare_once_before_first_run() -> None:
     from linch.filesystem.offload import OffloadConfig
 
@@ -194,7 +207,7 @@ async def test_cancelled_agent_close_drains_default_plugin_before_returning() ->
         await agent.close()
 
 
-@pytest.mark.parametrize("operation", ["append"])
+@pytest.mark.parametrize("operation", ["run", "append"])
 async def test_closed_session_rejects_operations(operation: str) -> None:
     from linch.errors import ConfigError
 

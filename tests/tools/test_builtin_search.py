@@ -143,6 +143,32 @@ async def test_windowed_read_only_grants_edit_for_seen_lines(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_windowed_read_replace_all_requires_every_match_region(tmp_path) -> None:
+    target = tmp_path / "repeated.txt"
+    target.write_text("same\nother\nsame\n", encoding="utf-8")
+    ctx = _make_ctx(tmp_path)
+    ctx.file_read_tracker = FileReadTracker()
+    read = ReadTool()
+    edit = EditTool()
+
+    await read.execute(read.validate({"file_path": target.name, "offset": 1, "limit": 1}), ctx)
+    result = await edit.execute(
+        edit.validate(
+            {
+                "file_path": target.name,
+                "old_string": "same",
+                "new_string": "changed",
+                "replace_all": True,
+            }
+        ),
+        ctx,
+    )
+
+    assert result.is_error
+    assert target.read_text(encoding="utf-8") == "same\nother\nsame\n"
+
+
+@pytest.mark.asyncio
 async def test_windowed_read_beyond_eof_records_no_range(tmp_path) -> None:
     target = tmp_path / "short.txt"
     target.write_text("line\n", encoding="utf-8")

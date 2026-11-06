@@ -148,6 +148,52 @@ class LoopingProvider:
         }
 
 
+def _make_agent(
+    provider: Any,
+    *,
+    loop_guard: Any = None,
+    tool_name: str = "FakeTool",
+    **overrides: Any,
+):
+    """Build a minimal Agent suitable for loop guard integration tests."""
+    from linch.config import FeatureFlags
+
+    return make_agent(
+        provider,
+        tools=tool_registry(StubTool(name=tool_name, scope="read", parallel=True, output="ok")),
+        run_store=None,
+        loop_guard=loop_guard,
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        **overrides,
+    )
+
+
+async def _collect(session, prompt: str = "go"):
+    events = []
+    async for event in session.run(prompt):
+        events.append(event)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_guard_disabled_via_none():
+    """loop_guard=None disables all guard checks; loop runs until max_turns."""
+    from linch.events import LoopGuardEvent
+
+    provider = LoopingProvider(tool_name="FakeTool", tool_input={"k": "v"})
+    agent = _make_agent(provider, loop_guard=None, max_turns=5)
+    session = await agent.session()
+    events = await _collect(session)
+
+    # With guard disabled there should be no loop_guard trip events
+    # (only the max_turns LoopGuardEvent at the end)
+    guard_events = [e for e in events if isinstance(e, LoopGuardEvent)]
+    assert all(g.reason == "max_turns" for g in guard_events), (
+        "guard_disabled should only see max_turns event, got: "
+        + str([g.reason for g in guard_events])
+    )
+
+
 def test_loop_guard_and_permission_keys_preserve_exact_ascii_escaped_bytes() -> None:
     from linch.loop_guard.guard import LoopGuard, LoopGuardState, evaluate_loop_guard
     from linch.permissions.keys import permission_decision_key

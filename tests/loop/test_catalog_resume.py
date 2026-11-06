@@ -19,6 +19,42 @@ def _skill_file(root: Path, name: str, description: str) -> None:
     )
 
 
+def test_bypass_contract_keeps_generated_skill_permission_rules() -> None:
+    from types import SimpleNamespace
+
+    from linch.loop.contracts import _permission_policy_contract
+    from linch.permissions import PermissionEngine, ToolRule
+
+    generated = ToolRule(tool="Skill", decision="allow", arg="alpha")
+    agent = SimpleNamespace(
+        permission_engine=PermissionEngine(mode="default", rules=[generated]),
+        _skill_permission_rules=[generated],
+    )
+
+    contract = _permission_policy_contract(agent)
+
+    assert contract["rules"] == [
+        {"kind": "tool", "decision": "allow", "tool": "Skill", "arg": "alpha"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_contract_fingerprints_bash_process_limits() -> None:
+    from linch import BashTool, RunOptions
+    from linch.loop.contracts import _build_run_contract
+    from tests.support.tools import tool_registry
+
+    supplied = BashTool(max_processes=1, max_runtime_ms=70)
+    agent = make_agent(ScriptedProvider([]), tools=tool_registry(supplied))
+    session = await agent.session(id="contract-limits")
+    before = _build_run_contract(session, "go", RunOptions())
+
+    supplied.max_processes = 2
+    after = _build_run_contract(session, "go", RunOptions())
+
+    assert before.fingerprint != after.fingerprint
+
+
 @pytest.mark.asyncio
 async def test_durable_resume_after_skill_reload_passes_contract_validation(tmp_path: Path) -> None:
     from linch.config import FeatureFlags
@@ -369,3 +405,17 @@ async def test_resume_contract_survives_in_turn_reload_compaction_and_crash(tmp_
     snapshot = resumed.meta["linch.prefix"]
     assert snapshot_system(snapshot) == provider.requests[0].system
     assert snapshot_tools(snapshot) == provider.requests[0].tools
+
+
+async def test_contract_fingerprints_bash_max_runtime_independently() -> None:
+    from linch import BashTool, RunOptions
+    from linch.loop.contracts import _build_run_contract
+    from tests.support.tools import tool_registry
+
+    tool = BashTool(max_processes=1, max_runtime_ms=70)
+    agent = make_agent(ScriptedProvider([]), tools=tool_registry(tool))
+    session = await agent.session(id="contract-runtime")
+    before = _build_run_contract(session, "go", RunOptions())
+    tool.max_runtime_ms = 71
+    after = _build_run_contract(session, "go", RunOptions())
+    assert before.fingerprint != after.fingerprint

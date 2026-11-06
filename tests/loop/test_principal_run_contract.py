@@ -5,10 +5,10 @@ from typing import Any
 import pytest
 
 from linch import Principal, RunOptions
-from linch.run_store import InMemoryRunStore, run_meta_with_contract
+from linch.run_store import InMemoryRunStore, RunCheckpoint, run_meta_with_contract
 from linch.sessions import InMemorySessionStore
 from tests.support.agents import make_agent
-from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 from tests.support.stores import memory_run_store, memory_session_store
 from tests.support.tools import tool_registry
 
@@ -73,6 +73,42 @@ async def _interrupt(session: Any, opts: Any) -> str:
 
 
 @pytest.mark.asyncio
+async def test_omitted_resume_principal_hydrates_from_durable_contract() -> None:
+    run_store = InMemoryRunStore()
+    session_store = InMemorySessionStore()
+    principal = Principal("tenant-a", "alice", {"reader", "operator"})
+    first_tool = _PrincipalTool()
+    first = _agent(
+        ScriptedProvider([ToolUseTurn("PrincipalTool", {}), TextTurn("done")]),
+        first_tool,
+        run_store,
+        session_store,
+    )
+    run_id = await _interrupt(await first.session(id="s"), RunOptions(principal=principal))
+    await first.close()
+
+    resumed_tool = _PrincipalTool()
+    resumed = _agent(
+        ScriptedProvider([ToolUseTurn("PrincipalTool", {}), TextTurn("done")]),
+        resumed_tool,
+        run_store,
+        session_store,
+    )
+    opts = RunOptions()
+    events = [event async for event in (await resumed.session(id="s")).resume(run_id, opts)]
+    assert events[-1].subtype == "success"
+    assert resumed_tool.seen == [principal]
+    assert opts.principal is None
+    record = await run_store.load_run(run_id)
+    assert record is not None
+    assert record.meta["run_contract"]["payload"]["run_options"]["principal"] == {
+        "roles": ["operator", "reader"],
+        "tenant": "tenant-a",
+        "user": "alice",
+    }
+
+
+@pytest.mark.asyncio
 async def test_resume_rejects_tenant_user_or_role_change_before_provider_dispatch() -> None:
     from linch.errors import ConfigError
 
@@ -98,6 +134,30 @@ async def test_resume_rejects_tenant_user_or_role_change_before_provider_dispatc
                 )
             ]
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_run_options_principal_is_snapshotted_before_caller_mutation() -> None:
+    for initial, replacement, expected in (
+        (
+            Principal("tenant-a", "alice", {"reader"}),
+            Principal("tenant-b", "mallory", {"admin"}),
+            Principal("tenant-a", "alice", {"reader"}),
+        ),
+        (None, Principal("tenant-b", "mallory", {"admin"}), None),
+    ):
+        tool = _PrincipalTool()
+        opts = RunOptions(principal=initial)
+        agent = _agent(
+            ScriptedProvider([ToolUseTurn("PrincipalTool", {}), TextTurn("done")]),
+            tool,
+        )
+        iterator = (await agent.session()).run("go", opts).__aiter__()
+        await iterator.__anext__()
+        opts.principal = replacement
+        events = [event async for event in iterator]
+        assert events[-1].subtype == "success"
+        assert tool.seen == [expected]
 
 
 @pytest.mark.asyncio
@@ -195,6 +255,61 @@ async def test_malformed_stored_principal_is_rejected_after_valid_contract_recom
     with pytest.raises(ConfigError, match="invalid principal shape"):
         _ = [event async for event in (await resumed.session(id="s")).resume(run_id, RunOptions())]
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rule() -> None:
+    import asyncio
+    import copy
+
+    from linch.loop.contracts import _build_run_contract
+    from linch.permissions import ToolRule
+    from linch.types import Usage
+
+    first_store = InMemoryRunStore()
+    second_store = copy.copy(first_store)
+    session_store = InMemorySessionStore()
+    principal = Principal("tenant-a", "alice", {"reader"})
+    permissions = {
+        "mode": "skip-dangerous",
+        "rules": [ToolRule("PrincipalTool", "deny", unless_role="reader")],
+    }
+    contract_agent = _agent(
+        ScriptedProvider([TextTurn("unused")]),
+        _PrincipalTool(),
+        first_store,
+        session_store,
+        permissions=permissions,
+    )
+    contract_session = await contract_agent.session(id="s")
+    contract = _build_run_contract(contract_session, "go", RunOptions(principal=principal))
+    await first_store.create_run(
+        "s",
+        id="cold",
+        meta=run_meta_with_contract(contract),
+        initial_checkpoint=RunCheckpoint(
+            phase="started", prompt="go", turn_index=0, total_usage=Usage()
+        ),
+    )
+    await first_store.claim("cold", "worker-a", 0.01)
+    await asyncio.sleep(0.02)
+    new = await second_store.claim("cold", "worker-b", 60.0)
+    await contract_agent.close()
+
+    tool = _PrincipalTool()
+    resumed = _agent(
+        ScriptedProvider([ToolUseTurn("PrincipalTool", {}), TextTurn("done")]),
+        tool,
+        second_store,
+        session_store,
+        permissions=permissions,
+    )
+    events = [
+        event
+        async for event in (await resumed.session(id="s")).resume("cold", RunOptions(lease=new))
+    ]
+    assert events[-1].subtype == "success"
+    assert tool.seen == [principal]
 
 
 @pytest.mark.asyncio
