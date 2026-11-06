@@ -268,6 +268,38 @@ impl Agent {
         runner::resume(Arc::clone(&self.inner), run_id, Some(decisions), options)
     }
 
+    /// Mark `run_id` failed for good, when it can never continue (its
+    /// durable state does not reconcile, or no agent has its contract).
+    ///
+    /// It claims the run, which fences out any live owner: that owner's
+    /// next write fails with a lost lease. Then one write commits an
+    /// `Error` holding `reason`, the `Result` (subtype `error`, with the
+    /// checkpoint's usage) and status `failed`. The contract is not
+    /// checked. A run whose last provider or summary call may be in flight
+    /// reports `usage_complete: false`.
+    ///
+    /// Args:
+    ///     run_id: A run of this agent's namespace that is not terminal.
+    ///     reason: Why the run failed; the `Error` event's message.
+    ///     options: The owner name for the claim; the other fields are
+    ///         ignored.
+    ///
+    /// Returns:
+    ///     The `Error` and `Result` envelopes, now durable.
+    ///
+    /// Raises:
+    ///     RunError: `Terminal` if the run already finished; `Store` if it
+    ///         does not exist or a store call fails; `Journal` if the commit
+    ///         fails, for example because another owner claimed it since.
+    pub async fn fail(
+        &self,
+        run_id: RunId,
+        reason: impl Into<String>,
+        options: RunOptions,
+    ) -> Result<Vec<Envelope>, RunError> {
+        runner::fail(&self.inner, run_id, reason.into(), options).await
+    }
+
     /// Tell the agent the host is done with `session_id`: run every
     /// [`AgentBuilder::on_session_close`] callback, in the order added.
     ///

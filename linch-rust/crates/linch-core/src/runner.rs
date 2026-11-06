@@ -37,13 +37,16 @@ use futures::Stream;
 use futures::future::BoxFuture;
 
 use crate::agent::{AgentInner, RunError, RunOptions};
+
 use crate::events::Envelope;
 use crate::hooks::ApprovalResponse;
 use crate::ids::RunId;
+pub(crate) use fail::fail;
 
 mod batch;
 mod compact;
 mod end;
+mod fail;
 mod hooks;
 mod sink;
 mod start;
