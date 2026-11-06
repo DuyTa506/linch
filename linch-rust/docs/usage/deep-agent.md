@@ -112,8 +112,8 @@ stores then work, and everything is gone when the server exits.
 
 ### Permissions
 
-The preset sets no permission policy. In `default` mode the file tools ask;
-`accept_edits`, as above, lets them write. `Subagent`, `SubagentContinue` and
+The preset sets no permission policy. In `default` mode `write_file` and
+`edit_file` ask; `accept_edits`, as above, lets them write. `Subagent`, `SubagentContinue` and
 `TaskStop` are exec-scoped and ask in both modes, so a deep agent that should
 delegate without stopping for approval needs rules that allow them, or
 `skip_dangerous`.
