@@ -88,7 +88,7 @@ cannot type.
 | `bool` | `boolean` |
 | `list`, `list[...]` | `array` (the item type is not kept) |
 | `dict`, `dict[...]` | `object` |
-| `X | None`, `Optional[X]` | `X`, not required |
+| `X \| None`, `Optional[X]` | `X`, not required |
 
 A parameter without a default and not optional is required, and the schema
 sets `additionalProperties: false`. Any other hint, a parameter with no hint,
