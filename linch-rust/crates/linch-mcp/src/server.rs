@@ -212,7 +212,10 @@ impl Supervisor {
                 () = lost.cancelled() => break false,
                 _ = &mut ended => break true,
                 () = list_changed.notified() => tokio::select! {
+                    biased;
                     () = close.cancelled() => break false,
+                    () = lost.cancelled() => break false,
+                    _ = &mut ended => break true,
                     listed = peer.list_all_tools() => match listed {
                         Ok(tools) => self.sync(tools),
                         Err(ServiceError::TransportSend(_) | ServiceError::TransportClosed) => {

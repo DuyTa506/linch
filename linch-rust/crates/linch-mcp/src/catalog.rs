@@ -237,4 +237,23 @@ mod tests {
         assert!(visible(&registry).is_empty());
         assert_eq!(catalog.skipped().len(), 1);
     }
+
+    #[test]
+    fn a_draft_07_schema_registers() {
+        // The MCP spec shows this as a valid inputSchema.
+        let registry = ToolRegistry::new();
+        let mut draft_07 = spec("calc", "Add.");
+        draft_07.input_schema.insert(
+            "$schema".into(),
+            "http://json-schema.org/draft-07/schema#".into(),
+        );
+        draft_07.input_schema.insert(
+            "properties".into(),
+            serde_json::json!({"a": {"type": "number"}, "b": {"type": "number"}}),
+        );
+        let mut catalog = Catalog::default();
+        catalog.sync(&registry, &link(), vec![draft_07]);
+        assert!(catalog.skipped().is_empty(), "{:?}", catalog.skipped());
+        assert_eq!(catalog.names(), ["mcp__s__calc"]);
+    }
 }

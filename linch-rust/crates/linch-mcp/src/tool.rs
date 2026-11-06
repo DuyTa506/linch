@@ -214,9 +214,14 @@ impl Tool for McpTool {
             () = ctx.cancel.cancelled() => {
                 // Over stdio this sends `notifications/cancelled`; over modern
                 // streamable HTTP rmcp closes the request's stream instead.
+                // Sent in the background: a server that stopped reading its
+                // stdin must not keep the cancelled call from returning.
                 let reason = Some("cancelled by the caller".to_owned());
                 let notice = CancelledNotificationParam::new(Some(id), reason);
-                let _ = conn.peer.notify_cancelled(notice).await;
+                let peer = conn.peer.clone();
+                tokio::spawn(async move {
+                    let _ = peer.notify_cancelled(notice).await;
+                });
                 Err(coded("[aborted; the MCP request was cancelled]", codes::ABORTED))
             }
             response = handle.await_response() => match response {
