@@ -57,14 +57,15 @@ struct OpenCall {
 /// # Coalescing
 ///
 /// Consecutive `text_delta`s merge into one [`TextBlock`]; consecutive
-/// `thinking_delta`s merge into one [`ThinkingBlock`] whose `signature` is
-/// the last non-`None` signature seen in that run. A run of either kind
-/// flushes as soon as a different kind of event arrives, or at
-/// `message_end` — so a `text_delta` received while a tool call is open
-/// does not flush around that call; the resulting text block simply lands
-/// after the tool-use block in `content` order. Each `redacted_thinking`
-/// and each completed tool call appends its own block immediately and does
-/// not coalesce with neighbors.
+/// `thinking_delta`s merge into one [`ThinkingBlock`] until a delta that
+/// carries a signature, which ends the block: a provider signs each block
+/// once, at its end, and two signed blocks in a row must replay as two. A
+/// run of either kind also flushes as soon as a different kind of event
+/// arrives, or at `message_end` — so a `text_delta` received while a tool
+/// call is open does not flush around that call; the resulting text block
+/// simply lands after the tool-use block in `content` order. Each
+/// `redacted_thinking` and each completed tool call appends its own block
+/// immediately and does not coalesce with neighbors.
 ///
 /// A thinking run flushes to a block if it has any text, or carries a
 /// signature — a signed `thinking_delta` with empty text is valid provider
@@ -157,6 +158,7 @@ impl Assembler {
                 self.thinking_buf.push_str(&delta.text);
                 if let Some(signature) = delta.signature {
                     self.thinking_sig = Some(signature);
+                    self.flush_thinking();
                 }
                 Ok(())
             }

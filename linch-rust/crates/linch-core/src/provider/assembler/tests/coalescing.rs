@@ -35,32 +35,69 @@ fn text_delta_during_an_open_tool_call_lands_after_its_block() {
     );
 }
 
+fn thinking(text: &str, signature: Option<&str>) -> ProviderEvent {
+    ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
+        text: text.into(),
+        signature: signature.map(Into::into),
+    })
+}
+
+fn block(text: &str, signature: Option<&str>) -> ContentBlock {
+    ContentBlock::Thinking(ThinkingBlock {
+        thinking: text.into(),
+        signature: signature.map(Into::into),
+    })
+}
+
 #[test]
-fn thinking_signature_is_the_last_one_seen_in_the_run() {
+fn a_signed_thinking_delta_closes_its_block() {
     let assembly = assemble([
         start("m"),
-        ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
-            text: "a".into(),
-            signature: Some("sig-1".into()),
-        }),
-        ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
-            text: "b".into(),
-            signature: None,
-        }),
-        ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
-            text: "c".into(),
-            signature: Some("sig-2".into()),
-        }),
+        thinking("a", Some("sig-1")),
+        thinking("b", None),
+        thinking("c", Some("sig-2")),
         end(StopReason::EndTurn),
     ])
     .unwrap();
     assert_eq!(
         assembly.message.content,
-        vec![ContentBlock::Thinking(ThinkingBlock {
-            thinking: "abc".into(),
-            signature: Some("sig-2".into()),
-        })]
+        [block("a", Some("sig-1")), block("bc", Some("sig-2"))]
     );
+}
+
+/// Claude 5.x sends a reasoning block and a separately signed progress
+/// update back to back before a tool call (R1-prov 1). Each must replay as
+/// it came, or the next request is refused.
+#[test]
+fn back_to_back_signed_thinking_blocks_stay_apart() {
+    let assembly = assemble([
+        start("m"),
+        thinking("reasoning A", None),
+        thinking("", Some("sigA")),
+        thinking("update B", None),
+        thinking("", Some("sigB")),
+        ProviderEvent::ToolUseStart(ToolUseStartEvent {
+            id: "c1".into(),
+            name: "Read".into(),
+        }),
+        ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
+            id: "c1".into(),
+            json_delta: "{}".into(),
+        }),
+        ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
+        end(StopReason::ToolUse),
+    ])
+    .unwrap();
+    let content = &assembly.message.content;
+    assert_eq!(
+        content[..2],
+        [
+            block("reasoning A", Some("sigA")),
+            block("update B", Some("sigB"))
+        ]
+    );
+    assert!(matches!(content[2], ContentBlock::ToolUse(_)));
+    assert_eq!(content.len(), 3);
 }
 
 #[test]

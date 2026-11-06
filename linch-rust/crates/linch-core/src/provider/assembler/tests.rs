@@ -124,8 +124,10 @@ fn events_and_expected(model: &str, seeds: &[Seed]) -> (Vec<ProviderEvent>, Vec<
                 }));
                 expected.flush_text();
                 expected.thinking.push_str(text);
+                // A signature ends its block.
                 if let Some(sig) = signature {
                     expected.thinking_sig = Some(sig.clone());
+                    expected.flush_thinking();
                 }
             }
             Seed::Redacted(data) => {
