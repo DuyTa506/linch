@@ -57,7 +57,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             result: ToolResultBlock::text("c1", "done", false),
             duration_ms: 1,
             canonical_output: None,
-            metadata: JsonObject::new(),
+            metadata: None,
         }),
         Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),

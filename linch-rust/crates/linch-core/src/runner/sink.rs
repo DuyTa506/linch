@@ -131,8 +131,10 @@ impl ToolSink for JournalSink<'_> {
             duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
             canonical_output: None,
             metadata: match &outcome.result {
-                Ok(output) => output.metadata.clone(),
-                Err(_) => Default::default(),
+                Ok(output) if !output.metadata.is_empty() => {
+                    Some(Box::new(output.metadata.clone()))
+                }
+                _ => None,
             },
         });
         let events = if ran {
