@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 async-trait = "0.1.92"
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
 jsonschema = { version = "0.60.2", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }

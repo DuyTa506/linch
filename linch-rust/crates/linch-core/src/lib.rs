@@ -28,6 +28,7 @@ pub mod provider;
 pub mod registration;
 pub mod registry;
 pub mod run;
+pub mod scheduler;
 pub mod session_log;
 pub mod tool;
 pub mod usage;
