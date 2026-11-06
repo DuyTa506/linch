@@ -39,6 +39,7 @@ pub mod store;
 pub mod subagents;
 pub mod tool;
 pub mod usage;
+pub mod vfs;
 
 pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, RunError, RunOptions};
 pub use canonical::{

@@ -41,20 +41,19 @@ pub fn vfs_tools(files: Arc<dyn SessionFiles>) -> Vec<Arc<dyn Tool>> {
     ]
 }
 
-impl From<VfsError> for ToolOutputError {
-    fn from(error: VfsError) -> Self {
-        let code = match &error {
-            VfsError::NotFound { path } => {
-                let message = format!("File not found: '{path}'. Use ls() to see available files.");
-                return coded(message, "not_found");
-            }
-            VfsError::InvalidPath { .. } => "invalid_path",
-            VfsError::NoMatch { .. } => "no_match",
-            VfsError::NotUnique { .. } => "ambiguous_match",
-            VfsError::Backend(_) => "backend",
-        };
-        coded(error.to_string(), code)
-    }
+/// The model-facing error for a failed file operation, with a code.
+fn tool_error(error: VfsError) -> ToolOutputError {
+    let code = match &error {
+        VfsError::NotFound { path } => {
+            let message = format!("File not found: '{path}'. Use ls() to see available files.");
+            return coded(message, "not_found");
+        }
+        VfsError::InvalidPath { .. } => "invalid_path",
+        VfsError::NoMatch { .. } => "no_match",
+        VfsError::NotUnique { .. } => "ambiguous_match",
+        VfsError::Backend(_) => "backend",
+    };
+    coded(error.to_string(), code)
 }
 
 /// The trimmed `path` field, normalized as a file path.
@@ -63,7 +62,7 @@ fn path_field(input: &JsonObject) -> Result<String, ToolOutputError> {
     if path.is_empty() {
         return Err(invalid("path must be a non-empty string"));
     }
-    Ok(file_path(path)?)
+    file_path(path).map_err(tool_error)
 }
 
 fn path_of(input: &JsonObject) -> &str {
@@ -129,7 +128,7 @@ impl Tool for Ls {
 
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let prefix = optional_string(&input, "prefix")?.unwrap_or("");
-        let paths = self.files.backend(&ctx.session_id).ls(prefix).await?;
+        let paths = (self.files.backend(&ctx.session_id).ls(prefix).await).map_err(tool_error)?;
         if paths.is_empty() {
             let message = match prefix {
                 "" => "No files found.".to_owned(),
@@ -210,7 +209,7 @@ impl Tool for ReadFile {
         let path = path_field(&input)?;
         let offset = optional_count(&input, "offset")?;
         let limit = optional_count(&input, "limit")?;
-        let text = self.files.backend(&ctx.session_id).read(&path).await?;
+        let text = (self.files.backend(&ctx.session_id).read(&path).await).map_err(tool_error)?;
         if text.is_empty() {
             return Ok(ToolOutput::new("<file is empty>"));
         }
@@ -287,7 +286,8 @@ impl Tool for WriteFile {
         self.files
             .backend(&ctx.session_id)
             .write(&path, content)
-            .await?;
+            .await
+            .map_err(tool_error)?;
         let lines = plural(split_lines(content).len(), "line");
         Ok(ToolOutput::new(format!("Written {lines} to '{path}'.")))
     }
@@ -356,7 +356,10 @@ impl Tool for EditFile {
             return Err(invalid("old_string must not be empty"));
         }
         let backend = self.files.backend(&ctx.session_id);
-        let count = backend.edit(&path, old, new, all).await?;
+        let count = backend
+            .edit(&path, old, new, all)
+            .await
+            .map_err(tool_error)?;
         let made = plural(count, "replacement");
         Ok(ToolOutput::new(format!("Made {made} in '{path}'.")))
     }

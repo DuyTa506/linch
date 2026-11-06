@@ -3,8 +3,8 @@
 //! [`PgRunStore`] and [`PgSessionStore`] implement linch-core's
 //! [`RunStore`](linch_core::RunStore) and
 //! [`SessionStore`](linch_core::SessionStore) and pass its conformance suite;
-//! [`PgFileBackend`] implements linch-tools'
-//! [`FileBackend`](linch_tools::vfs::FileBackend) and passes its suite. All
+//! [`PgFileBackend`] implements linch-core's
+//! [`FileBackend`](linch_core::vfs::FileBackend) and passes its suite. All
 //! take a [`PgPool`]; tables are created by [`migrate`], which the host runs
 //! once at startup:
 //!

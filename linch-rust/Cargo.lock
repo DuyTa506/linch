@@ -1723,7 +1723,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "linch-core",
- "linch-tools",
  "serde",
  "serde_json",
  "sqlx",

@@ -1,9 +1,9 @@
 //! `PgFileBackend`: the vfs conformance suite, namespaces, byte order and
 //! edits that do not lose each other.
 
+use linch_core::vfs::FileBackend;
+use linch_core::vfs::conformance::backend_suite;
 use linch_postgres::PgFileBackend;
-use linch_tools::vfs::FileBackend;
-use linch_tools::vfs::conformance::backend_suite;
 
 use crate::common::TestDb;
 
