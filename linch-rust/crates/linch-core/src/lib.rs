@@ -49,6 +49,7 @@ pub use hooks::{
     ToolMatcher,
 };
 pub use ids::{RunId, SessionId};
+pub use journal::{Journal, JournalError, ReconcileError, Recovery, ToolRecovery, reconcile};
 pub use json::{JsonObject, JsonValue};
 pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,
@@ -75,6 +76,7 @@ pub use scheduler::{
     RunIdentity, ToolSink,
 };
 pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
+pub use store::memory::{MemoryRunStore, MemorySessionStore};
 pub use store::{Commit, Lease, NewRun, RunRecord, RunStore, SessionStore, StoreError};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
