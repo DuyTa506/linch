@@ -1,11 +1,14 @@
 //! [`execute`]: run a decided plan.
 
+use std::any::Any;
 use std::convert::Infallible;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use futures::future::{self, Either};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -98,7 +101,8 @@ pub struct ExecuteOptions {
 /// the tool's `output_schema`.
 ///
 /// A run abort is not an error: the calls it stops get an aborted error
-/// result. Only a [`ToolSink`] error stops the batch and is returned.
+/// result, and a tool that panics gets an error result naming the panic.
+/// Only a [`ToolSink`] error stops the batch and is returned.
 ///
 /// # Panics
 ///
@@ -239,7 +243,8 @@ impl<S: ToolSink> Runner<'_, S> {
             Some(progress),
         )
         .with_deadline(deadline);
-        let execution = self.timed(call, deadline, tool.tool().execute(call.input.clone(), ctx));
+        let execution = async { tool.tool().execute(call.input.clone(), ctx).await };
+        let execution = self.timed(call, deadline, caught(&call.tool_name, execution));
         let result = {
             let forward = pin!(async {
                 while let Some(report) = reports.recv().await {
@@ -310,6 +315,26 @@ impl<S: ToolSink> Runner<'_, S> {
         }
         finished
     }
+}
+
+/// `execution`, with a panic in the tool turned into its error result, so a
+/// broken tool fails its call and not the run.
+async fn caught(name: &str, execution: impl Future<Output = ToolResult>) -> ToolResult {
+    let panic = match AssertUnwindSafe(execution).catch_unwind().await {
+        Ok(result) => return result,
+        Err(panic) => panic,
+    };
+    let message = match panic_text(&*panic) {
+        Some(text) => format!("Tool {name:?} panicked: {text}"),
+        None => format!("Tool {name:?} panicked"),
+    };
+    Err(ToolOutputError::new(message))
+}
+
+/// The message of a `panic!`, which is a `&str` or a `String`.
+fn panic_text(panic: &(dyn Any + Send)) -> Option<&str> {
+    (panic.downcast_ref::<&str>().copied())
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
 }
 
 fn error(message: impl Into<String>) -> Finished {

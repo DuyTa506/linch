@@ -166,3 +166,32 @@ async fn progress_reaches_the_sink_and_late_reports_are_dropped() {
         "the call's token ends with the call"
     );
 }
+
+/// R1-sec F5: a tool that panics, before or after it first awaits, gives
+/// an error result; the batch goes on and the run does not die.
+#[tokio::test]
+async fn a_panicking_tool_becomes_an_error_result() {
+    let log = new_log();
+    let fx = Fixture::new(PermissionMode::Default);
+    fx.tool(TestTool::new("Boom", ToolScope::Read, &log).body(|_, _| panic!("kaboom")));
+    fx.tool(TestTool::new("Bang", ToolScope::Read, &log).body(|_, _| {
+        async {
+            tokio::task::yield_now().await;
+            panic!("bang {}", 1)
+        }
+        .boxed()
+    }));
+    fx.tool(TestTool::new("Read", ToolScope::Read, &log));
+    let sink = RecSink::default();
+    let blocks = [
+        use_block("a", "Boom", json!({})),
+        use_block("b", "Bang", json!({})),
+        use_block("c", "Read", json!({})),
+    ];
+    let results = fx.run(&blocks, &sink, 4).await;
+    assert_eq!(text(&results[0]), r#"Tool "Boom" panicked: kaboom"#);
+    assert_eq!(text(&results[1]), r#"Tool "Bang" panicked: bang 1"#);
+    assert!(results[0].is_error && results[1].is_error);
+    assert!(!results[2].is_error);
+    assert_eq!(sink.finished_ids().len(), 3);
+}
