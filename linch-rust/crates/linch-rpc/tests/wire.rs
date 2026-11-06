@@ -173,7 +173,12 @@ async fn the_start_result_comes_before_the_run_notifications() {
             assert!(notification["params"].get("error").is_none());
             break;
         }
-        assert_eq!(notification["params"]["v"], 1);
+        let envelopes = notification["params"]["envelopes"].as_array().unwrap();
+        assert!(!envelopes.is_empty(), "{notification}");
+        for envelope in envelopes {
+            assert_eq!(envelope["v"], 1);
+            assert_eq!(envelope["run_id"], run_id);
+        }
     }
     assert!(
         methods[..methods.len() - 1]
@@ -216,8 +221,12 @@ async fn a_client_answer_reaches_its_server_request_and_a_malformed_one_fails_it
                 answer["id"] = json!(id);
                 wire.send(&answer.to_string()).await;
             }
-            Some("run.event") if message["params"]["event"]["type"] == "tool_call_end" => {
-                ends.push(message["params"]["event"]["result"].to_string());
+            Some("run.event") => {
+                for envelope in message["params"]["envelopes"].as_array().unwrap() {
+                    if envelope["event"]["type"] == "tool_call_end" {
+                        ends.push(envelope["event"]["result"].to_string());
+                    }
+                }
             }
             Some("run.end") => break,
             Some(_) => {}
@@ -231,6 +240,73 @@ async fn a_client_answer_reaches_its_server_request_and_a_malformed_one_fails_it
     // Reported as the server's reading failure, not as the tool's error.
     assert!(ends[0].contains("answered badly"), "{}", ends[0]);
     assert!(ends[1].contains("fine"), "{}", ends[1]);
+}
+
+#[tokio::test]
+async fn envelopes_share_lines_and_each_tool_call_follows_its_start() {
+    let mut wire = Wire::new();
+    let turns = vec![
+        tool_turn("call_1", "lookup", json!({})),
+        tool_turn("call_2", "lookup", json!({})),
+        text_turn("Done."),
+    ];
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let open = json!({"jsonrpc": "2.0", "id": 1, "method": "agent.open",
+                      "params": hosted(turns, "default", tools)});
+    wire.send(&open.to_string()).await;
+    let agent = wire.recv().await["result"]["agent"].clone();
+    let start = json!({"jsonrpc": "2.0", "id": 2, "method": "run.start",
+                       "params": {"agent": agent, "session_id": "s1", "prompt": "go"}});
+    wire.send(&start.to_string()).await;
+    assert_eq!(wire.recv().await["id"], 2);
+    // What crossed, in order: each envelope's kind and seq, and each call.
+    let (mut order, mut lines, mut seqs) = (Vec::new(), 0, Vec::new());
+    loop {
+        let message = wire.recv().await;
+        match message["method"].as_str() {
+            Some("tool.call") => {
+                order.push(format!("call {}", message["params"]["tool_use_id"]));
+                let answer = json!({"jsonrpc": "2.0", "id": message["id"],
+                                    "result": {"value": "ok"}});
+                wire.send(&answer.to_string()).await;
+            }
+            Some("run.event") => {
+                lines += 1;
+                for envelope in message["params"]["envelopes"].as_array().unwrap() {
+                    let event = &envelope["event"];
+                    let call = match event["type"].as_str() {
+                        Some("tool_call_end") => &event["result"]["tool_use_id"],
+                        _ => &event["tool_use_id"],
+                    };
+                    order.push(format!("{} {call}", event["type"].as_str().unwrap()));
+                    seqs.push(envelope["seq"].as_u64().unwrap());
+                }
+            }
+            Some("run.end") => break,
+            other => panic!("unexpected {other:?}: {message}"),
+        }
+    }
+    assert!(
+        lines < seqs.len(),
+        "{lines} lines for {} envelopes",
+        seqs.len()
+    );
+    assert!(seqs.is_sorted(), "{seqs:?}");
+    for call in ["\"call_1\"", "\"call_2\""] {
+        let at = order
+            .iter()
+            .position(|o| *o == format!("call {call}"))
+            .unwrap();
+        assert_eq!(
+            order[at - 1],
+            format!("tool_call_start {call}"),
+            "{order:?}"
+        );
+        let end = order
+            .iter()
+            .position(|o| *o == format!("tool_call_end {call}"));
+        assert!(end.unwrap() > at, "{order:?}");
+    }
 }
 
 const CANCEL: &str =

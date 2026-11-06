@@ -41,7 +41,7 @@ pub mod method {
     pub const RUN_CANCEL: &str = "run.cancel";
     /// Read a run's durable events after a seq.
     pub const RUN_EVENTS: &str = "run.events";
-    /// Notification: one envelope of an active run.
+    /// Notification: one or more envelopes of an active run, in order.
     pub const RUN_EVENT: &str = "run.event";
     /// Notification: the server stopped driving a run.
     pub const RUN_END: &str = "run.end";
@@ -202,6 +202,18 @@ pub struct EventsParams {
 pub struct Events {
     /// Durable envelopes in seq order.
     pub events: Vec<Envelope>,
+}
+
+/// Params of the `run.event` notification: consecutive envelopes of one
+/// run, in the run's order. Each envelope is whole (`v`, `seq`, `run_id`,
+/// `ts_ms`, `event`) and decodes on its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunEvent {
+    /// The run every envelope belongs to.
+    pub run_id: RunId,
+    /// One or more envelopes.
+    pub envelopes: Vec<Envelope>,
 }
 
 /// Params of the `run.end` notification.

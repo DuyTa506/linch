@@ -4,7 +4,7 @@
 //!
 //! A process (the `linch-server` sidecar) opens agents from configs and
 //! drives their runs; the client starts, approves, cancels and replays runs
-//! and receives every envelope as a notification. Everything inside a turn
+//! and receives every envelope in a notification. Everything inside a turn
 //! runs in the server; it calls back into the client, on the same
 //! connection, only for what the client declared: host tools, and
 //! intercept callbacks at the occurrences their matchers accept.
@@ -288,12 +288,19 @@
 //!
 //! # Notifications
 //!
-//! **`run.event`**: params are one [`Envelope`](linch::Envelope),
-//! `{"v": 1, "seq": 7, "run_id": "...", "ts_ms": 1762400000000, "event":
-//! {"type": "...", ...}}`, in the run's order; `ts_ms` is when the server
-//! made the envelope, in Unix milliseconds. Durable kinds arrive once they
-//! are durable, so a client that saw seq `n` replays with
-//! `run.events(after_seq = n)`.
+//! **`run.event`** `{run_id, envelopes}` ([`RunEvent`](protocol::RunEvent)):
+//! one or more consecutive envelopes of one run, in the run's order. Each
+//! is a whole [`Envelope`](linch::Envelope), `{"v": 1, "seq": 7, "run_id":
+//! "...", "ts_ms": 1762400000000, "event": {"type": "...", ...}}`, that
+//! decodes on its own; `ts_ms` is when the server made the envelope, in
+//! Unix milliseconds. The server sends each envelope as soon as the run
+//! hands it over and joins only what is already waiting to be written: the
+//! envelopes queued together for one write (a turn's, say) share one
+//! notification, up to about 64 KiB, and any other message or another
+//! run's envelope starts a new one, so the order of the messages is
+//! unchanged (a `tool.call` still follows its call's `tool_call_start`).
+//! Durable kinds arrive once they are durable, so a client that saw seq
+//! `n` replays with `run.events(after_seq = n)`.
 //! Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) arrive
 //! at once, carry the last durable seq, and are never replayed. A run's
 //! envelopes end with `result` (finished) or `suspended` (waiting for

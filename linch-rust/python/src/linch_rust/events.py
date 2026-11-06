@@ -259,15 +259,20 @@ class Envelope:
     event: Event
 
 
+# Each kind's field names (`type` is a class variable, not among them).
+_FIELDS: dict[str, frozenset[str]] = {
+    kind: frozenset(field.name for field in fields(cls)) for kind, cls in _KINDS.items()
+}
+
+
 def decode_event(raw: JsonObject) -> Event:
     """Decode one event object `{"type": ..., ...}`."""
-    payload = {key: value for key, value in raw.items() if key != "type"}
     kind = str(raw.get("type", ""))
     cls = _KINDS.get(kind)
     if cls is None:
-        return UnknownEvent(kind, payload)
-    names = {field.name for field in fields(cls)}
-    event: Event = cls(**{key: value for key, value in payload.items() if key in names})
+        return UnknownEvent(kind, {key: value for key, value in raw.items() if key != "type"})
+    names = _FIELDS[kind]
+    event: Event = cls(**{key: value for key, value in raw.items() if key in names})
     return event
 
 

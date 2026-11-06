@@ -12,9 +12,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::*;
+use crate::server::outgoing::Outgoing;
 
 /// A server whose output lines land in the returned receiver.
-fn server() -> (Server, mpsc::Receiver<String>) {
+fn server() -> (Server, mpsc::Receiver<Outgoing>) {
     let (sender, lines) = mpsc::channel(64);
     (
         Server::new(
@@ -27,9 +28,10 @@ fn server() -> (Server, mpsc::Receiver<String>) {
     )
 }
 
-async fn next(lines: &mut mpsc::Receiver<String>) -> JsonValue {
+async fn next(lines: &mut mpsc::Receiver<Outgoing>) -> JsonValue {
     let line = tokio::time::timeout(Duration::from_secs(5), lines.recv());
-    serde_json::from_str(&line.await.expect("a line").expect("open")).unwrap()
+    let line = line.await.expect("a line").expect("open").into_line();
+    serde_json::from_str(&line).unwrap()
 }
 
 fn request(id: u64, method: &str, params: JsonValue) -> String {

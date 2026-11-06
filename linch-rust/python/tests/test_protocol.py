@@ -10,6 +10,7 @@ import pytest
 
 from linch_rust import (
     AgentNotFound,
+    ConnectionClosed,
     NotSuspended,
     OpenError,
     PromptBlocked,
@@ -48,9 +49,10 @@ class Answering:
 
 async def test_events_read_with_the_run_answer_reach_the_run() -> None:
     envelope = {"v": 1, "seq": 1, "run_id": "r1", "event": {"type": "custom", "x": 1}}
+    batch = {"run_id": "r1", "envelopes": [envelope, {**envelope, "seq": 2}]}
     lines = [
         {"jsonrpc": "2.0", "result": {"run_id": "r1"}},
-        {"jsonrpc": "2.0", "method": "run.event", "params": envelope},
+        {"jsonrpc": "2.0", "method": "run.event", "params": batch},
         {"jsonrpc": "2.0", "method": "run.end", "params": {"run_id": "r1"}},
     ]
     reader = asyncio.StreamReader()
@@ -59,7 +61,7 @@ async def test_events_read_with_the_run_answer_reach_the_run() -> None:
     run_id, queue = await conn.request_run("run.start", {})
 
     assert run_id == "r1"
-    assert [queue.get_nowait(), queue.get_nowait()] == [envelope, RunEnd(None)]
+    assert [queue.get_nowait(), queue.get_nowait()] == [batch["envelopes"], RunEnd(None)]
     reader.feed_eof()
     await conn.finish()
 
@@ -82,6 +84,19 @@ async def test_a_run_that_failed_inside_the_server_ends_with_a_run_error() -> No
     # Answering a request, the same code is still a protocol error.
     assert type(error_from(panic)) is ProtocolError
     reader.feed_eof()
+    await conn.finish()
+
+
+async def test_a_server_line_with_a_non_finite_number_closes_the_connection() -> None:
+    reader = asyncio.StreamReader()
+    conn = Connection(reader, cast(asyncio.StreamWriter, Answering(reader, [])))
+    call = asyncio.create_task(conn.request("run.cancel", {"run_id": "r1"}))
+    await asyncio.sleep(0)
+
+    reader.feed_data(b'{"jsonrpc": "2.0", "id": 1, "result": {"cancelled": NaN}}\n')
+
+    with pytest.raises(ConnectionClosed, match="reading the server failed"):
+        await call
     await conn.finish()
 
 
