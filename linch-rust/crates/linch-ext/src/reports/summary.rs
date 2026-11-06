@@ -298,9 +298,11 @@ pub(super) fn ratio(part: u64, whole: u64, places: i32) -> f64 {
     round(part as f64 / whole as f64, places)
 }
 
+/// `value` to `places` decimals, half to even on its exact binary value,
+/// like Python's `round`: formatting with a precision rounds that way.
 fn round(value: f64, places: i32) -> f64 {
-    let scale = 10f64.powi(places);
-    (value * scale).round() / scale
+    let places = usize::try_from(places).unwrap_or(0);
+    format!("{value:.places$}").parse().unwrap_or(value)
 }
 
 /// The event's wire `type`. Exhaustive, so a new kind must be named here.

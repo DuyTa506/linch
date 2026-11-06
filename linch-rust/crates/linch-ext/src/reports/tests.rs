@@ -368,3 +368,13 @@ async fn the_report_renders_as_markdown_and_json() {
         Some(events.len())
     );
 }
+
+/// Ratios round half to even, like Python's `round`.
+#[test]
+fn ratios_round_half_to_even_like_python() {
+    assert_eq!(summary::ratio(9, 8, 2), 1.12);
+    assert_eq!(summary::ratio(1, 8, 2), 0.12);
+    assert_eq!(summary::ratio(3, 8, 2), 0.38);
+    assert_eq!(summary::ratio(5, 2, 0), 2.0);
+    assert_eq!(summary::ratio(2, 3, 4), 0.6667);
+}
