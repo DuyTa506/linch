@@ -15,6 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures::{SinkExt, StreamExt};
+use linch::PgPools;
 use linch_rpc::{Access, MAX_LINE_BYTES, Tokens};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -28,24 +29,32 @@ pub const PATH: &str = "/rpc";
 /// closes.
 const MAX_MESSAGE_BYTES: usize = 4 * MAX_LINE_BYTES;
 
+/// What every HTTP connection of a server shares.
+#[derive(Clone)]
+pub(crate) struct Shared {
+    /// The bearer tokens and their tenants.
+    pub(crate) tokens: Arc<Tokens>,
+    /// The Postgres pools of the server's agents.
+    pub(crate) pools: Arc<PgPools>,
+    /// Tracks each upgraded connection, so a stop waits for it.
+    pub(crate) connections: TaskTracker,
+}
+
 #[derive(Clone)]
 struct Http {
-    tokens: Arc<Tokens>,
-    connections: TaskTracker,
+    shared: Shared,
     stop: CancellationToken,
 }
 
 /// Serve HTTP on `listener` until `stop` fires; each upgraded connection
-/// is tracked by `connections` and ends with `stop`.
+/// is tracked by `shared.connections` and ends with `stop`.
 pub(crate) async fn serve(
     listener: TcpListener,
-    tokens: Arc<Tokens>,
-    connections: TaskTracker,
+    shared: Shared,
     stop: CancellationToken,
 ) -> io::Result<()> {
     let state = Http {
-        tokens,
-        connections,
+        shared,
         stop: stop.clone(),
     };
     let app = Router::new().route(PATH, get(upgrade)).with_state(state);
@@ -61,7 +70,8 @@ async fn upgrade(
     headers: HeaderMap,
     socket: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    let Some(tenant) = bearer(&headers).and_then(|token| http.tokens.tenant(token)) else {
+    let shared = http.shared;
+    let Some(tenant) = bearer(&headers).and_then(|token| shared.tokens.tenant(token)) else {
         return (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response();
     };
     let socket = match socket {
@@ -69,13 +79,13 @@ async fn upgrade(
         Err(rejection) => return rejection.into_response(),
     };
     // Counted from now, so a stop cannot finish before this connection.
-    let counted = http.connections.token();
-    let stop = http.stop;
+    let counted = shared.connections.token();
+    let (pools, stop) = (shared.pools, http.stop);
     socket
         .max_message_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _counted = counted;
-            serve_socket(socket, Access::Tenant(tenant), stop).await;
+            serve_socket(socket, Access::Tenant(tenant), pools, stop).await;
         })
 }
 
@@ -86,7 +96,12 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
-async fn serve_socket(socket: WebSocket, access: Access, stop: CancellationToken) {
+async fn serve_socket(
+    socket: WebSocket,
+    access: Access,
+    pools: Arc<PgPools>,
+    stop: CancellationToken,
+) {
     let (sink, stream) = socket.split();
     let incoming = stream.filter_map(|frame| {
         ready(match frame {
@@ -106,5 +121,5 @@ async fn serve_socket(socket: WebSocket, access: Access, stop: CancellationToken
         .with(|message: String| ready(Ok::<_, axum::Error>(Message::Text(message.into()))))
         .sink_map_err(io::Error::other);
     // A connection's I/O error ends only that connection.
-    let _ = linch_rpc::serve_messages(incoming, Box::pin(outgoing), access, stop).await;
+    let _ = linch_rpc::serve_messages(incoming, Box::pin(outgoing), access, pools, stop).await;
 }

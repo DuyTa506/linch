@@ -6,9 +6,10 @@
 //! ([`serve_messages`]) feed the same loop.
 
 use std::io;
+use std::sync::Arc;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use linch::JsonValue;
+use linch::{JsonValue, PgPools};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{self, error::TrySendError};
@@ -28,7 +29,8 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const OUTBOX_CAPACITY: usize = 1024;
 
 /// Serve one local client until its input ends: [`serve_lines`] with
-/// [`Access::Local`] and no stop signal, as the stdio sidecar does.
+/// [`Access::Local`], Postgres pools of its own and no stop signal, as the
+/// stdio sidecar does (one connection per process).
 ///
 /// Args:
 ///     reader: The client's requests, for example stdin.
@@ -41,7 +43,15 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    serve_lines(reader, writer, Access::Local, CancellationToken::new()).await
+    let pools = Arc::new(PgPools::new());
+    serve_lines(
+        reader,
+        writer,
+        Access::Local,
+        pools,
+        CancellationToken::new(),
+    )
+    .await
 }
 
 /// Serve one client of a byte stream pair, one message per line, until
@@ -61,6 +71,9 @@ where
 ///     access: How the client is trusted. With [`Access::Login`] the first
 ///         line must be `connection.auth`; a refused login, or none within
 ///         10 s, closes the connection.
+///     pools: Where the connection's agents take their Postgres pools;
+///         pass one for every connection of a process, so agents on one
+///         DSN share a pool.
 ///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:
@@ -69,6 +82,7 @@ pub async fn serve_lines<R, W>(
     reader: R,
     writer: W,
     access: Access,
+    pools: Arc<PgPools>,
     stop: CancellationToken,
 ) -> io::Result<()>
 where
@@ -88,7 +102,7 @@ where
         LinesCodecError::Io(error) => error,
         other => io::Error::other(other),
     });
-    connection(input, output, access, stop).await
+    connection(input, output, access, pools, stop).await
 }
 
 /// Serve one client of a message transport (one JSON-RPC message per
@@ -101,6 +115,7 @@ where
 ///         one message per item. It is flushed whenever no message waits,
 ///         and closed at the end.
 ///     access: How the client is trusted.
+///     pools: Where the connection's agents take their Postgres pools.
 ///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:
@@ -109,6 +124,7 @@ pub async fn serve_messages<S, K>(
     incoming: S,
     outgoing: K,
     access: Access,
+    pools: Arc<PgPools>,
     stop: CancellationToken,
 ) -> io::Result<()>
 where
@@ -126,7 +142,7 @@ where
         Ok(message) => Inbound::Message(message),
         Err(error) => Inbound::Failed(error),
     });
-    connection(input, outgoing, access, stop).await
+    connection(input, outgoing, access, pools, stop).await
 }
 
 /// What a transport delivered.
@@ -144,6 +160,7 @@ async fn connection<S, K>(
     mut input: S,
     output: K,
     access: Access,
+    pools: Arc<PgPools>,
     stop: CancellationToken,
 ) -> io::Result<()>
 where
@@ -164,7 +181,7 @@ where
             }
         },
     };
-    let server = Server::new(outbox, tenant, &stop);
+    let server = Server::new(outbox, tenant, pools, &stop);
     let mut failed = None;
     loop {
         let inbound = tokio::select! {

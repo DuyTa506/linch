@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use linch::PgPools;
 use linch_rpc::{Access, Tokens};
 use tokio::net::{TcpListener, UnixListener};
 use tokio_util::sync::CancellationToken;
@@ -70,22 +71,28 @@ impl Listeners {
     /// Serve every connection until `stop` fires, then stop accepting,
     /// end every connection as at the end of its input (runs dropped,
     /// calls in flight answered, MCP servers closed), wait for them, and
-    /// remove the socket file.
+    /// remove the socket file. Agents of every connection on one Postgres
+    /// DSN share one pool.
     ///
     /// Raises:
     ///     io::Error: If the HTTP server fails.
     pub async fn serve(self, stop: CancellationToken) -> io::Result<()> {
         let connections = TaskTracker::new();
+        let pools = Arc::new(PgPools::new());
         let socket = async {
             if let Some((listener, _)) = &self.socket {
-                accept(listener, &self.tokens, &connections, &stop).await;
+                accept(listener, &self.tokens, &pools, &connections, &stop).await;
             }
         };
         let web = async {
             match self.http {
                 Some(listener) => {
-                    let tokens = Arc::clone(&self.tokens);
-                    http::serve(listener, tokens, connections.clone(), stop.clone()).await
+                    let shared = http::Shared {
+                        tokens: Arc::clone(&self.tokens),
+                        pools: Arc::clone(&pools),
+                        connections: connections.clone(),
+                    };
+                    http::serve(listener, shared, stop.clone()).await
                 }
                 None => Ok(()),
             }
@@ -124,6 +131,7 @@ fn bind_socket(path: &Path) -> io::Result<UnixListener> {
 async fn accept(
     listener: &UnixListener,
     tokens: &Arc<Tokens>,
+    pools: &Arc<PgPools>,
     connections: &TaskTracker,
     stop: &CancellationToken,
 ) {
@@ -144,10 +152,11 @@ async fn accept(
         };
         let (reader, writer) = stream.into_split();
         let access = Access::Login(Arc::clone(tokens));
+        let pools = Arc::clone(pools);
         let stop = stop.clone();
         connections.spawn(async move {
             // A connection's I/O error ends only that connection.
-            let _ = linch_rpc::serve_lines(reader, writer, access, stop).await;
+            let _ = linch_rpc::serve_lines(reader, writer, access, pools, stop).await;
         });
     }
 }

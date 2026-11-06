@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::FutureExt;
-use linch::{JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
+use linch::{JsonObject, JsonValue, OpenedAgent, PgPools, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Semaphore;
@@ -57,6 +57,8 @@ struct State {
     /// The tenant a remote client acts for; `None` for a local client,
     /// which is not checked.
     tenant: Option<Arc<Tenant>>,
+    /// Postgres pools, shared with the process's other connections.
+    pools: Arc<PgPools>,
     outbox: Outbox,
     /// Requests from the server to the client.
     peer: Peer,
@@ -94,11 +96,17 @@ enum Reply {
 }
 
 impl Server {
-    fn new(outbox: Outbox, tenant: Option<Arc<Tenant>>, stop: &CancellationToken) -> Self {
+    fn new(
+        outbox: Outbox,
+        tenant: Option<Arc<Tenant>>,
+        pools: Arc<PgPools>,
+        stop: &CancellationToken,
+    ) -> Self {
         Self(Arc::new(State {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),
             tenant,
+            pools,
             peer: Peer::new(outbox.clone()),
             outbox,
             shutdown: stop.child_token(),

@@ -108,8 +108,12 @@
 //! ```
 //!
 //! `stores` defaults to `{"type": "memory"}`: stores owned by this agent
-//! handle, so resume and approve must use the same handle. A Postgres
-//! connect gives up after 5 s. Provider keys are read from the server's
+//! handle, so resume and approve must use the same handle. Agents on one
+//! Postgres DSN share one pool across all connections of a server process
+//! (the [`PgPools`](linch::PgPools) given to [`serve_lines`] or
+//! [`serve_messages`]); only an open that finds no pool in use connects,
+//! giving up after 5 s, and runs the migrations, and `agent.close` never
+//! closes a pool another agent uses. Provider keys are read from the server's
 //! environment (`DEEPSEEK_API_KEY`, ...; see
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
 //! config's `mcp_servers` are connected in order before the result is sent.

@@ -56,7 +56,8 @@
 //!   loopback only.
 //!
 //! Every connection is its own session of the protocol: its agent handles
-//! and runs are its own, and it acts for its token's tenant.
+//! and runs are its own, and it acts for its token's tenant. Agents of all
+//! connections on one Postgres DSN share one pool.
 
 #![forbid(unsafe_code)]
 

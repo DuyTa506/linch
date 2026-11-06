@@ -1,6 +1,7 @@
 //! The HTTP transport: `GET /rpc` with a bearer token upgrades to a
 //! WebSocket that carries one JSON-RPC message per text frame; a missing
-//! or wrong token gets 401 before any upgrade.
+//! or wrong token gets 401 before any upgrade. Its connections and the
+//! socket's share the server's Postgres pools.
 
 mod common;
 
@@ -9,8 +10,10 @@ use std::time::Duration;
 
 use common::*;
 use futures::{SinkExt, StreamExt};
+use linch_rpc::Client;
+use linch_server::ServerConfig;
 use serde_json::{Value, json};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::{Error, Message};
@@ -88,6 +91,44 @@ async fn a_websocket_with_a_valid_token_runs_an_agent() {
 
     server.stop().await;
     assert!(recv(&mut socket).await.is_none(), "stop ends the socket");
+}
+
+#[tokio::test]
+async fn a_websocket_and_a_socket_connection_share_a_postgres_pool() {
+    let Some(db) = common::pg::TestDb::empty("server_pools").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("linch.sock");
+    let config = ServerConfig::from_json(
+        &json!({"socket": path, "http": "127.0.0.1:0",
+                "tenants": {"acme": {"tokens": [{"value": TOKEN}],
+                                     "allow": {"scripted_provider": true,
+                                               "postgres_dsns": [db.base]}}}})
+        .to_string(),
+    )
+    .unwrap();
+    let (server, listening) = running(&config).await;
+    let mut agent = scripted("x");
+    agent["stores"] = json!({"type": "postgres", "dsn": db.dsn});
+
+    let mut socket = connect(listening.http.unwrap(), Some(&format!("Bearer {TOKEN}")))
+        .await
+        .unwrap();
+    send(&mut socket, 1, "agent.open", agent.clone()).await;
+    let opened = recv(&mut socket).await.unwrap();
+    assert!(opened["result"]["agent"].is_string(), "{opened}");
+    let stream = UnixStream::connect(&path).await.unwrap();
+    let (reader, writer) = stream.into_split();
+    let (client, _events) = Client::connect(reader, writer);
+    let auth = json!({"token": TOKEN});
+    let _: Value = client.call("connection.auth", &auth).await.unwrap();
+    let opened: Value = client.call("agent.open", &agent).await.unwrap();
+    assert!(opened["agent"].is_string(), "{opened}");
+    assert_eq!(db.connections().await, 1);
+
+    server.stop().await;
+    db.drop().await;
 }
 
 #[tokio::test]

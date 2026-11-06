@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+pub mod pg;
+
 pub const TOKEN: &str = "tok-acme-p11c-transport-0001";
 
 /// A config with tenant `acme` (token [`TOKEN`], scripted provider

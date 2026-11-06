@@ -16,7 +16,12 @@ use super::*;
 fn server() -> (Server, mpsc::Receiver<String>) {
     let (sender, lines) = mpsc::channel(64);
     (
-        Server::new(Outbox(sender), None, &CancellationToken::new()),
+        Server::new(
+            Outbox(sender),
+            None,
+            Arc::new(linch::PgPools::new()),
+            &CancellationToken::new(),
+        ),
         lines,
     )
 }

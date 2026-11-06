@@ -36,8 +36,20 @@ impl TestDb {
             query.execute(&admin).await.expect("reset the test schema");
         }
         let separator = if dsn.contains('?') { '&' } else { '?' };
-        let dsn = format!("{dsn}{separator}options=-c%20search_path%3D{schema}");
+        let dsn = format!(
+            "{dsn}{separator}options=-c%20search_path%3D{schema}&application_name={schema}"
+        );
         Some(Self { admin, schema, dsn })
+    }
+
+    /// Connections open now through [`Self::dsn`] (its `application_name`).
+    pub async fn connections(&self) -> i64 {
+        let sql = "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1";
+        let query = sqlx::query_scalar(sql).bind(&self.schema);
+        query
+            .fetch_one(&self.admin)
+            .await
+            .expect("count connections")
     }
 
     /// Drop the schema.

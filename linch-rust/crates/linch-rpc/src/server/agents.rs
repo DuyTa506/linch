@@ -26,7 +26,7 @@ impl Server {
         let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
         let opened = params
             .config
-            .open_with(tools, hooks, &linch::PgPools::new())
+            .open_with(tools, hooks, &self.0.pools)
             .await
             .map_err(|error| ErrorObject::from(&error))?;
         let contract = opened.agent().contract().to_string();
