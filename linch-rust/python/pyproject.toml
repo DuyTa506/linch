@@ -11,6 +11,10 @@ dependencies = ["orjson>=3.10"]
 # Spans and metrics of each run through the host's OpenTelemetry providers
 # (`linch_rust.otel`); the API only, as in Python Linch: the host owns the SDK.
 otel = ["opentelemetry-api>=1.20"]
+# `Server.connect("ws://...")`: the standard library has no WebSocket client,
+# and RFC 6455 framing, masking, pings, close and TLS are not worth writing
+# here. A Unix socket needs nothing extra.
+websocket = ["websockets>=14"]
 
 [build-system]
 requires = ["maturin>=1.16,<2"]
@@ -46,6 +50,8 @@ dev = [
     "psycopg[binary]>=3.2",
     # Test-only: the in-memory span and metric exporters the otel tests read.
     "opentelemetry-sdk>=1.20",
+    # The `websocket` extra, for the remote connection tests.
+    "websockets>=14",
 ]
 
 # The dev venv does not install the project: an editable maturin install

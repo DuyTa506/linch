@@ -10,7 +10,8 @@ class LinchError(Exception):
 
 
 class ConnectionClosed(LinchError):
-    """The server process exited or its pipes closed before an answer arrived."""
+    """The server process exited or the connection closed before an answer
+    arrived, or a remote server refused the WebSocket upgrade."""
 
 
 class RpcError(LinchError):
@@ -39,6 +40,49 @@ class AgentNotFound(RpcError):
 
 class RunBusy(RpcError):
     """The server already drives that run (-32002)."""
+
+
+class Unauthenticated(RpcError):
+    """A remote server refused the token (-32003, or HTTP 401 on a WebSocket).
+
+    The server closed the connection.
+    """
+
+
+class NotAllowed(RpcError):
+    """A remote server's checks for the tenant refused the request (-32004)."""
+
+    @property
+    def kind(self) -> str:
+        """The check that refused, such as `namespace` or `workspace`."""
+        return _field(self.data, "kind")
+
+
+class LimitReached(RpcError):
+    """A cap on runs, connections or logins is reached (-32005, or HTTP 429).
+
+    Nothing was started; try again once a run or connection ends.
+    """
+
+    @property
+    def kind(self) -> str:
+        """`runs`, `connections` or `logins`."""
+        return _field(self.data, "kind")
+
+    @property
+    def max(self) -> int | None:
+        """The cap, when the server named it."""
+        try:
+            return int(self.data["max"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+
+def _field(data: Any, name: str) -> str:
+    try:
+        return str(data[name])
+    except (TypeError, KeyError):
+        return ""
 
 
 class OpenError(RpcError):
@@ -114,6 +158,9 @@ class SessionBusy(RunError):
 _BY_CODE: dict[int, type[RpcError]] = {
     -32001: AgentNotFound,
     -32002: RunBusy,
+    -32003: Unauthenticated,
+    -32004: NotAllowed,
+    -32005: LimitReached,
     -32021: RunNotFound,
     -32025: ContractMismatch,
     -32026: RunTerminal,

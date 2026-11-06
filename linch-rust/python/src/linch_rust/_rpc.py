@@ -1,6 +1,8 @@
-"""JSON-RPC 2.0 with the server over its stdin and stdout, one message per line.
+"""JSON-RPC 2.0 with the server, one message at a time over a `Transport`.
 
-One reader task reads every server line: responses resolve pending calls,
+The transport is the child's stdin and stdout or a Unix socket, one message
+per line (`StreamTransport`), or a WebSocket, one per text frame. One reader
+task reads every server message: responses resolve pending calls,
 `run.event` (consecutive envelopes of one run, as one list) and `run.end`
 go to the run's queue, and `tool.call` and `hook.call` run as tasks that
 `$/cancelRequest` cancels.
@@ -18,7 +20,7 @@ import itertools
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import orjson
 
@@ -61,20 +63,55 @@ class _Refused(Exception):
         self.code = code
 
 
-def _encode(message: JsonObject) -> bytes:
-    return (json.dumps(message, ensure_ascii=False, allow_nan=False) + "\n").encode()
+class Transport(Protocol):
+    """Carries whole JSON-RPC messages to and from the server."""
+
+    async def receive(self) -> bytes | str | None:
+        """The next message from the server, or `None` once it closed."""
+        ...
+
+    async def send(self, message: str) -> None:
+        """Send one message.
+
+        Raises:
+            ConnectionClosed: The server is gone.
+        """
+        ...
 
 
-def _error_line(id: Any, code: int, message: str) -> bytes:
-    return _encode({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-
-
-class Connection:
-    """The client end of one server process's stdio."""
+class StreamTransport:
+    """One message per line on a byte stream: a child's stdio, or a Unix socket."""
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
         self._writer = writer
+
+    async def receive(self) -> bytes | None:
+        """The next line; blank lines are returned too, and skipped by the reader."""
+        return await self._reader.readline() or None
+
+    async def send(self, message: str) -> None:
+        """Write `message` and a newline, and wait for room in the stream."""
+        try:
+            self._writer.write((message + "\n").encode())
+            await self._writer.drain()
+        except (BrokenPipeError, ConnectionResetError) as error:
+            raise ConnectionClosed(f"writing to the server failed: {error}") from error
+
+
+def _encode(message: JsonObject) -> str:
+    return json.dumps(message, ensure_ascii=False, allow_nan=False)
+
+
+def _error_line(id: Any, code: int, message: str) -> str:
+    return _encode({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+
+
+class Connection:
+    """The client end of one connection to a server, over `transport`."""
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
         self._ids = itertools.count(1)
         self._pending: dict[int, _Pending] = {}
         self._runs: dict[str, asyncio.Queue[RunItem]] = {}
@@ -129,21 +166,17 @@ class Connection:
         finally:
             self._pending.pop(id, None)
 
-    async def _write(self, line: bytes) -> None:
+    async def _write(self, message: str) -> None:
         if self._closed is not None:
             raise ConnectionClosed(self._closed)
-        try:
-            self._writer.write(line)
-            await self._writer.drain()
-        except (BrokenPipeError, ConnectionResetError) as error:
-            raise ConnectionClosed(f"writing to the server failed: {error}") from error
+        await self._transport.send(message)
 
     async def _read(self) -> None:
         reason = "the server closed its output"
         try:
-            while line := await self._reader.readline():
-                if line.strip():
-                    self._dispatch(orjson.loads(line))
+            while (message := await self._transport.receive()) is not None:
+                if message.strip():
+                    self._dispatch(orjson.loads(message))
         except Exception as error:
             reason = f"reading the server failed: {error!r}"
         finally:

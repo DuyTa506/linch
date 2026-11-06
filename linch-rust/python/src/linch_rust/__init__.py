@@ -1,8 +1,10 @@
 """Minimal asyncio client for the Linch Rust core.
 
 It spawns the `linch-server` sidecar and speaks its JSON-RPC protocol over
-stdio; everything inside a turn runs in the server, which calls back into
-this process only for the host tools and callbacks an agent declared::
+stdio, or reaches a running `linch-server --config` over its Unix socket or
+WebSocket (`Server.connect`); everything inside a turn runs in the server,
+which calls back into this process only for the host tools and callbacks an
+agent declared::
 
     async with Server() as server:
         agent = await server.open_agent(config, tools=[lookup])
@@ -28,7 +30,9 @@ from .errors import (
     AgentNotFound,
     ConnectionClosed,
     ContractMismatch,
+    LimitReached,
     LinchError,
+    NotAllowed,
     NotSuspended,
     OpenError,
     PromptBlocked,
@@ -39,6 +43,7 @@ from .errors import (
     RunNotFound,
     RunTerminal,
     SessionBusy,
+    Unauthenticated,
 )
 from .events import (
     AssistantEvent,
@@ -93,14 +98,16 @@ __all__ = [
     "HookEvent",
     "HostTool",
     "InitEvent",
+    "LimitReached",
     "LinchError",
     "LoopGuardEvent",
+    "NotAllowed",
     "NotSuspended",
     "OpenError",
     "PartialAssistantEvent",
     "PermissionRequestEvent",
-    "Principal",
     "Point",
+    "Principal",
     "Profile",
     "PromptBlocked",
     "ProtocolError",
@@ -124,6 +131,7 @@ __all__ = [
     "ToolOutput",
     "ToolProgressEvent",
     "ToolSearch",
+    "Unauthenticated",
     "UnknownEvent",
     "UsageEvent",
     "UserEvent",
