@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use common::{Workspace, call, code, ctx, input, text};
 use linch_core::{Tool, ToolScope};
-use linch_tools::{Edit, Read, Write};
+use linch_tools::{Edit, Read, Write, workspace_tools};
 use serde_json::json;
 
 struct Tools {
@@ -262,4 +262,30 @@ async fn tools_work_behind_shared_trait_objects() {
     )
     .await;
     assert_eq!(code(escape), "path_escape");
+}
+
+#[tokio::test]
+async fn workspace_tools_share_one_tracker_and_declare_scopes() {
+    let ws = Workspace::new();
+    ws.put("a.txt", "one\n");
+    let tools = workspace_tools(ws.fs.clone(), ws.reads.clone());
+    let named: Vec<(&str, ToolScope)> = tools.iter().map(|t| (t.name(), t.scope())).collect();
+    assert_eq!(
+        named,
+        [
+            ("Read", ToolScope::Read),
+            ("Write", ToolScope::Write),
+            ("Edit", ToolScope::Write),
+            ("Grep", ToolScope::Read),
+            ("Glob", ToolScope::Read),
+            ("Bash", ToolScope::Exec),
+        ]
+    );
+    call(tools[0].as_ref(), json!({"file_path": "a.txt"}))
+        .await
+        .unwrap();
+    let edit = json!({"file_path": "a.txt", "old_string": "one", "new_string": "two"});
+    assert_eq!(text(call(tools[2].as_ref(), edit).await), "Edited a.txt");
+    let cat = text(call(tools[5].as_ref(), json!({"command": "cat a.txt"})).await);
+    assert_eq!(cat, "two\n[exit code 0]");
 }
