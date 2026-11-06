@@ -242,6 +242,43 @@ async fn read_only_subagents_run_in_parallel() {
     assert_eq!(result_texts(&log[2]), ["seen", "seen"]);
 }
 
+#[tokio::test]
+async fn parallel_children_lose_no_event_while_a_flush_holds_the_journal() {
+    let prompts = ["a", "b", "c", "d"];
+    let parent = vec![spawn_turn(Some("scout"), &prompts), text_turn("done")];
+    let family = Arc::new(Family::new(parent, vec![text_turn("seen")]));
+    let stores = Arc::new(Stores::default());
+    let slow = Arc::new(Slow(stores.clone()));
+    let agent = AgentBuilder::new(spec())
+        .provider(family)
+        .tools(tools(&Runs::default()))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(slow.clone())
+        .session_store(slow)
+        .namespace(NS)
+        .subagents(vec![scout()])
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let durable = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    let children = wrapped(&durable);
+    assert_eq!(children.len(), prompts.len());
+    for (child_id, events) in children {
+        let own = stores.runs.events(NS, &child_id, 0).await.unwrap();
+        let own: Vec<String> = (own.iter())
+            .filter(|e| e.event.persistence() == linch_core::Persistence::Both)
+            .map(|e| kind(&e.event))
+            .collect();
+        assert_eq!(
+            events.iter().map(kind).collect::<Vec<_>>(),
+            own,
+            "{child_id}"
+        );
+    }
+}
+
 fn input(value: serde_json::Value) -> JsonObject {
     value.as_object().unwrap().clone()
 }

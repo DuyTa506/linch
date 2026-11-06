@@ -59,9 +59,10 @@ pub trait ToolSink: Send + Sync {
     fn tool_progress(&self, call: &PlannedCall, progress: ToolProgress);
 
     /// An event the call's running tool put in the run's log (a subagent's
-    /// wrapped event), before the call's [`Self::tool_finished`]. The
+    /// wrapped event), before the call's [`Self::tool_finished`]. Sync, so
+    /// taking it never waits: the sink stages it with its next write. The
     /// default drops it.
-    async fn tool_event(&self, call: &PlannedCall, event: Event) {
+    fn tool_event(&self, call: &PlannedCall, event: Event) {
         let _ = (call, event);
     }
 }
@@ -257,7 +258,7 @@ impl<S: ToolSink> Runner<'_, S> {
         let result = {
             let forward = pin!(async {
                 while let Some(report) = reports.recv().await {
-                    self.report(call, report).await;
+                    self.report(call, report);
                 }
                 future::pending::<Infallible>().await
             });
@@ -267,15 +268,15 @@ impl<S: ToolSink> Runner<'_, S> {
             }
         };
         while let Ok(report) = reports.try_recv() {
-            self.report(call, report).await;
+            self.report(call, report);
         }
         result
     }
 
-    async fn report(&self, call: &PlannedCall, report: Report) {
+    fn report(&self, call: &PlannedCall, report: Report) {
         match report {
             Report::Progress(progress) => self.sink.tool_progress(call, progress),
-            Report::Event(event) => self.sink.tool_event(call, *event).await,
+            Report::Event(event) => self.sink.tool_event(call, *event),
         }
     }
 

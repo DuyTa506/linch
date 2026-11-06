@@ -7,19 +7,20 @@
 //! barrier, which keeps a tool turn at `3 + 2k` run writes.
 //!
 //! An event a running tool puts in the run's log (a subagent's wrapped
-//! event) is staged the same way: it rides the next barrier, at the latest
-//! the call's end.
+//! event) waits in an inbox, which the next start or end stages ahead of
+//! itself: it rides that barrier, at the latest the call's own end. A
+//! stream-only one goes to the caller at once, like progress.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 
 use super::Outbox;
 use super::hooks::push_records;
 use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent};
-use crate::events::{Envelope, Event, WIRE_VERSION};
+use crate::events::{Envelope, Event, Persistence, WIRE_VERSION};
 use crate::ids::RunId;
 use crate::journal::{Journal, JournalError};
 use crate::scheduler::{CallOutcome, PlannedCall, ToolSink};
@@ -35,6 +36,15 @@ pub(super) struct JournalSink<'a> {
     durable: AtomicU64,
     /// Calls whose tool started, so `tool_finished` knows which ones ran.
     started: Mutex<HashSet<String>>,
+    /// Durable events tools reported, in order, not staged yet (sync, so a
+    /// report never waits on a flush).
+    inbox: Mutex<Vec<Event>>,
+}
+
+/// The guarded value even if a holder panicked; nothing panics while
+/// holding these locks.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl<'a> JournalSink<'a> {
@@ -46,19 +56,16 @@ impl<'a> JournalSink<'a> {
             run_id,
             durable,
             started: Mutex::new(HashSet::new()),
+            inbox: Mutex::new(Vec::new()),
         }
     }
 
-    fn started(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
-        // Nothing panics while holding the lock.
-        self.started.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Stage `events`, then flush when `barrier` is set.
+    /// Stage the inbox, then `events`, then flush when `barrier` is set.
     async fn write(&self, events: Vec<Event>, barrier: bool) -> Result<(), JournalError> {
         let ready = {
             let mut journal = self.journal.lock().await;
-            for event in events {
+            let reported = std::mem::take(&mut *lock(&self.inbox));
+            for event in reported.into_iter().chain(events) {
                 journal.stage(event);
             }
             if !barrier {
@@ -70,6 +77,17 @@ impl<'a> JournalSink<'a> {
         };
         self.outbox.deliver(ready).await;
         Ok(())
+    }
+
+    /// A stream-only envelope at the last durable seq.
+    fn now(&self, event: Event) -> Envelope {
+        Envelope {
+            v: WIRE_VERSION,
+            seq: self.durable.load(Ordering::SeqCst),
+            run_id: self.run_id.clone(),
+            ignorable: false,
+            event,
+        }
     }
 }
 
@@ -87,7 +105,7 @@ impl ToolSink for JournalSink<'_> {
     type Error = JournalError;
 
     async fn tool_starting(&self, call: &PlannedCall) -> Result<(), JournalError> {
-        self.started().insert(call.tool_use_id.clone());
+        lock(&self.started).insert(call.tool_use_id.clone());
         self.write(vec![start_event(call)], true).await
     }
 
@@ -96,7 +114,7 @@ impl ToolSink for JournalSink<'_> {
         call: &PlannedCall,
         outcome: &CallOutcome,
     ) -> Result<(), JournalError> {
-        let ran = self.started().remove(&call.tool_use_id);
+        let ran = lock(&self.started).remove(&call.tool_use_id);
         let seq = self.durable.load(Ordering::SeqCst);
         let records = outcome.hook_records.clone();
         push_records(
@@ -120,27 +138,20 @@ impl ToolSink for JournalSink<'_> {
         self.write(events, ran).await
     }
 
-    /// Stage the event: a durable one rides the next barrier (at the latest
-    /// the call's end); a stream-only one goes to the caller at once.
-    async fn tool_event(&self, _call: &PlannedCall, event: Event) {
-        let now = self.journal.lock().await.stage(event);
-        if let Some(envelope) = now {
-            self.outbox.push(envelope);
+    fn tool_event(&self, _call: &PlannedCall, event: Event) {
+        match event.persistence() {
+            Persistence::StreamOnly => self.outbox.push(self.now(event)),
+            Persistence::Both | Persistence::JournalOnly => lock(&self.inbox).push(event),
         }
     }
 
     fn tool_progress(&self, call: &PlannedCall, progress: ToolProgress) {
-        self.outbox.push(Envelope {
-            v: WIRE_VERSION,
-            seq: self.durable.load(Ordering::SeqCst),
-            run_id: self.run_id.clone(),
-            ignorable: false,
-            event: Event::ToolProgress(ToolProgressEvent {
+        self.outbox
+            .push(self.now(Event::ToolProgress(ToolProgressEvent {
                 tool_use_id: call.tool_use_id.clone(),
                 tool_name: call.tool_name.clone(),
                 message: progress.message,
                 data: progress.data,
-            }),
-        });
+            })));
     }
 }

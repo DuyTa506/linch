@@ -115,6 +115,48 @@ pub fn spawn_turn(subagent_type: Option<&str>, prompts: &[&str]) -> ScriptedTurn
     builder.usage(usage(10, 5)).build()
 }
 
+/// A store whose run commits take a while, so a flush holds the journal.
+pub struct Slow<S>(pub Arc<S>);
+
+#[async_trait]
+impl<S: RunStore + SessionStore + 'static> RunStore for Slow<S> {
+    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
+        RunStore::create(&*self.0, run).await
+    }
+    async fn claim(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
+        self.0.claim(ns, run_id, owner).await
+    }
+    async fn load(&self, ns: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
+        RunStore::load(&*self.0, ns, run_id).await
+    }
+    async fn commit(&self, lease: &Lease, commit: Commit) -> Result<(), StoreError> {
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        self.0.commit(lease, commit).await
+    }
+    async fn events(&self, ns: &str, id: &RunId, after: u64) -> Result<Vec<Envelope>, StoreError> {
+        self.0.events(ns, id, after).await
+    }
+}
+
+#[async_trait]
+impl<S: RunStore + SessionStore + 'static> SessionStore for Slow<S> {
+    async fn create(&self, ns: &str, session: &SessionId) -> Result<(), StoreError> {
+        SessionStore::create(&*self.0, ns, session).await
+    }
+    async fn load(&self, ns: &str, session: &SessionId) -> Result<Vec<LogEntry>, StoreError> {
+        SessionStore::load(&*self.0, ns, session).await
+    }
+    async fn append(
+        &self,
+        ns: &str,
+        session: &SessionId,
+        expected: u64,
+        entries: Vec<LogEntry>,
+    ) -> Result<u64, StoreError> {
+        self.0.append(ns, session, expected, entries).await
+    }
+}
+
 /// A store whose write `n` fails and every write after it too, like a
 /// process that died there. Reads still work.
 pub struct Dying<S> {
