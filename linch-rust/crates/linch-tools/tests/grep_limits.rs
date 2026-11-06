@@ -72,7 +72,10 @@ async fn multiline_search_skips_a_file_over_the_read_cap() {
     big.set_len(10 * 1024 * 1024 + 1).unwrap();
     let tool = Grep::new(ws.fs.clone());
     let multiline = json!({"pattern": "start.end", "multiline": true});
-    assert_eq!(text(call(&tool, multiline).await), "small.txt");
+    assert_eq!(
+        text(call(&tool, multiline).await),
+        "small.txt\n… (not searched in full, so matches may be missing: big.txt)"
+    );
     // A line search streams the file, so it still finds the match, and so
     // does a multiline one whose pattern cannot match a newline.
     let lines = json!({"pattern": "start"});

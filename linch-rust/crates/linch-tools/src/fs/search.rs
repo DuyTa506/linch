@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 use super::local::is_hidden;
 use super::{FsError, GlobHit, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery};
 use crate::fs::LocalFs;
-use crate::read::MAX_READ_BYTES;
 
 /// Longest line text kept in content output, in bytes.
 const MAX_LINE: usize = 500;
@@ -29,7 +28,8 @@ pub(super) fn grep(
 ) -> Result<GrepHits, FsError> {
     let target = fs.resolve(query.path.as_deref().unwrap_or("."))?;
     let matcher = matcher(query)?;
-    let mut searcher = searcher(query);
+    let limit = fs.search_limit();
+    let mut searcher = searcher(query, limit);
     let mut walk = walker(&target, false);
     if let Some(glob) = &query.glob {
         let overrides = OverrideBuilder::new(&target)
@@ -59,10 +59,9 @@ pub(super) fn grep(
         // whole file; skip one over the cap without reading it. Other
         // searches stream, so any size is fine.
         if searcher.multi_line_with_matcher(&matcher)
-            && path
-                .metadata()
-                .is_ok_and(|meta| meta.len() > MAX_READ_BYTES)
+            && path.metadata().is_ok_and(|meta| meta.len() > limit)
         {
+            hits.skipped.push(fs.workspace_path(&path));
             continue;
         }
         let budget = match query.mode {
@@ -75,8 +74,13 @@ pub(super) fn grep(
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
-        if searched.is_err() || sink.binary {
+        if sink.binary {
             continue;
+        }
+        // Over the memory limit or unreadable partway: keep what was found
+        // before the cut, and say the file was not searched in full.
+        if searched.is_err() {
+            hits.skipped.push(fs.workspace_path(&path));
         }
         // Context lines alone mean the budget ran out before the match.
         if sink.count == 0 && sink.lines.is_empty() {
@@ -172,16 +176,16 @@ fn regular_file(entry: Result<DirEntry, ignore::Error>) -> Option<std::path::Pat
         .then(|| entry.into_path())
 }
 
-/// The searcher for `query`. It holds at most [`MAX_READ_BYTES`] of a file:
-/// the whole file in multiline mode, else the longest line with its context.
-/// A file that needs more fails, so one search cannot exhaust memory.
-fn searcher(query: &GrepQuery) -> Searcher {
+/// The searcher for `query`. It holds at most `limit` bytes of a file: the
+/// whole file in multiline mode, else the longest line with its context. A
+/// file that needs more fails, so one search cannot exhaust memory.
+fn searcher(query: &GrepQuery, limit: u64) -> Searcher {
     let content = query.mode == GrepMode::Content;
     SearcherBuilder::new()
         .line_number(true)
         .multi_line(query.multiline)
         .binary_detection(BinaryDetection::quit(0))
-        .heap_limit(usize::try_from(MAX_READ_BYTES).ok())
+        .heap_limit(usize::try_from(limit).ok())
         .before_context(if content { query.before } else { 0 })
         .after_context(if content { query.after } else { 0 })
         .build()

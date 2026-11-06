@@ -13,6 +13,7 @@ use super::search;
 use super::{
     ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHit, GlobQuery, GrepHits, GrepQuery,
 };
+use crate::read::MAX_READ_BYTES;
 
 /// Files on this host under one root directory.
 ///
@@ -24,6 +25,8 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct LocalFs {
     root: PathBuf,
+    /// Most bytes of one file a search holds in memory.
+    search_limit: u64,
 }
 
 impl LocalFs {
@@ -38,7 +41,23 @@ impl LocalFs {
         if !root.is_dir() {
             return Err(FsError::NotADirectory { path: shown });
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            search_limit: MAX_READ_BYTES,
+        })
+    }
+
+    /// This root with searches limited to `bytes` per file, so a test can
+    /// trip the limit without a big file.
+    #[cfg(test)]
+    pub(crate) fn with_search_limit(mut self, bytes: u64) -> Self {
+        self.search_limit = bytes;
+        self
+    }
+
+    /// Most bytes of one file a search holds in memory.
+    pub(crate) fn search_limit(&self) -> u64 {
+        self.search_limit
     }
 
     /// The canonical root directory.

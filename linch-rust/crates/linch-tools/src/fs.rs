@@ -116,6 +116,11 @@ pub struct GrepHits {
     pub files: Vec<GrepFile>,
     /// Whether the search stopped at [`GrepQuery::limit`].
     pub truncated: bool,
+    /// Files not searched in full, sorted by path: a line with its context,
+    /// or a whole file in a multiline search, needed more memory than the
+    /// search may hold, or reading failed. Matches found before the cut are
+    /// kept in [`Self::files`].
+    pub skipped: Vec<String>,
 }
 
 /// A file-name search under the root.

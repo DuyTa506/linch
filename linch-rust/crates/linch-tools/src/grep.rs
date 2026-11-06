@@ -21,6 +21,9 @@ const OUTPUT_CAP: usize = 30_000;
 /// entry takes at least two bytes of output, so more could never be shown.
 const MAX_LINES: u64 = (OUTPUT_CAP / 2) as u64;
 
+/// Most file names the note on files not searched in full lists.
+const SKIPPED_NAMES: usize = 20;
+
 /// Search file contents by regex with ripgrep's engine, in-process. Scope
 /// `read`.
 pub struct Grep {
@@ -119,10 +122,11 @@ impl Tool for Grep {
             limit: usize::try_from(limit).unwrap_or(usize::MAX),
         };
         let hits = self.fs.grep(&query, &ctx.cancel).await?;
-        if hits.files.is_empty() {
-            return Ok(ToolOutput::new("No matches found."));
-        }
-        let mut text = render(&hits, &query, flag(&input, "-n")?);
+        let mut text = if hits.files.is_empty() {
+            "No matches found.".to_owned()
+        } else {
+            render(&hits, &query, flag(&input, "-n")?)
+        };
         if text.len() > OUTPUT_CAP {
             let mut cut = OUTPUT_CAP;
             while !text.is_char_boundary(cut) {
@@ -130,6 +134,10 @@ impl Tool for Grep {
             }
             text.truncate(cut);
             text.push_str(&format!("\n… (output capped at {OUTPUT_CAP} bytes)"));
+        }
+        // After the cap, so the cap never hides it.
+        if !hits.skipped.is_empty() {
+            text.push_str(&skipped_note(&hits.skipped));
         }
         Ok(ToolOutput::new(text))
     }
@@ -166,4 +174,14 @@ fn render(hits: &GrepHits, query: &GrepQuery, numbered: bool) -> String {
         out.push(format!("… (truncated at head_limit {})", query.limit));
     }
     out.join("\n")
+}
+
+/// The note naming files not searched in full, at most [`SKIPPED_NAMES`]
+/// of them.
+fn skipped_note(skipped: &[String]) -> String {
+    let mut names = skipped[..skipped.len().min(SKIPPED_NAMES)].join(", ");
+    if skipped.len() > SKIPPED_NAMES {
+        names.push_str(&format!(" and {} more", skipped.len() - SKIPPED_NAMES));
+    }
+    format!("\n… (not searched in full, so matches may be missing: {names})")
 }
