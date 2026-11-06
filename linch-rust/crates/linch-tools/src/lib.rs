@@ -7,6 +7,10 @@
 //! [`Bash`] runs a command in its own process group in the same root.
 //! [`workspace_tools`] wires all six together.
 //!
+//! [`vfs`] is the virtual filesystem apart from the workspace: file
+//! backends, the `ls`, `read_file`, `write_file` and `edit_file` tools, and
+//! the offload of large tool results.
+//!
 //! The crate is Unix-only: Bash relies on process groups.
 
 #![forbid(unsafe_code)]
@@ -19,6 +23,7 @@ mod grep;
 mod input;
 mod read;
 mod tracker;
+pub mod vfs;
 mod write;
 
 use std::sync::Arc;
