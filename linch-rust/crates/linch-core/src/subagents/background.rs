@@ -9,10 +9,13 @@ use super::run::{Outcome, failed, finished};
 use super::workers::Worker;
 use crate::agent::{AgentInner, RunOptions};
 use crate::events::kinds::{ChildRunStatusEvent, ResultSubtype};
-use crate::events::{Event, Persistence, SubagentEvent};
+use crate::events::{Envelope, Event, Persistence, SubagentEvent};
 use crate::ids::{RunId, SessionId};
+use crate::json::{JsonObject, JsonValue};
+use crate::policy::Principal;
 use crate::run::RunStatus;
 use crate::runner::{self, Family, RunStream};
+use crate::scheduler::RunIdentity;
 use crate::store::StoreError;
 use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 
@@ -96,6 +99,22 @@ pub(super) async fn launch(
         let message = "Background subagents need the parent's run stream to drive them.";
         return Err(ToolOutputError::new(message));
     };
+    let id = worker.id.clone();
+    let principal = ctx.principal.clone();
+    pick_up(parent, &family, worker, prompt, principal, &ctx.run_id).await?;
+    Ok(started(ctx, &id))
+}
+
+/// Have `family` drive the child run of `worker`: start it on `prompt`,
+/// resume it, or put the end of one that finished in the inbox.
+async fn pick_up(
+    parent: &AgentInner,
+    family: &Arc<Family>,
+    worker: Worker,
+    prompt: String,
+    principal: Option<Principal>,
+    parent_run: &RunId,
+) -> Result<(), ToolOutputError> {
     let child = match parent.child(&worker.definition) {
         Ok(child) => Arc::new(child),
         Err(error) => return Err(failed("could not be built", error)),
@@ -105,25 +124,84 @@ pub(super) async fn launch(
     let options = RunOptions {
         session_id: SessionId::new(id.as_str()),
         run_id: Some(id.clone()),
-        principal: ctx.principal.clone(),
+        principal,
         owner: "subagent".into(),
         cancel: cancel.clone(),
     };
     let stream = match child.runs.load(&child.namespace, &id).await {
         Err(StoreError::NotFound { .. }) => {
-            runner::start_child(child, prompt, options, ctx.run_id.clone())
+            runner::start_child(child, prompt, options, parent_run.clone())
         }
         Ok(record) if record.status.is_terminal() => {
             let outcome = finished(&child, &id).await?;
-            family.complete(Completion::of(id.clone(), worker.display_name, outcome));
-            return Ok(started(ctx, &id));
+            family.complete(Completion::of(id, worker.display_name, outcome));
+            return Ok(());
         }
         Ok(_) => runner::resume(child, id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
-    let drive = drive(stream, worker, Arc::downgrade(&family));
-    family.adopt(id.clone(), cancel, true, drive);
-    Ok(started(ctx, &id))
+    let drive = drive(stream, worker, Arc::downgrade(family));
+    family.adopt(id, cancel, true, drive);
+    Ok(())
+}
+
+/// Pick up the background children of a resumed run: each child that a
+/// `child_run_status` event in `events` marks running, with no later mark
+/// of its end, is resumed, started (its create never landed), or read
+/// back. A child that cannot be picked up reports a failed end.
+pub(crate) async fn reattach(
+    parent: &AgentInner,
+    family: &Arc<Family>,
+    run: &RunIdentity,
+    events: &[Envelope],
+) {
+    let Some(roster) = &parent.subagents else {
+        return;
+    };
+    let mut running: Vec<&RunId> = Vec::new();
+    for envelope in events {
+        if let Event::ChildRunStatus(mark) = &envelope.event {
+            running.retain(|id| **id != mark.child_run_id);
+            if mark.status == RunStatus::Running {
+                running.push(&mark.child_run_id);
+            }
+        }
+    }
+    let prefix = format!("{}:", run.run_id);
+    for id in running {
+        let Some(input) = call_input(events, id.as_str().strip_prefix(&prefix)) else {
+            continue;
+        };
+        let text = |key: &str| input.get(key).and_then(JsonValue::as_str);
+        let Some(definition) = roster.get(text("subagent_type")) else {
+            continue;
+        };
+        let general = std::ptr::eq(definition, roster.general());
+        let registry = &parent.worker_registry;
+        let worker = registry.enlist(&run.session_id, id, definition, general);
+        let name = worker.display_name.clone();
+        let prompt = text("prompt").unwrap_or_default().to_owned();
+        let principal = run.principal.clone();
+        let picked = pick_up(parent, family, worker, prompt, principal, &run.run_id).await;
+        if let Err(error) = picked {
+            family.complete(Completion {
+                child: id.clone(),
+                display_name: name,
+                status: RunStatus::Failed,
+                text: String::new(),
+                error: Some(error.message),
+            });
+        }
+    }
+}
+
+/// The input of the call `tool_use_id` among `events`.
+fn call_input<'a>(events: &'a [Envelope], tool_use_id: Option<&str>) -> Option<&'a JsonObject> {
+    let tool_use_id = tool_use_id?;
+    events.iter().find_map(|envelope| match &envelope.event {
+        Event::ToolCallStart(start) if start.tool_use_id == tool_use_id => Some(&start.input),
+        _ => None,
+    })
 }
 
 /// The acknowledgement, after marking the child as running in the

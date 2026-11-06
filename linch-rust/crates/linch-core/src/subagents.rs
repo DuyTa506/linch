@@ -69,7 +69,7 @@ mod workers;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) use background::Completion;
+pub(crate) use background::{Completion, reattach};
 pub(crate) use tool::SubagentTool;
 pub(crate) use workers::Registry;
 

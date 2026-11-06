@@ -242,6 +242,9 @@ pub(super) async fn continue_run(
     let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     let progress = Progress::of(checkpoint, last_stop(&events), started);
     let run = identity(record.session_id.clone(), run_id, &options.principal);
+    if let Some(family) = &family {
+        crate::subagents::reattach(&agent, family, &run, &events).await;
+    }
     let mut runner = Runner::new(
         agent,
         journal,
