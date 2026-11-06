@@ -1,6 +1,6 @@
 //! Shared test helpers: an in-process server over a duplex pipe, and calls.
 
-#![allow(dead_code, reason = "each test binary uses a subset")]
+#![allow(dead_code, unused_imports, reason = "each test binary uses a subset")]
 
 pub mod server;
 

@@ -3,10 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use linch_core::ToolRegistry;
-use rmcp::model::{ServerNotification, SubscriptionFilter};
-use rmcp::service::{
-    Peer, RoleClient, RunningService, ServiceError, Subscription, SubscriptionEnd,
-};
+use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -15,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::catalog::{Catalog, SkippedTool};
 use crate::config::{ConfigError, McpServerConfig, ReconnectPolicy};
 use crate::connector::{ConnectError, Connector, Handler, connector};
+use crate::listener::Listener;
 use crate::tool::{Conn, Link, ToolSpec};
 
 /// Where a server's connection stands.
@@ -161,7 +159,7 @@ struct Live {
     lost: CancellationToken,
     list_changed: Arc<Notify>,
     /// Forwards a 2026-07-28 `subscriptions/listen` stream to `list_changed`.
-    listener: Option<JoinHandle<()>>,
+    listener: Option<Listener>,
 }
 
 /// The background half of an [`McpServer`].
@@ -230,7 +228,7 @@ impl Supervisor {
         };
         self.link.conn.send_replace(None);
         if let Some(listener) = listener {
-            listener.abort();
+            listener.stop().await;
         }
         if !ended_by_itself {
             stop.cancel();
@@ -311,67 +309,17 @@ async fn prepare(
     peer: &Peer<RoleClient>,
     list_changed: &Arc<Notify>,
     lost: &CancellationToken,
-) -> Result<(Option<JoinHandle<()>>, Vec<rmcp::model::Tool>), ConnectError> {
-    let listener = if needs_subscription(peer) {
-        let filter = SubscriptionFilter::builder().tools_list_changed().build();
-        let subscription = peer.listen(filter).await.map_err(ConnectError::Listen)?;
-        Some(tokio::spawn(forward(
-            subscription,
-            Arc::clone(list_changed),
-            lost.clone(),
-        )))
-    } else {
-        None
-    };
+) -> Result<(Option<Listener>, Vec<rmcp::model::Tool>), ConnectError> {
+    let listener = Listener::start(peer, list_changed, lost)
+        .await
+        .map_err(ConnectError::Listen)?;
     match peer.list_all_tools().await {
         Ok(tools) => Ok((listener, tools)),
         Err(error) => {
             if let Some(listener) = listener {
-                listener.abort();
+                listener.stop().await;
             }
             Err(ConnectError::ListTools(error))
-        }
-    }
-}
-
-/// From protocol 2026-07-28 on, `notifications/tools/list_changed` only
-/// arrives on a `subscriptions/listen` stream that asked for it. Earlier
-/// versions send it unprompted, to [`Handler`].
-fn needs_subscription(peer: &Peer<RoleClient>) -> bool {
-    peer.peer_info().is_some_and(|info| {
-        !info.protocol_version.has_initialize()
-            && info
-                .capabilities
-                .tools
-                .as_ref()
-                .and_then(|tools| tools.list_changed)
-                == Some(true)
-    })
-}
-
-/// Wake the relist loop on each tool change. A stream that ends without
-/// the server's final result means the connection dropped.
-async fn forward(
-    mut subscription: Subscription,
-    list_changed: Arc<Notify>,
-    lost: CancellationToken,
-) {
-    loop {
-        match subscription.next().await {
-            Ok(Some(ServerNotification::ToolListChangedNotification(_))) => {
-                list_changed.notify_one();
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if matches!(subscription.end(), Some(SubscriptionEnd::Abrupt)) {
-                    lost.cancel();
-                }
-                return;
-            }
-            Err(_) => {
-                lost.cancel();
-                return;
-            }
         }
     }
 }
