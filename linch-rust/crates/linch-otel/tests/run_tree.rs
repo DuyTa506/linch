@@ -233,8 +233,14 @@ async fn a_compaction_is_a_span_with_its_summary_call_under_the_turn() {
         "summary"
     );
     assert_eq!(int(compaction, "linch.turn_index"), Some(2));
-    assert_eq!(compaction.start_time, steps[2].start_time);
-    assert_eq!(compaction.end_time, at(ts(&envelopes, "compaction", 0)));
+    let compacted = ts(&envelopes, "compaction", 0);
+    let took = envelopes.iter().find_map(|e| match &e.event {
+        linch_core::Event::Compaction(c) => Some(c.duration_ms),
+        _ => None,
+    });
+    let started = at(compacted - took.unwrap()).max(steps[2].start_time);
+    assert_eq!(compaction.start_time, started);
+    assert_eq!(compaction.end_time, at(compacted));
 
     // The summary call is a chat under the compaction, holding its usage.
     let summary: Vec<_> = chats.iter().filter(|c| is_child(c, compaction)).collect();

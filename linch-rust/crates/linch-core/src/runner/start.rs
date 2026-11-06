@@ -82,6 +82,7 @@ pub(super) async fn new_run(
         run_id: run_id.clone(),
         parent_run_id: parent.clone(),
         model: agent.spec.model.clone(),
+        provider: agent.provider.id().to_owned(),
         tools: tools.into_iter().map(|tool| tool.name).collect(),
         trace_id: None,
     }));

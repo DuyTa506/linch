@@ -44,8 +44,8 @@ keeps a convention update local.
 |---|---|
 | `invoke_agent` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.conversation.id` (the session), `linch.run_id`, `linch.resumed`; at the end the four `gen_ai.usage.*` token counts, `linch.stop_reason` and `linch.cost_usd` |
 | `step` | The same identity attributes plus `linch.turn_index` |
-| `chat {model}` | Identity attributes and turn, `gen_ai.response.finish_reasons`, the four token counts, `linch.cost_usd` |
-| `compaction` | Identity attributes and turn, `linch.compaction.strategy` |
+| `chat {model}` | Identity attributes and turn, `gen_ai.response.finish_reasons`, `gen_ai.response.model` (the `usage` event's `actual_model`), the four token counts, `linch.cost_usd` |
+| `compaction` | Identity attributes and turn, `linch.compaction.strategy`; it starts the `compaction` event's `duration_ms` before that event, and holds the summary call's `chat` from there to its `usage` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.conversation.id`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `linch.run_id`, `linch.turn_index` |
 
 An attribute whose value the observer does not know is left out rather than
@@ -63,10 +63,9 @@ What differs from Python:
 | Name | Rust |
 |---|---|
 | `linch.cost_usd` | Rust only: the call's or the run's cost when the agent prices its model (`keys.rs:59-61`) |
-| `gen_ai.response.model` | Defined but never set: the stream does not carry the model that served a call (`keys.rs:15-17`) |
 | `gen_ai.input.messages` on `chat` | Not set: the stream does not carry the request's messages |
 | `linch.store.duration` | Not built: the stream carries no store calls |
-| `gen_ai.provider.name` | Set only when the host gives the provider id with `RunObserver::provider` |
+| `gen_ai.provider.name` | From the `init` event's `provider`, mapped by `provider_name`; `RunObserver::provider` sets it for a stream without one |
 | `gen_ai.usage.input_tokens`, the `input` token bucket | Cached tokens included, where Python counts uncached input only |
 
 Subagent events reach the parent's stream wrapped, after the fact and without
@@ -85,7 +84,7 @@ private content; the span status is an error with an empty description
 | Source | `error.type` |
 |---|---|
 | An `error` event | The payload's `name`, else `run_error`; marks the open chat, the step and the run (`observer.rs:261-271`) |
-| A tool call that ended in error | `tool_error` |
+| A tool call that ended in error | Its `tool_call_end` `error_code`, else `tool_error`, as Python uses the outcome's error type (`crates/linch-otel/src/observer/tools.rs`) |
 | A tool end whose start is in an earlier stream (the placeholder of a call a crash interrupted) | `interrupted`, on a span started `duration_ms` before the end (`crates/linch-otel/src/observer/tools.rs:43-65`) |
 | A non-success `result` with no earlier `error` event | The result subtype's wire name (`observer.rs:273-293`) |
 | `RunObserver::fail(type)` | The type the host passes |

@@ -220,7 +220,7 @@ fn events_in_an_order_no_run_produces_never_panic_and_every_span_ends() {
     });
     let compaction = json!({
         "type": "compaction", "messages_before": 5, "messages_after": 2,
-        "tokens_before": 50, "tokens_after": 20, "strategy": "summary",
+        "tokens_before": 50, "tokens_after": 20, "strategy": "summary", "duration_ms": 3,
     });
     let error = json!({"type": "error", "error": {}});
     let events = [

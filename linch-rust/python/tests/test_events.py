@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from linch_rust import (
     ChildRunStatusEvent,
+    CompactionEvent,
+    InitEvent,
     SkillCompletedEvent,
     SkillInvokedEvent,
     SubagentEvent,
     ToolCallEndEvent,
     UnknownEvent,
+    UsageEvent,
 )
 from linch_rust.events import decode_event
 
@@ -62,3 +65,23 @@ def test_a_subagent_event_wraps_the_childs_event_decoded() -> None:
     assert isinstance(wrapped.event, ToolCallEndEvent) and wrapped.event.tool_use_id == "c1"
     assert isinstance(nested, SubagentEvent) and isinstance(nested.event, SubagentEvent)
     assert nested.event.event == UnknownEvent("x", {})
+
+
+def test_the_stream_names_the_provider_the_served_model_and_a_tool_error_code() -> None:
+    init = decode_event(
+        {"type": "init", "session_id": "s1", "run_id": "r1", "model": "m"}
+        | {"provider": "anthropic", "tools": []}
+    )
+    usage = decode_event(
+        {"type": "usage", "usage": {}, "cumulative": {}, "actual_model": "claude-served"}
+    )
+    end = decode_event({**END, "error_code": "not_found"})
+    compaction = decode_event(
+        {"type": "compaction", "messages_before": 4, "messages_after": 2}
+        | {"tokens_before": 9, "tokens_after": 3, "strategy": "summary", "duration_ms": 12}
+    )
+
+    assert isinstance(init, InitEvent) and init.provider == "anthropic"
+    assert isinstance(usage, UsageEvent) and usage.actual_model == "claude-served"
+    assert isinstance(end, ToolCallEndEvent) and end.error_code == "not_found"
+    assert isinstance(compaction, CompactionEvent) and compaction.duration_ms == 12

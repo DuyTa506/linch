@@ -127,7 +127,14 @@ def envelope(seq: int, ts_ms: int, event: dict[str, Any], run_id: str = "r1") ->
 
 
 def init() -> dict[str, Any]:
-    return {"type": "init", "session_id": "s1", "run_id": "r1", "model": "m", "tools": []}
+    return {
+        "type": "init",
+        "session_id": "s1",
+        "run_id": "r1",
+        "model": "m",
+        "provider": "scripted",
+        "tools": [],
+    }
 
 
 def prompt() -> dict[str, Any]:
@@ -607,6 +614,7 @@ def test_events_in_an_order_no_run_produces_never_raise_and_every_span_ends() ->
         "tokens_before": 50,
         "tokens_after": 20,
         "strategy": "summary",
+        "duration_ms": 3,
     }
     events = [
         tool_end("nobody", False, 9_000),
@@ -760,3 +768,67 @@ assert not any(name.startswith("linch_rust.otel") for name in sys.modules)
         + RUN_ONE
     )
     assert run_script(script).splitlines() == ["hello"]
+
+
+def test_the_provider_comes_from_init_when_the_host_names_none() -> None:
+    sdk = Sdk()
+    observer = sdk.telemetry.observer(capture_content=False)
+    assert observer is not None
+    feed(
+        observer, [(100, init()), (101, prompt()), (102, context_build()), (103, result("success"))]
+    )
+
+    spans = sdk.spans()
+    for name in ("invoke_agent", "step", "chat m"):
+        assert attr(one(spans, name), "gen_ai.provider.name") == "scripted", name
+
+
+def test_a_chat_names_the_model_that_served_it() -> None:
+    sdk = Sdk()
+    served = {**usage_event(1, 1), "actual_model": "served-2026"}
+    feed(
+        sdk.observer(),
+        [(100, init()), (101, prompt()), (102, context_build()), (103, assistant("end_turn"))]
+        + [(104, served), (105, result("success"))],
+    )
+
+    assert attr(one(sdk.spans(), "chat m"), "gen_ai.response.model") == "served-2026"
+
+
+def test_a_compaction_span_starts_its_duration_before_its_event() -> None:
+    sdk = Sdk()
+    compaction = {
+        "type": "compaction",
+        "messages_before": 5,
+        "messages_after": 2,
+        "tokens_before": 50,
+        "tokens_after": 20,
+        "strategy": "summary",
+        "duration_ms": 30,
+    }
+    feed(
+        sdk.observer(),
+        [(100, init()), (101, prompt()), (150, usage_event(7, 3)), (160, compaction)]
+        + [(161, context_build()), (170, assistant("end_turn")), (171, result("success"))],
+    )
+
+    spans = sdk.spans()
+    span = one(spans, "compaction")
+    assert (span.start_time, span.end_time) == (at(130), at(160))
+    [summary] = [chat for chat in all_named(spans, "chat m") if is_child(chat, span)]
+    assert (summary.start_time, summary.end_time) == (at(130), at(150))
+    assert attr(summary, "gen_ai.usage.input_tokens") == 7
+
+
+def test_a_failed_tool_call_is_marked_with_its_error_code() -> None:
+    sdk = Sdk()
+    coded = {**tool_end("c1", True, 1), "error_code": "not_found"}
+    feed(
+        sdk.observer(),
+        [(100, init()), (101, prompt()), (102, tool_start("c1")), (103, coded)]
+        + [(104, tool_start("c2")), (105, tool_end("c2", True, 1)), (106, result("success"))],
+    )
+
+    tools = {attr(s, "gen_ai.tool.call.id"): s for s in all_named(sdk.spans(), "execute_tool Echo")}
+    assert error_type(tools["c1"]) == "not_found"
+    assert error_type(tools["c2"]) == "tool_error", "no code: as before"

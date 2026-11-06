@@ -104,9 +104,9 @@
 //! # What the stream does not give
 //!
 //! The event stream carries no store calls, so Python's `linch.store.duration`
-//! metric is not built here. It carries neither the model that served a call
-//! (`gen_ai.response.model`) nor the request's messages (a chat span's
-//! `gen_ai.input.messages`), nor a provider id: set [`RunObserver::provider`].
+//! metric is not built here. It does not carry the request's messages (a
+//! chat span's `gen_ai.input.messages`). The provider comes from `init` and
+//! the model that served a call (`gen_ai.response.model`) from its `usage`.
 //! A resumed call has no `init` event, so its session, model and turn come
 //! from the host through the observer's setters. Subagent events reach the
 //! parent's stream wrapped, after the fact and without their own times, so

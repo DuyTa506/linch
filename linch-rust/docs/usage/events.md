@@ -164,6 +164,7 @@ The run started.
 |---|---|
 | `session_id`, `run_id` | The session and run |
 | `model` | `spec.model` |
+| `provider` | The provider's id: `anthropic`, `openai-chat`, `scripted`, ... |
 | `tools` | Names of the tools offered, in order |
 | `parent_run_id` | The parent run, for a subagent's run; `None` otherwise |
 | `trace_id` | Trace id, when one is set; always `None` from the server. Use `Run.trace_id` ([Observability](./observability.md#correlate-logs-and-traces)) |
@@ -223,6 +224,7 @@ Token usage of one model call. See [Usage and cost](#usage-and-cost).
 | `cumulative` | The run so far, same keys |
 | `cost_usd` | This call's cost in USD; `None` when the model has no price |
 | `cumulative_cost_usd` | The run's priced calls so far; `None` until one is priced |
+| `actual_model` | The model the provider reported serving this call (it can differ from the one asked for, for example a dated id); `None` when it named none |
 
 ### `ToolCallStartEvent` (`tool_call_start`)
 
@@ -247,6 +249,7 @@ A tool call finished.
 | `duration_ms` | How long the call took |
 | `canonical_output` | The structured value, for tools that declare an output schema; `None` otherwise |
 | `metadata` | Details for the host only, never shown to the model: what a host tool returned in [`ToolOutput.metadata`](./tools.md#metadata-for-the-host), or where an offloaded result went; `None` for an error or a tool that set none |
+| `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise |
 | `tool_use_id` | Property: `result["tool_use_id"]` |
 | `is_error` | Property: whether the result is a tool error |
 
@@ -279,7 +282,9 @@ The run stopped to wait; its stream ends here.
 
 The older part of the conversation was summarized
 ([`spec.compaction`](./agent.md#compaction)): `messages_before`,
-`messages_after`, `tokens_before`, `tokens_after` (estimates) and `strategy`.
+`messages_after`, `tokens_before`, `tokens_after` (estimates), `strategy`,
+and `duration_ms`, the time from the decision to compact to this event (the
+summary call and the projection).
 
 ### `LoopGuardEvent` (`loop_guard`)
 

@@ -22,6 +22,9 @@ pub struct InitEvent {
     pub parent_run_id: Option<RunId>,
     /// Model selected for the run.
     pub model: String,
+    /// Id of the run's provider ([`crate::Provider::id`]), for example
+    /// `anthropic` or `scripted`.
+    pub provider: String,
     /// Names of tools offered to the model.
     pub tools: Vec<String>,
     /// Trace identifier correlating this run with host observability.

@@ -13,7 +13,7 @@ use linch_core::{Envelope, Event, JsonValue};
 use opentelemetry::trace::SpanKind;
 use opentelemetry::{Context, KeyValue};
 
-use self::calls::{Chat, Compaction};
+use self::calls::{Chat, Summary};
 use crate::span::{Open, count, json, now_ms, wire_name};
 use crate::{Telemetry, keys, provider_name, span_trace_id};
 
@@ -49,7 +49,9 @@ pub struct RunObserver {
     /// When the next turn begins: the prompt, or the end of the last turn.
     turn_opened: Option<u64>,
     chat: Option<Chat>,
-    compaction: Option<Compaction>,
+    /// The turn's summary call, until its `compaction` event (or the
+    /// turn's primary call, when none follows) places its span.
+    summary: Option<Summary>,
     tools: Vec<(String, Open)>,
     /// Whether an `error` event already marked the run.
     errored: bool,
@@ -73,7 +75,7 @@ impl RunObserver {
             step: None,
             turn_opened: None,
             chat: None,
-            compaction: None,
+            summary: None,
             tools: Vec::new(),
             errored: false,
             prompt_captured: false,
@@ -82,8 +84,8 @@ impl RunObserver {
     }
 
     /// The Linch provider id (`openai-chat`, `anthropic`, ...), reported as
-    /// `gen_ai.provider.name` through [`provider_name`]. The stream does
-    /// not carry it.
+    /// `gen_ai.provider.name` through [`provider_name`]; a run's `init`
+    /// event overrides it.
     pub fn provider(mut self, id: &str) -> Self {
         self.provider = Some(provider_name(id).to_owned());
         self
@@ -207,6 +209,7 @@ impl RunObserver {
             Event::Init(init) => {
                 self.session_id = Some(init.session_id.as_str().to_owned());
                 self.model = Some(init.model.clone());
+                self.provider = Some(provider_name(&init.provider).to_owned());
                 self.turn = Some(0);
                 false
             }
@@ -297,10 +300,10 @@ impl RunObserver {
         if let Some(chat) = self.chat.take() {
             self.finish_chat(chat, at, error);
         }
-        let compaction = self.compaction.take().map(|c| (c.open, c.last));
+        self.flush_summary(error);
         let tools = self.tools.drain(..).map(|(_, open)| (open, at));
         let step = self.step.take().map(|open| (open, at));
-        for (open, end) in compaction.into_iter().chain(tools).chain(step) {
+        for (open, end) in tools.chain(step) {
             if let Some(error) = error {
                 open.set_error(error);
             }

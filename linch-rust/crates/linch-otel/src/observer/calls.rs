@@ -15,22 +15,21 @@ pub(super) struct Chat {
     open: Open,
     usage: Option<Usage>,
     cost: Option<f64>,
+    /// The model the provider reported serving the call.
+    served: Option<String>,
     /// When the response arrived; its `usage` event, if any, comes next.
     answered: Option<u64>,
 }
 
-/// An open compaction, and the last time its summary call was seen.
-pub(super) struct Compaction {
-    pub(super) open: Open,
-    pub(super) last: u64,
+/// A summary call seen by its usage, and when.
+pub(super) struct Summary {
+    usage: UsageEvent,
+    at: u64,
 }
 
 impl RunObserver {
     pub(super) fn context_build(&mut self, at: u64) {
-        // A summary call that gave no compaction ends where it was seen.
-        if let Some(compaction) = self.compaction.take() {
-            compaction.open.end(compaction.last);
-        }
+        self.flush_summary(None);
         if let Some(chat) = self.chat.take() {
             self.finish_chat(chat, at, None);
         }
@@ -48,6 +47,7 @@ impl RunObserver {
             open: self.start(parent, name, SpanKind::Client, at, attributes),
             usage: None,
             cost: None,
+            served: None,
             answered: None,
         }
     }
@@ -68,65 +68,64 @@ impl RunObserver {
         if let Some(chat) = &mut self.chat {
             chat.usage = Some(event.usage);
             chat.cost = event.cost_usd;
+            chat.served.clone_from(&event.actual_model);
             self.close_answered_chat();
             return;
         }
         // No primary call is open, so this is the turn's summary call.
-        let (parent, start) = self.open_compaction(at);
-        self.summary_call(&parent, start, at, Some(event));
-        if let Some(compaction) = &mut self.compaction {
-            compaction.last = at;
-        }
+        let usage = event.clone();
+        self.summary = Some(Summary { usage, at });
     }
 
-    pub(super) fn open_compaction(&mut self, at: u64) -> (Context, u64) {
-        if let Some(compaction) = &self.compaction {
-            return (
-                compaction.open.context().clone(),
-                compaction.open.start_ms(),
-            );
-        }
-        let (step, start) = self.step(at);
+    /// A compaction span from `start` holding the summary call, which
+    /// ended at `end`, with the `usage` it reported.
+    fn summary_span(&mut self, start: u64, end: u64, usage: Option<&UsageEvent>) -> Open {
+        let (step, step_start) = self.step(start);
+        let start = start.max(step_start);
         let attributes = self.attributes(keys::COMPACTION, true);
-        let open = self.start(
+        let compaction = self.start(
             &step,
             keys::COMPACTION,
             SpanKind::Internal,
             start,
             attributes,
         );
-        let opened = (open.context().clone(), start);
-        self.compaction = Some(Compaction { open, last: at });
-        opened
-    }
-
-    /// The compaction's summary call, from the turn's start to `end`.
-    pub(super) fn summary_call(
-        &self,
-        parent: &Context,
-        start: u64,
-        end: u64,
-        usage: Option<&UsageEvent>,
-    ) {
-        let mut chat = self.open_chat(parent, start);
+        let mut chat = self.open_chat(compaction.context(), start);
         if let Some(event) = usage {
             chat.usage = Some(event.usage);
             chat.cost = event.cost_usd;
+            chat.served.clone_from(&event.actual_model);
         }
         self.finish_chat(chat, end, None);
+        compaction
     }
 
+    /// A summary call that gave no compaction: a compaction span from the
+    /// turn's start to where the call was seen, marked with `error` if set.
+    pub(super) fn flush_summary(&mut self, error: Option<&str>) {
+        let Some(Summary { usage, at }) = self.summary.take() else {
+            return;
+        };
+        let start = self.step(at).1;
+        let compaction = self.summary_span(start, at, Some(&usage));
+        if let Some(error) = error {
+            compaction.set_error(error);
+        }
+        compaction.end(at);
+    }
+
+    /// The compaction span: from `duration_ms` before its event to the
+    /// event, around its summary call.
     pub(super) fn compaction(&mut self, event: &CompactionEvent, at: u64) {
-        if self.compaction.is_none() {
-            // Its summary call reported no usage.
-            let (parent, start) = self.open_compaction(at);
-            self.summary_call(&parent, start, at, None);
-        }
-        if let Some(compaction) = self.compaction.take() {
-            let strategy = KeyValue::new(keys::COMPACTION_STRATEGY, event.strategy.clone());
-            compaction.open.set(strategy);
-            compaction.open.end(at);
-        }
+        let summary = self.summary.take();
+        // A summary call that reported no usage ends with the compaction.
+        let end = summary.as_ref().map_or(at, |summary| summary.at);
+        let start = at.saturating_sub(event.duration_ms);
+        let usage = summary.as_ref().map(|summary| &summary.usage);
+        let compaction = self.summary_span(start, end, usage);
+        let strategy = KeyValue::new(keys::COMPACTION_STRATEGY, event.strategy.clone());
+        compaction.set(strategy);
+        compaction.end(at);
     }
 
     /// Close a chat whose response arrived and whose usage did not follow.
@@ -141,7 +140,11 @@ impl RunObserver {
     /// End the chat: its span, its duration and its token counts.
     pub(super) fn finish_chat(&self, chat: Chat, at: u64, error: Option<&str>) {
         let Chat {
-            open, usage, cost, ..
+            open,
+            usage,
+            cost,
+            served,
+            ..
         } = chat;
         let mut attributes = vec![KeyValue::new(keys::OPERATION, keys::CHAT)];
         for (key, value) in [(keys::PROVIDER, &self.provider), (keys::MODEL, &self.model)] {
@@ -158,6 +161,9 @@ impl RunObserver {
         }
         if let Some(cost) = cost {
             open.set(KeyValue::new(keys::COST_USD, cost));
+        }
+        if let Some(served) = served {
+            open.set(KeyValue::new(keys::RESPONSE_MODEL, served));
         }
         let seconds = at.saturating_sub(open.start_ms()) as f64 / 1000.0;
         open.end(at);

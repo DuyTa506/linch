@@ -4,7 +4,10 @@
 use serde_json::{Value, json};
 
 pub fn init() -> Value {
-    json!({"type": "init", "session_id": "s1", "run_id": "r1", "model": "m", "tools": []})
+    json!({
+        "type": "init", "session_id": "s1", "run_id": "r1", "model": "m",
+        "provider": "scripted", "tools": [],
+    })
 }
 
 pub fn prompt() -> Value {

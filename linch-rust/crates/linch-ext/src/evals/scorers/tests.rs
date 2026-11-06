@@ -35,6 +35,7 @@ fn end(id: &str, tool: &str, is_error: bool) -> Event {
         duration_ms: 1,
         canonical_output: None,
         metadata: None,
+        error_code: None,
     })
 }
 

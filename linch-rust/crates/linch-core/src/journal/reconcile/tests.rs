@@ -91,6 +91,7 @@ fn end(id: &str, name: &str) -> Event {
         duration_ms: 1,
         canonical_output: None,
         metadata: None,
+        error_code: None,
     })
 }
 

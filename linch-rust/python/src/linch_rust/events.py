@@ -17,12 +17,13 @@ JsonObject = dict[str, Any]
 
 @dataclass(frozen=True)
 class InitEvent:
-    """The run started: its session, model and tool names."""
+    """The run started: its session, model, provider id and tool names."""
 
     type: ClassVar[str] = "init"
     session_id: str
     run_id: str
     model: str
+    provider: str
     tools: list[str]
     parent_run_id: str | None = None
     trace_id: str | None = None
@@ -59,7 +60,8 @@ class UsageEvent:
     """Token usage of one provider call, and the run's running total.
 
     `cost_usd` and `cumulative_cost_usd` are in USD, `None` when the model
-    has no price.
+    has no price. `actual_model` is the model the provider reported
+    serving the call, `None` when it named none.
     """
 
     type: ClassVar[str] = "usage"
@@ -67,6 +69,7 @@ class UsageEvent:
     cumulative: JsonObject
     cost_usd: float | None = None
     cumulative_cost_usd: float | None = None
+    actual_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,8 @@ class ToolCallEndEvent:
 
     `metadata` is what the tool returned for the host only, never shown to
     the model (a host tool's `ToolOutput.metadata`, or where an offloaded
-    result went); `None` for an error or a tool that set none.
+    result went); `None` for an error or a tool that set none. `error_code`
+    is a failed call's machine-readable code, `None` without one.
     """
 
     type: ClassVar[str] = "tool_call_end"
@@ -95,6 +99,7 @@ class ToolCallEndEvent:
     duration_ms: int
     canonical_output: Any = None
     metadata: JsonObject | None = None
+    error_code: str | None = None
 
     @property
     def tool_use_id(self) -> str:
@@ -149,7 +154,7 @@ class ContextBuildEvent:
 
 @dataclass(frozen=True)
 class CompactionEvent:
-    """The provider view was compacted into a summary."""
+    """The provider view was compacted into a summary, in `duration_ms`."""
 
     type: ClassVar[str] = "compaction"
     messages_before: int
@@ -157,6 +162,7 @@ class CompactionEvent:
     tokens_before: int
     tokens_after: int
     strategy: str
+    duration_ms: int
 
 
 @dataclass(frozen=True)

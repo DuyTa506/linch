@@ -136,6 +136,10 @@ impl ToolSink for JournalSink<'_> {
                 }
                 _ => None,
             },
+            error_code: match &outcome.result {
+                Err(error) => error.code.clone(),
+                Ok(_) => None,
+            },
         });
         let events = if ran {
             vec![end]

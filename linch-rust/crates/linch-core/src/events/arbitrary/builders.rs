@@ -16,15 +16,17 @@ pub(super) fn init_event() -> impl Strategy<Value = InitEvent> {
         run_id(),
         option::of(run_id()),
         short_string(),
+        short_string(),
         vec(short_string(), 0..3),
         option::of(short_string()),
     )
         .prop_map(
-            |(session_id, run_id, parent_run_id, model, tools, trace_id)| InitEvent {
+            |(session_id, run_id, parent_run_id, model, provider, tools, trace_id)| InitEvent {
                 session_id,
                 run_id,
                 parent_run_id,
                 model,
+                provider,
                 tools,
                 trace_id,
             },
@@ -166,15 +168,24 @@ pub(super) fn compaction_event() -> impl Strategy<Value = CompactionEvent> {
         any::<u64>(),
         any::<u64>(),
         short_string(),
+        any::<u64>(),
     )
         .prop_map(
-            |(messages_before, messages_after, tokens_before, tokens_after, strategy)| {
+            |(
+                messages_before,
+                messages_after,
+                tokens_before,
+                tokens_after,
+                strategy,
+                duration_ms,
+            )| {
                 CompactionEvent {
                     messages_before,
                     messages_after,
                     tokens_before,
                     tokens_after,
                     strategy,
+                    duration_ms,
                 }
             },
         )

@@ -197,6 +197,7 @@ fn without_a_record_the_status_follows_the_stream() {
         model: "m".into(),
         tools: Vec::new(),
         trace_id: None,
+        provider: "scripted".into(),
     });
     let running = report(vec![init.clone()]);
     assert_eq!(
@@ -259,6 +260,7 @@ fn recovery_cache_and_risk_events_are_counted() {
             tokens_before: before,
             tokens_after: after,
             strategy: "summary".into(),
+            duration_ms: 0,
         })
     };
     let verification = |action| {
@@ -323,6 +325,7 @@ fn usage_falls_back_to_the_last_usage_event() {
             cumulative,
             cost_usd: None,
             cumulative_cost_usd: None,
+            actual_model: None,
         })
     };
     let fallback = report(vec![usage(Usage::default()), usage(cached)]);

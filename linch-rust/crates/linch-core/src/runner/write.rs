@@ -139,14 +139,20 @@ impl Runner {
     }
 
     /// Stage the `Usage` event of a call that reported `usage`, with the
-    /// call's `cost` and the run's so far.
-    pub(super) fn stage_usage(&mut self, usage: Option<Usage>, cost: Option<f64>) {
+    /// call's `cost`, the run's so far, and the model that `served` it.
+    pub(super) fn stage_usage(
+        &mut self,
+        usage: Option<Usage>,
+        cost: Option<f64>,
+        served: Option<String>,
+    ) {
         if let Some(usage) = usage {
             self.journal.stage(Event::Usage(UsageEvent {
                 usage,
                 cumulative: self.usage,
                 cost_usd: cost,
                 cumulative_cost_usd: self.cost,
+                actual_model: served,
             }));
         }
     }

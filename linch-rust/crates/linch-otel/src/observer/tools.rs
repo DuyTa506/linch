@@ -56,7 +56,7 @@ impl RunObserver {
             }
         };
         if end.is_error() {
-            open.set_error(error);
+            open.set_error(end.error_code.as_deref().unwrap_or(error));
         }
         if self.capture && open.recording() {
             open.set(KeyValue::new(keys::TOOL_RESULT, result_text(&end.result)));
