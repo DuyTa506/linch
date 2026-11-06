@@ -132,34 +132,14 @@ pub struct ApproveParams {
     pub agent: String,
     /// A run suspended awaiting approval.
     pub run_id: RunId,
-    /// The answer per pending `tool_use_id`. Answers for calls that are not
-    /// pending are ignored; a pending call without one is asked again.
-    pub decisions: BTreeMap<String, Decision>,
+    /// The answer per pending `tool_use_id`, in the core wire form:
+    /// `{"decision": "allow"}` or `{"decision": "deny", "reason": "..."}`.
+    /// Answers for calls that are not pending are ignored; a pending call
+    /// without one is asked again.
+    pub decisions: BTreeMap<String, ApprovalResponse>,
     /// Caller identity for permission rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<Principal>,
-}
-
-/// The answer to one pending tool call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Decision {
-    /// Run the call (later policy may still deny it).
-    Allow {},
-    /// Refuse the call; `reason` is shown to the model.
-    Deny {
-        /// Why the call was refused.
-        reason: String,
-    },
-}
-
-impl From<Decision> for ApprovalResponse {
-    fn from(decision: Decision) -> Self {
-        match decision {
-            Decision::Allow {} => Self::Allow,
-            Decision::Deny { reason } => Self::Deny { reason },
-        }
-    }
 }
 
 /// Result of `run.start`, `run.resume` and `run.approve`.
@@ -217,4 +197,35 @@ pub struct RunEnd {
     /// ended normally (after its `result` or `suspended` envelope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorObject>,
+}
+
+#[cfg(test)]
+mod tests {
+    use linch::hooks::ApprovalResponse;
+    use serde_json::json;
+
+    use super::ApproveParams;
+
+    #[test]
+    fn approve_params_carry_core_approval_responses_strictly() {
+        let wire = json!({"agent": "agent-1", "run_id": "r1", "decisions": {
+            "c1": {"decision": "allow"},
+            "c2": {"decision": "deny", "reason": "not now"},
+        }});
+        let params: ApproveParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(params.decisions["c1"], ApprovalResponse::Allow);
+        let deny = ApprovalResponse::Deny {
+            reason: "not now".into(),
+        };
+        assert_eq!(params.decisions["c2"], deny);
+        assert_eq!(serde_json::to_value(&params).unwrap(), wire);
+        for bad in [
+            json!({"decision": "allow", "reason": "x"}),
+            json!({"decision": "deny"}),
+            json!({"decision": "maybe"}),
+        ] {
+            let wire = json!({"agent": "agent-1", "run_id": "r1", "decisions": {"c1": bad}});
+            assert!(serde_json::from_value::<ApproveParams>(wire).is_err());
+        }
+    }
 }

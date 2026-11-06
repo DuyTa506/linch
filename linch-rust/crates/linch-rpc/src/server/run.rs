@@ -40,9 +40,7 @@ impl Server {
     }
 
     pub(super) fn approve(&self, params: ApproveParams) -> Result<Reply, ErrorObject> {
-        let decisions = (params.decisions.into_iter())
-            .map(|(tool_use_id, decision)| (tool_use_id, decision.into()))
-            .collect();
+        let decisions = params.decisions.into_iter().collect();
         let run_id = params.run_id;
         self.claim(params.agent, &run_id, params.principal, |agent, options| {
             agent.approve(run_id.clone(), decisions, options)

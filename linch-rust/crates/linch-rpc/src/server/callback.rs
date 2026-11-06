@@ -24,7 +24,7 @@ use serde_json::json;
 use super::peer::Peer;
 use crate::error::{ErrorObject, invalid_params};
 use crate::protocol::{
-    CallbackSpec, ContextBuildAnswer, Decision, HookCallParams, PostToolUseAnswer, PostTurnAnswer,
+    CallbackSpec, ContextBuildAnswer, HookCallParams, PostToolUseAnswer, PostTurnAnswer,
     PreToolUseAnswer, StopAnswer, UserPromptAnswer, WireToolResult, method,
 };
 
@@ -188,7 +188,7 @@ impl Wire for PermissionRequest {
     }
 
     fn decode(value: JsonValue) -> Result<linch::hooks::ApprovalResponse, serde_json::Error> {
-        answer::<Decision>(value).map(Into::into)
+        answer(value)
     }
 }
 
