@@ -45,7 +45,7 @@ pub fn tool_name(server: &str, tool: &str) -> String {
 #[derive(Clone)]
 pub(crate) struct Conn {
     pub(crate) peer: Peer<RoleClient>,
-    /// Cancelled when a call sees this connection's transport fail, so the
+    /// Cancelled when a call sees this connection's transport close, so the
     /// supervisor reconnects. A stale connection's token cannot touch the
     /// next connection.
     pub(crate) lost: CancellationToken,
@@ -80,13 +80,19 @@ impl Link {
     fn call_failed(&self, conn: &Conn, error: ServiceError) -> ToolOutputError {
         let server = &self.server;
         match error {
-            ServiceError::TransportSend(_) | ServiceError::TransportClosed => {
+            ServiceError::TransportClosed => {
                 conn.lost.cancel();
                 coded(
                     format!("MCP server {server:?} connection lost during the call: {error}"),
                     codes::UNAVAILABLE,
                 )
             }
+            // Only this request failed to go out, such as an HTTP error
+            // status on its POST; the connection itself is still up.
+            ServiceError::TransportSend(_) => coded(
+                format!("MCP server {server:?} did not take the call: {error}"),
+                codes::UNAVAILABLE,
+            ),
             ServiceError::McpError(error) => coded(
                 format!(
                     "MCP server {server:?} rejected the call: {} (code {})",

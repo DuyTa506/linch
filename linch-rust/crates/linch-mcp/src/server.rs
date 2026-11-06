@@ -226,9 +226,7 @@ impl Supervisor {
                     listed = tokio::time::timeout(self.policy.attempt_timeout, list_tools(&peer)) => {
                         match listed {
                             Ok(Ok(tools)) => self.sync(tools),
-                            Ok(Err(
-                                ServiceError::TransportSend(_) | ServiceError::TransportClosed,
-                            )) => lost.cancel(),
+                            Ok(Err(ServiceError::TransportClosed)) => lost.cancel(),
                             // A failed or timed-out relist keeps the current
                             // tools; the next change or reconnect lists again.
                             _ => {}

@@ -13,8 +13,9 @@ pub const ABORTED: &str = "aborted";
 /// No result within the call timeout; the server is sent
 /// `notifications/cancelled`.
 pub const TIMEOUT: &str = "timeout";
-/// The server is reconnecting, unavailable or disconnected, or the
-/// connection dropped during the call.
+/// The server is reconnecting, unavailable or disconnected, the connection
+/// dropped during the call, or the call's request could not be sent (an
+/// HTTP error status on its POST).
 pub const UNAVAILABLE: &str = "mcp_unavailable";
 /// The server ran the tool and returned `isError: true`.
 pub const TOOL_ERROR: &str = "mcp_tool_error";
