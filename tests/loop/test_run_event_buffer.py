@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -145,6 +147,29 @@ class _VarPositionalAppendStore(InMemoryRunStore):
 
     async def _append_event(self, run_id: str, event: Any) -> int:
         return await InMemoryRunStore.append_event(self, run_id, event)
+
+
+class _InterleavingRunStore(InMemoryRunStore):
+    """Run a queued hook inside an atomic write, where Postgres lets other tasks run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.during_write: list[Callable[[], Awaitable[None]]] = []
+
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Any,
+        *,
+        status: str = "running",
+        lease: RunLease | None = None,
+    ) -> list[int]:
+        if self.during_write:
+            await self.during_write.pop(0)()
+        return await super().save_checkpoint_with_events(
+            run_id, checkpoint, events, status=status, lease=lease
+        )
 
 
 class _FailOnceBatchStore:
@@ -550,3 +575,54 @@ async def test_events_group_commit_and_tool_start_closes_its_batch() -> None:
             assert batch[-1] == "tool_call_start", batch
 
     assert any(len(batch) > 1 for batch in run_store.batches), run_store.batches
+
+
+async def test_checkpoint_deferred_during_a_session_barrier_stays_held() -> None:
+    store = _InterleavingRunStore()
+    record = await store.create_run("s1", id="r1")
+    buffer = RunEventBuffer(store, record.id)
+    await buffer.append(PartialAssistantEvent(delta={"text": "a"}))
+    buffer.defer_checkpoint(RunCheckpoint("assistant_appended", "hi", 0, Usage()))
+
+    async def loop_saves_newer_phase() -> None:
+        buffer.defer_checkpoint(RunCheckpoint("tool_results_appended", "hi", 0, Usage()))
+
+    store.during_write.append(loop_saves_newer_phase)
+
+    await buffer.flush_checkpoint()  # a background notify's session-store barrier
+    await buffer.flush()  # the loop's next barrier
+
+    run = await store.load_run(record.id)
+    assert run is not None and run.checkpoint is not None
+    assert run.checkpoint.phase == "tool_results_appended"
+
+
+async def test_overlapping_barriers_commit_in_buffer_order() -> None:
+    store = _InterleavingRunStore()
+    record = await store.create_run("s1", id="r1")
+    buffer = RunEventBuffer(store, record.id)
+    first = PartialAssistantEvent(delta={"text": "first"})
+    second = PartialAssistantEvent(delta={"text": "second"})
+    await buffer.append(first)
+    buffer.defer_checkpoint(RunCheckpoint("assistant_appended", "hi", 0, Usage()))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_open() -> None:
+        entered.set()
+        await release.wait()
+
+    store.during_write.append(hold_open)
+
+    background = asyncio.create_task(buffer.flush_checkpoint())
+    await entered.wait()
+    await buffer.append(second)
+    buffer.defer_checkpoint(RunCheckpoint("tool_results_appended", "hi", 0, Usage()))
+    loop_barrier = asyncio.create_task(buffer.flush())
+    await asyncio.sleep(0)  # an unserialized write would commit here, ahead of the first
+    release.set()
+    await asyncio.gather(background, loop_barrier)
+
+    run = await store.load_run(record.id)
+    assert run is not None and run.checkpoint is not None
+    assert run.checkpoint.phase == "tool_results_appended"
+    assert [row.event for row in await store.load_events(record.id)] == [first, second]
