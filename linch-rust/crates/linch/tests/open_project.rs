@@ -154,11 +154,12 @@ async fn workers_and_a_mailbox_add_their_tools() {
 
     let no_subagents = config("notes", json!({"workers": {"retain": true}}));
     let hooks = Arc::new(Hooks::default());
-    let error = no_subagents
+    let opened = no_subagents
         .open_with(Arc::new(ToolRegistry::new()), hooks, &PgPools::new())
-        .await
-        .err()
-        .expect("workers need subagents");
+        .await;
+    let Err(error) = opened else {
+        panic!("workers need subagents");
+    };
     assert!(
         error.to_string().contains("workers need subagents"),
         "{error}"
