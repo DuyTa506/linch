@@ -50,6 +50,10 @@ pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,
     Role, SystemBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultPart, ToolUseBlock,
 };
+pub use permissions::{
+    PermissionCall, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy,
+    PolicyError, permission_decision_key,
+};
 pub use policy::{FailMode, HookPoint, PermissionDecision, Principal, PrincipalError};
 pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
