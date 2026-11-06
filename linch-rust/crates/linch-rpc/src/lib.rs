@@ -30,7 +30,9 @@
 //! - **HTTP** ([`serve_messages`] with [`Access::Tenant`]): `GET /rpc` with
 //!   `Authorization: Bearer <token>` upgrades to a WebSocket carrying one
 //!   message per text frame (a binary frame that is not UTF-8 ends the
-//!   connection). A missing or unknown token gets `401` before the upgrade.
+//!   connection). A missing or unknown token gets `401` before the upgrade,
+//!   and a tenant at its connection cap `429`: the transport takes the
+//!   connection's place with [`Tenant::connect`] before it upgrades.
 //!
 //! `connection.auth` anywhere but first on the socket is `-32600`. Tokens
 //! are compared in constant time and never logged or echoed. A remote
@@ -53,10 +55,15 @@
 //!   - a `workspace` and a `permissions.project_root` only as existing
 //!     directories under an allowed root, each replaced by its canonical
 //!     path (without a root, a config keeps the default policy);
+//!   - with skills or subagents on, a `config_dir` (relative to the
+//!     workspace) only as an existing directory under an allowed root, and
+//!     the default `.linch` only there or missing, so neither leads, by an
+//!     absolute path, `..` or a symlink, to another tenant's files; it is
+//!     replaced by the checked path;
 //!   - `Bash` only when the tenant allows exec tools; otherwise the config's
 //!     `bash` is turned off and the agent opens without it;
 //!   - a Postgres DSN only with an allowed host, port, socket, database,
-//!     user and options;
+//!     user, options and TLS files (`sslrootcert`, `sslcert`, `sslkey`);
 //!   - an MCP stdio server only with the `command` and `args` of an entry,
 //!     setting only the `env` names that entry lists ([`McpCommand`]); an
 //!     MCP HTTP URL only at an allowed origin.
@@ -64,15 +71,15 @@
 //! A refusal is `-32004` with `data.kind` naming the check: `namespace`,
 //! `principal`, `provider`, `provider_base_url`, `permission_mode`,
 //! `auto_allow`, `permission_rule`, `workspace`, `project_root`,
-//! `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
+//! `config_dir`, `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
 //!
 //! A tenant also has caps, counted across all its connections: at most
 //! `max_runs` runs driven at once (default [`DEFAULT_MAX_RUNS`]; a run
 //! holds its place until its `run.end`) and `max_connections` connections
 //! (default [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is
 //! refused with `-32005` and `data: {kind: "runs" | "connections", max}`;
-//! a refused connection gets that error (under the `connection.auth` id on
-//! the socket, a null id on HTTP) and closes. A local connection has none.
+//! a refused socket login gets that error under its `connection.auth` id
+//! and closes (on HTTP, the `429` above). A local connection has none.
 //!
 //! # Framing
 //!
@@ -347,8 +354,8 @@ pub mod protocol;
 mod server;
 
 pub use access::{
-    Access, AccessError, Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, MAX_PENDING_LOGINS,
-    McpCommand, Tenant, Tokens,
+    Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
+    MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens,
 };
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};

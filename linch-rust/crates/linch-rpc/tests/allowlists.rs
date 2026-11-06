@@ -119,6 +119,66 @@ async fn a_workspace_must_lie_under_an_allowed_root() {
 }
 
 #[tokio::test]
+async fn a_config_dir_must_lie_under_an_allowed_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tenants").join("acme");
+    let beta = dir.path().join("tenants/beta/.linch");
+    for skill in [
+        root.join("project/.linch/skills/notes"),
+        beta.join("skills/secret"),
+    ] {
+        std::fs::create_dir_all(&skill).unwrap();
+        let text = "---\ndescription: Notes.\n---\nNotes.";
+        std::fs::write(skill.join("SKILL.md"), text).unwrap();
+    }
+    for sub in ["empty", "escape", "dangles"] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    std::os::unix::fs::symlink(&beta, root.join("link")).unwrap();
+    std::os::unix::fs::symlink(&beta, root.join("escape/.linch")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("gone"), root.join("dangles/.linch")).unwrap();
+    let roots = [root.clone()];
+    let rpc = Rpc::remote(acme(|allow| allow.workspace_roots(&roots).unwrap()));
+    let project = root.join("project");
+    let inside = [
+        json!({"skills": true, "workspace": project}),
+        json!({"subagents": true, "workspace": project, "config_dir": ".linch"}),
+        json!({"skills": true, "workspace": root, "config_dir": "project/.linch"}),
+        json!({"skills": true, "config_dir": project.join(".linch")}),
+        // No `.linch` at all: only the built-in skill loads.
+        json!({"skills": true, "workspace": root.join("empty")}),
+        json!({"skills": true}),
+        // Unused while skills and subagents are off.
+        json!({"workspace": project, "config_dir": beta}),
+    ];
+    for extra in inside {
+        assert_eq!(refused(&rpc, config(extra.clone())).await, None, "{extra}");
+    }
+    // The checked path still loads: the `notes` skill changes the contract.
+    let contract = |extra: Value| async {
+        let opened = rpc.call(method::AGENT_OPEN, config(extra)).await.unwrap();
+        opened["contract"].clone()
+    };
+    let notes = contract(json!({"skills": true, "config_dir": project.join(".linch")}));
+    assert_ne!(notes.await, contract(json!({"skills": true})).await);
+    let outside = [
+        json!({"skills": true, "workspace": project, "config_dir": beta}),
+        json!({"skills": true, "workspace": project, "config_dir": "../../beta/.linch"}),
+        json!({"skills": true, "workspace": root, "config_dir": "link"}),
+        json!({"subagents": true, "workspace": root, "config_dir": "link"}),
+        json!({"skills": true, "workspace": root.join("escape")}),
+        json!({"skills": true, "workspace": root.join("dangles")}),
+        json!({"skills": true, "workspace": project, "config_dir": "missing"}),
+        json!({"skills": true, "config_dir": beta}),
+        json!({"skills": true, "config_dir": "/"}),
+    ];
+    for extra in outside {
+        let kind = refused(&rpc, config(extra.clone())).await;
+        assert_eq!(kind.as_deref(), Some("config_dir"), "{extra}");
+    }
+}
+
+#[tokio::test]
 async fn an_mcp_stdio_server_must_match_an_entry_exactly() {
     let program = example("mcp_server");
     assert!(program.exists(), "{} was not built", program.display());
@@ -242,6 +302,44 @@ async fn a_store_dsn_must_name_an_allowed_server() {
     // Memory stores need no entry.
     let memory = config(json!({"stores": {"type": "memory"}}));
     assert_eq!(refused(&rpc, memory).await, None);
+}
+
+#[tokio::test]
+async fn a_store_dsn_must_name_an_entrys_tls_files_exactly() {
+    let address = hangs_up().await;
+    let two = "sslrootcert=/etc/linch/ca.pem&sslcert=/etc/linch/acme.crt";
+    let files = format!("{two}&sslkey=/etc/linch/acme.key");
+    let dsns = [
+        format!("postgres://acme@{address}/linch"),
+        format!("postgres://pinned@{address}/linch?{files}"),
+    ];
+    let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
+    let store = |dsn: String| config(json!({"stores": {"type": "postgres", "dsn": dsn}}));
+    // The same files, also under the other names the store reads them by.
+    for ours in [
+        format!("postgres://pinned@{address}/linch?sslmode=disable&{files}"),
+        format!(
+            "postgres://pinned@{address}/linch?sslmode=disable&ssl-ca=/etc/linch/ca.pem\
+             &ssl-cert=/etc/linch/acme.crt&ssl-key=/etc/linch/acme.key"
+        ),
+    ] {
+        let error = rpc.call(method::AGENT_OPEN, store(ours)).await.unwrap_err();
+        assert_eq!(refusal(error), (code::STORE_UNAVAILABLE, None));
+    }
+    let outside = [
+        // An entry without files refuses every one.
+        format!("postgres://acme@{address}/linch?sslrootcert=/srv/beta/ca.pem"),
+        format!("postgres://acme@{address}/linch?sslcert=/srv/beta/client.crt"),
+        format!("postgres://acme@{address}/linch?ssl-key=/srv/beta/client.key"),
+        // One missing, one other, or one named again later.
+        format!("postgres://pinned@{address}/linch?{two}"),
+        format!("postgres://pinned@{address}/linch?{two}&sslkey=/srv/beta/client.key"),
+        format!("postgres://pinned@{address}/linch?{files}&sslkey=/srv/beta/client.key"),
+    ];
+    for dsn in outside {
+        let kind = refused(&rpc, store(dsn.clone())).await;
+        assert_eq!(kind.as_deref(), Some("postgres"), "{dsn}");
+    }
 }
 
 #[tokio::test]

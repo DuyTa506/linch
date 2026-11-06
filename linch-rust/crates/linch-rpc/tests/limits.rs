@@ -24,6 +24,11 @@ fn acme(allow: Allowlists) -> Arc<Tenant> {
     Arc::new(Tenant::new("acme", allow.scripted_provider(true)).unwrap())
 }
 
+/// Access as `tenant`, holding one of its connection places.
+fn connected(tenant: &Arc<Tenant>) -> Access {
+    Access::Tenant(Arc::clone(tenant).connect().unwrap())
+}
+
 /// The code and `data` of a refused call.
 fn limit(error: linch_rpc::ClientError) -> (i64, Value) {
     match error {
@@ -60,8 +65,8 @@ async fn waiting(access: Access, arrived: mpsc::UnboundedSender<()>) -> (Rpc, St
 async fn a_tenant_drives_at_most_max_runs_at_once_across_its_connections() {
     let acme = acme(Allowlists::new().max_runs(2));
     let (arrived, mut calls) = mpsc::unbounded_channel();
-    let (mut first, agent_a) = waiting(Access::Tenant(acme.clone()), arrived.clone()).await;
-    let (second, agent_b) = waiting(Access::Tenant(acme.clone()), arrived).await;
+    let (mut first, agent_a) = waiting(connected(&acme), arrived.clone()).await;
+    let (second, agent_b) = waiting(connected(&acme), arrived).await;
     let running = first.start(&agent_a, "s1", "wait").await;
     second.start(&agent_b, "s2", "wait").await;
     for _ in 0..2 {
@@ -149,21 +154,15 @@ fn cancel_params() -> Value {
 #[tokio::test]
 async fn a_tenant_holds_at_most_max_connections() {
     let acme = acme(Allowlists::new().max_connections(1));
-    let mut first = Raw::connect(Access::Tenant(acme.clone()));
+    let mut first = Raw::connect(connected(&acme));
     let answer = first.call(1, method::RUN_CANCEL, cancel_params()).await;
     assert_eq!(answer.unwrap()["result"], json!({"cancelled": false}));
-    let mut second = Raw::connect(Access::Tenant(acme.clone()));
-    let refused = second.next().await.expect("one error line");
-    assert_eq!(refused["id"], Value::Null);
-    assert_eq!(refused["error"]["code"], code::LIMIT_REACHED);
-    assert_eq!(
-        refused["error"]["data"],
-        json!({"kind": "connections", "max": 1})
-    );
-    assert!(second.next().await.is_none(), "the connection closes");
-    second.close().await;
+    // The place is refused before a connection is served.
+    let refused = Arc::clone(&acme).connect().unwrap_err();
+    assert_eq!(refused.code, code::LIMIT_REACHED);
+    assert_eq!(refused.data, Some(json!({"kind": "connections", "max": 1})));
     first.close().await;
-    let mut third = Raw::connect(Access::Tenant(acme));
+    let mut third = Raw::connect(connected(&acme));
     let answer = third.call(1, method::RUN_CANCEL, cancel_params()).await;
     assert_eq!(answer.unwrap()["result"], json!({"cancelled": false}));
     third.close().await;
@@ -174,12 +173,12 @@ async fn a_login_past_the_connection_cap_is_refused_under_its_id() {
     let mut tokens = Tokens::new();
     let acme = acme(Allowlists::new().max_connections(1));
     tokens.insert("tok-acme-p11e-0001", acme).unwrap();
-    let login = Access::Login(Arc::new(tokens));
+    let tokens = Arc::new(tokens);
     let auth = json!({"token": "tok-acme-p11e-0001"});
-    let mut first = Raw::connect(login.clone());
+    let mut first = Raw::connect(Access::Login(Arc::clone(&tokens)));
     let answer = first.call(1, method::CONNECTION_AUTH, auth.clone()).await;
     assert_eq!(answer.unwrap()["result"], json!({"tenant": "acme"}));
-    let mut second = Raw::connect(login);
+    let mut second = Raw::connect(Access::Login(tokens));
     let refused = second.call(7, method::CONNECTION_AUTH, auth).await.unwrap();
     assert_eq!(refused["id"], 7);
     assert_eq!(refused["error"]["code"], code::LIMIT_REACHED);

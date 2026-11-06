@@ -20,14 +20,16 @@ mod allowlists;
 pub use allowlists::{Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, McpCommand};
 
 /// How a connection's client is trusted.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Access {
     /// The client owns the server process, as on stdio: no token, no
     /// tenant, no allowlists.
     Local,
-    /// The client already proved it acts for this tenant (the HTTP
-    /// transport checked its bearer header).
-    Tenant(Arc<Tenant>),
+    /// The client already proved it acts for this place's tenant (the
+    /// HTTP transport checked its bearer header), and the place, taken
+    /// with [`Tenant::connect`] before the connection was accepted, is
+    /// held until the connection ends.
+    Tenant(ConnectionPlace),
     /// The client must first send `connection.auth` with one of these
     /// tokens; the connection then acts for the token's tenant.
     Login(Arc<Tokens>),
@@ -72,9 +74,23 @@ impl Tenant {
         take(&self.runs, "runs", self.allow.max_runs)
     }
 
-    /// A place among the tenant's connections, or `-32005`.
-    pub(crate) fn connection_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
-        take(&self.connections, "connections", self.allow.max_connections)
+    /// Take a place among the tenant's connections for a client that
+    /// proved it acts for the tenant, as [`Access::Tenant`] needs. A
+    /// transport that knows the tenant before it accepts the connection
+    /// takes it first, so it can refuse in its own terms (HTTP 429).
+    ///
+    /// Returns:
+    ///     The place, given back when it drops.
+    ///
+    /// Raises:
+    ///     ErrorObject: `-32005` with `data: {kind: "connections", max}`
+    ///         when the tenant already holds `max_connections`.
+    pub fn connect(self: Arc<Self>) -> Result<ConnectionPlace, ErrorObject> {
+        let place = take(&self.connections, "connections", self.allow.max_connections)?;
+        Ok(ConnectionPlace {
+            tenant: self,
+            _place: place,
+        })
     }
 
     /// The tenant name.
@@ -86,6 +102,14 @@ impl Tenant {
     pub fn allowlists(&self) -> &Allowlists {
         &self.allow
     }
+}
+
+/// A connection's place among its tenant's connections, from
+/// [`Tenant::connect`]; the place is given back when this drops.
+#[derive(Debug)]
+pub struct ConnectionPlace {
+    pub(crate) tenant: Arc<Tenant>,
+    _place: OwnedSemaphorePermit,
 }
 
 /// Socket connections that may wait for their login at once, across every

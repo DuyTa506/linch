@@ -47,7 +47,8 @@
 //! which defaults to `default` and `accept_edits`; `scripted_provider`
 //! and `exec_tools` (`Bash` for workspace agents) are off when absent;
 //! `max_runs` and `max_connections`, the tenant's caps across all its
-//! connections, default to 16 and 8. See [`linch_rpc::Allowlists`] for
+//! connections, default to 16 and 8, and a 0 is refused when the config
+//! loads. See [`linch_rpc::Allowlists`] for
 //! how each entry matches.
 //!
 //! # Transports
@@ -58,7 +59,9 @@
 //!   the file is removed at shutdown. Its permissions follow the umask.
 //! - **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades
 //!   to a WebSocket carrying one JSON-RPC message per text frame. A
-//!   missing or unknown token gets `401` with `WWW-Authenticate: Bearer`.
+//!   missing or unknown token gets `401` with `WWW-Authenticate: Bearer`;
+//!   a tenant already holding its `max_connections` gets `429`, both
+//!   before the upgrade.
 //!   The server speaks plain HTTP: put TLS in front of it, or listen on
 //!   loopback only.
 //!

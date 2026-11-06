@@ -93,6 +93,11 @@ pub(super) struct PgTarget {
     database: Option<String>,
     user: String,
     options: Option<String>,
+    /// The files the server would read for TLS, as named in the DSN:
+    /// `sslrootcert`, `sslcert` and `sslkey`.
+    root_cert: Option<String>,
+    client_cert: Option<String>,
+    client_key: Option<String>,
 }
 
 impl PgTarget {
@@ -101,14 +106,29 @@ impl PgTarget {
     /// server's own (`PGUSER`, else the process's user).
     pub(super) fn parse(dsn: &str) -> Option<Self> {
         let options = PgConnectOptions::from_str(dsn).ok()?;
-        Some(Self {
+        let mut target = Self {
             host: options.get_host().to_owned(),
             port: options.get_port(),
             socket: options.get_socket().cloned(),
             database: options.get_database().map(str::to_owned),
             user: options.get_username().to_owned(),
             options: options.get_options().map(str::to_owned),
-        })
+            root_cert: None,
+            client_cert: None,
+            client_key: None,
+        };
+        // sqlx has no getters for these, so read the query as it does:
+        // under each of its names, the last one winning.
+        for (key, value) in Url::parse(dsn).ok()?.query_pairs() {
+            let file = match &*key {
+                "sslrootcert" | "ssl-root-cert" | "ssl-ca" => &mut target.root_cert,
+                "sslcert" | "ssl-cert" => &mut target.client_cert,
+                "sslkey" | "ssl-key" => &mut target.client_key,
+                _ => continue,
+            };
+            *file = Some(value.into_owned());
+        }
+        Some(target)
     }
 }
 
@@ -161,7 +181,8 @@ impl Allowlists {
     }
 
     /// How many connections may act for the tenant at once; one past it
-    /// is refused with `-32005` and closed.
+    /// is refused ([`Tenant::connect`](super::Tenant::connect) fails with
+    /// `-32005`).
     pub fn max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self
@@ -184,10 +205,11 @@ impl Allowlists {
         self
     }
 
-    /// Directories a `workspace` and a `permissions.project_root` may be,
-    /// or lie under, compared on the canonical path. Without one a config
-    /// can name neither, so it keeps the default policy. Blocks on the file
-    /// system, so call it at startup.
+    /// Directories a `workspace`, a `permissions.project_root` and, with
+    /// skills or subagents on, a `config_dir` may be, or lie under,
+    /// compared on the canonical path. Without one a config can name none
+    /// of them, so it keeps the default policy. Blocks on the file system,
+    /// so call it at startup.
     ///
     /// Raises:
     ///     AccessError: If a root does not exist or cannot be resolved.
@@ -204,13 +226,14 @@ impl Allowlists {
     }
 
     /// Postgres servers a store DSN may connect to, and as whom: a DSN is
-    /// allowed when its host, port (or socket), database, user and startup
-    /// `options` all equal an entry's. An entry without a user stands for
-    /// the server's own (`PGUSER`, else the process's user), whose
-    /// password the server may hold (`PGPASSWORD`, `.pgpass`); an entry
-    /// without options allows none, so a client cannot pick a role or a
-    /// `search_path` the entry does not name. The password is the
-    /// client's.
+    /// allowed when its host, port (or socket), database, user, startup
+    /// `options` and TLS files (`sslrootcert`, `sslcert`, `sslkey`) all
+    /// equal an entry's. An entry without a user stands for the server's
+    /// own (`PGUSER`, else the process's user), whose password the server
+    /// may hold (`PGPASSWORD`, `.pgpass`); an entry without options or
+    /// files allows none, so a client cannot pick a role, a `search_path`,
+    /// or a certificate or key file on the server the entry does not name.
+    /// The password is the client's.
     ///
     /// Raises:
     ///     AccessError: If an entry is not a valid DSN.

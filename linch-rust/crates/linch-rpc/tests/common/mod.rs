@@ -165,9 +165,11 @@ impl Rpc {
     }
 }
 
-/// Access as tenant `name`, allowed what `allow` lists.
+/// Access as tenant `name`, allowed what `allow` lists, holding one of its
+/// connection places.
 pub fn tenant(name: &str, allow: Allowlists) -> Access {
-    Access::Tenant(Arc::new(Tenant::new(name, allow).unwrap()))
+    let tenant = Arc::new(Tenant::new(name, allow).unwrap());
+    Access::Tenant(tenant.connect().unwrap())
 }
 
 /// The `data.kind` of an `agent.open` of `config` refused as not allowed;
