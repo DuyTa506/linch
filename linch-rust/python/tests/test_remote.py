@@ -313,13 +313,13 @@ async def test_a_postgres_run_suspended_on_the_socket_is_approved_over_the_webso
     assert isinstance(result, ResultEvent) and result.final_text == "Saved."
 
 
-async def test_a_socket_connection_names_its_tenant() -> None:
+async def test_a_remote_connection_names_its_tenant() -> None:
     async with listening() as at:
         async with Server.connect(at.socket, token=TOKEN) as server:
             assert server.tenant == "acme"
-        # The WebSocket upgrade does not name it.
+        # The WebSocket upgrade names it in its `Linch-Tenant` header.
         async with Server.connect(at.websocket, token=TOKEN) as server:
-            assert server.tenant is None
+            assert server.tenant == "acme"
     async with Server() as server:
         assert server.tenant is None
 

@@ -56,12 +56,15 @@ exception class tells you its family:
 | `[Errno 2] No such file or directory` or `[Errno 111] Connect call failed` (`OSError`) | Nothing listens there | Start `linch-server --config`, or fix the path or port |
 | `authentication required: the first message must be connection.auth with a valid token (code -32003)` on the socket, `the server refused the token (HTTP 401) (code -32003)` on the WebSocket (`Unauthenticated`) | The token is not in the server's config | Use a token of the config; the server read its variables at startup |
 | `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | The tenant holds `max_connections` connections | Close one, or raise the tenant's `max_connections` |
+| `at most <n> logins at once; try again once one ends` (`LimitReached`, `kind == "logins"`) | 32 socket connections wait to log in at once | Retry with backoff; the server is busy, not gone |
+| `at most <n> agents at once; try again once one ends` (`LimitReached`, `kind == "agents"`) by `open_agent` | The tenant keeps `max_agents` agents open, across its connections | Close agents it no longer uses, or raise the tenant's `max_agents` |
 | `Server.connect over WebSocket needs the websocket extra` (`ImportError`) | `websockets` is not installed | `pip install 'linch-rust[websocket]'`, or use the socket |
 | `a server reached with Server.connect has no process here` (`LinchError`) | `server.pid` on a remote server | Only a spawned server has a process here |
 
 Refusals of `open_agent` and `run` on a remote server are `NotAllowed`
 (-32004), whose `kind` names the check, and `LimitReached` (-32005) for
-`max_runs`; [Server](./server.md#what-admission-refuses-and-why) lists them.
+`max_agents` and `max_runs`; [Server](./server.md#what-admission-refuses-and-why)
+lists them.
 
 ## Opening an agent
 

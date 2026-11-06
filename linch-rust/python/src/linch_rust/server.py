@@ -116,11 +116,11 @@ class Server:
 
     @property
     def tenant(self) -> str | None:
-        """The tenant a `Server.connect` socket connection acts for, as the
-        server named it at login.
+        """The tenant a `Server.connect` connection acts for, as the server
+        named it: in the socket's login answer, or in the WebSocket upgrade's
+        `Linch-Tenant` header.
 
-        `None` over a WebSocket, whose upgrade does not name it, and for a
-        server spawned here, which has no tenants.
+        `None` for a server spawned here, which has no tenants.
         """
         self._started()
         return self._link.tenant if self._link is not None else None
