@@ -140,6 +140,23 @@ async fn tool_round_trip(test: &str, thinking: bool) {
     assert!(second.message.text().contains("17"), "{:?}", second.message);
 }
 
+/// A compacted view opens with two user messages (the prompt, then the
+/// summary); `deepseek-reasoner` used to reject successive user messages.
+#[tokio::test]
+async fn two_user_messages_in_a_row_are_accepted() {
+    let test = "two_user_messages_in_a_row_are_accepted";
+    let Some(provider) = provider(test) else {
+        return;
+    };
+    let messages = vec![
+        Message::user_text("My name is Ada."),
+        Message::user_text("Reply with exactly my name."),
+    ];
+    let turn = call(test, &provider, request(true, messages, vec![])).await;
+    assert_eq!(turn.stop_reason, StopReason::EndTurn);
+    assert!(turn.message.text().contains("Ada"), "{:?}", turn.message);
+}
+
 #[tokio::test]
 async fn text_turn_thinking_on() {
     text_turn("text_turn_thinking_on", true).await;
