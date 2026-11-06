@@ -63,8 +63,10 @@ pub(crate) async fn serve(
         .await
 }
 
-/// Check the bearer token, then upgrade. The token is checked first, so
-/// a request without one learns nothing else.
+/// Check the bearer token and take a place among its tenant's
+/// connections, then upgrade. The token is checked first, so a request
+/// without one learns nothing else; a tenant at its `max_connections`
+/// gets 429 instead of a socket that closes at once.
 async fn upgrade(
     State(http): State<Http>,
     headers: HeaderMap,
@@ -73,6 +75,10 @@ async fn upgrade(
     let shared = http.shared;
     let Some(tenant) = bearer(&headers).and_then(|token| shared.tokens.tenant(token)) else {
         return (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response();
+    };
+    let place = match tenant.connect() {
+        Ok(place) => place,
+        Err(error) => return (StatusCode::TOO_MANY_REQUESTS, error.message).into_response(),
     };
     let socket = match socket {
         Ok(socket) => socket,
@@ -85,7 +91,7 @@ async fn upgrade(
         .max_message_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _counted = counted;
-            serve_socket(socket, Access::Tenant(tenant), pools, stop).await;
+            serve_socket(socket, Access::Tenant(place), pools, stop).await;
         })
 }
 

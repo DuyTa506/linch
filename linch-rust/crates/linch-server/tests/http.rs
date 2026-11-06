@@ -157,3 +157,40 @@ async fn a_missing_or_wrong_token_gets_401_before_the_upgrade() {
     assert!(connect(address, Some(&lower)).await.is_ok());
     server.stop().await;
 }
+
+#[tokio::test]
+async fn a_connection_past_the_tenants_cap_gets_429_before_the_upgrade() {
+    let text = json!({"http": "127.0.0.1:0",
+                      "tenants": {"acme": {"tokens": [{"value": TOKEN}],
+                                           "allow": {"max_connections": 1}}}});
+    let (server, listening) = running(&ServerConfig::from_json(&text.to_string()).unwrap()).await;
+    let address = listening.http.unwrap();
+    let bearer = format!("Bearer {TOKEN}");
+    let mut first = connect(address, Some(&bearer)).await.unwrap();
+    match connect(address, Some(&bearer)).await {
+        Err(Error::Http(response)) => {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        other => panic!("the second was not refused: {:?}", other.map(|_| ())),
+    }
+    send(&mut first, 1, "run.cancel", json!({"run_id": "r"})).await;
+    let answer = recv(&mut first).await.unwrap();
+    assert_eq!(answer["result"], json!({"cancelled": false}), "{answer}");
+    // Its place is free once the first connection has ended.
+    first.close(None).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match connect(address, Some(&bearer)).await {
+            Ok(_) => break,
+            Err(Error::Http(response)) if response.status() == StatusCode::TOO_MANY_REQUESTS => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the place stays taken"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    server.stop().await;
+}

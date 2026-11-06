@@ -1,16 +1,14 @@
 //! The socket login: the first message must be `connection.auth` with a
 //! known token. Anything else, or nothing in time, ends the connection.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use linch::JsonValue;
-use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use super::connection::{Inbound, Outbox};
-use crate::access::{Tenant, Tokens};
+use crate::access::{ConnectionPlace, Tenant, Tokens};
 use crate::error::{ErrorObject, code};
 use crate::message::{Id, Request, Response};
 use crate::protocol::{AuthParams, Authenticated, method};
@@ -18,17 +16,17 @@ use crate::protocol::{AuthParams, Authenticated, method};
 /// How long a new connection may take to send `connection.auth`.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Read and answer the first message: the tenant, with the connection's
-/// place among the tenant's connections. `None` when the login was
-/// refused (answered with `-32003`, or `-32005` past the tenant's
-/// connection cap or [`MAX_PENDING_LOGINS`](crate::MAX_PENDING_LOGINS)),
-/// timed out, or `stop` fired.
+/// Read and answer the first message: the connection's place among its
+/// tenant's connections. `None` when the login was refused (answered with
+/// `-32003`, or `-32005` past the tenant's connection cap or
+/// [`MAX_PENDING_LOGINS`](crate::MAX_PENDING_LOGINS)), timed out, or
+/// `stop` fired.
 pub(super) async fn login<S>(
     input: &mut S,
     tokens: &Tokens,
     outbox: &Outbox,
     stop: &CancellationToken,
-) -> Option<(Arc<Tenant>, OwnedSemaphorePermit)>
+) -> Option<ConnectionPlace>
 where
     S: Stream<Item = Inbound> + Unpin,
 {
@@ -63,15 +61,14 @@ where
             serde_json::from_value::<AuthParams>(JsonValue::Object(request.params)).ok()
         })
         .and_then(|params| tokens.tenant(&params.token));
-    let admitted = tenant.map(|tenant| tenant.connection_place().map(|place| (tenant, place)));
-    match admitted {
-        Some(Ok((tenant, place))) => {
+    match tenant.map(Tenant::connect) {
+        Some(Ok(place)) => {
             let result = Authenticated {
-                tenant: tenant.name().to_owned(),
+                tenant: place.tenant.name().to_owned(),
             };
             let result = serde_json::to_value(result).expect("a tenant name encodes");
             outbox.send(&Response::ok(id, result)).await;
-            Some((tenant, place))
+            Some(place)
         }
         Some(Err(error)) => {
             outbox.send(&Response::err(id, error)).await;

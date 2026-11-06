@@ -172,24 +172,18 @@ where
     let outbox = Outbox(sender);
     // A remote connection holds a place among its tenant's connections
     // until it ends.
-    let (tenant, _place) = match access {
-        Access::Local => (None, None),
-        Access::Tenant(tenant) => match tenant.connection_place() {
-            Ok(place) => (Some(tenant), Some(place)),
-            Err(error) => {
-                outbox.send(&Response::err(Id::Null, error)).await;
-                drop(outbox);
-                return writing.await.map_err(io::Error::other)?;
-            }
-        },
+    let place = match access {
+        Access::Local => None,
+        Access::Tenant(place) => Some(place),
         Access::Login(tokens) => match login::login(&mut input, &tokens, &outbox, &stop).await {
-            Some((tenant, place)) => (Some(tenant), Some(place)),
+            Some(place) => Some(place),
             None => {
                 drop(outbox);
                 return writing.await.map_err(io::Error::other)?;
             }
         },
     };
+    let tenant = place.as_ref().map(|place| Arc::clone(&place.tenant));
     let server = Server::new(outbox, tenant, pools, &stop);
     let mut failed = None;
     loop {

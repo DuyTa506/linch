@@ -181,7 +181,8 @@ impl Allowlists {
     }
 
     /// How many connections may act for the tenant at once; one past it
-    /// is refused with `-32005` and closed.
+    /// is refused ([`Tenant::connect`](super::Tenant::connect) fails with
+    /// `-32005`).
     pub fn max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self

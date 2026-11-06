@@ -59,7 +59,9 @@
 //!   the file is removed at shutdown. Its permissions follow the umask.
 //! - **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades
 //!   to a WebSocket carrying one JSON-RPC message per text frame. A
-//!   missing or unknown token gets `401` with `WWW-Authenticate: Bearer`.
+//!   missing or unknown token gets `401` with `WWW-Authenticate: Bearer`;
+//!   a tenant already holding its `max_connections` gets `429`, both
+//!   before the upgrade.
 //!   The server speaks plain HTTP: put TLS in front of it, or listen on
 //!   loopback only.
 //!

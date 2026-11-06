@@ -30,7 +30,9 @@
 //! - **HTTP** ([`serve_messages`] with [`Access::Tenant`]): `GET /rpc` with
 //!   `Authorization: Bearer <token>` upgrades to a WebSocket carrying one
 //!   message per text frame (a binary frame that is not UTF-8 ends the
-//!   connection). A missing or unknown token gets `401` before the upgrade.
+//!   connection). A missing or unknown token gets `401` before the upgrade,
+//!   and a tenant at its connection cap `429`: the transport takes the
+//!   connection's place with [`Tenant::connect`] before it upgrades.
 //!
 //! `connection.auth` anywhere but first on the socket is `-32600`. Tokens
 //! are compared in constant time and never logged or echoed. A remote
@@ -76,8 +78,8 @@
 //! holds its place until its `run.end`) and `max_connections` connections
 //! (default [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is
 //! refused with `-32005` and `data: {kind: "runs" | "connections", max}`;
-//! a refused connection gets that error (under the `connection.auth` id on
-//! the socket, a null id on HTTP) and closes. A local connection has none.
+//! a refused socket login gets that error under its `connection.auth` id
+//! and closes (on HTTP, the `429` above). A local connection has none.
 //!
 //! # Framing
 //!
@@ -352,8 +354,8 @@ pub mod protocol;
 mod server;
 
 pub use access::{
-    Access, AccessError, Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, MAX_PENDING_LOGINS,
-    McpCommand, Tenant, Tokens,
+    Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
+    MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens,
 };
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
