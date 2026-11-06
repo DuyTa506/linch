@@ -11,7 +11,7 @@ use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
-use crate::journal::{Journal, Recovery, reconcile};
+use crate::journal::{Journal, JournalError, Recovery, reconcile};
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
@@ -26,6 +26,14 @@ pub(super) async fn new_run(
     outbox: Outbox,
 ) -> Result<(), RunError> {
     let namespace = agent.namespace.clone();
+    if options.run_id.is_some() {
+        // A caller-chosen id may be taken: refuse it before any write.
+        match agent.runs.load(&namespace, &run_id).await {
+            Ok(_) => return Err(duplicate(&run_id, &namespace).into()),
+            Err(StoreError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let session_id = options.session_id;
     let prompt = hooks::submit(&agent, &outbox, &session_id, &run_id, prompt).await?;
     let entries = match agent.sessions.load(&namespace, &session_id).await {
@@ -66,7 +74,15 @@ pub(super) async fn new_run(
         },
     };
     let contract = agent.contract;
-    let ready = (journal.create(session_id.clone(), None, contract, checkpoint)).await?;
+    let ready = match journal
+        .create(session_id.clone(), None, contract, checkpoint)
+        .await
+    {
+        Ok(ready) => ready,
+        // Another start with the same id created it first.
+        Err(JournalError::Store(error @ StoreError::Conflict { .. })) => return Err(error.into()),
+        Err(error) => return Err(error.into()),
+    };
     outbox.deliver(ready).await;
     let progress = Progress::FIRST;
     let run = identity(session_id, run_id, &options.principal);
@@ -196,6 +212,12 @@ pub(super) async fn continue_run(
         runner.commit_decisions(decisions, assistant_seq).await?;
     }
     runner.drive(step).await
+}
+
+/// The error for a new run whose id is already taken.
+fn duplicate(run_id: &RunId, namespace: &str) -> StoreError {
+    let message = format!("run {run_id} already exists in {namespace}");
+    StoreError::Conflict { message }
 }
 
 /// Why the run's last durable response stopped; `end_turn` before any.

@@ -110,7 +110,8 @@ impl Stream for RunStream {
 
 /// Start a new run (see [`crate::agent::Agent::run`]).
 pub(crate) fn start(agent: Arc<AgentInner>, prompt: String, options: RunOptions) -> RunStream {
-    let run_id = RunId::new(uuid::Uuid::new_v4().to_string());
+    let run_id =
+        (options.run_id.clone()).unwrap_or_else(|| RunId::new(uuid::Uuid::new_v4().to_string()));
     let outbox = Outbox::default();
     let run = start::new_run(agent, run_id.clone(), prompt, options, outbox.clone());
     RunStream::new(run_id, outbox, Box::pin(run))

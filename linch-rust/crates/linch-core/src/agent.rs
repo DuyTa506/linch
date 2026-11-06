@@ -36,6 +36,12 @@ pub struct RunOptions {
     /// Session a new run belongs to. Resume and approve use the session
     /// stored with the run and ignore this field.
     pub session_id: SessionId,
+    /// Id for a new run; `None` picks a fresh uuid. An id that already
+    /// exists fails with [`StoreError::Conflict`] and writes nothing. Resume
+    /// and approve ignore this field.
+    ///
+    /// [`StoreError::Conflict`]: crate::store::StoreError::Conflict
+    pub run_id: Option<RunId>,
     /// Caller identity; permission rules match on its roles.
     pub principal: Option<Principal>,
     /// Lease owner name written with the claim, for diagnostics.
@@ -45,11 +51,12 @@ pub struct RunOptions {
 }
 
 impl RunOptions {
-    /// Options for `session_id`, with no principal, owner `linch` and a fresh
-    /// cancel token.
+    /// Options for `session_id`, with no run id, no principal, owner `linch`
+    /// and a fresh cancel token.
     pub fn new(session_id: impl Into<SessionId>) -> Self {
         Self {
             session_id: session_id.into(),
+            run_id: None,
             principal: None,
             owner: "linch".into(),
             cancel: CancellationToken::new(),
@@ -200,12 +207,18 @@ impl Agent {
         self.inner.contract
     }
 
+    /// The store key space of this agent's runs and sessions.
+    pub fn namespace(&self) -> &str {
+        &self.inner.namespace
+    }
+
     /// Start a new run on `prompt` in `options.session_id`, creating the
     /// session if it does not exist.
     ///
     /// Returns:
-    ///     The run's stream. Its [`RunStream::run_id`] is known at once, so a
-    ///     caller that drops the stream early can still resume the run.
+    ///     The run's stream. Its [`RunStream::run_id`] is known at once
+    ///     (`options.run_id`, or a fresh uuid), so a caller that drops the
+    ///     stream early can still resume the run.
     pub fn run(&self, prompt: impl Into<String>, options: RunOptions) -> RunStream {
         runner::start(Arc::clone(&self.inner), prompt.into(), options)
     }
