@@ -4,6 +4,7 @@
 use linch_core::{BuildError, Registration};
 
 use super::OpenedAgent;
+use crate::deep;
 use crate::project::{self, Skipped};
 
 impl OpenedAgent {
@@ -21,7 +22,8 @@ impl OpenedAgent {
     /// Raises:
     ///     BuildError: `Invalid` when the agent was opened without skills.
     pub async fn reload_skills(&self) -> Result<(Registration, Vec<Skipped>), BuildError> {
-        let loaded = project::load(self.config_dir.clone(), true, false, &self.tools).await;
+        let mut loaded = project::load(self.config_dir.clone(), true, false, &self.tools).await;
+        deep::add_roster(self.deep.as_ref(), &mut loaded);
         let registration = self
             .agent
             .reload_skills(loaded.skills.unwrap_or_default())?;
@@ -40,7 +42,8 @@ impl OpenedAgent {
     ///     BuildError: `Invalid` when the agent was opened without
     ///         subagents.
     pub async fn reload_subagents(&self) -> Result<(Registration, Vec<Skipped>), BuildError> {
-        let loaded = project::load(self.config_dir.clone(), false, true, &self.tools).await;
+        let mut loaded = project::load(self.config_dir.clone(), false, true, &self.tools).await;
+        deep::add_roster(self.deep.as_ref(), &mut loaded);
         let definitions = loaded.subagents.unwrap_or_default();
         let registration = self.agent.reload_subagents(definitions)?;
         Ok((registration, loaded.skipped))

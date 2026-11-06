@@ -25,6 +25,7 @@ use crate::error::OpenError;
 use crate::files::Files;
 use crate::pools::{PgPools, Shared};
 use crate::project::{self, Loaded, Skipped};
+use linch_ext::deep_agent::DeepAgent;
 
 mod reload;
 
@@ -186,6 +187,7 @@ impl AgentConfig {
                     skipped,
                     config_dir,
                     tools: registry,
+                    deep,
                 })
             }
             Err(error) => {
@@ -210,6 +212,8 @@ pub struct OpenedAgent {
     /// Where [`Self::reload_skills`] and [`Self::reload_subagents`] scan.
     config_dir: PathBuf,
     tools: Arc<ToolRegistry>,
+    /// The deep agent preset, whose roster a reload keeps.
+    deep: Option<DeepAgent>,
 }
 
 impl OpenedAgent {
