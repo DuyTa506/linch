@@ -1,6 +1,7 @@
 //! Workflow tests on the memory journal store, plus shared fixtures.
 
 mod agent;
+mod policy;
 mod resume;
 mod store;
 

@@ -3,14 +3,18 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use linch_core::JsonValue;
 use linch_core::events::kinds::{WorkflowEvent, WorkflowKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
 
+use super::engine::WorkflowOptions;
 use super::error::{BoxError, WorkflowError};
 use super::journal::{JournalLease, JournalRecord, JournalStore, step_key};
+use super::policy::{Retry, attempt_timeout, run_attempts};
 
 /// Receives every [`WorkflowEvent`] a workflow emits, in order.
 pub type EventSink = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
@@ -23,6 +27,12 @@ pub struct StepOptions {
     /// told apart by call order only. Objects are compared in canonical
     /// form; array order counts.
     pub key: Option<JsonValue>,
+    /// Limit on each attempt; `None` uses the workflow's `step_timeout`,
+    /// and zero opts out of it. An attempt past it fails with
+    /// [`WorkflowError::Timeout`].
+    pub timeout: Option<Duration>,
+    /// Retries after a failed attempt; `None` is one attempt.
+    pub retry: Option<Retry>,
 }
 
 /// The orchestration handle passed to a workflow function.
@@ -42,6 +52,8 @@ struct Inner {
     lease: JournalLease,
     journal: Mutex<Journal>,
     on_event: Option<EventSink>,
+    step_timeout: Option<Duration>,
+    cancel: CancellationToken,
 }
 
 /// Journaled results by `(call_key, occurrence)`, and how many calls of
@@ -54,10 +66,9 @@ struct Journal {
 
 impl WorkflowContext {
     pub(super) fn new(
-        store: Arc<dyn JournalStore>,
         lease: JournalLease,
         records: Vec<JournalRecord>,
-        on_event: Option<EventSink>,
+        options: &WorkflowOptions,
     ) -> Self {
         let records = records
             .into_iter()
@@ -68,10 +79,12 @@ impl WorkflowContext {
             counters: HashMap::new(),
         };
         let inner = Inner {
-            store,
+            store: options.journal.clone(),
             lease,
             journal: Mutex::new(journal),
-            on_event,
+            on_event: options.on_event.clone(),
+            step_timeout: options.step_timeout,
+            cancel: options.cancel.clone(),
         };
         Self {
             inner: Arc::new(inner),
@@ -108,16 +121,18 @@ impl WorkflowContext {
     /// Args:
     ///     name: The step's durable identity; renaming it makes its old
     ///         record miss, while later steps whose keys still match replay.
-    ///     options: The step's input key.
+    ///     options: The step's input key, timeout and retries.
     ///     f: The work; called again for each attempt.
     ///
     /// Returns:
     ///     `f`'s value, decoded from its journaled JSON.
     ///
     /// Raises:
-    ///     WorkflowError: `Step` when `f` fails, `Encode` when its value
-    ///         cannot round-trip through JSON, `Store` when the journal
-    ///         write fails or the lease was lost.
+    ///     WorkflowError: `Step` when the last attempt fails, `Timeout`
+    ///         when it runs past its limit, `Aborted` when the cancel token
+    ///         fired first, `Encode` when the value cannot round-trip
+    ///         through JSON, `Store` when the journal write fails or the
+    ///         lease was lost.
     pub async fn step_with<T, E, F, Fut>(
         &self,
         name: &str,
@@ -143,12 +158,22 @@ impl WorkflowContext {
             emit(WorkflowKind::StepReplayed, Some(&value));
             return decode(&label, value);
         }
+        self.check_cancel(&label)?;
         emit(WorkflowKind::StepStart, None);
-        let output = f().await.map_err(|error| WorkflowError::Step {
-            name: name.to_owned(),
-            source: error.into(),
-        })?;
-        let (value, output) = round_trip(&label, &output)?;
+        let timeout = attempt_timeout(options.timeout, self.inner.step_timeout);
+        let retry = options.retry.as_ref();
+        let label = &label;
+        let (value, output) = run_attempts(label, timeout, retry, &self.inner.cancel, || {
+            let attempt = f();
+            async move {
+                let output = attempt.await.map_err(|error| WorkflowError::Step {
+                    name: name.to_owned(),
+                    source: error.into(),
+                })?;
+                round_trip(label, &output)
+            }
+        })
+        .await?;
         self.record(&call_key, occurrence, &value).await?;
         emit(WorkflowKind::StepEnd, Some(&value));
         Ok(output)
@@ -180,6 +205,17 @@ impl WorkflowContext {
         self.inner.store.append(&self.inner.lease, record).await?;
         let key = (call_key.to_owned(), occurrence);
         self.journal().records.insert(key, value.clone());
+        Ok(())
+    }
+
+    /// `Aborted` once the workflow's cancel token fired: no new work starts,
+    /// while replays still return.
+    fn check_cancel(&self, label: &str) -> Result<(), WorkflowError> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(WorkflowError::Aborted {
+                label: label.to_owned(),
+            });
+        }
         Ok(())
     }
 

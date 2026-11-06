@@ -1,5 +1,7 @@
 //! [`WorkflowError`]: every way a workflow call or run can end early.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 use super::journal::JournalStoreError;
@@ -18,6 +20,20 @@ pub enum WorkflowError {
         /// The function's error.
         #[source]
         source: BoxError,
+    },
+    /// A step attempt, or the whole workflow, ran past its time.
+    #[error("{label} timed out after {after:?}")]
+    Timeout {
+        /// The call, for example `step fetch`, or `workflow`.
+        label: String,
+        /// The limit it ran past.
+        after: Duration,
+    },
+    /// The workflow's cancel token fired before the call ran.
+    #[error("{label} was aborted")]
+    Aborted {
+        /// The call that did not run.
+        label: String,
     },
     /// A value could not be journaled as JSON, so it could never replay.
     #[error("{label} cannot be journaled: {message}")]

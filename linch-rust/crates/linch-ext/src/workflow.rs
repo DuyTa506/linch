@@ -46,6 +46,7 @@ mod engine;
 mod error;
 mod journal;
 mod memory;
+mod policy;
 #[cfg(test)]
 mod tests;
 
@@ -57,3 +58,4 @@ pub use journal::{
     WorkflowStatus, interrupt_key, step_key,
 };
 pub use memory::MemoryJournalStore;
+pub use policy::Retry;

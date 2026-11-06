@@ -2,6 +2,9 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
 
 use super::context::{EventSink, WorkflowContext};
 use super::error::WorkflowError;
@@ -17,13 +20,23 @@ pub struct WorkflowOptions {
     pub namespace: String,
     /// Stable id of this workflow; calling again with it resumes.
     pub workflow_id: String,
+    /// Default limit on each step attempt; a step's own
+    /// [`StepOptions::timeout`](super::StepOptions::timeout) wins.
+    pub step_timeout: Option<Duration>,
+    /// Limit on the whole workflow function. When it runs out the function
+    /// is dropped, the run fails with [`WorkflowError::Timeout`], and the
+    /// finished steps stay journaled for a resume.
+    pub deadline: Option<Duration>,
+    /// Stops the workflow at its next journaled call that would run live
+    /// work; replays still return.
+    pub cancel: CancellationToken,
     /// Receives every workflow event; `None` drops them.
     pub on_event: Option<EventSink>,
 }
 
 impl WorkflowOptions {
     /// Options for workflow `workflow_id` of `namespace`, journaled in
-    /// `journal`, with no event sink.
+    /// `journal`, with no timeouts, a fresh cancel token and no event sink.
     pub fn new(
         journal: Arc<dyn JournalStore>,
         namespace: impl Into<String>,
@@ -33,6 +46,9 @@ impl WorkflowOptions {
             journal,
             namespace: namespace.into(),
             workflow_id: workflow_id.into(),
+            step_timeout: None,
+            deadline: None,
+            cancel: CancellationToken::new(),
             on_event: None,
         }
     }
@@ -52,15 +68,17 @@ impl WorkflowOptions {
 /// crash: finished calls stay journaled and the status stays `running`.
 ///
 /// Args:
-///     options: The journal store, the workflow's key and the event sink.
+///     options: The journal store, the workflow's key, its limits and the
+///         event sink.
 ///     workflow: The workflow function; it gets the context by value.
 ///
 /// Returns:
 ///     What `workflow` returned.
 ///
 /// Raises:
-///     WorkflowError: The function's own error, or `Store` when the
-///         claim, a journal write or the final status write fails.
+///     WorkflowError: The function's own error, `Timeout` past the
+///         deadline, or `Store` when the claim, a journal write or the
+///         final status write fails.
 pub async fn run_workflow<T, F, Fut>(
     options: WorkflowOptions,
     workflow: F,
@@ -69,17 +87,21 @@ where
     F: FnOnce(WorkflowContext) -> Fut,
     Fut: Future<Output = Result<T, WorkflowError>>,
 {
-    let WorkflowOptions {
-        journal,
-        namespace,
-        workflow_id,
-        on_event,
-    } = options;
-    let lease = journal.claim(&namespace, &workflow_id).await?;
-    let stored = journal.load(&namespace, &workflow_id).await?;
+    let journal = options.journal.clone();
+    let lease = (journal.claim(&options.namespace, &options.workflow_id)).await?;
+    let stored = (journal.load(&options.namespace, &options.workflow_id)).await?;
     let records = stored.map(|run| run.records).unwrap_or_default();
-    let context = WorkflowContext::new(journal.clone(), lease.clone(), records, on_event);
-    let outcome = workflow(context).await;
+    let context = WorkflowContext::new(lease.clone(), records, &options);
+    let run = workflow(context);
+    let outcome = match options.deadline.filter(|deadline| !deadline.is_zero()) {
+        Some(after) => tokio::time::timeout(after, run).await.unwrap_or_else(|_| {
+            Err(WorkflowError::Timeout {
+                label: "workflow".into(),
+                after,
+            })
+        }),
+        None => run.await,
+    };
     match outcome {
         Err(WorkflowError::Store(JournalStoreError::LeaseLost { .. })) => outcome,
         Ok(value) => {

@@ -20,9 +20,14 @@ linch-core = { path = "../linch-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
+# Workflow step timeouts, retry backoff and the fan-out semaphore (already
+# in the tree through linch-core; no runtime is started here).
+tokio = { version = "1.54.1", features = ["sync", "time"] }
+# The workflow cancel token, the same type as linch-core's RunOptions::cancel.
+tokio-util = "0.7.20"
 # Fresh session ids, so every eval case starts on an empty session.
 uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["rt", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "macros", "time"] }

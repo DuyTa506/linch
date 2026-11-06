@@ -73,6 +73,7 @@ async fn steps_in_a_loop_replay_per_occurrence_and_keys_separate_inputs() {
             for url in ["a", "b"] {
                 let options = StepOptions {
                     key: Some(json!(url)),
+                    ..StepOptions::default()
                 };
                 let fetched = wf.step_with("fetch", &options, || ok(format!("{url}!")));
                 seen.push(fetched.await?);
