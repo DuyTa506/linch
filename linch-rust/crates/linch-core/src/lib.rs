@@ -19,6 +19,7 @@
 pub mod agent;
 pub mod canonical;
 pub mod compaction;
+pub mod coordination;
 pub mod events;
 pub mod hooks;
 pub mod ids;
@@ -41,12 +42,13 @@ pub mod tool;
 pub mod usage;
 pub mod vfs;
 
-pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, RunError, RunOptions};
+pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, ForkError, RunError, RunOptions};
 pub use canonical::{
     CanonicalError, Digest, JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth, digest,
     digest_with_domain, to_canonical_string,
 };
 pub use compaction::CompactionSpec;
+pub use coordination::{Correlator, InMemoryMailbox, Mailbox, MailboxError, MailboxMessage};
 pub use events::{
     Envelope, Event, EventError, IgnorableEvent, Persistence, SubagentEvent, WIRE_VERSION,
 };
@@ -89,7 +91,7 @@ pub use store::{
     Commit, Lease, NewRun, NewTask, RunRecord, RunStore, SessionStore, StoreError, Task, TaskPatch,
     TaskStatus, TaskStore,
 };
-pub use subagents::SubagentDefinition;
+pub use subagents::{SubagentDefinition, Workers};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn};
+use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, Workers};
 use serde::{Deserialize, Serialize};
 
 mod filesystem;
@@ -64,6 +64,16 @@ pub struct AgentConfig {
     /// [`crate::project::load_subagents`]). Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub subagents: bool,
+    /// How subagents keep their workers: in the background, or kept for
+    /// `SubagentContinue` (see [`Workers`]). Off when absent; it needs
+    /// `subagents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Workers>,
+    /// Whether the agent has an in-process mailbox and the `send_message`
+    /// tool, for messages between its sessions (see
+    /// [`linch_core::coordination`]). Off when absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mailbox: bool,
     /// Directory holding `skills/` and `agents/`. Absent: `.linch`. A
     /// relative path resolves against the workspace root, or the process's
     /// working directory without a workspace. Unused unless `skills` or

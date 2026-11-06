@@ -6,10 +6,10 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
-use super::Outbox;
 use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
 use super::progress::Progress;
+use super::{Family, Outbox};
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
@@ -22,6 +22,7 @@ use crate::registry::ToolSnapshot;
 use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
+use crate::skills;
 use crate::usage::Usage;
 
 /// What the run does next.
@@ -80,7 +81,7 @@ pub(super) struct Batch {
 }
 
 /// The in-memory log of the stored session `entries`.
-pub(super) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
+pub(crate) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
     let mut log = SessionLog::new();
     for entry in entries {
         match entry {
@@ -116,6 +117,8 @@ pub(super) struct Runner {
     pub(super) stop_reason: StopReason,
     /// When this call of the run started, for the result's `duration_ms`.
     pub(super) started: Instant,
+    /// The run's subagent child runs; `None` without subagents.
+    pub(super) family: Option<Arc<Family>>,
 }
 
 impl Runner {
@@ -130,7 +133,7 @@ impl Runner {
     ) -> Self {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
-        Self {
+        let mut runner = Self {
             snapshot: agent.snapshot(),
             agent,
             journal,
@@ -145,7 +148,26 @@ impl Runner {
             cost: progress.cost,
             stop_reason: progress.stop_reason,
             started: progress.started,
+            family: None,
+        };
+        runner.narrow();
+        runner
+    }
+
+    /// Take this turn's tools, and return its model, when a skill the
+    /// model just loaded sets them (see [`crate::skills`]).
+    fn narrow(&mut self) -> Option<String> {
+        self.snapshot = self.agent.snapshot();
+        if self.agent.overlays.is_empty() {
+            return None;
         }
+        let view = self.log.provider_view();
+        let overlay = skills::overlay(&view, &self.agent.overlays)?;
+        if let Some(allowed) = &overlay.allowed_tools {
+            let keep = |name: &str| allowed.iter().any(|tool| tool == name);
+            self.snapshot = Arc::new(self.snapshot.filtered(keep));
+        }
+        overlay.model.clone()
     }
 
     /// Run steps until the run ends or suspends.
@@ -233,7 +255,8 @@ impl Runner {
             self.max_turns(max).await?;
             return Ok(None);
         }
-        self.snapshot = self.agent.snapshot();
+        self.stage_children();
+        let model = self.narrow();
         let view = self.log.provider_view();
         let mut messages: Vec<Message> =
             view.iter().map(|message| Message::clone(message)).collect();
@@ -242,7 +265,10 @@ impl Runner {
             return Ok(None);
         };
         add_context(&mut messages, context);
-        let request = self.agent.request(self.snapshot.definitions(), messages);
+        let mut request = self.agent.request(self.snapshot.definitions(), messages);
+        if let Some(model) = model {
+            request.model = skills::model_override(&model, &request.model);
+        }
         self.stage_context(&request);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
@@ -340,6 +366,9 @@ impl Runner {
             self.append(message).await?;
         }
         if calls.is_empty() {
+            if let Some(next) = self.hear_back().await? {
+                return Ok(next);
+            }
             match self.stop(&text).await? {
                 Stopping::Stop => {}
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use tokio::sync::oneshot;
 
 use super::SubagentDefinition;
 use crate::agent::{AgentInner, RunOptions};
@@ -15,47 +16,71 @@ use crate::store::StoreError;
 use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 
 /// Run the `definition` subagent on `prompt` as the child run of the call
-/// in `ctx`: start it, resume it if a crash left it unfinished, or read
-/// the result of one that finished. Each event of the child goes into the
-/// parent's log wrapped in a `subagent` event.
+/// in `ctx`, in `session` (the child run's own id for a new worker, a
+/// worker's for a continuation): start it, resume it if a crash left it
+/// unfinished, or read the end of one that finished. Each event of the
+/// child goes into the parent's log wrapped in a `subagent` event.
+///
+/// The parent run's [`Family`](crate::runner::Family) drives the child, so
+/// a call cut short (by its timeout or the run's cancel, which cancel the
+/// call's token and so the child's) leaves the child to write its abort.
 pub(super) async fn run(
     parent: &AgentInner,
     definition: &SubagentDefinition,
+    session: SessionId,
     prompt: String,
     ctx: &ToolContext,
-) -> ToolResult {
+) -> Result<Outcome, ToolOutputError> {
     let child = match parent.child(definition) {
         Ok(child) => Arc::new(child),
         Err(error) => return Err(failed("could not be built", error)),
     };
     let child_id = RunId::new(ctx.idempotency_key());
+    let cancel = ctx.cancel.child_token();
     let options = RunOptions {
-        session_id: SessionId::new(child_id.as_str()),
+        session_id: session,
         run_id: Some(child_id.clone()),
         principal: ctx.principal.clone(),
         owner: "subagent".into(),
-        cancel: ctx.cancel.child_token(),
+        cancel: cancel.clone(),
     };
     let stream = match child.runs.load(&child.namespace, &child_id).await {
         Err(StoreError::NotFound { .. }) => {
             runner::start_child(child, prompt, options, ctx.run_id.clone())
         }
-        Ok(record) if record.status.is_terminal() => {
-            let events = (child.runs.events(&child.namespace, &child_id, 0)).await;
-            let events = events.map_err(|error| failed("could not be read", error))?;
-            let mut outcome = Outcome::default();
-            events
-                .iter()
-                .for_each(|envelope| outcome.see(&envelope.event));
-            return outcome.result();
-        }
+        Ok(record) if record.status.is_terminal() => return finished(&child, &child_id).await,
         Ok(_) => runner::resume(child, child_id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
-    drive(stream, child_id, ctx).await
+    let Some(family) = parent.family(&ctx.run_id) else {
+        return drive(stream, child_id, ctx).await;
+    };
+    let (done, result) = oneshot::channel();
+    let (id, ctx) = (child_id.clone(), ctx.clone());
+    family.adopt(child_id, cancel, false, async move {
+        let _ = done.send(drive(stream, id, &ctx).await);
+    });
+    let result = result.await;
+    result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
 }
 
-async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) -> ToolResult {
+/// How the finished child run `child_id` ended, read back from its events.
+pub(super) async fn finished(
+    child: &AgentInner,
+    child_id: &RunId,
+) -> Result<Outcome, ToolOutputError> {
+    let events = (child.runs.events(&child.namespace, child_id, 0)).await;
+    let events = events.map_err(|error| failed("could not be read", error))?;
+    let mut outcome = Outcome::default();
+    (events.iter()).for_each(|envelope| outcome.see(&envelope.event));
+    Ok(outcome)
+}
+
+async fn drive(
+    mut stream: RunStream,
+    child_run_id: RunId,
+    ctx: &ToolContext,
+) -> Result<Outcome, ToolOutputError> {
     let mut outcome = Outcome::default();
     while let Some(item) = stream.next().await {
         let envelope = item.map_err(|error| failed("could not continue", error))?;
@@ -65,25 +90,25 @@ async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) ->
             event: Box::new(envelope.event),
         }));
     }
-    outcome.result()
+    Ok(outcome)
 }
 
-fn failed(what: &str, error: impl std::fmt::Display) -> ToolOutputError {
+pub(super) fn failed(what: &str, error: impl std::fmt::Display) -> ToolOutputError {
     ToolOutputError::new(format!("The subagent run {what}: {error}"))
 }
 
 /// What the child's events say about how it ended.
 #[derive(Default)]
-struct Outcome {
+pub(super) struct Outcome {
     /// The final text, else the last response's text.
-    text: String,
+    pub(super) text: String,
     /// The last error, as `name: message`.
-    error: Option<String>,
-    ended: Option<ResultSubtype>,
+    pub(super) error: Option<String>,
+    pub(super) ended: Option<ResultSubtype>,
 }
 
 impl Outcome {
-    fn see(&mut self, event: &Event) {
+    pub(super) fn see(&mut self, event: &Event) {
         match event {
             Event::Assistant(response) => self.text = response.message.text(),
             Event::Error(error) => self.error = Some(error_text(&error.error)),
@@ -98,8 +123,9 @@ impl Outcome {
     }
 
     /// The tool result: the text of a successful child, else an error that
-    /// keeps any partial output.
-    fn result(self) -> ToolResult {
+    /// keeps any partial output and names the child as `who` (`Subagent`,
+    /// or `Worker` for a continuation).
+    pub(super) fn result(self, who: &str) -> ToolResult {
         let partial = |message: String| {
             let message = match self.text.is_empty() {
                 true => message,
@@ -109,18 +135,16 @@ impl Outcome {
         };
         match self.ended {
             Some(ResultSubtype::Success) if !self.text.is_empty() => Ok(ToolOutput::new(self.text)),
-            Some(ResultSubtype::Success) => partial("Subagent produced no text output.".into()),
+            Some(ResultSubtype::Success) => partial(format!("{who} produced no text output.")),
             Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) => {
-                partial("Subagent aborted.".into())
+                partial(format!("{who} aborted."))
             }
             Some(ResultSubtype::Error) => {
                 let error = self.error.as_ref().map(|e| format!(": {e}"));
-                partial(format!(
-                    "Subagent encountered an error{}.",
-                    error.unwrap_or_default()
-                ))
+                let error = error.unwrap_or_default();
+                partial(format!("{who} encountered an error{error}."))
             }
-            None => partial("Subagent stopped without a result.".into()),
+            None => partial(format!("{who} stopped without a result.")),
         }
     }
 }
@@ -160,7 +184,7 @@ mod tests {
     fn outcome(events: &[Event]) -> ToolResult {
         let mut outcome = Outcome::default();
         events.iter().for_each(|event| outcome.see(event));
-        outcome.result()
+        outcome.result("Subagent")
     }
 
     fn message(result: ToolResult) -> String {

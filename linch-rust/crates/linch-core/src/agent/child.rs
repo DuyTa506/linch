@@ -3,14 +3,17 @@
 use std::sync::Arc;
 
 use super::spec::{self, contract_digest};
-use super::{AgentInner, BuildError};
+use super::{Agent, AgentInner, BuildError, RunOptions};
+use crate::ids::RunId;
 use crate::message::SystemBlock;
 use crate::registry::ToolSnapshot;
+use crate::runner::{self, RunStream};
 use crate::skills::SKILL_TOOL;
-use crate::subagents::{SUBAGENT_TOOL, SubagentDefinition};
+use crate::subagents::{CONTINUE_TOOL, STOP_TOOL, SUBAGENT_TOOL, SubagentDefinition};
 
 /// Which of the parent's tools a child run sees: never `Subagent` (a child
-/// cannot spawn), and only the named ones when the definition names any.
+/// cannot spawn) nor the worker tools (it has no workers), and only the
+/// named ones when the definition names any.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildTools {
     only: Option<Vec<String>>,
@@ -25,12 +28,54 @@ impl ChildTools {
     }
 
     fn keeps(&self, name: &str) -> bool {
-        name != SUBAGENT_TOOL
+        ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL].contains(&name)
             && (self.only.as_ref()).is_none_or(|only| only.iter().any(|n| n == name))
     }
 
     pub(crate) fn apply(&self, snapshot: &ToolSnapshot) -> ToolSnapshot {
         snapshot.filtered(|name| self.keeps(name))
+    }
+}
+
+impl Agent {
+    /// The agent of this agent's subagent `name`, for a host that runs a
+    /// subagent itself (a workflow step, say): what the `Subagent` tool
+    /// runs a child run with. `None`, blank, `general-purpose` or
+    /// `_default` names the general-purpose agent; another name is looked
+    /// up case-insensitively.
+    ///
+    /// The agent shares this agent's bindings and stores, sees the
+    /// definition's tools without the subagent tools, cannot spawn, and has
+    /// its own contract. Start its runs with [`Agent::run_child`] to record
+    /// the parent; the host drives and ends them. Its
+    /// [`Agent::close_session`] runs this agent's session-close callbacks.
+    ///
+    /// Raises:
+    ///     BuildError: `Invalid` when this agent has no subagents or none
+    ///         has that name; `Contract` if the definition cannot be
+    ///         digested.
+    pub fn subagent(&self, name: Option<&str>) -> Result<Agent, BuildError> {
+        let roster = (self.inner.subagents.as_ref())
+            .ok_or_else(|| BuildError::Invalid("this agent has no subagents".into()))?;
+        let definition = roster.get(name).ok_or_else(|| {
+            let name = name.unwrap_or_default().trim();
+            BuildError::Invalid(format!("unknown subagent type: {name}"))
+        })?;
+        let inner = Arc::new(self.inner.child(definition)?);
+        Ok(Agent { inner })
+    }
+
+    /// Start a new run like [`Agent::run`], recorded as a child run of
+    /// `parent_run_id`. Nothing else ties it to that run: the caller
+    /// drives the stream, and the parent does not wait for it or cancel it.
+    pub fn run_child(
+        &self,
+        prompt: impl Into<String>,
+        options: RunOptions,
+        parent_run_id: RunId,
+    ) -> RunStream {
+        let agent = Arc::clone(&self.inner);
+        runner::start_child(agent, prompt.into(), options, parent_run_id)
     }
 }
 
@@ -85,10 +130,15 @@ impl AgentInner {
             features,
             skills: self.skills,
             skill_listing: self.skill_listing.clone(),
+            overlays: Arc::clone(&self.overlays),
             subagents: None,
+            workers: Default::default(),
+            worker_registry: Default::default(),
             child: true,
             pricing: self.pricing.clone(),
-            session_close: Vec::new(),
+            mailbox: self.mailbox.clone(),
+            families: Default::default(),
+            session_close: self.session_close.clone(),
             registrations: Vec::new(),
         })
     }

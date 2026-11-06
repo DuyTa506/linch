@@ -1,5 +1,6 @@
-//! Foreground subagents: the `Subagent` tool runs a focused task as a
-//! durable child run and returns its answer as the tool result.
+//! Subagents: the `Subagent` tool runs a focused task as a durable child
+//! run and returns its answer as the tool result, or, in the background,
+//! reports its end to the parent later.
 //!
 //! A host passes the [`SubagentDefinition`]s it loaded (the `linch` facade
 //! reads `.linch/agents/*.md`) to [`crate::AgentBuilder::subagents`]. That
@@ -21,7 +22,11 @@
 //! - it cannot suspend: a call that needs approval is denied, unless a
 //!   rule or a `permission_request` hook allows it;
 //! - each of its events reaches the parent's log wrapped in a `subagent`
-//!   event, before the call's end, and its final text is the tool result.
+//!   event, before the call's end, and its final text is the tool result;
+//! - the parent's stream drives it, so a call that its timeout or the
+//!   parent's cancel cuts short leaves the child to write its abort, and
+//!   the parent waits for every child run to end before its own terminal
+//!   write.
 //!
 //! The tool is exec-scoped. A call runs alongside other read calls only
 //! when it names a type whose definition lists its tools and every one of
@@ -31,18 +36,77 @@
 //! is not, the call runs again: it resumes the child run (the child's own
 //! journal never pays a model call twice), or reads the result of a child
 //! that already finished.
+//!
+//! # Background workers
+//!
+//! With [`Workers::background`] on ([`crate::AgentBuilder::workers`]), a
+//! call with `run_in_background: true` starts its child run the same way
+//! and returns at once with an acknowledgement naming the worker id (the
+//! child run id). The call never runs in parallel. The child goes on next
+//! to the parent, driven by the parent's stream:
+//! - a `child_run_status` event (`running`) marks it in the parent's log
+//!   with the call's end, and its durable events reach the parent's log
+//!   wrapped, at the parent's next turn;
+//! - its end becomes a `<task-notification>` (Python's text) added to the
+//!   next logged tool results, with a `child_run_status` event of its end
+//!   in the same write;
+//! - when the parent answers with text while a background child runs, the
+//!   run does not end: it waits for the next end and logs the notification
+//!   as a user message, so the model takes another turn;
+//! - a parent that ends anyway (cancelled, failed, out of turns) cancels
+//!   its children and waits for their aborts first.
+//!
+//! A worker's display name is its definition's name, or `Agent #N` for
+//! the N-th general-purpose worker of the parent session (kept in process
+//! memory).
+//!
+//! A background worker, and with [`Workers::retain`] a foreground one
+//! (whose result then ends with `[Worker ID: <id>]`), stays addressable by
+//! id or unique display name:
+//! - `SubagentContinue` runs it again on its own session, history intact,
+//!   as a new foreground child run of the calling run;
+//! - `TaskStop` (with background on) stops a background worker; its end is
+//!   recorded with no notification.
+//!
+//! [`crate::Agent::close_session`] closes the sessions of a session's
+//! workers with it; an unaddressable child's session closes when it ends.
 
+mod background;
+mod control;
 mod run;
 #[cfg(test)]
 mod tests;
 mod tool;
+mod workers;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+pub(crate) use background::{Completion, reattach};
+pub(crate) use control::{ContinueTool, StopTool};
 pub(crate) use tool::SubagentTool;
+pub(crate) use workers::Registry;
+
+/// How the `Subagent` tool keeps its workers. Off by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workers {
+    /// Whether a call may run its child in the background
+    /// (`run_in_background`).
+    #[serde(default)]
+    pub background: bool,
+    /// Whether a foreground worker stays addressable once it answered.
+    #[serde(default)]
+    pub retain: bool,
+}
 
 /// Name of the tool that runs a subagent.
 pub const SUBAGENT_TOOL: &str = "Subagent";
+
+/// Name of the tool that runs a kept worker again.
+pub const CONTINUE_TOOL: &str = "SubagentContinue";
+
+/// Name of the tool that stops a background worker.
+pub const STOP_TOOL: &str = "TaskStop";
 
 /// A kind of subagent the model can ask for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -167,6 +231,11 @@ impl Roster {
             None | Some("" | "general-purpose" | "_default") => Some(&self.general),
             Some(name) => self.named(name),
         }
+    }
+
+    /// The general-purpose definition.
+    pub(crate) fn general(&self) -> &SubagentDefinition {
+        &self.general
     }
 
     /// The listed definition named `name` (case-insensitively).

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::canonical::Digest;
+use crate::coordination::Mailbox;
 use crate::events::{Envelope, Persistence};
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
@@ -23,18 +24,22 @@ use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
-use crate::runner::{self, RunStream};
+use crate::run::RunStatus;
+use crate::runner::{self, Families, RunStream};
+use crate::skills::Overlays;
 use crate::store::{RunStore, SessionStore};
-use crate::subagents::Roster;
+use crate::subagents::{Registry, Roster, Workers};
 use crate::usage::Usage;
 
 mod builder;
 mod child;
 mod error;
+mod fork;
 mod spec;
 
 pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
+pub use fork::ForkError;
 pub use spec::AgentSpec;
 
 pub(crate) use child::ChildTools;
@@ -111,13 +116,23 @@ pub(crate) struct AgentInner {
     /// The skill listing block; `None` when skills are off or none is
     /// visible to the model.
     pub(crate) skill_listing: Option<SystemBlock>,
+    /// What each skill that sets one sets for the turn after it loads.
+    pub(crate) overlays: Arc<Overlays>,
     /// The subagents the `Subagent` tool runs; `None` when they are off.
     pub(crate) subagents: Option<Arc<Roster>>,
+    /// How the `Subagent` tool keeps its workers.
+    pub(crate) workers: Workers,
+    /// The workers of each parent session.
+    pub(crate) worker_registry: Registry,
     /// Whether this is a subagent's agent: its runs cannot suspend, so a
     /// call that needs approval is denied.
     pub(crate) child: bool,
     /// Prices each paid call; `None` reports no cost.
     pub(crate) pricing: Option<Pricing>,
+    /// The inbox each run of a session drains; `None` without one.
+    pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
+    /// The subagent child runs of each live run (see [`runner::Family`]).
+    pub(crate) families: Families,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
@@ -133,6 +148,13 @@ impl AgentInner {
         let mut request = self.spec.request(tools, messages);
         request.system = self.system.clone();
         request
+    }
+
+    /// Run every session-close callback for `session`.
+    pub(crate) fn close(&self, session: &SessionId) {
+        for callback in &self.session_close {
+            callback(session);
+        }
     }
 
     /// What `usage` on `model` cost in USD, by the host's pricing; `None`
@@ -255,14 +277,28 @@ impl Agent {
     }
 
     /// Tell the agent the host is done with `session_id`: run every
-    /// [`AgentBuilder::on_session_close`] callback, in the order added.
+    /// [`AgentBuilder::on_session_close`] callback, in the order added,
+    /// first for the session of each subagent worker the session started
+    /// (in this process), then for the session itself. The workers are
+    /// forgotten: `SubagentContinue` no longer finds them.
     ///
-    /// Nothing is written: the session log and its runs stay, and a later
-    /// run on the session works as before.
+    /// Nothing is written: the session logs and runs stay, and a later run
+    /// on the session works as before.
     pub fn close_session(&self, session_id: &SessionId) {
-        for callback in &self.inner.session_close {
-            callback(session_id);
+        for worker in self.inner.worker_registry.close(session_id) {
+            self.inner.close(&worker);
         }
+        self.inner.close(session_id);
+    }
+
+    /// The status of `run_id`, from its record alone.
+    ///
+    /// Raises:
+    ///     RunError: `Store` (`NotFound` for an unknown run) if the read
+    ///         fails.
+    pub async fn status(&self, run_id: &RunId) -> Result<RunStatus, RunError> {
+        let record = self.inner.runs.load(&self.inner.namespace, run_id).await?;
+        Ok(record.status)
     }
 
     /// The run's durable envelopes with seq greater than `after_seq`,

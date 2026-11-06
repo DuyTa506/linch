@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{SKILL_TOOL, Skill, substitute};
+use crate::events::Event;
+use crate::events::kinds::{SkillCompletedEvent, SkillInvokedEvent};
 use crate::json::{JsonObject, JsonValue};
 use crate::tool::{Tool, ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope};
 
@@ -76,6 +78,24 @@ impl Tool for SkillTool {
 
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let name = requested(&input);
+        let args = input.get("args").and_then(JsonValue::as_str);
+        ctx.emit(Event::SkillInvoked(SkillInvokedEvent {
+            name: name.to_owned(),
+            args: args.map(str::to_owned),
+            model_override: None,
+            allowed_tools: None,
+        }));
+        let result = self.load(name, args.unwrap_or(""), &ctx);
+        ctx.emit(Event::SkillCompleted(SkillCompletedEvent {
+            name: name.to_owned(),
+            is_error: result.is_err(),
+        }));
+        result
+    }
+}
+
+impl SkillTool {
+    fn load(&self, name: &str, args: &str, ctx: &ToolContext) -> ToolResult {
         let Some(skill) = self.skills.iter().find(|skill| skill.name == name) else {
             return Err(ToolOutputError::new(format!("Unknown skill: {name}")));
         };
@@ -83,7 +103,6 @@ impl Tool for SkillTool {
             let message = format!("Skill is not invokable by the model: {}", skill.name);
             return Err(ToolOutputError::new(message));
         }
-        let args = input.get("args").and_then(JsonValue::as_str).unwrap_or("");
         let body = substitute(skill, args, ctx.session_id.as_str());
         Ok(ToolOutput::new(body))
     }

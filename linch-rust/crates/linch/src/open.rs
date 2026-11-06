@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use linch_core::{
-    Agent, AgentBuilder, Hooks, MemoryRunStore, MemorySessionStore, PermissionEngine,
-    PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore,
-    TaskStore, Tool, ToolRegistry,
+    Agent, AgentBuilder, Hooks, InMemoryMailbox, MemoryRunStore, MemorySessionStore,
+    PermissionEngine, PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider,
+    SessionStore, TaskStore, Tool, ToolRegistry,
 };
 use linch_mcp::McpServer;
 use linch_postgres::{PgRunStore, PgSessionStore};
@@ -143,6 +143,12 @@ impl AgentConfig {
         }
         if let Some(definitions) = project.subagents {
             builder = builder.subagents(definitions);
+        }
+        if let Some(workers) = self.workers {
+            builder = builder.workers(workers);
+        }
+        if self.mailbox {
+            builder = builder.mailbox(Arc::new(InMemoryMailbox::new()));
         }
         let skipped = project.skipped;
         match builder.build() {

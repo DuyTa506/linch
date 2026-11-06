@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
 use super::{Agent, AgentInner, BuildError, Pricing, SessionClose};
+use crate::coordination::{Mailbox, SendMessageTool};
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
 use crate::json::JsonObject;
@@ -14,14 +15,14 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{self, Skill, SkillTool};
 use crate::store::{RunStore, SessionStore};
-use crate::subagents::{Roster, SubagentDefinition, SubagentTool};
+use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
 use crate::usage::Usage;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
 ///
 /// The provider, the permission engine, both stores and a namespace are
-/// required; tools, hooks, skills, subagents, pricing and session-close
-/// callbacks default to none. Nothing here does I/O.
+/// required; tools, hooks, skills, subagents, a mailbox, pricing and
+/// session-close callbacks default to none. Nothing here does I/O.
 pub struct AgentBuilder {
     spec: AgentSpec,
     provider: Option<Arc<dyn Provider>>,
@@ -35,6 +36,8 @@ pub struct AgentBuilder {
     skills: Option<Vec<Skill>>,
     subagents: Option<Vec<SubagentDefinition>>,
     pricing: Option<Pricing>,
+    mailbox: Option<Arc<dyn Mailbox>>,
+    workers: Option<Workers>,
 }
 
 impl AgentBuilder {
@@ -53,6 +56,8 @@ impl AgentBuilder {
             skills: None,
             subagents: None,
             pricing: None,
+            mailbox: None,
+            workers: None,
         }
     }
 
@@ -149,6 +154,26 @@ impl AgentBuilder {
         self
     }
 
+    /// Keep the `Subagent` tool's workers as `workers` says (see
+    /// [`crate::subagents`]); it needs [`Self::subagents`]. The setting is
+    /// part of the run contract.
+    pub fn workers(mut self, workers: Workers) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
+    /// Give the agent a mailbox for peer messages (see
+    /// [`crate::coordination`]).
+    ///
+    /// [`Self::build`] registers the `send_message` tool in the tool
+    /// registry, for as long as the agent lives, and every run (a
+    /// subagent's too) drains its session's inbox at its start and at the
+    /// end of each tool batch. Several agents may share one mailbox.
+    pub fn mailbox(mut self, mailbox: Arc<dyn Mailbox>) -> Self {
+        self.mailbox = Some(mailbox);
+        self
+    }
+
     /// Build the agent and compute its contract digest from the spec, the
     /// tools registered now, the hook policies, the skills and the
     /// subagents (BLUEPRINT 13.1.2).
@@ -178,24 +203,47 @@ impl AgentBuilder {
         let mut features = JsonObject::new();
         let mut built_ins = BuiltIns::default();
         let mut listing = None;
+        let mut overlays = skills::Overlays::new();
         let skills_on = self.skills.is_some();
         if let Some(skills) = self.skills {
             let skills = skills::with_builtins(skills);
+            overlays = skills::overlays(&skills);
             let value =
                 serde_json::to_value(&skills).map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("skills".into(), value);
             listing = listing_block(&skills);
             built_ins.register(&self.tools, Arc::new(SkillTool::new(skills)))?;
         }
+        if let Some(mailbox) = &self.mailbox {
+            let tool = SendMessageTool::new(Arc::clone(mailbox));
+            built_ins.register(&self.tools, Arc::new(tool))?;
+        }
         let handle = Arc::new(OnceLock::new());
         let mut subagents = None;
+        if self.workers.is_some() && self.subagents.is_none() {
+            return Err(BuildError::Invalid("workers need subagents".into()));
+        }
+        if let Some(workers) = self.workers {
+            let value =
+                serde_json::to_value(workers).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            features.insert("workers".into(), value);
+        }
+        let workers = self.workers.unwrap_or_default();
         if let Some(definitions) = self.subagents {
             let roster = Arc::new(Roster::new(definitions));
             let value =
                 serde_json::to_value(&*roster).map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("subagents".into(), value);
-            let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle));
+            let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle), workers);
             built_ins.register(&self.tools, Arc::new(tool))?;
+            if workers.background || workers.retain {
+                let tool = ContinueTool::new(Arc::clone(&handle));
+                built_ins.register(&self.tools, Arc::new(tool))?;
+            }
+            if workers.background {
+                let tool = StopTool::new(Arc::clone(&handle));
+                built_ins.register(&self.tools, Arc::new(tool))?;
+            }
             subagents = Some(roster);
         }
         let tools = self.tools.snapshot().contract_tools();
@@ -218,9 +266,14 @@ impl AgentBuilder {
             features,
             skills: skills_on,
             skill_listing: listing,
+            overlays: Arc::new(overlays),
             subagents,
+            workers,
+            worker_registry: Default::default(),
             child: false,
             pricing: self.pricing,
+            mailbox: self.mailbox,
+            families: Default::default(),
             session_close: self.session_close,
             registrations: built_ins.take(),
         });
