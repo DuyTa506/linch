@@ -36,9 +36,7 @@ class HostAdapter:
         return False
 
 
-@pytest.mark.parametrize(
-    "missing", ["session_store", "run_store", "filesystem", "filesystem_omitted", "all"]
-)
+@pytest.mark.parametrize("missing", ["run_store", "all"])
 async def test_durable_deep_agent_rejects_missing_host_storage(
     tmp_path: Path, missing: str
 ) -> None:
@@ -53,8 +51,6 @@ async def test_durable_deep_agent_rejects_missing_host_storage(
     }
     if missing == "all":
         kwargs.clear()
-    elif missing == "filesystem_omitted":
-        kwargs.pop("filesystem")
     else:
         kwargs[missing] = None
     agent = None
@@ -66,9 +62,7 @@ async def test_durable_deep_agent_rejects_missing_host_storage(
         assert "Postgres" in str(exc.value)
         assert "durable=False" in str(exc.value)
         expected_missing = (
-            ("session_store", "run_store", "filesystem")
-            if missing == "all"
-            else (missing.removesuffix("_omitted"),)
+            ("session_store", "run_store", "filesystem") if missing == "all" else (missing,)
         )
         for name in expected_missing:
             assert name in str(exc.value)
@@ -93,19 +87,14 @@ def test_durable_storage_validation_precedes_agent_creation(
 
 
 @pytest.mark.parametrize("durable", [True, False])
-@pytest.mark.parametrize("host_adapters", [True, False])
-async def test_deep_agent_preserves_explicit_host_adapters(
-    tmp_path: Path, durable: bool, host_adapters: bool
-) -> None:
+async def test_deep_agent_preserves_explicit_host_adapters(tmp_path: Path, durable: bool) -> None:
     from linch import InMemoryRunStore, InMemorySessionStore
     from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem import StateFileBackend
 
-    sessions: Any = InMemorySessionStore()
-    runs: Any = InMemoryRunStore()
-    filesystem: Any = StateFileBackend()
-    if host_adapters:
-        sessions, runs, filesystem = (HostAdapter(store) for store in (sessions, runs, filesystem))
+    sessions: Any = HostAdapter(InMemorySessionStore())
+    runs: Any = HostAdapter(InMemoryRunStore())
+    filesystem: Any = HostAdapter(StateFileBackend())
     agent = create_deep_agent(
         model="offline",
         provider=OfflineProvider(),

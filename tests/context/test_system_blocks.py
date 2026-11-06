@@ -224,6 +224,7 @@ async def test_bare_agent_defaults_are_inert_and_ephemeral(tmp_path):
     assert not agent.features.mcp
     assert not agent.features.filesystem
     assert agent.session_store is None
+    assert agent.run_store is None
 
     await agent.session()
     assert isinstance(agent.session_store, InMemorySessionStore)
