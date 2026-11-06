@@ -13,12 +13,12 @@ use super::request;
 use crate::anthropic::{DEFAULT_MAX_TOKENS, payload};
 
 fn build(request: &ProviderRequest) -> serde_json::Value {
-    payload::build(request).unwrap()
+    payload::build(request, false).unwrap()
 }
 
 fn invalid(request: &ProviderRequest) -> bool {
     matches!(
-        payload::build(request),
+        payload::build(request, false),
         Err(ProviderError::InvalidRequest { .. })
     )
 }

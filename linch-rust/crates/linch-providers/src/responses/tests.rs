@@ -15,6 +15,8 @@ use crate::openai::test_support::{
 };
 use crate::test_server::{assert_redirect_refused, redirect_response};
 
+mod catalog;
+
 const SECRET: &str = "sk-unit-test-responses-8e7d";
 const MODEL: &str = "gpt-5.5";
 const TOOLS: &str = include_str!("../../tests/fixtures/responses_reasoning_tools.sse");

@@ -9,6 +9,7 @@ use crate::test_server::{
     assert_redirect_refused, redirect_response, serve_once, serve_stalled_error,
 };
 
+mod catalog;
 mod payload;
 
 const SECRET: &str = "sk-ant-unit-test-secret-4b5c";
@@ -43,6 +44,7 @@ fn provider(base_url: String) -> Anthropic {
     Anthropic::new(AnthropicOptions {
         api_key: ApiKey::new(SECRET).unwrap(),
         base_url,
+        native_catalog_changes: false,
     })
     .unwrap()
 }

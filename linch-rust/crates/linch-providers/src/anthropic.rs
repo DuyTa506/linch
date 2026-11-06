@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
 
+mod catalog;
 mod http;
 mod payload;
 mod stream;
@@ -57,6 +58,12 @@ pub struct AnthropicOptions {
     /// API root without the `/v1/messages` path. Any server that speaks
     /// the Messages API works here.
     pub base_url: String,
+    /// Whether a tool added or removed mid-session goes in the
+    /// conversation as a tool block, keeping the prompt cache, instead of
+    /// in `tools` (beta `inline-tools-2026-09-15`). Used only on
+    /// `api.anthropic.com` with the models that take it; off by default
+    /// and not verified against the live API.
+    pub native_catalog_changes: bool,
 }
 
 impl AnthropicOptions {
@@ -65,6 +72,7 @@ impl AnthropicOptions {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
+            native_catalog_changes: false,
         }
     }
 
@@ -115,13 +123,15 @@ impl Provider for Anthropic {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = payload::build(&request)?;
+        let native = catalog::enabled(&self.options, &request.model);
+        let body = payload::build(&request, native)?;
         let url = format!(
             "{}/v1/messages",
             self.options.base_url.trim_end_matches('/')
         );
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, key, &body, &cancel).await?;
+        let beta = native.then_some(catalog::BETA);
+        let response = http::post(&self.client, &url, key, &body, beta, &cancel).await?;
         let translator = stream::Translator::new(request.model, key.clone());
         Ok(stream::events(
             response.bytes_stream(),

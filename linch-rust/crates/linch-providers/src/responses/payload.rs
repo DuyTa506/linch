@@ -2,11 +2,12 @@
 
 use linch_core::{
     ContentBlock, ImageSource, JsonValue, Message, ProviderError, ProviderRequest, Role,
-    ToolChoice, ToolResultBlock, ToolResultPart,
+    ToolChoice, ToolDefinition, ToolResultBlock, ToolResultPart,
 };
 use serde_json::json;
 
 use super::ResponsesOptions;
+use super::catalog::{self, Native};
 use super::stream::METADATA_KEY;
 use crate::openai::effort_value;
 
@@ -25,9 +26,11 @@ pub(crate) fn build_payload(
             "the Responses API has no stop sequences; remove stop_sequences".into(),
         ));
     }
+    let native = catalog::enabled(options, &request.model);
+    let mut catalog = native.then(|| Native::new(&request.tools, &request.messages));
     let mut body = json!({
         "model": request.model,
-        "input": input(&request.messages)?,
+        "input": input(&request.messages, catalog.as_mut())?,
         "stream": true,
     });
     if !request.system.is_empty() {
@@ -38,20 +41,11 @@ pub(crate) fn build_payload(
             .collect();
         body["instructions"] = text.join("\n\n").into();
     }
-    if !request.tools.is_empty() {
-        let tools: Vec<JsonValue> = request
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "type": "function",
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                    "strict": false,
-                })
-            })
-            .collect();
+    let tools: Vec<JsonValue> = (request.tools.iter())
+        .filter(|tool| catalog.as_ref().is_none_or(|catalog| catalog.keeps(tool)))
+        .map(function)
+        .collect();
+    if !tools.is_empty() {
         body["tools"] = tools.into();
     }
     if let Some(choice) = &request.tool_choice {
@@ -61,6 +55,14 @@ pub(crate) fn build_payload(
             ToolChoice::Required {} => "required".into(),
             ToolChoice::Tool { name } => json!({"type": "function", "name": name}),
         };
+    }
+    let open = matches!(request.tool_choice, None | Some(ToolChoice::Auto {}));
+    if let Some(allowed) = catalog
+        .as_ref()
+        .and_then(Native::tool_choice)
+        .filter(|_| open)
+    {
+        body["tool_choice"] = allowed;
     }
     if let Some(max_tokens) = request.max_output_tokens {
         body["max_output_tokens"] = max_tokens.into();
@@ -85,13 +87,27 @@ pub(crate) fn build_payload(
     Ok(body)
 }
 
-/// The `input` items, in conversation order.
-fn input(messages: &[Message]) -> Result<Vec<JsonValue>, ProviderError> {
+fn function(tool: &ToolDefinition) -> JsonValue {
+    json!({
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.input_schema,
+        "strict": false,
+    })
+}
+
+/// The `input` items, in conversation order, with a `native` catalog's
+/// additions at their notices.
+fn input(
+    messages: &[Message],
+    mut native: Option<&mut Native>,
+) -> Result<Vec<JsonValue>, ProviderError> {
     let mut out = Vec::with_capacity(messages.len());
     for message in messages {
         match message.role {
             Role::Assistant => assistant(message, &mut out)?,
-            Role::User => user(message, &mut out)?,
+            Role::User => user(message, &mut out, native.as_deref_mut())?,
         }
     }
     Ok(out)
@@ -147,13 +163,30 @@ fn assistant(message: &Message, out: &mut Vec<JsonValue>) -> Result<(), Provider
 }
 
 /// Tool results become `function_call_output` items ahead of the user's own
-/// parts, so they directly follow the calls they answer.
-fn user(message: &Message, out: &mut Vec<JsonValue>) -> Result<(), ProviderError> {
+/// parts, so they directly follow the calls they answer. A notice that adds
+/// tools natively ends the user message there, and its `additional_tools`
+/// item follows.
+fn user(
+    message: &Message,
+    out: &mut Vec<JsonValue>,
+    mut native: Option<&mut Native>,
+) -> Result<(), ProviderError> {
     let mut parts = Vec::new();
     for block in &message.content {
         match block {
             ContentBlock::Text(block) => parts.push(input_text(&block.text)),
-            ContentBlock::CatalogChange(block) => parts.push(input_text(&block.text)),
+            ContentBlock::CatalogChange(block) => {
+                parts.push(input_text(&block.text));
+                let added = native.as_deref_mut().map(|n| n.additions(block));
+                if let Some(added) = added.filter(|added| !added.is_empty()) {
+                    let content = std::mem::take(&mut parts);
+                    out.push(json!({"type": "message", "role": "user", "content": content}));
+                    let tools: Vec<JsonValue> = added.into_iter().map(function).collect();
+                    let item =
+                        json!({"type": "additional_tools", "role": "developer", "tools": tools});
+                    out.push(item);
+                }
+            }
             ContentBlock::Image(image) => parts.push(input_image(&image.source)),
             ContentBlock::ToolResult(result) => out.push(call_output(result)),
             ContentBlock::ToolUse(_)
