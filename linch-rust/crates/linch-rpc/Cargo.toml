@@ -18,6 +18,9 @@ futures = "0.3.34"
 linch = { path = "../linch" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# Reads a store DSN the way the store connects with it, for the Postgres
+# allowlist (already built for linch-postgres).
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate"] }
 # Bearer tokens are kept as SHA-256 digests and compared in constant time
 # (`subtle`); provider base URLs are matched by origin (`url`).
 sha2 = "0.11.1"
@@ -30,7 +33,5 @@ url = "2.5.8"
 [dev-dependencies]
 # The `mcp_server` example serves linch-mcp's test server on stdio.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
-# The Postgres tenant test creates and drops its own schema.
-sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "rt", "sync", "time"] }

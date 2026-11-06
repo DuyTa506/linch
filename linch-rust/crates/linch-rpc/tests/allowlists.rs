@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use common::*;
 use linch_rpc::protocol::method;
@@ -22,11 +22,26 @@ fn example(name: &str) -> PathBuf {
     dir.join("examples").join(name)
 }
 
-fn acme(urls: &[&str], roots: &[&Path], commands: &[&str]) -> Access {
-    let urls: Vec<String> = urls.iter().map(|url| url.to_string()).collect();
-    let roots: Vec<PathBuf> = roots.iter().map(|root| root.to_path_buf()).collect();
-    let commands: Vec<String> = commands.iter().map(|c| c.to_string()).collect();
-    tenant("acme", Allowlists::new(&urls, &roots, &commands).unwrap())
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| item.to_string()).collect()
+}
+
+/// Tenant `acme` with the scripted provider and `allow` applied.
+fn acme(allow: impl FnOnce(Allowlists) -> Allowlists) -> Access {
+    tenant("acme", allow(Allowlists::new().scripted_provider(true)))
+}
+
+/// A listener that accepts and drops every connection, so a client fails
+/// at once instead of retrying a refused port.
+async fn hangs_up() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    address
 }
 
 fn config(extra: Value) -> Value {
@@ -54,7 +69,8 @@ async fn refused(rpc: &Rpc, config: Value) -> Option<String> {
 
 #[tokio::test]
 async fn a_provider_endpoint_must_share_an_allowed_origin() {
-    let rpc = Rpc::remote(acme(&["http://127.0.0.1:9/v1"], &[], &[]));
+    let urls = strings(&["http://127.0.0.1:9/v1"]);
+    let rpc = Rpc::remote(acme(|allow| allow.provider_base_urls(&urls).unwrap()));
     let vllm = |url: &str| config(json!({"provider": {"id": "vllm", "base_url": url}}));
     // The key of a self-hosted server is optional, so these open.
     for allowed in ["http://127.0.0.1:9/v1", "http://127.0.0.1:9/other/v1/"] {
@@ -91,7 +107,8 @@ async fn a_workspace_must_lie_under_an_allowed_root() {
         std::fs::create_dir_all(dir.path().join(sub)).unwrap();
     }
     std::os::unix::fs::symlink(dir.path().join("tenants/beta"), root.join("link")).unwrap();
-    let rpc = Rpc::remote(acme(&[], &[&root], &[]));
+    let roots = [root.clone()];
+    let rpc = Rpc::remote(acme(|allow| allow.workspace_roots(&roots).unwrap()));
     for inside in [
         root.clone(),
         root.join("project"),
@@ -120,7 +137,8 @@ async fn an_mcp_stdio_command_must_be_listed() {
     let program = example("mcp_server");
     assert!(program.exists(), "{} was not built", program.display());
     let listed = program.to_str().unwrap();
-    let rpc = Rpc::remote(acme(&[], &[], &[listed]));
+    let commands = strings(&[listed]);
+    let rpc = Rpc::remote(acme(|allow| allow.mcp_commands(&commands)));
     let stdio = |command: &str| {
         json!({"mcp_servers": [{"name": "tools", "transport": {"type": "stdio",
                                                                "command": command}}]})
@@ -142,4 +160,80 @@ async fn a_local_connection_checks_no_allowlist() {
                       "provider": {"id": "vllm", "base_url": "http://127.0.0.1:10/v1"},
                       "workspace": dir.path()});
     rpc.open(open).await;
+}
+
+#[tokio::test]
+async fn the_scripted_provider_needs_the_servers_consent() {
+    let refusing = Rpc::remote(tenant("acme", Allowlists::new()));
+    assert_eq!(
+        refused(&refusing, config(json!({}))).await.as_deref(),
+        Some("provider")
+    );
+    let consenting = Rpc::remote(acme(|allow| allow));
+    assert_eq!(refused(&consenting, config(json!({}))).await, None);
+}
+
+#[tokio::test]
+async fn skip_dangerous_needs_the_servers_consent() {
+    let mode = |mode: &str| config(json!({"permissions": {"mode": mode, "project_root": "/"}}));
+    let rpc = Rpc::remote(acme(|allow| allow));
+    for allowed in ["default", "accept_edits"] {
+        assert_eq!(refused(&rpc, mode(allowed)).await, None, "{allowed}");
+    }
+    let kind = refused(&rpc, mode("skip_dangerous")).await;
+    assert_eq!(kind.as_deref(), Some("permission_mode"));
+    let only = Rpc::remote(acme(|allow| {
+        allow.permission_modes(&[linch::PermissionMode::SkipDangerous])
+    }));
+    assert_eq!(refused(&only, mode("skip_dangerous")).await, None);
+    // No policy means mode `default`.
+    let kind = refused(&only, config(json!({}))).await;
+    assert_eq!(kind.as_deref(), Some("permission_mode"));
+}
+
+#[tokio::test]
+async fn a_store_dsn_must_name_an_allowed_server() {
+    let address = hangs_up().await;
+    let listed = format!("postgres://{address}/linch");
+    let dsns = [listed];
+    let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
+    let store = |dsn: String| config(json!({"stores": {"type": "postgres", "dsn": dsn}}));
+    // Allowed: the open goes on and fails on the fake server.
+    let ours = format!("postgres://acme:secret@{address}/linch?sslmode=disable");
+    let error = rpc.call(method::AGENT_OPEN, store(ours)).await.unwrap_err();
+    assert_eq!(refusal(error), (code::STORE_UNAVAILABLE, None));
+    let outside = [
+        format!("postgres://{address}/other"),
+        "postgres://127.0.0.1:1/linch".to_owned(),
+        format!("postgres://{address}/linch?host=10.255.255.1"),
+        "not a dsn".to_owned(),
+    ];
+    for dsn in outside {
+        let kind = refused(&rpc, store(dsn.clone())).await;
+        assert_eq!(kind.as_deref(), Some("postgres"), "{dsn}");
+    }
+    // Memory stores need no entry.
+    let memory = config(json!({"stores": {"type": "memory"}}));
+    assert_eq!(refused(&rpc, memory).await, None);
+}
+
+#[tokio::test]
+async fn an_mcp_http_url_must_share_an_allowed_origin() {
+    let address = hangs_up().await;
+    let urls = strings(&[&format!("http://{address}/")]);
+    let rpc = Rpc::remote(acme(|allow| allow.mcp_urls(&urls).unwrap()));
+    let http = |url: String| {
+        json!({"mcp_servers": [{"name": "remote", "reconnect": {"attempts": 0},
+                                "transport": {"type": "http", "url": url}}]})
+    };
+    let error = rpc
+        .call(
+            method::AGENT_OPEN,
+            config(http(format!("http://{address}/mcp"))),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(error).0, code::MCP_UNAVAILABLE);
+    let outside = config(http("http://127.0.0.1:1/mcp".into()));
+    assert_eq!(refused(&rpc, outside).await.as_deref(), Some("mcp_url"));
 }

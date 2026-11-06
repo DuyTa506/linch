@@ -59,26 +59,39 @@ fn blank_and_repeated_tokens_are_refused_without_echoing_them() {
 #[test]
 fn allowlists_take_only_web_urls_and_existing_roots() {
     let urls = |list: &[&str]| list.iter().map(|url| url.to_string()).collect::<Vec<_>>();
-    let ok = Allowlists::new(
-        &urls(&["https://api.example.com/v1", "http://10.0.0.5:8000"]),
-        &[],
-        &[],
-    );
-    assert_eq!(ok.unwrap().origins.len(), 2);
+    let ok = Allowlists::new().provider_base_urls(&urls(&[
+        "https://api.example.com/v1",
+        "http://10.0.0.5:8000",
+    ]));
+    assert_eq!(ok.unwrap().provider_origins.len(), 2);
     for bad in ["file:///etc", "api.example.com", "not a url"] {
-        let error = Allowlists::new(&urls(&["https://ok.example", bad]), &[], &[]).unwrap_err();
-        assert!(matches!(error, AccessError::BaseUrl { index: 1 }), "{bad}");
+        let list = urls(&["https://ok.example", bad]);
+        let error = Allowlists::new().mcp_urls(&list).unwrap_err();
+        let expected = AccessError::Url {
+            list: "mcp_urls",
+            index: 1,
+        };
+        assert_eq!(error.to_string(), expected.to_string(), "{bad}");
     }
+    let dsns = urls(&["postgres://db.internal:5432/linch", "not a dsn"]);
+    let error = Allowlists::new().postgres_dsns(&dsns).unwrap_err();
+    assert!(matches!(
+        error,
+        AccessError::Url {
+            list: "postgres_dsns",
+            index: 1
+        }
+    ));
     let dir = tempfile::tempdir().unwrap();
     let roots = [
         dir.path().join("."),
         PathBuf::from("/nonexistent/linch-p11c"),
     ];
-    let error = Allowlists::new(&[], &roots, &[]).unwrap_err();
+    let error = Allowlists::new().workspace_roots(&roots).unwrap_err();
     assert!(
         matches!(error, AccessError::WorkspaceRoot { .. }),
         "{error}"
     );
-    let allow = Allowlists::new(&[], &roots[..1], &[]).unwrap();
+    let allow = Allowlists::new().workspace_roots(&roots[..1]).unwrap();
     assert_eq!(allow.workspace_roots, [dir.path().canonicalize().unwrap()]);
 }

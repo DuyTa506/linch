@@ -4,17 +4,20 @@
 
 use std::path::PathBuf;
 
-use linch::{AgentConfig, McpTransportConfig, Principal, ProviderConfig};
+use linch::{
+    AgentConfig, McpTransportConfig, PermissionMode, Principal, ProviderConfig, StoreConfig,
+};
 use serde_json::json;
-use url::Url;
 
+use super::allowlists::{PgTarget, allows};
 use super::{Allowlists, Tenant};
 use crate::error::{ErrorObject, code};
 
 impl Tenant {
-    /// Refuse `config` unless its namespace is this tenant's and every
-    /// provider endpoint, workspace and MCP command it names is allowed.
-    /// The workspace is replaced by the canonical path that was checked.
+    /// Refuse `config` unless its namespace is this tenant's and its
+    /// provider, endpoints, permission mode, workspace, store and MCP
+    /// servers are all allowed. The workspace is replaced by the
+    /// canonical path that was checked.
     pub(crate) async fn admit(&self, config: &mut AgentConfig) -> Result<(), ErrorObject> {
         let namespace = &config.namespace;
         let own = namespace == &self.name
@@ -27,21 +30,38 @@ impl Tenant {
             );
             return Err(refused("namespace", message));
         }
-        if let Some(base_url) = base_url(&config.provider) {
-            self.allow.admit_base_url(base_url)?;
+        let allow = &self.allow;
+        allow.admit_provider(&config.provider)?;
+        let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
+        if !allow.permission_modes.contains(&mode) {
+            let message =
+                format!("permission mode {mode:?} is not in the tenant's permission_modes");
+            return Err(refused("permission_mode", message));
         }
         if let Some(root) = config.workspace.take() {
-            config.workspace = Some(self.allow.admit_workspace(root).await?);
+            config.workspace = Some(allow.admit_workspace(root).await?);
+        }
+        if let StoreConfig::Postgres { dsn } = &config.stores
+            && !PgTarget::parse(dsn).is_some_and(|target| allow.postgres.contains(&target))
+        {
+            let message = "the store DSN does not name a server in the tenant's postgres_dsns";
+            return Err(refused("postgres", message.into()));
         }
         for server in &config.mcp_servers {
-            if let McpTransportConfig::Stdio { command, .. } = &server.transport
-                && !self.allow.mcp_commands.contains(command)
-            {
+            let (kind, allowed) = match &server.transport {
+                McpTransportConfig::Stdio { command, .. } => {
+                    ("mcp_command", allow.mcp_commands.contains(command))
+                }
+                McpTransportConfig::Http { url, .. } => {
+                    ("mcp_url", allows(&allow.mcp_origins, url))
+                }
+            };
+            if !allowed {
                 let message = format!(
-                    "MCP server {:?}: its command is not in the tenant's mcp_commands",
+                    "MCP server {:?}: its transport is not in the tenant's allowlists ({kind})",
                     server.name
                 );
-                return Err(refused("mcp_command", message));
+                return Err(refused(kind, message));
             }
         }
         Ok(())
@@ -63,14 +83,19 @@ impl Tenant {
 }
 
 impl Allowlists {
-    fn admit_base_url(&self, base_url: &str) -> Result<(), ErrorObject> {
-        let allowed = Url::parse(base_url).is_ok_and(|url| self.origins.contains(&url.origin()));
-        if allowed {
-            return Ok(());
+    fn admit_provider(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
+        if matches!(provider, ProviderConfig::Scripted { .. }) && !self.scripted_provider {
+            let message = "the scripted provider is not allowed on this connection";
+            return Err(refused("provider", message.into()));
         }
-        let message = "provider base_url is not in the tenant's provider_base_urls, \
-                       so the server's key may not be sent there";
-        Err(refused("provider_base_url", message.into()))
+        match base_url(provider) {
+            Some(url) if !allows(&self.provider_origins, url) => {
+                let message = "provider base_url is not in the tenant's provider_base_urls, \
+                               so the server's key may not be sent there";
+                Err(refused("provider_base_url", message.into()))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The canonical `root`, if it lies in an allowed root. A path that

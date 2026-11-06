@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 const TOKEN: &str = "tok-acme-p11c-0123456789";
 
 fn login() -> Access {
-    let acme = Arc::new(Tenant::new("acme", Allowlists::default()).unwrap());
+    let acme = Arc::new(Tenant::new("acme", Allowlists::new().scripted_provider(true)).unwrap());
     let mut tokens = Tokens::new();
     tokens.insert(TOKEN, acme).unwrap();
     Access::Login(Arc::new(tokens))

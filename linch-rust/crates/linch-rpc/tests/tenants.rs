@@ -16,8 +16,13 @@ use linch_rpc::{Access, Allowlists, ErrorObject, code};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+/// What these tests' tenants may use: the scripted provider.
+fn allow() -> Allowlists {
+    Allowlists::new().scripted_provider(true)
+}
+
 fn acme() -> Access {
-    tenant("acme", Allowlists::default())
+    tenant("acme", allow())
 }
 
 /// A scripted config in `namespace`.
@@ -95,7 +100,7 @@ async fn another_tenants_handles_and_runs_are_unknown() {
     let run_id = owner.start(&agent, "s1", "Look it up.").await;
     calls.recv().await.expect("the run waits in its tool");
 
-    let other = Rpc::remote(tenant("beta", Allowlists::default()));
+    let other = Rpc::remote(tenant("beta", allow()));
     let by_handle = [
         (
             method::RUN_START,
@@ -150,14 +155,15 @@ async fn on_shared_postgres_a_tenant_reaches_only_its_own_runs() {
         config["stores"] = json!({"type": "postgres", "dsn": db.dsn});
         config
     };
-    let mut owner = Rpc::remote(acme());
+    let on_shared = || allow().postgres_dsns(std::slice::from_ref(&db.dsn)).unwrap();
+    let mut owner = Rpc::remote(tenant("acme", on_shared()));
     let agent = owner.open(on_db("acme")).await;
     let run_id = owner.start(&agent, "s1", "go").await;
     let durable = owner.until_end(&run_id).await;
     assert!(durable.error.is_none(), "{:?}", durable.error);
 
     // Another connection of the same tenant reads the run.
-    let colleague = Rpc::remote(acme());
+    let colleague = Rpc::remote(tenant("acme", on_shared()));
     let theirs = colleague.open(on_db("acme")).await;
     let params = json!({"agent": theirs, "run_id": run_id});
     let events: Events = colleague
@@ -169,7 +175,7 @@ async fn on_shared_postgres_a_tenant_reaches_only_its_own_runs() {
 
     // Another tenant cannot open that namespace, and in its own the run
     // does not exist.
-    let mut stranger = Rpc::remote(tenant("beta", Allowlists::default()));
+    let mut stranger = Rpc::remote(tenant("beta", on_shared()));
     let error = stranger
         .call(method::AGENT_OPEN, on_db("acme"))
         .await

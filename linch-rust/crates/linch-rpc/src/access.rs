@@ -10,9 +10,11 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use url::{Origin, Url};
 
 mod admit;
+mod allowlists;
+
+pub use allowlists::Allowlists;
 
 /// How a connection's client is trusted.
 #[derive(Debug, Clone)]
@@ -61,60 +63,6 @@ impl Tenant {
     /// What this tenant's agents may use.
     pub fn allowlists(&self) -> &Allowlists {
         &self.allow
-    }
-}
-
-/// What a tenant's `agent.open` may ask for. Each list allows nothing when
-/// empty.
-#[derive(Debug, Default)]
-pub struct Allowlists {
-    origins: Vec<Origin>,
-    workspace_roots: Vec<PathBuf>,
-    mcp_commands: Vec<String>,
-}
-
-impl Allowlists {
-    /// Build the allowlists, resolving each workspace root.
-    ///
-    /// Blocks on the file system (each root is canonicalized), so call it
-    /// at startup.
-    ///
-    /// Args:
-    ///     provider_base_urls: `http` or `https` URLs. A provider
-    ///         `base_url` is allowed when its scheme, host and port equal
-    ///         one of these; the path does not matter.
-    ///     workspace_roots: Existing directories. A `workspace` is allowed
-    ///         when its canonical path is one of them or lies under one.
-    ///     mcp_commands: Programs an MCP `stdio` transport may run, each
-    ///         compared with `command` exactly.
-    ///
-    /// Raises:
-    ///     AccessError: If a URL is not `http` or `https`, or a root cannot
-    ///         be resolved.
-    pub fn new(
-        provider_base_urls: &[String],
-        workspace_roots: &[PathBuf],
-        mcp_commands: &[String],
-    ) -> Result<Self, AccessError> {
-        let origins = (provider_base_urls.iter().enumerate())
-            .map(|(index, url)| match Url::parse(url) {
-                Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(url.origin()),
-                _ => Err(AccessError::BaseUrl { index }),
-            })
-            .collect::<Result<_, _>>()?;
-        let workspace_roots = (workspace_roots.iter())
-            .map(|root| {
-                std::fs::canonicalize(root).map_err(|source| AccessError::WorkspaceRoot {
-                    root: root.clone(),
-                    source,
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Self {
-            origins,
-            workspace_roots,
-            mcp_commands: mcp_commands.to_vec(),
-        })
     }
 }
 
@@ -191,9 +139,13 @@ pub enum AccessError {
         /// The rejected name.
         name: String,
     },
-    /// An entry of `provider_base_urls` is not an `http` or `https` URL.
-    #[error("provider_base_urls[{index}] is not an http or https URL")]
-    BaseUrl {
+    /// An entry of a URL or DSN allowlist cannot be read: not an `http`
+    /// or `https` URL, or not a Postgres DSN.
+    #[error("{list}[{index}] is not a valid entry")]
+    Url {
+        /// The allowlist: `provider_base_urls`, `mcp_urls` or
+        /// `postgres_dsns`.
+        list: &'static str,
         /// Its position in the list.
         index: usize,
     },
