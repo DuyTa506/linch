@@ -14,6 +14,7 @@ this process only for the host tools and callbacks an agent declared::
 from ._binary import find_server
 from .agent import Agent, Allow, Decision, Deny
 from .callbacks import Callback, FailMode, Point, callback
+from .config import AgentConfig, Filesystem, Workers
 from .errors import (
     AgentNotFound,
     ConnectionClosed,
@@ -56,6 +57,7 @@ from .tools import HostTool, Scope, tool
 
 __all__ = [
     "Agent",
+    "AgentConfig",
     "AgentNotFound",
     "Allow",
     "AssistantEvent",
@@ -69,6 +71,7 @@ __all__ = [
     "ErrorEvent",
     "Event",
     "FailMode",
+    "Filesystem",
     "HookEvent",
     "HostTool",
     "InitEvent",
@@ -98,6 +101,7 @@ __all__ = [
     "UnknownEvent",
     "UsageEvent",
     "UserEvent",
+    "Workers",
     "callback",
     "find_server",
     "tool",

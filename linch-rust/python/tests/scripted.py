@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
+
+from linch_rust import AgentConfig
 
 MODEL = "scripted-model"
 _USAGE = {"input_tokens": 3, "output_tokens": 1, "cache_read_tokens": 0, "cache_creation_tokens": 0}
@@ -33,12 +35,13 @@ def tool_turn(call_id: str, name: str, input: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def config(turns: list[dict[str, Any]], mode: str = "default", **extra: Any) -> dict[str, Any]:
+def config(turns: list[dict[str, Any]], mode: str = "default", **extra: Any) -> AgentConfig:
     """A scripted agent config with no workspace, in permission mode `mode`."""
-    return {
+    fields: dict[str, Any] = {
         "namespace": "p12",
         "spec": {"model": MODEL},
         "provider": {"id": "scripted", "turns": turns},
         "permissions": {"mode": mode, "project_root": "/"},
         **extra,
     }
+    return cast(AgentConfig, fields)

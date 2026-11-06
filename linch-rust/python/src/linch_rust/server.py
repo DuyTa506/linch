@@ -12,6 +12,7 @@ from ._binary import find_server
 from ._rpc import Connection
 from .agent import Agent
 from .callbacks import Callback
+from .config import AgentConfig
 from .errors import LinchError
 from .tools import HostTool
 
@@ -99,17 +100,18 @@ class Server:
 
     async def open_agent(
         self,
-        config: Mapping[str, Any],
+        config: AgentConfig,
         tools: Sequence[HostTool] = (),
         callbacks: Sequence[Callback] = (),
     ) -> Agent:
         """Open an agent from its config, with host tools and callbacks.
 
         Args:
-            config: The `AgentConfig` as JSON (`namespace`, `spec`,
-                `provider`, and optionally `stores`, `workspace`,
-                `permissions`, `mcp_servers`); the `linch-rpc` crate docs
-                show its shape. It never carries a provider key.
+            config: The agent as data: `namespace`, `spec` and `provider`,
+                and optionally `stores`, `workspace`, `bash`, `permissions`,
+                `mcp_servers`, `skills`, `subagents`, `workers`, `mailbox`,
+                `config_dir`, `filesystem` and `tasks` (see `AgentConfig`).
+                It never carries a provider key.
             tools: Host tools made with `tool`, run in this process.
             callbacks: Intercept callbacks made with `callback`, answered in
                 this process.
@@ -122,7 +124,7 @@ class Server:
             ProtocolError: The config or a declaration is invalid.
         """
         _, conn = self._started()
-        params = dict(config)
+        params: dict[str, Any] = dict(config)
         if tools:
             params["tools"] = [host_tool.spec() for host_tool in tools]
         if callbacks:
