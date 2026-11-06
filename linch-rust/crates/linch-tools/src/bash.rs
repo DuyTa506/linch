@@ -13,6 +13,7 @@ use linch_core::{
     JsonObject, JsonValue, Tool, ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope,
 };
 use serde_json::json;
+use tokio::time::Instant;
 
 use crate::input::{coded, optional_count, schema, string};
 use process::{End, Finished};
@@ -22,6 +23,10 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 /// Longest timeout a call may ask for, in milliseconds.
 const MAX_TIMEOUT_MS: u64 = 1_800_000;
+
+/// How long before the call's deadline the command is killed, so the kill,
+/// the pipe drain and the result fit before the scheduler drops the call.
+const DEADLINE_MARGIN: Duration = Duration::from_millis(100);
 
 /// Host variables passed through to the shell; nothing else is inherited,
 /// so the host's credentials stay out of the command's environment.
@@ -36,6 +41,10 @@ const ALLOWED_ENV: [&str; 9] = [
 /// times out, when `ToolContext::cancel` fires, when the call's future is
 /// dropped, and when the shell exits (so background jobs never outlive the
 /// call). Each stream keeps its first 4000 and last 26000 bytes.
+///
+/// A call with a [`ToolContext::deadline`] (the scheduler's call timeout)
+/// cuts its timeout to end 100 ms before it, so the output so far reaches
+/// the model instead of a generic timeout.
 pub struct Bash {
     cwd: PathBuf,
     env: BTreeMap<String, String>,
@@ -118,17 +127,28 @@ impl Tool for Bash {
         if ctx.cancel.is_cancelled() {
             return Err(coded("[aborted before start]", "aborted"));
         }
-        let timeout = Duration::from_millis(timeout_ms);
+        let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline);
         let finished = process::run(command, &self.cwd, &self.env, timeout, &ctx.cancel)
             .await
             .map_err(|error| coded(format!("could not start /bin/sh: {error}"), "spawn_failed"))?;
-        render(finished, timeout_ms)
+        render(finished, timeout.as_millis())
     }
+}
+
+/// `timeout`, cut to end [`DEADLINE_MARGIN`] before `deadline` (at least
+/// 1 ms).
+fn fit(timeout: Duration, deadline: Option<Instant>) -> Duration {
+    let Some(deadline) = deadline else {
+        return timeout;
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    let left = left.saturating_sub(DEADLINE_MARGIN);
+    timeout.min(left.max(Duration::from_millis(1)))
 }
 
 /// The model-facing result: stdout, then `[stderr]` and stderr, then the
 /// status line. Anything but exit code 0 is an error carrying the same text.
-fn render(finished: Finished, timeout_ms: u64) -> ToolResult {
+fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
     let (stdout, out_cut) = finished.stdout.render();
     let (stderr, err_cut) = finished.stderr.render();
     let (status, failure): (String, Option<(&str, JsonValue)>) = match finished.end {

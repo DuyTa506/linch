@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::ids::{RunId, SessionId};
@@ -105,11 +106,18 @@ pub struct ToolContext {
     pub principal: Option<Principal>,
     /// Cancelled when the run aborts or the call times out.
     pub cancel: CancellationToken,
+    /// When the scheduler's call timeout ends the call; `None` without one.
+    ///
+    /// At the deadline the scheduler drops the call and reports a generic
+    /// timeout. A tool that can stop early with a useful partial result
+    /// (Bash keeps the output so far) should finish a little before it.
+    pub deadline: Option<Instant>,
     progress: Option<mpsc::UnboundedSender<ToolProgress>>,
 }
 
 impl ToolContext {
-    /// Context for one call. `progress` receives [`Self::report_progress`].
+    /// Context for one call, with no deadline. `progress` receives
+    /// [`Self::report_progress`].
     pub fn new(
         session_id: SessionId,
         run_id: RunId,
@@ -124,8 +132,15 @@ impl ToolContext {
             tool_use_id: tool_use_id.into(),
             principal,
             cancel,
+            deadline: None,
             progress,
         }
+    }
+
+    /// This context with `deadline` as the call's deadline.
+    pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// Stable `run_id:tool_use_id` key for this call.

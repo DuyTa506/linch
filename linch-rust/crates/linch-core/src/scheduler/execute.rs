@@ -78,8 +78,9 @@ pub struct CallOutcome {
 pub struct ExecuteOptions {
     /// Most read calls run at once. Zero counts as one.
     pub max_concurrency: usize,
-    /// Longest one tool may run before it gets a timeout error result.
-    /// `None` waits for the tool.
+    /// Longest one tool may run before it gets a timeout error result; the
+    /// tool sees the end as [`ToolContext::deadline`]. `None` waits for the
+    /// tool.
     pub call_timeout: Option<Duration>,
     /// Run abort. Cancelling it cancels running tools, and calls not yet
     /// started get an aborted error result.
@@ -225,6 +226,10 @@ impl<S: ToolSink> Runner<'_, S> {
         // stops too.
         let _stop = token.clone().drop_guard();
         let (progress, mut reports) = mpsc::unbounded_channel();
+        // One instant for the tool and the timeout, so a tool that stops
+        // just before its deadline is never cut off by the timeout.
+        let limit = self.options.call_timeout;
+        let deadline = limit.and_then(|limit| tokio::time::Instant::now().checked_add(limit));
         let ctx = ToolContext::new(
             self.run.session_id.clone(),
             self.run.run_id.clone(),
@@ -232,8 +237,9 @@ impl<S: ToolSink> Runner<'_, S> {
             self.run.principal.clone(),
             token,
             Some(progress),
-        );
-        let execution = self.timed(call, tool.tool().execute(call.input.clone(), ctx));
+        )
+        .with_deadline(deadline);
+        let execution = self.timed(call, deadline, tool.tool().execute(call.input.clone(), ctx));
         let result = {
             let forward = pin!(async {
                 while let Some(report) = reports.recv().await {
@@ -252,15 +258,17 @@ impl<S: ToolSink> Runner<'_, S> {
         result
     }
 
+    /// `execution`, or a timeout error result at `deadline`.
     async fn timed(
         &self,
         call: &PlannedCall,
+        deadline: Option<tokio::time::Instant>,
         execution: impl Future<Output = ToolResult>,
     ) -> ToolResult {
-        let Some(limit) = self.options.call_timeout else {
+        let (Some(deadline), Some(limit)) = (deadline, self.options.call_timeout) else {
             return execution.await;
         };
-        tokio::time::timeout(limit, execution)
+        tokio::time::timeout_at(deadline, execution)
             .await
             .unwrap_or_else(|_| {
                 Err(ToolOutputError::new(format!(

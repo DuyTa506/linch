@@ -251,6 +251,37 @@ async fn a_timeout_becomes_an_error_result() {
 }
 
 #[tokio::test]
+async fn the_call_timeout_reaches_the_tool_as_its_deadline() {
+    let log = new_log();
+    let fx = Fixture::new(PermissionMode::SkipDangerous);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s = Arc::clone(&seen);
+    fx.tool(
+        TestTool::new("Read", ToolScope::Read, &log).body(move |input, ctx| {
+            s.lock().unwrap().push(ctx.deadline);
+            async move { Ok(ToolOutput::new(JsonValue::Object(input))) }.boxed()
+        }),
+    );
+    let sink = RecSink::default();
+    let mut options = options(4);
+    for timeout in [None, Some(Duration::from_secs(60))] {
+        options.call_timeout = timeout;
+        let plan = fx.plan(&[use_block("r", "Read", json!({}))]).await;
+        let before = tokio::time::Instant::now();
+        within(fx.execute(plan, &sink, &options)).await.unwrap();
+        let deadline = seen.lock().unwrap().pop().unwrap();
+        match timeout {
+            None => assert_eq!(deadline, None),
+            Some(limit) => {
+                let deadline = deadline.expect("a call timeout sets a deadline");
+                assert!(deadline >= before + limit);
+                assert!(deadline <= tokio::time::Instant::now() + limit);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_sink_error_stops_the_next_tool_from_starting() {
     let log = new_log();
     let fx = Fixture::new(PermissionMode::SkipDangerous);

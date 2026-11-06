@@ -120,6 +120,26 @@ async fn timeout_kills_the_whole_group_and_keeps_partial_output() {
 }
 
 #[tokio::test]
+async fn a_call_deadline_cuts_the_timeout_and_keeps_partial_output() {
+    let ws = Workspace::new();
+    let tool = bash(&ws);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    let call_ctx = ctx("s1").with_deadline(Some(deadline));
+    let command = json!({"command": format!("{LEAK} echo before; sleep 30")});
+    // The scheduler drops the call at its deadline: Bash must answer first.
+    let call = tool.execute(input(command), call_ctx);
+    let result = tokio::time::timeout_at(deadline, call).await;
+    let error = result.expect("Bash ends before the deadline").unwrap_err();
+    assert_eq!(error.code.as_deref(), Some("timeout"));
+    let message = error.message;
+    assert!(
+        message.starts_with("before\n[timed out after "),
+        "{message}"
+    );
+    assert_no_leak(&ws.root()).await;
+}
+
+#[tokio::test]
 async fn cancel_kills_the_whole_group() {
     let ws = Workspace::new();
     let tool = bash(&ws);
