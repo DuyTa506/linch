@@ -19,6 +19,11 @@ use thiserror::Error;
 /// Boxed error of a storage layer under a backend.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The most bytes a virtual file holds: 10 MiB, what the workspace `Read`
+/// and `Edit` tools read of a file. `write_file` refuses more, and
+/// [`apply_edit`] refuses an edit whose result would be larger.
+pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Why a virtual file operation failed.
 #[derive(Debug, Error)]
 pub enum VfsError {
@@ -53,6 +58,15 @@ pub enum VfsError {
         path: String,
         /// How many times the old text occurs.
         count: usize,
+    },
+    /// A write or edit would make a file larger than [`MAX_FILE_BYTES`];
+    /// nothing changed.
+    #[error("the file would be {size} bytes; a virtual file holds at most {limit}")]
+    TooLarge {
+        /// The size the file would have, in bytes.
+        size: usize,
+        /// [`MAX_FILE_BYTES`].
+        limit: usize,
     },
     /// The storage under the backend failed.
     #[error("file backend failed: {0}")]
@@ -143,7 +157,9 @@ pub fn normalize_path(path: &str) -> Result<String, VfsError> {
 ///
 /// Raises:
 ///     VfsError: `NoMatch` when `old` does not occur, `NotUnique` when it
-///         occurs more than once without `replace_all`.
+///         occurs more than once without `replace_all`, `TooLarge` when the
+///         result would pass [`MAX_FILE_BYTES`] (checked before it is
+///         built).
 pub fn apply_edit(
     path: &str,
     text: &str,
@@ -160,13 +176,34 @@ pub fn apply_edit(
         0 => Err(VfsError::NoMatch {
             path: path.to_owned(),
         }),
-        1 => Ok((text.replacen(old, new, 1), 1)),
-        count if !replace_all => Err(VfsError::NotUnique {
+        count if count > 1 && !replace_all => Err(VfsError::NotUnique {
             path: path.to_owned(),
             count,
         }),
-        count => Ok((text.replace(old, new), count)),
+        count => {
+            // The matches never overlap, so they take `count * old.len()`
+            // bytes of `text`.
+            let kept = text.len() - count * old.len();
+            let added = count.checked_mul(new.len());
+            let size = added.and_then(|added| kept.checked_add(added));
+            check_size(size.unwrap_or(usize::MAX))?;
+            Ok((text.replacen(old, new, count), count))
+        }
     }
+}
+
+/// Refuse a file of `size` bytes past [`MAX_FILE_BYTES`].
+///
+/// Raises:
+///     VfsError: `TooLarge` when `size` passes the cap.
+pub fn check_size(size: usize) -> Result<(), VfsError> {
+    if size > MAX_FILE_BYTES {
+        return Err(VfsError::TooLarge {
+            size,
+            limit: MAX_FILE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 /// `path` normalized by [`normalize_path`] and checked to name a file, not
@@ -187,5 +224,46 @@ fn invalid(path: &str, reason: &'static str) -> VfsError {
     VfsError::InvalidPath {
         path: path.to_owned(),
         reason,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_edit_past_the_size_cap_is_refused() {
+        let text = "a".repeat(1_000_000);
+        let new = "a".repeat(20);
+        let grown = apply_edit("/f", &text, "a", &new, true);
+        assert!(
+            matches!(
+                grown,
+                Err(VfsError::TooLarge {
+                    size: 20_000_000,
+                    ..
+                })
+            ),
+            "{:?}",
+            grown.as_ref().err()
+        );
+        // Refused before the result is built: this one would be 100 GB.
+        let huge = apply_edit("/f", &text, "a", &"a".repeat(100_000), true);
+        let huge = huge.map(|(text, _)| text.len());
+        assert!(matches!(
+            huge,
+            Err(VfsError::TooLarge {
+                size: 100_000_000_000,
+                ..
+            })
+        ));
+        let (kept, count) = apply_edit("/f", &text, "a", "b", true).unwrap();
+        assert_eq!((kept.len(), count), (1_000_000, 1_000_000));
+        let full = format!("x{}", "a".repeat(MAX_FILE_BYTES - 2));
+        let (edge, _) = apply_edit("/f", &full, "x", "xy", false).unwrap();
+        assert_eq!(edge.len(), MAX_FILE_BYTES, "up to the cap is fine");
+        let over = apply_edit("/f", &full, "x", "xyz", false);
+        let over = over.map(|(text, _)| text.len());
+        assert!(matches!(over, Err(VfsError::TooLarge { .. })), "{over:?}");
     }
 }

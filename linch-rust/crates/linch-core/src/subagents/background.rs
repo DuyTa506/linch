@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use futures::StreamExt;
 
 use super::SUBAGENT_TOOL;
-use super::run::{Outcome, failed, finished};
+use super::run::{Outcome, failed, finished, first_use, mismatched};
 use super::tool::in_background;
 use super::workers::Worker;
 use crate::agent::{AgentInner, RunOptions};
@@ -106,12 +106,24 @@ pub(super) async fn launch(
     };
     let id = worker.id.clone();
     let principal = ctx.principal.clone();
-    pick_up(parent, &family, worker, prompt, principal, &ctx.run_id).await?;
+    let call = Some(ctx);
+    pick_up(
+        parent,
+        &family,
+        worker,
+        prompt,
+        principal,
+        &ctx.run_id,
+        call,
+    )
+    .await?;
     Ok(started(ctx, &id))
 }
 
 /// Have `family` drive the child run of `worker`: start it on `prompt`,
-/// resume it, or put the end of one that finished in the inbox.
+/// resume it, or put the end of one that finished in the inbox. `call` is
+/// the model's call that asks for it, which may not take an earlier call's
+/// child; `None` when a resumed run picks its children up.
 async fn pick_up(
     parent: &AgentInner,
     family: &Arc<Family>,
@@ -119,6 +131,7 @@ async fn pick_up(
     prompt: String,
     principal: Option<Principal>,
     parent_run: &RunId,
+    call: Option<&ToolContext>,
 ) -> Result<(), ToolOutputError> {
     let child = match parent.child(&worker.definition) {
         Ok(child) => Arc::new(child),
@@ -133,12 +146,31 @@ async fn pick_up(
         owner: "subagent".into(),
         cancel: cancel.clone(),
     };
-    let stream = match child.runs.load(&child.namespace, &id).await {
+    let loaded = child.runs.load(&child.namespace, &id).await;
+    if let (Ok(_), Some(ctx)) = (&loaded, call) {
+        first_use(parent, ctx, &id).await?;
+    }
+    let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
+            // Only a call starts a new child, so only a call can pass the
+            // cap; a resumed run's children were admitted when they began.
+            let max = parent.workers.max_background;
+            if call.is_some() && family.background_count() >= max as usize {
+                return Err(ToolOutputError::new(format!(
+                    "This run already has {max} background subagents running, the most \
+                     it may have (max_background). Wait for a <task-notification>, or stop \
+                     one with TaskStop, then call again."
+                )));
+            }
             runner::start_child(child, prompt, options, parent_run.clone())
         }
         Ok(record) if record.status.is_terminal() => {
             let outcome = finished(&child, &id).await?;
+            family.complete(Completion::of(id, worker.display_name, outcome));
+            return Ok(());
+        }
+        Ok(record) if record.contract != child.contract => {
+            let outcome = mismatched(&child, &record, options).await?;
             family.complete(Completion::of(id, worker.display_name, outcome));
             return Ok(());
         }
@@ -152,8 +184,10 @@ async fn pick_up(
 
 /// Pick up the background children of a resumed run: each child that a
 /// `child_run_status` event in `events` marks running, with no later mark
-/// of its end, is resumed, started (its create never landed), or read
-/// back. A child that cannot be picked up reports a failed end.
+/// of its end, and that `family` does not hold already (a run suspended
+/// in this process keeps its family), is resumed, started (its create
+/// never landed), or read back. A child that cannot be picked up reports a
+/// failed end.
 pub(crate) async fn reattach(
     parent: &AgentInner,
     family: &Arc<Family>,
@@ -191,7 +225,7 @@ pub(crate) async fn reattach(
             }
         }
     }
-    for id in running {
+    for id in running.into_iter().filter(|id| !family.knows(id)) {
         let Some(input) = call_input(events, id.as_str().strip_prefix(&prefix)) else {
             continue;
         };
@@ -205,7 +239,7 @@ pub(crate) async fn reattach(
         let name = worker.display_name.clone();
         let prompt = text("prompt").unwrap_or_default().to_owned();
         let principal = run.principal.clone();
-        let picked = pick_up(parent, family, worker, prompt, principal, &run.run_id).await;
+        let picked = pick_up(parent, family, worker, prompt, principal, &run.run_id, None).await;
         if let Err(error) = picked {
             family.complete(Completion {
                 child: id.clone(),

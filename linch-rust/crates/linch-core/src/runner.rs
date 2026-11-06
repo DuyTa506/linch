@@ -34,8 +34,9 @@
 //! create is read again before the new run's prompt goes in.
 //!
 //! A tool turn with `k` started tools costs `3 + 2k` run writes and 2 session
-//! writes. The core spawns no task: [`RunStream`] holds the run future and
-//! polls it only while the caller polls the stream.
+//! writes. [`RunStream`] holds the run future and polls it only while the
+//! caller polls the stream. The one task the core spawns drives the
+//! background subagents of a run suspended for approval (see `family`).
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -80,14 +81,16 @@ mod write;
 ///
 /// Dropping the stream drops the run where it stands, like a crash: the run
 /// keeps its last durable state and [`crate::agent::Agent::resume`] continues
-/// it.
+/// it. A run that suspended keeps its background subagents running once its
+/// stream ends or is dropped; an approve or resume of the run in this
+/// process takes them over.
 pub struct RunStream {
     run_id: RunId,
     outbox: Outbox,
     run: Option<BoxFuture<'static, Result<(), RunError>>>,
-    /// The subagent child runs this stream drives next to the run; `None`
-    /// for an agent without subagents.
-    family: Option<Arc<Family>>,
+    /// The subagent child runs this stream drives next to the run, once
+    /// the run is created or claimed.
+    driving: Driving,
     error: Option<RunError>,
 }
 
@@ -96,13 +99,13 @@ impl RunStream {
         run_id: RunId,
         outbox: Outbox,
         run: BoxFuture<'static, Result<(), RunError>>,
-        family: Option<Arc<Family>>,
+        driving: Driving,
     ) -> Self {
         Self {
             run_id,
             outbox,
             run: Some(run),
-            family,
+            driving,
             error: None,
         }
     }
@@ -110,6 +113,14 @@ impl RunStream {
     /// The run this stream drives.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
+    }
+}
+
+impl Drop for RunStream {
+    fn drop(&mut self) {
+        // The run goes first, so its family lets go of the children alone.
+        self.run = None;
+        self.driving.detach();
     }
 }
 
@@ -122,9 +133,7 @@ impl Stream for RunStream {
             if let Some(envelope) = this.outbox.pop() {
                 return Poll::Ready(Some(Ok(envelope)));
             }
-            if let Some(family) = &this.family {
-                family.poll(cx);
-            }
+            this.driving.poll(cx);
             let Some(run) = this.run.as_mut() else {
                 return Poll::Ready(this.error.take().map(Err));
             };
@@ -132,9 +141,11 @@ impl Stream for RunStream {
                 Poll::Ready(result) => {
                     this.run = None;
                     this.error = result.err();
+                    this.driving.detach();
                 }
-                // A child joined while the run was polled: poll it once.
-                Poll::Pending if this.family.as_ref().is_some_and(|f| f.joined()) => {}
+                // A child joined, or the run took its family, while the run
+                // was polled: poll the children once.
+                Poll::Pending if this.driving.joined() => {}
                 // The run parked on real I/O; hand over what it queued.
                 Poll::Pending if this.outbox.is_empty() => return Poll::Pending,
                 Poll::Pending => {}
@@ -166,26 +177,10 @@ fn start_under(
 ) -> RunStream {
     let run_id =
         (options.run_id.clone()).unwrap_or_else(|| RunId::new(uuid::Uuid::new_v4().to_string()));
-    let outbox = Outbox::default();
-    let family = family(&agent, &run_id, &options);
-    let run = start::new_run(
-        agent,
-        run_id.clone(),
-        prompt,
-        options,
-        Shared {
-            outbox: outbox.clone(),
-            family: family.clone(),
-        },
-        parent,
-    );
-    RunStream::new(run_id, outbox, Box::pin(run), family)
-}
-
-/// A family for the child runs of `run_id`, when the agent has subagents.
-fn family(agent: &AgentInner, run_id: &RunId, options: &RunOptions) -> Option<Arc<Family>> {
-    let family = || Family::new(run_id.clone(), options.cancel.clone());
-    agent.subagents.as_ref().map(|_| family())
+    let shared = Shared::default();
+    let (outbox, driving) = (shared.outbox.clone(), shared.driving.clone());
+    let run = start::new_run(agent, run_id.clone(), prompt, options, shared, parent);
+    RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 
 /// Resume a run, or approve its pending calls when `answers` is set.
@@ -195,20 +190,56 @@ pub(crate) fn resume(
     answers: Option<HashMap<String, ApprovalResponse>>,
     options: RunOptions,
 ) -> RunStream {
-    let outbox = Outbox::default();
-    let family = family(&agent, &run_id, &options);
-    let shared = Shared {
-        outbox: outbox.clone(),
-        family: family.clone(),
-    };
+    let shared = Shared::default();
+    let (outbox, driving) = (shared.outbox.clone(), shared.driving.clone());
     let run = start::continue_run(agent, run_id.clone(), answers, options, shared);
-    RunStream::new(run_id, outbox, Box::pin(run), family)
+    RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 
 /// What a run future shares with its stream.
+#[derive(Default)]
 pub(super) struct Shared {
     pub(super) outbox: Outbox,
-    pub(super) family: Option<Arc<Family>>,
+    pub(super) driving: Driving,
+}
+
+/// The family a run's stream drives, which the run future sets once the
+/// run is created or claimed, with the id the stream polls it under.
+#[derive(Clone, Default)]
+pub(super) struct Driving(Arc<Mutex<Attached>>);
+
+/// A family and the id its stream polls it under.
+type Attached = Option<(Arc<Family>, u64)>;
+
+impl Driving {
+    /// Take `family`'s children over for this stream.
+    pub(super) fn attach(&self, family: &Arc<Family>) {
+        let driver = family.attach();
+        *self.lock() = Some((Arc::clone(family), driver));
+    }
+
+    fn poll(&self, cx: &mut Context<'_>) {
+        let driving = self.lock().clone();
+        if let Some((family, driver)) = driving {
+            family.poll_for(cx, driver);
+        }
+    }
+
+    fn joined(&self) -> bool {
+        (self.lock().as_ref()).is_some_and(|(family, _)| family.joined())
+    }
+
+    /// Let go of the family: this stream polls it no more.
+    fn detach(&self) {
+        let driving = self.lock().take();
+        if let Some((family, driver)) = driving {
+            family.detach(driver);
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Attached> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Envelopes waiting for the caller, shared by the run future and its

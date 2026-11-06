@@ -7,7 +7,7 @@ use std::time::Instant;
 use super::batch::{answer_decision, approvals, turn_events, upsert};
 use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
-use super::{Shared, hooks, inbox};
+use super::{Driving, Family, Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::catalog::{self, Catalog};
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
@@ -32,7 +32,7 @@ pub(super) async fn new_run(
     shared: Shared,
     parent: Option<RunId>,
 ) -> Result<(), RunError> {
-    let Shared { outbox, family } = shared;
+    let Shared { outbox, driving } = shared;
     let started = Instant::now();
     let namespace = agent.namespace.clone();
     if options.run_id.is_some() {
@@ -118,9 +118,7 @@ pub(super) async fn new_run(
             });
         }
     };
-    if let Some(family) = &family {
-        family.register(&agent);
-    }
+    let family = drive_family(&agent, &driving, &run_id, &session_id);
     outbox.deliver(ready).await;
     let progress = Progress::first(started);
     let run = identity(session_id, run_id, &options.principal);
@@ -154,7 +152,7 @@ pub(super) async fn continue_run(
     options: RunOptions,
     shared: Shared,
 ) -> Result<(), RunError> {
-    let Shared { outbox, family } = shared;
+    let Shared { outbox, driving } = shared;
     let started = Instant::now();
     if options.cancel.is_cancelled() {
         return Ok(());
@@ -177,11 +175,11 @@ pub(super) async fn continue_run(
         }
         Err(error) => return Err(error.into()),
     };
-    if let Some(family) = &family {
-        family.register(&agent);
-    }
     let record = runs.load(namespace, &run_id).await?;
     check(&record, &agent, answers.as_ref())?;
+    // A family this process still holds (the run suspended here) is taken
+    // over as it is; its children never went through a crash.
+    let family = drive_family(&agent, &driving, &run_id, &record.session_id);
     let events = runs.events(namespace, &run_id, 0).await?;
     let entries = agent.sessions.load(namespace, &record.session_id).await?;
     let checkpoint = &record.checkpoint;
@@ -272,6 +270,20 @@ pub(super) async fn continue_run(
         runner.commit_decisions(decisions, assistant_seq).await?;
     }
     runner.drive(step).await
+}
+
+/// The family of `run_id` this run's stream drives from now on, when the
+/// agent has subagents: the one the agent still lists, or a new one.
+fn drive_family(
+    agent: &Arc<AgentInner>,
+    driving: &Driving,
+    run_id: &RunId,
+    session_id: &SessionId,
+) -> Option<Arc<Family>> {
+    agent.subagents.as_ref()?;
+    let family = agent.family_for(run_id, session_id);
+    driving.attach(&family);
+    Some(family)
 }
 
 /// The error for a new run whose id is already taken.

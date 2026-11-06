@@ -8,7 +8,7 @@
 //! tail (see [`crate::catalog`]). The run contract stays the one the agent
 //! was built with, so a run of the agent resumes across reloads.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError};
 
 use super::{Agent, AgentInner, BuildError};
 use crate::catalog::LiveSkill;
@@ -54,7 +54,9 @@ impl Agent {
     ///
     /// Returns:
     ///     A registration whose dispose brings back the roster and tool the
-    ///     agent had before, unless a later reload replaced them since.
+    ///     agent had before, unless a later reload replaced them since. The
+    ///     agent disposes it itself when it goes, so the replaced tool never
+    ///     outlives the agent in the registry it shares.
     ///
     /// Raises:
     ///     BuildError: `Invalid` when the agent was built without subagents.
@@ -71,10 +73,16 @@ impl Agent {
             BuildError::Invalid(format!("the Subagent tool cannot be replaced: {error}"))
         })?;
         let roster = versions.push(roster);
-        Ok(Registration::new(move || {
+        let reload = Arc::new(Registration::new(move || {
             tool.dispose();
             roster.dispose();
-        }))
+        }));
+        // The agent undoes it when it goes, so the tool it put in the shared
+        // registry never outlives it.
+        let mut reloads = (self.inner.reloads.lock()).unwrap_or_else(PoisonError::into_inner);
+        reloads.retain(|earlier| !earlier.is_disposed());
+        reloads.push(Arc::clone(&reload));
+        Ok(Registration::new(move || reload.dispose()))
     }
 }
 

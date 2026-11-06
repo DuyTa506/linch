@@ -137,7 +137,10 @@ impl Runner {
             .collect()
     }
 
-    /// Write through `AwaitingApproval` with the pending calls.
+    /// Write through `AwaitingApproval` with the pending calls. The
+    /// family is parked first, so its children outlive the stream even if
+    /// the caller drops it at the `Suspended` envelope; a failed write
+    /// takes that back.
     async fn suspend(
         &mut self,
         plan: &BatchPlan,
@@ -164,8 +167,16 @@ impl Runner {
             status: SuspendStatus::AwaitingApproval,
             pending_request_ids: pending.clone(),
         }));
-        self.save(Phase::AwaitingApproval { decisions, pending })
-            .await
+        let family = self.family.clone();
+        if let Some(family) = &family {
+            family.park(true);
+        }
+        let saved = self.save(Phase::AwaitingApproval { decisions, pending });
+        let saved = saved.await;
+        if let (Err(_), Some(family)) = (&saved, &family) {
+            family.park(false);
+        }
+        saved
     }
 
     /// Run a decided plan with the journal as its durability sink.

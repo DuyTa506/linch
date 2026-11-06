@@ -195,6 +195,7 @@ async fn what_the_config_sets_itself_wins() {
     let expected_workers = Workers {
         background: false,
         retain: true,
+        ..Workers::default()
     };
     assert_eq!(config.workers, Some(expected_workers));
     let (opened, _) = open(config).await;

@@ -6,13 +6,13 @@ use futures::StreamExt;
 use tokio::sync::oneshot;
 
 use super::SubagentDefinition;
-use crate::agent::{AgentInner, RunOptions};
+use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::ResultSubtype;
 use crate::events::{Event, SubagentEvent};
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::runner::{self, RunStream};
-use crate::store::StoreError;
+use crate::store::{RunRecord, StoreError};
 use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 
 /// Run the `definition` subagent on `prompt` as the child run of the call
@@ -44,11 +44,18 @@ pub(super) async fn run(
         owner: "subagent".into(),
         cancel: cancel.clone(),
     };
-    let stream = match child.runs.load(&child.namespace, &child_id).await {
+    let loaded = child.runs.load(&child.namespace, &child_id).await;
+    if loaded.is_ok() {
+        first_use(parent, ctx, &child_id).await?;
+    }
+    let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
             runner::start_child(child, prompt, options, ctx.run_id.clone())
         }
         Ok(record) if record.status.is_terminal() => return finished(&child, &child_id).await,
+        Ok(record) if record.contract != child.contract => {
+            return mismatched(&child, &record, options).await;
+        }
         Ok(_) => runner::resume(child, child_id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
@@ -62,6 +69,63 @@ pub(super) async fn run(
     });
     let result = result.await;
     result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
+}
+
+/// Refuse the call in `ctx` when its child run `child_id`, which exists,
+/// is an earlier call's: the provider sent this call's id before, so the
+/// parent's log holds events of that child before its last response. A
+/// call that a resumed parent runs again finds none there.
+///
+/// Raises:
+///     ToolOutputError: The model-facing refusal, or the read's failure.
+pub(super) async fn first_use(
+    parent: &AgentInner,
+    ctx: &ToolContext,
+    child_id: &RunId,
+) -> Result<(), ToolOutputError> {
+    let events = parent.runs.events(&parent.namespace, &ctx.run_id, 0).await;
+    let events = events.map_err(|error| failed("could not be read", error))?;
+    let last = events
+        .iter()
+        .rposition(|e| matches!(e.event, Event::Assistant(_)));
+    let earlier = events[..last.unwrap_or(0)]
+        .iter()
+        .any(|envelope| match &envelope.event {
+            Event::Subagent(sub) => sub.child_run_id == *child_id,
+            Event::ChildRunStatus(mark) => mark.child_run_id == *child_id,
+            _ => false,
+        });
+    if !earlier {
+        return Ok(());
+    }
+    Err(ToolOutputError::new(format!(
+        "The tool call id '{}' was already used by an earlier call of this run, whose \
+         subagent run has that id, so this call started none. The provider repeated a \
+         tool call id.",
+        ctx.tool_use_id
+    )))
+}
+
+/// End the unfinished child run `record`, whose contract is not `child`'s
+/// (its definition changed since it started): it is failed for good, so its
+/// session takes runs again, and the parent gets the error. A child that
+/// ended meanwhile reads back as it ended.
+pub(super) async fn mismatched(
+    child: &AgentInner,
+    record: &RunRecord,
+    options: RunOptions,
+) -> Result<Outcome, ToolOutputError> {
+    let run_id = record.run_id.clone();
+    let error = RunError::ContractMismatch {
+        run_id: run_id.clone(),
+        expected: child.contract,
+        found: record.contract,
+    };
+    match runner::fail(child, run_id.clone(), error.to_string(), options).await {
+        Ok(_) => Err(failed("could not continue", error)),
+        Err(RunError::Terminal { .. }) => finished(child, &run_id).await,
+        Err(other) => Err(failed("could not be ended", other)),
+    }
 }
 
 /// How the finished child run `child_id` ended, read back from its events.
@@ -136,6 +200,10 @@ impl Outcome {
         match self.ended {
             Some(ResultSubtype::Success) if !self.text.is_empty() => Ok(ToolOutput::new(self.text)),
             Some(ResultSubtype::Success) => partial(format!("{who} produced no text output.")),
+            // Python's texts: with the partial output, or saying there is none.
+            Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) if self.text.is_empty() => {
+                partial(format!("{who} aborted before producing output."))
+            }
             Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) => {
                 partial(format!("{who} aborted."))
             }
@@ -203,6 +271,11 @@ mod tests {
         assert_eq!(message(silent), "Subagent produced no text output.");
         let aborted = outcome(&[said.clone(), ended(ResultSubtype::Aborted, None)]);
         assert_eq!(message(aborted), "Subagent aborted. Partial output: half");
+        let silent_abort = outcome(&[ended(ResultSubtype::Aborted, None)]);
+        assert_eq!(
+            message(silent_abort),
+            "Subagent aborted before producing output."
+        );
         let error = serde_json::json!({"name": "TurnLimitError", "message": "max turns exceeded"});
         let error = Event::Error(ErrorEvent {
             error: error.as_object().unwrap().clone(),

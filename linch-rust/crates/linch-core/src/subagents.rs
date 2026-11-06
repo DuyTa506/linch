@@ -13,7 +13,9 @@
 //! `parent_run_id`:
 //! - its id, and its session's, is the call's
 //!   [`idempotency_key`](crate::ToolContext::idempotency_key), so the
-//!   parent finds it again;
+//!   parent finds it again; a call in a later response with an id the run
+//!   already used (a provider that repeats ids) gets a tool error instead of
+//!   the earlier call's child;
 //! - its session starts empty, and its system prompt is the parent's (with
 //!   the skill listing when the child has the `Skill` tool), then the
 //!   definition's body;
@@ -52,9 +54,18 @@
 //!   in the same write;
 //! - when the parent answers with text while a background child runs, the
 //!   run does not end: it waits for the next end and logs the notification
-//!   as a user message, so the model takes another turn;
+//!   as a user message, so the model takes another turn; an end `TaskStop`
+//!   caused has none, so it is recorded and the wait goes on;
 //! - a parent that ends anyway (cancelled, failed, out of turns) cancels
-//!   its children and waits for their aborts first.
+//!   its children and waits for their aborts first, and records each end
+//!   it has not reported in its terminal write;
+//! - a parent that suspends for approval keeps its children running: the
+//!   agent holds its family, a task drives them while the parent waits, and
+//!   the approve or resume in this process takes them over, so a child is
+//!   never resumed as if it crashed. Closing the parent's session
+//!   ([`crate::Agent::close_session`]) or dropping the agent meanwhile
+//!   cancels them; each writes its abort, which the parent hears when it
+//!   goes on.
 //!
 //! A worker's display name is its definition's name, or `Agent #N` for
 //! the N-th general-purpose worker of the parent session (kept in process
@@ -87,7 +98,7 @@ pub(crate) use tool::SubagentTool;
 pub(crate) use workers::Registry;
 
 /// How the `Subagent` tool keeps its workers. Off by default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workers {
     /// Whether a call may run its child in the background
@@ -97,6 +108,26 @@ pub struct Workers {
     /// Whether a foreground worker stays addressable once it answered.
     #[serde(default)]
     pub retain: bool,
+    /// How many background children one run may have running at once;
+    /// a call past it gets a tool error. 4 when absent.
+    #[serde(default = "default_max_background")]
+    pub max_background: u32,
+}
+
+impl Default for Workers {
+    fn default() -> Self {
+        Self {
+            background: false,
+            retain: false,
+            max_background: default_max_background(),
+        }
+    }
+}
+
+/// Python Linch has no cap on background workers; 4 keeps a run's
+/// concurrent model streams at five.
+fn default_max_background() -> u32 {
+    4
 }
 
 /// Name of the tool that runs a subagent.

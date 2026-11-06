@@ -70,8 +70,9 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub subagents: bool,
     /// How subagents keep their workers: in the background, or kept for
-    /// `SubagentContinue` (see [`Workers`]). Off when absent; it needs
-    /// `subagents`.
+    /// `SubagentContinue`, and how many background workers one run may
+    /// have running (`max_background`, 4 unless set; see [`Workers`]). Off
+    /// when absent; it needs `subagents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<Workers>,
     /// Whether the agent has an in-process mailbox and the `send_message`

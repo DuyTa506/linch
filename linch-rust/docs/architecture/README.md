@@ -70,9 +70,11 @@ These hold across the pages above, as in Python Linch's
 
 - **Async only on the hot path.** Blocking file work runs on Tokio's blocking
   pool (`crates/linch-tools/src/fs/local.rs:228`,
-  `crates/linch-tools/src/vfs/disk.rs:57`); the core spawns no task, and a
-  run advances only while the caller polls its stream
-  (`crates/linch-core/src/runner.rs:37-38`).
+  `crates/linch-tools/src/vfs/disk.rs:57`); a run advances only while the
+  caller polls its stream (`crates/linch-core/src/runner.rs:36-39`). The core
+  spawns one kind of task, on the caller's Tokio runtime: the one that drives
+  the background subagents of a run suspended for approval until an approve
+  or resume takes them over (`crates/linch-core/src/runner/family.rs`).
 - **Registrations are reversible.** Every registry and hook registration
   returns a `Registration` whose `dispose` undoes exactly that registration
   and is idempotent ([tools](./tools.md#reversible-registration)).

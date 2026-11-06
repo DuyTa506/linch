@@ -71,25 +71,26 @@ impl Runner {
 
     /// After a text answer: while a background child runs or ended
     /// undelivered, wait for an end and log what came in as a user message
-    /// for another turn, the way stop feedback is. `None` when nothing
-    /// waits; a cancel while waiting aborts the run.
+    /// for another turn, the way stop feedback is. An end with nothing to
+    /// report (a child `TaskStop` stopped) is recorded, and the wait goes
+    /// on for the others. `None` when nothing waits; a cancel while
+    /// waiting aborts the run.
     pub(super) async fn hear_back(&mut self) -> Result<Option<Option<Step>>, RunError> {
         let Some(family) = self.family.clone() else {
             return Ok(None);
         };
-        if !family.has_background() {
-            return Ok(None);
-        }
-        // A cancel aborts the run, even one whose children ended of it.
-        let settled = self.cancel.run_until_cancelled(family.settled()).await;
-        if settled.is_none() || self.cancel.is_cancelled() {
-            self.abort().await?;
-            return Ok(Some(None));
-        }
-        let mut notes = self.notes().await?;
-        if notes.is_empty() {
-            // The children ended without an end to report (stopped).
-            return Ok(None);
+        let mut notes = Vec::new();
+        while notes.is_empty() {
+            if !family.has_background() {
+                return Ok(None);
+            }
+            // A cancel aborts the run, even one whose children ended of it.
+            let settled = self.cancel.run_until_cancelled(family.settled()).await;
+            if settled.is_none() || self.cancel.is_cancelled() {
+                self.abort().await?;
+                return Ok(Some(None));
+            }
+            notes = self.notes().await?;
         }
         notes.extend(self.catalog_change());
         let message = Message::new(Role::User, notes);

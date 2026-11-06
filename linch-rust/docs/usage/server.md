@@ -298,14 +298,20 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | One message | 16 MiB | The request gets `-32600` |
 | A Postgres pool | One per DSN across the server, `stores.max_connections` connections (10 unless set) | Queries wait for a connection; the open that connects a DSN sets its size and later opens share it ([Stores](./stores.md#connections-and-pools)) |
 | Requests in flight per connection | 64 | Reading waits until one is answered |
+| Background subagents per run | The agent config's `workers.max_background`, 4 unless set | The `Subagent` call gets a tool error and starts nothing ([Subagents](./subagents.md#background-workers)) |
 
 The defaults bound what one tenant spends: each run streams from a provider
 on the server's key, each open agent holds its config in memory and runs its
 MCP stdio servers as child processes, and each connection may buffer a large
-message. A run's background subagents stream too, up to its
-`workers.max_background` (4 unless set) at once, so one tenant has at most
-`max_runs × (1 + max_background)` provider streams open: 80 with the
-defaults.
+message. A run's background subagents stream too, outside the run's place,
+up to its `workers.max_background` (4 unless set) at once, so one tenant's
+running runs have at most `max_runs × (1 + max_background)` provider streams
+open: 80 with the defaults. Read-only foreground subagents that run in
+parallel count up to the spec's `max_tool_concurrency` in place of the
+parent's one. A run awaiting approval holds no place but keeps its
+background subagents running until it is approved or resumed, or its
+session or agent closes, so those streams are not counted against
+`max_runs`.
 
 ---
 

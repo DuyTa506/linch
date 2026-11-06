@@ -234,13 +234,22 @@ execution world when that matters. What it does guarantee:
 
 The virtual filesystem is separate from the workspace: scratch notes and
 offloaded results live wherever the backend keeps them. The contract,
-`FileBackend` (`crates/linch-core/src/vfs.rs:69`), is in the core so a store
+`FileBackend` (`crates/linch-core/src/vfs.rs:83`), is in the core so a store
 crate can implement it without the tools. It stores UTF-8 text by `/`-rooted
 path with `read`, `write`, `edit`, `ls`, `exists` and `delete`. Every backend
-normalizes paths with `normalize_path` (`vfs.rs:106`): `a//b/` and `/a/b` are
+normalizes paths with `normalize_path` (`vfs.rs:120`): `a//b/` and `/a/b` are
 one file, `..` and NUL are refused, and the root is not a file. `edit` is
-atomic per backend and uses `apply_edit` (`vfs.rs:147`). Every backend passes
+atomic per backend and uses `apply_edit` (`vfs.rs:163`). Every backend passes
 `vfs::conformance::backend_suite`.
+
+A file holds at most `MAX_FILE_BYTES` (10 MiB, `vfs.rs:25`), the workspace
+`Read` and `Edit` limit. `apply_edit` refuses an edit whose result would pass
+it, with `VfsError::TooLarge`, from the match count before it builds the
+result, so every backend that edits through it (Postgres too) is bounded and
+`replace_all` cannot multiply a file without limit. `write_file` refuses
+content past it; a backend's own `write` does not check, so the offload hook
+can store a large result. The tools report both as `too_large`, naming the
+path, and leave the file as it was.
 
 | Backend | Where files live |
 |---|---|

@@ -17,6 +17,7 @@ use serde_json::json;
 use super::{SessionFiles, VfsError, file_path};
 use crate::input::{coded, flag, invalid, optional_count, optional_string, schema, string};
 use crate::read::split_lines;
+use linch_core::vfs::check_size;
 
 /// System prompt text that teaches the model the virtual filesystem and the
 /// offload pointers. Python adds it as a cacheable block whenever one of
@@ -51,9 +52,22 @@ fn tool_error(error: VfsError) -> ToolOutputError {
         VfsError::InvalidPath { .. } => "invalid_path",
         VfsError::NoMatch { .. } => "no_match",
         VfsError::NotUnique { .. } => "ambiguous_match",
+        VfsError::TooLarge { .. } => "too_large",
         VfsError::Backend(_) => "backend",
     };
     coded(error.to_string(), code)
+}
+
+/// [`tool_error`], naming `path` when the file would be too large.
+fn write_error(path: &str, error: VfsError) -> ToolOutputError {
+    let VfsError::TooLarge { size, limit } = error else {
+        return tool_error(error);
+    };
+    let message = format!(
+        "'{path}' would be {size} bytes, past the {limit} bytes a virtual file holds; \
+         nothing was changed. Write less, or split it into several files."
+    );
+    coded(message, "too_large")
 }
 
 /// The trimmed `path` field, normalized as a file path.
@@ -283,6 +297,7 @@ impl Tool for WriteFile {
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let path = path_field(&input)?;
         let content = string(&input, "content")?;
+        check_size(content.len()).map_err(|error| write_error(&path, error))?;
         self.files
             .backend(&ctx.session_id)
             .write(&path, content)
@@ -359,7 +374,7 @@ impl Tool for EditFile {
         let count = backend
             .edit(&path, old, new, all)
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| write_error(&path, error))?;
         let made = plural(count, "replacement");
         Ok(ToolOutput::new(format!("Made {made} in '{path}'.")))
     }

@@ -89,10 +89,12 @@ async fn run_r1(agent: &Agent) -> Vec<linch_core::Envelope> {
     finish(agent.run("go", options)).await
 }
 
-const RETAIN: Workers = Workers {
-    background: false,
-    retain: true,
-};
+fn retain() -> Workers {
+    Workers {
+        retain: true,
+        ..Workers::default()
+    }
+}
 
 #[tokio::test]
 async fn a_kept_worker_continues_on_its_own_session() {
@@ -106,7 +108,7 @@ async fn a_kept_worker_continues_on_its_own_session() {
     let family = Arc::new(Family::new(parent, child));
     let stores = Arc::new(Stores::default());
     let closed = Closed::default();
-    let agent = agent(&family, &stores, RETAIN, &closed);
+    let agent = agent(&family, &stores, retain(), &closed);
     run_r1(&agent).await;
 
     let log = messages(&*stores, "s1").await;
@@ -152,7 +154,7 @@ async fn a_worker_is_found_by_its_name_and_a_wrong_name_is_refused() {
     let child = vec![text_turn("x holds"), text_turn("y too")];
     let family = Arc::new(Family::new(parent, child));
     let stores = Arc::new(Stores::default());
-    let agent = agent(&family, &stores, RETAIN, &Closed::default());
+    let agent = agent(&family, &stores, retain(), &Closed::default());
     run_r1(&agent).await;
 
     let log = messages(&*stores, "s1").await;
@@ -178,7 +180,7 @@ async fn task_stop_stops_a_background_worker_without_a_notification() {
     let stores = Arc::new(Stores::default());
     let workers = Workers {
         background: true,
-        retain: false,
+        ..Workers::default()
     };
     let agent = agent(&family, &stores, workers, &Closed::default());
     let envelopes = run_r1(&agent).await;
@@ -242,6 +244,7 @@ async fn the_worker_tools_never_run_in_parallel_and_go_with_their_agent() {
         .workers(Workers {
             background: true,
             retain: true,
+            ..Workers::default()
         })
         .mailbox(Arc::new(InMemoryMailbox::new()))
         .build()

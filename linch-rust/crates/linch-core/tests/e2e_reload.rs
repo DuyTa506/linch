@@ -207,3 +207,36 @@ async fn a_reload_needs_the_feature_at_build() {
     let subagents = agent.reload_subagents(vec![definition]);
     assert!(matches!(subagents, Err(BuildError::Invalid(_))));
 }
+
+/// R3-core 5: an agent's reloads go with it, so the registry it shared is
+/// clean again and takes a new agent.
+#[tokio::test]
+async fn a_subagent_reload_goes_with_its_agent() {
+    let stores = Arc::new(Stores::default());
+    let tools = registry(Vec::new());
+    let build = || {
+        AgentBuilder::new(spec())
+            .provider(Arc::new(ScriptedProvider::new([])))
+            .tools(tools.clone())
+            .permissions(policy(PermissionMode::Default))
+            .run_store(stores.clone())
+            .session_store(stores.clone())
+            .namespace(NS)
+            .subagents(Vec::new())
+            .build()
+    };
+    let agent = build().unwrap();
+    let definition = SubagentDefinition::new("scout", "Scouts.", "Look.");
+    let reload = agent.reload_subagents(vec![definition]).unwrap();
+    drop(agent);
+    assert!(
+        tools.snapshot().resolve("Subagent").is_none(),
+        "no tool left"
+    );
+    let again = build();
+    assert!(again.is_ok(), "{:?}", again.err());
+    reload.dispose();
+    let tool = tools.snapshot().resolve("Subagent").is_some();
+    assert!(tool, "the old handle leaves the new agent's tool alone");
+    drop(again);
+}

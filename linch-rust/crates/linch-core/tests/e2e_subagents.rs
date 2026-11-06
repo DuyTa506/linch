@@ -345,3 +345,32 @@ async fn only_a_named_type_whose_tools_all_read_may_run_in_parallel() {
     drop(agent);
     assert!(registry.snapshot().resolve("Subagent").is_none());
 }
+
+/// R3-core 4: a child run is keyed by its call's id, so a provider that
+/// sends one id again in a later response gets a tool error for the later
+/// call, never the earlier call's answer.
+#[tokio::test]
+async fn a_call_id_used_again_in_a_later_turn_is_refused() {
+    let call = |prompt: &str| {
+        let input = json!({"description": "look", "prompt": prompt});
+        linch_core::provider::scripted::TurnBuilder::new(MODEL)
+            .tool_call("same", "Subagent", &input)
+            .usage(usage(10, 5))
+            .build()
+    };
+    let parent = vec![call("a"), call("b"), text_turn("done")];
+    let family = Arc::new(Family::new(parent, vec![text_turn("answered")]));
+    let runs = Runs::default();
+    let (_, stores, run_id) =
+        run(family.clone(), tools(&runs), PermissionMode::SkipDangerous).await;
+
+    let log = messages(&*stores, "s1").await;
+    assert_eq!(result_texts(&log[2]), ["answered"]);
+    let refused = &result_texts(&log[4])[0];
+    assert!(refused.contains("'same' was already used"), "{refused}");
+    let calls = family.calls.lock().unwrap().clone();
+    assert_eq!(calls.get(&("a".into(), 0)), Some(&1));
+    assert_eq!(calls.get(&("b".into(), 0)), None, "{calls:?}");
+    let parent = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(parent.status, RunStatus::Completed);
+}

@@ -222,10 +222,24 @@ replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', '
   added to the next tool results the parent logs, or logged as a user message.
 - When the parent answers with text while a worker still runs, the run does
   not end: it waits for the worker and gives the model another turn with the
-  notification. A parent that ends anyway (cancelled, failed, out of turns)
-  cancels its workers and waits for them first.
+  notification. A worker `TaskStop` stopped has no notification, so the wait
+  goes on for the others. A parent that ends anyway (cancelled, failed, out of
+  turns) cancels its workers, waits for them, and marks each one's end with a
+  `ChildRunStatusEvent` in its last write.
 - The parent's stream drives its workers: keep reading the run to its end, or
   call `Run.result()`.
+- A parent that suspends for approval keeps its workers running while it
+  waits, as Python Linch does: each writes its own log, and the approve (or a
+  resume) in the same server takes them over and hears of their ends. A
+  worker inside a model call or a tool at the suspend is not called or run
+  again.
+- Closing the parent's session (`Agent.close_session`) or the agent while the
+  parent waits cancels its workers: each ends `aborted`, and a later approve
+  or resume of the parent hears that.
+- One run has at most `workers.max_background` workers running at once (4
+  unless set). A `run_in_background` call past it gets a tool error the model
+  reads, and starts nothing; a worker that ends frees its place. Python Linch
+  has no such cap.
 - The worker's durable events reach the parent's log wrapped, at the parent's
   next turn.
 
@@ -240,7 +254,7 @@ display name when only one worker has it.
 
 | | Value |
 |---|---|
-| Worker id | `<parent run id>:<tool_use_id>`; pass `run_id=` to `Agent.run` to know it in advance |
+| Worker id | `<parent run id>:<tool_use_id>`; pass `run_id=` to `Agent.run` to know it in advance. A later call with a `tool_use_id` the run already used (a provider that repeats ids) gets a tool error and starts nothing |
 | Display name | The definition's name, or `Agent #N` for the N-th general-purpose worker of the session |
 | `SubagentContinue` input | `{"to": <id or display name>, "message": ...}` |
 
@@ -413,8 +427,15 @@ refuses a cut that leaves tool calls without their results.
 | Worker ids and display names | Process memory | Process memory; a resumed run knows its own workers again from its log |
 | Mailbox messages | Process memory | Process memory: lost when the server stops, including a message drained just before a crash |
 
-A parent that suspends for approval stops driving its workers; approving or
-resuming it picks them up again.
+A parent that suspends for approval keeps its workers running in the server
+until its approve or resume takes them over there. Only a parent resumed after
+a crash, or in another server, picks its workers up again from their logs.
+
+A child run's contract is its parent agent's, as the agent was opened, plus
+the child's definition: a tool registered since does not change it. A child
+whose definition changed since it started (a host that reloaded the subagents
+before resuming the parent) cannot continue: resuming the parent ends it
+`failed`, which frees its session, and the parent gets that error.
 
 ---
 

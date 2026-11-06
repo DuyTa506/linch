@@ -584,7 +584,9 @@ read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 
 `ls` and `read_file` are read-scope; `write_file` and `edit_file` are
-write-scope, so they ask in mode `default`. Errors, results whose value is
+write-scope, so they ask in mode `default`. A virtual file holds at most
+10 MiB: a `write_file` or an `edit_file` (`replace_all` included) that would
+make it larger gets a `too_large` error and changes nothing. Errors, results whose value is
 not a string (a host tool's dict, say) and the filesystem tools' own results
 are never offloaded. Where the files live
 follows the stores: per session in memory, or shared by every session of the

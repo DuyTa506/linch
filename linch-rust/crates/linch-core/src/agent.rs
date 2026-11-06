@@ -8,7 +8,7 @@
 //! every binding is a value the host passes in.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +23,7 @@ use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
-use crate::registry::ToolRegistry;
+use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
 use crate::runner::{self, Families, RunStream};
 use crate::skills::SkillSet;
@@ -110,6 +110,12 @@ pub(crate) struct AgentInner {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) namespace: String,
     pub(crate) contract: Digest,
+    /// The tools the contract was digested from at build (a subagent's
+    /// agent: its share of the parent's); a child's contract derives from
+    /// them, never from the live registry.
+    pub(crate) built_tools: Arc<ToolSnapshot>,
+    /// The hook policy digest the contract was built with.
+    pub(crate) built_hooks: Digest,
     /// The system blocks a new session's prefix takes, but for the skill
     /// listing (see [`AgentInner::system`]).
     pub(crate) system: Vec<SystemBlock>,
@@ -137,11 +143,15 @@ pub(crate) struct AgentInner {
     pub(crate) pricing: Option<Pricing>,
     /// The inbox each run of a session drains; `None` without one.
     pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
-    /// The subagent child runs of each live run (see [`runner::Family`]).
+    /// The subagent child runs of each run that is live or suspended in
+    /// this process (see [`runner::Family`]).
     pub(crate) families: Families,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
+    /// The reloads of this agent not disposed yet, undone when it goes,
+    /// before its built-in tools.
+    reloads: Mutex<Vec<Arc<Registration>>>,
 }
 
 impl AgentInner {
@@ -175,6 +185,16 @@ impl AgentInner {
 
 impl Drop for AgentInner {
     fn drop(&mut self) {
+        // The children of a suspended run stop and write their aborts.
+        self.close_all_families();
+        let reloads = std::mem::take(
+            self.reloads
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for reload in reloads.iter().rev() {
+            reload.dispose();
+        }
         for registration in &self.registrations {
             registration.dispose();
         }
@@ -259,7 +279,9 @@ impl Agent {
     /// `Error` holding `reason`, the `Result` (subtype `error`, with the
     /// checkpoint's usage) and status `failed`. The contract is not
     /// checked. A run whose last provider or summary call may be in flight
-    /// reports `usage_complete: false`.
+    /// reports `usage_complete: false`. Background subagents this process
+    /// still runs for it (it was suspended here) are cancelled after the
+    /// commit and write their aborts.
     ///
     /// Args:
     ///     run_id: A run of this agent's namespace that is not terminal.
@@ -280,7 +302,12 @@ impl Agent {
         reason: impl Into<String>,
         options: RunOptions,
     ) -> Result<Vec<Envelope>, RunError> {
-        runner::fail(&self.inner, run_id, reason.into(), options).await
+        let ended = runner::fail(&self.inner, run_id.clone(), reason.into(), options).await?;
+        // Background children this process still drives for it stop.
+        if let Some(family) = self.inner.family(&run_id) {
+            family.close();
+        }
+        Ok(ended)
     }
 
     /// Tell the agent the host is done with `session_id`: run every
@@ -289,9 +316,13 @@ impl Agent {
     /// (in this process), then for the session itself. The workers are
     /// forgotten: `SubagentContinue` no longer finds them.
     ///
-    /// Nothing is written: the session logs and runs stay, and a later run
-    /// on the session works as before.
+    /// Nothing else is written: the session logs and runs stay, and a later
+    /// run on the session works as before. A run of the session that is
+    /// suspended here has its background subagents cancelled first; each
+    /// writes its abort, and an approve or resume of the run later hears of
+    /// them.
     pub fn close_session(&self, session_id: &SessionId) {
+        self.inner.close_families(session_id);
         for worker in self.inner.worker_registry.close(session_id) {
             self.inner.close(&worker);
         }
