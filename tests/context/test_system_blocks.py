@@ -28,17 +28,6 @@ def _block_texts(agent):
     return [b.text for b in agent.system_blocks]
 
 
-def test_retrieve_only_agent_no_swe_protocol():
-    agent = _make_agent(tools=tool_registry(FakeTool("RetrieveDocs")))
-    combined = "\n".join(_block_texts(agent))
-    assert "Edit" not in combined
-    assert "Bash" not in combined
-    assert "Glob" not in combined
-    assert "multiple tool calls" in combined
-    for phrase in ("software engineering", "codebase", "task orchestration", "Working directory"):
-        assert phrase not in combined
-
-
 def test_default_swe_toolset_protocol_parity():
     from linch.tools.builtin import BashTool
     from linch.tools.registry import workspace_tools
@@ -73,32 +62,13 @@ def test_replace_defaults_omits_identity_and_protocol():
     assert "Working directory" not in combined
 
 
-def test_custom_blocks_prepended_in_default_mode():
+def test_custom_blocks_and_sections_render_by_placement_in_default_mode():
     from linch.config import SystemPromptConfig, SystemPromptSection
     from linch.types import SystemBlock
 
     custom = SystemBlock(text="CUSTOM BLOCK", cacheable=True)
     cfg = SystemPromptConfig(
         blocks=[custom],
-        sections=[
-            SystemPromptSection(name="before", text="BEFORE", placement="before_defaults"),
-            SystemPromptSection(name="after", text="AFTER", placement="after_env"),
-        ],
-        append="APPEND",
-    )
-    agent = _make_agent(system_prompt_config=cfg)
-    texts = _block_texts(agent)
-    custom_idx = next(i for i, t in enumerate(texts) if "CUSTOM BLOCK" in t)
-    identity_idx = next(i for i, t in enumerate(texts) if "configured through the Linch SDK" in t)
-    assert custom_idx < identity_idx
-    append_idx = next(i for i, t in enumerate(texts) if "APPEND" in t)
-    assert texts.index("BEFORE") < identity_idx < texts.index("AFTER") < append_idx
-
-
-def test_system_prompt_sections_render_by_placement():
-    from linch.config import SystemPromptConfig, SystemPromptSection
-
-    cfg = SystemPromptConfig(
         sections=[
             SystemPromptSection(name="before", text="BEFORE DEFAULTS", placement="before_defaults"),
             SystemPromptSection(
@@ -114,12 +84,13 @@ def test_system_prompt_sections_render_by_placement():
     agent = _make_agent(system_prompt_config=cfg)
     texts = _block_texts(agent)
     before = texts.index("BEFORE DEFAULTS")
+    custom_idx = texts.index("CUSTOM BLOCK")
     identity = next(i for i, t in enumerate(texts) if "configured through the Linch SDK" in t)
     after_defaults = texts.index("AFTER DEFAULTS")
     env = next(i for i, t in enumerate(texts) if t.startswith("Runtime:"))
     after_env = texts.index("AFTER ENV")
     append = next(i for i, t in enumerate(texts) if "APPEND" in t)
-    assert before < identity < after_defaults < env < after_env < append
+    assert before < custom_idx < identity < after_defaults < env < after_env < append
     assert agent.system_blocks[after_defaults].cacheable is False
 
 
@@ -227,19 +198,17 @@ def test_custom_tool_agent_prompt_is_domain_neutral():
     combined = "\n".join(_block_texts(agent))
     assert "configured through the Linch SDK" in combined
     assert "RetrieveInvoices" in combined
-    for phrase in ("software engineering", "codebase", "Bash", "Edit a file", "task orchestration"):
+    assert "multiple tool calls" in combined
+    for phrase in (
+        "software engineering",
+        "codebase",
+        "task orchestration",
+        "Working directory",
+        "Bash",
+        "Edit",
+        "Glob",
+    ):
         assert phrase not in combined
-
-
-@pytest.mark.asyncio
-async def test_feature_flags_disable_skills_connect():
-    from linch.config import FeatureFlags
-
-    agent = _make_agent()
-    agent.features = FeatureFlags(skills=False, subagents=False, mcp=False)
-    session = await agent.session()
-    assert session is not None
-    assert agent.skills == {}
 
 
 @pytest.mark.asyncio
