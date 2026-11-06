@@ -1,7 +1,8 @@
 //! A crash at any write while a subagent runs, then a resume of the parent:
 //! the call runs again and resumes its child run (or reads the result of
 //! one that finished), so the parent gets the child's real answer and no
-//! paid model call is made twice, in the parent or the child.
+//! paid model call is made twice, in the parent or the child. An approved
+//! call keeps its approval through such a crash.
 
 mod common;
 
@@ -12,12 +13,15 @@ use common::subagents::*;
 use common::*;
 use linch_core::events::kinds::ResultSubtype;
 use linch_core::events::model_call::CallDisposition;
+use linch_core::hooks::ApprovalResponse;
 use linch_core::journal::INTERRUPTED_TOOL_TEXT;
 use linch_core::store::faulty::FaultTiming;
 use linch_core::{
-    Agent, AgentBuilder, Envelope, Event, PermissionMode, RunId, RunOptions, RunStatus, RunStore,
-    SessionStore, StoreError, ToolScope,
+    Agent, AgentBuilder, Envelope, Event, PermissionMode, Phase, RunId, RunOptions, RunStatus,
+    RunStore, SessionStore, StoreError, ToolScope,
 };
+
+const SKIP: PermissionMode = PermissionMode::SkipDangerous;
 
 fn family() -> Arc<Family> {
     let parent = vec![spawn_turn(None, &["check x"]), text_turn("done")];
@@ -29,11 +33,12 @@ fn agent<S: RunStore + SessionStore + 'static>(
     family: &Arc<Family>,
     runs: &Runs,
     stores: Arc<S>,
+    mode: PermissionMode,
 ) -> Agent {
     AgentBuilder::new(spec())
         .provider(family.clone())
         .tools(registry(vec![Echo::new("Read", ToolScope::Read, runs)]))
-        .permissions(policy(PermissionMode::SkipDangerous))
+        .permissions(policy(mode))
         .run_store(stores.clone())
         .session_store(stores)
         .namespace(NS)
@@ -101,7 +106,7 @@ fn paid_once(family: &Family, who: &str, events: &[Envelope], context: &str) {
 async fn a_crash_with_a_child_in_flight_resumes_the_child() {
     let writes = {
         let stores = Arc::new(Stores::default());
-        let agent = agent(&family(), &Runs::default(), stores.clone());
+        let agent = agent(&family(), &Runs::default(), stores.clone(), SKIP);
         finish(agent.run("go", RunOptions::new("s1"))).await;
         stores.log.lock().unwrap().len() as u64
     };
@@ -113,11 +118,11 @@ async fn a_crash_with_a_child_in_flight_resumes_the_child() {
             let family = family();
             let runs = Runs::default();
             let dying = Arc::new(Dying::new(stores.clone(), n, timing));
-            let stream = agent(&family, &runs, dying).run("go", RunOptions::new("s1"));
+            let stream = agent(&family, &runs, dying, SKIP).run("go", RunOptions::new("s1"));
             let run_id = stream.run_id().clone();
             let (_, error) = drain(stream).await;
             assert!(error.is_some(), "{context}: the parent must stop");
-            let clean = agent(&family, &runs, stores.clone());
+            let clean = agent(&family, &runs, stores.clone(), SKIP);
             let run_id = recover(&clean, &stores, &run_id).await;
 
             let parent = stores.runs.load(NS, &run_id).await.unwrap();
@@ -146,4 +151,85 @@ async fn a_crash_with_a_child_in_flight_resumes_the_child() {
             }
         }
     }
+}
+
+/// Run the parent in default mode until its `Subagent` call asks.
+async fn suspend(family: &Arc<Family>, runs: &Runs, stores: &Arc<Stores>) -> RunId {
+    let agent = agent(family, runs, stores.clone(), PermissionMode::Default);
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let suspended = finish(stream).await;
+    assert_eq!(kind(&suspended.last().unwrap().event), "suspended");
+    run_id
+}
+
+fn allow() -> HashMap<String, ApprovalResponse> {
+    HashMap::from([("sub_0".to_owned(), ApprovalResponse::Allow)])
+}
+
+#[tokio::test]
+async fn an_approved_call_whose_child_crashed_resumes_without_asking_again() {
+    let writes = {
+        let stores = Arc::new(Stores::default());
+        let (family, runs) = (family(), Runs::default());
+        let run_id = suspend(&family, &runs, &stores).await;
+        let before = stores.log.lock().unwrap().len();
+        let agent = agent(&family, &runs, stores.clone(), PermissionMode::Default);
+        finish(agent.approve(run_id, allow(), RunOptions::new("s1"))).await;
+        (stores.log.lock().unwrap().len() - before) as u64
+    };
+    let mut cut_off = 0;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("approve write {n} failing {timing:?}");
+            let stores = Arc::new(Stores::default());
+            let (family, runs) = (family(), Runs::default());
+            let run_id = suspend(&family, &runs, &stores).await;
+            let dying = Arc::new(Dying::new(stores.clone(), n, timing));
+            let stream = agent(&family, &runs, dying, PermissionMode::Default).approve(
+                run_id.clone(),
+                allow(),
+                RunOptions::new("s1"),
+            );
+            let (_, error) = drain(stream).await;
+            assert!(error.is_some(), "{context}: the approve must stop");
+            let child_id = RunId::new(format!("{run_id}:sub_0"));
+            let child = stores.runs.load(NS, &child_id).await;
+            cut_off += usize::from(matches!(&child, Ok(c) if !c.status.is_terminal()));
+
+            // An approve whose answer never landed is sent again.
+            let clean = agent(&family, &runs, stores.clone(), PermissionMode::Default);
+            let parent = stores.runs.load(NS, &run_id).await.unwrap();
+            let recovered = match parent.checkpoint.phase {
+                _ if parent.status.is_terminal() => None,
+                Phase::AwaitingApproval { .. } => {
+                    Some(clean.approve(run_id.clone(), allow(), RunOptions::new("s1")))
+                }
+                _ => Some(clean.resume(run_id.clone(), RunOptions::new("s1"))),
+            };
+            let recovered = match recovered {
+                Some(stream) => kinds(&finish(stream).await),
+                None => Vec::new(),
+            };
+            assert!(
+                !recovered
+                    .iter()
+                    .any(|k| k == "permission_request" || k == "suspended"),
+                "{context}: the recorded allow stands: {recovered:?}"
+            );
+            let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+            let asked = (events.iter())
+                .filter(|e| kind(&e.event) == "permission_request")
+                .count();
+            assert_eq!(asked, 1, "{context}");
+            let log = messages(&*stores, "s1").await;
+            assert_eq!(result_texts(&log[2]), ["x holds"], "{context}");
+            let child = stores.runs.load(NS, &child_id).await.unwrap();
+            assert_eq!(child.status, RunStatus::Completed, "{context}");
+            paid_once(&family, "parent", &events, &context);
+            let child_events = stores.runs.events(NS, &child_id, 0).await.unwrap();
+            paid_once(&family, "check x", &child_events, &context);
+        }
+    }
+    assert!(cut_off > 4, "crashes with the child in flight: {cut_off}");
 }
