@@ -10,6 +10,7 @@ import pytest
 
 from linch_rust import (
     AgentNotFound,
+    NotSuspended,
     OpenError,
     PromptBlocked,
     ProtocolError,
@@ -171,6 +172,7 @@ def test_envelopes_and_results_carry_their_time_and_cost() -> None:
         (-32001, AgentNotFound),
         (-32013, OpenError),
         (-32026, RunTerminal),
+        (-32027, NotSuspended),
         (-32024, RunError),
         (-32030, SessionBusy),
         (-1, RpcError),

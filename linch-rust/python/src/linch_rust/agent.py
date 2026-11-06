@@ -78,6 +78,11 @@ class Agent:
     async def approve(self, run_id: str, decisions: Mapping[str, Decision]) -> Run:
         """Answer a suspended run's pending calls and continue it.
 
+        Only a run waiting for an approval takes it. Sent again after its
+        answers were committed (after a crash or a dropped connection), the
+        returned run ends with `NotSuspended` and nothing is written;
+        continue that run with `resume`.
+
         Args:
             run_id: The suspended run.
             decisions: An `Allow()` or `Deny(reason)` per `tool_use_id` from
