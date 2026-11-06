@@ -1,6 +1,9 @@
 //! The worker crate's error type.
 
+use linch_core::RunId;
 use thiserror::Error;
+
+use crate::job::JobId;
 
 /// A queue, schedule or worker call failed.
 #[derive(Debug, Error)]
@@ -20,6 +23,15 @@ pub enum WorkerError {
     /// An argument or a configuration value is unusable.
     #[error("invalid worker input: {0}")]
     Invalid(String),
+    /// The run already has an active job; a run has at most one, so that
+    /// two jobs never claim it from each other.
+    #[error("run {run_id} already has active job {}", job.0)]
+    RunBusy {
+        /// The run.
+        run_id: RunId,
+        /// Its active job.
+        job: JobId,
+    },
 }
 
 /// `error` and every source under it, joined with `: `, for job records and

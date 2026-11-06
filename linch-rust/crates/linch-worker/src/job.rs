@@ -31,45 +31,99 @@ pub(crate) struct NewJob<'a> {
     pub(crate) dedupe_key: Option<String>,
 }
 
+/// Most inserts of a job that names its run, when the run's active job
+/// ends between a refused insert and the read of its id.
+const ENQUEUE_TRIES: u32 = 3;
+
+/// What [`insert`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inserted {
+    /// A new job.
+    New(JobId),
+    /// The job names a run that has this active job; nothing was inserted.
+    RunBusy(JobId),
+    /// A job with the same dedupe key exists; nothing was inserted.
+    Duplicate,
+}
+
 /// Insert `job` and notify the workers, inside `tx`; the notification is
-/// delivered when `tx` commits. A job whose dedupe key already exists in
-/// its namespace is skipped and gives `None`.
+/// delivered when `tx` commits.
 pub(crate) async fn insert(
     tx: &mut Transaction<'static, Postgres>,
     job: NewJob<'_>,
-) -> Result<Option<JobId>, WorkerError> {
+) -> Result<Inserted, WorkerError> {
     non_blank(job.queue, "the queue")?;
     non_blank(job.namespace, "the namespace")?;
-    let id: Option<i64> = sqlx::query_scalar(
+    // A job that names its run gives way to the run's active job; a start
+    // job to an earlier job with its dedupe key.
+    let sql = if job.run_id.is_some() {
         "INSERT INTO linch_worker_jobs \
          (queue, namespace, session_id, prompt, run_id, approvals, dedupe_key) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) \
-         ON CONFLICT (namespace, dedupe_key) DO NOTHING RETURNING id",
-    )
-    .bind(job.queue)
-    .bind(job.namespace)
-    .bind(job.session_id)
-    .bind(job.prompt)
-    .bind(job.run_id)
-    .bind(job.approvals)
-    .bind(job.dedupe_key)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if id.is_some() {
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(CHANNEL)
+         ON CONFLICT (namespace, run_id) WHERE failed_at IS NULL DO NOTHING RETURNING id"
+    } else {
+        "INSERT INTO linch_worker_jobs \
+         (queue, namespace, session_id, prompt, run_id, approvals, dedupe_key) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (namespace, dedupe_key) DO NOTHING RETURNING id"
+    };
+    for _ in 0..ENQUEUE_TRIES {
+        let id: Option<i64> = sqlx::query_scalar(sql)
             .bind(job.queue)
-            .execute(&mut **tx)
+            .bind(job.namespace)
+            .bind(job.session_id)
+            .bind(job.prompt)
+            .bind(job.run_id)
+            .bind(&job.approvals)
+            .bind(&job.dedupe_key)
+            .fetch_optional(&mut **tx)
             .await?;
+        if let Some(id) = id {
+            sqlx::query("SELECT pg_notify($1, $2)")
+                .bind(CHANNEL)
+                .bind(job.queue)
+                .execute(&mut **tx)
+                .await?;
+            return Ok(Inserted::New(JobId(id)));
+        }
+        let Some(run_id) = job.run_id else {
+            return Ok(Inserted::Duplicate);
+        };
+        let active: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM linch_worker_jobs \
+             WHERE namespace = $1 AND run_id = $2 AND failed_at IS NULL",
+        )
+        .bind(job.namespace)
+        .bind(run_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(id) = active {
+            return Ok(Inserted::RunBusy(JobId(id)));
+        }
+        // The run's active job ended in between: try again.
     }
-    Ok(id.map(JobId))
+    let run_id = job.run_id.unwrap_or_default();
+    Err(WorkerError::Invalid(format!(
+        "the active job of run {run_id} kept changing; enqueue again"
+    )))
 }
 
-async fn enqueue(pool: &PgPool, job: NewJob<'_>) -> Result<JobId, WorkerError> {
+async fn enqueue(pool: &PgPool, job: NewJob<'_>) -> Result<Inserted, WorkerError> {
     let mut tx = crate::begin(pool).await?;
-    let id = insert(&mut tx, job).await?;
+    let inserted = insert(&mut tx, job).await?;
     tx.commit().await?;
-    id.ok_or_else(|| WorkerError::Invalid("a job without a dedupe key was skipped".into()))
+    Ok(inserted)
+}
+
+/// The id of a job enqueued without a dedupe key: the new job, or the
+/// active job of its run.
+fn job_id(inserted: Inserted) -> Result<JobId, WorkerError> {
+    match inserted {
+        Inserted::New(id) | Inserted::RunBusy(id) => Ok(id),
+        Inserted::Duplicate => Err(WorkerError::Invalid(
+            "a job without a dedupe key was skipped".into(),
+        )),
+    }
 }
 
 /// Queue a new run of `prompt` in `session_id`.
@@ -104,12 +158,15 @@ pub async fn enqueue_run(
         prompt: Some(prompt),
         ..NewJob::default()
     };
-    enqueue(pool, job).await
+    job_id(enqueue(pool, job).await?)
 }
 
 /// Queue a continuation of an existing run, for example one whose process
 /// crashed outside the worker. A run that is terminal, or suspended for
 /// approval, ends the job without running.
+///
+/// A run has at most one active job. When it has one already, that job
+/// continues the run, and its id is returned instead of a new one.
 ///
 /// Args:
 ///     pool: Pool for the queue's database.
@@ -118,7 +175,7 @@ pub async fn enqueue_run(
 ///     run_id: The run to resume.
 ///
 /// Returns:
-///     The new job's id.
+///     The id of the new job, or of the run's active job.
 ///
 /// Raises:
 ///     WorkerError: If a name is blank or the insert fails.
@@ -134,7 +191,7 @@ pub async fn enqueue_resume(
         run_id: Some(run_id.as_str()),
         ..NewJob::default()
     };
-    enqueue(pool, job).await
+    job_id(enqueue(pool, job).await?)
 }
 
 /// Queue the host's answers for a run suspended for approval; the worker
@@ -152,7 +209,9 @@ pub async fn enqueue_resume(
 ///     The new job's id.
 ///
 /// Raises:
-///     WorkerError: If a name is blank or the insert fails.
+///     WorkerError: `RunBusy` if the run already has an active job, which
+///         may end without reading these answers (enqueue them again once
+///         it has ended); otherwise if a name is blank or the insert fails.
 pub async fn enqueue_approve(
     pool: &PgPool,
     queue: &str,
@@ -170,7 +229,13 @@ pub async fn enqueue_approve(
         approvals: Some(approvals),
         ..NewJob::default()
     };
-    enqueue(pool, job).await
+    match enqueue(pool, job).await? {
+        Inserted::RunBusy(job) => Err(WorkerError::RunBusy {
+            run_id: run_id.clone(),
+            job,
+        }),
+        inserted => job_id(inserted),
+    }
 }
 
 #[cfg(test)]

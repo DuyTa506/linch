@@ -19,7 +19,7 @@ use linch_core::SessionId;
 use linch_postgres::PgPool;
 
 use crate::error::{WorkerError, chain, non_blank};
-use crate::job::{NewJob, insert};
+use crate::job::{Inserted, NewJob, insert};
 
 /// Most due schedules one [`fire_due_schedules`] call fires.
 const FIRE_BATCH: i64 = 64;
@@ -202,7 +202,7 @@ pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
             dedupe_key: Some(key),
             ..NewJob::default()
         };
-        if insert(&mut tx, job).await?.is_some() {
+        if let Inserted::New(_) = insert(&mut tx, job).await? {
             fired += 1;
         }
         sqlx::query(

@@ -12,7 +12,9 @@
 //!   so a crashed worker's job becomes visible again and another worker
 //!   takes it over. The run's lease epoch fences the old worker out.
 //! - **Runs.** A worker starts a run with [`linch_core::Agent::run`] and
-//!   continues it with `resume` or `approve`. A run that suspends for
+//!   continues it with `resume` or `approve`. A run has at most one active
+//!   job, and a job whose run another owner claimed is dropped, so two
+//!   holders never take a run from each other. A run that suspends for
 //!   approval ends its job; [`enqueue_approve`] queues the continuation. A
 //!   job that can never succeed is kept as failed; when its run can never
 //!   continue either (its durable state does not reconcile, or it has
@@ -77,13 +79,24 @@ pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres
 }
 
 fn migrator() -> Migrator {
-    let migrations = vec![Migration::new(
-        1,
-        Cow::Borrowed("worker"),
-        MigrationType::Simple,
-        include_str!("../migrations/0001_worker.sql").into_sql_str(),
-        false,
-    )];
+    let simple = |version, name, sql: &'static str| {
+        let sql = sql.into_sql_str();
+        Migration::new(
+            version,
+            Cow::Borrowed(name),
+            MigrationType::Simple,
+            sql,
+            false,
+        )
+    };
+    let migrations = vec![
+        simple(1, "worker", include_str!("../migrations/0001_worker.sql")),
+        simple(
+            2,
+            "one job per run",
+            include_str!("../migrations/0002_one_job_per_run.sql"),
+        ),
+    ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),
         ..Migrator::with_migrations(migrations)
