@@ -16,7 +16,7 @@ use linch_core::{
 };
 use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
 use serde_json::json;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::NS;
@@ -166,6 +166,46 @@ impl Provider for Replay {
     }
 }
 
+/// Holds every model call until the test opens it.
+pub struct Gate {
+    /// Notified when a call reaches the gate.
+    pub entered: Notify,
+    /// One permit per call let through.
+    pub open: Semaphore,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self {
+            entered: Notify::new(),
+            open: Semaphore::new(0),
+        }
+    }
+}
+
+/// [`Replay`] behind a [`Gate`].
+struct Gated {
+    replay: Replay,
+    gate: Arc<Gate>,
+}
+
+#[async_trait]
+impl Provider for Gated {
+    fn id(&self) -> &str {
+        "gated"
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.gate.entered.notify_one();
+        self.gate.open.acquire().await.unwrap().forget();
+        self.replay.stream(request, cancel).await
+    }
+}
+
 /// One call of `tool` (id `call_0`), then a text answer.
 fn script(tool: &str) -> Vec<ScriptedTurn> {
     let call = TurnBuilder::new(MODEL)
@@ -178,15 +218,27 @@ fn script(tool: &str) -> Vec<ScriptedTurn> {
 /// An agent on the Postgres stores of `pool` with `probe` as its one tool.
 /// Default permissions ask for write and exec tools.
 pub fn agent(pool: &PgPool, probe: Probe) -> Agent {
+    let replay = Replay {
+        turns: script(probe.name),
+    };
+    agent_with(pool, probe, Arc::new(replay))
+}
+
+/// [`agent`] whose model calls wait at `gate`.
+pub fn gated_agent(pool: &PgPool, probe: Probe, gate: Arc<Gate>) -> Agent {
+    let replay = Replay {
+        turns: script(probe.name),
+    };
+    agent_with(pool, probe, Arc::new(Gated { replay, gate }))
+}
+
+fn agent_with(pool: &PgPool, probe: Probe, provider: Arc<dyn Provider>) -> Agent {
     let registry = ToolRegistry::new();
-    let name = probe.name;
     // Dropping the handle keeps the registration.
     let _ = registry.register(Arc::new(probe)).unwrap();
     let policy = PermissionPolicy::new(PermissionMode::Default, "/");
     AgentBuilder::new(AgentSpec::new(MODEL))
-        .provider(Arc::new(Replay {
-            turns: script(name),
-        }))
+        .provider(provider)
         .tools(Arc::new(registry))
         .permissions(PermissionEngine::new(policy).unwrap())
         .run_store(Arc::new(PgRunStore::new(pool.clone())))

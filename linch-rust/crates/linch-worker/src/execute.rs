@@ -20,6 +20,7 @@ use tokio::time::Instant;
 
 use crate::error::chain;
 use crate::lease::{Job, JobLease};
+use crate::outcome::{Outcome, classify};
 
 /// What every job task of one worker shares.
 pub(crate) struct Shared {
@@ -36,46 +37,6 @@ impl Shared {
         let mut options = RunOptions::new(session_id);
         options.owner = self.owner.clone();
         options
-    }
-}
-
-/// How an attempt at a job ended.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
-    /// The run is terminal or waits for approval: delete the job.
-    Done,
-    /// Try again after the retry delay.
-    Retry(String),
-    /// The job can never succeed: keep it, failed, with this error.
-    Fail(String),
-    /// The run can never continue either: mark it failed, then the job.
-    FailRun {
-        /// The run to fail.
-        run_id: RunId,
-        /// Why; the run's `Error` event and the job's error.
-        error: String,
-    },
-    /// Another worker holds the job now: leave it alone.
-    Lost,
-}
-
-/// Map an error of `run_id` onto the job's outcome.
-pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
-    match error {
-        RunError::Terminal { .. } => Outcome::Done,
-        // Its durable state does not fit, or no agent has its contract.
-        RunError::ContractMismatch { .. } | RunError::Reconcile(_) => Outcome::FailRun {
-            run_id: run_id.clone(),
-            error: chain(error),
-        },
-        // An approve that came late: the run itself is fine.
-        RunError::NotSuspended { .. }
-        // A user_prompt_submit hook refused the prompt; a retry sends the same prompt.
-        | RunError::PromptBlocked { .. } => Outcome::Fail(chain(error)),
-        // Includes a lost run lease, a session append conflict, and a start
-        // on a session whose run is not terminal yet (SessionBusy, nothing
-        // written): it waits for that run.
-        RunError::Store(_) | RunError::Journal(_) => Outcome::Retry(chain(error)),
     }
 }
 
@@ -109,6 +70,10 @@ pub(crate) async fn execute(shared: Arc<Shared>, lease: JobLease) {
                     lease.release(pool, shared.retry_delay, &why).await
                 }
             }
+        }
+        Outcome::Fenced(error) => {
+            tracing::info!(job = id, %error, "another owner claimed the run; dropping the job");
+            lease.ack(pool).await
         }
         Outcome::Lost => {
             tracing::info!(job = id, "lost the job; dropped its run");
@@ -240,55 +205,5 @@ async fn keep_alive(shared: &Shared, lease: &JobLease) {
         if confirmed.elapsed() >= timeout {
             return;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use linch_core::{ReconcileError, RunStatus};
-
-    fn run() -> RunId {
-        RunId::new("r1")
-    }
-
-    fn classify(error: &RunError) -> Outcome {
-        super::classify(error, &run())
-    }
-
-    #[test]
-    fn run_errors_map_onto_outcomes() {
-        let terminal = RunError::Terminal {
-            run_id: run(),
-            status: RunStatus::Completed,
-        };
-        assert_eq!(classify(&terminal), Outcome::Done);
-        let digest = "0".repeat(64).parse().unwrap();
-        let mismatch = RunError::ContractMismatch {
-            run_id: run(),
-            expected: digest,
-            found: digest,
-        };
-        let fails_run =
-            |outcome| matches!(outcome, Outcome::FailRun { run_id, .. } if run_id == run());
-        assert!(fails_run(classify(&mismatch)));
-        let not_suspended = RunError::NotSuspended { run_id: run() };
-        assert!(matches!(classify(&not_suspended), Outcome::Fail(_)));
-        let lost = RunError::Store(StoreError::LeaseLost {
-            run_id: run(),
-            epoch: 1,
-        });
-        assert!(matches!(classify(&lost), Outcome::Retry(text) if text.contains("lease")));
-        let conflict = RunError::Store(StoreError::Conflict {
-            message: "session".into(),
-        });
-        assert!(matches!(classify(&conflict), Outcome::Retry(_)));
-        let busy = RunError::Store(StoreError::SessionBusy {
-            session_id: SessionId::new("s1"),
-            run_id: RunId::new("r0"),
-        });
-        assert!(matches!(classify(&busy), Outcome::Retry(text) if text.contains("busy")));
-        let reconcile = RunError::Reconcile(ReconcileError::MissingToolCalls);
-        assert!(fails_run(classify(&reconcile)));
     }
 }

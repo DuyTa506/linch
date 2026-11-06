@@ -47,6 +47,7 @@ mod error;
 mod execute;
 mod job;
 mod lease;
+mod outcome;
 mod schedule;
 mod worker;
 

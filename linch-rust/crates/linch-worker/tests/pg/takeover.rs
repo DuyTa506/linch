@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use linch_core::journal::INTERRUPTED_TOOL_TEXT;
-use linch_core::{Envelope, Event, RunOptions, RunStatus, SessionId, ToolScope};
+use linch_core::{Envelope, Event, RunError, RunOptions, RunStatus, SessionId, ToolScope};
 use linch_worker::{Worker, WorkerConfig, enqueue_run};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Semaphore;
@@ -175,7 +175,7 @@ async fn a_stalled_worker_is_taken_over_and_writes_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_claim_elsewhere_fences_a_worker_that_still_holds_its_job() {
+async fn a_fenced_worker_drops_its_job_and_leaves_the_run_alone() {
     let Some(db) = TestDb::new("fenced").await else {
         return;
     };
@@ -183,54 +183,48 @@ async fn a_claim_elsewhere_fences_a_worker_that_still_holds_its_job() {
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
         .await
         .unwrap();
-    let mut slow_retry = config("held");
-    slow_retry.retry_delay = Duration::from_secs(60);
-    let worker = FrozenWorker::spawn(&db, probe.clone(), slow_retry);
+    // A long timeout: the worker's pause below stays well inside it.
+    let mut held = config("held");
+    held.visibility_timeout = Duration::from_secs(10);
+    let worker = FrozenWorker::spawn(&db, probe.clone(), held);
     wait_until("the worker runs the tool", || async {
         probe.started() == 1
     })
     .await;
     let run_id = db.run_of("s1").await;
 
-    // While the worker pauses briefly (well inside its job's timeout), the
-    // host resumes the run itself: its claim takes epoch 2.
-    let host = agent(&db.pool, probe.with_hold(Hold::None));
+    // While the worker pauses, the host resumes the run itself: its claim
+    // takes epoch 2, and its model call waits at the gate.
+    let gate = Arc::new(Gate::default());
+    let host = gated_agent(&db.pool, probe.with_hold(Hold::None), Arc::clone(&gate));
     let mut options = RunOptions::new("s1");
     options.owner = "host".into();
     let mut stream = host.resume(run_id.clone(), options);
-    while let Some(item) = stream.next().await {
-        item.expect("the host's resume");
-    }
-    assert_eq!(db.status(&run_id).await, RunStatus::Completed);
-    let before = db.events(&run_id).await;
+    let hosting = tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            item?;
+        }
+        Ok::<(), RunError>(())
+    });
+    gate.entered.notified().await;
+    assert_eq!(db.record(&run_id).await.epoch, 2);
 
     // The worker's heartbeat still holds the job, but its next run write
-    // carries epoch 1 and is refused; the job goes back with that error.
+    // carries epoch 1 and is refused. Another owner has the run, so the
+    // job is dropped, not retried: nothing takes the run back.
     release.send(()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let error = loop {
-        let row: (Option<String>, Option<String>) =
-            sqlx::query_as("SELECT error, owner FROM linch_worker_jobs")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        if let (Some(error), None) = row {
-            break error;
-        }
-        assert!(Instant::now() < deadline, "the job was never released");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    assert!(
-        error.contains("lease on run") && error.contains("lost"),
-        "{error}"
-    );
+    wait_until("the job is dropped", || async { db.jobs().await == 0 }).await;
+    tokio::time::sleep(config("any").retry_delay * 3).await;
+    assert_eq!(db.record(&run_id).await.epoch, 2, "the host keeps the run");
+    gate.open.add_permits(1);
+    hosting.await.unwrap().expect("the host's resume");
     assert_eq!(worker.finish(), Ok(()));
-    assert_eq!(
-        db.events(&run_id).await,
-        before,
-        "the fenced worker wrote nothing"
-    );
     let record = db.record(&run_id).await;
     assert_eq!((record.status, record.epoch), (RunStatus::Completed, 2));
+    // The fenced worker's tool output never landed.
+    assert_eq!(probe.started(), 1);
+    assert_eq!(db.tool_results("s1").await, vec![INTERRUPTED_TOOL_TEXT]);
+    assert_eq!(tool_ends(&db.events(&run_id).await), 0);
+    assert_eq!(db.jobs().await, 0);
     db.finish().await;
 }
