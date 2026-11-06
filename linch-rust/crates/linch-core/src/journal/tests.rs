@@ -287,6 +287,29 @@ async fn finish_commits_the_held_state_before_the_result() {
 }
 
 #[tokio::test]
+async fn finish_with_nothing_held_writes_the_pending_events_with_the_result() {
+    let store = Arc::new(MemoryRunStore::new());
+    let mut journal = open(store.clone()).await;
+    let result = ResultEvent {
+        subtype: ResultSubtype::Error,
+        stop_reason: StopReason::Error,
+        total_usage: Usage::default(),
+        usage_complete: false,
+        final_text: None,
+        structured_output: None,
+        structured_error: None,
+        trace_id: None,
+    };
+    journal.stage(receipt("d1", CallDisposition::Failed));
+    journal.stage(durable(2));
+    let ready = journal.finish(RunStatus::Failed, result).await.unwrap();
+    assert_eq!(seqs(&ready), [2, 3], "the receipt is journal-only");
+    assert_eq!(store.writes().commit, 1, "one terminal write");
+    let record = store.load(NS, &run_id()).await.unwrap();
+    assert_eq!((record.status, record.last_seq), (RunStatus::Failed, 3));
+}
+
+#[tokio::test]
 async fn a_failed_write_poisons_the_journal() {
     let inner = Arc::new(MemoryRunStore::new());
     let store = Arc::new(Faulty::new(inner.clone(), 3, FaultTiming::Before));

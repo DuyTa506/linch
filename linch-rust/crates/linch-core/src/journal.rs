@@ -17,7 +17,8 @@
 //!   end), and [`Journal::flush_checkpoint`] before every session write.
 //!   Whether a tool runs is the scheduler's knowledge, not the journal's.
 //! - [`Journal::finish`] commits the held state, then the terminal status
-//!   with the `Result` event.
+//!   with the `Result` event; with nothing held, the pending events ride the
+//!   terminal write.
 //!
 //! Every write returns the envelopes that just became durable and are meant
 //! for the caller (`Persistence::Both`), in seq order, so nothing reaches the
@@ -224,6 +225,10 @@ impl Journal {
 
     /// End the run: commit the held state, then `status` with `result`.
     ///
+    /// With no checkpoint held, the pending events, the `Result` and the
+    /// status go in one write, so a crash never leaves them half durable
+    /// (a failed receipt with its `Error` but a running status).
+    ///
     /// Raises:
     ///     JournalError: If `status` is not terminal, a write fails, or the
     ///         journal is poisoned.
@@ -235,7 +240,10 @@ impl Journal {
         if !status.is_terminal() {
             return Err(JournalError::NotTerminal(status));
         }
-        let mut ready = self.flush().await?;
+        let mut ready = match self.held {
+            Some(_) => self.flush().await?,
+            None => Vec::new(),
+        };
         self.stage(Event::Result(result));
         ready.extend(self.commit(self.pending.len(), None, Some(status)).await?);
         Ok(ready)
