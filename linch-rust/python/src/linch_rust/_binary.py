@@ -16,21 +16,22 @@ WORKSPACE = Path(__file__).resolve().parents[3]
 def find_server() -> Path:
     """Return the server binary path.
 
-    The binary bundled in the installed `linch-rust` wheel wins; then
-    `LINCH_SERVER_BIN`; then, for development from a checkout, the newer of
-    the debug and release builds in cargo's target dir (`CARGO_TARGET_DIR`,
-    else the workspace's `target/`). `Server(binary=...)` skips this search.
+    `LINCH_SERVER_BIN` wins, so a build of your own replaces the bundled
+    one; then the binary bundled in the installed `linch-rust` wheel; then,
+    for development from a checkout, the newer of the debug and release
+    builds in cargo's target dir (`CARGO_TARGET_DIR`, else the workspace's
+    `target/`). `Server(binary=...)` skips this search.
 
     Raises:
-        FileNotFoundError: Nothing is bundled, the variable is unset and no
+        FileNotFoundError: The variable is unset, nothing is bundled and no
             build exists.
     """
-    bundled = _bundled()
-    if bundled is not None:
-        return bundled
     explicit = os.environ.get(ENV_VAR)
     if explicit:
         return Path(explicit)
+    bundled = _bundled()
+    if bundled is not None:
+        return bundled
     target = Path(os.environ.get("CARGO_TARGET_DIR") or WORKSPACE / "target")
     builds = [target / profile / _NAME for profile in ("debug", "release")]
     found = [build for build in builds if build.is_file()]

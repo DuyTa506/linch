@@ -1,4 +1,4 @@
-"""`find_server` order: the wheel's bundled binary, then `LINCH_SERVER_BIN`, then cargo."""
+"""`find_server` order: `LINCH_SERVER_BIN`, then the wheel's bundled binary, then cargo."""
 
 from __future__ import annotations
 
@@ -47,12 +47,22 @@ def nothing_bundled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_binary, "_bundled", lambda: None)
 
 
-def test_the_bundled_binary_wins(
+def test_the_variable_wins_over_the_bundled_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cargo_build: Path
 ) -> None:
     site = installed_wheel(tmp_path / "env")
     monkeypatch.syspath_prepend(str(site))
-    monkeypatch.setenv(_binary.ENV_VAR, str(executable(tmp_path / "other" / "linch-server")))
+    explicit = executable(tmp_path / "other" / "linch-server")
+    monkeypatch.setenv(_binary.ENV_VAR, str(explicit))
+
+    assert find_server() == explicit
+
+
+def test_the_bundled_binary_wins_over_cargo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cargo_build: Path
+) -> None:
+    monkeypatch.syspath_prepend(str(installed_wheel(tmp_path / "env")))
+    monkeypatch.delenv(_binary.ENV_VAR, raising=False)
 
     assert find_server().samefile(tmp_path / "env" / "bin" / "linch-server")
 
