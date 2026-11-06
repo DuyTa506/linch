@@ -7,6 +7,9 @@ license = "MIT"
 # orjson parses the server's lines: about three times faster than `json`.
 dependencies = ["orjson>=3.10"]
 
+[project.scripts]
+linch-rust = "linch_rust.cli:main"
+
 [build-system]
 requires = ["maturin>=1.16,<2"]
 build-backend = "maturin"
@@ -18,6 +21,12 @@ bindings = "bin"
 manifest-path = "../crates/linch-server/Cargo.toml"
 python-source = "src"
 module-name = "linch_rust"
+# `src/linch_rust/_docs` links to linch-rust/docs, which maturin does not walk
+# into: the globs copy its files, as files, into the sdist and the wheel.
+include = [
+    { path = "linch_rust/_docs/**/*", format = "sdist" },
+    { path = "linch_rust/_docs/**/*", format = "wheel" },
+]
 
 [dependency-groups]
 dev = [
