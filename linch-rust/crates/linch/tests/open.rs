@@ -5,7 +5,9 @@ use std::error::Error;
 
 use futures::StreamExt;
 use linch::provider::scripted::TurnBuilder;
-use linch::{AgentConfig, BuildError, Event, OpenError, RunOptions, StoreConfig, Usage};
+use linch::{
+    AgentConfig, BuildError, Event, OpenError, ProviderConfig, RunOptions, StoreConfig, Usage,
+};
 use serde_json::{Value, json};
 
 fn config(value: Value) -> AgentConfig {
@@ -65,6 +67,34 @@ fn a_config_reads_strictly_with_defaults() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn native_catalog_changes_is_an_anthropic_and_responses_switch_off_by_default() {
+    let provider = |value: Value| {
+        let value = json!({"namespace": "t", "spec": {"model": "m"}, "provider": value});
+        serde_json::from_value::<AgentConfig>(value).map(|config| config.provider)
+    };
+    for id in ["anthropic", "openai-responses"] {
+        let on = provider(json!({"id": id, "native_catalog_changes": true})).unwrap();
+        let off = provider(json!({"id": id})).unwrap();
+        let switch = |config: &ProviderConfig| match config {
+            ProviderConfig::Anthropic {
+                native_catalog_changes,
+                ..
+            }
+            | ProviderConfig::OpenAiResponses {
+                native_catalog_changes,
+                ..
+            } => *native_catalog_changes,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((switch(&on), switch(&off)), (true, false), "{id}");
+        let echoed = serde_json::to_value(&off).unwrap();
+        assert!(echoed.get("native_catalog_changes").is_none(), "{echoed}");
+    }
+    let chat = provider(json!({"id": "openai-chat", "native_catalog_changes": true}));
+    assert!(chat.is_err(), "only the two adapters that take it");
 }
 
 /// The facade prices each paid call with `linch_providers::cost`, so a

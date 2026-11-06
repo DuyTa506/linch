@@ -18,8 +18,8 @@ the [architecture providers page](../architecture/providers.md).
 |---|---|---|---|
 | `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `base_url` |
 | `openai-chat` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `base_url` |
-| `openai-responses` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `base_url`, `reasoning_summary`, `store` |
-| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`, else `https://api.anthropic.com` | `base_url` |
+| `openai-responses` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `base_url`, `reasoning_summary`, `store`, `native_catalog_changes` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`, else `https://api.anthropic.com` | `base_url`, `native_catalog_changes` |
 | `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com` | `base_url` |
 | `vllm` | `VLLM_API_KEY`, optional | none | `base_url`, required |
 | `sglang` | `SGLANG_API_KEY`, optional | none | `base_url`, required |
@@ -146,6 +146,7 @@ The OpenAI Responses API. Each request carries the full history; no
 |---|---|---|
 | `reasoning_summary` | none | Stream a reasoning summary as thinking: `auto`, `concise` or `detailed` |
 | `store` | `True` | Whether OpenAI stores each response. `False` sends `store: false` and asks for encrypted reasoning instead |
+| `native_catalog_changes` | `False` | Send a tool added or removed mid-session in the input as `additional_tools`, with an `allowed_tools` choice, so the prompt cache holds. Only with gpt-5.4 and later; not yet run against the live API |
 
 ```python
 {"id": "openai-responses", "reasoning_summary": "concise", "store": False}
@@ -159,6 +160,10 @@ ignore `spec.thinking`.
 The Anthropic Messages API. The endpoint is `base_url`, else the server's
 `ANTHROPIC_BASE_URL`, else the public one. `max_tokens` is required by the API
 and defaults to 8192 when `spec.max_output_tokens` is absent.
+
+| Field | Default | What it controls |
+|---|---|---|
+| `native_catalog_changes` | `False` | Send a tool added or removed mid-session in the conversation as a tool block (beta `inline-tools-2026-09-15`), so the prompt cache holds. Only on `api.anthropic.com` with the models that take it; not yet run against the live API |
 
 ```python
 {"id": "anthropic"}

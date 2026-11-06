@@ -220,7 +220,7 @@ fn base_url(provider: &ProviderConfig) -> Option<&str> {
         ProviderConfig::DeepSeek { base_url }
         | ProviderConfig::OpenAiChat { base_url }
         | ProviderConfig::OpenAiResponses { base_url, .. }
-        | ProviderConfig::Anthropic { base_url }
+        | ProviderConfig::Anthropic { base_url, .. }
         | ProviderConfig::Gemini { base_url } => base_url.as_deref(),
         // Their keys are optional, but a key set in the environment is
         // still sent.
