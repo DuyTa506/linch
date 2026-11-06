@@ -13,7 +13,10 @@ impl Server {
     /// Open an agent whose host tools and callbacks call back over this
     /// connection. They are bound before the agent is built, so the
     /// contract covers them.
-    pub(super) async fn open(&self, params: OpenParams) -> Result<JsonValue, ErrorObject> {
+    pub(super) async fn open(&self, mut params: OpenParams) -> Result<JsonValue, ErrorObject> {
+        if let Some(tenant) = &self.0.tenant {
+            tenant.admit(&mut params.config).await?;
+        }
         // The handle is named first: tools and callbacks carry it per call.
         let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
         let handle = format!("agent-{number}");

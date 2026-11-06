@@ -12,9 +12,13 @@ use async_trait::async_trait;
 use linch::provider::scripted::TurnBuilder;
 use linch::{Envelope, Event, JsonObject, RunId, ScriptedTurn};
 use linch_rpc::protocol::{AgentOpened, RunAccepted, RunEnd, method};
-use linch_rpc::{Client, ClientError, ErrorObject, Notifications, RequestHandler};
+use linch_rpc::{
+    Access, Allowlists, Client, ClientError, ErrorObject, Notifications, RequestHandler, Tenant,
+};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+
+pub mod pg;
 
 pub const MODEL: &str = "scripted-model";
 
@@ -51,6 +55,36 @@ impl Rpc {
     /// A client whose server requests go to `handler`.
     pub fn with_handler(handler: Arc<dyn RequestHandler>) -> Self {
         Self::connected(Client::in_process_with(handler))
+    }
+
+    /// A client of an in-process server that trusts it as `access`.
+    pub fn remote(access: Access) -> Self {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (server_reader, server_writer) = tokio::io::split(theirs);
+        let stop = CancellationToken::new();
+        tokio::spawn(linch_rpc::serve_lines(
+            server_reader,
+            server_writer,
+            access,
+            stop,
+        ));
+        let (reader, writer) = tokio::io::split(ours);
+        Self::connected(Client::connect(reader, writer))
+    }
+
+    /// [`Self::remote`], answering server requests with `handler`.
+    pub fn remote_with(access: Access, handler: Arc<dyn RequestHandler>) -> Self {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (server_reader, server_writer) = tokio::io::split(theirs);
+        let stop = CancellationToken::new();
+        tokio::spawn(linch_rpc::serve_lines(
+            server_reader,
+            server_writer,
+            access,
+            stop,
+        ));
+        let (reader, writer) = tokio::io::split(ours);
+        Self::connected(Client::connect_with(reader, writer, handler))
     }
 
     /// Wrap a connected client.
@@ -120,6 +154,32 @@ impl Rpc {
             }
             other => panic!("unexpected notification {other}"),
         }
+    }
+}
+
+/// Access as tenant `name`, allowed what `allow` lists.
+pub fn tenant(name: &str, allow: Allowlists) -> Access {
+    Access::Tenant(Arc::new(Tenant::new(name, allow).unwrap()))
+}
+
+/// The code of a failed call.
+pub fn code_of(error: ClientError) -> i64 {
+    match error {
+        ClientError::Rpc(error) => error.code,
+        other => panic!("expected an error object, got {other:?}"),
+    }
+}
+
+/// The code and `data.kind` of a failed call.
+pub fn refusal(error: ClientError) -> (i64, Option<String>) {
+    match error {
+        ClientError::Rpc(error) => {
+            let kind = (error.data.as_ref())
+                .and_then(|data| data["kind"].as_str())
+                .map(str::to_owned);
+            (error.code, kind)
+        }
+        other => panic!("expected an error object, got {other:?}"),
     }
 }
 

@@ -36,8 +36,17 @@ pub mod code {
     pub const INTERNAL_ERROR: i64 = -32603;
     /// No open agent has that handle.
     pub const AGENT_NOT_FOUND: i64 = -32001;
-    /// The server already drives that run.
+    /// The server already drives that run, or `agent.close` named an
+    /// agent with a run in progress.
     pub const RUN_BUSY: i64 = -32002;
+    /// No valid bearer token: a socket connection whose first message is
+    /// not `connection.auth` with a known token. The server then closes
+    /// the connection.
+    pub const UNAUTHENTICATED: i64 = -32003;
+    /// Outside the tenant's allowlists, or naming another tenant;
+    /// `data.kind` says which check refused: `namespace`, `principal`,
+    /// `provider_base_url`, `workspace` or `mcp_command`.
+    pub const NOT_ALLOWED: i64 = -32004;
     /// `BuildError::Missing`: a required binding was not set.
     pub const BUILD_MISSING: i64 = -32010;
     /// `BuildError::Invalid`, or a workspace, policy or tool error.
@@ -85,7 +94,7 @@ impl ErrorObject {
         }
     }
 
-    fn with_data(mut self, data: JsonValue) -> Self {
+    pub(crate) fn with_data(mut self, data: JsonValue) -> Self {
         self.data = Some(data);
         self
     }

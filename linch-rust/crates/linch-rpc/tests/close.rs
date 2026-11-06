@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use common::*;
 use linch::provider::scripted::TurnBuilder;
 use linch_rpc::protocol::method;
-use linch_rpc::{ClientError, ErrorObject, code};
+use linch_rpc::{ErrorObject, code};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -23,13 +23,6 @@ fn example(name: &str) -> PathBuf {
         dir.pop();
     }
     dir.join("examples").join(name)
-}
-
-fn code_of(error: ClientError) -> i64 {
-    match error {
-        ClientError::Rpc(error) => error.code,
-        other => panic!("expected an error object, got {other:?}"),
-    }
 }
 
 #[tokio::test]

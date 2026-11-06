@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::access::Tenant;
 use crate::error::{ErrorObject, code, invalid_params, invalid_request};
 use crate::message::{Id, Request, Response};
 use crate::protocol::{RunAccepted, method};
@@ -27,11 +28,12 @@ mod agents;
 mod callback;
 mod connection;
 mod host;
+mod login;
 mod peer;
 mod run;
 
 use connection::Outbox;
-pub use connection::{MAX_LINE_BYTES, serve, serve_messages};
+pub use connection::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};
 use peer::Peer;
 
 /// Server state shared by every task. Cheap to clone.
@@ -43,6 +45,9 @@ struct State {
     /// starts while it checks.
     tables: Mutex<Tables>,
     next_agent: AtomicU64,
+    /// The tenant a remote client acts for; `None` for a local client,
+    /// which is not checked.
+    tenant: Option<Arc<Tenant>>,
     outbox: Outbox,
     /// Requests from the server to the client.
     peer: Peer,
@@ -73,10 +78,11 @@ enum Reply {
 }
 
 impl Server {
-    fn new(outbox: Outbox) -> Self {
+    fn new(outbox: Outbox, tenant: Option<Arc<Tenant>>) -> Self {
         Self(Arc::new(State {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),
+            tenant,
             peer: Peer::new(outbox.clone()),
             outbox,
             shutdown: CancellationToken::new(),
@@ -194,6 +200,9 @@ impl Server {
             method::RUN_APPROVE => self.approve(parse(params)?),
             method::RUN_CANCEL => to_value(&self.cancel(parse(params)?)).map(Reply::Value),
             method::RUN_EVENTS => self.events(parse(params)?).await.map(Reply::Value),
+            method::CONNECTION_AUTH => Err(invalid_request(
+                "connection.auth is only accepted as the first message of a socket connection",
+            )),
             other => Err(ErrorObject::new(
                 code::METHOD_NOT_FOUND,
                 format!("no method {other:?}"),

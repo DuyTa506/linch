@@ -2,7 +2,7 @@
 //! writer task, and the teardown when the input ends.
 //!
 //! The core sees messages, not bytes: newline-delimited byte streams
-//! ([`serve`]) and message transports such as WebSocket
+//! ([`serve_lines`]) and message transports such as WebSocket
 //! ([`serve_messages`]) feed the same loop.
 
 use std::io;
@@ -13,8 +13,10 @@ use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
+use tokio_util::sync::CancellationToken;
 
-use super::Server;
+use super::{Server, login};
+use crate::access::Access;
 use crate::error::invalid_request;
 use crate::message::{Id, Notification, Response};
 
@@ -24,15 +26,8 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// Responses and notifications waiting for the writer.
 const OUTBOX_CAPACITY: usize = 1024;
 
-/// Serve one client until its input ends.
-///
-/// Every line of `reader` is one request, or the answer to a server
-/// request; every line written to `writer` is one response, notification or
-/// server request. At end of input the server stops: each active run is
-/// dropped where it stands, as in a crash, so it stays resumable from its
-/// last durable state; every server request still waiting fails; every
-/// agent's MCP servers are disconnected; queued output is written; then
-/// this returns.
+/// Serve one local client until its input ends: [`serve_lines`] with
+/// [`Access::Local`] and no stop signal, as the stdio sidecar does.
 ///
 /// Args:
 ///     reader: The client's requests, for example stdin.
@@ -41,6 +36,40 @@ const OUTBOX_CAPACITY: usize = 1024;
 /// Raises:
 ///     io::Error: If reading the input or writing the output fails.
 pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    serve_lines(reader, writer, Access::Local, CancellationToken::new()).await
+}
+
+/// Serve one client of a byte stream pair, one message per line, until
+/// its input ends or `stop` fires.
+///
+/// Every line of `reader` is one request, or the answer to a server
+/// request; every line written to `writer` is one response, notification or
+/// server request. When the input ends or `stop` fires the connection
+/// stops: each active run is dropped where it stands, as in a crash, so it
+/// stays resumable from its last durable state; every server request still
+/// waiting fails; every agent's MCP servers are disconnected; queued output
+/// is written; then this returns.
+///
+/// Args:
+///     reader: The client's requests.
+///     writer: Where responses and notifications go.
+///     access: How the client is trusted. With [`Access::Login`] the first
+///         line must be `connection.auth`; a refused login, or none within
+///         10 s, closes the connection.
+///     stop: Ends the connection as if its input ended.
+///
+/// Raises:
+///     io::Error: If reading the input or writing the output fails.
+pub async fn serve_lines<R, W>(
+    reader: R,
+    writer: W,
+    access: Access,
+    stop: CancellationToken,
+) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -58,21 +87,28 @@ where
         LinesCodecError::Io(error) => error,
         other => io::Error::other(other),
     });
-    connection(input, output).await
+    connection(input, output, access, stop).await
 }
 
 /// Serve one client of a message transport (one JSON-RPC message per
-/// frame, as on a WebSocket) until its input ends; otherwise as [`serve`].
+/// frame, as on a WebSocket); otherwise as [`serve_lines`].
 ///
 /// Args:
 ///     incoming: The client's messages; an error ends the connection.
 ///     outgoing: Where responses, notifications and server requests go,
 ///         one message per item. It is flushed whenever no message waits,
 ///         and closed at the end.
+///     access: How the client is trusted.
+///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:
 ///     io::Error: If `incoming` yields an error or `outgoing` fails.
-pub async fn serve_messages<S, K>(incoming: S, outgoing: K) -> io::Result<()>
+pub async fn serve_messages<S, K>(
+    incoming: S,
+    outgoing: K,
+    access: Access,
+    stop: CancellationToken,
+) -> io::Result<()>
 where
     S: Stream<Item = io::Result<String>> + Unpin,
     K: Sink<String, Error = io::Error> + Unpin + Send + 'static,
@@ -81,34 +117,57 @@ where
         Ok(message) => Inbound::Message(message),
         Err(error) => Inbound::Failed(error),
     });
-    connection(input, outgoing).await
+    connection(input, outgoing, access, stop).await
 }
 
 /// What a transport delivered.
-enum Inbound {
+pub(super) enum Inbound {
     Message(String),
     /// A line over [`MAX_LINE_BYTES`], already discarded.
     TooLong,
     Failed(io::Error),
 }
 
-async fn connection<S, K>(mut input: S, output: K) -> io::Result<()>
+async fn connection<S, K>(
+    mut input: S,
+    output: K,
+    access: Access,
+    stop: CancellationToken,
+) -> io::Result<()>
 where
     S: Stream<Item = Inbound> + Unpin,
     K: Sink<String, Error = io::Error> + Unpin + Send + 'static,
 {
     let (sender, queue) = mpsc::channel(OUTBOX_CAPACITY);
     let writing = tokio::spawn(write_messages(output, queue));
-    let server = Server::new(Outbox(sender));
+    let outbox = Outbox(sender);
+    let tenant = match access {
+        Access::Local => None,
+        Access::Tenant(tenant) => Some(tenant),
+        Access::Login(tokens) => match login::login(&mut input, &tokens, &outbox, &stop).await {
+            Some(tenant) => Some(tenant),
+            None => {
+                drop(outbox);
+                return writing.await.map_err(io::Error::other)?;
+            }
+        },
+    };
+    let server = Server::new(outbox, tenant);
     let mut failed = None;
-    while let Some(inbound) = input.next().await {
+    loop {
+        let inbound = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            inbound = input.next() => inbound,
+        };
         match inbound {
-            Inbound::Message(message) => server.receive(&message).await,
-            Inbound::TooLong => {
+            None => break,
+            Some(Inbound::Message(message)) => server.receive(&message).await,
+            Some(Inbound::TooLong) => {
                 let error = invalid_request("request line too long");
                 server.0.outbox.send(&Response::err(Id::Null, error)).await;
             }
-            Inbound::Failed(error) => {
+            Some(Inbound::Failed(error)) => {
                 failed = Some(error);
                 break;
             }

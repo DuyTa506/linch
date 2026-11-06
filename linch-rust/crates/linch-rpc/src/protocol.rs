@@ -2,6 +2,7 @@
 //! directions. Every params object rejects unknown fields.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use linch::hooks::ApprovalResponse;
 use linch::{Envelope, Principal, RunId, SessionId};
@@ -22,6 +23,8 @@ pub use open::{HostToolSpec, OpenParams};
 
 /// Method and notification names.
 pub mod method {
+    /// The first message on a socket connection: present a bearer token.
+    pub const CONNECTION_AUTH: &str = "connection.auth";
     /// Open an agent from an `AgentConfig` plus host tools and callbacks.
     pub const AGENT_OPEN: &str = "agent.open";
     /// Disconnect an agent's MCP servers and free its handle.
@@ -47,6 +50,32 @@ pub mod method {
     /// Notification from the server: it no longer waits for the answer to
     /// one of its requests.
     pub const CANCEL_REQUEST: &str = "$/cancelRequest";
+}
+
+/// Params of `connection.auth`.
+///
+/// `Debug` hides the token.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthParams {
+    /// A bearer token from the server's config.
+    pub token: String,
+}
+
+impl fmt::Debug for AuthParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthParams")
+            .field("token", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Result of `connection.auth`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Authenticated {
+    /// The tenant the token belongs to; the connection now acts for it.
+    pub tenant: String,
 }
 
 /// Result of `agent.open`.

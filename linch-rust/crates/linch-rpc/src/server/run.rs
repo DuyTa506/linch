@@ -14,6 +14,7 @@ const OWNER: &str = "linch-rpc";
 
 impl Server {
     pub(super) fn start(&self, params: StartParams) -> Result<Reply, ErrorObject> {
+        self.admit_principal(params.principal.as_ref())?;
         let mut options = RunOptions::new(params.session_id);
         options.principal = params.principal;
         options.owner = OWNER.into();
@@ -66,6 +67,7 @@ impl Server {
         principal: Option<Principal>,
         continue_run: impl FnOnce(&linch::Agent, RunOptions) -> RunStream,
     ) -> Result<Reply, ErrorObject> {
+        self.admit_principal(principal.as_ref())?;
         let mut tables = lock(&self.0.tables);
         let agent = tables.agent(&handle)?;
         if tables.runs.contains_key(run_id) {
@@ -84,6 +86,13 @@ impl Server {
         };
         tables.runs.insert(run_id.clone(), driven);
         Ok(Reply::Run(continue_run(&agent, options)))
+    }
+
+    fn admit_principal(&self, principal: Option<&Principal>) -> Result<(), ErrorObject> {
+        match &self.0.tenant {
+            Some(tenant) => tenant.admit_principal(principal),
+            None => Ok(()),
+        }
     }
 
     /// Forward every envelope as `run.event`, then send `run.end`.
