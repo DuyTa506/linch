@@ -96,9 +96,9 @@ impl From<UsageMetadata> for Usage {
 /// Turns chunks into events for one response.
 pub(crate) struct Translator {
     fallback_model: String,
-    /// Assistant turns before this response; part of synthesized call ids,
-    /// so they stay unique across a conversation.
-    turn: usize,
+    /// Random per response and the start of every synthesized call id, so
+    /// ids never repeat in a session, compacted or not.
+    call_prefix: String,
     key: ApiKey,
     started: bool,
     calls: usize,
@@ -111,12 +111,14 @@ pub(crate) struct Translator {
 }
 
 impl Translator {
-    /// `fallback_model` names the model when no chunk reports one; `turn`
-    /// counts the request's earlier assistant turns.
-    pub(crate) fn new(fallback_model: String, turn: usize, key: ApiKey) -> Self {
+    /// `fallback_model` names the model when no chunk reports one.
+    pub(crate) fn new(fallback_model: String, key: ApiKey) -> Self {
+        // Half a v4 UUID (62 random bits) keeps ids short: OpenAI caps
+        // call ids at 40 characters.
+        let nonce = uuid::Uuid::new_v4().as_u64_pair().1;
         Self {
             fallback_model,
-            turn,
+            call_prefix: format!("gemini_{nonce:016x}"),
             key,
             started: false,
             calls: 0,
@@ -178,11 +180,11 @@ impl Translator {
                 .and_then(JsonValue::as_str)
                 .filter(|id| !id.is_empty());
             self.keep |= server_id.is_some();
-            // Gemini may omit call ids; a synthesized one is fixed by the
-            // conversation position, so replays and tests see the same id.
+            // Gemini may omit call ids. A synthesized one is recorded with
+            // the turn, so it need not be reproducible, only unique.
             let id = server_id
                 .map(String::from)
-                .unwrap_or_else(|| format!("gemini_{}_{}", self.turn, self.calls));
+                .unwrap_or_else(|| format!("{}_{}", self.call_prefix, self.calls));
             let name = call.get("name").and_then(JsonValue::as_str);
             out.push_back(ProviderEvent::ToolUseStart(ToolUseStartEvent {
                 id: id.clone(),

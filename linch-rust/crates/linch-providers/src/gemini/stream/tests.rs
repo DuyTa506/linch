@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 
 use futures::{StreamExt, stream};
@@ -18,15 +19,16 @@ fn key() -> ApiKey {
     ApiKey::new("AIza-test").unwrap()
 }
 
-/// Run `sse` through the driver as the response to turn 3, split into
-/// `chunk`-byte pieces.
+/// Run `sse` through the driver, split into `chunk`-byte pieces. The call
+/// id prefix is fixed so that runs compare equal.
 async fn run(sse: &str, chunk: usize) -> Vec<Result<ProviderEvent, ProviderError>> {
     let pieces: Vec<Result<Vec<u8>, Infallible>> = sse
         .as_bytes()
         .chunks(chunk)
         .map(|piece| Ok(piece.to_vec()))
         .collect();
-    let translator = Translator::new("gemini-requested".into(), 3, key());
+    let mut translator = Translator::new("gemini-requested".into(), key());
+    translator.call_prefix = "gemini_t".into();
     events(
         stream::iter(pieces),
         translator,
@@ -105,12 +107,12 @@ async fn text_turn_keeps_thoughts_text_usage_and_the_signed_parts() {
 }
 
 #[tokio::test]
-async fn parallel_calls_get_position_ids_and_keep_the_signature_on_the_first() {
+async fn parallel_calls_get_numbered_ids_and_keep_the_signature_on_the_first() {
     let turn = assemble(run_ok(CALLS).await).unwrap();
     assert_eq!(turn.stop_reason, StopReason::ToolUse);
     let calls: Vec<_> = turn.message.tool_uses().collect();
-    assert_eq!(calls[0].id, "gemini_3_0");
-    assert_eq!(calls[1].id, "gemini_3_1");
+    assert_eq!(calls[0].id, "gemini_t_0");
+    assert_eq!(calls[1].id, "gemini_t_1");
     assert_eq!(calls[0].input["city"], "Paris");
     assert_eq!(calls[1].input["city"], "Tokyo");
     assert_eq!(turn.usage.unwrap().output_tokens, 42);
@@ -118,6 +120,29 @@ async fn parallel_calls_get_position_ids_and_keep_the_signature_on_the_first() {
     assert_eq!(parts[1]["thoughtSignature"], "c2lnLWNhbGw=");
     assert!(parts[2].get("thoughtSignature").is_none());
     assert!(parts[1]["functionCall"].get("id").is_none());
+}
+
+#[tokio::test]
+async fn synthesized_ids_are_unique_per_response() {
+    // After compaction two responses can follow the same number of turns.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let bytes = stream::iter([Ok::<_, Infallible>(CALLS.as_bytes().to_vec())]);
+        let translator = Translator::new("m".into(), key());
+        let results: Vec<_> = events(bytes, translator, CancellationToken::new(), key())
+            .collect()
+            .await;
+        let turn = assemble(results.into_iter().map(Result::unwrap)).unwrap();
+        ids.extend(turn.message.tool_uses().map(|call| call.id.clone()));
+    }
+    let unique: HashSet<_> = ids.iter().collect();
+    assert_eq!((ids.len(), unique.len()), (4, 4), "{ids:?}");
+    // OpenAI caps tool call ids at 40 characters.
+    assert!(
+        ids.iter()
+            .all(|id| id.starts_with("gemini_") && id.len() <= 40),
+        "{ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -229,7 +254,7 @@ async fn cancel_mid_stream_ends_with_cancelled() {
     let first = frames(&[candidate(json!([{"text": "hi"}]), None)]);
     let bytes = stream::iter([Ok::<_, Infallible>(first.into_bytes())]).chain(stream::pending());
     let cancel = CancellationToken::new();
-    let translator = Translator::new("m".into(), 0, key());
+    let translator = Translator::new("m".into(), key());
     let mut events = events(bytes, translator, cancel.clone(), key());
     assert!(matches!(
         events.next().await,
@@ -250,7 +275,7 @@ async fn cancel_mid_stream_ends_with_cancelled() {
 #[tokio::test]
 async fn transport_and_stream_errors_are_redacted() {
     let bytes = stream::iter([Err::<Vec<u8>, _>("reset; x-goog-api-key: AIza-test")]);
-    let translator = Translator::new("m".into(), 0, key());
+    let translator = Translator::new("m".into(), key());
     let err = last_error(
         events(bytes, translator, CancellationToken::new(), key())
             .collect()

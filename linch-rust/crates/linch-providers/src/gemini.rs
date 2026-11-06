@@ -7,8 +7,8 @@
 //!   with `x-goog-api-key`, the model percent-encoded as one path segment.
 //!   The stream has no end marker: it closes after the chunk with
 //!   `finishReason`.
-//! - Function calls may carry no `id`; the adapter then makes one from the
-//!   conversation position and never sends it back. Responses to parallel
+//! - Function calls may carry no `id`; the adapter then makes one that is
+//!   random per response and never sends it back. Responses to parallel
 //!   calls go in one turn, in call order.
 //! - Thought signatures sit on parts (the first `functionCall` of a step,
 //!   or a trailing, possibly empty, text part) and must return inside the
@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream, Role};
+use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio_util::sync::CancellationToken;
 
@@ -123,12 +123,7 @@ impl Provider for Gemini {
         );
         let key = &self.options.api_key;
         let response = http::post(&self.client, &url, key, &body, &cancel).await?;
-        let turn = request
-            .messages
-            .iter()
-            .filter(|message| message.role == Role::Assistant)
-            .count();
-        let translator = stream::Translator::new(request.model, turn, key.clone());
+        let translator = stream::Translator::new(request.model, key.clone());
         Ok(stream::events(
             response.bytes_stream(),
             translator,
