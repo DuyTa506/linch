@@ -114,13 +114,18 @@ token names exactly one tenant: the same token twice is refused.
 | `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host and port |
 | `permission_modes` | `default`, `accept_edits` | The modes a config may choose |
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
-| `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry |
+| `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
 | `mcp_commands` | none | MCP stdio servers, `{"command", "args", "env"}`: the command and argument list must match exactly, and the transport may set only the `env` names listed |
 | `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
 
 The live providers at their public endpoints and the memory stores need no
 entry. A `postgres_dsns` entry without a user stands for the server's own
-user; one without options or TLS files allows none. An `mcp_commands` entry
+user; one without options or TLS files allows none. Its `sslmode` is the
+weakest a DSN may ask for, in the order `disable`, `allow`, `prefer`,
+`require`, `verify-ca`, `verify-full`: an entry with `sslmode=verify-full`
+refuses a DSN with `sslmode=require` or none. An entry or DSN without
+`sslmode` has the server's default, `PGSSLMODE` or else `prefer`, so a DSN
+with `sslmode=disable` needs an entry that says so. An `mcp_commands` entry
 may not list `PATH`, `BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`, `PYTHONPATH`,
 `PYTHONHOME`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `NODE_PATH`, `PERL5LIB`,
 `PERL5OPT`, `RUBYLIB`, `RUBYOPT`, `CLASSPATH` or `JAVA_TOOL_OPTIONS`: they
@@ -316,7 +321,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `workspace` | Not an existing directory under `workspace_roots` | The workspace tools read and write there |
 | `project_root` | The same, for `permissions.project_root` | Path rules resolve against it; with no roots, a config cannot send `permissions` at all and keeps the default policy |
 | `config_dir` | With skills or subagents on: not an existing directory under the roots, through an absolute path, `..` or a symlink | `SKILL.md` and agent files would load from another tenant's tree |
-| `postgres` | A DSN that matches no `postgres_dsns` entry exactly | A client could pick another database, role, `search_path` or certificate file |
+| `postgres` | A DSN that matches no `postgres_dsns` entry exactly, or asks for a weaker `sslmode` | A client could pick another database, role, `search_path` or certificate file, or send the server's credentials without TLS |
 | `mcp_command` | A stdio command and argument list that match no entry | The server would start that program |
 | `mcp_env` | An `env` name the matching entry does not list | It could change what the program loads |
 | `mcp_url` | An MCP HTTP URL outside `mcp_urls` | The server would connect there |

@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use linch::PermissionMode;
 use serde::Deserialize;
-use sqlx::postgres::PgConnectOptions;
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::{Origin, Url};
 
 use super::AccessError;
@@ -89,9 +89,9 @@ fn loads_code(name: &str) -> bool {
     CODE_LOADING_ENV.contains(&name) || name.starts_with("LD_") || name.starts_with("DYLD_")
 }
 
-/// Where a Postgres DSN connects, and as whom: what an allowed DSN must
-/// match.
-#[derive(Debug, PartialEq, Eq)]
+/// Where a Postgres DSN connects, as whom, and how strictly it asks for
+/// TLS: what an allowed DSN must match.
+#[derive(Debug)]
 pub(super) struct PgTarget {
     host: String,
     port: u16,
@@ -104,12 +104,15 @@ pub(super) struct PgTarget {
     root_cert: Option<String>,
     client_cert: Option<String>,
     client_key: Option<String>,
+    /// The `sslmode` as a rank, from `disable` (0) to `verify-full` (5).
+    tls: u8,
 }
 
 impl PgTarget {
     /// Read `dsn` the way the store connects with it, so a `?host=` or
-    /// `?user=` override counts, and a DSN without a user gets the
-    /// server's own (`PGUSER`, else the process's user).
+    /// `?user=` override counts, a DSN without a user gets the server's
+    /// own (`PGUSER`, else the process's user), and one without an
+    /// `sslmode` the server's default (`PGSSLMODE`, else `prefer`).
     pub(super) fn parse(dsn: &str) -> Option<Self> {
         let options = PgConnectOptions::from_str(dsn).ok()?;
         let mut target = Self {
@@ -122,6 +125,14 @@ impl PgTarget {
             root_cert: None,
             client_cert: None,
             client_key: None,
+            tls: match options.get_ssl_mode() {
+                PgSslMode::Disable => 0,
+                PgSslMode::Allow => 1,
+                PgSslMode::Prefer => 2,
+                PgSslMode::Require => 3,
+                PgSslMode::VerifyCa => 4,
+                PgSslMode::VerifyFull => 5,
+            },
         };
         // sqlx has no getters for these, so read the query as it does:
         // under each of its names, the last one winning.
@@ -135,6 +146,29 @@ impl PgTarget {
             *file = Some(value.into_owned());
         }
         Some(target)
+    }
+
+    /// Whether this entry allows `dsn`: the same server, database, user,
+    /// options and TLS files, and an `sslmode` this strict or stricter.
+    pub(super) fn allows(&self, dsn: &Self) -> bool {
+        // Taken apart, so a field added later cannot miss the check.
+        let Self {
+            host,
+            port,
+            socket,
+            database,
+            user,
+            options,
+            root_cert,
+            client_cert,
+            client_key,
+            tls,
+        } = self;
+        (host, port, socket, database) == (&dsn.host, &dsn.port, &dsn.socket, &dsn.database)
+            && (user, options) == (&dsn.user, &dsn.options)
+            && (root_cert, client_cert, client_key)
+                == (&dsn.root_cert, &dsn.client_cert, &dsn.client_key)
+            && dsn.tls >= *tls
     }
 }
 
@@ -245,12 +279,17 @@ impl Allowlists {
     /// Postgres servers a store DSN may connect to, and as whom: a DSN is
     /// allowed when its host, port (or socket), database, user, startup
     /// `options` and TLS files (`sslrootcert`, `sslcert`, `sslkey`) all
-    /// equal an entry's. An entry without a user stands for the server's
+    /// equal an entry's, and its `sslmode` is the entry's or stricter
+    /// (`disable` < `allow` < `prefer` < `require` < `verify-ca` <
+    /// `verify-full`). An entry without a user stands for the server's
     /// own (`PGUSER`, else the process's user), whose password the server
     /// may hold (`PGPASSWORD`, `.pgpass`); an entry without options or
     /// files allows none, so a client cannot pick a role, a `search_path`,
     /// or a certificate or key file on the server the entry does not name.
-    /// The password is the client's.
+    /// An entry, or a DSN, without `sslmode` has the server's default
+    /// (`PGSSLMODE`, else `prefer`), so an entry that asks for TLS keeps a
+    /// client from turning it off or skipping the certificate check. The
+    /// password is the client's.
     ///
     /// Raises:
     ///     AccessError: If an entry is not a valid DSN.

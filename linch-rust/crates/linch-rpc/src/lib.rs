@@ -64,7 +64,8 @@
 //!   - `Bash` only when the tenant allows exec tools; otherwise the config's
 //!     `bash` is turned off and the agent opens without it;
 //!   - a Postgres DSN only with an allowed host, port, socket, database,
-//!     user, options and TLS files (`sslrootcert`, `sslcert`, `sslkey`);
+//!     user, options and TLS files (`sslrootcert`, `sslcert`, `sslkey`),
+//!     and an `sslmode` at least as strict as the entry's;
 //!   - an MCP stdio server only with the `command` and `args` of an entry,
 //!     setting only the `env` names that entry lists ([`McpCommand`]); an
 //!     MCP HTTP URL only at an allowed origin.
