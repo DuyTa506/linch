@@ -12,6 +12,7 @@
 //! primary typed entry point is [`super::Envelope::from_value`].
 
 mod ignorable;
+mod name;
 #[cfg(test)]
 mod tests;
 
