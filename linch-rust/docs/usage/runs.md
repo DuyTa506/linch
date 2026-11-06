@@ -11,7 +11,7 @@ the run's events then stream in as `Envelope`s.
 
 | Call | Does |
 |---|---|
-| `await agent.run(session_id, prompt, *, run_id=None, principal=None)` | Start a run; the session is created when missing |
+| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None)` | Start a run; the session is created when missing. `trace_id` is yours, echoed on the run's `init` and `result` events ([Observability](./observability.md#correlate-logs-and-traces)) |
 | `await agent.resume(run_id, *, principal=None)` | Continue a run after a crash or a dropped stream |
 | `await agent.approve(run_id, decisions, *, principal=None)` | Answer a suspended run's pending calls and continue it |
 | `async for envelope in run` | Every envelope of this call, in order, ending after `result` or `suspended` |

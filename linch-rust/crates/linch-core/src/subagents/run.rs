@@ -43,6 +43,7 @@ pub(super) async fn run(
         principal: ctx.principal.clone(),
         owner: "subagent".into(),
         cancel: cancel.clone(),
+        trace_id: ctx.trace_id.clone(),
     };
     let loaded = child.runs.load(&child.namespace, &child_id).await;
     if loaded.is_ok() {

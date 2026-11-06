@@ -10,6 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common::*;
 use linch_core::events::kinds::{CompactionEvent, InitEvent, ToolCallEndEvent, UsageEvent};
+use linch_core::hooks::ApprovalResponse;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     CompactionSpec, Envelope, Event, JsonObject, PermissionMode, Provider, ProviderError,
@@ -192,4 +193,155 @@ async fn a_failed_tool_call_ends_with_its_error_code() {
     };
     assert_eq!(code("c1"), Some("not_found"));
     assert_eq!(code("c2"), None, "an unknown tool's refusal has no code");
+}
+
+/// Records the trace id each call sees.
+struct Traced {
+    name: &'static str,
+    scope: ToolScope,
+    schema: JsonObject,
+    seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+}
+
+#[async_trait]
+impl Tool for Traced {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "Records its trace id."
+    }
+    fn input_schema(&self) -> &JsonObject {
+        &self.schema
+    }
+    fn scope(&self) -> ToolScope {
+        self.scope
+    }
+    async fn execute(&self, _: JsonObject, ctx: ToolContext) -> ToolResult {
+        self.seen.lock().unwrap().push(ctx.trace_id.clone());
+        Ok(linch_core::ToolOutput::new("ok"))
+    }
+}
+
+fn result_of(envelopes: &[Envelope]) -> &linch_core::events::kinds::ResultEvent {
+    match &envelopes.last().unwrap().event {
+        Event::Result(result) => result,
+        other => panic!("no result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_trace_id_of_a_run_is_echoed_on_init_result_and_tool_calls_after_an_approve() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tools = ToolRegistry::new();
+    let schema = json!({"type": "object"}).as_object().unwrap().clone();
+    for (name, scope) in [("Look", ToolScope::Read), ("Write", ToolScope::Write)] {
+        let tool = Traced {
+            name,
+            scope,
+            schema: schema.clone(),
+            seen: Arc::clone(&seen),
+        };
+        let _ = tools.register(Arc::new(tool)).unwrap();
+    }
+    let turns = [
+        TurnBuilder::new(MODEL)
+            .tool_call("c1", "Look", &json!({}))
+            .build(),
+        TurnBuilder::new(MODEL)
+            .tool_call("c2", "Write", &json!({}))
+            .build(),
+        text_turn("done"),
+    ];
+    let agent = agent(
+        Arc::new(ScriptedProvider::new(turns)),
+        Arc::new(tools),
+        policy(PermissionMode::Default),
+        Arc::new(Stores::default()),
+    );
+    let mut options = RunOptions::new("s1");
+    options.trace_id = Some("trace-7".into());
+    let stream = agent.run("go", options);
+    let run_id = stream.run_id().clone();
+    let first = finish(stream).await;
+    assert_eq!(init(&first).trace_id.as_deref(), Some("trace-7"));
+    assert!(matches!(first.last().unwrap().event, Event::Suspended(_)));
+
+    // The approve's options carry no trace id: the run's own is kept.
+    let answers = [("c2".to_owned(), ApprovalResponse::Allow)];
+    let approved = agent.approve(run_id, answers.into(), RunOptions::new(""));
+    let second = finish(approved).await;
+    assert_eq!(result_of(&second).trace_id.as_deref(), Some("trace-7"));
+    let seen = seen.lock().unwrap().clone();
+    let traced = Some("trace-7".to_owned());
+    assert_eq!(seen, [traced.clone(), traced]);
+}
+
+#[tokio::test]
+async fn a_run_failed_from_outside_keeps_its_trace_id() {
+    let runs = Runs::default();
+    let agent = agent(
+        Arc::new(ScriptedProvider::new([tool_turn(0, 1, "Write")])),
+        registry(vec![Echo::new("Write", ToolScope::Write, &runs)]),
+        policy(PermissionMode::Default),
+        Arc::new(Stores::default()),
+    );
+    let mut options = RunOptions::new("s1");
+    options.trace_id = Some("trace-8".into());
+    let stream = agent.run("go", options);
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+
+    let ended = agent.fail(run_id, "gone", RunOptions::new("")).await;
+    assert_eq!(
+        result_of(&ended.unwrap()).trace_id.as_deref(),
+        Some("trace-8")
+    );
+}
+
+#[tokio::test]
+async fn a_run_without_a_trace_id_reports_none() {
+    let provider = Arc::new(ScriptedProvider::new([text_turn("hi")]));
+    let agent = agent(
+        provider,
+        registry(vec![]),
+        policy(PermissionMode::Default),
+        Arc::new(Stores::default()),
+    );
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    assert_eq!(init(&envelopes).trace_id, None);
+    assert_eq!(result_of(&envelopes).trace_id, None);
+}
+
+#[tokio::test]
+async fn a_subagent_run_inherits_its_parents_trace_id() {
+    let parent = vec![
+        common::subagents::spawn_turn(None, &["look"]),
+        text_turn("done"),
+    ];
+    let family = common::subagents::Family::new(parent, vec![text_turn("seen")]);
+    let stores = Arc::new(Stores::default());
+    let agent = linch_core::AgentBuilder::new(spec())
+        .provider(Arc::new(family))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .subagents(vec![])
+        .build()
+        .unwrap();
+    let mut options = RunOptions::new("s1");
+    options.trace_id = Some("trace-9".into());
+    let envelopes = finish(agent.run("go", options)).await;
+
+    let child_inits: Vec<&InitEvent> = events(&envelopes, |e| match e {
+        Event::Subagent(sub) => match &*sub.event {
+            Event::Init(init) => Some(init),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(child_inits.len(), 1);
+    assert_eq!(child_inits[0].trace_id.as_deref(), Some("trace-9"));
 }

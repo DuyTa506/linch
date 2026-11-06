@@ -254,8 +254,13 @@ Values are JSON text, and are built only for spans that record.
 a log line or a response header. The run span starts with the first envelope,
 so read it after that; before it, `run.trace_id` is the trace of the span
 current at the call, or `None` outside any span. It is `None` for a run that
-is not traced. `InitEvent.trace_id` and `ResultEvent.trace_id` stay `None`:
-the server does not set them.
+is not traced.
+
+`agent.run(..., trace_id=...)` gives a run a trace id of your own, such as
+your request's: the run stores it, and every `InitEvent` and `ResultEvent` of
+it carries it, a resume or approve included, as do its subagents' runs and
+the context of its tool calls. Without it they carry `None`; the server
+never makes one up.
 
 ```python
 import asyncio

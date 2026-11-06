@@ -198,7 +198,7 @@
 //! again. Nothing is written; the session and its runs stay, and a run of
 //! it still in progress just has to read again before it writes.
 //!
-//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?}`
+//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
 //! created when missing. `run_id` names the new run (a fresh uuid when
 //! absent), so a client can resume it even if it never saw the answer; an
@@ -206,7 +206,9 @@
 //! session has at most one run that is not terminal: a start on a session
 //! whose run is still going or waiting for approval ends with `-32030`,
 //! naming that run, and writes nothing. `principal` is
-//! `{tenant, user, roles?}`.
+//! `{tenant, user, roles?}`. `trace_id` is the host's trace id: stored with
+//! the run and echoed on every `init` and `result` of it, its tool calls'
+//! context and its subagents' runs, a resume or approve included.
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash

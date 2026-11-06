@@ -48,7 +48,7 @@ impl Runner {
             final_text,
             structured_output: None,
             structured_error: None,
-            trace_id: None,
+            trace_id: self.run.trace_id.clone(),
         };
         let ready = self.journal.finish(status, result).await?;
         self.outbox.deliver(ready).await;

@@ -69,11 +69,17 @@ pub struct RunOptions {
     /// approve given a token that is already cancelled does nothing: it
     /// claims and writes nothing, and its stream ends with no item.
     pub cancel: CancellationToken,
+    /// The host's trace id for a new run, stored with it in its `init`
+    /// event and echoed on every `init` and `result` of the run and on
+    /// each [`crate::ToolContext::trace_id`]; its subagents' runs inherit
+    /// it. `None` sets none. Resume and approve ignore this field and keep
+    /// the run's own.
+    pub trace_id: Option<String>,
 }
 
 impl RunOptions {
-    /// Options for `session_id`, with no run id, no principal, owner `linch`
-    /// and a fresh cancel token.
+    /// Options for `session_id`, with no run id, no principal, owner
+    /// `linch`, a fresh cancel token and no trace id.
     pub fn new(session_id: impl Into<SessionId>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -81,6 +87,7 @@ impl RunOptions {
             principal: None,
             owner: "linch".into(),
             cancel: CancellationToken::new(),
+            trace_id: None,
         }
     }
 }

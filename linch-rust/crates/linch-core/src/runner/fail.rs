@@ -44,6 +44,7 @@ pub(crate) async fn fail(
         checkpoint.phase,
         Phase::ProviderPending { .. } | Phase::CompactionPending { .. }
     );
+    let trace_id = super::start::trace_of(&runs.events(namespace, &run_id, 0).await?);
     let mut journal = Journal::new(Arc::clone(runs), lease, record.last_seq);
     let error = json!({"name": "RunFailed", "message": reason, "retryable": false});
     let error = error.as_object().cloned().unwrap_or_default();
@@ -58,7 +59,7 @@ pub(crate) async fn fail(
         final_text: None,
         structured_output: None,
         structured_error: None,
-        trace_id: None,
+        trace_id,
     };
     Ok(journal.finish(RunStatus::Failed, result).await?)
 }

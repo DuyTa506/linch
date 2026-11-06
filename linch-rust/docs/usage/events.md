@@ -167,7 +167,7 @@ The run started.
 | `provider` | The provider's id: `anthropic`, `openai-chat`, `scripted`, ... |
 | `tools` | Names of the tools offered, in order |
 | `parent_run_id` | The parent run, for a subagent's run; `None` otherwise |
-| `trace_id` | Trace id, when one is set; always `None` from the server. Use `Run.trace_id` ([Observability](./observability.md#correlate-logs-and-traces)) |
+| `trace_id` | The `trace_id` given to `agent.run`, kept for the whole run and its subagents' runs; `None` when none was given ([Observability](./observability.md#correlate-logs-and-traces)) |
 
 A resumed or approved stream does not start with `init`; it starts where the
 run continues.
@@ -329,7 +329,7 @@ The run finished; its stream ends here.
 | `duration_ms` | Wall time of the `run`, `resume` or `approve` call that ended the run. The whole run's span is this envelope's `ts_ms` minus the `init` envelope's |
 | `total_cost_usd` | Cost of the run's priced calls; `None` when none was priced |
 | `structured_output`, `structured_error` | For runs with an output schema; `None` with this client |
-| `trace_id` | Trace id, when one is set; always `None` from the server |
+| `trace_id` | The run's `trace_id`, as on `InitEvent` |
 
 ### `SkillInvokedEvent` (`skill_invoked`)
 

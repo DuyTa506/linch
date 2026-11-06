@@ -166,6 +166,10 @@ pub struct StartParams {
     /// Caller identity for permission rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<Principal>,
+    /// The host's trace id, stored with the run and echoed on its `init`
+    /// and `result` events, its tool calls and its subagents' runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 /// Params of `run.resume`.

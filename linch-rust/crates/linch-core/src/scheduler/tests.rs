@@ -202,6 +202,7 @@ impl Fixture {
                 session_id: SessionId::from("s1"),
                 run_id: RunId::from("r1"),
                 principal: None,
+                trace_id: None,
             },
         }
     }

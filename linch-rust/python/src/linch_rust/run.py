@@ -67,8 +67,9 @@ class Run:
 
         With tracing on (`linch_rust.otel`), it is the run span's once the
         first envelope arrived; before that, the trace of the span current
-        at the call, if any. `None` when the run is not traced. The server
-        does not set `InitEvent.trace_id` or `ResultEvent.trace_id`.
+        at the call, if any. `None` when the run is not traced. It is not
+        the `trace_id` given to `Agent.run`, which the run's `InitEvent` and
+        `ResultEvent` carry.
         """
         return self._observer.trace_id if self._observer is not None else None
 

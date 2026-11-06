@@ -46,6 +46,17 @@ async def test_a_run_streams_its_envelopes_then_its_result() -> None:
     assert result.total_cost_usd is None, "the scripted model has no price"
 
 
+async def test_a_run_keeps_the_trace_id_it_was_started_with() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("Hello there.")]))
+        run = await agent.run("s1", "Say hello", trace_id="4bf92f3577b34da6")
+        envelopes = [envelope async for envelope in run]
+
+    init, result = envelopes[0].event, envelopes[-1].event
+    assert isinstance(init, InitEvent) and init.trace_id == "4bf92f3577b34da6"
+    assert isinstance(result, ResultEvent) and result.trace_id == "4bf92f3577b34da6"
+
+
 async def test_a_priced_model_reports_what_the_run_cost() -> None:
     async with Server() as server:
         agent = await server.open_agent(config([text_turn("Hi.", model="claude-opus-4-8")]))
