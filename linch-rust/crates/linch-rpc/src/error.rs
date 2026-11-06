@@ -66,6 +66,9 @@ pub mod code {
     pub const NOT_SUSPENDED: i64 = -32027;
     /// `RunError::Reconcile`: durable state does not fit together.
     pub const RECONCILE: i64 = -32028;
+    /// `RunError::PromptBlocked`: a `user_prompt_submit` hook refused the
+    /// prompt; `data.reason` says why. Nothing was written.
+    pub const PROMPT_BLOCKED: i64 = -32029;
 }
 
 impl ErrorObject {
@@ -123,6 +126,9 @@ impl From<&RunError> for ErrorObject {
             }
             RunError::NotSuspended { .. } => Self::new(code::NOT_SUSPENDED, message),
             RunError::Reconcile(_) => Self::new(code::RECONCILE, message),
+            RunError::PromptBlocked { reason, .. } => {
+                Self::new(code::PROMPT_BLOCKED, message).with_data(json!({ "reason": reason }))
+            }
         }
     }
 }

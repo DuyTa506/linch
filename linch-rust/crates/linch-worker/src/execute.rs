@@ -58,7 +58,9 @@ pub(crate) fn classify(error: &RunError) -> Outcome {
         RunError::Terminal { .. } => Outcome::Done,
         RunError::ContractMismatch { .. }
         | RunError::NotSuspended { .. }
-        | RunError::Reconcile(_) => Outcome::Fail(chain(error)),
+        | RunError::Reconcile(_)
+        // A user_prompt_submit hook refused the prompt; a retry sends the same prompt.
+        | RunError::PromptBlocked { .. } => Outcome::Fail(chain(error)),
         // Includes a lost run lease and a session append conflict.
         RunError::Store(_) | RunError::Journal(_) => Outcome::Retry(chain(error)),
     }

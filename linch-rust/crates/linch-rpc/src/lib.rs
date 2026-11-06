@@ -119,6 +119,7 @@
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
 //! | -32027 | not suspended | `RunError::NotSuspended` |
 //! | -32028 | reconcile | `RunError::Reconcile` |
+//! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //!
 //! Codes from -32010 to -32014 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
