@@ -45,6 +45,10 @@ impl Runner {
             &approvals,
         )
         .await;
+        for call in plan.calls() {
+            let records = call.hook_records.clone();
+            self.push_records(records, Some(&call.tool_use_id));
+        }
         for record in plan_decisions(&plan) {
             upsert(&mut decisions, record);
         }

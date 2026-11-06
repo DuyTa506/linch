@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+pub mod hooks;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

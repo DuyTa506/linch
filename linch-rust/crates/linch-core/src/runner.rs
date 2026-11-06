@@ -2,19 +2,24 @@
 //!
 //! One turn:
 //! 1. snapshot the tools and build the request from the session's provider
-//!    view;
+//!    view, with the `context_build` blocks added to its tail, never logged;
 //! 2. stage the model-call delivery and flush it with the held
 //!    `ProviderPending` checkpoint, then drive the call (deltas go to the
 //!    caller at once);
 //! 3. stage the receipt, the `Assistant` event and its `Usage`, and write
 //!    them through with `AssistantReceived`;
 //! 4. append the response to the session (the held checkpoint is flushed
-//!    first); a text-only response ends the run;
+//!    first); a text-only response ends the run unless a `stop` hook keeps
+//!    it going with feedback for the next turn;
 //! 5. plan the tool calls. A call awaiting approval suspends the run with a
 //!    write-through `AwaitingApproval`. Otherwise the plan's decisions are
 //!    held in `ToolBatch` and the batch runs: every tool that really runs
 //!    flushes its start before it runs and its end after;
-//! 6. hold `ToolResults`, append the results to the session, next turn.
+//! 6. hold `ToolResults`, append the results to the session, run
+//!    `post_turn`, next turn.
+//!
+//! A new run's prompt passes `user_prompt_submit` before anything is
+//! written; a blocked prompt creates no run. Hooks are never barriers.
 //!
 //! A tool turn with `k` started tools costs `3 + 2k` run writes and 2 session
 //! writes. The core spawns no task: [`RunStream`] holds the run future and
@@ -35,9 +40,12 @@ use crate::hooks::ApprovalResponse;
 use crate::ids::RunId;
 
 mod batch;
+mod end;
+mod hooks;
 mod sink;
 mod start;
 mod turn;
+mod write;
 
 /// The envelopes of one run, in order, as the caller polls for them.
 ///

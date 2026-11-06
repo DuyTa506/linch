@@ -13,6 +13,7 @@ use std::sync::{Mutex, PoisonError};
 use async_trait::async_trait;
 
 use super::Outbox;
+use super::hooks::push_records;
 use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent};
 use crate::events::{Envelope, Event, WIRE_VERSION};
 use crate::ids::RunId;
@@ -92,6 +93,15 @@ impl ToolSink for JournalSink<'_> {
         outcome: &CallOutcome,
     ) -> Result<(), JournalError> {
         let ran = self.started().remove(&call.tool_use_id);
+        let seq = self.durable.load(Ordering::SeqCst);
+        let records = outcome.hook_records.clone();
+        push_records(
+            self.outbox,
+            &self.run_id,
+            seq,
+            records,
+            Some(&call.tool_use_id),
+        );
         let end = Event::ToolCallEnd(ToolCallEndEvent {
             tool_name: call.tool_name.clone(),
             result: outcome.block.clone(),

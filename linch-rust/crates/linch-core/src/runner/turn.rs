@@ -3,16 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::Outbox;
+use super::hooks::add_context;
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
-use crate::events::kinds::{
-    AssistantEvent, ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent,
-    ResultSubtype, UsageEvent,
-};
+use crate::events::kinds::{AssistantEvent, ResultSubtype};
 use crate::events::model_call::ModelCallReceiptEvent;
 use crate::journal::{Journal, ToolRecovery};
 use crate::message::Message;
@@ -21,12 +18,12 @@ use crate::provider::{AssistantAssembly, ProviderError};
 use crate::registry::ToolSnapshot;
 use crate::run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
-use crate::session_log::{LogEntry, MessageEntry, SessionLog};
+use crate::session_log::{LogEntry, SessionLog};
 use crate::usage::Usage;
 
 /// What the run does next.
 pub(super) enum Step {
-    /// Append the prompt unless `appended`, then dispatch.
+    /// Append the prompt unless `appended`, then start the turn.
     Prompt { prompt: Message, appended: bool },
     /// Dispatch delivery `attempt` of the current turn, after staging the
     /// `abandoned` receipt of an unsettled earlier attempt.
@@ -42,7 +39,8 @@ pub(super) enum Step {
     },
     /// Plan and run the tool calls of the last response.
     Batch(Batch),
-    /// Append the tool results unless `appended`, then start the next turn.
+    /// Append the tool results (or stop feedback) unless `appended`, then
+    /// start the next turn.
     Results { message: Message, appended: bool },
 }
 
@@ -58,12 +56,14 @@ pub(super) struct Batch {
     pub(super) after_seq: Option<u64>,
 }
 
-/// Turn index and usage carried over from a checkpoint.
+/// Turn index, usage and last stop reason carried over from durable state.
 #[derive(Clone, Copy)]
 pub(super) struct Progress {
     pub(super) turn: u32,
     pub(super) usage: Usage,
     pub(super) usage_complete: bool,
+    /// Why the last response stopped, for `post_turn`.
+    pub(super) stop_reason: StopReason,
 }
 
 impl Progress {
@@ -77,13 +77,15 @@ impl Progress {
             cache_creation_tokens: 0,
         },
         usage_complete: true,
+        stop_reason: StopReason::EndTurn,
     };
 
-    pub(super) fn of(checkpoint: &Checkpoint) -> Self {
+    pub(super) fn of(checkpoint: &Checkpoint, stop_reason: StopReason) -> Self {
         Self {
             turn: checkpoint.turn,
             usage: checkpoint.usage,
             usage_complete: checkpoint.usage_complete,
+            stop_reason,
         }
     }
 }
@@ -96,12 +98,14 @@ pub(super) struct Runner {
     pub(super) run: RunIdentity,
     pub(super) cancel: CancellationToken,
     pub(super) snapshot: Arc<ToolSnapshot>,
-    log: SessionLog,
+    pub(super) log: SessionLog,
     /// Entries in the stored session log.
-    session_len: u64,
-    turn: u32,
-    usage: Usage,
-    usage_complete: bool,
+    pub(super) session_len: u64,
+    pub(super) turn: u32,
+    pub(super) usage: Usage,
+    pub(super) usage_complete: bool,
+    /// Why the last response stopped, for `post_turn`.
+    pub(super) stop_reason: StopReason,
 }
 
 impl Runner {
@@ -139,6 +143,7 @@ impl Runner {
             turn: progress.turn,
             usage: progress.usage,
             usage_complete: progress.usage_complete,
+            stop_reason: progress.stop_reason,
         }
     }
 
@@ -150,10 +155,7 @@ impl Runner {
                     if !appended {
                         self.append(prompt).await?;
                     }
-                    Some(Step::Dispatch {
-                        attempt: 1,
-                        abandoned: None,
-                    })
+                    Some(self.turn_start())
                 }
                 Step::Dispatch { attempt, abandoned } => self.dispatch(attempt, abandoned).await?,
                 Step::Received {
@@ -166,17 +168,23 @@ impl Runner {
                     if !appended {
                         self.append(message).await?;
                     }
+                    self.post_turn(self.stop_reason).await;
                     self.turn += 1;
-                    Some(Step::Dispatch {
-                        attempt: 1,
-                        abandoned: None,
-                    })
+                    Some(self.turn_start())
                 }
             };
             match next {
                 Some(next) => step = next,
                 None => return Ok(()),
             }
+        }
+    }
+
+    /// The first step of a turn.
+    fn turn_start(&self) -> Step {
+        Step::Dispatch {
+            attempt: 1,
+            abandoned: None,
         }
     }
 
@@ -203,7 +211,9 @@ impl Runner {
         }
         self.snapshot = self.agent.tools.snapshot();
         let view = self.log.provider_view();
-        let messages = view.iter().map(|message| Message::clone(message)).collect();
+        let mut messages: Vec<Message> =
+            view.iter().map(|message| Message::clone(message)).collect();
+        add_context(&mut messages, self.context(view).await);
         let request = (self.agent.spec).request(self.snapshot.definitions(), messages);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
@@ -232,6 +242,7 @@ impl Runner {
                 Ok(None)
             }
             Err(failure) => {
+                // One terminal write: receipt, error, status and result.
                 self.journal.stage(Event::Error(failure.event));
                 let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
                 self.end(RunStatus::Failed, subtype, stop, None).await?;
@@ -251,11 +262,7 @@ impl Runner {
             message: message.clone(),
             stop_reason,
         }));
-        if let Some(usage) = usage {
-            let cumulative = self.usage;
-            self.journal
-                .stage(Event::Usage(UsageEvent { usage, cumulative }));
-        }
+        self.stage_usage(usage);
         let phase = Phase::AssistantReceived {
             message: message.clone(),
             stop_reason,
@@ -280,10 +287,15 @@ impl Runner {
             .map(ToolRecovery::Replan)
             .collect();
         let text = message.text();
+        self.stop_reason = stop_reason;
         if !appended {
             self.append(message).await?;
         }
         if calls.is_empty() {
+            if let Some(feedback) = self.stop(&text).await? {
+                return Ok(Some(feedback));
+            }
+            self.post_turn(stop_reason).await;
             let final_text = (!text.is_empty()).then_some(text);
             let status = RunStatus::Completed;
             (self.end(status, ResultSubtype::Success, stop_reason, final_text)).await?;
@@ -295,93 +307,5 @@ impl Runner {
             approvals: HashMap::new(),
             after_seq: None,
         })))
-    }
-
-    /// Session write: flush the held checkpoint, then append `message`.
-    async fn append(&mut self, message: Message) -> Result<(), RunError> {
-        let ready = self.journal.flush_checkpoint().await?;
-        self.outbox.deliver(ready).await;
-        let entry = LogEntry::Message(MessageEntry {
-            message: Arc::new(message.clone()),
-            visible: true,
-            historical: true,
-        });
-        let (sessions, namespace) = (&self.agent.sessions, &self.agent.namespace);
-        let session = &self.run.session_id;
-        self.session_len =
-            (sessions.append(namespace, session, self.session_len, vec![entry])).await?;
-        self.log.append(message, true, true);
-        Ok(())
-    }
-
-    /// Save a checkpoint for `phase` and deliver what a write-through made
-    /// durable.
-    pub(super) async fn save(&mut self, phase: Phase) -> Result<(), RunError> {
-        let checkpoint = Checkpoint {
-            turn: self.turn,
-            usage: self.usage,
-            usage_complete: self.usage_complete,
-            session_len: self.session_len,
-            phase,
-        };
-        let ready = self.journal.save(checkpoint).await?;
-        self.outbox.deliver(ready).await;
-        Ok(())
-    }
-
-    /// Count a settled receipt: known usage adds up, unknown usage makes
-    /// the total incomplete (never a zero fill).
-    fn settle(&mut self, receipt: &ModelCallReceiptEvent) {
-        match receipt.usage {
-            Some(usage) => self.usage += usage,
-            None => self.usage_complete = false,
-        }
-    }
-
-    /// End the run with `status` and its `Result`.
-    pub(super) async fn end(
-        &mut self,
-        status: RunStatus,
-        subtype: ResultSubtype,
-        stop_reason: StopReason,
-        final_text: Option<String>,
-    ) -> Result<(), RunError> {
-        let result = ResultEvent {
-            subtype,
-            stop_reason,
-            total_usage: self.usage,
-            usage_complete: self.usage_complete,
-            final_text,
-            structured_output: None,
-            structured_error: None,
-            trace_id: None,
-        };
-        let ready = self.journal.finish(status, result).await?;
-        self.outbox.deliver(ready).await;
-        Ok(())
-    }
-
-    /// The abort terminal. Python reports `stop_reason: error` with it.
-    async fn abort(&mut self) -> Result<(), RunError> {
-        let (subtype, stop) = (ResultSubtype::Aborted, StopReason::Error);
-        self.end(RunStatus::Aborted, subtype, stop, None).await
-    }
-
-    /// The `max_turns` terminal, as Python's `_max_turns_tail` emits it.
-    async fn max_turns(&mut self, max: u32) -> Result<(), RunError> {
-        self.journal.stage(Event::LoopGuard(LoopGuardEvent {
-            reason: LoopGuardReason::MaxTurns,
-            detail: format!("Maximum turns ({max}) reached."),
-            action: LoopGuardAction::Stop,
-        }));
-        let error = json!({
-            "name": "TurnLimitError",
-            "message": "max turns exceeded",
-            "retryable": false,
-        });
-        let error = error.as_object().cloned().unwrap_or_default();
-        self.journal.stage(Event::Error(ErrorEvent { error }));
-        let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
-        self.end(RunStatus::Failed, subtype, stop, None).await
     }
 }

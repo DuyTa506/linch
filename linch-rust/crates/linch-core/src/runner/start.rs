@@ -3,17 +3,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::Outbox;
 use super::batch::{answer_decision, approvals, turn_events, upsert};
 use super::turn::{Batch, Progress, Runner, Step};
+use super::{Outbox, hooks};
 use crate::agent::{AgentInner, RunError, RunOptions};
-use crate::events::Event;
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
+use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, Recovery, reconcile};
-use crate::message::Message;
-use crate::run::{Checkpoint, Phase, ToolDecisionRecord};
+use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
 use crate::usage::Usage;
@@ -28,6 +27,7 @@ pub(super) async fn new_run(
 ) -> Result<(), RunError> {
     let namespace = agent.namespace.clone();
     let session_id = options.session_id;
+    let prompt = hooks::submit(&agent, &outbox, &session_id, &run_id, prompt).await?;
     let entries = match agent.sessions.load(&namespace, &session_id).await {
         Ok(entries) => entries,
         Err(StoreError::NotFound { .. }) => {
@@ -52,7 +52,6 @@ pub(super) async fn new_run(
         tools: tools.into_iter().map(|tool| tool.name).collect(),
         trace_id: None,
     }));
-    let prompt = Message::user_text(prompt);
     journal.stage(Event::User(UserEvent {
         message: prompt.clone(),
         subtype: UserEventSubtype::Prompt,
@@ -172,7 +171,7 @@ pub(super) async fn continue_run(
         Recovery::ToolResults { message, appended } => Step::Results { message, appended },
     };
     let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
-    let progress = Progress::of(checkpoint);
+    let progress = Progress::of(checkpoint, last_stop(&events));
     let run = identity(record.session_id.clone(), run_id, &options.principal);
     let mut runner = Runner::new(
         agent,
@@ -187,6 +186,18 @@ pub(super) async fn continue_run(
         runner.commit_decisions(decisions, assistant_seq).await?;
     }
     runner.drive(step).await
+}
+
+/// Why the run's last durable response stopped; `end_turn` before any.
+fn last_stop(events: &[Envelope]) -> StopReason {
+    let last = events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            Event::Assistant(response) => Some(response.stop_reason),
+            _ => None,
+        });
+    last.unwrap_or(StopReason::EndTurn)
 }
 
 /// Refuse a terminal run, a run of another contract, and an approve on a

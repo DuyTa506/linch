@@ -25,11 +25,22 @@ pub enum BuildError {
 /// A run cannot continue durably.
 ///
 /// A provider error is not a `RunError`: it ends the run with status
-/// `failed` and a `Result` event. Every `RunError` leaves the run at its
-/// last durable state, so [`super::Agent::resume`] can pick it up again
-/// unless the run is terminal.
+/// `failed` and a `Result` event. Every `RunError` but
+/// [`RunError::PromptBlocked`] leaves the run at its last durable state, so
+/// [`super::Agent::resume`] can pick it up again unless the run is
+/// terminal.
 #[derive(Debug, Error)]
 pub enum RunError {
+    /// A `user_prompt_submit` hook blocked the prompt, or failed closed,
+    /// before the run was created. Nothing was written: the run does not
+    /// exist, so resume and events report it not found.
+    #[error("run {run_id} was not started: the prompt was blocked: {reason}")]
+    PromptBlocked {
+        /// The run id the stream announced.
+        run_id: RunId,
+        /// Why the prompt was blocked.
+        reason: String,
+    },
     /// A store read or write failed, including a lost lease
     /// ([`StoreError::LeaseLost`]) and a session append conflict.
     #[error(transparent)]
