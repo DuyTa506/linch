@@ -1,4 +1,4 @@
-//! Workspace file tools and Bash for Linch.
+//! Workspace file tools, Bash and the session task tools for Linch.
 //!
 //! The file tools ([`Read`], [`Write`], [`Edit`], [`Grep`], [`Glob`]) go
 //! through one [`ExecutionFs`]; [`LocalFs`] confines them to a root
@@ -11,6 +11,9 @@
 //! backends, the `ls`, `read_file`, `write_file` and `edit_file` tools, and
 //! the offload of large tool results.
 //!
+//! [`task_tools`] are the session task tools ([`TaskCreate`], [`TaskList`],
+//! [`TaskGet`], [`TaskUpdate`]) over a [`TaskStore`](linch_core::TaskStore).
+//!
 //! The crate is Unix-only: Bash relies on process groups.
 
 #![forbid(unsafe_code)]
@@ -22,6 +25,7 @@ mod glob;
 mod grep;
 mod input;
 mod read;
+mod tasks;
 mod tracker;
 pub mod vfs;
 mod write;
@@ -37,6 +41,7 @@ pub use glob::Glob;
 pub use grep::Grep;
 pub use input::READ_FIRST_CODE;
 pub use read::Read;
+pub use tasks::{TASK_TOOL_NAMES, TaskCreate, TaskGet, TaskList, TaskUpdate, task_tools};
 pub use tracker::ReadTracker;
 pub use write::Write;
 
