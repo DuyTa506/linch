@@ -134,10 +134,14 @@ impl AgentBuilder {
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
-    ///         namespace is blank, or the tool schemas cannot be digested.
+    ///         namespace is blank, the compaction settings cannot run, or
+    ///         the tool schemas cannot be digested.
     pub fn build(self) -> Result<Agent, BuildError> {
         if self.spec.model.trim().is_empty() {
             return Err(BuildError::Invalid("the model must not be blank".into()));
+        }
+        if let Some(problem) = self.spec.compaction.as_ref().and_then(|c| c.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
         }
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;
         if namespace.trim().is_empty() {

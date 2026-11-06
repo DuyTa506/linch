@@ -177,7 +177,15 @@ async fn save_writes_through_or_holds_by_phase() {
             },
             true,
         ),
+        (
+            Phase::Compacted {
+                summary: Message::user_text("s"),
+                keep_from: 3,
+            },
+            true,
+        ),
         (Phase::ProviderPending { attempt: 1 }, false),
+        (Phase::CompactionPending { attempt: 1 }, false),
         (
             Phase::ToolBatch {
                 decisions: Vec::new(),

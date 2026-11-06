@@ -9,7 +9,7 @@ use super::*;
 enum Op {
     /// 0: durable and delivered, 1: journal-only, 2: stream-only.
     Stage(u8),
-    /// 0..3 held phases, 3..5 write-through phases.
+    /// 0..4 held phases, 4..7 write-through phases.
     Save(u8),
     Flush,
     FlushCheckpoint,
@@ -18,7 +18,7 @@ enum Op {
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         3 => (0u8..3).prop_map(Op::Stage),
-        2 => (0u8..5).prop_map(Op::Save),
+        2 => (0u8..7).prop_map(Op::Save),
         1 => Just(Op::Flush),
         1 => Just(Op::FlushCheckpoint),
     ]
@@ -38,14 +38,19 @@ fn saved(kind: u8, i: u64) -> Checkpoint {
     let message = Message::user_text(i.to_string());
     let phase = match kind {
         0 => Phase::ProviderPending { attempt: 1 },
-        1 => Phase::ToolBatch {
+        1 => Phase::CompactionPending { attempt: 1 },
+        2 => Phase::ToolBatch {
             decisions: Vec::new(),
             after_seq: i,
         },
-        2 => Phase::ToolResults { message },
-        3 => Phase::AssistantReceived {
+        3 => Phase::ToolResults { message },
+        4 => Phase::AssistantReceived {
             message,
             stop_reason: StopReason::EndTurn,
+        },
+        5 => Phase::Compacted {
+            summary: message,
+            keep_from: i,
         },
         _ => Phase::Started { prompt: message },
     };

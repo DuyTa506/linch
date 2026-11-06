@@ -169,6 +169,16 @@ pub(super) async fn continue_run(
             })
         }
         Recovery::ToolResults { message, appended } => Step::Results { message, appended },
+        Recovery::Recompact { attempt, abandoned } => Step::Compact { attempt, abandoned },
+        Recovery::Compacted {
+            summary,
+            keep_from,
+            appended,
+        } => Step::Compacted {
+            summary,
+            keep_from,
+            appended,
+        },
     };
     let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     let progress = Progress::of(checkpoint, last_stop(&events));

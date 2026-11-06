@@ -25,6 +25,20 @@ use crate::usage::Usage;
 pub(super) enum Step {
     /// Append the prompt unless `appended`, then start the turn.
     Prompt { prompt: Message, appended: bool },
+    /// Compact the provider view if it passed the threshold, with summary
+    /// delivery `attempt`, after staging the `abandoned` receipt of an
+    /// unsettled earlier attempt; then dispatch.
+    Compact {
+        attempt: u32,
+        abandoned: Option<ModelCallReceiptEvent>,
+    },
+    /// Append the projection of a durable summary unless `appended`, then
+    /// dispatch.
+    Compacted {
+        summary: Message,
+        keep_from: u64,
+        appended: bool,
+    },
     /// Dispatch delivery `attempt` of the current turn, after staging the
     /// `abandoned` receipt of an unsettled earlier attempt.
     Dispatch {
@@ -157,6 +171,12 @@ impl Runner {
                     }
                     Some(self.turn_start())
                 }
+                Step::Compact { attempt, abandoned } => self.compact(attempt, abandoned).await?,
+                Step::Compacted {
+                    summary,
+                    keep_from,
+                    appended,
+                } => self.compacted(summary, keep_from, appended).await?,
                 Step::Dispatch { attempt, abandoned } => self.dispatch(attempt, abandoned).await?,
                 Step::Received {
                     message,
@@ -180,12 +200,23 @@ impl Runner {
         }
     }
 
-    /// The first step of a turn.
+    /// The first step of a turn: compaction when the spec turns it on.
     fn turn_start(&self) -> Step {
-        Step::Dispatch {
-            attempt: 1,
-            abandoned: None,
+        match self.agent.spec.compaction {
+            Some(_) => Step::Compact {
+                attempt: 1,
+                abandoned: None,
+            },
+            None => Step::Dispatch {
+                attempt: 1,
+                abandoned: None,
+            },
         }
+    }
+
+    /// Whether `max_turns` allows no more provider calls.
+    pub(super) fn out_of_turns(&self) -> bool {
+        (self.agent.spec.max_turns).is_some_and(|max| self.turn >= max)
     }
 
     /// One provider call: the `ProviderPending` barrier, the call, and the

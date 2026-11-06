@@ -1,8 +1,10 @@
 //! The run state machine (card P4-D) and the caller-driven [`RunStream`].
 //!
 //! One turn:
-//! 1. snapshot the tools and build the request from the session's provider
-//!    view, with the `context_build` blocks added to its tail, never logged;
+//! 1. when compaction is on and the provider view passed its threshold,
+//!    summarize the older part and log the projection (see `compact`);
+//!    snapshot the tools and build the request from the provider view, with
+//!    the `context_build` blocks added to its tail, never logged;
 //! 2. stage the model-call delivery and flush it with the held
 //!    `ProviderPending` checkpoint, then drive the call (deltas go to the
 //!    caller at once);
@@ -40,6 +42,7 @@ use crate::hooks::ApprovalResponse;
 use crate::ids::RunId;
 
 mod batch;
+mod compact;
 mod end;
 mod hooks;
 mod sink;

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
+use crate::compaction::CompactionSpec;
 use crate::message::SystemBlock;
 use crate::provider::{ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
 
@@ -48,6 +49,10 @@ pub struct AgentSpec {
     /// Longest one tool call may run, in milliseconds; `None` waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_ms: Option<u64>,
+    /// When to summarize the older part of the provider view; `None`
+    /// (the default) never compacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionSpec>,
 }
 
 impl AgentSpec {
@@ -62,6 +67,7 @@ impl AgentSpec {
             max_output_tokens: None,
             max_tool_concurrency: default_concurrency(),
             call_timeout_ms: None,
+            compaction: None,
         }
     }
 
@@ -147,5 +153,26 @@ mod tests {
         assert_ne!(base, contract_digest(&spec, &[tool], hooks).unwrap());
         let digest = crate::canonical::digest(&json!(1)).unwrap();
         assert_ne!(base, contract_digest(&spec, &[], digest).unwrap());
+        let mut compacting = spec.clone();
+        compacting.compaction = Some(CompactionSpec::new(1000));
+        assert_ne!(base, contract_digest(&compacting, &[], hooks).unwrap());
+    }
+
+    #[test]
+    fn a_spec_without_compaction_keeps_its_wire_shape() {
+        // So the contract of every spec written before compaction existed
+        // is unchanged.
+        let wire = serde_json::to_value(AgentSpec::new("m")).unwrap();
+        assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+        let read: AgentSpec = serde_json::from_value(json!({
+            "model": "m",
+            "compaction": {"threshold_tokens": 50000, "keep_recent_turns": 4},
+        }))
+        .unwrap();
+        let compaction = read.compaction.unwrap();
+        assert_eq!(
+            (compaction.threshold_tokens, compaction.keep_recent_turns),
+            (50000, 4)
+        );
     }
 }

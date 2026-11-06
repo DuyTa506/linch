@@ -11,8 +11,11 @@ use crate::message::{Message, Role, ToolResultBlock, ToolUseBlock};
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::session_log::LogEntry;
 
+mod session;
 #[cfg(test)]
 mod tests;
+
+use session::{appended, projected, unchanged};
 
 /// Result text for a tool that started but has no durable end.
 pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a result was \
@@ -62,11 +65,31 @@ pub enum Recovery {
         /// Tool use ids that wait for a decision.
         pending: Vec<String>,
     },
-    /// `ToolResults`: append the results unless `appended`, then go on.
+    /// `ToolResults`: append the message unless `appended`, then go on.
     ToolResults {
-        /// The user message holding the tool results.
+        /// The user message to append (tool results or stop feedback).
         message: Message,
         /// Whether the message is already in the session.
+        appended: bool,
+    },
+    /// `CompactionPending` without a receipt, or with a failed or
+    /// cancelled one: write `abandoned`, if any, then dispatch summary
+    /// `attempt`.
+    Recompact {
+        /// The new delivery attempt number.
+        attempt: u32,
+        /// A cancelled receipt for the unsettled delivery; `None` when the
+        /// delivery already has a receipt.
+        abandoned: Option<ModelCallReceiptEvent>,
+    },
+    /// `Compacted`: append the projection unless `appended`, then dispatch
+    /// the turn's primary call.
+    Compacted {
+        /// The summary as a user message.
+        summary: Message,
+        /// Index in the provider view where the kept turns start.
+        keep_from: u64,
+        /// Whether the projection is already in the session.
         appended: bool,
     },
 }
@@ -111,6 +134,13 @@ pub enum ReconcileError {
     /// A tool phase whose session does not end with an assistant tool call.
     #[error("the session does not end with the batch's assistant tool calls")]
     MissingToolCalls,
+    /// `CompactionPending` with an accepted receipt: the summary should have
+    /// landed with it in a `Compacted` checkpoint, so the store lost a write.
+    #[error("accepted compaction receipt {delivery_attempt_id} has no summary")]
+    MissingSummary {
+        /// Delivery attempt of the receipt.
+        delivery_attempt_id: String,
+    },
 }
 
 /// Decide how a run resumes from its durable state. Pure: reads only its
@@ -118,9 +148,10 @@ pub enum ReconcileError {
 ///
 /// Args:
 ///     checkpoint: The run's committed checkpoint.
-///     events: Durable events of the run. `ProviderPending` needs the current
-///         turn's delivery among them; `ToolBatch` reads only events after its
-///         `after_seq`. Passing every event is always enough.
+///     events: Durable events of the run. `ProviderPending` and
+///         `CompactionPending` need the current turn's delivery among them;
+///         `ToolBatch` reads only events after its `after_seq`. Passing
+///         every event is always enough.
 ///     session: Every entry of the run's session log.
 ///
 /// Returns:
@@ -173,6 +204,28 @@ pub fn reconcile(
             appended: appended(checkpoint, session, message)?,
             message: message.clone(),
         }),
+        Phase::CompactionPending { attempt } => {
+            let (delivery, later, receipt) =
+                delivery(checkpoint, ModelCallKind::Compaction, events)?;
+            if let Some(i) = receipt
+                && matches!(&later[i].event, Event::ModelCallReceipt(r)
+                    if r.disposition == CallDisposition::Accepted)
+            {
+                return Err(ReconcileError::MissingSummary {
+                    delivery_attempt_id: delivery.delivery_attempt_id.clone(),
+                });
+            }
+            unchanged(checkpoint, session)?;
+            Ok(Recovery::Recompact {
+                attempt: attempt + 1,
+                abandoned: receipt.is_none().then(|| abandoned(delivery)),
+            })
+        }
+        Phase::Compacted { summary, keep_from } => Ok(Recovery::Compacted {
+            appended: projected(checkpoint, session, summary)?,
+            summary: summary.clone(),
+            keep_from: *keep_from,
+        }),
     }
 }
 
@@ -182,25 +235,7 @@ fn provider_pending(
     events: &[Envelope],
     session: &[LogEntry],
 ) -> Result<Recovery, ReconcileError> {
-    let turn = checkpoint.turn;
-    let (at, delivery) = events
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(at, envelope)| match &envelope.event {
-            Event::ModelCallDelivery(d)
-                if d.kind == ModelCallKind::Primary && d.turn_index == Some(u64::from(turn)) =>
-            {
-                Some((at, d))
-            }
-            _ => None,
-        })
-        .ok_or(ReconcileError::MissingDelivery { turn })?;
-    let later = &events[at + 1..];
-    let receipt = later.iter().position(|envelope| {
-        matches!(&envelope.event, Event::ModelCallReceipt(r)
-            if r.delivery_attempt_id == delivery.delivery_attempt_id)
-    });
+    let (delivery, later, receipt) = delivery(checkpoint, ModelCallKind::Primary, events)?;
     let accepted = receipt.filter(|&i| {
         matches!(&later[i].event, Event::ModelCallReceipt(r)
             if r.disposition == CallDisposition::Accepted)
@@ -226,6 +261,32 @@ fn provider_pending(
         message: response.message.clone(),
         stop_reason: response.stop_reason,
     })
+}
+
+/// The latest delivery of `kind` for the checkpoint's turn, the events
+/// after it, and the position of its receipt among them.
+fn delivery<'a>(
+    checkpoint: &Checkpoint,
+    kind: ModelCallKind,
+    events: &'a [Envelope],
+) -> Result<(&'a ModelCallDeliveryEvent, &'a [Envelope], Option<usize>), ReconcileError> {
+    let turn = checkpoint.turn;
+    let (at, delivery) = (events.iter().enumerate().rev())
+        .find_map(|(at, envelope)| match &envelope.event {
+            Event::ModelCallDelivery(d)
+                if d.kind == kind && d.turn_index == Some(u64::from(turn)) =>
+            {
+                Some((at, d))
+            }
+            _ => None,
+        })
+        .ok_or(ReconcileError::MissingDelivery { turn })?;
+    let later = &events[at + 1..];
+    let receipt = later.iter().position(|envelope| {
+        matches!(&envelope.event, Event::ModelCallReceipt(r)
+            if r.delivery_attempt_id == delivery.delivery_attempt_id)
+    });
+    Ok((delivery, later, receipt))
 }
 
 /// A cancelled receipt that settles a delivery with no outcome.
@@ -279,41 +340,5 @@ fn tool_calls<'a>(
             Ok(entry.message.tool_uses())
         }
         _ => Err(ReconcileError::MissingToolCalls),
-    }
-}
-
-/// The session must have exactly `session_len` entries.
-fn unchanged(checkpoint: &Checkpoint, session: &[LogEntry]) -> Result<(), ReconcileError> {
-    let found = session.len() as u64;
-    if found == checkpoint.session_len {
-        return Ok(());
-    }
-    Err(ReconcileError::SessionConflict {
-        expected: checkpoint.session_len,
-        found,
-    })
-}
-
-/// Whether `pending` was already appended: `session_len` entries means not
-/// yet, one more with `pending` last means yes, anything else conflicts.
-fn appended(
-    checkpoint: &Checkpoint,
-    session: &[LogEntry],
-    pending: &Message,
-) -> Result<bool, ReconcileError> {
-    let found = session.len() as u64;
-    if found == checkpoint.session_len {
-        return Ok(false);
-    }
-    match session.last() {
-        Some(LogEntry::Message(entry))
-            if found == checkpoint.session_len + 1 && *entry.message == *pending =>
-        {
-            Ok(true)
-        }
-        _ => Err(ReconcileError::SessionConflict {
-            expected: checkpoint.session_len,
-            found,
-        }),
     }
 }

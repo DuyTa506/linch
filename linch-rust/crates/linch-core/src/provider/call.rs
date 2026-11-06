@@ -1,4 +1,5 @@
-//! One primary model call: its delivery record, stream assembly and receipt.
+//! One model call (a turn's primary call, or a compaction summary): its
+//! delivery record, stream assembly and receipt.
 //!
 //! The loop runs a call in two steps around the journal barrier.
 //! [`ModelCall::prepare`] builds the [`ModelCallDeliveryEvent`], which must
@@ -30,7 +31,7 @@ mod tests;
 /// Receives each stream-only delta as soon as the provider sends it.
 pub type DeltaSink<'a> = dyn FnMut(PartialAssistantEvent) + Send + 'a;
 
-/// A prepared primary call: the delivery record, waiting to be driven.
+/// A prepared call: the delivery record, waiting to be driven.
 ///
 /// Deliberately not `Clone`: [`ModelCall::drive`] consumes it, so each
 /// delivery settles once. Clone the [`ModelCall::delivery`] record instead.
@@ -86,14 +87,31 @@ impl ModelCall {
     ///     attempt: Delivery attempt for this turn, from 1.
     ///     model: Model the request asks for.
     pub fn prepare(run_id: &RunId, turn: u32, attempt: u32, model: &str) -> Self {
-        let logical_call_id = format!("{run_id}:primary:{turn}");
+        Self::of_kind(ModelCallKind::Primary, run_id, turn, attempt, model)
+    }
+
+    /// Prepare attempt `attempt` of the compaction summary call made
+    /// before `turn`'s primary call: an auxiliary call with its own
+    /// delivery and receipt. The logical call id is
+    /// `{run_id}:compaction:{turn}`; the arguments are as for
+    /// [`ModelCall::prepare`].
+    pub fn prepare_compaction(run_id: &RunId, turn: u32, attempt: u32, model: &str) -> Self {
+        Self::of_kind(ModelCallKind::Compaction, run_id, turn, attempt, model)
+    }
+
+    fn of_kind(kind: ModelCallKind, run_id: &RunId, turn: u32, attempt: u32, model: &str) -> Self {
+        let name = match kind {
+            ModelCallKind::Primary => "primary",
+            ModelCallKind::Compaction => "compaction",
+        };
+        let logical_call_id = format!("{run_id}:{name}:{turn}");
         let delivery_attempt_id = format!("{logical_call_id}:{attempt}");
         Self {
             delivery: ModelCallDeliveryEvent {
                 run_id: run_id.clone(),
                 logical_call_id,
                 delivery_attempt_id,
-                kind: ModelCallKind::Primary,
+                kind,
                 turn_index: Some(u64::from(turn)),
                 requested_model: model.to_owned(),
             },

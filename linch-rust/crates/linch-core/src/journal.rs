@@ -8,8 +8,9 @@
 //!   it. A stream-only event is never stored: it comes back at once, with the
 //!   last durable seq.
 //! - [`Journal::save`] applies the phase rule of BLUEPRINT 13.1.3:
-//!   `Started` and `AssistantReceived` write through, `AwaitingApproval`
-//!   writes through with status `awaiting_approval`, and `ProviderPending`,
+//!   `Started`, `AssistantReceived` and `Compacted` (a paid summary) write
+//!   through, `AwaitingApproval` writes through with status
+//!   `awaiting_approval`, and `ProviderPending`, `CompactionPending`,
 //!   `ToolBatch` and `ToolResults` are held. A held checkpoint is a snapshot:
 //!   it covers only the events pending when it was saved.
 //! - The caller places the barriers: [`Journal::flush`] before a provider
@@ -187,9 +188,14 @@ impl Journal {
     ///     JournalError: If a write-through fails, or the journal is poisoned.
     pub async fn save(&mut self, checkpoint: Checkpoint) -> Result<Vec<Envelope>, JournalError> {
         let status = match checkpoint.phase {
-            Phase::Started { .. } | Phase::AssistantReceived { .. } => None,
+            Phase::Started { .. } | Phase::AssistantReceived { .. } | Phase::Compacted { .. } => {
+                None
+            }
             Phase::AwaitingApproval { .. } => Some(RunStatus::AwaitingApproval),
-            Phase::ProviderPending { .. } | Phase::ToolBatch { .. } | Phase::ToolResults { .. } => {
+            Phase::ProviderPending { .. }
+            | Phase::CompactionPending { .. }
+            | Phase::ToolBatch { .. }
+            | Phase::ToolResults { .. } => {
                 self.check()?;
                 let covers = self.pending.len();
                 self.held = Some(Held { checkpoint, covers });

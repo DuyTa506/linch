@@ -110,10 +110,27 @@ pub enum Phase {
         /// Tool use ids that wait for a decision.
         pending: Vec<String>,
     },
-    /// Tool results are ready; they may not be in the session yet.
+    /// A user message is ready for the next turn: the tool results, or the
+    /// feedback of a `stop` hook that kept the run going. It may not be in
+    /// the session yet.
     ToolResults {
-        /// The user message holding the tool results.
+        /// The user message to append.
         message: Message,
+    },
+    /// A compaction summary call is about to be dispatched, before the
+    /// turn's primary call.
+    CompactionPending {
+        /// Delivery attempt number of the summary call, from 1.
+        attempt: u32,
+    },
+    /// A compaction summary was received; its projection may not be in the
+    /// session yet. The projection is the provider view's first message,
+    /// `summary`, then the view from `keep_from` on.
+    Compacted {
+        /// The summary as a user message.
+        summary: Message,
+        /// Index in the provider view where the kept turns start.
+        keep_from: u64,
     },
 }
 
