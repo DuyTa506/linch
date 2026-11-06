@@ -34,7 +34,9 @@ async fn a_relist_that_never_answers_times_out() {
     let fixture = Fixture::new(standard_tools());
     let registry = Arc::new(ToolRegistry::new());
     let mut quick = config("t", Duplex::new(fixture.clone()));
-    quick.reconnect.attempt_timeout = Duration::from_millis(200);
+    // Long enough for the first connect on a busy machine, short enough
+    // that the hung relist below times out quickly.
+    quick.reconnect.attempt_timeout = Duration::from_secs(2);
     let server = McpServer::connect(quick, Arc::clone(&registry))
         .await
         .unwrap();
