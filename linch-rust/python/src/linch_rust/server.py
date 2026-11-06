@@ -29,7 +29,8 @@ class Server:
 
     Args:
         binary: Path of the server binary; found by `find_server` when absent
-            (`LINCH_SERVER_BIN`, else cargo's target dir).
+            (the wheel's bundled binary, then `LINCH_SERVER_BIN`, then cargo's
+            target dir).
         env: The server's environment, where provider keys such as
             `DEEPSEEK_API_KEY` are read; this process's when absent.
     """
