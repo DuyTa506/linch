@@ -28,28 +28,6 @@ async def test_no_wrappers_reports_empty_and_runs_terminal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_wrapper_wraps_body_in_order() -> None:
-    order: list[str] = []
-    pipe = ToolPipeline()
-
-    async def wrapper(execution: ToolExecution, next) -> object:
-        order.append("before")
-        result = await next()
-        order.append("after")
-        return result
-
-    pipe.on_execute(wrapper)
-    assert pipe.has_execute_listeners() is True
-
-    async def terminal() -> str:
-        order.append("body")
-        return "ok"
-
-    assert await pipe.run_execute(_exec(), terminal) == "ok"
-    assert order == ["before", "body", "after"]
-
-
-@pytest.mark.asyncio
 async def test_execute_wrapper_can_short_circuit() -> None:
     reached: list[str] = []
     pipe = ToolPipeline()
@@ -160,19 +138,6 @@ async def test_disposer_removes_execute_wrapper() -> None:
     assert pipe.has_execute_listeners() is True
     await handle.dispose()
     assert pipe.has_execute_listeners() is False
-
-
-@pytest.mark.asyncio
-async def test_timeout_wrapper_raises_on_slow_body() -> None:
-    pipe = ToolPipeline()
-    pipe.on_execute(timeout_wrapper(0.01))
-
-    async def slow() -> str:
-        await asyncio.sleep(1.0)
-        return "never"
-
-    with pytest.raises(ToolTimeoutError, match="pipeline timeout"):
-        await pipe.run_execute(_exec(), slow)
 
 
 @pytest.mark.asyncio

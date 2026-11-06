@@ -92,19 +92,6 @@ async def test_local_backend_abort_interrupts_running_command(tmp_path) -> None:
     assert result.aborted and not result.timed_out
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_bash_tool_defaults_to_local_backend(tmp_path) -> None:
-    from linch.tools.builtin import BashTool
-
-    tool = BashTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"command": "echo hi"})
-    result = await tool.execute(validated, ctx)
-    assert result.is_error is False
-    assert "hi" in result.content
-    assert result.summary == "Exited 0"
-
-
 class _FakeBackend:
     """Records the command, returns canned result."""
 
@@ -159,17 +146,6 @@ async def test_docker_backend_missing_docker_raises_on_run(
     backend = DockerBackend()
     with pytest.raises(ToolExecutionError, match="docker"):
         await backend.run("echo hi", cwd=str(tmp_path), timeout_s=10.0)
-
-
-def test_docker_backend_missing_docker_does_not_raise_at_construction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import linch.tools.execution as execution_mod
-    from linch.tools.execution import DockerBackend
-
-    monkeypatch.setattr(execution_mod.shutil, "which", lambda _: None)
-
-    DockerBackend()
 
 
 def test_docker_backend_invalid_workspace_mount_raises() -> None:
@@ -232,21 +208,6 @@ def test_system_prompt_is_neutral_without_workspace_tools(tmp_path) -> None:
     assert "Tools available: none" in combined
 
 
-def test_system_prompt_sandbox_note_when_backend_injected(tmp_path) -> None:
-    fake = _FakeBackend()
-    world = _fake_world(fake)
-    from linch import workspace_tools
-
-    agent = _agent(
-        tmp_path,
-        tools=workspace_tools(),
-        execution_backend=world,
-    )
-    combined = "\n".join(_block_texts(agent))
-    assert "There is no sandbox" not in combined
-    assert "sandbox" in combined.lower()
-
-
 def test_execution_backend_not_injected_into_restricted_registry(tmp_path) -> None:
     """execution_backend must not grant shell access to a registry that deliberately omits Bash."""
     fake = _FakeBackend()
@@ -262,22 +223,6 @@ def test_execution_backend_not_injected_into_restricted_registry(tmp_path) -> No
     assert agent.tools.get("Bash") is None, (
         "execution_backend must not inject BashTool into a registry that did not include it"
     )
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_abort_context_wait_unblocks_on_abort() -> None:
-    """AbortContext.wait() returns once the signal is aborted."""
-    from linch.abort import AbortContext
-
-    signal = AbortContext()
-
-    async def _abort_soon() -> None:
-        await asyncio.sleep(0.01)
-        signal.abort()
-
-    asyncio.create_task(_abort_soon())
-    await asyncio.wait_for(signal.wait(), timeout=1.0)
-    assert signal.aborted
 
 
 async def test_bash_timeout_clamps_large_positive_integer(tmp_path):

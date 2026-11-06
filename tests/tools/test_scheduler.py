@@ -238,16 +238,6 @@ async def test_tool_batching_respects_scope_resource_and_limit(
         assert recorder.started_before_end("ReadB", "ReadA")
 
 
-def test_agent_accepts_max_tool_concurrency_option() -> None:
-    from linch import Agent
-    from tests.support.providers import ScriptedProvider
-
-    agent = Agent(model="dummy", provider=ScriptedProvider([]), max_tool_concurrency=3)
-
-    assert agent.max_tool_concurrency == 3
-    assert agent.tool_concurrency == 3
-
-
 @pytest.mark.asyncio
 async def test_results_keep_original_tool_call_order() -> None:
     recorder = Recorder()

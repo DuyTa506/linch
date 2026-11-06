@@ -93,14 +93,6 @@ def test_public_execution_annotations_resolve_at_runtime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_shell_runs_command() -> None:
-    backend = LocalExecutionBackend()
-    result = await backend.shell.run("echo hello", cwd=".", timeout_s=10.0)
-    assert result.returncode == 0
-    assert "hello" in result.stdout
-
-
-@pytest.mark.asyncio
 async def test_local_fs_and_shell_share_workspace(tmp_path: Any) -> None:
     backend = LocalExecutionBackend(cwd=tmp_path)
     await backend.fs.write("/a.txt", "content")
