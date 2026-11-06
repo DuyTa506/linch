@@ -308,7 +308,7 @@ one span of yours.
 | `gen_ai.response.model`, `gen_ai.input.messages` on `chat` | Not set: the stream does not carry them |
 | No cost attribute | `linch.cost_usd` on `chat` and `invoke_agent` |
 | `gen_ai.usage.input_tokens` and the `input` token bucket count uncached input only | Both include the cached tokens, as the GenAI convention says |
-| `trace_id` on run events and `ToolContext.trace_id` | `None`; read `Run.trace_id` |
+| `trace_id` on run events and `ToolContext.trace_id` | `None` on events, and the client's `ToolContext` has none; read `Run.trace_id` |
 | `TraceIdFilter` for log records | Not available |
 | Child runs get spans of their own | A child run has no spans |
 

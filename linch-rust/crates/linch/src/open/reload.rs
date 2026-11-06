@@ -13,7 +13,9 @@ impl OpenedAgent {
     /// session that has a prefix keeps it and is told what changed; a new
     /// session lists the new skills.
     ///
-    /// As at open, a skill named like one of the agent's tools is skipped.
+    /// As at open, a skill named like one of the agent's tools is skipped,
+    /// and the directory is read only when the config turned `skills` on:
+    /// a deep agent with `skills` off gets its built-in skills again.
     ///
     /// Returns:
     ///     The registration whose dispose brings back the skills the agent
@@ -22,7 +24,8 @@ impl OpenedAgent {
     /// Raises:
     ///     BuildError: `Invalid` when the agent was opened without skills.
     pub async fn reload_skills(&self) -> Result<(Registration, Vec<Skipped>), BuildError> {
-        let mut loaded = project::load(self.config_dir.clone(), true, false, &self.tools).await;
+        let dir = self.config_dir.clone();
+        let mut loaded = project::load(dir, self.skills, false, &self.tools).await;
         deep::add_roster(self.deep.as_ref(), &mut loaded);
         let registration = self
             .agent
@@ -34,6 +37,10 @@ impl OpenedAgent {
     /// and make them the agent's (see
     /// [`linch_core::Agent::reload_subagents`]).
     ///
+    /// As at open, the directory is read only when the config turned
+    /// `subagents` on: a deep agent with `subagents` off gets its roster
+    /// again.
+    ///
     /// Returns:
     ///     The registration whose dispose brings back the subagents the
     ///     agent had before, and the subagent files the scan left out.
@@ -42,7 +49,8 @@ impl OpenedAgent {
     ///     BuildError: `Invalid` when the agent was opened without
     ///         subagents.
     pub async fn reload_subagents(&self) -> Result<(Registration, Vec<Skipped>), BuildError> {
-        let mut loaded = project::load(self.config_dir.clone(), false, true, &self.tools).await;
+        let dir = self.config_dir.clone();
+        let mut loaded = project::load(dir, false, self.subagents, &self.tools).await;
         deep::add_roster(self.deep.as_ref(), &mut loaded);
         let definitions = loaded.subagents.unwrap_or_default();
         let registration = self.agent.reload_subagents(definitions)?;

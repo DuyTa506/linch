@@ -1,37 +1,75 @@
-//! [`PgPools`]: one Postgres pool per DSN, shared by the agents opened
-//! with it.
+//! [`PgPools`]: one Postgres pool per connection target, shared by the
+//! agents opened with it.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use linch_postgres::PgPool;
+use sqlx::ConnectOptions;
+use sqlx::postgres::PgConnectOptions;
 use tokio::sync::OnceCell;
 
 use crate::error::OpenError;
 
-/// Postgres pools by DSN, for [`AgentConfig::open_with`]: agents opened
-/// with the same `PgPools` and the same DSN share one pool, connected and
-/// migrated once.
+/// Postgres pools by connection target, for [`AgentConfig::open_with`]:
+/// agents opened with the same `PgPools` and DSNs of one target share one
+/// pool, connected and migrated once.
 ///
 /// A pool stays while an [`OpenedAgent`] that uses it is open; closing
 /// one agent never closes a pool another uses. Once the last one closes,
-/// the next open connects again. DSNs are matched as written, so two
-/// spellings of one database get two pools. A pool has the
-/// `max_connections` of the open that connected it; the others share it
-/// at that size. A server keeps one `PgPools`
-/// for all its connections; [`AgentConfig::open`] uses a fresh one, so
-/// each agent gets its own pool. `Debug` shows no DSN.
+/// the next open connects again. DSNs are matched on where they connect
+/// and as whom, as sqlx reads them: host or socket, port, database, user,
+/// password, startup `options`, `sslmode` and the TLS files. Spellings
+/// that differ only in the order of their parameters, or in the others
+/// (`application_name`, `statement-cache-capacity`, keys sqlx ignores),
+/// share one pool. A pool has the `max_connections`, `application_name`
+/// and cache size of the open that connected it; the others share it as
+/// it is. A server keeps one `PgPools` for all its connections;
+/// [`AgentConfig::open`] uses a fresh one, so each agent gets its own
+/// pool. `Debug` shows no DSN.
 ///
 /// [`AgentConfig::open_with`]: crate::AgentConfig::open_with
 /// [`AgentConfig::open`]: crate::AgentConfig::open
 /// [`OpenedAgent`]: crate::OpenedAgent
 #[derive(Default)]
 pub struct PgPools {
-    pools: Mutex<HashMap<String, Weak<Shared>>>,
+    pools: Mutex<HashMap<Target, Weak<Shared>>>,
+}
+
+/// Where a DSN connects and as whom, as sqlx reads it: the key of its
+/// pool. A DSN sqlx cannot read is its own key; its connect says why.
+#[derive(PartialEq, Eq, Hash)]
+enum Target {
+    Parsed {
+        /// sqlx's URL of the options: host or socket, port, user,
+        /// password (decoded), database, `sslmode` and the TLS files.
+        url: String,
+        /// The startup `options`, which that URL leaves out: they can set
+        /// the `search_path`, and so the tables the pool writes.
+        options: Option<String>,
+    },
+    Raw(String),
+}
+
+impl Target {
+    fn of(dsn: &str) -> Self {
+        let Ok(parsed) = PgConnectOptions::from_str(dsn) else {
+            return Self::Raw(dsn.to_owned());
+        };
+        let options = parsed.get_options().map(str::to_owned);
+        // The URL names the cache size too, which leaves the connection
+        // as it is: like the pool size, the open that connects sets it.
+        let url = parsed.statement_cache_capacity(0).to_url_lossy();
+        Self::Parsed {
+            url: url.into(),
+            options,
+        }
+    }
 }
 
 /// One DSN's pool, set once its connect and migrations succeed. Every
@@ -52,11 +90,12 @@ impl PgPools {
         Self::default()
     }
 
-    /// The pool for `dsn`, connecting it with at most `max_connections`
-    /// ([`linch_postgres::MAX_CONNECTIONS`] when `None`) and applying the
-    /// migrations if no open agent uses one. A pool in use keeps the size
-    /// it was connected with. Concurrent opens of one DSN wait for the
-    /// same connect; a failed connect is tried again by the next open.
+    /// The pool for the target of `dsn`, connecting it with at most
+    /// `max_connections` ([`linch_postgres::MAX_CONNECTIONS`] when `None`)
+    /// and applying the migrations if no open agent uses one. A pool in
+    /// use keeps the size it was connected with. Concurrent opens of one
+    /// target wait for the same connect; a failed connect is tried again
+    /// by the next open.
     pub(crate) async fn get(
         &self,
         dsn: &str,
@@ -69,16 +108,17 @@ impl PgPools {
         Ok((shared, pool))
     }
 
-    /// The slot in use for `dsn`, or a new one. Slots no agent holds any
-    /// more are dropped first.
+    /// The slot in use for the target of `dsn`, or a new one. Slots no
+    /// agent holds any more are dropped first.
     fn slot(&self, dsn: &str) -> Arc<Shared> {
+        let target = Target::of(dsn);
         let mut pools = lock(&self.pools);
         pools.retain(|_, slot| slot.strong_count() > 0);
-        if let Some(shared) = pools.get(dsn).and_then(Weak::upgrade) {
+        if let Some(shared) = pools.get(&target).and_then(Weak::upgrade) {
             return shared;
         }
         let shared = Arc::new(Shared::default());
-        pools.insert(dsn.to_owned(), Arc::downgrade(&shared));
+        pools.insert(target, Arc::downgrade(&shared));
         shared
     }
 }
@@ -161,8 +201,36 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &pools.slot("postgres://db/b")));
         drop(first);
         let _held = pools.slot("postgres://db/c");
-        let dsns: Vec<String> = lock(&pools.pools).keys().cloned().collect();
-        assert_eq!(dsns, ["postgres://db/c"]);
+        assert_eq!(lock(&pools.pools).len(), 1);
         assert_eq!(format!("{pools:?}"), "PgPools { pools: 1 }");
+    }
+
+    #[test]
+    fn the_spellings_of_one_target_share_a_slot() {
+        let pools = PgPools::new();
+        let first = pools.slot("postgres://ada:pw@db:5432/linch?application_name=a1");
+        for same in [
+            "postgres://ada:pw@db/linch?application_name=a2",
+            "postgres://db:5432/linch?statement-cache-capacity=7&user=ada&password=pw",
+            "postgres://ada:p%77@db:5432/linch?unknown=1",
+            "postgres://ada:pw@db:5432/?application_name=a3&dbname=linch",
+        ] {
+            assert!(Arc::ptr_eq(&first, &pools.slot(same)), "{same}");
+        }
+        for other in [
+            "postgres://ada:other@db:5432/linch",
+            "postgres://ada@db:5432/linch",
+            "postgres://bob:pw@db:5432/linch",
+            "postgres://ada:pw@db:5432/other",
+            "postgres://ada:pw@db:5433/linch",
+            "postgres://ada:pw@db2:5432/linch",
+            "postgres://ada:pw@%2Frun%2Fpg/linch",
+            "postgres://ada:pw@db:5432/linch?sslmode=require",
+            "postgres://ada:pw@db:5432/linch?sslrootcert=/ca.pem",
+            "postgres://ada:pw@db:5432/linch?sslcert=/c.pem&sslkey=/k.pem",
+            "postgres://ada:pw@db:5432/linch?options=-c%20search_path%3Dx",
+        ] {
+            assert!(!Arc::ptr_eq(&first, &pools.slot(other)), "{other}");
+        }
     }
 }

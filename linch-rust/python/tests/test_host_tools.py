@@ -6,9 +6,19 @@ import asyncio
 import json
 from typing import Any
 
+import pytest
 from scripted import config, text_turn, tool_turn
 
-from linch_rust import ResultEvent, Server, ToolCallEndEvent, ToolOutput, tool
+from linch_rust import (
+    Agent,
+    Principal,
+    ResultEvent,
+    Server,
+    ToolCallEndEvent,
+    ToolContext,
+    ToolOutput,
+    tool,
+)
 
 
 def tool_ends(envelopes: list[Any]) -> list[ToolCallEndEvent]:
@@ -39,6 +49,29 @@ async def test_a_host_tool_runs_in_the_client_and_the_model_reads_its_value() ->
     [end] = tool_ends(envelopes)
     assert end.tool_use_id == "call_1" and not end.is_error
     assert json.loads(result_text(end)) == {"name": "Ada", "email": "ada@example.com"}
+    assert isinstance(result, ResultEvent) and result.final_text == "Found."
+
+
+async def test_a_host_tool_that_declares_a_context_learns_which_call_it_serves() -> None:
+    seen: list[ToolContext] = []
+
+    @tool(scope="read")
+    async def lookup(email: str, ctx: ToolContext) -> str:
+        """Find a customer by email."""
+        seen.append(ctx)
+        return email
+
+    turns = [tool_turn("call_1", "lookup", {"email": "ada@example.com"}), text_turn("Found.")]
+    principal: Principal = {"tenant": "acme", "user": "ada", "roles": ["support"]}
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup])
+        run = await agent.run("s1", "Who is ada@example.com?", run_id="r1", principal=principal)
+        result = await run.result()
+
+    [ctx] = seen
+    assert (ctx.session_id, ctx.run_id, ctx.tool_use_id) == ("s1", "r1", "call_1")
+    assert ctx.principal == principal
+    assert ctx.idempotency_key == "r1:call_1"
     assert isinstance(result, ResultEvent) and result.final_text == "Found."
 
 
@@ -105,6 +138,55 @@ async def test_cancelling_a_run_cancels_its_host_tool_task() -> None:
         assert not await run.cancel()
 
     assert isinstance(result, ResultEvent) and result.subtype == "aborted"
+
+
+def cancel_before_answer(agent: Agent, call: asyncio.Task[Any], run_id: str) -> None:
+    """Cancel `call` as the answer naming `run_id` arrives, before it is read."""
+    conn = agent._conn  # pyright: ignore[reportPrivateUsage]
+    dispatch = conn._dispatch  # pyright: ignore[reportPrivateUsage]
+
+    def cancel_first(message: dict[str, Any]) -> None:
+        result = message.get("result")
+        if isinstance(result, dict) and result.get("run_id") == run_id:
+            call.cancel()
+        dispatch(message)
+
+    conn._dispatch = cancel_first  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_run_call_cancelled_before_its_answer_cancels_the_run() -> None:
+    wait, _, _ = hanging()
+    turns = [tool_turn("call_1", "wait", {"q": "x"}), text_turn("unused")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[wait])
+        call = asyncio.create_task(agent.run("s1", "Wait", run_id="r1"))
+        cancel_before_answer(agent, call, "r1")
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        # The host tool never returns: only a cancel ends the run.
+        async with asyncio.timeout(10):
+            while not (events := await agent.events("r1")) or not isinstance(
+                events[-1].event, ResultEvent
+            ):
+                await asyncio.sleep(0.01)
+        await agent.close()
+
+    result = events[-1].event
+    assert isinstance(result, ResultEvent) and result.subtype == "aborted"
+
+
+async def test_closing_an_agent_waits_for_the_runs_of_its_cancelled_calls() -> None:
+    wait, started, cancelled = hanging()
+    turns = [tool_turn("call_1", "wait", {"q": "x"}), text_turn("unused")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[wait])
+        call = asyncio.create_task(agent.run("s1", "Wait", run_id="r1"))
+        cancel_before_answer(agent, call, "r1")
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        await asyncio.wait_for(agent.close(), 10)
+        if started.is_set():
+            await asyncio.wait_for(cancelled.wait(), 10)
 
 
 async def test_a_host_tool_timeout_cancels_its_task() -> None:

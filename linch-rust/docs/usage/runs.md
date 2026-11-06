@@ -189,6 +189,12 @@ the stream to see it. It returns `False`, not an error, when the server no
 longer drives the run. An aborted run is finished: its session takes a new run.
 Only the server that drives a run can cancel it.
 
+Cancelling the `run`, `resume` or `approve` call itself (with
+`asyncio.wait_for`, say) before it returns raises `CancelledError` as usual.
+The run the server may have started for it is cancelled as soon as its answer
+arrives, and `agent.close()` waits for that run to end before it frees the
+agent.
+
 ## Resume
 
 `resume(run_id)` continues a run from its last durable state. Use it after

@@ -211,6 +211,9 @@ final: Hello over WebSocket.
 
 - A remote server owns the provider keys: they come from its environment, and
   `Server.connect` takes no `env`. `server.pid` raises `LinchError`.
+- `server.tenant` is the tenant a socket connection acts for, as the login
+  answer names it (`"acme"`). It is `None` over the WebSocket, whose upgrade
+  does not name it, and for a server spawned with `Server()`.
 - Each connection has its own agent handles (`agent-1` is always the
   connection's own) and can cancel only the runs it drives. A Postgres run
   can be resumed or approved from another connection that opens the same

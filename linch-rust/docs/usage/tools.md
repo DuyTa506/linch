@@ -158,6 +158,68 @@ host reads: {'source': 'crm', 'cache': 'hit'}
 A tool error carries no metadata. A `post_tool_use` callback that replaces
 the result gives the event the metadata of its replacement.
 
+### Which call a tool serves
+
+A host tool that declares a parameter named `ctx`, or annotated
+`ToolContext`, gets the call's `ToolContext` there. That parameter is never
+part of the input schema, and a tool that declares none is called with its
+input only. The names are Python Linch's.
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, Server, ToolContext, tool
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+
+@tool(scope="write")
+async def refund(order: str, ctx: ToolContext) -> str:
+    """Refund an order."""
+    print("run:", ctx.run_id, "session:", ctx.session_id, "call:", ctx.tool_use_id)
+    print("acting for:", ctx.principal)
+    print("key:", ctx.idempotency_key)
+    return f"refunded {order}"
+
+
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": MODEL},
+    "provider": {"id": "scripted", "turns": [
+        tool_turn("c1", "refund", {"order": "A-17"}),
+        text_turn("Refunded."),
+    ]},
+    "permissions": {"mode": "skip_dangerous", "project_root": "/"},
+}
+
+
+async def main() -> None:
+    print(refund.spec()["input_schema"]["properties"])
+    async with Server() as server:
+        agent = await server.open_agent(config, tools=[refund])
+        principal = {"tenant": "acme", "user": "ada"}
+        run = await agent.run("s1", "Refund A-17", run_id="r1", principal=principal)
+        print((await run.result()).final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+{'order': {'type': 'string'}}
+run: r1 session: s1 call: c1
+acting for: {'tenant': 'acme', 'user': 'ada', 'roles': []}
+key: r1:c1
+Refunded.
+```
+
+| Field | What it is |
+|---|---|
+| `session_id` | The session that owns the call |
+| `run_id` | The run executing the call |
+| `tool_use_id` | The provider's id of this tool use; a resumed run that calls it again uses the same one |
+| `principal` | Who the run acts for (`tenant`, `user`, `roles`), or `None` |
+| `idempotency_key` | `"<run_id>:<tool_use_id>"`, to deduplicate a side effect that ran before a crash |
+
 ## Scopes
 
 | Scope | Mode `default` | Mode `accept_edits` | Mode `skip_dangerous` | Runs in parallel |

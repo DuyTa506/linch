@@ -9,6 +9,7 @@ import asyncio
 import json
 import shutil
 import signal
+import socket
 import tempfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -41,6 +42,7 @@ from linch_rust import (
     find_server,
     tool,
 )
+from linch_rust._remote import login
 
 __all__ = ["pg_dsn"]
 
@@ -235,6 +237,56 @@ async def test_a_tenant_at_its_connection_cap_is_refused(transport: str) -> None
     assert refused.value.kind == "connections"
 
 
+async def test_a_login_past_the_pending_login_cap_is_refused_as_a_limit() -> None:
+    async with listening() as at:
+        path = at.socket.removeprefix("unix:")
+        # 32 silent connections hold the server's places for a login until
+        # its 10 second timeout, and it refuses the other 8 at once. Wait
+        # for those 8, so no place is still free when the client logs in.
+        held = [await asyncio.open_unix_connection(path) for _ in range(40)]
+        waits = {asyncio.ensure_future(reader.readline()) for reader, _ in held}
+        try:
+            answered = 0
+            while answered < 8:
+                done, waits = await asyncio.wait(
+                    waits, timeout=5, return_when=asyncio.FIRST_COMPLETED
+                )
+                assert done, "the server refused fewer than 8 silent connections"
+                answered += len(done)
+            with pytest.raises(LimitReached) as refused:
+                async with Server.connect(at.socket, token=TOKEN):
+                    pass
+        finally:
+            for wait in waits:
+                wait.cancel()
+            for _, writer in held:
+                writer.close()
+
+    assert (refused.value.kind, refused.value.max) == ("logins", 32)
+
+
+async def test_a_login_the_server_refused_before_the_write_still_reads_its_answer() -> None:
+    # What the real server does past its pending-login cap, in the order
+    # it loses on a fast machine: answer with a null id and close, all
+    # before the client writes its `connection.auth`.
+    client, server = socket.socketpair()
+    refusal = {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32005, "message": "at most 32 logins", "data": {"kind": "logins"}},
+    }
+    server.sendall(json.dumps(refusal).encode() + b"\n")
+    server.close()
+    client.setblocking(False)
+    try:
+        with pytest.raises(LimitReached) as refused:
+            await login(asyncio.get_running_loop(), client, TOKEN)
+    finally:
+        client.close()
+
+    assert refused.value.kind == "logins"
+
+
 async def test_a_postgres_run_suspended_on_the_socket_is_approved_over_the_websocket(
     pg_dsn: str,
 ) -> None:
@@ -259,6 +311,17 @@ async def test_a_postgres_run_suspended_on_the_socket_is_approved_over_the_webso
 
     assert saved == ["hi"]
     assert isinstance(result, ResultEvent) and result.final_text == "Saved."
+
+
+async def test_a_socket_connection_names_its_tenant() -> None:
+    async with listening() as at:
+        async with Server.connect(at.socket, token=TOKEN) as server:
+            assert server.tenant == "acme"
+        # The WebSocket upgrade does not name it.
+        async with Server.connect(at.websocket, token=TOKEN) as server:
+            assert server.tenant is None
+    async with Server() as server:
+        assert server.tenant is None
 
 
 def test_an_address_must_name_a_socket_or_a_websocket() -> None:

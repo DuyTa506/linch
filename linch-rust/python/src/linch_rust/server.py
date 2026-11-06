@@ -114,12 +114,24 @@ class Server:
             raise LinchError("a server reached with Server.connect has no process here")
         return self._process.pid
 
+    @property
+    def tenant(self) -> str | None:
+        """The tenant a `Server.connect` socket connection acts for, as the
+        server named it at login.
+
+        `None` over a WebSocket, whose upgrade does not name it, and for a
+        server spawned here, which has no tenants.
+        """
+        self._started()
+        return self._link.tenant if self._link is not None else None
+
     async def start(self) -> None:
         """Spawn the server, or connect and log in; `async with` calls this.
 
         Raises:
             Unauthenticated: A remote server does not know the token.
-            LimitReached: The tenant holds all its connections.
+            LimitReached: The tenant holds all its connections, or too many
+                connections wait to log in to a remote socket.
             ConnectionClosed: A WebSocket upgrade was refused otherwise.
             OSError: Nothing listens at a remote address.
         """

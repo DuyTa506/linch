@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._rpc import Connection
+from ._rpc import Connection, RunEnd, RunItem
 from .config import Principal
+from .errors import LinchError
 from .events import Envelope, decode_envelope
 from .run import Observer, Run
 
@@ -73,6 +75,8 @@ class Agent:
         self._conn = conn
         # Makes the tracer of each run, resume or approve; None when untraced.
         self._observer = observer
+        # One per call cancelled before its answer: cancels the run it started.
+        self._abandoned: set[asyncio.Task[None]] = set()
 
     async def run(
         self,
@@ -147,15 +151,19 @@ class Agent:
     async def close(self) -> None:
         """Free the agent on the server: its stores and its MCP servers.
 
-        The server disconnects the MCP servers and waits for them first.
-        With memory stores the agent's runs and sessions are gone; with
-        Postgres stores they stay, for another agent of the same config.
+        It first waits for the runs started by a `run`, `resume` or
+        `approve` call that was cancelled before its answer: each such run
+        is cancelled as soon as the server names it. The server disconnects
+        the MCP servers and waits for them first. With memory stores the
+        agent's runs and sessions are gone; with Postgres stores they stay,
+        for another agent of the same config.
 
         Raises:
             AgentNotFound: The agent is already closed.
             RunBusy: A run of the agent is still going on this connection;
                 cancel it or read it to its end first.
         """
+        await asyncio.gather(*self._abandoned)
         await self._conn.request("agent.close", {"agent": self.handle})
         self._conn.unbind(self.handle)
 
@@ -188,8 +196,28 @@ class Agent:
         if principal is not None:
             params["principal"] = dict(principal)
         observer = self._observer() if self._observer is not None else None
-        run_id, queue = await self._conn.request_run(method, params)
+        # Shielded: the server may start the run whatever happens to this
+        # caller, so a cancelled one leaves the answer to `_abandon`.
+        call = asyncio.ensure_future(self._conn.request_run(method, params))
+        try:
+            run_id, queue = await asyncio.shield(call)
+        except asyncio.CancelledError:
+            abandoned = asyncio.create_task(self._abandon(call))
+            self._abandoned.add(abandoned)
+            abandoned.add_done_callback(self._abandoned.discard)
+            raise
         return Run(self._conn, run_id, queue, observer)
+
+    async def _abandon(self, call: asyncio.Future[tuple[str, asyncio.Queue[RunItem]]]) -> None:
+        # Cancel the run a cancelled call started, and read it to its end,
+        # after which `close` may free the agent.
+        try:
+            run_id, queue = await call
+            await self._conn.request("run.cancel", {"run_id": run_id})
+        except LinchError:
+            return  # Refused, so nothing started; or the connection is gone.
+        while not isinstance(await queue.get(), RunEnd):
+            pass
 
 
 def _decision(decision: Decision) -> dict[str, str]:

@@ -106,6 +106,22 @@ fn a_postgres_store_takes_a_pool_size() {
 }
 
 #[tokio::test]
+async fn two_spellings_of_one_target_share_a_pool() {
+    let Some(db) = TestDb::empty("pools_spellings").await else {
+        return;
+    };
+    let pools = PgPools::new();
+    let first = open(&db.dsn, &pools, "one").await;
+    // sqlx ignores an unknown key; the cache size is the pool's to set.
+    let respelled = format!("{}&statement-cache-capacity=50&unknown=1", db.dsn);
+    let second = open(&respelled, &pools, "two").await;
+    assert_eq!(db.connections().await, 1);
+    first.close().await;
+    second.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn agents_on_one_dsn_share_a_pool_that_outlives_each_close() {
     let Some(db) = TestDb::empty("pools_share").await else {
         return;

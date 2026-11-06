@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import pytest
 
-from linch_rust import callback, tool
+from linch_rust import ToolContext, callback, tool
 
 
 def test_the_schema_comes_from_simple_type_hints() -> None:
@@ -64,6 +64,34 @@ def test_an_explicit_schema_name_and_timeout_are_used_as_given() -> None:
         "scope": "exec",
         "timeout_ms": 1500,
     }
+
+
+def test_a_context_parameter_is_left_out_of_the_schema() -> None:
+    @tool(scope="read")
+    async def lookup(email: str, ctx: ToolContext) -> str:
+        return email
+
+    @tool(scope="read")
+    async def audit(note: str, context: ToolContext) -> str:
+        return note
+
+    @tool(scope="exec", input_schema={"type": "object"})
+    async def job(ctx: Any, **input: Any) -> None:
+        return None
+
+    @tool(scope="read")
+    async def plain(email: str) -> str:
+        return email
+
+    assert lookup.input_schema["properties"] == {"email": {"type": "string"}}
+    assert lookup.input_schema["required"] == ["email"]
+    assert audit.input_schema["properties"] == {"note": {"type": "string"}}
+    assert (lookup.context_param, audit.context_param, job.context_param) == (
+        "ctx",
+        "context",
+        "ctx",
+    )
+    assert plain.context_param is None
 
 
 def test_a_tool_needs_a_valid_scope_and_an_async_function() -> None:

@@ -26,7 +26,7 @@ import orjson
 
 from .callbacks import Callback
 from .errors import ConnectionClosed, LinchError, error_from, run_end_error
-from .tools import HostTool, ToolOutput
+from .tools import HostTool, ToolContext, ToolOutput
 
 JsonObject = dict[str, Any]
 # A host tool's or callback's own failure; the code is application-defined.
@@ -242,7 +242,15 @@ class Connection:
             tool = handlers.tools.get(name) if handlers else None
             if tool is None:
                 raise _Refused(_METHOD_NOT_FOUND, f"no host tool {name!r}")
-            output = await tool.fn(**params.get("input", {}))
+            arguments: JsonObject = dict(params.get("input", {}))
+            if tool.context_param is not None:
+                arguments[tool.context_param] = ToolContext(
+                    session_id=str(params.get("session_id", "")),
+                    run_id=str(params.get("run_id", "")),
+                    tool_use_id=str(params.get("tool_use_id", "")),
+                    principal=params.get("principal"),
+                )
+            output = await tool.fn(**arguments)
             if isinstance(output, ToolOutput):
                 return output.wire()
             return {"value": output}
