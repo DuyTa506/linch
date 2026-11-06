@@ -31,7 +31,10 @@ mod tests;
 pub type DeltaSink<'a> = dyn FnMut(PartialAssistantEvent) + Send + 'a;
 
 /// A prepared primary call: the delivery record, waiting to be driven.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Deliberately not `Clone`: [`ModelCall::drive`] consumes it, so each
+/// delivery settles once. Clone the [`ModelCall::delivery`] record instead.
+#[derive(Debug, PartialEq)]
 pub struct ModelCall {
     delivery: ModelCallDeliveryEvent,
 }
