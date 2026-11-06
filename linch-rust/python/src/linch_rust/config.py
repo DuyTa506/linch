@@ -45,6 +45,75 @@ class Filesystem(TypedDict, total=False):
     offload_threshold_tokens: int
 
 
+class DeepAgentProfile(TypedDict):
+    """A deep agent profile written out in full; every key is required.
+
+    Attributes:
+        name: The profile's name.
+        durable: Whether the agent must keep its runs and sessions in
+            Postgres stores.
+        coordinator: Whether the agent runs as a coordinator.
+        max_turns: Most provider calls one run may make, unless the spec
+            sets its own; `None` sets no limit.
+        max_tokens: A token budget across the subagent tree; kept for
+            Python Linch's profiles, not enforced.
+        retain_subagents: Whether a foreground worker stays addressable.
+        enable_background_subagents: Whether a worker may run in the
+            background.
+    """
+
+    name: str
+    durable: bool
+    coordinator: bool
+    max_turns: int | None
+    max_tokens: int | None
+    retain_subagents: bool
+    enable_background_subagents: bool
+
+
+class DeepAgent(TypedDict, total=False):
+    """The deep agent preset: it plans, delegates, and keeps notes.
+
+    Opening it turns on `tasks`, the `Skill` tool with the built-in skills,
+    the `Subagent` tool with the `researcher`, `planner`, `implementer` and
+    `verification` roster, the profile's `workers` and a `filesystem` with
+    file memory, unless the config sets them itself; its instructions go
+    before `spec.system_prompt`. It adds no workspace.
+
+    Attributes:
+        profile: A built-in profile by name, `balanced` (the default),
+            `coordinator` or `unbounded`, or a `DeepAgentProfile`. The
+            built-in ones are durable.
+        durable: Overrides the profile's `durable`; a durable deep agent
+            needs Postgres stores, or the open fails.
+        coordinator: Overrides the profile's `coordinator`.
+    """
+
+    profile: str | DeepAgentProfile
+    durable: bool
+    coordinator: bool
+
+
+class Profile(TypedDict, total=False):
+    """A domain profile: a versioned role the agent's runs take.
+
+    Attributes:
+        id: Stable domain or tenant profile id; not blank.
+        version: Revision of the profile; not blank.
+        system_prompt: Role instructions, after the agent's system prompt.
+        tool_deny: Tools whose calls are always denied, whatever the
+            permission mode says; the model is still offered them.
+        max_turns: Most provider calls one run may make; replaces the
+            spec's. At least 1.
+    """
+
+    id: Required[str]
+    version: Required[str]
+    system_prompt: str
+    tool_deny: Sequence[str]
+    max_turns: int
+
+
 class AgentConfig(TypedDict, total=False):
     """An agent as data: what `Server.open_agent` opens.
 
@@ -87,6 +156,8 @@ class AgentConfig(TypedDict, total=False):
         tasks: Whether the agent has the session task tools (`TaskCreate`,
             `TaskList`, `TaskGet`, `TaskUpdate`), kept in the session store.
             They run without approval in every permission mode.
+        deep_agent: The deep agent preset; see `DeepAgent`.
+        profile: The domain profile its runs take; see `Profile`.
     """
 
     namespace: Required[str]
@@ -104,3 +175,5 @@ class AgentConfig(TypedDict, total=False):
     config_dir: str
     filesystem: Filesystem
     tasks: bool
+    deep_agent: DeepAgent
+    profile: Profile

@@ -14,7 +14,7 @@ this process only for the host tools and callbacks an agent declared::
 from ._binary import find_server
 from .agent import Agent, Allow, Decision, Deny
 from .callbacks import Callback, FailMode, Point, callback
-from .config import AgentConfig, Filesystem, Workers
+from .config import AgentConfig, DeepAgent, DeepAgentProfile, Filesystem, Profile, Workers
 from .errors import (
     AgentNotFound,
     ConnectionClosed,
@@ -68,6 +68,8 @@ __all__ = [
     "ContextBuildEvent",
     "ContractMismatch",
     "Decision",
+    "DeepAgent",
+    "DeepAgentProfile",
     "Deny",
     "Envelope",
     "ErrorEvent",
@@ -84,6 +86,7 @@ __all__ = [
     "PartialAssistantEvent",
     "PermissionRequestEvent",
     "Point",
+    "Profile",
     "PromptBlocked",
     "ProtocolError",
     "ResultEvent",

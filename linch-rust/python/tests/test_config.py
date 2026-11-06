@@ -14,10 +14,12 @@ from linch_rust import (
     Envelope,
     InitEvent,
     OpenError,
+    Profile,
     ResultEvent,
     Server,
     ToolCallEndEvent,
     UserEvent,
+    tool,
 )
 
 TASKS = ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"]
@@ -173,3 +175,55 @@ async def test_the_filesystem_tools_keep_files_for_the_session() -> None:
 
     assert tools_of(envelopes) == ["ls", "read_file", "write_file", "edit_file"]
     assert results(envelopes)[1] == "remember this"
+
+
+DEEP_AGENT_TOOLS = sorted(
+    [*TASKS, "ls", "read_file", "write_file", "edit_file"]
+    + ["Skill", "Subagent", "SubagentContinue", "TaskStop"]
+)
+
+
+async def test_a_deep_agent_plans_with_tasks_and_can_delegate() -> None:
+    turns = [
+        tool_turn("c1", "TaskCreate", {"subject": "Plan", "description": "Steps"}),
+        text_turn("planned"),
+    ]
+    envelopes = await run_once(config(turns, deep_agent={"durable": False}))
+
+    assert sorted(tools_of(envelopes)) == DEEP_AGENT_TOOLS
+    assert results(envelopes) == ["Task #1 created: Plan"]
+    assert final(envelopes).final_text == "planned", "no approval was asked"
+
+
+async def test_a_durable_deep_agent_needs_postgres_stores() -> None:
+    async with Server() as server:
+        with pytest.raises(OpenError) as raised:
+            await server.open_agent(config([], deep_agent={"profile": "balanced"}))
+    assert "Postgres stores" in str(raised.value)
+
+
+async def test_a_profile_denies_its_tools() -> None:
+    seen: list[str] = []
+
+    @tool(scope="read")
+    async def lookup(email: str) -> str:
+        """Find a customer."""
+        seen.append(email)
+        return "Ada"
+
+    turns = [tool_turn("c1", "lookup", {"email": "ada@example.com"}), text_turn("Cannot.")]
+    support: Profile = {"id": "support", "version": "2", "tool_deny": ["lookup"], "max_turns": 5}
+    async with Server() as server:
+        agent = await server.open_agent(config(turns, profile=support), tools=[lookup])
+        envelopes = [e async for e in await agent.run("s1", "Who is ada@example.com?")]
+
+    [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+    assert end.is_error and seen == [], "a denied tool never runs"
+    assert final(envelopes).final_text == "Cannot."
+
+
+async def test_an_invalid_profile_does_not_open() -> None:
+    async with Server() as server:
+        with pytest.raises(OpenError) as raised:
+            await server.open_agent(config([], profile={"id": "", "version": "1"}))
+    assert "profile id must not be blank" in str(raised.value)
