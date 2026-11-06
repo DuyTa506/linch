@@ -209,7 +209,11 @@
 //! ([`ApproveParams`](protocol::ApproveParams)) answers a suspended run's
 //! pending calls and continues it. `decisions` maps each `tool_use_id` (from
 //! the `suspended` envelope's `pending_request_ids`) to
-//! `{"decision": "allow"}` or `{"decision": "deny", "reason": "..."}`.
+//! `{"decision": "allow"}` or `{"decision": "deny", "reason": "..."}`. Only
+//! a run awaiting approval takes it: once an approve has committed its
+//! answers, the same approve sent again (after a dropped connection or a
+//! crash) ends with `-32027` in `run.end` and writes nothing. Continue
+//! that run with `run.resume`, which keeps the committed decisions.
 //!
 //! These three answer [`RunAccepted`](protocol::RunAccepted)
 //! `{"run_id": "..."}` at once, before any notification of that run; the
@@ -331,7 +335,7 @@
 //! | -32024 | journal | `RunError::Journal` |
 //! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}` |
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
-//! | -32027 | not suspended | `RunError::NotSuspended` |
+//! | -32027 | not suspended | `RunError::NotSuspended`: `run.approve` on a run not awaiting approval; after a retried approve, `run.resume` it |
 //! | -32028 | reconcile | `RunError::Reconcile` |
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |

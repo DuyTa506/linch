@@ -81,7 +81,8 @@ pub mod code {
     pub const CONTRACT_MISMATCH: i64 = -32025;
     /// `RunError::Terminal`; `data.status` is the final status.
     pub const TERMINAL: i64 = -32026;
-    /// `RunError::NotSuspended`: approve on a run not awaiting approval.
+    /// `RunError::NotSuspended`: approve on a run not awaiting approval; a
+    /// host that retried an approve continues the run with `run.resume`.
     pub const NOT_SUSPENDED: i64 = -32027;
     /// `RunError::Reconcile`: durable state does not fit together.
     pub const RECONCILE: i64 = -32028;

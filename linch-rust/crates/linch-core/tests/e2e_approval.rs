@@ -306,6 +306,9 @@ async fn an_approve_after_its_answers_were_committed_is_refused_and_resume_conti
             matches!(error, Some(RunError::NotSuspended { .. })),
             "{error:?}"
         );
+        // The message tells a host what to do next.
+        let text = error.unwrap().to_string();
+        assert!(text.contains("resume"), "{text}");
         let after = fixture.stores.runs.load(NS, &run_id).await.unwrap();
         assert_eq!(after.epoch, record.epoch, "refused before the claim");
         assert_eq!(after.last_seq, record.last_seq, "nothing written");
