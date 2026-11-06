@@ -16,10 +16,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod canonical;
 pub mod events;
 pub mod hooks;
 pub mod ids;
+pub mod journal;
 pub mod json;
 pub mod message;
 pub mod permissions;
@@ -28,8 +30,10 @@ pub mod provider;
 pub mod registration;
 pub mod registry;
 pub mod run;
+pub mod runner;
 pub mod scheduler;
 pub mod session_log;
+pub mod store;
 pub mod tool;
 pub mod usage;
 
@@ -59,12 +63,14 @@ pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
     ProviderRequest, ReasoningEffort, StreamError, ToolChoice, ToolDefinition, assemble,
 };
+pub use provider::{Provider, ProviderError, ProviderStream};
 pub use registration::Registration;
 pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
 };
-pub use run::{RunStatus, StopReason};
+pub use run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
 pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
+pub use store::{Commit, Lease, NewRun, RunRecord, RunStore, SessionStore, StoreError};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::message::Message;
+use crate::policy::PermissionDecision;
+use crate::usage::Usage;
+
 /// Why a provider response stopped generating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +63,76 @@ impl RunStatus {
     }
 }
 
+/// A permission outcome recorded for one tool call, so a resumed or approved
+/// run reuses it instead of asking again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolDecisionRecord {
+    /// Provider call id of the tool use.
+    pub tool_use_id: String,
+    /// The recorded decision.
+    pub decision: PermissionDecision,
+}
+
+/// Where a running run is inside its turn. Terminal states live only in
+/// [`RunStatus`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Phase {
+    /// The run was created; the user prompt may not be in the session yet.
+    Started {
+        /// The user message to append.
+        prompt: Message,
+    },
+    /// A provider call is about to be dispatched.
+    ProviderPending {
+        /// Delivery attempt number for this turn, from 1.
+        attempt: u32,
+    },
+    /// A response was received; it may not be in the session yet.
+    AssistantReceived {
+        /// The assembled assistant message.
+        message: Message,
+        /// Why the response stopped.
+        stop_reason: StopReason,
+    },
+    /// The tool calls of the last response are being decided and run.
+    ToolBatch {
+        /// Decisions recorded so far.
+        decisions: Vec<ToolDecisionRecord>,
+        /// Last event seq before the batch; tool starts and ends follow it.
+        after_seq: u64,
+    },
+    /// Suspended until the host approves or denies the pending calls.
+    AwaitingApproval {
+        /// Decisions recorded so far.
+        decisions: Vec<ToolDecisionRecord>,
+        /// Tool use ids that wait for a decision.
+        pending: Vec<String>,
+    },
+    /// Tool results are ready; they may not be in the session yet.
+    ToolResults {
+        /// The user message holding the tool results.
+        message: Message,
+    },
+}
+
+/// Durable progress of a running run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checkpoint {
+    /// Turn index, from 0.
+    pub turn: u32,
+    /// Usage accumulated so far.
+    pub usage: Usage,
+    /// Whether every call so far reported usage.
+    pub usage_complete: bool,
+    /// Session log length this checkpoint expects.
+    pub session_len: u64,
+    /// Position inside the turn.
+    pub phase: Phase,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +168,30 @@ mod tests {
             );
         }
         assert!(Completed.is_terminal() && AwaitingInput.is_awaiting() && !Running.is_terminal());
+    }
+    #[test]
+    fn checkpoint_round_trips_strictly() {
+        let cp = Checkpoint {
+            turn: 1,
+            usage: Usage::default(),
+            usage_complete: true,
+            session_len: 3,
+            phase: Phase::ToolBatch {
+                decisions: vec![ToolDecisionRecord {
+                    tool_use_id: "t1".into(),
+                    decision: PermissionDecision::Allow {},
+                }],
+                after_seq: 7,
+            },
+        };
+        let wire = serde_json::to_value(&cp).unwrap();
+        assert_eq!(wire["phase"]["phase"], "tool_batch");
+        assert_eq!(
+            serde_json::from_value::<Checkpoint>(wire.clone()).unwrap(),
+            cp
+        );
+        let mut extra = wire;
+        extra["phase"]["x"] = 1.into();
+        assert!(serde_json::from_value::<Checkpoint>(extra).is_err());
     }
 }

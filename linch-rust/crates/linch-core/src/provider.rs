@@ -10,10 +10,14 @@
 //! module enforces.
 
 mod assembler;
+pub mod call;
+mod client;
 mod event;
 mod request;
+pub mod scripted;
 
 pub use assembler::{Assembler, AssistantAssembly, StreamError, assemble};
+pub use client::{Provider, ProviderError, ProviderStream};
 pub use event::{
     MessageEndEvent, MessageStartEvent, ProviderEvent, TextDeltaEvent, ThinkingDeltaEvent,
     ToolUseEndEvent, ToolUseInputDeltaEvent, ToolUseStartEvent,
