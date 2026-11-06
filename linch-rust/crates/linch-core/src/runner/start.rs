@@ -9,11 +9,13 @@ use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
 use super::{Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
+use crate::catalog::{self, Catalog};
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, reconcile};
+use crate::message::ContentBlock;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
@@ -53,10 +55,19 @@ pub(super) async fn new_run(
         },
         Err(error) => return Err(error.into()),
     };
-    // Peer messages that waited for the session join the prompt.
+    // Peer messages that waited for the session join the prompt, then the
+    // notice of a catalog change since the session's last run.
     let peers = inbox::drain(&agent, &session_id).await?;
     let mut prompt = prompt;
     prompt.content.extend(inbox::blocks(&peers));
+    let seen = Catalog::of_entries(&entries).map(|known| {
+        let version = catalog::version(&agent);
+        let change = known.change(&catalog::live(&agent));
+        prompt
+            .content
+            .extend(change.map(ContentBlock::CatalogChange));
+        version
+    });
     let lease = Lease {
         namespace,
         run_id: run_id.clone(),
@@ -122,6 +133,7 @@ pub(super) async fn new_run(
         progress,
     );
     runner.family = family;
+    runner.seen = seen;
     let prompt = Step::Prompt {
         prompt,
         appended: false,

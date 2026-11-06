@@ -18,6 +18,7 @@
 
 pub mod agent;
 pub mod canonical;
+pub(crate) mod catalog;
 pub mod compaction;
 pub mod coordination;
 pub mod events;
@@ -61,7 +62,8 @@ pub use journal::{Journal, JournalError, ReconcileError, Recovery, ToolRecovery,
 pub use json::{JsonObject, JsonValue};
 pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,
-    Role, SystemBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultPart, ToolUseBlock,
+    Role, SkillStamp, SystemBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultPart,
+    ToolUseBlock,
 };
 pub use permissions::{
     PermissionCall, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy,
@@ -84,7 +86,7 @@ pub use scheduler::{
     BatchPlan, CallOutcome, ExecuteOptions, PlannedAction, PlannedCall, RecordedApproval,
     RunIdentity, ToolSink,
 };
-pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
+pub use session_log::{LogEntry, MessageEntry, PrefixEntry, ProjectionEntry, SessionLog};
 pub use skills::Skill;
 pub use store::memory::{MemoryRunStore, MemorySessionStore};
 pub use store::{

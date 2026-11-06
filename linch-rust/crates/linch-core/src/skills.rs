@@ -31,7 +31,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::message::{ContentBlock, Message, Role, ToolResultPart};
+use crate::canonical::{self, CanonicalError};
+use crate::message::{ContentBlock, Message, Role, SkillStamp, ToolResultPart};
 
 pub use listing::listing;
 pub use overlay::model_override;
@@ -153,6 +154,26 @@ pub(crate) fn with_builtins(mut skills: Vec<Skill>) -> Vec<Skill> {
     }
     skills.sort_by_key(|skill| skill.name.to_lowercase());
     skills
+}
+
+/// The stamp of each skill the model may invoke, sorted by name: what a
+/// session's catalog records of the skills it was told about.
+///
+/// Raises:
+///     CanonicalError: If a skill cannot be digested.
+pub(crate) fn stamps(skills: &[Skill]) -> Result<Vec<SkillStamp>, CanonicalError> {
+    let mut stamps = Vec::new();
+    for skill in skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+    {
+        let value = serde_json::to_value(skill).expect("a skill serializes");
+        let digest = canonical::digest(&value)?;
+        let name = skill.name.clone();
+        stamps.push(SkillStamp { name, digest });
+    }
+    stamps.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(stamps)
 }
 
 /// Wrap `text` in the `<system-reminder>` envelope.

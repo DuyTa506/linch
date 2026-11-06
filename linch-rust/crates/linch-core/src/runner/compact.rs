@@ -11,8 +11,11 @@
 //!
 //! With skills on, the summary message also carries a `<system-reminder>`
 //! with the body of each skill the model loaded in the session, since the
-//! summary folds their tool results away. The projection logs it, so it is
-//! in the provider view and never in the full history.
+//! summary folds their tool results away. Likewise it carries one notice
+//! that restates every catalog change of the session (see
+//! [`crate::catalog`]); the system blocks and the tools of the request stay
+//! byte-identical. The projection logs both, so they are in the provider
+//! view and never in the full history.
 //!
 //! A summary call that fails, or answers with no text, is not fatal: the
 //! turn goes on uncompacted. Its receipt and `Usage` are written at once,
@@ -21,6 +24,7 @@
 //! then goes on to the turn's primary call and never buys it again.
 
 use crate::agent::RunError;
+use crate::catalog;
 use crate::compaction::{self, estimate_tokens};
 use crate::events::Event;
 use crate::events::kinds::CompactionEvent;
@@ -75,7 +79,10 @@ impl Runner {
             .iter()
             .map(|m| Message::clone(m))
             .collect();
-        let tools = self.snapshot.definitions();
+        let tools = match &self.catalog {
+            Some(catalog) => catalog.tools(None),
+            None => self.snapshot.definitions(),
+        };
         let request = compaction::summary_request(&agent.spec, spec, tools, older);
         let call =
             ModelCall::prepare_compaction(&self.run.run_id, self.turn, attempt, &request.model);
@@ -112,6 +119,12 @@ impl Runner {
             // The bodies the model loaded, which the summary folds away.
             let reminders = skills::reminders(&self.log.full_history());
             (summary.content).extend(reminders.into_iter().map(ContentBlock::text));
+        }
+        if let Some(catalog) = &self.catalog {
+            let restated = catalog.restatement(&catalog::live_skills(&agent));
+            summary
+                .content
+                .extend(restated.map(ContentBlock::CatalogChange));
         }
         let compacted = compaction::replacement(&view, summary.clone(), keep_from);
         self.journal.stage(Event::Compaction(CompactionEvent {

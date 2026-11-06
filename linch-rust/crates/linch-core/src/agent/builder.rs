@@ -203,6 +203,7 @@ impl AgentBuilder {
         let mut features = JsonObject::new();
         let mut built_ins = BuiltIns::default();
         let mut listing = None;
+        let mut skill_stamps = Vec::new();
         let mut overlays = skills::Overlays::new();
         let skills_on = self.skills.is_some();
         if let Some(skills) = self.skills {
@@ -212,6 +213,7 @@ impl AgentBuilder {
                 serde_json::to_value(&skills).map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("skills".into(), value);
             listing = listing_block(&skills);
+            skill_stamps = skills::stamps(&skills)?;
             built_ins.register(&self.tools, Arc::new(SkillTool::new(skills)))?;
         }
         if let Some(mailbox) = &self.mailbox {
@@ -263,6 +265,7 @@ impl AgentBuilder {
             namespace,
             contract,
             system,
+            skill_stamps,
             features,
             skills: skills_on,
             skill_listing: listing,

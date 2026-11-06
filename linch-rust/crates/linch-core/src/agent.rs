@@ -18,7 +18,7 @@ use crate::events::{Envelope, Persistence};
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
-use crate::message::{Message, SystemBlock};
+use crate::message::{Message, SkillStamp, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
@@ -106,9 +106,11 @@ pub(crate) struct AgentInner {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) namespace: String,
     pub(crate) contract: Digest,
-    /// The system blocks of every request: the system prompt, then the
-    /// skill listing.
+    /// The system blocks a new session's prefix takes: the system prompt,
+    /// then the skill listing.
     pub(crate) system: Vec<SystemBlock>,
+    /// The skills the listing in `system` holds, for the prefix.
+    pub(crate) skill_stamps: Vec<SkillStamp>,
     /// What the contract covers beyond the spec, tools and hooks.
     pub(crate) features: JsonObject,
     /// Whether skills are on: the agent registered the `Skill` tool.
@@ -139,14 +141,15 @@ pub(crate) struct AgentInner {
 }
 
 impl AgentInner {
-    /// A request for `messages` with this agent's system blocks and `tools`.
+    /// A request for `messages` with `system` blocks and `tools`.
     pub(crate) fn request(
         &self,
+        system: Vec<SystemBlock>,
         tools: Vec<ToolDefinition>,
         messages: Vec<Message>,
     ) -> ProviderRequest {
         let mut request = self.spec.request(tools, messages);
-        request.system = self.system.clone();
+        request.system = system;
         request
     }
 

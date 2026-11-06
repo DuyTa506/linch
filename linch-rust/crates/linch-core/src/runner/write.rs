@@ -2,27 +2,43 @@
 
 use std::sync::Arc;
 
-use super::turn::{Runner, session_log};
+use super::turn::Runner;
 use crate::agent::RunError;
+use crate::catalog::{self, Catalog};
 use crate::events::Event;
 use crate::events::kinds::UsageEvent;
 use crate::events::model_call::ModelCallReceiptEvent;
 use crate::message::Message;
 use crate::run::{Checkpoint, Phase};
-use crate::session_log::{LogEntry, MessageEntry};
+use crate::session_log::{LogEntry, MessageEntry, SessionLog};
 use crate::store::StoreError;
 use crate::usage::Usage;
 
 impl Runner {
     /// Session write: flush the held checkpoint, then append `message`.
     pub(super) async fn append(&mut self, message: Message) -> Result<(), RunError> {
-        let entry = LogEntry::Message(MessageEntry {
-            message: Arc::new(message.clone()),
-            visible: true,
-            historical: true,
-        });
-        self.write_session(entry).await?;
+        self.write_session(vec![entry(&message)]).await?;
+        if let Some(catalog) = &mut self.catalog {
+            catalog.apply(&message);
+        }
         self.log.append(message, true, true);
+        Ok(())
+    }
+
+    /// Session write: append the run's `prompt`, after the session's
+    /// frozen prefix when the session has none yet (its first prompt).
+    async fn append_opening(&mut self, prompt: Message) -> Result<(), RunError> {
+        if self.catalog.is_some() {
+            return self.append(prompt).await;
+        }
+        let version = catalog::version(&self.agent);
+        let prefix = catalog::prefix(&self.agent, &self.agent.snapshot());
+        let entries = vec![LogEntry::Prefix(prefix.clone()), entry(&prompt)];
+        self.write_session(entries).await?;
+        self.log.record_prefix(prefix);
+        self.log.append(prompt, true, true);
+        self.catalog = Catalog::of(&self.log);
+        self.seen = Some(version);
         Ok(())
     }
 
@@ -34,7 +50,8 @@ impl Runner {
     /// append then conflicts, and the run reads the session again, saves
     /// `Started` at its length and appends there. `moved`: resume found the
     /// session grown already. Either way the prompt lands exactly at the
-    /// checkpoint's `session_len`, so a crash after it reconciles.
+    /// checkpoint's `session_len`, so a crash after it reconciles. The
+    /// session's first prompt carries the frozen prefix in the same write.
     pub(super) async fn append_prompt(
         &mut self,
         prompt: Message,
@@ -43,7 +60,7 @@ impl Runner {
         if moved {
             self.save_started(&prompt).await?;
         }
-        match self.append(prompt.clone()).await {
+        match self.append_opening(prompt.clone()).await {
             Err(RunError::Store(StoreError::Conflict { .. })) => {}
             done => return done,
         }
@@ -51,8 +68,9 @@ impl Runner {
         let entries = sessions.load(namespace, &self.run.session_id).await?;
         self.session_len = entries.len() as u64;
         self.log = session_log(entries);
+        self.catalog = Catalog::of(&self.log);
         self.save_started(&prompt).await?;
-        self.append(prompt).await
+        self.append_opening(prompt).await
     }
 
     async fn save_started(&mut self, prompt: &Message) -> Result<(), RunError> {
@@ -68,19 +86,19 @@ impl Runner {
             replacement: replacement.clone(),
             reason: reason.into(),
         });
-        self.write_session(entry).await?;
+        self.write_session(vec![entry]).await?;
         self.log.record_projection(replacement, reason);
         Ok(())
     }
 
-    /// Flush the held checkpoint, then append `entry` to the stored session.
-    async fn write_session(&mut self, entry: LogEntry) -> Result<(), RunError> {
+    /// Flush the held checkpoint, then append `entries` to the stored
+    /// session in one write.
+    async fn write_session(&mut self, entries: Vec<LogEntry>) -> Result<(), RunError> {
         let ready = self.journal.flush_checkpoint().await?;
         self.outbox.deliver(ready).await;
         let (sessions, namespace) = (&self.agent.sessions, &self.agent.namespace);
         let session = &self.run.session_id;
-        self.session_len =
-            (sessions.append(namespace, session, self.session_len, vec![entry])).await?;
+        self.session_len = (sessions.append(namespace, session, self.session_len, entries)).await?;
         Ok(())
     }
 
@@ -132,4 +150,31 @@ impl Runner {
             }));
         }
     }
+}
+
+/// The log entry of `message`, in both projections.
+fn entry(message: &Message) -> LogEntry {
+    LogEntry::Message(MessageEntry {
+        message: Arc::new(message.clone()),
+        visible: true,
+        historical: true,
+    })
+}
+
+/// The in-memory log of the stored session `entries`.
+pub(crate) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
+    let mut log = SessionLog::new();
+    for entry in entries {
+        match entry {
+            LogEntry::Message(entry) => {
+                let message = Arc::unwrap_or_clone(entry.message);
+                log.append(message, entry.visible, entry.historical);
+            }
+            LogEntry::Projection(entry) => {
+                log.record_projection(entry.replacement, entry.reason);
+            }
+            LogEntry::Prefix(prefix) => log.record_prefix(prefix),
+        }
+    }
+    log
 }

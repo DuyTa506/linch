@@ -102,8 +102,10 @@ impl AgentInner {
         let filter = ChildTools::of(definition);
         let tools = filter.apply(&self.tools.snapshot());
         let mut system = spec::prompt_block(&self.spec);
+        let mut skill_stamps = Vec::new();
         if tools.resolve(SKILL_TOOL).is_some() {
             system.extend(self.skill_listing.clone());
+            skill_stamps = self.skill_stamps.clone();
         }
         system.push(SystemBlock {
             text: format!("User-provided instructions:\n\n{}", definition.body),
@@ -127,6 +129,7 @@ impl AgentInner {
             namespace: self.namespace.clone(),
             contract,
             system,
+            skill_stamps,
             features,
             skills: self.skills,
             skill_listing: self.skill_listing.clone(),

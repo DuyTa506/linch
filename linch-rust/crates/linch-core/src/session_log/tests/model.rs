@@ -25,6 +25,7 @@ fn replay_entries(log: &SessionLog) -> (Vec<Message>, Vec<Message>) {
             LogEntry::Projection(entry) => {
                 derived = entry.replacement.iter().map(|m| (**m).clone()).collect();
             }
+            LogEntry::Prefix(_) => {}
         }
     }
     (full, derived)

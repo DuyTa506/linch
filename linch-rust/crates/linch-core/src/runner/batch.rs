@@ -96,6 +96,7 @@ impl Runner {
         });
         let mut blocks: Vec<ContentBlock> = results.map(ContentBlock::ToolResult).collect();
         blocks.extend(self.notes().await?);
+        blocks.extend(self.catalog_change());
         let message = Message::new(Role::User, blocks);
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),

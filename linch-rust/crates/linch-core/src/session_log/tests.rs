@@ -53,6 +53,26 @@ fn historical_only_message_excluded_from_provider_view() {
 }
 
 #[test]
+fn the_first_prefix_counts_and_no_projection_holds_it() {
+    let mut log = SessionLog::new();
+    assert!(log.prefix().is_none());
+    let prefix = |text: &str| PrefixEntry {
+        system: vec![SystemBlock {
+            text: text.into(),
+            cacheable: true,
+        }],
+        tools: Vec::new(),
+        skills: Vec::new(),
+    };
+    log.record_prefix(prefix("first"));
+    log.append(make_message(0), true, true);
+    log.record_prefix(prefix("second"));
+    assert_eq!(log.prefix(), Some(&prefix("first")));
+    assert_eq!(log.entries().len(), 3);
+    assert_eq!((log.history_count(), log.visible_count()), (1, 1));
+}
+
+#[test]
 fn neither_flag_logs_an_entry_in_no_projection() {
     let mut log = SessionLog::new();
     log.append(make_message(0), false, false);

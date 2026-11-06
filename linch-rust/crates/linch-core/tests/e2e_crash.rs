@@ -145,6 +145,15 @@ async fn check(
 ) {
     let got = messages(stores, "s1").await;
     let results = compare(&got, want, context);
+    // The frozen prefix rides the first prompt's write: logged once, first.
+    let entries = SessionStore::load(stores, NS, &linch_core::SessionId::new("s1"))
+        .await
+        .unwrap();
+    let prefixes: Vec<usize> = (entries.iter().enumerate())
+        .filter(|(_, entry)| matches!(entry, linch_core::LogEntry::Prefix(_)))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(prefixes, [0], "{context}: prefixes at {prefixes:?}");
     let placeholders = results
         .iter()
         .filter(|(_, interrupted)| *interrupted)

@@ -86,11 +86,12 @@ impl Runner {
             self.abort().await?;
             return Ok(Some(None));
         }
-        let notes = self.notes().await?;
+        let mut notes = self.notes().await?;
         if notes.is_empty() {
             // The children ended without an end to report (stopped).
             return Ok(None);
         }
+        notes.extend(self.catalog_change());
         let message = Message::new(Role::User, notes);
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),

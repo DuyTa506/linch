@@ -16,7 +16,8 @@ fn s(id: &str) -> SessionId {
     SessionId::new(id)
 }
 
-/// `s1` after one run: prompt, a call, its results, the answer.
+/// `s1` after one run: its frozen prefix, the prompt, a call, its
+/// results, the answer.
 async fn source() -> (Arc<Stores>, linch_core::Agent, Arc<ScriptedProvider>) {
     let runs = Runs::default();
     let mut turns = script(1, 1, "Echo");
@@ -38,11 +39,11 @@ async fn source() -> (Arc<Stores>, linch_core::Agent, Arc<ScriptedProvider>) {
 async fn a_fork_copies_the_log_and_a_run_on_it_goes_on_from_there() {
     let (stores, agent, provider) = source().await;
     let before = stores.sessions.load(NS, &s("s1")).await.unwrap();
-    assert_eq!(before.len(), 4);
+    assert_eq!(before.len(), 5);
 
     assert_eq!(
         agent.fork_session(&s("s1"), &s("f1"), None).await.unwrap(),
-        4
+        5
     );
     let copied = stores.sessions.load(NS, &s("f1")).await.unwrap();
     assert_eq!(copied, before);
@@ -62,14 +63,14 @@ async fn a_fork_before_an_entry_copies_only_what_precedes_it() {
     let (stores, agent, _) = source().await;
     assert_eq!(
         agent
-            .fork_session(&s("s1"), &s("f1"), Some(1))
+            .fork_session(&s("s1"), &s("f1"), Some(2))
             .await
             .unwrap(),
-        1
+        2
     );
     let copied = stores.sessions.load(NS, &s("f1")).await.unwrap();
-    let [LogEntry::Message(prompt)] = copied.as_slice() else {
-        panic!("one entry: {copied:?}")
+    let [LogEntry::Prefix(_), LogEntry::Message(prompt)] = copied.as_slice() else {
+        panic!("the prefix and the prompt: {copied:?}")
     };
     assert_eq!(prompt.message.text(), "go");
     assert_eq!(
@@ -85,7 +86,7 @@ async fn a_fork_before_an_entry_copies_only_what_precedes_it() {
 #[tokio::test]
 async fn a_fork_inside_a_tool_exchange_is_refused_and_writes_nothing() {
     let (stores, agent, _) = source().await;
-    let error = agent.fork_session(&s("s1"), &s("f1"), Some(2)).await;
+    let error = agent.fork_session(&s("s1"), &s("f1"), Some(3)).await;
     assert!(
         matches!(&error, Err(ForkError::Unpaired(ids)) if ids == "call_0_0"),
         "{error:?}"
@@ -102,8 +103,8 @@ async fn a_fork_with_a_bad_boundary_or_destination_is_refused() {
         async move { agent.fork_session(&s("s1"), &s(dest), before).await }
     };
     assert!(matches!(
-        fork(Some(4), "f1").await,
-        Err(ForkError::Boundary { before: 4, len: 4 })
+        fork(Some(5), "f1").await,
+        Err(ForkError::Boundary { before: 5, len: 5 })
     ));
     assert!(matches!(
         fork(None, "s1").await,

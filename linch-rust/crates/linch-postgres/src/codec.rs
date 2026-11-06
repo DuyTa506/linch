@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use linch_core::{
-    Checkpoint, Digest, Envelope, LogEntry, Message, MessageEntry, ProjectionEntry, RunId,
-    RunStatus, StoreError,
+    Checkpoint, Digest, Envelope, LogEntry, Message, MessageEntry, PrefixEntry, ProjectionEntry,
+    RunId, RunStatus, StoreError,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -141,7 +141,7 @@ pub(crate) fn check_events(
 /// Wire form of a [`LogEntry`] (linch-core defines none yet).
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum EntryWire<M> {
+enum EntryWire<M, P> {
     Message {
         message: M,
         visible: bool,
@@ -151,6 +151,7 @@ enum EntryWire<M> {
         replacement: Vec<M>,
         reason: String,
     },
+    Prefix(P),
 }
 
 pub(crate) fn encode_entry(entry: &LogEntry) -> Result<String, StoreError> {
@@ -164,12 +165,13 @@ pub(crate) fn encode_entry(entry: &LogEntry) -> Result<String, StoreError> {
             replacement: p.replacement.iter().map(|m| &**m).collect(),
             reason: p.reason.clone(),
         },
+        LogEntry::Prefix(p) => EntryWire::Prefix(p),
     };
     serde_json::to_string(&wire).map_err(|e| encode_err("entry")(e.into()))
 }
 
 pub(crate) fn decode_entry(text: &str) -> Result<LogEntry, StoreError> {
-    let wire: EntryWire<Message> =
+    let wire: EntryWire<Message, PrefixEntry> =
         serde_json::from_str(text).map_err(|e| decode_err("entry")(e.into()))?;
     Ok(match wire {
         EntryWire::Message {
@@ -188,6 +190,7 @@ pub(crate) fn decode_entry(text: &str) -> Result<LogEntry, StoreError> {
             replacement: replacement.into_iter().map(Arc::new).collect(),
             reason,
         }),
+        EntryWire::Prefix(prefix) => LogEntry::Prefix(prefix),
     })
 }
 
@@ -215,6 +218,16 @@ mod tests {
         assert!(parse_status("suspended").is_err());
     }
 
+    /// A frozen prefix with one system block, one tool and one skill.
+    fn prefix() -> PrefixEntry {
+        let value = serde_json::json!({
+            "system": [{"text": "Be brief.", "cacheable": true}],
+            "tools": [{"name": "Read", "description": "Read.", "input_schema": {"type": "object"}}],
+            "skills": [{"name": "verify", "digest": "0".repeat(64)}],
+        });
+        serde_json::from_value(value).unwrap()
+    }
+
     #[test]
     fn log_entries_round_trip() {
         let message = Arc::new(Message::user_text("hi"));
@@ -228,6 +241,7 @@ mod tests {
                 replacement: vec![message, Arc::new(Message::assistant_text("ok"))],
                 reason: "compacted".into(),
             }),
+            LogEntry::Prefix(prefix()),
         ];
         for entry in entries {
             let text = encode_entry(&entry).unwrap();
@@ -244,7 +258,9 @@ mod tests {
         let extra = ok.replace(r#""visible""#, r#""extra":1,"visible""#);
         let unknown = ok.replace(r#""type":"message""#, r#""type":"note""#);
         let missing = ok.replace(r#","historical":true"#, "");
-        for bad in [extra, unknown, missing, "not json".into()] {
+        let prefix = encode_entry(&LogEntry::Prefix(prefix())).unwrap();
+        let stray = prefix.replace(r#""tools""#, r#""extra":1,"tools""#);
+        for bad in [extra, unknown, missing, stray, "not json".into()] {
             let error = decode_entry(&bad).unwrap_err();
             let StoreError::Backend(source) = error else {
                 panic!("{bad}: {error:?}");
