@@ -9,7 +9,10 @@
 //!    `ProviderPending` checkpoint, then drive the call (deltas go to the
 //!    caller at once);
 //! 3. stage the receipt, the `Assistant` event and its `Usage`, and write
-//!    them through with `AssistantReceived`;
+//!    them through with `AssistantReceived`. A response the output limit
+//!    cut off before it held any text or whole tool call is not an answer:
+//!    its receipt (rejected) and `Usage` go out with an `OutputLimitError`
+//!    in the failed terminal write, and the session gets nothing;
 //! 4. append the response to the session (the held checkpoint is flushed
 //!    first); a text-only response ends the run unless a `stop` hook keeps
 //!    it going with feedback for the next turn;

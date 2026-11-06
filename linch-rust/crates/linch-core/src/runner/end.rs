@@ -8,6 +8,7 @@ use crate::events::Event;
 use crate::events::kinds::{
     ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent, ResultSubtype,
 };
+use crate::provider::AssistantAssembly;
 use crate::run::{RunStatus, StopReason};
 
 impl Runner {
@@ -50,6 +51,22 @@ impl Runner {
         self.end(RunStatus::Failed, subtype, stop, None).await
     }
 
+    /// The terminal for a response the output limit cut off before it held
+    /// any text or whole tool call (see [`cut_empty`]). Nothing goes into
+    /// the session: there is no answer to log.
+    pub(super) async fn output_limit(&mut self) -> Result<(), RunError> {
+        let error = json!({
+            "name": "OutputLimitError",
+            "message": "the response reached the output token limit before it held any text \
+                        or complete tool call; raise max_output_tokens",
+            "retryable": false,
+        });
+        let error = error.as_object().cloned().unwrap_or_default();
+        self.journal.stage(Event::Error(ErrorEvent { error }));
+        let (subtype, stop) = (ResultSubtype::Error, StopReason::MaxTokens);
+        self.end(RunStatus::Failed, subtype, stop, None).await
+    }
+
     /// The `max_turns` terminal, as Python's `_max_turns_tail` emits it.
     pub(super) async fn max_turns(&mut self, max: u32) -> Result<(), RunError> {
         self.journal.stage(Event::LoopGuard(LoopGuardEvent {
@@ -67,4 +84,15 @@ impl Runner {
         let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
         self.end(RunStatus::Failed, subtype, stop, None).await
     }
+}
+
+/// Whether `assembly` stopped at the output limit with no text and no tool
+/// call: the cut call was dropped, or the model only reasoned. Appending
+/// it would log an answer that says nothing (and a reasoning item with
+/// nothing after it, which some providers refuse on replay).
+pub(super) fn cut_empty(assembly: &AssistantAssembly) -> bool {
+    let message = &assembly.message;
+    assembly.stop_reason == StopReason::MaxTokens
+        && message.text().is_empty()
+        && message.tool_uses().next().is_none()
 }

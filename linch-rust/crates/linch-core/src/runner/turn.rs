@@ -6,11 +6,12 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::Outbox;
+use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
-use crate::events::model_call::ModelCallReceiptEvent;
+use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
 use crate::journal::{Journal, ToolRecovery};
 use crate::message::Message;
 use crate::provider::call::ModelCall;
@@ -286,10 +287,21 @@ impl Runner {
             call.drive(provider, request, &self.cancel, Some(&mut on_delta))
                 .await
         };
-        self.settle(&outcome.receipt);
-        let usage = outcome.receipt.usage;
-        self.journal.stage(Event::ModelCallReceipt(outcome.receipt));
+        let mut receipt = outcome.receipt;
+        self.settle(&receipt);
+        let usage = receipt.usage;
+        let empty = matches!(&outcome.result, Ok(assembly) if cut_empty(assembly));
+        if empty {
+            receipt.disposition = CallDisposition::Rejected;
+        }
+        self.journal.stage(Event::ModelCallReceipt(receipt));
         let failure = match outcome.result {
+            // One terminal write: the paid receipt, usage, error and result.
+            Ok(_) if empty => {
+                self.stage_usage(usage);
+                self.output_limit().await?;
+                return Ok(None);
+            }
             Ok(assembly) => return self.accept(assembly).await.map(Some),
             Err(failure) => failure,
         };
