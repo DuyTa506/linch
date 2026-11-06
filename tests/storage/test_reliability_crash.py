@@ -156,10 +156,14 @@ def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize(
     ("point", "after"),
-    [("feedback", True)],
-    ids=["feedback-after"],
+    # The write committing a turn's end also holds the next dispatch marker;
+    # committed, a retry is a new delivery attempt by design, so only "before".
+    [("feedback", False), ("feedback", True), ("checkpoint", False)],
+    ids=["feedback-before", "feedback-after", "checkpoint-before"],
 )
-@pytest.mark.parametrize("case", ["text_twice"])
+@pytest.mark.parametrize(
+    "case", ["text", "native", "completion", "final_tool", "text_twice", "native_twice"]
+)
 async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
     from linch.events import PromptCacheAdvisoryEvent, event_to_dict
 
@@ -269,9 +273,9 @@ async def test_resume_poisoned_reliability_namespace_fails_closed(raw):
     assert provider.calls == 1
 
 
-@pytest.mark.parametrize("enabled", [False])
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("after", [False])
-@pytest.mark.parametrize("hooked", [True])
+@pytest.mark.parametrize("hooked", [False, True])
 async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hooked):
     from linch import Agent, HookResult, ReliabilityPolicy
     from linch.loop.turn_stopping import INVALID_RESPONSE_DIAGNOSTIC
@@ -315,7 +319,7 @@ async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hoo
 
 
 @pytest.mark.parametrize("kind", ["postgres"])
-@pytest.mark.parametrize("crash", [2])
+@pytest.mark.parametrize("crash", [0, 1, 2])
 async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind, crash):
     from linch import Agent, HookResult, ReliabilityPolicy, ToolPrerequisite
     from linch.tools import tool

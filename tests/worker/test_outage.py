@@ -371,7 +371,7 @@ def test_worker_rejects_single_connection_pool_before_acquisition():
     assert not pool.entered.is_set() and not pool.closed
 
 
-@pytest.mark.parametrize("limit", [-1])
+@pytest.mark.parametrize("limit", [1, -1])
 def test_worker_rejects_invalid_process_run_limit(limit):
     from linch.worker import Worker
 

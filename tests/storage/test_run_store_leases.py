@@ -258,8 +258,16 @@ async def test_malformed_explicit_owner_cannot_bypass_fencing(lease_stores) -> N
     ("mutation", "variant"),
     [
         pytest.param("create_run", "pending", id="create_run"),
+        pytest.param("save_checkpoint", "normal", id="save_checkpoint"),
+        pytest.param("save_checkpoint_with_events", "events", id="save_checkpoint_with_events"),
+        pytest.param("append_event", "normal", id="append_event"),
+        pytest.param("mark_completed", "normal", id="mark_completed"),
         pytest.param("mark_failed", "events", id="mark_failed"),
+        pytest.param("append_events", "events", id="append_events"),
         pytest.param("append_events", "empty", id="append_events_empty"),
+        pytest.param("save", "normal", id="save_snapshot"),
+        pytest.param("delete", "missing", id="delete_snapshot"),
+        pytest.param("prune", "empty", id="prune_snapshots"),
     ],
 )
 async def test_explicit_token_missing_run_is_lease_lost_for_every_mutation(

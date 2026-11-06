@@ -9,8 +9,8 @@ from tests.support.agents import make_agent
 from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 
-@pytest.mark.parametrize("outcome", ["failed"])
-@pytest.mark.parametrize("cleanup_fails", [True])
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "failed"])
+@pytest.mark.parametrize("cleanup_fails", [False, True, "once"])
 async def test_terminal_status_follows_process_cleanup(outcome, cleanup_fails):
     from linch import InMemoryRunStore, empty_tools, tool
     from linch.tools.execution import ExecResult

@@ -57,7 +57,7 @@ def test_inbox_delivery_is_user_only_json_safe_and_detached() -> None:
         InboxDelivery("tuple", _message("bad"), metadata={"tuple": (1, 2)})  # type: ignore[dict-item]
 
 
-@pytest.mark.parametrize(("depth", "reject"), [(101, True)])
+@pytest.mark.parametrize(("depth", "reject"), [(100, False), (101, True)])
 async def test_inbox_delivery_matches_strict_json_depth_boundary(
     inbox_store, depth, reject
 ) -> None:

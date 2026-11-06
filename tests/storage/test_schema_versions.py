@@ -44,7 +44,7 @@ async def pg_schema():
 
 
 @pytest.mark.parametrize("module,name,key,tables", _PG, ids=[row[1] for row in _PG])
-@pytest.mark.parametrize("version", [0])
+@pytest.mark.parametrize("version", [None, 0, 1, 2, 4, 999])
 async def test_postgres_rejects_existing_schema_unchanged(
     pg_schema, module, name, key, tables, version
 ):

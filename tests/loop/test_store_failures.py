@@ -107,7 +107,7 @@ class _FailProviderSnapshotStore:
         raise OSError("provider snapshot failed")
 
 
-@pytest.mark.parametrize("failure", ["checkpoint"])
+@pytest.mark.parametrize("failure", ["checkpoint", "session", "provider"])
 async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure: str) -> None:
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
@@ -338,7 +338,7 @@ async def test_abort_terminal_write_failure_persists_error_pair_before_failed_st
     assert stop.calls == 1
 
 
-@pytest.mark.parametrize("route", ["max_turns", "interrupt"])
+@pytest.mark.parametrize("route", ["budget", "max_turns", "stop", "abort", "interrupt"])
 async def test_each_terminal_route_commits_result_with_status(route: str) -> None:
     from linch import HookResult, RunBudget
     from linch.run_store import InMemoryRunStore

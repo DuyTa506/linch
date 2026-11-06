@@ -73,7 +73,7 @@ def test_unknown_required_version_fails_closed(record_kind: str) -> None:
         (intent_from_dict if record_kind == "intent" else receipt_from_dict)(raw)
 
 
-@pytest.mark.parametrize("value", [-1, "0.2"])
+@pytest.mark.parametrize("value", [True, -1, "0.2", float("nan"), float("inf")])
 def test_invalid_cost_is_rejected(value: Any) -> None:
     from linch.model_calls import _ModelCallError, receipt_from_dict, receipt_to_dict
 
@@ -513,8 +513,8 @@ def _source_projection_for(intent: Any) -> dict[str, Any]:
     )
 
 
-@pytest.mark.parametrize("phase", ["abandoned"])
-@pytest.mark.parametrize("repeat_intent", [False])
+@pytest.mark.parametrize("phase", ["started", "settled", "abandoned", "not_dispatched"])
+@pytest.mark.parametrize("repeat_intent", [False, True])
 async def test_restore_rejects_first_source_after_delivery_phase(
     phase: str,
     repeat_intent: bool,
