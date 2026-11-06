@@ -133,6 +133,25 @@ class Profile(TypedDict, total=False):
     max_turns: int
 
 
+class Principal(TypedDict, total=False):
+    """Who a run acts for, given to `Agent.run`, `resume` and `approve`.
+
+    Permission rules with `role` or `unless_role` match its roles, and a
+    `permission_request` callback's request carries it. Without one, a
+    rule with `role` never matches and one with `unless_role` always does.
+
+    Attributes:
+        tenant: The tenant; not blank. On a remote server it must be the
+            connection's own tenant.
+        user: The user; not blank.
+        roles: The roles the user holds; none when absent.
+    """
+
+    tenant: Required[str]
+    user: Required[str]
+    roles: Sequence[str]
+
+
 class AgentConfig(TypedDict, total=False):
     """An agent as data: what `Server.open_agent` opens.
 

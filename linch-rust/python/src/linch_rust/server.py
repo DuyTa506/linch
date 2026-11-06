@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._binary import find_server
 from ._rpc import Connection
-from .agent import Agent
+from .agent import Agent, Skipped
 from .callbacks import Callback
 from .config import AgentConfig
 from .errors import LinchError
@@ -146,7 +146,12 @@ class Server:
             {host_tool.name: host_tool for host_tool in tools},
             {(declared.point, declared.policy_id): declared for declared in callbacks},
         )
-        return Agent(conn, handle, str(opened["contract"]), _observers(config, telemetry))
+        skipped = [
+            Skipped(str(item["path"]), str(item["reason"]), str(item["detail"]))
+            for item in opened.get("skipped", [])
+        ]
+        observers = _observers(config, telemetry)
+        return Agent(conn, handle, str(opened["contract"]), observers, skipped)
 
     def _started(self) -> tuple[asyncio.subprocess.Process, Connection]:
         if self._process is None or self._conn is None:

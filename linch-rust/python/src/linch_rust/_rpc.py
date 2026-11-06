@@ -92,6 +92,10 @@ class Connection:
         """Route the server's `tool.call` and `hook.call` for `agent` to these."""
         self._agents[agent] = _Handlers(tools, callbacks)
 
+    def unbind(self, agent: str) -> None:
+        """Forget the handlers of a closed agent."""
+        self._agents.pop(agent, None)
+
     async def request(self, method: str, params: JsonObject) -> JsonObject:
         """Call `method` and return its result object."""
         return await self._call(method, params, None)

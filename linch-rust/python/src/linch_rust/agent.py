@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ._rpc import Connection
+from .config import Principal
 from .events import Envelope, decode_envelope
 from .run import Observer, Run
 
@@ -26,6 +27,23 @@ class Deny:
 Decision = Allow | Deny
 
 
+@dataclass(frozen=True)
+class Skipped:
+    """A skill directory or subagent file the agent left out when it opened.
+
+    Attributes:
+        path: The skill directory or subagent file.
+        reason: Why: `missing_skill_md`, `missing_frontmatter`,
+            `invalid_frontmatter`, `io_error`, `name_collision_tool`,
+            `name_collision_skill` or `name_collision`.
+        detail: What exactly is wrong, for a person to read.
+    """
+
+    path: str
+    reason: str
+    detail: str
+
+
 class Agent:
     """An agent the server opened; made by `Server.open_agent`.
 
@@ -37,6 +55,8 @@ class Agent:
         handle: The server's handle for the agent, such as `agent-1`.
         contract: Digest of the spec, tools and callback policies; a run is
             resumed or approved only under the contract it started with.
+        skipped: The skill directories and subagent files of the config
+            directory that were left out, and why; empty when none was.
     """
 
     def __init__(
@@ -45,14 +65,23 @@ class Agent:
         handle: str,
         contract: str,
         observer: Callable[[], Observer | None] | None = None,
+        skipped: Sequence[Skipped] = (),
     ) -> None:
         self.handle = handle
         self.contract = contract
+        self.skipped = list(skipped)
         self._conn = conn
         # Makes the tracer of each run, resume or approve; None when untraced.
         self._observer = observer
 
-    async def run(self, session_id: str, prompt: str, *, run_id: str | None = None) -> Run:
+    async def run(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        run_id: str | None = None,
+        principal: Principal | None = None,
+    ) -> Run:
         """Start a run of `prompt` in a session, which is created when missing.
 
         A session has at most one run that is not terminal; starting another
@@ -64,6 +93,8 @@ class Agent:
             run_id: The new run's id, so it can be resumed even if this call
                 never returns; the server picks one when absent. An id
                 already stored ends the run with a `RunError` (-32023).
+            principal: Who the run acts for, matched by permission rules
+                with `role` or `unless_role`; none when absent.
 
         Returns:
             The started run; iterate it or await `Run.result()`.
@@ -74,16 +105,24 @@ class Agent:
         params: dict[str, Any] = {"agent": self.handle, "session_id": session_id, "prompt": prompt}
         if run_id is not None:
             params["run_id"] = run_id
-        return await self._start("run.start", params)
+        return await self._start("run.start", params, principal)
 
-    async def resume(self, run_id: str) -> Run:
+    async def resume(self, run_id: str, *, principal: Principal | None = None) -> Run:
         """Continue a run after a crash or a dropped stream.
 
-        A run waiting for approval suspends again.
+        A run waiting for approval suspends again. `principal` is who the
+        rest of the run acts for, as in `run`.
         """
-        return await self._start("run.resume", {"agent": self.handle, "run_id": run_id})
+        params: dict[str, Any] = {"agent": self.handle, "run_id": run_id}
+        return await self._start("run.resume", params, principal)
 
-    async def approve(self, run_id: str, decisions: Mapping[str, Decision]) -> Run:
+    async def approve(
+        self,
+        run_id: str,
+        decisions: Mapping[str, Decision],
+        *,
+        principal: Principal | None = None,
+    ) -> Run:
         """Answer a suspended run's pending calls and continue it.
 
         Only a run waiting for an approval takes it. Sent again after its
@@ -96,13 +135,29 @@ class Agent:
             decisions: An `Allow()` or `Deny(reason)` per `tool_use_id` from
                 the `suspended` event's `pending_request_ids`; a pending call
                 with no decision is asked again.
+            principal: Who the rest of the run acts for, as in `run`.
 
         Returns:
             The continued run.
         """
         wire = {call: _decision(decision) for call, decision in decisions.items()}
-        params = {"agent": self.handle, "run_id": run_id, "decisions": wire}
-        return await self._start("run.approve", params)
+        params: dict[str, Any] = {"agent": self.handle, "run_id": run_id, "decisions": wire}
+        return await self._start("run.approve", params, principal)
+
+    async def close(self) -> None:
+        """Free the agent on the server: its stores and its MCP servers.
+
+        The server disconnects the MCP servers and waits for them first.
+        With memory stores the agent's runs and sessions are gone; with
+        Postgres stores they stay, for another agent of the same config.
+
+        Raises:
+            AgentNotFound: The agent is already closed.
+            RunBusy: A run of the agent is still going on this connection;
+                cancel it or read it to its end first.
+        """
+        await self._conn.request("agent.close", {"agent": self.handle})
+        self._conn.unbind(self.handle)
 
     async def close_session(self, session_id: str) -> None:
         """Tell the agent this client is done with a session.
@@ -129,7 +184,9 @@ class Agent:
         answer = await self._conn.request("run.events", params)
         return [decode_envelope(raw) for raw in answer["events"]]
 
-    async def _start(self, method: str, params: dict[str, Any]) -> Run:
+    async def _start(self, method: str, params: dict[str, Any], principal: Principal | None) -> Run:
+        if principal is not None:
+            params["principal"] = dict(principal)
         observer = self._observer() if self._observer is not None else None
         run_id, queue = await self._conn.request_run(method, params)
         return Run(self._conn, run_id, queue, observer)

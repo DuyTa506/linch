@@ -12,13 +12,14 @@ this process only for the host tools and callbacks an agent declared::
 """
 
 from ._binary import find_server
-from .agent import Agent, Allow, Decision, Deny
+from .agent import Agent, Allow, Decision, Deny, Skipped
 from .callbacks import Callback, FailMode, Point, callback
 from .config import (
     AgentConfig,
     DeepAgent,
     DeepAgentProfile,
     Filesystem,
+    Principal,
     Profile,
     ToolSearch,
     Workers,
@@ -98,6 +99,7 @@ __all__ = [
     "OpenError",
     "PartialAssistantEvent",
     "PermissionRequestEvent",
+    "Principal",
     "Point",
     "Profile",
     "PromptBlocked",
@@ -112,6 +114,7 @@ __all__ = [
     "Scope",
     "Server",
     "SessionBusy",
+    "Skipped",
     "SkillCompletedEvent",
     "SkillInvokedEvent",
     "SubagentEvent",
