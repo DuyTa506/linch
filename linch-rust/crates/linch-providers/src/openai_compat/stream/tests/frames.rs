@@ -54,12 +54,50 @@ async fn an_error_frame_with_an_http_code_keeps_that_status() {
 }
 
 #[tokio::test]
+async fn a_string_code_or_type_maps_to_the_status_openai_sends_for_it() {
+    for (error, status, retryable) in [
+        (
+            json!({"message": "m", "type": "invalid_request_error", "code": "context_length_exceeded"}),
+            400,
+            false,
+        ),
+        (
+            json!({"message": "m", "type": "invalid_request_error", "code": "invalid_api_key"}),
+            401,
+            false,
+        ),
+        (
+            json!({"message": "m", "type": "invalid_request_error", "code": null}),
+            400,
+            false,
+        ),
+        (
+            json!({"message": "m", "type": "tokens", "code": "rate_limit_exceeded"}),
+            429,
+            true,
+        ),
+        (
+            json!({"message": "m", "type": "server_error", "code": null}),
+            500,
+            true,
+        ),
+    ] {
+        let err = last_error(run_with(None, &error_frame(error.clone())).await);
+        assert!(
+            matches!(&err, ProviderError::Status { status: s, retry_after: None, .. } if *s == status),
+            "{error}: {err:?}"
+        );
+        assert_eq!(err.retryable(), retryable, "{error}");
+    }
+}
+
+#[tokio::test]
 async fn an_error_frame_without_an_http_code_is_a_transport_error() {
-    // OpenAI's shape: a string code.
-    let sse = error_frame(json!({"message": "boom", "type": "server_error", "code": "x"}));
+    // OpenAI's shape, with a code and a type it does not document.
+    let sse = error_frame(json!({"message": "boom", "type": "new_error", "code": "x"}));
     let err = last_error(run_with(None, &sse).await);
     assert!(
-        matches!(&err, ProviderError::Transport { message } if message == "stream error: server_error: boom"),
+        matches!(&err, ProviderError::Transport { message } if message == "stream error: new_error: boom"),
         "{err:?}"
     );
     let bare = format!("data: {}\n\n", json!({"error": "Unauthorized"}));

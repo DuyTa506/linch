@@ -11,6 +11,7 @@ use linch_core::provider::{
 };
 use linch_core::{JsonValue, ProviderError, ProviderEvent, StopReason, Usage};
 
+use super::http;
 use crate::sse::Decoder;
 pub(crate) use crate::sse::events;
 
@@ -209,9 +210,10 @@ fn stop_reason(reason: &str) -> Result<StopReason, ProviderError> {
     }
 }
 
-/// An error frame (`{"error": {...}}`) sent after the stream started. A
-/// numeric `code` that is an HTTP error status keeps that status, so
-/// retrying follows the server's own classification.
+/// An error frame (`{"error": {...}}`) sent after the stream started. Its
+/// `code` or `type` gives the HTTP status the same error has outside a
+/// stream (see [`http::stream_status`]), so retrying follows the server's
+/// own classification; an unknown error is a retryable transport error.
 fn stream_error(error: &JsonValue) -> ProviderError {
     let text = |key: &str| error.get(key).and_then(JsonValue::as_str);
     let detail = text("message")
@@ -221,12 +223,7 @@ fn stream_error(error: &JsonValue) -> ProviderError {
         Some(kind) => format!("stream error: {kind}: {detail}"),
         None => format!("stream error: {detail}"),
     };
-    let status = error
-        .get("code")
-        .and_then(JsonValue::as_u64)
-        .and_then(|code| u16::try_from(code).ok())
-        .filter(|code| (400..=599).contains(code));
-    match status {
+    match http::stream_status(error.get("code"), text("type")) {
         Some(status) => ProviderError::Status {
             status,
             retry_after: None,

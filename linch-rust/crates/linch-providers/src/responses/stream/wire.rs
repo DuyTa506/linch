@@ -68,8 +68,11 @@ pub(super) struct IncompleteDetails {
     pub reason: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub(super) struct WireError {
+    /// The error type, which the nested `error` frame shape carries.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub code: Option<JsonValue>,
     #[serde(default)]

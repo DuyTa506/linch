@@ -14,12 +14,13 @@ use linch_core::provider::{
 use linch_core::{JsonValue, ProviderError, ProviderEvent, StopReason};
 use serde_json::json;
 
+use crate::openai_compat::http;
 use crate::sse::Decoder;
 pub(crate) use crate::sse::events;
 
 mod wire;
 
-use wire::{Item, WireEvent, WireResponse, usage};
+use wire::{Item, WireError, WireEvent, WireResponse, usage};
 
 /// The `provider_metadata` key the response id and output items live under.
 pub(crate) const METADATA_KEY: &str = "openai_responses";
@@ -106,16 +107,15 @@ impl Translator {
             }
             "response.failed" => {
                 let error = event.response.and_then(|response| response.error);
-                let (code, message) =
-                    error.map_or((None, None), |error| (error.code, error.message));
-                return Err(failure("response failed", code, message));
+                return Err(failure("response failed", error));
             }
             "error" => {
-                let (code, message) = match event.error {
-                    Some(error) => (error.code, error.message),
-                    None => (event.code, event.message),
-                };
-                return Err(failure("stream error", code, message));
+                let error = event.error.unwrap_or(WireError {
+                    kind: None,
+                    code: event.code,
+                    message: event.message,
+                });
+                return Err(failure("stream error", Some(error)));
             }
             _ => {}
         }
@@ -255,16 +255,30 @@ fn metadata(id: Option<String>, output: Option<Vec<JsonValue>>) -> Option<linch_
     json!({ METADATA_KEY: entry }).as_object().cloned()
 }
 
-fn failure(what: &str, code: Option<JsonValue>, message: Option<String>) -> ProviderError {
+/// A failed response or an error event. Its code or type gives the HTTP
+/// status the same error has outside a stream, so it retries alike; an
+/// unknown error is a retryable transport error.
+fn failure(what: &str, error: Option<WireError>) -> ProviderError {
+    let WireError {
+        kind,
+        code,
+        message,
+    } = error.unwrap_or_default();
+    let status = http::stream_status(code.as_ref(), kind.as_deref());
     let code = match code {
         Some(JsonValue::String(code)) => code,
         Some(JsonValue::Null) | None => "unknown".into(),
         Some(other) => other.to_string(),
     };
-    transport(format!(
-        "{what}: {code}: {}",
-        message.unwrap_or_default().trim()
-    ))
+    let message = format!("{what}: {code}: {}", message.unwrap_or_default().trim());
+    match status {
+        Some(status) => ProviderError::Status {
+            status,
+            retry_after: None,
+            message,
+        },
+        None => transport(message),
+    }
 }
 
 fn transport(message: String) -> ProviderError {

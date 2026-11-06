@@ -175,6 +175,45 @@ async fn refusal_text_ends_with_refusal() {
 }
 
 #[tokio::test]
+async fn failures_retry_only_when_the_same_error_over_http_would() {
+    let failed = |code: &str| {
+        let error = json!({"code": code, "message": "m"});
+        frames(&[terminal(
+            "response.failed",
+            json!({"status": "failed", "error": error}),
+        )])
+    };
+    for (code, status, retryable) in [
+        ("invalid_prompt", 400, false),
+        ("image_too_large", 400, false),
+        ("rate_limit_exceeded", 429, true),
+        ("server_error", 500, true),
+        ("vector_store_timeout", 504, true),
+    ] {
+        let err = last_error(run(&failed(code), 64).await);
+        assert!(
+            matches!(&err, ProviderError::Status { status: s, retry_after: None, .. } if *s == status),
+            "{code}: {err:?}"
+        );
+        assert_eq!(err.retryable(), retryable, "{code}");
+    }
+    // The nested shape names the error type when the code is not known.
+    let nested = frames(&[json!({"type": "error", "error": {
+        "type": "invalid_request_error", "code": "context_length_exceeded", "message": "too long",
+    }})]);
+    let err = last_error(run(&nested, 64).await);
+    assert!(
+        matches!(&err, ProviderError::Status { status: 400, message, .. }
+            if message == "stream error: context_length_exceeded: too long"),
+        "{err:?}"
+    );
+    let typed = frames(&[json!({"type": "error", "error": {
+        "type": "invalid_request_error", "code": null, "message": "bad",
+    }})]);
+    assert!(!last_error(run(&typed, 64).await).retryable());
+}
+
+#[tokio::test]
 async fn failed_response_and_error_events_fail_the_call() {
     let failed = frames(&[terminal(
         "response.failed",
@@ -182,7 +221,7 @@ async fn failed_response_and_error_events_fail_the_call() {
     )]);
     let err = last_error(run(&failed, 64).await);
     assert!(
-        matches!(&err, ProviderError::Transport { message }
+        matches!(&err, ProviderError::Status { status: 500, message, .. }
             if message == "response failed: server_error: The model failed."),
         "{err:?}"
     );

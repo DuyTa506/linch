@@ -261,8 +261,8 @@ async fn an_error_frame_after_200_fails_the_stream() {
         .await;
     server.join().unwrap();
     assert!(
-        matches!(results.as_slice(), [Err(ProviderError::Transport { message })]
-            if message == "stream error: server_error: The server had an error"),
+        matches!(results.as_slice(), [Err(err @ ProviderError::Status { status: 500, message, .. })]
+            if message == "stream error: server_error: The server had an error" && err.retryable()),
         "{results:?}"
     );
 }

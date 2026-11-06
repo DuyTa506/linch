@@ -97,6 +97,49 @@ pub(crate) fn status_error(
     }
 }
 
+/// The HTTP status for an error sent inside a 200 stream, so it retries
+/// like the same error outside a stream: `code` when it is an HTTP error
+/// status, else the status OpenAI answers with for that string `code`,
+/// else for the error `type`. `None` when none of them is known.
+pub(crate) fn stream_status(code: Option<&JsonValue>, kind: Option<&str>) -> Option<u16> {
+    code.and_then(JsonValue::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+        .filter(|code| (400..=599).contains(code))
+        .or_else(|| code.and_then(JsonValue::as_str).and_then(known_status))
+        .or_else(|| kind.and_then(known_status))
+}
+
+/// OpenAI's error codes and types, including the Responses
+/// `response.error.code` values, by the HTTP status they come with.
+fn known_status(name: &str) -> Option<u16> {
+    Some(match name {
+        "invalid_request_error"
+        | "context_length_exceeded"
+        | "invalid_prompt"
+        | "invalid_image"
+        | "invalid_image_format"
+        | "invalid_base64_image"
+        | "invalid_image_url"
+        | "invalid_image_mode"
+        | "image_too_large"
+        | "image_too_small"
+        | "image_parse_error"
+        | "image_content_policy_violation"
+        | "image_file_too_large"
+        | "image_file_not_found"
+        | "unsupported_image_media_type"
+        | "empty_image_file"
+        | "failed_to_download_image" => 400,
+        "invalid_api_key" | "authentication_error" => 401,
+        "model_not_found" => 404,
+        // Quota runs out with a 429 over HTTP too, so it retries alike.
+        "rate_limit_exceeded" | "insufficient_quota" => 429,
+        "server_error" => 500,
+        "vector_store_timeout" => 504,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
