@@ -84,11 +84,13 @@ flowchart LR
   same epoch; a write with a stale epoch raises `LeaseLostError`.
 - Run state is group-committed at barriers. Checkpoints and events are held
   in the per-run buffer and committed in one `save_checkpoint_with_events()`
-  write before the next external effect: provider dispatch, each tool start
-  and end, session-store writes, and terminals. Paid receipts and projections
-  are written as soon as they exist. A held checkpoint is a snapshot of its
-  save, so every committed state is one that writing through would also have
-  produced.
+  write before the next external effect: provider dispatch, each tool start,
+  session-store writes, and terminals. Paid receipts, projections and tool
+  ends are written as soon as they exist. A tool's end event is flushed right
+  after the tool returns, so a crash before that flush resumes the call as
+  interrupted, without re-running it, although its effect happened. A held
+  checkpoint is a snapshot of its save, so every committed state is one that
+  writing through would also have produced.
 - Durable run events have a per-run sequence. A reader reconnects with
   `PostgresRunStore.load_events(run_id, after_seq=...)`; notifications are
   wakeups, not the source of truth.
