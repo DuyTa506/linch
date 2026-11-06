@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use linch_core::{
     Agent, AgentBuilder, Hooks, MemoryRunStore, MemorySessionStore, PermissionEngine,
-    PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore,
+    PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore, Tool,
     ToolRegistry,
 };
 use linch_mcp::McpServer;
@@ -83,7 +83,10 @@ impl AgentConfig {
         let provider = provider(self.provider)?;
         let reads = Arc::new(ReadTracker::new());
         let root = match self.workspace {
-            Some(root) => Some(register_workspace(&tools, root, Arc::clone(&reads)).await?),
+            Some(root) => {
+                let reads = Arc::clone(&reads);
+                Some(register_workspace(&tools, root, reads, self.bash).await?)
+            }
             None => None,
         };
         let policy = self.permissions.unwrap_or_else(|| {
@@ -222,12 +225,13 @@ async fn disconnect(servers: Vec<McpServer>) {
     }
 }
 
-/// Register the six workspace tools over `root`, sharing `reads`; returns
-/// the canonical root as a string.
+/// Register the workspace tools over `root`, sharing `reads`, with `Bash`
+/// only when `bash` is on; returns the canonical root as a string.
 async fn register_workspace(
     tools: &ToolRegistry,
     root: PathBuf,
     reads: Arc<ReadTracker>,
+    bash: bool,
 ) -> Result<String, OpenError> {
     // `LocalFs::new` canonicalizes the root: blocking file system calls.
     let fs = match tokio::task::spawn_blocking(move || LocalFs::new(root)).await {
@@ -236,7 +240,8 @@ async fn register_workspace(
     };
     let fs = Arc::new(fs);
     let canonical = fs.root().display().to_string();
-    for tool in workspace_tools(fs, reads) {
+    let wanted = |tool: &Arc<dyn Tool>| bash || tool.name() != "Bash";
+    for tool in workspace_tools(fs, reads).into_iter().filter(wanted) {
         // The registry lives as long as the agent; the handle is not needed.
         let _ = tools.register(tool)?;
     }
