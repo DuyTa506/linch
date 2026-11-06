@@ -202,6 +202,25 @@ fn a_stored_turn_is_replayed_verbatim_and_not_rebuilt() {
     assert_eq!(body["input"], items);
 }
 
+/// A call the output limit cut off was dropped from the turn, so no result
+/// answers it; its stored item is not sent back.
+#[test]
+fn a_stored_call_the_turn_dropped_is_not_replayed() {
+    let items = json!([{"id": "fc_1", "type": "function_call", "call_id": "c1",
+                        "name": "get_weather", "arguments": "{}", "status": "completed"},
+                       {"id": "fc_2", "type": "function_call", "call_id": "c2",
+                        "name": "get_weather", "arguments": "{\"ci", "status": "incomplete"}]);
+    let mut turn = Message::new(Role::Assistant, vec![call("c1")]);
+    turn.provider_metadata = json!({stream::METADATA_KEY: {"output": items}})
+        .as_object()
+        .cloned();
+    let body = body(&ProviderRequest {
+        messages: vec![turn],
+        ..request(MODEL)
+    });
+    assert_eq!(body["input"], json!([items[0]]));
+}
+
 #[test]
 fn tool_outputs_come_before_user_parts_and_images_use_input_image() {
     let image = ImageBlock {

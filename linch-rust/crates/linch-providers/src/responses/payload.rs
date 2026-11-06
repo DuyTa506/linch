@@ -98,8 +98,9 @@ fn input(messages: &[Message]) -> Result<Vec<JsonValue>, ProviderError> {
 }
 
 /// A turn this adapter produced is replayed from its stored output items,
-/// which keeps reasoning items next to the calls they led to. Any other
-/// assistant turn is rebuilt from its blocks.
+/// which keeps reasoning items next to the calls they led to. A stored call
+/// the turn does not hold is left out: the output limit cut it off, so no
+/// result answers it. Any other assistant turn is rebuilt from its blocks.
 fn assistant(message: &Message, out: &mut Vec<JsonValue>) -> Result<(), ProviderError> {
     let stored = message
         .provider_metadata
@@ -108,7 +109,13 @@ fn assistant(message: &Message, out: &mut Vec<JsonValue>) -> Result<(), Provider
         .and_then(|entry| entry.get("output"))
         .and_then(JsonValue::as_array);
     if let Some(items) = stored {
-        out.extend(items.iter().cloned());
+        let held = |item: &&JsonValue| {
+            item["type"] != "function_call"
+                || message
+                    .tool_uses()
+                    .any(|call| item["call_id"] == call.id.as_str())
+        };
+        out.extend(items.iter().filter(held).cloned());
         return Ok(());
     }
     let mut text = String::new();
