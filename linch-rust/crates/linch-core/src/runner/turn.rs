@@ -23,8 +23,14 @@ use crate::usage::Usage;
 
 /// What the run does next.
 pub(super) enum Step {
-    /// Append the prompt unless `appended`, then start the turn.
-    Prompt { prompt: Message, appended: bool },
+    /// Append the prompt unless `appended`, then start the turn. `moved`:
+    /// the session grew since the `Started` checkpoint, which is saved
+    /// again at the current length before the append.
+    Prompt {
+        prompt: Message,
+        appended: bool,
+        moved: bool,
+    },
     /// Compact the provider view if it passed the threshold, with summary
     /// delivery `attempt`, after staging the `abandoned` receipt of an
     /// unsettled earlier attempt; then dispatch.
@@ -165,9 +171,13 @@ impl Runner {
     pub(super) async fn drive(mut self, mut step: Step) -> Result<(), RunError> {
         loop {
             let next = match step {
-                Step::Prompt { prompt, appended } => {
+                Step::Prompt {
+                    prompt,
+                    appended,
+                    moved,
+                } => {
                     if !appended {
-                        self.append(prompt).await?;
+                        self.append_prompt(prompt, moved).await?;
                     }
                     Some(self.turn_start())
                 }

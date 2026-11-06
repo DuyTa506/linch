@@ -10,6 +10,7 @@ use crate::events::model_call::ModelCallReceiptEvent;
 use crate::message::Message;
 use crate::run::{Checkpoint, Phase};
 use crate::session_log::{LogEntry, MessageEntry};
+use crate::store::StoreError;
 use crate::usage::Usage;
 
 impl Runner {
@@ -23,6 +24,36 @@ impl Runner {
         self.write_session(entry).await?;
         self.log.append(message, true, true);
         Ok(())
+    }
+
+    /// Session write: append the run's prompt at the `Started`
+    /// checkpoint's length, so a crash after it reconciles as appended.
+    ///
+    /// When the session `moved` since that checkpoint, `Started` is saved
+    /// again at the current length first. When another run on the session
+    /// appends first, `Started` is saved at the new length and the conflict
+    /// is returned: resume appends the prompt after that run's entries
+    /// instead of in the middle of its turn, which would break it.
+    pub(super) async fn append_prompt(
+        &mut self,
+        prompt: Message,
+        moved: bool,
+    ) -> Result<(), RunError> {
+        if moved {
+            let phase = Phase::Started {
+                prompt: prompt.clone(),
+            };
+            self.save(phase).await?;
+        }
+        let conflict = match self.append(prompt.clone()).await {
+            Err(RunError::Store(conflict @ StoreError::Conflict { .. })) => conflict,
+            done => return done,
+        };
+        let (sessions, namespace) = (&self.agent.sessions, &self.agent.namespace);
+        let entries = sessions.load(namespace, &self.run.session_id).await?;
+        self.session_len = entries.len() as u64;
+        self.save(Phase::Started { prompt }).await?;
+        Err(conflict.into())
     }
 
     /// Session write: flush the held checkpoint, then append the

@@ -15,7 +15,7 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use session::{appended, projected, unchanged};
+use session::{appended, projected, prompt_appended, unchanged};
 
 /// Result text for a tool that started but has no durable end.
 pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a result was \
@@ -26,10 +26,15 @@ pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a
 #[derive(Debug, Clone, PartialEq)]
 pub enum Recovery {
     /// `Started`: append the prompt unless `appended`, then dispatch.
+    ///
+    /// Unlike the other pending appends, a session that moved on since the
+    /// checkpoint (another run on the session appended first) is not a
+    /// conflict: the prompt is not in it, and goes at its current end.
     Started {
         /// The user prompt.
         prompt: Message,
-        /// Whether the prompt is already in the session.
+        /// Whether the prompt is already in the session, at the
+        /// checkpoint's `session_len`.
         appended: bool,
     },
     /// `ProviderPending` without an accepted receipt: write `abandoned`, if
@@ -166,7 +171,7 @@ pub fn reconcile(
 ) -> Result<Recovery, ReconcileError> {
     match &checkpoint.phase {
         Phase::Started { prompt } => Ok(Recovery::Started {
-            appended: appended(checkpoint, session, prompt)?,
+            appended: prompt_appended(checkpoint, session, prompt)?,
             prompt: prompt.clone(),
         }),
         Phase::ProviderPending { attempt } => {

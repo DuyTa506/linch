@@ -36,12 +36,15 @@ pub(super) async fn new_run(
     }
     let session_id = options.session_id;
     let prompt = hooks::submit(&agent, &outbox, &session_id, &run_id, prompt).await?;
-    let entries = match agent.sessions.load(&namespace, &session_id).await {
+    let sessions = &agent.sessions;
+    let entries = match sessions.load(&namespace, &session_id).await {
         Ok(entries) => entries,
-        Err(StoreError::NotFound { .. }) => {
-            agent.sessions.create(&namespace, &session_id).await?;
-            Vec::new()
-        }
+        // When another run created the session first, this run still saw it
+        // empty: the prompt append decides which run goes first.
+        Err(StoreError::NotFound { .. }) => match sessions.create(&namespace, &session_id).await {
+            Ok(()) | Err(StoreError::Conflict { .. }) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        },
         Err(error) => return Err(error.into()),
     };
     let lease = Lease {
@@ -98,6 +101,7 @@ pub(super) async fn new_run(
     let prompt = Step::Prompt {
         prompt,
         appended: false,
+        moved: false,
     };
     runner.drive(prompt).await
 }
@@ -137,7 +141,12 @@ pub(super) async fn continue_run(
     let (assistant_seq, turn) = turn_events(&events);
     let mut commit = None;
     let step = match reconcile(checkpoint, &events, &entries)? {
-        Recovery::Started { prompt, appended } => Step::Prompt { prompt, appended },
+        Recovery::Started { prompt, appended } => Step::Prompt {
+            prompt,
+            appended,
+            // Another run on the session appended after the checkpoint.
+            moved: !appended && entries.len() as u64 != checkpoint.session_len,
+        },
         Recovery::Redispatch { attempt, abandoned } => Step::Dispatch { attempt, abandoned },
         Recovery::Received {
             message,

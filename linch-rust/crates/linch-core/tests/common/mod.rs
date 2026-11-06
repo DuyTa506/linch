@@ -279,6 +279,9 @@ pub struct Stores {
     pub runs: MemoryRunStore,
     pub sessions: MemorySessionStore,
     pub log: Mutex<Vec<Write>>,
+    /// Yield to the executor after every session load and append, so runs
+    /// driven together interleave there (memory stores never wait).
+    pub interleave: bool,
 }
 
 impl Stores {
@@ -322,7 +325,9 @@ impl SessionStore for Stores {
         self.landed(result, Write::Setup)
     }
     async fn load(&self, ns: &str, session: &SessionId) -> Result<Vec<LogEntry>, StoreError> {
-        SessionStore::load(&self.sessions, ns, session).await
+        let result = SessionStore::load(&self.sessions, ns, session).await;
+        self.yield_now().await;
+        result
     }
     async fn append(
         &self,
@@ -332,7 +337,16 @@ impl SessionStore for Stores {
         entries: Vec<LogEntry>,
     ) -> Result<u64, StoreError> {
         let result = self.sessions.append(ns, session, expected, entries).await;
+        self.yield_now().await;
         self.landed(result, Write::Append)
+    }
+}
+
+impl Stores {
+    async fn yield_now(&self) {
+        if self.interleave {
+            tokio::task::yield_now().await;
+        }
     }
 }
 

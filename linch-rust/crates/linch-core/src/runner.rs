@@ -23,6 +23,10 @@
 //! A new run's prompt passes `user_prompt_submit` before anything is
 //! written; a blocked prompt creates no run. Hooks are never barriers.
 //!
+//! Two runs on one session take turns at the prompt: the run whose prompt
+//! append loses saves `Started` at the session's new length and ends with
+//! the conflict, and its resume appends the prompt there.
+//!
 //! A tool turn with `k` started tools costs `3 + 2k` run writes and 2 session
 //! writes. The core spawns no task: [`RunStream`] holds the run future and
 //! polls it only while the caller polls the stream.

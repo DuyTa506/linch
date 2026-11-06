@@ -132,16 +132,7 @@ fn a_pending_session_append_is_checked_against_the_log() {
     let pending = Message::user_text("pending");
     let other = Message::user_text("other");
     type Expect = fn(bool) -> Recovery;
-    let phases: [(Phase, Expect); 3] = [
-        (
-            Phase::Started {
-                prompt: pending.clone(),
-            },
-            |appended| Recovery::Started {
-                prompt: Message::user_text("pending"),
-                appended,
-            },
-        ),
+    let phases: [(Phase, Expect); 2] = [
         (
             Phase::AssistantReceived {
                 message: pending.clone(),
@@ -175,6 +166,48 @@ fn a_pending_session_append_is_checked_against_the_log() {
         for (log, expected) in cases {
             assert_eq!(reconcile(&cp, &[], &log), expected, "{:?}", cp.phase);
         }
+    }
+}
+
+#[test]
+fn a_started_prompt_is_found_at_its_slot_or_goes_after_other_runs() {
+    let prompt = Message::user_text("pending");
+    let other = Message::user_text("other");
+    let cp = checkpoint(Phase::Started {
+        prompt: prompt.clone(),
+    });
+    let landed = |extra: &[&Message]| {
+        let mut log = session(LEN, None);
+        log.push(entry(&prompt));
+        log.extend(extra.iter().map(|m| entry(m)));
+        log
+    };
+    let projection = LogEntry::Projection(crate::session_log::ProjectionEntry {
+        replacement: vec![Arc::new(prompt.clone())],
+        reason: "compaction".into(),
+    });
+    let mut projected = session(LEN, None);
+    projected.push(projection);
+    let started = |appended| {
+        Ok(Recovery::Started {
+            prompt: prompt.clone(),
+            appended,
+        })
+    };
+    let cases = [
+        (session(LEN, None), started(false)),
+        (landed(&[]), started(true)),
+        // Another run on the session appended after the prompt landed.
+        (landed(&[&other, &other]), started(true)),
+        // Another run appended first: the prompt is not in the session,
+        // even when an identical message came later.
+        (session(LEN + 1, Some(&other)), started(false)),
+        (session(LEN + 2, Some(&prompt)), started(false)),
+        (projected, started(false)),
+        (session(LEN - 1, None), conflict(LEN - 1)),
+    ];
+    for (log, expected) in cases {
+        assert_eq!(reconcile(&cp, &[], &log), expected, "{} entries", log.len());
     }
 }
 
