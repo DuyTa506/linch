@@ -274,22 +274,24 @@ async fn open(config: Value, tools: Arc<ToolRegistry>) -> Result<linch::OpenedAg
 }
 
 /// What one run delivered.
+#[derive(Default)]
 struct Ran {
     compactions: usize,
     turns: usize,
+    final_chars: usize,
 }
 
 /// Drive one run to its end; fails unless it ends with `success`.
 async fn run_once(agent: &Agent, session: &str, prompt: &str) -> Result<Ran, String> {
     let mut stream = agent.run(prompt, RunOptions::new(session));
-    let mut ran = Ran {
-        compactions: 0,
-        turns: 0,
-    };
+    let mut ran = Ran::default();
     let (mut subtype, mut tool_error) = (None, None);
     while let Some(item) = stream.next().await {
         match item.map_err(err)?.event {
-            Event::Result(done) => subtype = Some(done.subtype),
+            Event::Result(done) => {
+                ran.final_chars = done.final_text.as_deref().map_or(0, str::len);
+                subtype = Some(done.subtype);
+            }
             Event::Compaction(_) => ran.compactions += 1,
             Event::Assistant(_) => ran.turns += 1,
             Event::ToolCallEnd(end) if end.result.is_error => {
@@ -315,10 +317,7 @@ async fn timed_runs(
     before: &dyn Fn() -> Result<(), String>,
 ) -> Result<(Clock, Ran), String> {
     let mut clock = Clock::default();
-    let mut last = Ran {
-        compactions: 0,
-        turns: 0,
-    };
+    let mut last = Ran::default();
     for i in 0..runs(job)? {
         before()?;
         let timed = i >= count(job, "warmup")?;
@@ -469,7 +468,12 @@ async fn case_decode(job: &Value) -> Outcome {
         provider["store"] = false.into();
     }
     let config = config(job, provider)?;
-    let (clock, _) = open_and_time(job, config, no_tools(), &nothing).await?;
+    let (clock, last) = open_and_time(job, config, no_tools(), &nothing).await?;
+    let expected = count(job, "expect_chars")?;
+    if last.final_chars != expected {
+        let decoded = last.final_chars;
+        return Err(format!("decoded {decoded} characters, expected {expected}"));
+    }
     let extra = json!({"bytes_per_iter": job["stream_bytes"]});
     Ok(clock.ok(job["stream_events"].as_f64().unwrap_or(1.0), "event", extra))
 }

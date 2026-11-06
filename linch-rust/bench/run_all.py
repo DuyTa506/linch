@@ -338,6 +338,7 @@ class Runner:
             "stream_bytes": info["bytes"],
             "stream_events": info["events"],
             "stream_sha256": info["sha256"],
+            "expect_chars": info["text_chars"],
         }
 
     def env_for(self, case: str) -> dict[str, str]:

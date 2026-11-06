@@ -69,7 +69,9 @@ def _text(turn: dict) -> str:
     return "".join(e.get("text", "") for e in turn["events"] if e["type"] == "text_delta")
 
 
-def echo_tool(spec: dict):
+def echo_tool(spec: dict, reply: str | None = None):
+    """Echo returns its `value`; with `reply` (the live `get_weather`) it
+    answers that template with `{city}` filled in."""
     from linch import ToolResult
 
     class Echo:
@@ -86,6 +88,8 @@ def echo_tool(spec: dict):
             return self.name
 
         async def execute(self, input, ctx) -> ToolResult:
+            if reply is not None:
+                return ToolResult(content=reply.replace("{city}", input.get("city", "there")))
             return ToolResult(content=input["value"])
 
     return Echo()
@@ -223,7 +227,7 @@ async def timed_runs(job: Job, agent, before=None) -> Clock:
         if before is not None:
             before()
         clock.start()
-        await run_once(agent)
+        clock.last = await run_once(agent)
         clock.stop()
     return clock
 
@@ -341,7 +345,216 @@ async def case_startup(job: Job) -> Result:
     }
 
 
+def decode_provider(job: Job):
+    """The vendor's adapter pointed at the loopback replay server."""
+    import os
+
+    import linch
+
+    vendor, url, key = job["vendor"], job["base_url"], "bench-dummy-key"
+    if vendor == "deepseek":
+        options = linch.DeepSeekProviderOptions(api_key=key, base_url=url)
+        return linch.DeepSeekProvider(options)
+    if vendor == "openai-chat":
+        options = linch.OpenAIChatProviderOptions(api_key=key, base_url=url)
+        return linch.OpenAIChatCompletionsProvider(options)
+    if vendor == "openai-responses":
+        options = linch.OpenAIResponsesProviderOptions(api_key=key, base_url=url)
+        return linch.OpenAIResponsesProvider(options)
+    if vendor == "anthropic":
+        options = linch.AnthropicProviderOptions(api_key=key, base_url=url)
+        return linch.AnthropicProvider(options)
+    # GeminiProviderOptions has no base URL; google-genai reads this one.
+    os.environ["GOOGLE_GEMINI_BASE_URL"] = job["gemini_base_url"]
+    return linch.GeminiProvider(linch.GeminiProviderOptions(api_key=key))
+
+
+async def case_decode(job: Job) -> Result:
+    from linch import ToolRegistry
+
+    agent = build_agent(job, decode_provider(job), tools=ToolRegistry())
+    try:
+        clock = await timed_runs(job, agent)
+    finally:
+        await agent.close()
+    text = next(e.final_text for e in clock.last if type(e).__name__ == "ResultEvent") or ""
+    if len(text) != job["expect_chars"]:
+        raise RuntimeError(f"decoded {len(text)} characters, expected {job['expect_chars']}")
+    return ok(
+        clock, job["stream_events"], "event", peak_rss_mb(), bytes_per_iter=job["stream_bytes"]
+    )
+
+
+async def case_worker(job: Job) -> Result:
+    """Enqueue N one-turn runs; a Worker in this process drains them."""
+    import asyncpg
+
+    from linch import ToolRegistry
+    from linch.worker import Worker, enqueue_run, install
+
+    jobs, runs = job["jobs"], job["warmup"] + job["iterations"]
+    pool = await asyncpg.create_pool(job["pg_dsn"], min_size=2, max_size=10)
+    provider = FixtureProvider(load_turns(job["fixture"]) * jobs * runs)
+
+    async def factory(work):
+        return build_agent(
+            job,
+            provider,
+            tools=ToolRegistry(),
+            run_store=work.run_store,
+            session_store=work.session_store,
+        )
+
+    clock = Clock()
+    try:
+        await install(pool)
+        worker = Worker(pool, factory, worker_id="bench")
+        serving = asyncio.create_task(worker.run())
+        try:
+            for i in range(runs):
+                timed = i >= job["warmup"]
+                if timed:
+                    clock.start()
+                ids = [await enqueue_run(pool, f"i{i}-j{j}", "go") for j in range(jobs)]
+                await drain(pool, ids)
+                if timed:
+                    clock.stop()
+        finally:
+            worker.stop()
+            await serving
+    finally:
+        await pool.close()
+    return ok(clock, jobs, "job", peak_rss_mb(), runs_total=jobs * runs)
+
+
+async def drain(pool, ids: list[str]) -> None:
+    """Wait until every run in `ids` is terminal; fail if one did not complete."""
+    import time
+
+    live = ("pending", "running", "waiting_permission", "suspended")
+    deadline = time.monotonic() + 120
+    while True:
+        row = await pool.fetchrow(
+            "SELECT count(*) FILTER (WHERE status = ANY($2::text[])) AS left, "
+            "count(*) FILTER (WHERE status <> 'completed' AND NOT status = ANY($2::text[])) "
+            "AS failed FROM runs WHERE id = ANY($1::text[])",
+            ids,
+            list(live),
+        )
+        if row["failed"]:
+            raise RuntimeError(f"{row['failed']} queued runs did not complete")
+        if row["left"] == 0:
+            return
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"{row['left']} queued runs still live after 120 s")
+        await asyncio.sleep(0.002)
+
+
+async def case_workflow(job: Job) -> Result:
+    """A workflow of N journaled steps; the journal is the run store."""
+    from linch import InMemorySessionStore, ToolRegistry
+    from linch.ext.workflow import run_workflow
+
+    run_store, _ = stores(job)
+    agent = build_agent(
+        job,
+        FixtureProvider([]),
+        tools=ToolRegistry(),
+        run_store=run_store,
+        session_store=InMemorySessionStore(),
+    )
+    steps = job["steps"]
+
+    async def flow(wf):
+        total = 0
+        for i in range(steps):
+            total += await wf.step("step", lambda i=i: i)
+        return total
+
+    clock = Clock()
+    runs = job["warmup"] + job["iterations"]
+    try:
+        for i in range(runs):
+            timed = i >= job["warmup"]
+            if timed:
+                clock.start()
+            total = await run_workflow(agent, flow, run_id=f"wf-{i}")
+            if timed:
+                clock.stop()
+            if total != sum(range(steps)):
+                raise RuntimeError(f"workflow returned {total!r}")
+    finally:
+        await close_all(agent, run_store)
+    return ok(clock, steps, "step", peak_rss_mb(), runs_total=runs)
+
+
+async def case_evals(job: Job) -> Result:
+    from linch.ext.evals import EvalCase, run_eval, text_contains
+
+    with open(job["fixture"]) as handle:
+        fixture = json.load(handle)
+    cases = [EvalCase(prompt=c["prompt"], expected=c["expected"]) for c in fixture["cases"]]
+    runs = job["warmup"] + job["iterations"]
+    agent = build_agent(job, FixtureProvider(fixture["turns"] * runs))
+    clock = Clock()
+    try:
+        for i in range(runs):
+            timed = i >= job["warmup"]
+            if timed:
+                clock.start()
+            result = await run_eval(agent, cases, [text_contains("{expected}")])
+            if timed:
+                clock.stop()
+            if result.passed != result.total:
+                raise RuntimeError(f"{result.passed} of {result.total} cases passed")
+    finally:
+        await agent.close()
+    return ok(clock, len(cases), "case", peak_rss_mb())
+
+
+async def case_live(job: Job) -> Result:
+    """The W5 live prompts on DeepSeek; the key is read from the environment."""
+    import os
+
+    from linch import (
+        AssistantEvent,
+        DeepSeekProvider,
+        DeepSeekProviderOptions,
+        ToolRegistry,
+    )
+
+    options = DeepSeekProviderOptions(
+        api_key=os.environ["DEEPSEEK_API_KEY"], thinking="disabled", effort=None
+    )
+    tools = ToolRegistry()
+    tools.register(echo_tool(job["tool"], reply=job["tool_reply"]))
+    agent = build_agent(
+        job,
+        DeepSeekProvider(options),
+        tools=tools,
+        max_turns=job["spec"]["max_turns"],
+        max_output_tokens=job["spec"]["max_output_tokens"],
+    )
+    clock = Clock()
+    turns = 0
+    try:
+        for prompt in job["prompts"]:
+            clock.start()
+            events = await run_once(agent, prompt)
+            clock.stop()
+            turns += sum(isinstance(e, AssistantEvent) for e in events)
+    finally:
+        await agent.close()
+    per_run = turns / max(len(job["prompts"]), 1)
+    return ok(clock, per_run, "turn", peak_rss_mb(), turns=turns)
+
+
 CASES = {
+    "decode": case_decode,
+    "worker": case_worker,
+    "workflow": case_workflow,
+    "evals": case_evals,
+    "live": case_live,
     "loop": case_loop,
     "pg_loop": case_loop,
     "tools": case_tools,

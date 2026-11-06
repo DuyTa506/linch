@@ -18,7 +18,17 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "python" / "src"))
 
-from common import Clock, Job, Result, load_turns, main, ok, peak_rss_mb, proc_hwm_mb  # noqa: E402
+from common import (  # noqa: E402
+    Clock,
+    Job,
+    Result,
+    load_turns,
+    main,
+    na,
+    ok,
+    peak_rss_mb,
+    proc_hwm_mb,
+)
 
 
 def lr():
@@ -28,15 +38,20 @@ def lr():
     return linch_rust
 
 
-def echo_tool(spec: dict):
+def echo_tool(spec: dict, reply: str | None = None):
+    """Echo as a host tool; with `reply` (the live `get_weather`) it answers
+    that template with `{city}` filled in."""
+
     @lr().tool(
         scope="read",
         name=spec["name"],
         description=spec["description"],
         input_schema=spec["input_schema"],
     )
-    async def echo(value: str) -> str:
-        return value
+    async def echo(**input: str) -> str:
+        if reply is not None:
+            return reply.replace("{city}", input.get("city", "there"))
+        return input["value"]
 
     return echo
 
@@ -45,6 +60,7 @@ def config(job: Job, provider: dict, **extra) -> dict:
     spec = {"model": job["model"], "system_prompt": job["system"]}
     if job.get("max_tool_concurrency") is not None:
         spec["max_tool_concurrency"] = job["max_tool_concurrency"]
+    spec.update(job.get("spec", {}))
     out = {
         "namespace": "bench",
         "spec": spec,
@@ -86,7 +102,7 @@ async def timed_runs(job: Job, agent, server, before=None) -> Clock:
         if before is not None:
             before()
         clock.start()
-        await run_once(agent, f"s{i}")
+        clock.last = await run_once(agent, f"s{i}")
         clock.stop()
     return clock
 
@@ -207,7 +223,56 @@ async def case_startup(job: Job) -> Result:
     }
 
 
+async def case_decode(job: Job) -> Result:
+    """A one-turn run whose stream is the vendor's replayed SSE stream."""
+    provider = {"id": job["vendor"], "base_url": job["base_url"]}
+    if job["vendor"] == "openai-responses":
+        provider["store"] = False
+    async with lr().Server(binary=job["server_bin"]) as server:
+        agent = await server.open_agent(config(job, provider))
+        clock = await timed_runs(job, agent, server)
+        memory = rss(server)
+    text = next(e.event.final_text for e in clock.last if e.event.type == "result") or ""
+    if len(text) != job["expect_chars"]:
+        raise RuntimeError(f"decoded {len(text)} characters, expected {job['expect_chars']}")
+    peak = memory.pop("peak_rss_mb")
+    extra = {"bytes_per_iter": job["stream_bytes"], **memory}
+    return ok(clock, job["stream_events"], "event", peak, **extra)
+
+
+async def case_live(job: Job) -> Result:
+    """The W5 live prompts on DeepSeek; the sidecar reads the key from its
+    environment, which is this process's."""
+    tool = echo_tool(job["tool"], reply=job["tool_reply"])
+    turns = 0
+    async with lr().Server(binary=job["server_bin"]) as server:
+        agent = await server.open_agent(config(job, {"id": "deepseek"}), tools=[tool])
+        clock = Clock(lambda: [server.pid])
+        for i, prompt in enumerate(job["prompts"]):
+            clock.start()
+            envelopes = await run_once(agent, f"live-{i}", prompt)
+            clock.stop()
+            turns += sum(e.event.type == "assistant" for e in envelopes)
+        memory = rss(server)
+    per_run = turns / max(len(job["prompts"]), 1)
+    return ok(clock, per_run, "turn", memory.pop("peak_rss_mb"), turns=turns, **memory)
+
+
+async def not_in_client(job: Job) -> Result:
+    what = {
+        "worker": "the worker queue (linch-worker)",
+        "workflow": "workflows (linch-ext)",
+        "evals": "evals (linch-ext)",
+    }[job["case"]]
+    return na(f"{what} is Rust-only: neither linch-server nor the client exposes it")
+
+
 CASES = {
+    "decode": case_decode,
+    "live": case_live,
+    "worker": not_in_client,
+    "workflow": not_in_client,
+    "evals": not_in_client,
     "loop": case_loop,
     "pg_loop": case_loop,
     "tools": case_tools,

@@ -83,6 +83,7 @@ class Clock:
     def __init__(self, extra_pids: Callable[[], list[int]] = list) -> None:
         self.wall_ms: list[float] = []
         self.cpu_ms = 0.0
+        self.last: list = []  # the last timed run's events, for checks
         self._extra = extra_pids
         self._start = 0.0
         self._cpu = 0.0
