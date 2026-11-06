@@ -192,14 +192,15 @@ ends at its closing event's. The instrumentation scope is `linch`.
 |---|---|
 | `invoke_agent` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.conversation.id` (the session), `linch.run_id`, `linch.resumed`; at the end the four `gen_ai.usage.*` token counts, `linch.stop_reason`, `linch.cost_usd` |
 | `step` | The same identity attributes and `linch.turn_index` |
-| `chat {model}` | Identity attributes and turn, `gen_ai.response.finish_reasons`, the four token counts, `linch.cost_usd` |
+| `chat {model}` | Identity attributes and turn, with `gen_ai.request.model` (and the name's `{model}`) the call's own from its `context_build` event; `gen_ai.response.finish_reasons`, `gen_ai.response.model` (the `usage` event's `actual_model`), the four token counts, `linch.cost_usd` |
 | `compaction` | Identity attributes and turn, `linch.compaction.strategy` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.conversation.id`, `linch.run_id`, `linch.turn_index` |
 
 `gen_ai.provider.name` comes from the config's provider id (`openai-chat` and
 `openai-responses` report `openai`, `gemini` reports `gcp.gemini`), and
 `gen_ai.request.model` from `spec.model` until the run's `init` event names
-it. `linch.cost_usd` is set when the model has a price.
+it. A chat, and its two metrics, carry the model its call requested, which a
+loaded skill can change for one turn. `linch.cost_usd` is set when the model has a price.
 
 `gen_ai.usage.input_tokens` counts every input token, cached ones included,
 as the GenAI semantic convention says: the uncached input plus

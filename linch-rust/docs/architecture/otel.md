@@ -44,7 +44,7 @@ keeps a convention update local.
 |---|---|
 | `invoke_agent` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.conversation.id` (the session), `linch.run_id`, `linch.resumed`; at the end the four `gen_ai.usage.*` token counts, `linch.stop_reason` and `linch.cost_usd` |
 | `step` | The same identity attributes plus `linch.turn_index` |
-| `chat {model}` | Identity attributes and turn, `gen_ai.response.finish_reasons`, `gen_ai.response.model` (the `usage` event's `actual_model`), the four token counts, `linch.cost_usd` |
+| `chat {model}` | Identity attributes and turn, with `gen_ai.request.model` and the name's `{model}` from the `context_build` event's `model` (the request's, as Python's `chat {request.model}`; a summary call is on the run's model); `gen_ai.response.finish_reasons`, `gen_ai.response.model` (the `usage` event's `actual_model`), the four token counts, `linch.cost_usd` |
 | `compaction` | Identity attributes and turn, `linch.compaction.strategy`; it starts the `compaction` event's `duration_ms` before that event, and holds the summary call's `chat` from there to its `usage` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.conversation.id`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `linch.run_id`, `linch.turn_index` |
 
@@ -95,7 +95,7 @@ Per model call (`crates/linch-otel/src/observer/calls.rs:142-176`):
 
 | Metric | Unit | Attributes |
 |---|---|---|
-| `gen_ai.client.operation.duration` | `s` | `gen_ai.operation.name` (`chat`), `gen_ai.provider.name`, `gen_ai.request.model`, `error.type` on failure |
+| `gen_ai.client.operation.duration` | `s` | `gen_ai.operation.name` (`chat`), `gen_ai.provider.name`, `gen_ai.request.model` (the call's), `error.type` on failure |
 | `gen_ai.client.token.usage` | `{token}` | The same, plus `gen_ai.token.type` (`input` or `output`) |
 
 Both are histograms with the SDK's default buckets, created once on the meter

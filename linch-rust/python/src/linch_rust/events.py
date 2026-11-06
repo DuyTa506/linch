@@ -151,6 +151,7 @@ class ContextBuildEvent:
     """The context of the next provider request was assembled; the call starts."""
 
     type: ClassVar[str] = "context_build"
+    model: str
     system_blocks: int
     messages: int
     budget: JsonObject

@@ -173,8 +173,8 @@ fn a_resume_without_setters_leaves_unknown_attributes_out() {
     let step = span(&spans, "step");
     assert_eq!(attr(step, "linch.turn_index"), None);
     assert_eq!(step.start_time, at(200));
-    // A chat whose model is unknown is just `chat`.
-    assert_eq!(span(&spans, "chat").end_time, at(210));
+    // The chat's model comes from its `context_build`.
+    assert_eq!(span(&spans, "chat m").end_time, at(210));
 }
 
 #[test]

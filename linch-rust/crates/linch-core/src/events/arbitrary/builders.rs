@@ -147,6 +147,7 @@ pub(super) fn suspended_event() -> impl Strategy<Value = SuspendedEvent> {
 
 pub(super) fn context_build_event() -> impl Strategy<Value = ContextBuildEvent> {
     (
+        short_string(),
         any::<u64>(),
         any::<u64>(),
         option::of(vec(short_string(), 0..3)),
@@ -154,12 +155,15 @@ pub(super) fn context_build_event() -> impl Strategy<Value = ContextBuildEvent> 
         json_object(1),
     )
         .prop_map(
-            |(system_blocks, messages, selected_tools, budget, metadata)| ContextBuildEvent {
-                system_blocks,
-                messages,
-                selected_tools,
-                budget,
-                metadata,
+            |(model, system_blocks, messages, selected_tools, budget, metadata)| {
+                ContextBuildEvent {
+                    model,
+                    system_blocks,
+                    messages,
+                    selected_tools,
+                    budget,
+                    metadata,
+                }
             },
         )
 }

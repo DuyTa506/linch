@@ -161,6 +161,7 @@ impl Runner {
     pub(super) fn stage_context(&mut self, request: &ProviderRequest) {
         let tools = request.tools.iter().map(|tool| tool.name.clone());
         self.journal.stage(Event::ContextBuild(ContextBuildEvent {
+            model: request.model.clone(),
             system_blocks: request.system.len() as u64,
             messages: request.messages.len() as u64,
             selected_tools: Some(tools.collect()),

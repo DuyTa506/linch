@@ -145,6 +145,7 @@ def prompt() -> dict[str, Any]:
 def context_build() -> dict[str, Any]:
     return {
         "type": "context_build",
+        "model": "m",
         "system_blocks": 1,
         "messages": 1,
         "budget": {},
@@ -601,7 +602,7 @@ def test_a_resume_without_presets_leaves_unknown_attributes_out() -> None:
         assert attr(run, key) is None, key
     step = one(spans, "step")
     assert attr(step, "linch.turn_index") is None and step.start_time == at(200)
-    assert one(spans, "chat").end_time == at(210), "a chat of an unknown model is just `chat`"
+    assert one(spans, "chat m").end_time == at(210), "the model of its context_build"
 
 
 def test_events_in_an_order_no_run_produces_never_raise_and_every_span_ends() -> None:
@@ -793,6 +794,25 @@ def test_a_chat_names_the_model_that_served_it() -> None:
     )
 
     assert attr(one(sdk.spans(), "chat m"), "gen_ai.response.model") == "served-2026"
+
+
+def test_a_chat_is_named_for_the_model_its_call_requested() -> None:
+    sdk = Sdk()
+    skill_call = {**context_build(), "model": "skill-model"}
+    feed(
+        sdk.observer(),
+        [(100, init()), (101, prompt()), (102, skill_call), (110, assistant("end_turn"))]
+        + [(111, usage_event(4, 2)), (112, result("success"))],
+    )
+
+    spans = sdk.spans()
+    assert attr(one(spans, "chat skill-model"), "gen_ai.request.model") == "skill-model"
+    assert attr(one(spans, "invoke_agent"), "gen_ai.request.model") == "m"
+    points = sdk.points("gen_ai.client.operation.duration")
+    points += sdk.points("gen_ai.client.token.usage")
+    assert points and all(
+        (p.attributes or {})["gen_ai.request.model"] == "skill-model" for p in points
+    )
 
 
 def test_a_compaction_span_starts_its_duration_before_its_event() -> None:

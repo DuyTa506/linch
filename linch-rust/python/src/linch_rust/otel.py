@@ -281,8 +281,10 @@ class _Open:
 class _Chat:
     """An open model call; `answered` is when its response arrived."""
 
-    def __init__(self, open: _Open) -> None:
+    def __init__(self, open: _Open, model: str | None) -> None:
         self.open = open
+        # The model the call requested; the run's when unknown.
+        self.model = model
         self.usage: JsonObject | None = None
         self.cost: float | None = None
         # The model the provider reported serving the call.
@@ -362,7 +364,7 @@ class RunObserver:
         if isinstance(event, UserEvent):
             self._user(event, at)
         elif isinstance(event, ContextBuildEvent):
-            self._context_build(at)
+            self._context_build(event, at)
         elif isinstance(event, AssistantEvent):
             self._assistant(event, at)
         elif isinstance(event, UsageEvent):
@@ -507,18 +509,22 @@ class RunObserver:
             self._run = None
         self._ended = True
 
-    def _context_build(self, at: int) -> None:
+    def _context_build(self, event: ContextBuildEvent, at: int) -> None:
         self._flush_summary(None)
         if self._chat is not None:
             chat, self._chat = self._chat, None
             self._finish_chat(chat, at, None)
         step, _ = self._open_step(at)
-        self._chat = self._open_chat(step, at)
+        self._chat = self._open_chat(step, at, event.model)
 
-    def _open_chat(self, parent: Context, at: int) -> _Chat:
-        name = CHAT if self._model is None else f"{CHAT} {self._model}"
+    def _open_chat(self, parent: Context, at: int, model: str | None = None) -> _Chat:
+        """A chat on `model`, its call's requested model; the run's when absent."""
+        model = self._model if model is None else model
+        name = CHAT if model is None else f"{CHAT} {model}"
         attributes = self._attributes(CHAT, True)
-        return _Chat(self._start(parent, name, SpanKind.CLIENT, at, attributes))
+        if model is not None:
+            attributes[MODEL] = model
+        return _Chat(self._start(parent, name, SpanKind.CLIENT, at, attributes), model)
 
     def _assistant(self, event: AssistantEvent, at: int) -> None:
         chat = self._chat
@@ -587,8 +593,8 @@ class RunObserver:
         attributes: dict[str, AttributeValue] = {OPERATION: CHAT}
         if self._provider is not None:
             attributes[PROVIDER] = self._provider
-        if self._model is not None:
-            attributes[MODEL] = self._model
+        if chat.model is not None:
+            attributes[MODEL] = chat.model
         if error is not None:
             open.set_error(error)
             attributes[ERROR_TYPE] = error

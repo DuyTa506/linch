@@ -128,6 +128,27 @@ async fn a_skill_narrows_the_next_turn_to_its_tools_and_model() {
     assert!(runs.lock().unwrap().is_empty(), "Write never ran");
 }
 
+#[tokio::test]
+async fn each_call_names_the_model_it_requests_on_its_context_build() {
+    let turns = [
+        skill_call("review"),
+        text_turn("checked"),
+        text_turn("done"),
+    ];
+    let provider = Arc::new(ScriptedProvider::new(turns));
+    let stores = Arc::new(Stores::default());
+    let agent = agent(provider, &Runs::default(), stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    let models: Vec<&str> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::ContextBuild(build) => Some(build.model.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(models, [MODEL, "other-model"]);
+}
+
 #[test]
 fn a_skill_model_keeps_the_one_million_token_suffix() {
     use linch_core::skills::model_override;

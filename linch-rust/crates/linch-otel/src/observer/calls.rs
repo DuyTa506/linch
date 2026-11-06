@@ -2,7 +2,7 @@
 //! around a summary call, and the two model-call metrics.
 
 use linch_core::Usage;
-use linch_core::events::kinds::{AssistantEvent, CompactionEvent, UsageEvent};
+use linch_core::events::kinds::{AssistantEvent, CompactionEvent, ContextBuildEvent, UsageEvent};
 use opentelemetry::trace::SpanKind;
 use opentelemetry::{Array, Context, KeyValue, Value};
 
@@ -13,6 +13,8 @@ use crate::span::{Open, json, wire_name};
 /// An open model call.
 pub(super) struct Chat {
     open: Open,
+    /// The model the call requested; the run's when unknown.
+    model: Option<String>,
     usage: Option<Usage>,
     cost: Option<f64>,
     /// The model the provider reported serving the call.
@@ -28,23 +30,32 @@ pub(super) struct Summary {
 }
 
 impl RunObserver {
-    pub(super) fn context_build(&mut self, at: u64) {
+    pub(super) fn context_build(&mut self, build: &ContextBuildEvent, at: u64) {
         self.flush_summary(None);
         if let Some(chat) = self.chat.take() {
             self.finish_chat(chat, at, None);
         }
         let (step, _) = self.step(at);
-        self.chat = Some(self.open_chat(&step, at));
+        let model = Some(build.model.clone());
+        self.chat = Some(self.open_chat(&step, at, model));
     }
 
-    pub(super) fn open_chat(&self, parent: &Context, at: u64) -> Chat {
-        let name = match &self.model {
+    /// A chat on `model`, the model its call requested; the run's when
+    /// `None` (a summary call is on the run's).
+    pub(super) fn open_chat(&self, parent: &Context, at: u64, model: Option<String>) -> Chat {
+        let model = model.or_else(|| self.model.clone());
+        let name = match &model {
             Some(model) => format!("{} {model}", keys::CHAT),
             None => keys::CHAT.to_owned(),
         };
-        let attributes = self.attributes(keys::CHAT, true);
+        let mut attributes = self.attributes(keys::CHAT, true);
+        if let Some(model) = &model {
+            attributes.retain(|kv| kv.key.as_str() != keys::MODEL);
+            attributes.push(KeyValue::new(keys::MODEL, model.clone()));
+        }
         Chat {
             open: self.start(parent, name, SpanKind::Client, at, attributes),
+            model,
             usage: None,
             cost: None,
             served: None,
@@ -90,7 +101,7 @@ impl RunObserver {
             start,
             attributes,
         );
-        let mut chat = self.open_chat(compaction.context(), start);
+        let mut chat = self.open_chat(compaction.context(), start, None);
         if let Some(event) = usage {
             chat.usage = Some(event.usage);
             chat.cost = event.cost_usd;
@@ -141,13 +152,14 @@ impl RunObserver {
     pub(super) fn finish_chat(&self, chat: Chat, at: u64, error: Option<&str>) {
         let Chat {
             open,
+            model,
             usage,
             cost,
             served,
             ..
         } = chat;
         let mut attributes = vec![KeyValue::new(keys::OPERATION, keys::CHAT)];
-        for (key, value) in [(keys::PROVIDER, &self.provider), (keys::MODEL, &self.model)] {
+        for (key, value) in [(keys::PROVIDER, &self.provider), (keys::MODEL, &model)] {
             if let Some(value) = value {
                 attributes.push(KeyValue::new(key, value.clone()));
             }

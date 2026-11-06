@@ -86,6 +86,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             selected_tools: None,
             budget: JsonObject::new(),
             metadata: JsonObject::new(),
+            model: "m".into(),
         }),
         Event::Compaction(CompactionEvent {
             messages_before: 10,

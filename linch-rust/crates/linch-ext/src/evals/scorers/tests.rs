@@ -46,6 +46,7 @@ fn build(tools: &[&str], budget: JsonValue, metadata: JsonValue) -> Event {
         selected_tools: Some(tools.iter().map(|tool| tool.to_string()).collect()),
         budget: object(budget),
         metadata: object(metadata),
+        model: "m".into(),
     })
 }
 

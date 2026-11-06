@@ -30,6 +30,7 @@ fn build(used: JsonValue, max: JsonValue, trimmed: bool) -> Event {
         selected_tools: Some(vec!["Read".into()]),
         budget: object(json!({"used_tokens": used, "max_tokens": max, "trimmed": trimmed})),
         metadata: object(json!({"rag": "p1"})),
+        model: "m".into(),
     })
 }
 

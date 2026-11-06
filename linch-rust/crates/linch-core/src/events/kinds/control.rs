@@ -42,6 +42,9 @@ pub struct UsageEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextBuildEvent {
+    /// The model the call requests: the run's, or a loaded skill's for the
+    /// turn it narrows.
+    pub model: String,
     /// Number of system blocks selected.
     pub system_blocks: u64,
     /// Number of conversation messages selected.

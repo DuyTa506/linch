@@ -49,6 +49,42 @@ async fn a_chat_names_the_model_that_served_it() {
 }
 
 #[test]
+fn a_chat_is_named_for_the_model_its_call_requested() {
+    let sdk = Sdk::new();
+    let mut observer = sdk.observer();
+    let mut skill_call = context_build();
+    skill_call["model"] = json!("skill-model");
+    let events = [
+        (100, init()),
+        (101, prompt()),
+        (102, skill_call),
+        (110, assistant("end_turn")),
+        (111, usage_event(4, 2)),
+        (112, result("success")),
+    ];
+    for (seq, (ts_ms, event)) in events.into_iter().enumerate() {
+        observer.observe(&envelope(seq as u64, ts_ms, event));
+    }
+    drop(observer);
+
+    let spans = sdk.spans();
+    let chat = span(&spans, "chat skill-model");
+    assert_eq!(
+        text(chat, "gen_ai.request.model").as_deref(),
+        Some("skill-model")
+    );
+    let run = span(&spans, "invoke_agent");
+    assert_eq!(text(run, "gen_ai.request.model").as_deref(), Some("m"));
+    let points = [
+        sdk.points("gen_ai.client.operation.duration"),
+        sdk.points("gen_ai.client.token.usage"),
+    ];
+    for point in points.iter().flatten() {
+        assert_eq!(point.attr("gen_ai.request.model").unwrap(), "skill-model");
+    }
+}
+
+#[test]
 fn a_compaction_span_starts_its_duration_before_its_event() {
     let sdk = Sdk::new();
     let mut observer = sdk.observer();

@@ -153,7 +153,7 @@ impl RunObserver {
         }
         match event {
             Event::User(user) => self.user(user, at),
-            Event::ContextBuild(_) => self.context_build(at),
+            Event::ContextBuild(build) => self.context_build(build, at),
             Event::Assistant(response) => self.assistant(response, at),
             Event::Usage(usage) => self.usage(usage, at),
             Event::Compaction(compaction) => self.compaction(compaction, at),

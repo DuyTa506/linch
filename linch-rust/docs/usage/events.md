@@ -211,6 +211,7 @@ The request for the next model call was assembled; the call starts.
 
 | Field | What it is |
 |---|---|
+| `model` | The model the call requests: `spec.model`, or a loaded skill's `model` for the turn the skill narrows |
 | `system_blocks` | Number of system blocks |
 | `messages` | Number of conversation messages sent |
 | `selected_tools` | Tool names offered in this request |
