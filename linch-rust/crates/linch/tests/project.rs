@@ -275,3 +275,28 @@ fn a_subagent_that_is_not_usable_is_skipped_with_its_reason() {
     );
     assert_eq!(skipped[5].detail, "agent name 'twin' already loaded");
 }
+
+#[test]
+fn yaml_is_read_as_yaml_1_2_with_no_repeated_key() {
+    let dir = tempfile::tempdir().unwrap();
+    skill(dir.path(), "dup", "description: A.\ndescription: B.");
+    skill(
+        dir.path(),
+        "yes",
+        "description: D.\ndisable_model_invocation: yes",
+    );
+    let (skills, skipped) = load_skills(dir.path(), &HashSet::new());
+    assert!(skills.is_empty(), "{skills:?}");
+    let got = reasons(&skipped);
+    assert_eq!(got[0].1, SkipReason::InvalidFrontmatter);
+    assert!(
+        got[0].2.contains("duplicated key in mapping"),
+        "{}",
+        got[0].2
+    );
+    let boolean = "frontmatter 'disable_model_invocation' must be a boolean";
+    assert_eq!(
+        got[1],
+        ("yes".into(), SkipReason::InvalidFrontmatter, boolean.into())
+    );
+}
