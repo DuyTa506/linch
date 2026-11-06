@@ -72,6 +72,7 @@ async fn dispatch(job: &Value) -> Outcome {
         "evals" => case_evals(job).await,
         "startup" => case_startup(job).await,
         "concurrency" => case_concurrency(job).await,
+        "sessions" => case_sessions(job).await,
         "live" => case_live(job).await,
         _ => Ok(json!({"status": "n/a", "reason": "not implemented on this side"})),
     }
@@ -680,6 +681,69 @@ async fn case_concurrency(job: &Value) -> Outcome {
     }
     outcome?;
     Ok(clock.ok(sessions as f64, "run", json!({})))
+}
+
+/// Case 14: M sessions on one agent, started together, each one run of
+/// Bash, TaskCreate, TaskList and a text turn against `chat_server.py`, on
+/// Postgres stores.
+async fn case_sessions(job: &Value) -> Outcome {
+    let provider = json!({"id": "openai-chat", "base_url": text(job, "base_url")?});
+    let mut config = config(job, provider)?;
+    config["workspace"] = job["workspace"].clone();
+    config["tasks"] = true.into();
+    if job["raise_caps"] == true {
+        config["stores"]["max_connections"] = job["pg_pool"].clone();
+    }
+    let opened = open(config, no_tools()).await?;
+    let outcome = sessions(job, opened.agent()).await;
+    opened.close().await;
+    outcome
+}
+
+/// One warm-up run, then `sessions` runs spawned together between the two
+/// marks; each run's wall is from the common start.
+async fn sessions(job: &Value, agent: &Agent) -> Outcome {
+    run_once(agent, "w0", "session w0").await?;
+    let total = count(job, "sessions")?;
+    mark("start").await?;
+    let start = Instant::now();
+    let runs: Vec<_> = (0..total)
+        .map(|i| {
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                let ran = run_once(&agent, &format!("s{i}"), &format!("session s{i}")).await;
+                ran.map(|_| ms_since(start))
+            })
+        })
+        .collect();
+    let mut walls = Vec::with_capacity(total);
+    let mut errors = std::collections::BTreeSet::new();
+    for run in runs {
+        match run.await.map_err(err).and_then(|ran| ran) {
+            Ok(wall) => walls.push(wall),
+            Err(error) => {
+                errors.insert(error);
+            }
+        }
+    }
+    let window = ms_since(start);
+    mark("end").await?;
+    Ok(json!({
+        "status": "ok",
+        "sessions": total,
+        "failed": total - walls.len(),
+        "run_wall_ms": walls,
+        "window_ms": window,
+        "errors": errors.into_iter().take(3).collect::<Vec<_>>(),
+    }))
+}
+
+/// Tell `run_all.py` the measured window starts or ends; wait for its go.
+async fn mark(name: &str) -> Result<(), String> {
+    println!("{}", json!({"mark": name}));
+    let read = tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new()));
+    read.await.map_err(err)?.map_err(err)?;
+    Ok(())
 }
 
 /// Case 13: the W5 live prompts on DeepSeek (the key comes from the

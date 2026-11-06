@@ -2,6 +2,7 @@
 
     python run_all.py --out DIR [--quick] [--cases 1,3,loop] [--sides py,rs-kernel]
                       [--pg-dsn DSN] [--live] [--runs N]
+                      [--sessions 100,500] [--sidecars N] [--turn-delay S]
 
 Three sides run the same work from the same fixture files:
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -31,6 +33,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -81,6 +84,7 @@ GRID = [
     (11, "concurrency", ("16-sessions-10x1",), "Concurrent sessions"),
     (12, "rpc_overhead", LOOPS, "RPC overhead (rs-client minus rs-kernel)"),
     (13, "live", ("deepseek",), "Live DeepSeek"),
+    (14, "sessions", (), "Concurrent sessions, Postgres"),  # variants: `variants_of`
 ]
 PG_CASES = {"pg_loop", "worker"}
 COMPACTION = {
@@ -104,6 +108,15 @@ TOOL_FIXTURES = {
     "Grep-2k": ("tools_grep2k.json", 5),
 }
 CONCURRENT_SESSIONS = 16
+# Case 14: sessions per cell; turns per run (Bash, TaskCreate, TaskList,
+# text: `chat_server.py`); Postgres connections per side in total on the
+# row with the default caps raised.
+SESSIONS = (100, 500, 1000, 2000)
+QUICK_SESSIONS = (20, 50)
+SESSION_TURNS = 4
+RAISED_PG_POOL = 40
+CLK_TCK = os.sysconf("SC_CLK_TCK")
+PAGE_MB = os.sysconf("SC_PAGE_SIZE") / 2**20
 LIVE = {
     "model": "deepseek-flash",
     "system": LIVE_SYSTEM,
@@ -151,6 +164,100 @@ def build_workspace(root: Path) -> None:
             (folder / f"f{f:03d}.txt").write_text("\n".join(lines) + "\n")
 
 
+def variants_of(case: str, variants: tuple, args: argparse.Namespace) -> tuple:
+    """A case's variants. Case 14's come from the session counts: M on every
+    side, `Mx<N>` over N sidecars (rs-client only), and the largest M with
+    the default caps raised (`+caps`)."""
+    if case != "sessions":
+        return variants
+    sizes = args.sessions or (QUICK_SESSIONS if args.quick else SESSIONS)
+    each = [v for m in sizes for v in (f"{m}", f"{m}x{args.sidecars}")]
+    return (*each, f"{sizes[-1]}+caps")
+
+
+def pct(values: list[float], p: float) -> float:
+    """Nearest-rank percentile of `values` (not empty)."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(p / 100 * len(ordered)) - 1)]
+
+
+def tree_usage(root: int) -> dict:
+    """CPU seconds, RSS, descendants and open fds of the process tree under `root`.
+
+    CPU is each live process's own time plus that of the children it reaped
+    (`cutime`, `cstime`), so a Bash child that exited between reads counts.
+    A `linch-server` is not dumpable, so its `fd/` cannot be listed: its fd
+    table size (`FDSize`, at least its open fds) is counted instead and
+    `fds_bound` is set.
+    """
+    ticks = pages = fds = processes = 0
+    bound = False
+    todo = [root]
+    while todo:
+        pid = todo.pop()
+        try:
+            with open(f"/proc/{pid}/stat") as handle:
+                fields = handle.read().rsplit(")", 1)[1].split()
+            tasks = os.listdir(f"/proc/{pid}/task")
+            try:
+                open_fds = len(os.listdir(f"/proc/{pid}/fd"))
+            except PermissionError:  # not dumpable, or a zombie (FDSize 0)
+                with open(f"/proc/{pid}/status") as handle:
+                    slots = [line for line in handle if line.startswith("FDSize:")]
+                open_fds = int(slots[0].split()[1])
+                bound = bound or open_fds > 0
+        except (OSError, IndexError):  # it exited while being read
+            continue
+        ticks += sum(int(value) for value in fields[11:15])  # utime stime cutime cstime
+        pages += int(fields[21])
+        fds += open_fds
+        processes += 1
+        for task in tasks:
+            try:
+                with open(f"/proc/{pid}/task/{task}/children") as handle:
+                    todo.extend(int(child) for child in handle.read().split())
+            except OSError:
+                pass
+    return {
+        "cpu_s": ticks / CLK_TCK,
+        "peak_rss_mb": pages * PAGE_MB,
+        "peak_children": processes - 1,
+        "peak_fds": fds,
+        "fds_bound": bound,
+    }
+
+
+class Sampler(threading.Thread):
+    """A process tree's peaks, read every 100 ms between `begin` and `end`,
+    and its CPU seconds from one to the other."""
+
+    def __init__(self, root: int) -> None:
+        super().__init__(daemon=True)
+        self.root = root
+        self.peaks = {"peak_rss_mb": 0.0, "peak_children": 0, "peak_fds": 0, "fds_bound": False}
+        self.cpu_s = 0.0
+        self.stopped = threading.Event()
+
+    def read(self) -> float:
+        usage = tree_usage(self.root)
+        for key in self.peaks:
+            self.peaks[key] = max(self.peaks[key], usage[key])
+        return usage["cpu_s"]
+
+    def begin(self) -> None:
+        self.cpu_s = self.read()
+        self.start()
+
+    def run(self) -> None:
+        while not self.stopped.wait(0.1):
+            self.read()
+
+    def end(self) -> dict:
+        self.stopped.set()
+        self.join()
+        return {"cpu_s": self.read() - self.cpu_s, **self.peaks}
+
+
 def git_head(path: Path) -> str | None:
     """The commit checked out at `path`, read from the git files (no git call)."""
     for directory in (path, *path.parents):
@@ -190,6 +297,8 @@ class Runner:
         self.results: dict[str, dict[str, dict]] = {side: {} for side in SIDES}
         self.sse: subprocess.Popen | None = None
         self.sse_url = ""
+        self.chat: subprocess.Popen | None = None  # case 14's chat server, one per cell
+        self.chat_stats = Path()
 
     # ------------------------------------------------------------ commands
 
@@ -224,7 +333,20 @@ class Runner:
         )
         if proc.returncode != 0:
             raise RuntimeError(f"pg-admin {action} failed: {proc.stderr.strip()[-300:]}")
-        return json.loads(proc.stdout) if action == "stats" else None
+        return json.loads(proc.stdout) if action in ("stats", "commits") else None
+
+    def pg_commits(self, start: int) -> int:
+        """The database's commits since `start`, once the side's backends have
+        flushed their stats (on exit). A read itself commits a fixed number
+        (its connection, its query): reads repeat until two steps agree, and
+        that step comes off for each read, the start read included."""
+        reads = [self.pg_admin("commits", "")]
+        while len(reads) < 20:
+            time.sleep(0.25)
+            reads.append(self.pg_admin("commits", ""))
+            if len(reads) >= 3 and reads[-1] - reads[-2] == reads[-2] - reads[-3]:
+                break
+        return reads[-1] - start - (reads[-1] - reads[-2]) * len(reads)
 
     def pg_writes(self, schema: str) -> dict:
         # Backends flush their table stats when they exit, a moment after the
@@ -289,6 +411,22 @@ class Runner:
             job["fixture"] = str(FIXTURES / "evals.json")
         elif case == "concurrency":
             job.update(fixture=str(FIXTURES / "loop_10x1.json"), sessions=CONCURRENT_SESSIONS)
+        elif case == "sessions":
+            if not self.args.pg_dsn:
+                return "no --pg-dsn given"
+            name = f"{side}__sessions__{variant}"
+            root = self.out / "work" / name
+            root.mkdir(parents=True, exist_ok=True)
+            raised = variant.endswith("+caps")
+            job.update(
+                sessions=int(variant.split("x")[0].split("+")[0]),
+                sidecars=self.args.sidecars if "x" in variant else 1,
+                raise_caps=raised,
+                pg_pool=RAISED_PG_POOL if raised else None,
+                workspace=str(root),
+                stores="postgres",
+                base_url=self.chat_server(name),
+            )
         elif case == "live":
             if not self.args.live:
                 return "live run off; pass --live"
@@ -342,12 +480,87 @@ class Runner:
             "expect_chars": info["text_chars"],
         }
 
+    def chat_server(self, name: str) -> str:
+        """Start this cell's chat server (case 14); its base URL."""
+        if self.chat is not None:  # a cell that failed before its own stop
+            self.stop_chat()
+        self.chat_stats = self.out / "chat" / f"{name}.jsonl"
+        self.chat_stats.parent.mkdir(exist_ok=True)
+        self.chat_stats.unlink(missing_ok=True)  # the workers append to it
+        command = [
+            sys.executable,
+            "-I",
+            str(HERE / "chat_server.py"),
+            "--stats",
+            str(self.chat_stats),
+        ]
+        command += ["--delay", str(self.args.turn_delay), "--workers", str(self.args.chat_workers)]
+        self.chat = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, env=scrubbed_env())
+        line = self.chat.stdout.readline() if self.chat.stdout else ""
+        if not line.startswith("PORT "):
+            raise RuntimeError("the chat server did not start")
+        return f"http://127.0.0.1:{int(line.split()[1])}/v1"
+
+    def stop_chat(self) -> dict:
+        """Stop the cell's chat server; its request count and own overhead per request."""
+        chat, self.chat = self.chat, None
+        assert chat is not None
+        chat.terminate()
+        chat.wait(timeout=30)
+        lines = self.chat_stats.read_text().splitlines() if self.chat_stats.is_file() else []
+        ms = [ms for line in lines for ms in json.loads(line)["overhead_ms"]]
+        late = {"overhead_p50_ms": pct(ms, 50), "overhead_p99_ms": pct(ms, 99)} if ms else {}
+        return {"requests": len(ms), **late, "overhead_max_ms": max(ms, default=0.0)}
+
+    def sampled(self, command: list[str], stderr, tree: dict) -> subprocess.CompletedProcess:
+        """Run a case 14 side through its two marks. At each, read the process
+        tree's CPU (and at the start the Postgres commits), then let the side
+        go on; in between, sample the tree's peaks. Fills `tree`."""
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            text=True,
+            env=self.env_for("sessions"),
+            cwd=self.out / "work",
+        )
+        killed = threading.Event()
+        timer = threading.Timer(self.args.timeout, lambda: (killed.set(), proc.kill()))
+        timer.start()
+        sampler = Sampler(proc.pid)
+        lines = []
+        assert proc.stdout is not None and proc.stdin is not None
+        try:
+            for line in proc.stdout:
+                if not line.startswith('{"mark"'):
+                    lines.append(line)
+                    continue
+                if json.loads(line)["mark"] == "start":
+                    tree["pg_commits_start"] = self.pg_admin("commits", "")
+                    sampler.begin()
+                else:
+                    tree.update(sampler.end())
+                proc.stdin.write("go\n")
+                proc.stdin.flush()
+            proc.wait()
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if sampler.is_alive():
+                sampler.end()
+        if killed.is_set():
+            raise subprocess.TimeoutExpired(command, self.args.timeout)
+        return subprocess.CompletedProcess(command, proc.returncode, "".join(lines))
+
     def env_for(self, case: str) -> dict[str, str]:
         env = scrubbed_env()
         if case == "live" and "DEEPSEEK_API_KEY" in os.environ:
             env["DEEPSEEK_API_KEY"] = os.environ["DEEPSEEK_API_KEY"]
-        if case == "decode":
-            # The replay server ignores keys; the adapters only need one set.
+        if case in ("decode", "sessions"):
+            # The loopback servers ignore keys; the adapters only need one set.
             for key in DUMMY_KEYS:
                 env[key] = "bench-dummy-key"
         return env
@@ -375,17 +588,21 @@ class Runner:
         log = self.out / "logs" / f"{name}.log"
         started = time.perf_counter()
         result: dict = {"status": "error", "error": "the side process did not start"}
+        tree: dict = {}
         try:
             with log.open("w") as stderr:
-                proc = subprocess.run(
-                    self.command(side, job_path),
-                    stdout=subprocess.PIPE,
-                    stderr=stderr,
-                    text=True,
-                    env=self.env_for(case),
-                    timeout=self.args.timeout,
-                    cwd=self.out / "work",
-                )
+                if case == "sessions":
+                    proc = self.sampled(self.command(side, job_path), stderr, tree)
+                else:
+                    proc = subprocess.run(
+                        self.command(side, job_path),
+                        stdout=subprocess.PIPE,
+                        stderr=stderr,
+                        text=True,
+                        env=self.env_for(case),
+                        timeout=self.args.timeout,
+                        cwd=self.out / "work",
+                    )
             lines = [line for line in proc.stdout.splitlines() if line.startswith("{")]
             if not lines:
                 result = {
@@ -399,11 +616,16 @@ class Runner:
         except OSError as error:
             result = {"status": "error", "error": f"cannot start the side: {error}"}
         finally:
+            if self.chat is not None:
+                result["provider"] = self.stop_chat()
             if schema is not None:
                 try:
+                    if "pg_commits_start" in tree:  # before the tuple reads, which commit
+                        result["pg_commits"] = self.pg_commits(tree.pop("pg_commits_start"))
                     result["pg_tuple_writes"] = self.pg_writes(schema)
                 finally:
                     self.pg_admin("drop", schema)
+        result.update(tree)
         result["process_wall_s"] = time.perf_counter() - started
         return result
 
@@ -499,10 +721,11 @@ class Runner:
             for number, case, variants, _ in GRID:
                 if not self.selected(number, case):
                     continue
-                for variant in variants:
+                for variant in variants_of(case, variants, self.args):
                     for side in SIDES:
                         key = f"{case}/{variant}"
-                        if side not in sides:
+                        spread = case == "sessions" and "x" in variant  # N sidecars
+                        if side not in sides or (spread and side != "rs-client"):
                             continue
                         if case == "rpc_overhead":
                             result = (
@@ -520,9 +743,10 @@ class Runner:
                             print(f"[{side}] {key}: {summary(result)}", file=sys.stderr, flush=True)
                         self.results[side][key] = result
         finally:
-            if self.sse is not None:
-                self.sse.terminate()
-                self.sse.wait()
+            for server in (self.sse, self.chat):
+                if server is not None:
+                    server.terminate()
+                    server.wait()
         self.write(sides)
 
     def py_linch(self) -> dict:
@@ -552,6 +776,8 @@ class Runner:
             "client_python": self.args.client_python,
             "server_bin": self.args.server_bin,
             "kernel_bin": self.args.kernel_bin,
+            "turn_delay": self.args.turn_delay,
+            "chat_workers": self.args.chat_workers,
             "host": socket.gethostname(),
             "cpus": os.cpu_count(),
             "loadavg": os.getloadavg(),
@@ -572,6 +798,9 @@ class Runner:
 def summary(result: dict) -> str:
     if result.get("status") != "ok":
         return f"{result.get('status')}: {result.get('reason') or result.get('error')}"
+    if "run_wall_ms" in result:
+        runs, window = len(result["run_wall_ms"]), result["window_ms"]
+        return f"{runs} runs in {window:.0f} ms, {result['failed']} failed {result['errors']}"
     return f"{per_op(result)}, wall {statistics.median(result['wall_ms']):.3f} ms"
 
 
@@ -604,6 +833,61 @@ def writes(result: dict) -> str:
     return "; ".join(parts) if parts else "n/c"
 
 
+def sessions_table(results: dict, sides: list[str], args: argparse.Namespace) -> list[str]:
+    """Case 14's own table: its columns are not the main table's."""
+    delay, turns = args.turn_delay, SESSION_TURNS
+    lines = [
+        "",
+        "## 14. Concurrent sessions, Postgres",
+        "",
+        f"Provider delay {delay:g} s per turn; overhead per turn is (run wall - {turns} x delay) "
+        f"/ {turns}. CPU, RSS, children and fds: the side's process tree (bench/README.md).",
+        "",
+        "| M | Side | Run wall p50 / p99 s | Overhead p50 / p99 ms/turn | Turns/s | PG commits/s "
+        "| CPU s | Peak RSS MB | Peak children | Peak fds | Provider p99 ms | Failed |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for variant in variants_of("sessions", (), args):
+        for side in sides:
+            result = results[side].get(f"sessions/{variant}")
+            if result is None:
+                continue
+            m = variant.split("x")[0].split("+")[0]
+            label = side + (f", {args.sidecars} sidecars" if "x" in variant else "")
+            label += ", caps raised" if variant.endswith("+caps") else ""
+            if result.get("status") != "ok":
+                why = str(result.get("reason") or result.get("error") or "?")
+                why = why.replace("|", "/").replace("\n", " ")
+                lines.append(f"| {m} | {label} | {result.get('status')} ({why}) |" + " |" * 9)
+                continue
+            walls = result["run_wall_ms"]
+            window = result["window_ms"] / 1000
+            cells = ["-", "-"]
+            if walls:
+                over = [(wall - turns * delay * 1000) / turns for wall in walls]
+                cells = [
+                    f"{pct(walls, 50) / 1000:.2f} / {pct(walls, 99) / 1000:.2f}",
+                    f"{pct(over, 50):.1f} / {pct(over, 99):.1f}",
+                ]
+            commits = result.get("pg_commits")
+            provider = result.get("provider", {}).get("overhead_p99_ms")
+            failed = str(result["failed"])
+            if result["failed"]:
+                failed += " (" + "; ".join(result["errors"]).replace("|", "/") + ")"
+            cells += [
+                f"{len(walls) * turns / window:.0f}",
+                "n/c" if commits is None else f"{commits / window:.0f}",
+                f"{result.get('cpu_s', 0):.1f}",
+                f"{result.get('peak_rss_mb', 0):.0f}",
+                str(result.get("peak_children", "n/c")),
+                ("<= " if result.get("fds_bound") else "") + str(result.get("peak_fds", "n/c")),
+                "n/c" if provider is None else f"{provider:.1f}",
+                failed,
+            ]
+            lines.append(f"| {m} | {label} | {' | '.join(cells)} |")
+    return lines
+
+
 def table(results: dict, sides: list[str], prov: dict, args: argparse.Namespace) -> str:
     lines = [
         "# Python Linch vs linch-rust",
@@ -625,6 +909,9 @@ def table(results: dict, sides: list[str], prov: dict, args: argparse.Namespace)
     ]
     for number, case, variants, title in GRID:
         if args.cases and str(number) not in args.cases and case not in args.cases:
+            continue
+        if case == "sessions":
+            lines += sessions_table(results, sides, args)
             continue
         for variant in variants:
             for side in sides:
@@ -676,7 +963,16 @@ def main() -> None:
         default=str(ROOT / "target" / "release" / "examples" / "mcp_stdio_server"),
     )
     parser.add_argument("--timeout", type=float, default=900, help="seconds per cell")
+    parser.add_argument(
+        "--sessions", default="", help="case 14 session counts (100,500,1000,2000; --quick 20,50)"
+    )
+    parser.add_argument("--sidecars", type=int, default=4, help="case 14 rs-client spread rows")
+    parser.add_argument(
+        "--turn-delay", type=float, default=1.0, help="case 14 provider delay per turn (s)"
+    )
+    parser.add_argument("--chat-workers", type=int, default=16, help="case 14 server processes")
     args = parser.parse_args()
+    args.sessions = tuple(int(m) for m in args.sessions.split(",") if m.strip())
     args.cases = {c.strip() for c in args.cases.split(",") if c.strip()}
     args.sides = {s.strip() for s in args.sides.split(",") if s.strip()}
     args.client_python = args.client_python or args.py_python

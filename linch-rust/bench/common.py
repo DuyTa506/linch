@@ -7,6 +7,7 @@ its command line) and prints one result object as the last line of stdout;
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import resource
@@ -127,6 +128,44 @@ def ok(clock: Clock, ops: float, op: str, rss_mb: float, **extra: Any) -> Result
 
 def na(reason: str) -> Result:
     return {"status": "n/a", "reason": reason}
+
+
+async def mark(name: str) -> None:
+    """Tell `run_all.py` the measured window starts or ends; wait for its go."""
+    print(json.dumps({"mark": name}), flush=True)
+    await asyncio.to_thread(sys.stdin.readline)
+
+
+async def sessions(count: int, run: Callable[[int], Awaitable[Any]]) -> Result:
+    """Case 14: start `count` runs together between the two marks.
+
+    Each run's wall is from the common start to its end; a failed run is
+    counted and its error kept (the first three distinct texts).
+    """
+    walls: list[float] = []
+    errors: list[str] = []
+
+    async def one(i: int) -> None:
+        try:
+            await run(i)
+        except Exception as error:  # noqa: BLE001 - counted and reported, not raised
+            errors.append(f"{type(error).__name__}: {error}"[:300])
+        else:
+            walls.append(1000 * (time.perf_counter() - start))
+
+    await mark("start")
+    start = time.perf_counter()
+    await asyncio.gather(*(one(i) for i in range(count)))
+    window = 1000 * (time.perf_counter() - start)
+    await mark("end")
+    return {
+        "status": "ok",
+        "sessions": count,
+        "run_wall_ms": walls,
+        "window_ms": window,
+        "failed": len(errors),
+        "errors": sorted(set(errors))[:3],
+    }
 
 
 def main(cases: dict[str, Callable[[Job], Awaitable[Result]]], runner: Callable[..., Any]) -> None:

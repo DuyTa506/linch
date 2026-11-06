@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import Clock, Job, Result, load_turns, main, ok, peak_rss_mb  # noqa: E402
+from common import Clock, Job, Result, load_turns, main, ok, peak_rss_mb, sessions  # noqa: E402
 
 READS = ("load", "list", "get", "ready", "close", "connect")
 
@@ -320,6 +320,44 @@ async def case_concurrency(job: Job) -> Result:
     return ok(clock, job["sessions"], "run", peak_rss_mb())
 
 
+async def case_sessions(job: Job) -> Result:
+    """Case 14: M sessions on one agent, each one run of Bash, TaskCreate,
+    TaskList and a text turn against `chat_server.py`, on Postgres stores."""
+    import linch
+    from linch import PostgresRunStore, workspace_tools
+    from linch.sessions.postgres import PostgresSessionStore
+
+    url, key = job["base_url"], "bench-dummy-key"
+    provider = linch.OpenAIChatCompletionsProvider(
+        linch.OpenAIChatProviderOptions(api_key=key, base_url=url)
+    )
+    pool = {}
+    if job["raise_caps"]:
+        # The options have no HTTP pool setting: give the adapter its client.
+        import httpx2
+        import openai
+
+        limits = httpx2.Limits(max_connections=None, max_keepalive_connections=None)
+        http = openai.DefaultAsyncHttpxClient(limits=limits)
+        provider._client = openai.AsyncOpenAI(api_key=key, base_url=url, http_client=http)
+        pool = {"max_size": job["pg_pool"] // 2}  # two pools, run and session store
+    run_store = PostgresRunStore(job["pg_dsn"], **pool)
+    session_store = PostgresSessionStore(job["pg_dsn"], **pool)
+    agent = build_agent(
+        job,
+        provider,
+        tools=workspace_tools(exclude={"BashProcess"}),
+        run_store=run_store,
+        session_store=session_store,
+        cwd=job["workspace"],
+    )
+    try:
+        await run_once(agent, "session w0")
+        return await sessions(job["sessions"], lambda i: run_once(agent, f"session s{i}"))
+    finally:
+        await close_all(agent, run_store, session_store)
+
+
 async def case_startup(job: Job) -> Result:
     """One cold process: import, build, first run (`run_all.py` times the process)."""
     import time
@@ -561,6 +599,7 @@ CASES = {
     "mcp": case_mcp,
     "compaction": case_compaction,
     "concurrency": case_concurrency,
+    "sessions": case_sessions,
     "startup": case_startup,
 }
 
@@ -581,6 +620,9 @@ async def pg_admin(action: str, dsn: str, schema: str) -> None:
                 schema,
             )
             print(json.dumps({key: int(row[key]) for key in ("ins", "upd", "del")}))
+        elif action == "commits":
+            query = "SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()"
+            print(await conn.fetchval(query))
     finally:
         await conn.close()
 
