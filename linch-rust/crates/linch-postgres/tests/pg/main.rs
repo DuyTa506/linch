@@ -8,5 +8,6 @@ mod crash;
 mod files;
 mod isolation;
 mod migrations;
+mod pool;
 mod refusals;
 mod tasks;

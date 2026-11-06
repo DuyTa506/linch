@@ -29,6 +29,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use sqlx::migrate::{Migration, MigrationType, Migrator};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
 mod codec;
@@ -61,6 +62,13 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// that long. Only this first connect is bounded; later waits for a pooled
 /// connection keep sqlx's defaults.
 ///
+/// The pool does not ping a connection before handing it out (sqlx's
+/// `test_before_acquire`): a run commit or session append is one round
+/// trip, and the ping would make it two. A connection the server dropped
+/// while idle fails the next query on it with a backend error instead of
+/// being replaced first; sqlx's idle timeout and lifetime still recycle
+/// connections.
+///
 /// Args:
 ///     dsn: Connection string, for example `postgres://user:pass@host/db`.
 ///     timeout: Longest wait for the first connection.
@@ -73,7 +81,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///         `Configuration` for a malformed DSN, or the server's refusal
 ///         (bad password, unknown database). No message holds the DSN.
 pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error> {
-    match tokio::time::timeout(timeout, PgPool::connect(dsn)).await {
+    let pool = PgPoolOptions::new().test_before_acquire(false);
+    match tokio::time::timeout(timeout, pool.connect(dsn)).await {
         Ok(connected) => connected,
         Err(_) => Err(sqlx::Error::PoolTimedOut),
     }
