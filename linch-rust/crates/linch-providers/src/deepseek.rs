@@ -7,6 +7,9 @@
 //!   thinking on.
 //! - With tools in the request, every earlier assistant turn's reasoning
 //!   must be sent back as `reasoning_content`, or the call fails with 400.
+//!   With thinking on, a turn that has no thinking (made with thinking
+//!   off, or by another provider) sends `""`: checked live on 2026-11-06,
+//!   leaving the field out is that 400 and `""` is accepted.
 //! - A forced `tool_choice` (`required` or a named tool) with thinking on
 //!   is a 400, so it fails locally instead.
 
@@ -132,9 +135,17 @@ pub(crate) fn build_payload(request: &ProviderRequest) -> Result<JsonValue, Prov
             "the DeepSeek adapter does not support output_schema yet",
         ));
     }
+    let mut messages = payload::messages(&request.system, &request.messages, true)?;
+    if thinking {
+        for message in &mut messages {
+            if message["role"] == "assistant" && message.get("reasoning_content").is_none() {
+                message["reasoning_content"] = "".into();
+            }
+        }
+    }
     let mut body = json!({
         "model": request.model,
-        "messages": payload::messages(&request.system, &request.messages, true)?,
+        "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
         "thinking": {"type": if thinking { "enabled" } else { "disabled" }},

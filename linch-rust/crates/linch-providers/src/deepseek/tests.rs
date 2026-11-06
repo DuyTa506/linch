@@ -193,6 +193,45 @@ fn tool_loop_body_carries_tools_calls_reasoning_and_results() {
 }
 
 #[test]
+fn turns_without_thinking_send_empty_reasoning_while_thinking_is_on() {
+    // Checked live on 2026-11-06: with thinking on and tools offered, an
+    // assistant turn with no `reasoning_content` is a 400; `""` is accepted.
+    let call = ToolUseBlock {
+        id: "c1".into(),
+        name: "get_weather".into(),
+        input: json!({"city": "Paris"}).as_object().unwrap().clone(),
+    };
+    let messages = vec![
+        Message::user_text("hi"),
+        Message::new(Role::Assistant, vec![ContentBlock::text("Hello!")]),
+        Message::user_text("weather?"),
+        Message::new(Role::Assistant, vec![ContentBlock::ToolUse(call)]),
+        Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult(ToolResultBlock::text(
+                "c1", "18C", false,
+            ))],
+        ),
+    ];
+    let on = build_payload(&ProviderRequest {
+        tools: vec![weather_tool()],
+        messages: messages.clone(),
+        ..request()
+    })
+    .unwrap();
+    assert_eq!(on["messages"][1]["reasoning_content"], "");
+    assert_eq!(on["messages"][3]["reasoning_content"], "");
+    let off = build_payload(&ProviderRequest {
+        tools: vec![weather_tool()],
+        messages,
+        ..thinking(Some(Thinking::Disabled {}))
+    })
+    .unwrap();
+    assert!(off["messages"][1].get("reasoning_content").is_none());
+    assert!(off["messages"][3].get("reasoning_content").is_none());
+}
+
+#[test]
 fn sampling_controls_are_forwarded() {
     let body = build_payload(&ProviderRequest {
         max_output_tokens: Some(256),
