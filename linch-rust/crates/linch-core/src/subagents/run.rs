@@ -200,6 +200,10 @@ impl Outcome {
         match self.ended {
             Some(ResultSubtype::Success) if !self.text.is_empty() => Ok(ToolOutput::new(self.text)),
             Some(ResultSubtype::Success) => partial(format!("{who} produced no text output.")),
+            // Python's texts: with the partial output, or saying there is none.
+            Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) if self.text.is_empty() => {
+                partial(format!("{who} aborted before producing output."))
+            }
             Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) => {
                 partial(format!("{who} aborted."))
             }
@@ -267,6 +271,11 @@ mod tests {
         assert_eq!(message(silent), "Subagent produced no text output.");
         let aborted = outcome(&[said.clone(), ended(ResultSubtype::Aborted, None)]);
         assert_eq!(message(aborted), "Subagent aborted. Partial output: half");
+        let silent_abort = outcome(&[ended(ResultSubtype::Aborted, None)]);
+        assert_eq!(
+            message(silent_abort),
+            "Subagent aborted before producing output."
+        );
         let error = serde_json::json!({"name": "TurnLimitError", "message": "max turns exceeded"});
         let error = Event::Error(ErrorEvent {
             error: error.as_object().unwrap().clone(),
