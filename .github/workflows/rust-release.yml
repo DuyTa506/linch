@@ -114,10 +114,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#linch-rust-v}"
-          if [ "$(ls linch-server-"$version"-*.tar.gz | wc -l)" -ne 4 ]; then
+          if [ "$(find . -name "linch-server-$version-*.tar.gz" | wc -l)" -ne 4 ]; then
             echo "the tag $GITHUB_REF_NAME does not match the built version"; exit 1
           fi
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum -- *.tar.gz > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" --notes "linch-server $version for Linux and macOS."
 
