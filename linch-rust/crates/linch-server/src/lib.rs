@@ -47,7 +47,8 @@
 //! which defaults to `default` and `accept_edits`; `scripted_provider`
 //! and `exec_tools` (`Bash` for workspace agents) are off when absent;
 //! `max_runs` and `max_connections`, the tenant's caps across all its
-//! connections, default to 16 and 8. See [`linch_rpc::Allowlists`] for
+//! connections, default to 16 and 8, and a 0 is refused when the config
+//! loads. See [`linch_rpc::Allowlists`] for
 //! how each entry matches.
 //!
 //! # Transports

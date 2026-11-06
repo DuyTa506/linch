@@ -94,3 +94,19 @@ fn bad_configs_are_refused_without_echoing_tokens() {
                                                                   "env": ["LD_PRELOAD"]}]}}}));
     assert!(error.to_string().contains("LD_PRELOAD"), "{error}");
 }
+
+#[test]
+fn a_cap_of_zero_is_refused_when_the_config_loads() {
+    for field in ["max_runs", "max_connections"] {
+        let text = json!({"http": "127.0.0.1:1",
+                          "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                               "allow": {field: 0}}}});
+        let error = ServerConfig::from_json(&text.to_string()).unwrap_err();
+        let expected = format!("tenant \"acme\": {field} is 0, which lets it do nothing");
+        assert!(error.to_string().starts_with(&expected), "{error}");
+    }
+    let one = json!({"http": "127.0.0.1:1",
+                     "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                          "allow": {"max_runs": 1, "max_connections": 1}}}});
+    assert!(ServerConfig::from_json(&one.to_string()).is_ok());
+}

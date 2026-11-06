@@ -70,10 +70,10 @@ pub struct AllowConfig {
     /// Whether a workspace agent gets `Bash`, which runs commands
     /// unconfined, as the server's user; off when absent.
     pub exec_tools: bool,
-    /// Runs the tenant's connections may drive at once, together;
-    /// [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
+    /// Runs the tenant's connections may drive at once, together, at
+    /// least 1; [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
     pub max_runs: Option<usize>,
-    /// Connections that may act for the tenant at once;
+    /// Connections that may act for the tenant at once, at least 1;
     /// [`linch_rpc::DEFAULT_MAX_CONNECTIONS`] when absent.
     pub max_connections: Option<usize>,
     /// Endpoints a provider `base_url` may name.
@@ -111,6 +111,17 @@ pub enum ConfigError {
     /// No tenant has a token, so every connection would be refused.
     #[error("the config gives no tenant a token")]
     NoToken,
+    /// A tenant's `max_runs` or `max_connections` is 0.
+    #[error(
+        "tenant {tenant:?}: {field} is 0, which lets it do nothing; \
+         set at least 1, or leave it out for the default"
+    )]
+    ZeroCap {
+        /// The tenant.
+        tenant: String,
+        /// `max_runs` or `max_connections`.
+        field: &'static str,
+    },
     /// A token's environment variable is unset or not UTF-8.
     #[error("tenant {tenant:?}: environment variable {var} is unset")]
     TokenEnv {
@@ -134,11 +145,23 @@ impl ServerConfig {
     /// Read a config from its JSON text.
     ///
     /// Raises:
-    ///     ConfigError: If the JSON is invalid or sets no listener.
+    ///     ConfigError: If the JSON is invalid, sets no listener, or gives
+    ///         a tenant a cap of 0.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_json::from_str(text).map_err(ConfigError::Json)?;
         if config.socket.is_none() && config.http.is_none() {
             return Err(ConfigError::NoListener);
+        }
+        for (name, tenant) in &config.tenants {
+            let allow = &tenant.allow;
+            let caps = [
+                ("max_runs", allow.max_runs),
+                ("max_connections", allow.max_connections),
+            ];
+            if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
+                let tenant = name.clone();
+                return Err(ConfigError::ZeroCap { tenant, field });
+            }
         }
         Ok(config)
     }
