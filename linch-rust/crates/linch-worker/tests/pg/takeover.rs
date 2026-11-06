@@ -90,14 +90,16 @@ async fn a_killed_workers_job_is_taken_over() {
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
         .await
         .unwrap();
-    let first = Running::spawn(&db.pool, config("w1"), agent(&db.pool, probe.clone()));
+    let first = Running::spawn(&db.pool, losing("w1"), agent(&db.pool, probe.clone()));
     wait_until("the first worker runs the tool", || async {
         probe.started() == 1
     })
     .await;
     let run_id = db.run_of("s1").await;
     first.kill().await;
+    // The heartbeats kept the job hidden up to the kill, for this long yet.
     let killed = Instant::now();
+    let hidden = db.hidden_for().await;
 
     let second = Running::spawn(
         &db.pool,
@@ -108,10 +110,11 @@ async fn a_killed_workers_job_is_taken_over() {
         db.status(&run_id).await == RunStatus::Completed
     })
     .await;
-    // The job stayed hidden until its heartbeat-extended timeout ran out.
+    // Nobody took the job while it was hidden.
     assert!(
-        killed.elapsed() >= TIMEOUT / 3,
-        "taken over before the timeout"
+        killed.elapsed() >= hidden,
+        "taken over {:?} after the kill, while hidden for {hidden:?}",
+        killed.elapsed()
     );
     let record = db.record(&run_id).await;
     assert_eq!(record.epoch, 2, "one claim per worker");
@@ -134,7 +137,7 @@ async fn a_stalled_worker_is_taken_over_and_writes_nothing() {
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
         .await
         .unwrap();
-    let first = FrozenWorker::spawn(&db, probe.clone(), config("stalled"));
+    let first = FrozenWorker::spawn(&db, probe.clone(), losing("stalled"));
     wait_until("the first worker runs the tool", || async {
         probe.started() == 1
     })
@@ -183,10 +186,8 @@ async fn a_fenced_worker_drops_its_job_and_leaves_the_run_alone() {
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
         .await
         .unwrap();
-    // A long timeout: the worker's pause below stays well inside it.
-    let mut held = config("held");
-    held.visibility_timeout = Duration::from_secs(10);
-    let worker = FrozenWorker::spawn(&db, probe.clone(), held);
+    // The worker's pause below stays well inside its job's timeout.
+    let worker = FrozenWorker::spawn(&db, probe.clone(), config("held"));
     wait_until("the worker runs the tool", || async {
         probe.started() == 1
     })

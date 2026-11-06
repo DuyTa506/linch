@@ -2,6 +2,7 @@
 //! job continues it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use linch_core::hooks::ApprovalResponse;
@@ -36,8 +37,8 @@ async fn a_suspended_run_waits_for_approve() {
     })
     .await;
 
-    // Past a whole visibility timeout nothing picks the run up again.
-    tokio::time::sleep(TIMEOUT + TIMEOUT / 2).await;
+    // Its job is gone, so nothing picks the run up again.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     let record = db.record(&run_id).await;
     assert_eq!(
         (record.status, record.epoch),
@@ -129,7 +130,7 @@ async fn an_approve_taken_over_after_its_answers_landed_resumes() {
     };
     let gate = Arc::new(Semaphore::new(0));
     let probe = Probe::new("Write", ToolScope::Write, Hold::Forever(gate));
-    let first = Running::spawn(&db.pool, config("w1"), agent(&db.pool, probe.clone()));
+    let first = Running::spawn(&db.pool, losing("w1"), agent(&db.pool, probe.clone()));
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
         .await
         .unwrap();

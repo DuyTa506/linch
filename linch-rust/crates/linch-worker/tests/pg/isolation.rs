@@ -65,7 +65,7 @@ async fn a_queue_limit_holds_under_repeatable_read() {
     holder.commit().await.unwrap();
 
     // The queue is full, so the first job stays queued.
-    tokio::time::sleep(TIMEOUT / 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         probe.started(),
         0,

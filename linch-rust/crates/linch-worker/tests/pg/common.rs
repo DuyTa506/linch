@@ -29,8 +29,15 @@ pub use crate::fixtures::*;
 
 const DSN_VAR: &str = "LINCH_TEST_PG_DSN";
 pub const NS: &str = "p9";
-/// Visibility timeout of the test workers.
-pub const TIMEOUT: Duration = Duration::from_secs(1);
+/// Visibility timeout of a worker that a test means to lose its job (it is
+/// killed or stalls), so another worker takes the job over soon. A worker
+/// drops its run when no heartbeat lands within its timeout and then claims
+/// the run again, which a test counting claims must not see; 3 s holds
+/// before the kill even when one heartbeat of a loaded database is slow.
+pub const TIMEOUT: Duration = Duration::from_secs(3);
+/// Visibility timeout of every other test worker, so that no slow
+/// heartbeat ever makes it drop and claim its run again.
+pub const HOLD: Duration = Duration::from_secs(30);
 
 pub struct TestDb {
     /// Pool whose `search_path` is the test schema.
@@ -160,6 +167,19 @@ impl TestDb {
         self.record(run_id).await.status
     }
 
+    /// How long the only job stays hidden from now, by the database clock
+    /// (negative once it is visible).
+    pub async fn hidden_for(&self) -> Duration {
+        let millis: i64 = sqlx::query_scalar(
+            "SELECT (extract(epoch FROM visible_at - now()) * 1000)::bigint \
+             FROM linch_worker_jobs",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .expect("read the job's visibility");
+        Duration::from_millis(u64::try_from(millis).expect("the job is still hidden"))
+    }
+
     pub async fn jobs(&self) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM linch_worker_jobs")
             .fetch_one(&self.pool)
@@ -188,14 +208,22 @@ where
     }
 }
 
-/// Fast settings for tests: 1 s visibility, 50 ms poll, 200 ms retry.
+/// Fast settings for tests: `HOLD` visibility, 50 ms poll, 200 ms retry.
 pub fn config(owner: &str) -> WorkerConfig {
     let mut config = WorkerConfig::new(owner);
     config.queues = vec!["default".into()];
     config.max_jobs = 4;
-    config.visibility_timeout = TIMEOUT;
+    config.visibility_timeout = HOLD;
     config.poll_interval = Duration::from_millis(50);
     config.retry_delay = Duration::from_millis(200);
+    config
+}
+
+/// [`config`] for a worker that the test kills or stalls: its job becomes
+/// visible to the next worker soon after.
+pub fn losing(owner: &str) -> WorkerConfig {
+    let mut config = config(owner);
+    config.visibility_timeout = TIMEOUT;
     config
 }
 
