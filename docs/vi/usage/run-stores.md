@@ -221,8 +221,9 @@ Triển khai từng phương thức như sau:
   hàng mới là không hợp lệ; lease khi tiếp quản thực hiện fencing đối với hàng pending hiện có.
 - `load_run` trả về bản ghi tách biệt hoặc `None` nếu ID không tồn tại.
 - `save_checkpoint` thay thế checkpoint, lưu `status` được cung cấp
-  (mặc định là `"running"`) và cập nhật `updated_at`. Các phương thức ghi không
-  trả về bản ghi; đọc trạng thái đã lưu bằng `load_run`.
+  (mặc định là `"running"`) và cập nhật `updated_at`. Các phương thức ghi
+  checkpoint (`save_checkpoint`, `save_checkpoint_with_events`, `mark_completed`,
+  `mark_failed`) không trả về bản ghi; đọc trạng thái đã lưu bằng `load_run`.
   Run không tồn tại gây ra `KeyError`.
 - `save_checkpoint_with_events` commit checkpoint/trạng thái và tất cả
   event được cung cấp thành một ranh giới giai đoạn. Các event giữ nguyên thứ tự đầu vào. Danh sách

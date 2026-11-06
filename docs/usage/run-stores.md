@@ -220,8 +220,9 @@ Implement each method as follows:
   new row is invalid; a lease on adoption fences the existing pending row.
 - `load_run` returns a detached record or `None` for an unknown ID.
 - `save_checkpoint` replaces the checkpoint, stores the supplied `status`
-  (default `"running"`) and updates `updated_at`. Write methods return no
-  record; read the stored state with `load_run`.
+  (default `"running"`) and updates `updated_at`. The checkpoint writes
+  (`save_checkpoint`, `save_checkpoint_with_events`, `mark_completed`,
+  `mark_failed`) return no record; read the stored state with `load_run`.
   An unknown run raises `KeyError`.
 - `save_checkpoint_with_events` commits the checkpoint/status and all supplied
   events as one phase boundary. Events retain input order. The returned

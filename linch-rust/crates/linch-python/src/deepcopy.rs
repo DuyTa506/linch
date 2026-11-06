@@ -1,7 +1,7 @@
 //! Native `copy.deepcopy`.
 //!
-//! A port of CPython's `copy.deepcopy` / `copy._reconstruct` (identical in
-//! 3.11-3.13) that shares the caller's memo dict, including the keep-alive
+//! A port of CPython's `copy.deepcopy` / `copy._reconstruct` (3.11-3.14; 3.14
+//! moved the atomic types into a set and checks them before the memo) that shares the caller's memo dict, including the keep-alive
 //! list stored under `id(memo)`. Exact `list`/`dict`/`tuple`, the atomic types
 //! and the `__reduce_ex__(4)` reconstruction run natively. Every other case
 //! (`__deepcopy__` hooks, `copyreg.dispatch_table`, the remaining dispatch
@@ -11,9 +11,12 @@
 
 use std::collections::HashMap;
 
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
+
+use crate::dict_iter::for_each_item;
 
 /// Native recursion depth before delegating to the stdlib, which then owns
 /// any `RecursionError`. Keeps Rust stack use bounded on worker threads.
@@ -27,6 +30,9 @@ struct Refs {
     object: Py<PyType>,
     dispatch_table: Py<PyDict>,
     atomic: Vec<Py<PyType>>,
+    /// 3.14 returns an atomic before reading the memo; 3.11-3.13 read the
+    /// memo first, so a memo entry for an atomic wins there.
+    atomic_before_memo: bool,
     other_dispatch: Vec<Py<PyType>>,
 }
 
@@ -35,17 +41,27 @@ static REFS: PyOnceLock<Refs> = PyOnceLock::new();
 fn refs(py: Python<'_>) -> PyResult<&'static Refs> {
     REFS.get_or_try_init(py, || {
         let copy = py.import("copy")?;
-        let atomic_copier = copy.getattr("_deepcopy_atomic")?;
         let native = [
             py.get_type::<PyList>(),
             py.get_type::<PyDict>(),
             py.get_type::<PyTuple>(),
         ];
         let (mut atomic, mut other_dispatch) = (Vec::new(), Vec::new());
+        // 3.14 keeps the atomic types in a set; older versions map them to
+        // `_deepcopy_atomic` in the dispatch table.
+        let atomic_before_memo = copy.hasattr("_atomic_types")?;
+        let atomic_copier = if atomic_before_memo {
+            for cls in copy.getattr("_atomic_types")?.try_iter()? {
+                atomic.push(cls?.cast_into::<PyType>()?.unbind());
+            }
+            None
+        } else {
+            Some(copy.getattr("_deepcopy_atomic")?)
+        };
         let dispatch = copy.getattr("_deepcopy_dispatch")?.cast_into::<PyDict>()?;
         for (cls, copier) in dispatch.iter() {
             let cls = cls.cast_into::<PyType>()?;
-            if copier.is(&atomic_copier) {
+            if atomic_copier.as_ref().is_some_and(|f| copier.is(f)) {
                 atomic.push(cls.unbind());
             } else if !native.iter().any(|ty| ty.is(&cls)) {
                 other_dispatch.push(cls.unbind());
@@ -63,12 +79,14 @@ fn refs(py: Python<'_>) -> PyResult<&'static Refs> {
                 .cast_into::<PyDict>()?
                 .unbind(),
             atomic,
+            atomic_before_memo,
             other_dispatch,
         })
     })
 }
 
-/// How one type is copied, decided once per `deepcopy` call.
+/// How one type is copied, decided once per `deepcopy` call and again if
+/// what it was read from changes (see [`Sources`]).
 #[derive(Clone, Copy)]
 enum Plan {
     Atomic,
@@ -86,13 +104,34 @@ enum Plan {
     },
 }
 
+/// The mappings a cached answer was read from, each with its size then: the
+/// namespace of every MRO base below `object`, plus `copyreg.dispatch_table`
+/// for a slots plan.
+///
+/// Code run mid-copy (a sibling's hook or reducer) can add `__deepcopy__`,
+/// `__setstate__`, a pickle hook or a `copyreg` reducer, and the stdlib looks
+/// these up on every object. Each addition grows one of the mappings, so a
+/// cached answer is reused only while all of them keep their size. A change
+/// that keeps every size (deleting one entry and adding another) or a
+/// `__bases__` assignment is not seen.
+type Sources<'py> = Vec<(Bound<'py, PyAny>, usize)>;
+
+fn unchanged(sources: &Sources<'_>) -> PyResult<bool> {
+    for (mapping, size) in sources {
+        if mapping.len()? != *size {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 struct Copier<'py> {
     py: Python<'py>,
     refs: &'static Refs,
     memo: Bound<'py, PyDict>,
     depth: usize,
-    plans: HashMap<usize, Plan>,
-    setstate_absent: HashMap<usize, bool>,
+    plans: HashMap<usize, (Plan, Sources<'py>)>,
+    setstate_absent: HashMap<usize, (bool, Sources<'py>)>,
     slots: HashMap<usize, Vec<Py<PyString>>>,
 }
 
@@ -103,6 +142,10 @@ impl<'py> Copier<'py> {
 
     fn delegate(&self, x: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         self.refs.deepcopy.bind(self.py).call1((x, &self.memo))
+    }
+
+    fn is_atomic(&self, cls: &Bound<'py, PyType>) -> bool {
+        self.refs.atomic.iter().any(|ty| ty.bind(self.py).is(cls))
     }
 
     fn has_reductor(&self, cls: &Bound<'py, PyType>) -> PyResult<bool> {
@@ -148,6 +191,20 @@ impl<'py> Copier<'py> {
             }
         }
         Ok(true)
+    }
+
+    fn namespaces(&self, cls: &Bound<'py, PyType>) -> PyResult<Sources<'py>> {
+        let object = self.refs.object.bind(self.py);
+        let mut namespaces = Vec::new();
+        for base in cls.getattr("__mro__")?.try_iter()? {
+            let base = base?;
+            if !base.is(object) {
+                let namespace = base.getattr("__dict__")?;
+                let size = namespace.len()?;
+                namespaces.push((namespace, size));
+            }
+        }
+        Ok(namespaces)
     }
 
     fn in_mro(&self, cls: &Bound<'py, PyType>, name: &str) -> PyResult<bool> {
@@ -200,12 +257,14 @@ impl<'py> Copier<'py> {
 
     fn plan(&mut self, cls: &Bound<'py, PyType>) -> PyResult<Plan> {
         let key = cls.as_ptr() as usize;
-        if let Some(plan) = self.plans.get(&key) {
+        if let Some((plan, sources)) = self.plans.get(&key)
+            && unchanged(sources)?
+        {
             return Ok(*plan);
         }
         let refs = self.refs;
         let is_any = |types: &[Py<PyType>]| types.iter().any(|ty| ty.bind(self.py).is(cls));
-        let plan = if is_any(&refs.atomic) {
+        let plan = if self.is_atomic(cls) {
             Plan::Atomic
         } else if cls.is(self.py.get_type::<PyList>()) {
             Plan::List
@@ -229,24 +288,40 @@ impl<'py> Copier<'py> {
                     && !self.in_mro(cls, "__deepcopy__")?,
             }
         };
-        self.plans.insert(key, plan);
+        // Read after `_slotnames`, which may store `__slotnames__` on `cls`.
+        let mut sources = match plan {
+            Plan::Slots | Plan::Reduce { .. } => self.namespaces(cls)?,
+            _ => Vec::new(),
+        };
+        // The reduce arm reads `dispatch_table` on every object instead.
+        if let Plan::Slots = plan {
+            let table = refs.dispatch_table.bind(self.py);
+            sources.push((table.as_any().clone(), table.len()));
+        }
+        self.plans.insert(key, (plan, sources));
         Ok(plan)
     }
 
     fn setstate_absent(&mut self, y: &Bound<'py, PyAny>) -> PyResult<bool> {
         let cls = y.get_type();
         let key = cls.as_ptr() as usize;
-        if let Some(absent) = self.setstate_absent.get(&key) {
+        if let Some((absent, sources)) = self.setstate_absent.get(&key)
+            && unchanged(sources)?
+        {
             return Ok(*absent);
         }
         let absent = self.lookup_is_static(&cls)? && !self.in_mro(&cls, "__setstate__")?;
-        self.setstate_absent.insert(key, absent);
+        let sources = self.namespaces(&cls)?;
+        self.setstate_absent.insert(key, (absent, sources));
         Ok(absent)
     }
 
     fn deep_inner(&mut self, x: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let d = self.id(x);
         if let Some(y) = self.memo.get_item(d)? {
+            if self.refs.atomic_before_memo && self.is_atomic(&x.get_type()) {
+                return Ok(x.clone());
+            }
             return Ok(y);
         }
         let cls = x.get_type();
@@ -319,9 +394,10 @@ impl<'py> Copier<'py> {
     fn dict(&mut self, x: &Bound<'py, PyAny>, d: usize) -> PyResult<Bound<'py, PyAny>> {
         let y = PyDict::new(self.py);
         self.memo.set_item(d, &y)?;
-        for (key, value) in x.cast::<PyDict>()?.iter() {
+        for_each_item(x.cast::<PyDict>()?, |key, value| {
             y.set_item(self.deep(&key)?, self.deep(&value)?)?;
-        }
+            Ok(None::<()>)
+        })?;
         Ok(y.into_any())
     }
 
@@ -402,6 +478,12 @@ impl<'py> Copier<'py> {
                     for pair in slots.call_method0("items")?.try_iter()? {
                         let (key, value): (Bound<'py, PyAny>, Bound<'py, PyAny>) =
                             pair?.extract()?;
+                        if !key.is_instance_of::<PyString>() {
+                            return Err(PyTypeError::new_err(format!(
+                                "attribute name must be string, not '{}'",
+                                key.get_type().name()?
+                            )));
+                        }
                         y.setattr(key.cast_into::<PyString>()?, value)?;
                     }
                 }

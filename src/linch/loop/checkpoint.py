@@ -217,6 +217,7 @@ class RunEventBuffer:
         "_atomic_write_failed",
         "_dirty",
         "_dirty_covers",
+        "_commit_lock",
     )
 
     def __init__(
@@ -247,6 +248,9 @@ class RunEventBuffer:
         # Held checkpoint snapshot and how many pending events it covers.
         self._dirty: RunCheckpoint | None = None
         self._dirty_covers = 0
+        # A session-store barrier can start in another task (a durable notify
+        # from a background tool), so commits run one at a time, in order.
+        self._commit_lock = asyncio.Lock()
 
     @property
     def last_seq(self) -> int:
@@ -270,9 +274,24 @@ class RunEventBuffer:
         error: dict[str, object] | None = None,
     ) -> None:
         """Commit a pending prefix with its checkpoint."""
+        async with self._commit_lock:
+            await self._commit(checkpoint, status=status, error=error)
+
+    async def _commit(
+        self,
+        checkpoint: RunCheckpoint,
+        *,
+        count: int | None = None,
+        status: str = "running",
+        error: dict[str, object] | None = None,
+    ) -> None:
         if not self._pending and status == "running" and self._dirty is None:
             return
-        pending, self._pending = self._pending, []
+        held = self._dirty
+        # Take the first ``count`` events in place: anything appended while the
+        # write is in flight lands after the events still pending.
+        split = len(self._pending) if count is None else count
+        pending, self._pending = self._pending[:split], self._pending[split:]
         try:
             operation = "mark_failed" if status == "failed" else "save_checkpoint_with_events"
             if status == "failed":
@@ -299,8 +318,10 @@ class RunEventBuffer:
             self._atomic_write_failed = True
             raise
         self._atomic_write_failed = False
-        # The committed checkpoint is the latest state; any held one is superseded.
-        self._dirty = None
+        # The committed checkpoint supersedes the snapshot held when the write
+        # began; one deferred while the write was in flight is newer and stays.
+        if self._dirty is held:
+            self._dirty = None
         if seqs:
             self._last_seq = max(self._last_seq, *seqs)
 
@@ -310,22 +331,22 @@ class RunEventBuffer:
         Events recorded after the held save stay pending, as they did when
         every checkpoint was written through.
         """
-        checkpoint = self._dirty
-        if self.store is None or self._atomic_write_failed or checkpoint is None:
-            return
-        later = self._pending[self._dirty_covers :]
-        self._pending = self._pending[: self._dirty_covers]
-        try:
-            await self.flush_with_checkpoint(checkpoint)
-        finally:
-            self._pending.extend(later)
+        async with self._commit_lock:
+            checkpoint = self._dirty
+            if self.store is None or self._atomic_write_failed or checkpoint is None:
+                return
+            await self._commit(checkpoint, count=self._dirty_covers)
 
     async def flush(self) -> int:
         """Barrier: commit pending events and any held checkpoint in one write."""
+        async with self._commit_lock:
+            return await self._flush()
+
+    async def _flush(self) -> int:
         if self.store is None or self._atomic_write_failed:
             return self._last_seq
         if self._dirty is not None:
-            await self.flush_with_checkpoint(self._dirty)
+            await self._commit(self._dirty)
             return self._last_seq
         if not self._pending:
             return self._last_seq

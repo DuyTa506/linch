@@ -86,10 +86,13 @@ flowchart LR
 - Trạng thái run được group-commit tại các barrier. Checkpoint và event được
   giữ trong bộ đệm của run và commit trong một lần ghi
   `save_checkpoint_with_events()` trước tác động bên ngoài kế tiếp: gửi
-  provider, mỗi lần tool bắt đầu và kết thúc, mỗi lần ghi session store, và
-  khi kết thúc run. Receipt đã trả tiền và projection được ghi ngay khi có. Một
-  checkpoint đang giữ là snapshot tại thời điểm lưu, nên mọi trạng thái đã
-  commit đều là trạng thái mà cách ghi xuyên (write-through) cũng tạo ra.
+  provider, mỗi lần tool bắt đầu, mỗi lần ghi session store, và khi kết thúc
+  run. Receipt đã trả tiền, projection và event kết thúc của tool được ghi ngay
+  khi có. Event kết thúc của tool được flush ngay sau khi tool trả về, nên nếu
+  crash trước lần flush đó, lời gọi được resume với kết quả "bị gián đoạn" và
+  không chạy lại, dù tác động của nó đã xảy ra. Một checkpoint đang giữ là
+  snapshot tại thời điểm lưu, nên mọi trạng thái đã commit đều là trạng thái mà
+  cách ghi xuyên (write-through) cũng tạo ra.
 - Các event của run được lưu bền vững có số thứ tự riêng cho từng run. Bên đọc kết nối lại
   bằng `PostgresRunStore.load_events(run_id, after_seq=...)`; thông báo chỉ dùng để
   đánh thức bên đọc, không phải nguồn dữ liệu chuẩn.

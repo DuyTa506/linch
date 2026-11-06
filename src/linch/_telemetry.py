@@ -30,6 +30,7 @@ from .types import Usage
 # measurable share of each store call. Read the API's own globals first; only
 # defer to the public getter when they are absent or the variable was set at
 # import (the getter then installs the provider, so later reads are direct).
+# A variable set after import is not seen; docs/usage/events.md says so.
 _ENV_TRACER = "OTEL_PYTHON_TRACER_PROVIDER" in os.environ
 _ENV_METER = "OTEL_PYTHON_METER_PROVIDER" in os.environ
 
