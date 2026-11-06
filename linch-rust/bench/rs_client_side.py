@@ -12,6 +12,7 @@ import asyncio
 import shutil
 import sys
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -28,6 +29,7 @@ from common import (  # noqa: E402
     ok,
     peak_rss_mb,
     proc_hwm_mb,
+    sessions,
 )
 
 
@@ -198,6 +200,25 @@ async def case_concurrency(job: Job) -> Result:
     return ok(clock, job["sessions"], "run", memory.pop("peak_rss_mb"), **memory)
 
 
+async def case_sessions(job: Job) -> Result:
+    """Case 14: M sessions spread round-robin over N sidecars, one agent on
+    each, against `chat_server.py`, on Postgres stores."""
+    provider = {"id": "openai-chat", "base_url": job["base_url"]}
+    cfg = config(job, provider, workspace=job["workspace"], tasks=True)
+    if job["raise_caps"]:
+        cfg["stores"]["max_connections"] = job["pg_pool"] // job["sidecars"]
+    async with AsyncExitStack() as stack:
+        agents = []
+        for n in range(job["sidecars"]):
+            server = await stack.enter_async_context(lr().Server(binary=job["server_bin"]))
+            agents.append(await server.open_agent(cfg))
+            await run_once(agents[-1], f"w{n}", "session w0")
+        n = len(agents)
+        return await sessions(
+            job["sessions"], lambda i: run_once(agents[i % n], f"s{i}", f"session s{i}")
+        )
+
+
 async def case_startup(job: Job) -> Result:
     """One cold process: import, server start and open, first run."""
     started = time.perf_counter()
@@ -279,6 +300,7 @@ CASES = {
     "mcp": case_mcp,
     "compaction": case_compaction,
     "concurrency": case_concurrency,
+    "sessions": case_sessions,
     "startup": case_startup,
 }
 

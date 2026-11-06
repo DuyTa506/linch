@@ -81,6 +81,7 @@ sets dummy keys (the replay server ignores them); only `--live` passes
 | 11 | Concurrency | 16 agents in one process, one 10x1 session each, run at once | runs/s |
 | 12 | RPC overhead | rs-client minus rs-kernel on the case 1 rows (derived, not measured) | ms per turn |
 | 13 | Live DeepSeek | the W5 prompts on `deepseek-flash`, thinking off, one `get_weather` tool | ms per provider turn |
+| 14 | Concurrent sessions | M sessions on one agent (100, 500, 1000, 2000; 20, 50 with `--quick`) started together, each one run of 4 turns from `chat_server.py` (`Bash` `echo s<i>`, `TaskCreate`, `TaskList`, text), on Postgres stores | ms per turn over the provider delay |
 
 Columns: wall is the median per iteration; CPU is the mean per iteration
 from the process CPU-time clock (rs-client adds the sidecar's, read through
@@ -90,6 +91,51 @@ untimed run (Python's store methods; Rust's `MemoryRunStore` and
 `MemorySessionStore` counters; the client does not expose them, `n/c`); on
 Postgres, inserted, updated and deleted tuples of the cell's schema
 (`pg_stat_user_tables`) per run, or per job and per workflow.
+
+## Case 14: concurrent sessions
+
+```bash
+# Full run, on a quiet machine (the client interpreter's path must be absolute).
+$PY bench/run_all.py --out /tmp/bench-sessions --cases 14 --pg-dsn "$DSN" \
+    --client-python "$PWD/python/.venv/bin/python"
+# One size only: --sessions 100 (with --quick for a smoke).
+```
+
+`chat_server.py` is the provider: a fake OpenAI-compatible chat server on
+loopback, started per cell, `--chat-workers` processes (16) on one port
+(`SO_REUSEPORT`), each answer streamed after `--turn-delay` seconds (1). It
+reads the turn from the request (the number of `role: tool` messages) and
+the session's tag from the prompt, so it keeps no state. Every side runs
+its `openai-chat` adapter against it, Bash without asking (`skip-dangerous`),
+and its defaults otherwise.
+
+Rows for each M: `py` and `rs-kernel` (one process each), `rs-client` with
+one sidecar and with `--sidecars` (4), sessions round-robin; then the
+largest M again on each side with the caps below raised (`caps raised`).
+
+A side opens its agent, does one warm-up run and prints a mark. The
+coordinator reads the process tree's CPU and the database's
+`xact_commit`, then lets it start all M runs; at the second mark it reads
+the CPU again. In between it samples the tree every 100 ms from `/proc`
+(sidecars and Bash children included).
+
+- Run wall: from the common start to the run's end, p50 and p99 over the
+  runs. Overhead per turn: (run wall - 4 x delay) / 4, which includes the
+  HTTP round trip. Provider p99: the chat server's own time per request
+  (body read to answer sent, minus the delay), to show it is not the
+  bottleneck.
+- Turns/s: 4 x finished runs over the window. PG commits/s: the
+  database's `xact_commit` from the first mark to after the side exited
+  (its backends then report), minus the harness's own reads, over the
+  window. It counts every client of that database, and may include the
+  open, the warm-up run (an idle backend reports up to 10 s late) and the
+  close.
+- Peak children and fds are 100 ms samples, so a Bash child that lives a
+  millisecond is seen only when many run at once; between its fork and
+  exec it counts as a child but not its pages or fds (its parent's).
+  `linch-server` is not dumpable, so its `fd/` cannot be listed: its fd
+  table size (`FDSize`, at least its open fds) stands in, shown as `<= N`.
+- Failed: runs that did not end `success`, with the first error texts.
 
 ## What is not the same on every side
 
@@ -129,9 +175,28 @@ Postgres, inserted, updated and deleted tuples of the cell's schema
   `crates/linch-providers/examples/e2e_bench.rs` splits kernel time for Rust.
 - Worker, workflow and eval cells are n/a on rs-client: neither
   `linch-server` nor the client exposes them.
+- Case 14, defaults that cap concurrency: py's `openai` client opens at
+  most 1000 connections and keeps 100 alive, so past M = 1000 runs wait
+  for a connection, and past 100 a connection is closed after its answer
+  and opened again; py has two asyncpg pools of 10 (run and session store);
+  Rust has one sqlx pool of 10 per process, so 4 sidecars have 40;
+  `linch-server` handles at most 64 requests at once per connection (a
+  run's start is one; the running run holds none). reqwest has no
+  connection cap. `caps raised` lifts the HTTP pool and sets the Postgres
+  pools to 40 connections per side in total; Python's options have no HTTP
+  pool setting, so that row gives its adapter an `openai` client of its
+  own.
+- Case 14 tools: both sides have Read, Write, Edit, Bash, Glob, Grep and
+  the four task tools (py `workspace_tools` without BashProcess, Rust
+  `workspace` plus `tasks`), so each request carries the same catalog;
+  tasks live in the session store on both. py's Bash spawns through
+  asyncio directly, so its 32-thread blocking offload is not on the path.
+  py's `openai` client retries a failed request twice on its own; the
+  chat server's request count (raw JSON) shows any retry.
 
 ## Files
 
+`chat_server.py` is case 14's provider; `sse_server.py` case 6's.
 `make_fixtures.py` regenerates `fixtures/` (`--check` fails on a stale
 file); `loop_10x1.json` and `loop_10x3.json` are the W5 fixtures, byte for
 byte the same as `crates/linch-core/benches/fixtures/`. `common.py` holds the
