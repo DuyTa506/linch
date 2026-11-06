@@ -5,6 +5,14 @@
 //! `type` tags when decoding, so a reader never silently drops data. The one
 //! exception is an event its writer marked ignorable, which is kept as raw
 //! JSON in [`IgnorableEvent`].
+//!
+//! The crate root re-exports each module's entry types (the ones a caller
+//! names directly: [`Event`], [`ProviderRequest`], [`SessionLog`], ...).
+//! Payload structs that only ever appear *through* an entry type's enum
+//! variant stay addressed under their own module instead
+//! (`events::kinds::*` behind [`Event`], `provider::*Event` behind
+//! [`ProviderEvent`]), so the root namespace doesn't carry every variant's
+//! struct as a second, redundant path to the same type.
 
 #![forbid(unsafe_code)]
 
@@ -18,7 +26,10 @@ pub mod run;
 pub mod session_log;
 pub mod usage;
 
-pub use canonical::{CanonicalError, Digest, digest, digest_with_domain, to_canonical_string};
+pub use canonical::{
+    CanonicalError, Digest, JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth, digest,
+    digest_with_domain, to_canonical_string,
+};
 pub use events::{
     Envelope, Event, EventError, IgnorableEvent, Persistence, SubagentEvent, WIRE_VERSION,
 };
