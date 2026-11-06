@@ -1,4 +1,6 @@
 use super::*;
+use crate::events::{IgnorableEvent, SubagentEvent};
+use crate::json::JsonObject;
 use serde_json::json;
 
 fn minimal_known_event() -> JsonValue {
@@ -178,37 +180,73 @@ fn missing_event_is_rejected() {
     ));
 }
 
-/// Whether `event`, or any event nested inside it via `subagent`,
-/// contains an [`super::super::IgnorableEvent`] — i.e. whether encoding
-/// it into an envelope requires `ignorable: true` to decode back.
-fn contains_ignorable(event: &Event) -> bool {
-    match event {
-        Event::Ignorable(_) => true,
-        Event::Subagent(inner) => contains_ignorable(&inner.event),
-        _ => false,
-    }
+#[test]
+fn ignorable_flag_is_forced_true_when_an_ignorable_event_is_constructed_directly() {
+    // A caller who builds an `Envelope` by hand (not via `from_value`/
+    // decode) and forgets to set `ignorable: true` around an
+    // `IgnorableEvent` must still get a self-decodable envelope back.
+    let event = Event::Ignorable(IgnorableEvent::new("future_kind", JsonObject::new()).unwrap());
+    let envelope = Envelope {
+        v: WIRE_VERSION,
+        seq: 1,
+        run_id: RunId::new("r1"),
+        ignorable: false,
+        event,
+    };
+    let decoded: Envelope = serde_json::to_string(&envelope).unwrap().parse().unwrap();
+    assert!(decoded.ignorable);
+    assert_eq!(decoded.event, envelope.event);
+}
+
+#[test]
+fn ignorable_flag_is_forced_true_for_a_nested_subagent_ignorable_event() {
+    let child = Event::Ignorable(IgnorableEvent::new("future_kind", JsonObject::new()).unwrap());
+    let event = Event::Subagent(SubagentEvent {
+        child_run_id: RunId::new("child-1"),
+        event: Box::new(child),
+    });
+    let envelope = Envelope {
+        v: WIRE_VERSION,
+        seq: 1,
+        run_id: RunId::new("r1"),
+        ignorable: false,
+        event,
+    };
+    let decoded: Envelope = serde_json::to_string(&envelope).unwrap().parse().unwrap();
+    assert!(decoded.ignorable);
+    assert_eq!(decoded.event, envelope.event);
 }
 
 proptest::proptest! {
     /// The actual wire boundary the card describes: an arbitrary event,
     /// wrapped in an [`Envelope`], serialized to JSON text, and parsed
-    /// back, round-trips byte-for-byte equal — not just `Event::decode`
-    /// on a bare value, which `events::event::tests` already covers.
+    /// back, round-trips — not just `Event::decode` on a bare value, which
+    /// `events::event::tests` already covers. `declared` is drawn
+    /// independently of `event`, including the case the caller gets
+    /// `ignorable` "wrong" (`false` around an event that needs it): the
+    /// decoded flag must always be the OR of the two, never just the
+    /// caller's `declared` value, and every other field must round-trip
+    /// unchanged.
     #[test]
     fn envelope_round_trips_through_json_text(
         seq in proptest::prelude::any::<u64>(),
         run_id in "[a-zA-Z0-9_-]{1,8}",
+        declared in proptest::prelude::any::<bool>(),
         event in super::super::arbitrary::event(3),
     ) {
         let envelope = Envelope {
             v: WIRE_VERSION,
             seq,
             run_id: RunId::new(run_id),
-            ignorable: contains_ignorable(&event),
+            ignorable: declared,
             event,
         };
         let text = serde_json::to_string(&envelope).unwrap();
         let decoded: Envelope = text.parse().unwrap();
-        proptest::prop_assert_eq!(decoded, envelope);
+        proptest::prop_assert_eq!(decoded.v, envelope.v);
+        proptest::prop_assert_eq!(decoded.seq, envelope.seq);
+        proptest::prop_assert_eq!(&decoded.run_id, &envelope.run_id);
+        proptest::prop_assert_eq!(&decoded.event, &envelope.event);
+        proptest::prop_assert_eq!(decoded.ignorable, declared || envelope.event.contains_ignorable());
     }
 }

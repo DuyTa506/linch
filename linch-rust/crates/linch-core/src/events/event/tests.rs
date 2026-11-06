@@ -241,20 +241,8 @@ fn every_kind_round_trips_through_decode() {
         let tree = strategy.new_tree(&mut runner).unwrap();
         let event = tree.current();
         let value = event.to_value().expect("arbitrary finite events encode");
-        let ignorable = contains_ignorable(&event);
-        let ctx = DecodeCtx::root(ignorable);
+        let ctx = DecodeCtx::root(event.contains_ignorable());
         let decoded = Event::decode(value, ctx).expect("arbitrary event must decode");
         assert_eq!(decoded, event);
-    }
-}
-
-/// Whether `event`, or any event nested inside it via `subagent`,
-/// contains an [`IgnorableEvent`] — i.e. whether decoding it requires
-/// an `ignorable` envelope.
-fn contains_ignorable(event: &Event) -> bool {
-    match event {
-        Event::Ignorable(_) => true,
-        Event::Subagent(inner) => contains_ignorable(&inner.event),
-        _ => false,
     }
 }

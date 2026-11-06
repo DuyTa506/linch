@@ -149,7 +149,14 @@ pub enum EventError {
 /// is the producer's promise that an unknown `event.type` is safe to skip
 /// (see `Event::decode` and `docs/architecture/events.md`); it does not
 /// rescue a malformed *known* event.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Serialize` is hand-written (see [`Envelope::to_value`]) rather than
+/// derived: setting `ignorable: false` while `event` carries an
+/// [`super::IgnorableEvent`] (directly, or nested under a `subagent`) would
+/// otherwise encode an envelope that cannot decode itself back. Encoding
+/// always sets the wire `ignorable` flag to `true` in that case regardless
+/// of this field's value, so every envelope that encodes also decodes.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Envelope {
     /// Wire version this envelope was written with.
     pub v: u32,
@@ -159,7 +166,6 @@ pub struct Envelope {
     pub run_id: RunId,
     /// Whether an unknown `event.type` should decode to
     /// [`super::IgnorableEvent`] instead of failing.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignorable: bool,
     /// The event itself.
     pub event: Event,
@@ -202,6 +208,41 @@ impl Envelope {
             ignorable,
             event,
         })
+    }
+
+    /// Encode this envelope to its JSON wire representation.
+    ///
+    /// The wire `ignorable` field is `true` whenever `self.ignorable` is, or
+    /// `self.event` (recursively through `subagent`) is an
+    /// [`super::IgnorableEvent`] — see the type's docs.
+    ///
+    /// Raises:
+    ///     EventError: If `self.event` fails to encode (see
+    ///         [`Event::to_value`]).
+    pub fn to_value(&self) -> Result<JsonValue, EventError> {
+        let mut obj = crate::json::JsonObject::new();
+        obj.insert("v".to_string(), JsonValue::from(self.v));
+        obj.insert("seq".to_string(), JsonValue::from(self.seq));
+        obj.insert(
+            "run_id".to_string(),
+            JsonValue::String(self.run_id.as_str().to_string()),
+        );
+        if self.ignorable || self.event.contains_ignorable() {
+            obj.insert("ignorable".to_string(), JsonValue::Bool(true));
+        }
+        obj.insert("event".to_string(), self.event.to_value()?);
+        Ok(JsonValue::Object(obj))
+    }
+}
+
+impl Serialize for Envelope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_value()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
     }
 }
 

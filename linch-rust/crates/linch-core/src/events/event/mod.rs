@@ -336,6 +336,17 @@ impl Event {
             Event::Ignorable(_) => Both,
         }
     }
+
+    /// Whether this event, or a nested `subagent` event, is an
+    /// [`IgnorableEvent`] — i.e. whether an enclosing [`super::Envelope`]
+    /// must set `ignorable: true` for this event to decode back.
+    pub(super) fn contains_ignorable(&self) -> bool {
+        match self {
+            Event::Ignorable(_) => true,
+            Event::Subagent(e) => e.event.contains_ignorable(),
+            _ => false,
+        }
+    }
 }
 
 impl Serialize for Event {
