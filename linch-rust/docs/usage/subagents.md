@@ -430,7 +430,7 @@ resuming it picks them up again.
 | `Correlator`, `MailboxPlugin`, durable inbox | Mailbox in process only; `Correlator` in Rust only |
 | `generate_subagent_definition()` | Not in the client; write the file yourself |
 | `session.workers` handles | Not exposed; follow `child_run_status` and `subagent` events |
-| `fork` from Python | Rust only |
+| `agent.fork_session(...)` | Rust only, `Agent::fork_session` |
 | Reloading subagents | Not yet; open a new agent |
 
 ---
