@@ -25,6 +25,7 @@ pub mod message;
 pub mod permissions;
 pub mod policy;
 pub mod provider;
+pub mod registration;
 pub mod registry;
 pub mod run;
 pub mod session_log;
@@ -49,6 +50,7 @@ pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
     ProviderRequest, ReasoningEffort, StreamError, ToolChoice, ToolDefinition, assemble,
 };
+pub use registration::Registration;
 pub use run::{RunStatus, StopReason};
 pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
 pub use tool::{
