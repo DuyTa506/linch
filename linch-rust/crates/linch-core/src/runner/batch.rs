@@ -50,6 +50,7 @@ impl Runner {
                     result: result.clone(),
                     duration_ms: 0,
                     canonical_output: None,
+                    metadata: JsonObject::new(),
                 }));
             }
         }

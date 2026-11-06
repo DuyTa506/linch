@@ -82,6 +82,7 @@ async fn tool_turn(
             result: result.clone(),
             duration_ms: 1,
             canonical_output: None,
+            metadata: JsonObject::new(),
         }));
         journal.flush().await?;
         results.push(ContentBlock::ToolResult(result));

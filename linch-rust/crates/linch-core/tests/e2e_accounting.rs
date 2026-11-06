@@ -1,6 +1,6 @@
 //! What a run reports about itself beyond its answer (17.2): when each
-//! envelope was made, how long the call that ended the run took, and the
-//! context each provider request was built from.
+//! envelope was made, how long the call that ended the run took, the
+//! context each provider request was built from, and each tool's metadata.
 
 mod common;
 
@@ -59,7 +59,34 @@ async fn every_provider_request_reports_its_context() {
     assert_eq!(with_delivery.count(), 2, "{writes:?}");
 }
 
-/// A read tool that takes `PAUSE` to answer.
+/// A tool's output metadata is on its durable end event, and the model
+/// never sees it.
+#[tokio::test]
+async fn a_tools_metadata_rides_its_end_event_and_not_the_request() {
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(ScriptedProvider::new(script(1, 1, "Slow")));
+    let permissions = policy(PermissionMode::SkipDangerous);
+    let agent = agent(provider.clone(), slow_tools(), permissions, stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let streamed = finish(stream).await;
+    let stored = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    let rows = object(serde_json::json!({"rows": 3}));
+    for envelopes in [&streamed, &stored] {
+        let ends: Vec<&JsonObject> = (envelopes.iter())
+            .filter_map(|e| match &e.event {
+                Event::ToolCallEnd(end) => Some(&end.metadata),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends, [&rows]);
+    }
+    let requests = provider.requests();
+    let last = serde_json::to_string(&requests.last().unwrap().messages).unwrap();
+    assert!(last.contains("done") && !last.contains("rows"), "{last}");
+}
+
+/// A read tool that takes `PAUSE` to answer, with metadata for the host.
 struct Slow(JsonObject);
 
 const PAUSE: Duration = Duration::from_millis(30);
@@ -80,7 +107,9 @@ impl Tool for Slow {
     }
     async fn execute(&self, _input: JsonObject, _ctx: ToolContext) -> ToolResult {
         tokio::time::sleep(PAUSE).await;
-        Ok(ToolOutput::new("done"))
+        let mut output = ToolOutput::new("done");
+        output.metadata = object(serde_json::json!({"rows": 3}));
+        Ok(output)
     }
 }
 

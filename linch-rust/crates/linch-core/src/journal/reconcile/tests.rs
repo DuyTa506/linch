@@ -90,6 +90,7 @@ fn end(id: &str, name: &str) -> Event {
         result: ToolResultBlock::text(id, format!("{id} ok"), false),
         duration_ms: 1,
         canonical_output: None,
+        metadata: JsonObject::new(),
     })
 }
 

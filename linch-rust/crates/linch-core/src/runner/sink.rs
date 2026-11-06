@@ -130,6 +130,10 @@ impl ToolSink for JournalSink<'_> {
             result: outcome.block.clone(),
             duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
             canonical_output: None,
+            metadata: match &outcome.result {
+                Ok(output) => output.metadata.clone(),
+                Err(_) => Default::default(),
+            },
         });
         let events = if ran {
             vec![end]

@@ -34,6 +34,7 @@ fn end(id: &str, tool: &str, is_error: bool) -> Event {
         result: ToolResultBlock::text(id, "out", is_error),
         duration_ms: 1,
         canonical_output: None,
+        metadata: JsonObject::new(),
     })
 }
 
