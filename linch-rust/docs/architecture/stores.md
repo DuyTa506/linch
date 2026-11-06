@@ -184,23 +184,25 @@ the same way: `NotFound`, or `Conflict` naming both lengths
 
 ### Connecting and sizing a pool
 
-`linch_postgres::connect(dsn, timeout)` (`lib.rs:83`) bounds the first
-connection (default `CONNECT_TIMEOUT`, 5 s); sqlx alone would retry a refused
-connection for its 30 s acquire timeout. It also turns off sqlx's ping before
-each acquire (`test_before_acquire(false)`, `lib.rs:65-70`): a run commit or a
+`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:95`) bounds
+the first connection (default `CONNECT_TIMEOUT`, 5 s); sqlx alone would retry a
+refused connection for its 30 s acquire timeout. Past it, the error names the
+host and port (or socket) it tried. It also turns off sqlx's ping before
+each acquire (`test_before_acquire(false)`, `lib.rs:109`): a run commit or a
 session append is one round trip, and the ping would make it two. A
 connection the server dropped while idle then fails its next query with a
 `Backend` error instead of being replaced first; sqlx's idle timeout and
 lifetime still recycle connections. No error message holds the DSN.
 
-`connect` keeps sqlx's other defaults, including at most 10 connections. sqlx
+`connect` keeps sqlx's other defaults; `MAX_CONNECTIONS` is sqlx's 10, and a
+facade config sets its own with `stores.max_connections`. sqlx
 also pings a connection in the background when it is released (sqlx-core
 0.9.0, `src/pool/connection.rs:314`), so a run that commits back to
 back alternates between two connections. Size a pool at about two
 connections per concurrently committing run. A `Worker` needs one more for its
-`LISTEN` connection (`crates/linch-worker/src/worker.rs:87-90`). For a larger
-pool, build it with sqlx's `PgPoolOptions` and keep the acquire ping off, as
-the example below does.
+`LISTEN` connection (`crates/linch-worker/src/worker.rs:87-90`). The example
+below sizes its pool that way with sqlx's `PgPoolOptions`, keeping the acquire
+ping off.
 
 ## Group-commit write counts
 
@@ -261,7 +263,8 @@ async fn pool(dsn: &str, runs: u32) -> Result<PgPool, sqlx::Error> {
 
 /// Every suite a store backend must pass, here run on Postgres.
 async fn check_postgres(dsn: &str) -> Result<(), Box<dyn Error>> {
-    let pool = linch_postgres::connect(dsn, linch_postgres::CONNECT_TIMEOUT).await?;
+    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::MAX_CONNECTIONS);
+    let pool = linch_postgres::connect(dsn, timeout, max).await?;
     linch_postgres::migrate(&pool).await?;
     let runs = PgRunStore::new(pool.clone());
     run_store_suite(&runs).await;

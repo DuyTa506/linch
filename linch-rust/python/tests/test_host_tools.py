@@ -8,7 +8,7 @@ from typing import Any
 
 from scripted import config, text_turn, tool_turn
 
-from linch_rust import ResultEvent, Server, ToolCallEndEvent, tool
+from linch_rust import ResultEvent, Server, ToolCallEndEvent, ToolOutput, tool
 
 
 def tool_ends(envelopes: list[Any]) -> list[ToolCallEndEvent]:
@@ -40,6 +40,23 @@ async def test_a_host_tool_runs_in_the_client_and_the_model_reads_its_value() ->
     assert end.tool_use_id == "call_1" and not end.is_error
     assert json.loads(result_text(end)) == {"name": "Ada", "email": "ada@example.com"}
     assert isinstance(result, ResultEvent) and result.final_text == "Found."
+
+
+async def test_a_host_tool_returns_metadata_the_host_reads_and_the_model_does_not() -> None:
+    @tool(scope="read")
+    async def lookup(email: str) -> ToolOutput:
+        """Find a customer by email."""
+        return ToolOutput({"name": "Ada"}, metadata={"source": "crm", "ms": 4})
+
+    turns = [tool_turn("call_1", "lookup", {"email": "ada@example.com"}), text_turn("Found.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup])
+        envelopes = [e async for e in await agent.run("s1", "Who is ada@example.com?")]
+
+    [end] = tool_ends(envelopes)
+    assert json.loads(result_text(end)) == {"name": "Ada"}
+    assert end.metadata == {"source": "crm", "ms": 4}
+    assert "crm" not in result_text(end)
 
 
 async def test_a_raising_host_tool_is_a_tool_error_the_model_reads() -> None:

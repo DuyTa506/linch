@@ -13,7 +13,8 @@ async fn an_unreachable_server_fails_within_the_timeout() {
     let dsn = format!("postgres://postgres:secret@127.0.0.1:{port}/linch");
 
     let started = Instant::now();
-    let error = linch_postgres::connect(&dsn, Duration::from_millis(300))
+    let timeout = Duration::from_millis(300);
+    let error = linch_postgres::connect(&dsn, timeout, linch_postgres::MAX_CONNECTIONS)
         .await
         .expect_err("nothing listens there");
     assert!(
@@ -21,14 +22,26 @@ async fn an_unreachable_server_fails_within_the_timeout() {
         "{:?}",
         started.elapsed()
     );
-    assert!(matches!(error, sqlx::Error::PoolTimedOut), "{error:?}");
-    assert!(!error.to_string().contains("secret"), "{error}");
+    let sqlx::Error::Io(io) = &error else {
+        panic!("a timeout, got {error:?}");
+    };
+    assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+    let text = error.to_string();
+    assert!(
+        text.contains(&format!("Postgres at 127.0.0.1:{port} within 300ms")),
+        "names the host, port and wait: {text}"
+    );
+    assert!(!text.contains("secret"), "{error}");
 }
 
 #[tokio::test]
 async fn a_malformed_dsn_fails_at_once() {
-    let error = linch_postgres::connect("not a dsn", linch_postgres::CONNECT_TIMEOUT)
-        .await
-        .expect_err("not a DSN");
+    let error = linch_postgres::connect(
+        "not a dsn",
+        linch_postgres::CONNECT_TIMEOUT,
+        linch_postgres::MAX_CONNECTIONS,
+    )
+    .await
+    .expect_err("not a DSN");
     assert!(matches!(error, sqlx::Error::Configuration(_)), "{error:?}");
 }

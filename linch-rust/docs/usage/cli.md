@@ -81,7 +81,8 @@ stores or permissions ([Agent config](./agent.md)).
 
 Options and rules:
 
-- `--dir DIR` makes the project under `DIR` instead of the current directory.
+- `--dir DIR` makes the project under `DIR` instead of the current directory;
+  the next steps then `cd DIR/<name>`.
 - The name may be kebab-case (`demo-agent`); the package is its snake-case form
   (`demo_agent`). It starts with a lowercase letter, uses lowercase letters and
   digits with single `-` or `_` separators, and is not a Python keyword or one

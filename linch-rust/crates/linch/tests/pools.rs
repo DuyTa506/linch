@@ -4,7 +4,9 @@
 
 use futures::StreamExt;
 use linch::provider::scripted::TurnBuilder;
-use linch::{AgentConfig, Event, Hooks, OpenedAgent, PgPools, RunOptions, ToolRegistry};
+use linch::{
+    AgentConfig, Event, Hooks, OpenedAgent, PgPools, RunOptions, StoreConfig, ToolRegistry,
+};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool};
@@ -80,6 +82,27 @@ async fn open(dsn: &str, pools: &PgPools, text: &str) -> OpenedAgent {
     let tools = Arc::new(ToolRegistry::new());
     let hooks = Arc::new(Hooks::default());
     config.open_with(tools, hooks, pools).await.unwrap()
+}
+
+#[test]
+fn a_postgres_store_takes_a_pool_size() {
+    let decode = |stores: serde_json::Value| serde_json::from_value::<StoreConfig>(stores);
+    let sized = decode(json!({"type": "postgres", "dsn": "postgres://db/linch",
+                              "max_connections": 20}))
+    .unwrap();
+    let StoreConfig::Postgres {
+        max_connections, ..
+    } = &sized
+    else {
+        panic!("{sized:?}");
+    };
+    assert_eq!(max_connections.map(|n| n.get()), Some(20));
+    let shown = serde_json::to_value(&sized).unwrap();
+    assert_eq!(shown["max_connections"], 20);
+    assert!(decode(json!({"type": "postgres", "dsn": "d", "max_connections": 0})).is_err());
+    let default = decode(json!({"type": "postgres", "dsn": "postgres://db/linch"})).unwrap();
+    let shown = serde_json::to_value(&default).unwrap();
+    assert!(shown.get("max_connections").is_none(), "{shown}");
 }
 
 #[tokio::test]

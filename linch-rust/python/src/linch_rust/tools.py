@@ -24,6 +24,29 @@ _JSON_TYPES: dict[Any, str] = {
 
 
 @dataclass(frozen=True)
+class ToolOutput:
+    """What a host tool returns to attach metadata to its value.
+
+    The model reads `value`; `metadata` is for the host only and arrives in
+    the call's `ToolCallEndEvent.metadata`. A tool that returns anything
+    else returns a value with no metadata.
+
+    Attributes:
+        value: Any JSON value; what the model reads.
+        metadata: JSON-safe details for the host, never shown to the model.
+    """
+
+    value: Any
+    metadata: Mapping[str, Any] | None = None
+
+    def wire(self) -> dict[str, Any]:
+        """The `tool.call` result: `{"value", "metadata"?}`."""
+        if self.metadata is None:
+            return {"value": self.value}
+        return {"value": self.value, "metadata": dict(self.metadata)}
+
+
+@dataclass(frozen=True)
 class HostTool:
     """A host tool declaration and the function that runs it; made by `tool`."""
 
@@ -60,7 +83,8 @@ def tool(
     The server calls it with the model's input, already checked against the
     schema, as keyword arguments; its return value (any JSON value) is what
     the model reads, and an exception becomes a tool error whose message the
-    model reads. A `$/cancelRequest` from the server cancels its task.
+    model reads. Return a `ToolOutput` to add metadata only the host sees. A
+    `$/cancelRequest` from the server cancels its task.
 
     Args:
         scope: `read`, `write` or `exec`; required, with no default. It

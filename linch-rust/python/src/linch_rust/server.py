@@ -1,4 +1,5 @@
-"""`Server`: a `linch-server` child process spoken to over stdio."""
+"""`Server`: a `linch-server` child process over stdio, or a running server
+reached over its Unix socket or WebSocket."""
 
 from __future__ import annotations
 
@@ -10,8 +11,9 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from ._binary import find_server
-from ._rpc import Connection
-from .agent import Agent
+from ._remote import LINE_LIMIT, Link, check_address, open_link
+from ._rpc import Connection, StreamTransport
+from .agent import Agent, Skipped
 from .callbacks import Callback
 from .config import AgentConfig
 from .errors import LinchError
@@ -21,17 +23,17 @@ from .tools import HostTool
 if TYPE_CHECKING:
     from .otel import Telemetry
 
-# Server lines carry whole envelopes, tool results included.
-_LINE_LIMIT = 64 * 1024 * 1024
 _EXIT_TIMEOUT = 10.0
 
 
 class Server:
-    """A `linch-server` sidecar, spawned as a child process.
+    """A `linch-server` sidecar, spawned as a child process, or one running
+    elsewhere and reached with `Server.connect`.
 
     Use it as an async context manager. Leaving the block closes the
-    server's input: it drops its runs where they stand (a Postgres run stays
-    resumable), exits, and is killed if it has not after 10 seconds.
+    server's input: it drops this client's runs where they stand (a
+    Postgres run stays resumable). A child process then exits, and is
+    killed if it has not after 10 seconds.
 
     The server keeps provider keys from the processes it starts (`Bash`, a
     stdio MCP server) and, on Linux, from `/proc/<server pid>/environ`. This
@@ -44,7 +46,7 @@ class Server:
 
     Args:
         binary: Path of the server binary; found by `find_server` when absent
-            (the wheel's bundled binary, then `LINCH_SERVER_BIN`, then cargo's
+            (`LINCH_SERVER_BIN`, then the wheel's bundled binary, then cargo's
             target dir).
         env: The server's whole environment, where it reads provider keys
             such as `DEEPSEEK_API_KEY`; nothing else is passed on. This
@@ -56,8 +58,41 @@ class Server:
     ) -> None:
         self._binary = binary
         self._env = None if env is None else dict(env)
+        self._remote: tuple[str, str] | None = None
         self._process: asyncio.subprocess.Process | None = None
+        self._link: Link | None = None
         self._conn: Connection | None = None
+
+    @classmethod
+    def connect(cls, address: str, *, token: str) -> Server:
+        """A server already running with `linch-server --config`, reached at `address`.
+
+        Use it as `Server()` is: `async with Server.connect(...) as server:`
+        logs in, and leaving the block closes the connection. The connection
+        acts for the token's tenant, so every `open_agent` passes the
+        tenant's allowlists; host tools, callbacks, approvals and the event
+        stream work as over stdio. The server owns provider keys: they are
+        read from its environment, never sent from here.
+
+        Args:
+            address: Where the server listens, as it prints at startup:
+                `unix:/run/linch/linch.sock` for its Unix socket, or
+                `ws://127.0.0.1:8731/rpc` for its WebSocket (`wss://` behind
+                TLS). A WebSocket needs the `websocket` extra.
+            token: A bearer token of the server's config; it is sent as
+                `connection.auth` on the socket and as `Authorization:
+                Bearer` on the WebSocket upgrade, and never logged.
+
+        Returns:
+            The server, not yet connected.
+
+        Raises:
+            ValueError: The address is not `unix:`, `ws://` or `wss://`.
+        """
+        check_address(address)
+        server = cls()
+        server._remote = (address, token)
+        return server
 
     async def __aenter__(self) -> Server:
         await self.start()
@@ -73,27 +108,50 @@ class Server:
 
     @property
     def pid(self) -> int:
-        """The server process id."""
-        return self._started()[0].pid
+        """The server process id, for a server this client spawned."""
+        self._started()
+        if self._process is None:
+            raise LinchError("a server reached with Server.connect has no process here")
+        return self._process.pid
 
     async def start(self) -> None:
-        """Spawn the server; `async with` calls this."""
-        if self._process is not None:
+        """Spawn the server, or connect and log in; `async with` calls this.
+
+        Raises:
+            Unauthenticated: A remote server does not know the token.
+            LimitReached: The tenant holds all its connections.
+            ConnectionClosed: A WebSocket upgrade was refused otherwise.
+            OSError: Nothing listens at a remote address.
+        """
+        if self._conn is not None:
             raise LinchError("the server is already started")
+        if self._remote is not None:
+            self._link = await open_link(*self._remote)
+            self._conn = self._link.connection
+            return
         binary = self._binary if self._binary is not None else find_server()
         self._process = await asyncio.create_subprocess_exec(
             binary,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             env=self._env,
-            limit=_LINE_LIMIT,
+            limit=LINE_LIMIT,
         )
         assert self._process.stdout is not None and self._process.stdin is not None
-        self._conn = Connection(self._process.stdout, self._process.stdin)
+        self._conn = Connection(StreamTransport(self._process.stdout, self._process.stdin))
 
     async def close(self) -> None:
-        """Close the server's input and wait for it to exit; `async with` calls this."""
-        process, conn = self._started()
+        """Close the server's input and wait for it; `async with` calls this.
+
+        A child process is waited for until it exits; a remote connection
+        until the server closed its end, or 10 seconds.
+        """
+        conn = self._started()
+        if self._link is not None:
+            await self._link.close()
+            return
+        process = self._process
+        assert process is not None
         if process.stdin is not None and not process.stdin.is_closing():
             process.stdin.close()
         try:
@@ -117,8 +175,9 @@ class Server:
             config: The agent as data: `namespace`, `spec` and `provider`,
                 and optionally `stores`, `workspace`, `bash`, `permissions`,
                 `mcp_servers`, `skills`, `subagents`, `workers`, `mailbox`,
-                `config_dir`, `filesystem` and `tasks` (see `AgentConfig`).
-                It never carries a provider key.
+                `config_dir`, `filesystem`, `tasks`, `deep_agent` and
+                `profile` (see `AgentConfig`). It never carries a provider
+                key.
             tools: Host tools made with `tool`, run in this process.
             callbacks: Intercept callbacks made with `callback`, answered in
                 this process.
@@ -127,13 +186,15 @@ class Server:
                 absent and the `otel` extra is installed, none otherwise.
 
         Returns:
-            The opened agent.
+            The opened agent; `Agent.skipped` lists the skill and subagent
+            definitions it left out.
 
         Raises:
             OpenError: The config, provider, store or an MCP server failed.
             ProtocolError: The config or a declaration is invalid.
+            NotAllowed: A remote server's allowlists refused the config.
         """
-        _, conn = self._started()
+        conn = self._started()
         params: dict[str, Any] = dict(config)
         if tools:
             params["tools"] = [host_tool.spec() for host_tool in tools]
@@ -146,12 +207,17 @@ class Server:
             {host_tool.name: host_tool for host_tool in tools},
             {(declared.point, declared.policy_id): declared for declared in callbacks},
         )
-        return Agent(conn, handle, str(opened["contract"]), _observers(config, telemetry))
+        skipped = [
+            Skipped(str(item["path"]), str(item["reason"]), str(item["detail"]))
+            for item in opened.get("skipped", [])
+        ]
+        observers = _observers(config, telemetry)
+        return Agent(conn, handle, str(opened["contract"]), observers, skipped)
 
-    def _started(self) -> tuple[asyncio.subprocess.Process, Connection]:
-        if self._process is None or self._conn is None:
+    def _started(self) -> Connection:
+        if self._conn is None:
             raise LinchError("the server is not started; use `async with Server()`")
-        return self._process, self._conn
+        return self._conn
 
 
 def _observers(

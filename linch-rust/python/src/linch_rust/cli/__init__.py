@@ -10,6 +10,7 @@ owns. Standard library only.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 
@@ -77,11 +78,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _new(args: argparse.Namespace) -> int:
+    target = Path(args.dir) / args.name
     _print_created(scaffold_project(args.name, Path(args.dir)))
     package = args.name.replace("-", "_")
     print(
         f"\nNext steps:\n"
-        f"  cd {args.name}\n"
+        f"  cd {shlex.quote(str(target))}\n"
         f"  pip install -e '.[dev]'\n"
         f"  python -m {package}.agent   # runs offline, no API key needed\n"
         f"  pytest"

@@ -2,7 +2,8 @@
 
 Nested values (messages, usage, tool result blocks) stay as the JSON dicts
 the server sends; their shapes are documented in the `linch-core` crate.
-Any other kind decodes to `UnknownEvent`, which keeps the raw payload.
+The child event a `subagent` event wraps is decoded like any other. Any
+other kind decodes to `UnknownEvent`, which keeps the raw payload.
 Decoding is tolerant: members this client does not know are ignored.
 """
 
@@ -81,13 +82,19 @@ class ToolCallStartEvent:
 
 @dataclass(frozen=True)
 class ToolCallEndEvent:
-    """A tool call finished; `result` is the tool result block the model reads."""
+    """A tool call finished; `result` is the tool result block the model reads.
+
+    `metadata` is what the tool returned for the host only, never shown to
+    the model (a host tool's `ToolOutput.metadata`, or where an offloaded
+    result went); `None` for an error or a tool that set none.
+    """
 
     type: ClassVar[str] = "tool_call_end"
     tool_name: str
     result: JsonObject
     duration_ms: int
     canonical_output: Any = None
+    metadata: JsonObject | None = None
 
     @property
     def tool_use_id(self) -> str:
@@ -163,6 +170,44 @@ class LoopGuardEvent:
 
 
 @dataclass(frozen=True)
+class SkillInvokedEvent:
+    """The `Skill` tool loaded a skill, with the arguments it was given."""
+
+    type: ClassVar[str] = "skill_invoked"
+    name: str
+    args: str | None = None
+    model_override: str | None = None
+    allowed_tools: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class SkillCompletedEvent:
+    """That skill's call ended; `is_error` when the skill failed to load."""
+
+    type: ClassVar[str] = "skill_completed"
+    name: str
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
+class SubagentEvent:
+    """An event of a subagent's child run, decoded like the parent's own."""
+
+    type: ClassVar[str] = "subagent"
+    child_run_id: str
+    event: Event
+
+
+@dataclass(frozen=True)
+class ChildRunStatusEvent:
+    """A background worker's child run changed status (`running`, `completed`, ...)."""
+
+    type: ClassVar[str] = "child_run_status"
+    child_run_id: str
+    status: str
+
+
+@dataclass(frozen=True)
 class HookEvent:
     """One intercept-callback or hook call and its outcome. Stream-only."""
 
@@ -226,6 +271,10 @@ Event = (
     | ContextBuildEvent
     | CompactionEvent
     | LoopGuardEvent
+    | SkillInvokedEvent
+    | SkillCompletedEvent
+    | SubagentEvent
+    | ChildRunStatusEvent
     | HookEvent
     | ErrorEvent
     | ResultEvent
@@ -248,6 +297,10 @@ _KINDS: dict[str, type[Any]] = {
         ContextBuildEvent,
         CompactionEvent,
         LoopGuardEvent,
+        SkillInvokedEvent,
+        SkillCompletedEvent,
+        SubagentEvent,
+        ChildRunStatusEvent,
         HookEvent,
         ErrorEvent,
         ResultEvent,
@@ -285,6 +338,8 @@ def decode_event(raw: JsonObject) -> Event:
     cls = _KINDS.get(kind)
     if cls is None:
         return UnknownEvent(kind, {key: value for key, value in raw.items() if key != "type"})
+    if cls is SubagentEvent:
+        return SubagentEvent(str(raw.get("child_run_id", "")), decode_event(raw.get("event", {})))
     names = _FIELDS[kind]
     event: Event = cls(**{key: value for key, value in raw.items() if key in names})
     return event

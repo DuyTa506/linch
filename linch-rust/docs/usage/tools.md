@@ -109,9 +109,54 @@ refuses an invalid one, a duplicate name or a bad name with a
   and the function's task is cancelled (`asyncio.CancelledError`).
 - Cancelling the run (`run.cancel()`) cancels the task of a call in flight.
 
-A host tool cannot return metadata for the host only, and the
-`ToolCallEndEvent` this client decodes has no `metadata` field. Keep host-side
-details in your own code.
+### Metadata for the host
+
+Return a `ToolOutput(value, metadata=...)` to attach details the model never
+sees: the model reads `value`, and `metadata` (a JSON-safe dict) arrives in
+the call's `ToolCallEndEvent.metadata`.
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, Server, ToolCallEndEvent, ToolOutput, tool
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+
+@tool(scope="read")
+async def lookup(email: str) -> ToolOutput:
+    """Find a customer by email."""
+    return ToolOutput({"name": "Ada"}, metadata={"source": "crm", "cache": "hit"})
+
+
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": MODEL},
+    "provider": {"id": "scripted", "turns": [
+        tool_turn("c1", "lookup", {"email": "ada@example.com"}),
+        text_turn("Found Ada."),
+    ]},
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config, tools=[lookup])
+        async for envelope in await agent.run("s1", "Who is ada@example.com?"):
+            if isinstance(envelope.event, ToolCallEndEvent):
+                print("model reads:", envelope.event.result["content"][0]["text"])
+                print("host reads:", envelope.event.metadata)
+
+
+asyncio.run(main())
+```
+
+```text
+model reads: {"name":"Ada"}
+host reads: {'source': 'crm', 'cache': 'hit'}
+```
+
+A tool error carries no metadata. A `post_tool_use` callback that replaces
+the result gives the event the metadata of its replacement.
 
 ## Scopes
 
@@ -305,8 +350,10 @@ asks: ['c4']
 | `bash` | `patterns`, `decision` | Each command segment, as a glob or by its leading words (`npm install` matches `npm install lodash`) |
 
 `decision` is `allow`, `deny` or `ask`. Every rule also takes `role` and
-`unless_role`; this client starts runs without a principal, so a rule with
-`role` never matches and one with `unless_role` always applies.
+`unless_role`, matched against the roles of the run's principal: pass
+`principal={"tenant": ..., "user": ..., "roles": [...]}` to `agent.run`,
+`resume` or `approve` ([Runs](./runs.md#acting-for-a-principal)). Without one,
+a rule with `role` never matches and one with `unless_role` always applies.
 
 How rules combine:
 

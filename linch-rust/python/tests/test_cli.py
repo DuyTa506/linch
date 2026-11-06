@@ -99,7 +99,7 @@ def test_new_creates_the_project_tree(tmp_path: Path, capsys: pytest.CaptureFixt
     )
     out = capsys.readouterr().out
     assert f"created {proj / 'src/my_agent/agent.py'}" in out
-    assert "cd my-agent" in out and "python -m my_agent.agent" in out
+    assert f"  cd {proj}\n" in out and "python -m my_agent.agent" in out
     pyproject = tomllib.loads((proj / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["name"] == "my-agent"
     assert pyproject["project"]["dependencies"] == ["linch-rust"]
@@ -157,6 +157,14 @@ def test_new_refuses_a_directory_that_is_not_empty(
     assert "demo" in capsys.readouterr().err
     assert (target / "x.txt").read_text(encoding="utf-8") == "keep"
     assert not (target / "pyproject.toml").exists()
+
+
+def test_new_in_the_working_directory_says_cd_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["new", "my-agent"]) == 0
+    assert "  cd my-agent\n" in capsys.readouterr().out
 
 
 def test_new_fills_an_empty_directory(tmp_path: Path) -> None:

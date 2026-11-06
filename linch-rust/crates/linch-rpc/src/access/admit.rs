@@ -38,8 +38,10 @@ impl Tenant {
         allow.admit_provider(&config.provider)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
         if !allow.permission_modes.contains(&mode) {
-            let message =
-                format!("permission mode {mode:?} is not in the tenant's permission_modes");
+            // The config's spelling (`skip_dangerous`), not the variant's.
+            let name = json!(mode);
+            let name = name.as_str().unwrap_or_default();
+            let message = format!("permission mode {name} is not in the tenant's permission_modes");
             return Err(refused("permission_mode", message));
         }
         let unasked = config.tasks || config.deep_agent.is_some();
@@ -72,7 +74,7 @@ impl Tenant {
             config.config_dir = Some(dir.await?);
         }
         config.bash &= allow.exec_tools;
-        if let StoreConfig::Postgres { dsn } = &config.stores
+        if let StoreConfig::Postgres { dsn, .. } = &config.stores
             && !PgTarget::parse(dsn).is_some_and(|target| allow.postgres.contains(&target))
         {
             let message = "the store DSN does not name a server in the tenant's postgres_dsns";

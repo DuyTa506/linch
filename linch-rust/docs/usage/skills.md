@@ -80,8 +80,9 @@ from linch_rust import (
     AgentConfig,
     ContextBuildEvent,
     Server,
+    SkillCompletedEvent,
+    SkillInvokedEvent,
     ToolCallEndEvent,
-    UnknownEvent,
 )
 from linch_rust.scripted import MODEL, text_turn, tool_turn
 
@@ -109,8 +110,10 @@ async def main() -> None:
             event = envelope.event
             if isinstance(event, ContextBuildEvent):
                 print("offered:", event.selected_tools)
-            elif isinstance(event, UnknownEvent) and event.type.startswith("skill_"):
-                print(event.type, event.raw)
+            elif isinstance(event, SkillInvokedEvent):
+                print("skill_invoked:", event.name, event.args)
+            elif isinstance(event, SkillCompletedEvent):
+                print("skill_completed:", event.name, "failed" if event.is_error else "ok")
             elif isinstance(event, ToolCallEndEvent) and event.tool_name == "Skill":
                 print(event.result["content"][0]["text"])
 
@@ -120,8 +123,8 @@ asyncio.run(main())
 
 ```text
 offered: ['TaskCreate', 'TaskList', 'TaskGet', 'TaskUpdate', 'Skill']
-skill_invoked {'name': 'release-notes', 'args': "1.4.0 'support team'"}
-skill_completed {'name': 'release-notes'}
+skill_invoked: release-notes 1.4.0 'support team'
+skill_completed: release-notes ok
 Skill base directory: /srv/app/.linch/skills/release-notes
 
 # Release notes for 1.4.0
@@ -175,8 +178,9 @@ must exist on the machine that runs the server.
 A skill is left out when its directory has no `SKILL.md`, its frontmatter is
 invalid, the directory is a symlink, its name is taken by one of the agent's
 tools (a host tool, a workspace tool, `TaskList` when `tasks` is on) or by a
-skill loaded before it. The server does not tell the client which ones it
-skipped; a call to a missing skill fails with `Unknown skill: <name>`.
+skill loaded before it. `Agent.skipped` lists each one left out, with its
+path and reason ([Agent config](./agent.md#skipped-definitions)); a call to a
+missing skill fails with `Unknown skill: <name>`.
 
 ---
 
@@ -198,12 +202,11 @@ the turn after that offered every tool again.
 
 ## Events
 
-Each `Skill` call adds a `skill_invoked` event (`name`, and `args` when given)
-and a `skill_completed` event (`name`, and `is_error: true` when the load
-failed) between its `tool_call_start` and `tool_call_end`. Both are durable,
-so `Agent.events(run_id)` replays them. The client has no class for these
-kinds yet: they arrive as `UnknownEvent`, whose `type` is the kind and `raw`
-the payload, as in the loop above. See [Events](./events.md).
+Each `Skill` call adds a `SkillInvokedEvent` (`name`, and `args` when given)
+and a `SkillCompletedEvent` (`name`, and `is_error` true when the load
+failed) between its `tool_call_start` and `tool_call_end`, as in the loop
+above. Both are durable, so `Agent.events(run_id)` replays them. See
+[Events](./events.md).
 
 ---
 

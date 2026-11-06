@@ -207,7 +207,8 @@ async fn serve(
     provider: Arc<dyn Provider>,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
-    let pool = linch_postgres::connect(dsn, linch_postgres::CONNECT_TIMEOUT).await?;
+    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::MAX_CONNECTIONS);
+    let pool = linch_postgres::connect(dsn, timeout, max).await?;
     linch_postgres::migrate(&pool).await?;
     linch_worker::migrate(&pool).await?;
 

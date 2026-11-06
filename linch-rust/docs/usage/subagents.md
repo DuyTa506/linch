@@ -45,7 +45,8 @@ The body is the child's instructions. Two definitions come built in:
 a general-purpose agent with all of the parent's tools, used when the call
 names no `subagent_type`. A file named `verification` (in any case) replaces
 the built-in one. A file that does not parse, a symlink, or a second file with
-the same name is skipped, and the server does not report it to the client.
+the same name is skipped; `Agent.skipped` lists each one with its reason
+([Agent config](./agent.md#skipped-definitions)).
 
 What a child gets:
 
@@ -69,7 +70,7 @@ run continues the same reviewer (see [Keep and continue](#keep-and-continue-work
 import asyncio
 import os
 
-from linch_rust import AgentConfig, InitEvent, Server, ToolCallEndEvent, UnknownEvent
+from linch_rust import AgentConfig, InitEvent, Server, SubagentEvent, ToolCallEndEvent
 from linch_rust.scripted import MODEL, text_turn, tool_turn
 
 # Every model call takes the next turn, the child's included.
@@ -105,10 +106,8 @@ async def show(run) -> None:
         event = envelope.event
         if isinstance(event, InitEvent):
             print("parent tools:", event.tools)
-        elif isinstance(event, UnknownEvent) and event.type == "subagent":
-            child = event.raw["event"]
-            if child["type"] == "init":
-                print("child run:", child["run_id"], child["tools"])
+        elif isinstance(event, SubagentEvent) and isinstance(event.event, InitEvent):
+            print("child run:", event.event.run_id, event.event.tools)
         elif isinstance(event, ToolCallEndEvent):
             print("tool result:", event.result["content"][0]["text"])
 
@@ -140,10 +139,10 @@ tool result: Re-raise it as ParseError.
 - The tool is exec-scoped, so in `default` mode the call asks first; approve
   it as in [Runs](./runs.md). It runs alongside other read calls only when its
   type lists its tools and each one is a registered read-scoped tool.
-- Each event of the child reaches the parent's stream wrapped in a `subagent`
-  event, `{"child_run_id": ..., "event": {...}}`, before the call ends. The
-  client has no class for it: it arrives as `UnknownEvent`. The durable ones
-  are replayed by `Agent.events` on the parent run.
+- Each event of the child reaches the parent's stream wrapped in a
+  `SubagentEvent` before the call ends: `child_run_id`, and `event`, the
+  child's event decoded into its own class. The durable ones are replayed by
+  `Agent.events` on the parent run.
 - The child's run is an ordinary run in the same stores:
   `agent.events("review-1:c1")` reads its own journal, and its `init` event
   names the parent in `parent_run_id`.
@@ -162,7 +161,7 @@ beside the parent. The agent also gets `SubagentContinue` and `TaskStop`.
 import asyncio
 import tempfile
 
-from linch_rust import AgentConfig, Server, ToolCallEndEvent, UnknownEvent, UserEvent
+from linch_rust import AgentConfig, ChildRunStatusEvent, Server, ToolCallEndEvent, UserEvent
 from linch_rust.scripted import MODEL, text_turn, tool_turn
 
 turns = [
@@ -194,8 +193,8 @@ async def main() -> None:
             event = envelope.event
             if isinstance(event, ToolCallEndEvent):
                 print("ack:", event.result["content"][0]["text"])
-            elif isinstance(event, UnknownEvent) and event.type == "child_run_status":
-                print("status:", event.raw["status"])
+            elif isinstance(event, ChildRunStatusEvent):
+                print("status:", event.status)
             elif isinstance(event, UserEvent) and event.subtype != "prompt":
                 for block in event.message["content"]:
                     if block["type"] == "text":
@@ -217,9 +216,8 @@ final: The worker says test_upload is flaky.
 replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', 'subagent', 'tool_call_end', 'tool_call_start', 'usage', 'user']
 ```
 
-- A `child_run_status` event (`running`, then `completed`, `failed` or
-  `aborted`) marks the worker in the parent's log. It arrives as
-  `UnknownEvent`.
+- A `ChildRunStatusEvent` (`running`, then `completed`, `failed` or
+  `aborted`) marks the worker in the parent's log.
 - The worker's end becomes a `<task-notification>` (Python Linch's text),
   added to the next tool results the parent logs, or logged as a user message.
 - When the parent answers with text while a worker still runs, the run does
@@ -264,7 +262,7 @@ for `SubagentContinue`.
 import asyncio
 import tempfile
 
-from linch_rust import AgentConfig, Server, ToolCallEndEvent, UnknownEvent, tool
+from linch_rust import AgentConfig, ChildRunStatusEvent, Server, ToolCallEndEvent, tool
 from linch_rust.scripted import MODEL, text_turn, tool_turn
 
 
@@ -305,8 +303,8 @@ async def main() -> None:
             event = envelope.event
             if isinstance(event, ToolCallEndEvent):
                 print(event.tool_name + ":", event.result["content"][0]["text"])
-            elif isinstance(event, UnknownEvent) and event.type == "child_run_status":
-                print("status:", event.raw["status"])
+            elif isinstance(event, ChildRunStatusEvent):
+                print("status:", event.status)
         print("final:", (await run.result()).final_text)
 
 
@@ -429,7 +427,7 @@ resuming it picks them up again.
 | A running worker is marked `killed` after a restart | It is resumed with its parent run (Postgres) |
 | `Correlator`, `MailboxPlugin`, durable inbox | Mailbox in process only; `Correlator` in Rust only |
 | `generate_subagent_definition()` | Not in the client; write the file yourself |
-| `session.workers` handles | Not exposed; follow `child_run_status` and `subagent` events |
+| `session.workers` handles | Not exposed; follow `ChildRunStatusEvent` and `SubagentEvent` |
 | `agent.fork_session(...)` | Rust only, `Agent::fork_session` |
 | Reloading subagents | Not yet; open a new agent |
 
@@ -442,4 +440,4 @@ resuming it picks them up again.
   workers
 - [Deep agent](./deep-agent.md): a preset with a roster of subagents
 - [Runs](./runs.md): approve, resume and cancel
-- [Events](./events.md): `UnknownEvent` and replay
+- [Events](./events.md): `SubagentEvent`, `ChildRunStatusEvent` and replay

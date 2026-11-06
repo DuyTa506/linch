@@ -1,8 +1,10 @@
 """Minimal asyncio client for the Linch Rust core.
 
 It spawns the `linch-server` sidecar and speaks its JSON-RPC protocol over
-stdio; everything inside a turn runs in the server, which calls back into
-this process only for the host tools and callbacks an agent declared::
+stdio, or reaches a running `linch-server --config` over its Unix socket or
+WebSocket (`Server.connect`); everything inside a turn runs in the server,
+which calls back into this process only for the host tools and callbacks an
+agent declared::
 
     async with Server() as server:
         agent = await server.open_agent(config, tools=[lookup])
@@ -12,13 +14,14 @@ this process only for the host tools and callbacks an agent declared::
 """
 
 from ._binary import find_server
-from .agent import Agent, Allow, Decision, Deny
+from .agent import Agent, Allow, Decision, Deny, Skipped
 from .callbacks import Callback, FailMode, Point, callback
 from .config import (
     AgentConfig,
     DeepAgent,
     DeepAgentProfile,
     Filesystem,
+    Principal,
     Profile,
     ToolSearch,
     Workers,
@@ -27,7 +30,9 @@ from .errors import (
     AgentNotFound,
     ConnectionClosed,
     ContractMismatch,
+    LimitReached,
     LinchError,
+    NotAllowed,
     NotSuspended,
     OpenError,
     PromptBlocked,
@@ -38,9 +43,11 @@ from .errors import (
     RunNotFound,
     RunTerminal,
     SessionBusy,
+    Unauthenticated,
 )
 from .events import (
     AssistantEvent,
+    ChildRunStatusEvent,
     CompactionEvent,
     ContextBuildEvent,
     Envelope,
@@ -52,6 +59,9 @@ from .events import (
     PartialAssistantEvent,
     PermissionRequestEvent,
     ResultEvent,
+    SkillCompletedEvent,
+    SkillInvokedEvent,
+    SubagentEvent,
     SuspendedEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
@@ -62,7 +72,7 @@ from .events import (
 )
 from .run import Run
 from .server import Server
-from .tools import HostTool, Scope, tool
+from .tools import HostTool, Scope, ToolOutput, tool
 
 __all__ = [
     "Agent",
@@ -71,6 +81,7 @@ __all__ = [
     "Allow",
     "AssistantEvent",
     "Callback",
+    "ChildRunStatusEvent",
     "CompactionEvent",
     "ConnectionClosed",
     "ContextBuildEvent",
@@ -87,13 +98,16 @@ __all__ = [
     "HookEvent",
     "HostTool",
     "InitEvent",
+    "LimitReached",
     "LinchError",
     "LoopGuardEvent",
+    "NotAllowed",
     "NotSuspended",
     "OpenError",
     "PartialAssistantEvent",
     "PermissionRequestEvent",
     "Point",
+    "Principal",
     "Profile",
     "PromptBlocked",
     "ProtocolError",
@@ -107,11 +121,17 @@ __all__ = [
     "Scope",
     "Server",
     "SessionBusy",
+    "Skipped",
+    "SkillCompletedEvent",
+    "SkillInvokedEvent",
+    "SubagentEvent",
     "SuspendedEvent",
     "ToolCallEndEvent",
     "ToolCallStartEvent",
+    "ToolOutput",
     "ToolProgressEvent",
     "ToolSearch",
+    "Unauthenticated",
     "UnknownEvent",
     "UsageEvent",
     "UserEvent",

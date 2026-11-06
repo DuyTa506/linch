@@ -253,6 +253,12 @@ async fn skip_dangerous_needs_the_servers_consent() {
     }
     let kind = refused(&rpc, mode("skip_dangerous")).await;
     assert_eq!(kind.as_deref(), Some("permission_mode"));
+    let error = rpc.call(method::AGENT_OPEN, mode("skip_dangerous")).await;
+    let message = error.unwrap_err().to_string();
+    assert!(
+        message.starts_with("permission mode skip_dangerous is not"),
+        "the config's spelling: {message}"
+    );
     let only = Rpc::remote(acme(|allow| {
         let allow = allow.workspace_roots(&roots).unwrap();
         allow.permission_modes(&[linch::PermissionMode::SkipDangerous])

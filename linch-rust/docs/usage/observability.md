@@ -244,22 +244,50 @@ Values are JSON text, and are built only for spans that record.
 
 ## Correlate logs and traces
 
-`InitEvent.trace_id` and `ResultEvent.trace_id` are always `None`: the server
-does not set them. To tie logs, responses and traces together, start a span
-of your own around `Agent.run` (as in the first snippet) and log its trace
-id; the run's spans share it.
+`run.trace_id` is the trace id of a traced run's spans, as 32 hex digits, for
+a log line or a response header. The run span starts with the first envelope,
+so read it after that; before it, `run.trace_id` is the trace of the span
+current at the call, or `None` outside any span. It is `None` for a run that
+is not traced. `InitEvent.trace_id` and `ResultEvent.trace_id` stay `None`:
+the server does not set them.
 
 ```python
-from opentelemetry import trace
+import asyncio
+import logging
+
+from opentelemetry.sdk.trace import TracerProvider
+
+from linch_rust import AgentConfig, Server
+from linch_rust.otel import Telemetry
+from linch_rust.scripted import MODEL, text_turn
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+telemetry = Telemetry(tracer_provider=TracerProvider())
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": MODEL},
+    "provider": {"id": "scripted", "turns": [text_turn("Hello.")]},
+}
 
 
-def current_trace_id() -> str:
-    """The current span's trace id as 32 hex digits, for a log line."""
-    return format(trace.get_current_span().get_span_context().trace_id, "032x")
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config, telemetry=telemetry)
+        run = await agent.run("s1", "Say hello.")
+        result = await run.result()
+        logging.info("run %s trace %s: %s", run.id, run.trace_id, result.final_text)
+
+
+asyncio.run(main())
 ```
 
-Outside any span it returns 32 zeros. Log `run.id` as well: it is
-`linch.run_id` on every span of the run.
+```text
+run 21c62618-fb4c-4160-bf07-742f4487880f trace 4f6060a55bd5884c81cbd82583b32a9c: Hello.
+```
+
+Log `run.id` as well: it is `linch.run_id` on every span of the run. A resume
+or approve is its own `Run`, with its own trace unless you start them under
+one span of yours.
 
 ---
 
@@ -273,7 +301,7 @@ Outside any span it returns 32 zeros. Log `run.id` as well: it is
 | `linch.store.duration` | Not built: the stream carries no store calls |
 | `gen_ai.response.model`, `gen_ai.input.messages` on `chat` | Not set: the stream does not carry them |
 | No cost attribute | `linch.cost_usd` on `chat` and `invoke_agent` |
-| `trace_id` on run events and `ToolContext.trace_id` | `None`; use your own span's trace id |
+| `trace_id` on run events and `ToolContext.trace_id` | `None`; read `Run.trace_id` |
 | `TraceIdFilter` for log records | Not available |
 | Child runs get spans of their own | A child run has no spans |
 

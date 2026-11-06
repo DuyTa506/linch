@@ -145,7 +145,10 @@
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
 //! config's `mcp_servers` are connected in order before the result is sent.
 //! The result is [`AgentOpened`](protocol::AgentOpened):
-//! `{"agent": "agent-1", "contract": "<hex digest>"}`. The contract covers
+//! `{"agent": "agent-1", "contract": "<hex digest>", "skipped"?: [...]}`;
+//! `skipped` lists each skill directory or subagent file of the config
+//! directory that was left out, `{path, reason, detail}`
+//! ([`Skipped`](protocol::Skipped)), and is absent when none was. The contract covers
 //! the spec, every tool registered at open (host, workspace, then MCP),
 //! each with its scope, and the hook policies; a tool an MCP server adds
 //! later is outside it. A
@@ -341,7 +344,7 @@
 //! | -32022 | lease lost | `StoreError::LeaseLost` |
 //! | -32023 | conflict | `StoreError::Conflict`, such as a stored `run_id` |
 //! | -32024 | journal | `RunError::Journal` |
-//! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}` |
+//! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}`: the run's contract, then this agent's |
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
 //! | -32027 | not suspended | `RunError::NotSuspended`: `run.approve` on a run not awaiting approval; after a retried approve, `run.resume` it |
 //! | -32028 | reconcile | `RunError::Reconcile` |

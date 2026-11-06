@@ -14,6 +14,11 @@ from .events import Envelope, ResultEvent, SuspendedEvent, decode_envelope
 class Observer(Protocol):
     """What a run tells its tracer (`linch_rust.otel.RunObserver`)."""
 
+    @property
+    def trace_id(self) -> str | None:
+        """The trace id of the run's spans, as 32 hex digits."""
+        ...
+
     def observe(self, envelope: Envelope) -> None:
         """Trace one envelope, in stream order."""
         ...
@@ -55,6 +60,17 @@ class Run:
         self._received: deque[JsonObject] = deque()
         self._end: RunEnd | None = None
         self._terminal: ResultEvent | SuspendedEvent | None = None
+
+    @property
+    def trace_id(self) -> str | None:
+        """The trace id of this call's spans, as 32 hex digits, for a log line.
+
+        With tracing on (`linch_rust.otel`), it is the run span's once the
+        first envelope arrived; before that, the trace of the span current
+        at the call, if any. `None` when the run is not traced. The server
+        does not set `InitEvent.trace_id` or `ResultEvent.trace_id`.
+        """
+        return self._observer.trace_id if self._observer is not None else None
 
     def __aiter__(self) -> Run:
         return self

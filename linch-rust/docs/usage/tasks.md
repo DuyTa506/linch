@@ -125,7 +125,7 @@ turn):
 import asyncio
 import tempfile
 
-from linch_rust import AgentConfig, Server, ToolCallEndEvent, UnknownEvent
+from linch_rust import AgentConfig, Server, SubagentEvent, ToolCallEndEvent
 from linch_rust.scripted import MODEL, text_turn, tool_turn
 
 turns = [
@@ -152,10 +152,8 @@ async def main() -> None:
         agent = await server.open_agent(config)
         async for envelope in await agent.run("s1", "go"):
             event = envelope.event
-            if isinstance(event, UnknownEvent) and event.type == "subagent":
-                inner = event.raw["event"]
-                if inner["type"] == "tool_call_end":
-                    print("child:", inner["result"]["content"][0]["text"])
+            if isinstance(event, SubagentEvent) and isinstance(event.event, ToolCallEndEvent):
+                print("child:", event.event.result["content"][0]["text"])
             elif isinstance(event, ToolCallEndEvent):
                 print("parent:", event.result["content"][0]["text"])
 

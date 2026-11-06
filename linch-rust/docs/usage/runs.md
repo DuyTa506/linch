@@ -11,14 +11,15 @@ the run's events then stream in as `Envelope`s.
 
 | Call | Does |
 |---|---|
-| `await agent.run(session_id, prompt, *, run_id=None)` | Start a run; the session is created when missing |
-| `await agent.resume(run_id)` | Continue a run after a crash or a dropped stream |
-| `await agent.approve(run_id, decisions)` | Answer a suspended run's pending calls and continue it |
+| `await agent.run(session_id, prompt, *, run_id=None, principal=None)` | Start a run; the session is created when missing |
+| `await agent.resume(run_id, *, principal=None)` | Continue a run after a crash or a dropped stream |
+| `await agent.approve(run_id, decisions, *, principal=None)` | Answer a suspended run's pending calls and continue it |
 | `async for envelope in run` | Every envelope of this call, in order, ending after `result` or `suspended` |
 | `await run.result()` | Read the rest and return the `ResultEvent` or `SuspendedEvent` |
 | `await run.cancel()` | Abort the run; `True` when the server was driving it |
 | `await agent.events(run_id, after_seq=0)` | The run's durable envelopes after `after_seq`, from the stores |
 | `run.id` | The run id, for `resume`, `approve` and `events` |
+| `run.trace_id` | The trace id of the call's spans when it is traced ([Observability](./observability.md#correlate-logs-and-traces)) |
 
 ---
 
@@ -111,7 +112,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 |---|---|---|
 | `RunNotFound` | -32021 | No such run in the agent's stores (with memory stores: not in this handle) |
 | `RunError` | -32023 | `run_id` is already stored |
-| `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data` has `expected` and `found` |
+| `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data["expected"]` is the run's contract and `data["found"]` this agent's, as the message names them |
 | `RunTerminal` | -32026 | The run already finished; `data.status` is its status |
 | `NotSuspended` | -32027 | `approve` on a run that is not waiting for approval ([below](#approve)) |
 | `PromptBlocked` | -32029 | A `user_prompt_submit` callback refused the prompt; `.reason` says why. No run or session was created |
@@ -362,6 +363,65 @@ asyncio.run(main())
 ```text
 lost the server; did the approve land?
 Deploy was interrupted.
+```
+
+## Acting for a principal
+
+`principal` says who a run acts for: `{"tenant", "user", "roles"?}` (the
+`Principal` typed dict). Permission rules with `role` or `unless_role` match
+its roles ([Tools](./tools.md#permission-rules)), and a `permission_request`
+callback's request carries it. Pass it to `run`, and again to each `resume`
+and `approve`: each call acts for the principal it is given, and one without
+acts for nobody. On a remote server, `tenant` must be the connection's tenant
+([Server](./server.md#tenants-and-namespaces)).
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, Principal, Server, tool
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+
+@tool(scope="write")
+async def refund(order: str) -> str:
+    """Refund an order."""
+    return f"refunded {order}"
+
+
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": MODEL},
+    "provider": {"id": "scripted", "turns": [
+        tool_turn("c1", "refund", {"order": "A-1"}),  # the clerk's run
+        tool_turn("c1", "refund", {"order": "A-1"}),  # the manager's run
+        text_turn("Refunded A-1."),
+    ]},
+    "permissions": {
+        "mode": "default",
+        "project_root": "/",
+        "layers": [{"name": "app", "rules": [
+            {"type": "tool", "tool": "refund", "decision": "allow", "role": "manager"},
+        ]}],
+    },
+}
+clerk: Principal = {"tenant": "acme", "user": "bob"}
+manager: Principal = {"tenant": "acme", "user": "ada", "roles": ["manager"]}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config, tools=[refund])
+        for session, who in (("s1", clerk), ("s2", manager)):
+            stopped = await (await agent.run(session, "Refund A-1", principal=who)).result()
+            print(who["user"], "->", type(stopped).__name__)
+
+
+asyncio.run(main())
+```
+
+```text
+bob -> SuspendedEvent
+ada -> ResultEvent
 ```
 
 ## What is durable, and when
