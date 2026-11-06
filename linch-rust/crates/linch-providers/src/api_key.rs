@@ -39,6 +39,17 @@ impl ApiKey {
     }
 }
 
+/// Remove `key`, when there is one, and every `Bearer <token>` from `text`.
+///
+/// Servers that run without a key still get bearer tokens scrubbed, since a
+/// proxy in front of them may add one.
+pub(crate) fn scrub(key: Option<&ApiKey>, text: &str) -> String {
+    match key {
+        Some(key) => key.redact(text),
+        None => redact_bearer(text),
+    }
+}
+
 impl fmt::Debug for ApiKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ApiKey({REDACTED})")
@@ -90,6 +101,16 @@ mod tests {
             clean,
             r#"{"headers":{"Authorization":"Bearer [redacted]","x":"BEARER [redacted]"}} raw [redacted]"#
         );
+    }
+
+    #[test]
+    fn scrub_without_a_key_still_removes_bearer_tokens() {
+        assert_eq!(
+            scrub(None, "Authorization: Bearer proxy-token"),
+            "Authorization: Bearer [redacted]"
+        );
+        let key = ApiKey::new("sk-secret-123").unwrap();
+        assert_eq!(scrub(Some(&key), "raw sk-secret-123"), "raw [redacted]");
     }
 
     #[test]

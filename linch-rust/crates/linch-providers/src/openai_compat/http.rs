@@ -7,26 +7,30 @@ use reqwest::header::{ACCEPT, RETRY_AFTER};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
+use crate::api_key::scrub;
 
 /// Longest error-body summary kept in a [`ProviderError::Status`].
 const MAX_ERROR_CHARS: usize = 500;
 
 /// POST `body` to `url` and return the response once its status is 2xx.
 ///
-/// A non-2xx status reads the body and maps it with [`status_error`].
+/// `key`, when given, is sent as a bearer token. A non-2xx status reads the
+/// body and maps it with [`status_error`].
 pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
-    key: &ApiKey,
+    key: Option<&ApiKey>,
     body: &JsonValue,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, ProviderError> {
-    let request = client
+    let mut request = client
         .post(url)
-        .bearer_auth(key.expose())
         .header(ACCEPT, "text/event-stream")
-        .json(body)
-        .send();
+        .json(body);
+    if let Some(key) = key {
+        request = request.bearer_auth(key.expose());
+    }
+    let request = request.send();
     let response = cancel
         .run_until_cancelled(request)
         .await
@@ -55,9 +59,9 @@ pub(crate) async fn post(
 }
 
 /// A request that got no response, with its text redacted.
-pub(crate) fn transport(key: &ApiKey, err: &reqwest::Error) -> ProviderError {
+pub(crate) fn transport(key: Option<&ApiKey>, err: &reqwest::Error) -> ProviderError {
     ProviderError::Transport {
-        message: key.redact(&err.to_string()),
+        message: scrub(key, &err.to_string()),
     }
 }
 
@@ -70,7 +74,7 @@ pub(crate) fn status_error(
     status: u16,
     retry_after: Option<&str>,
     body: &str,
-    key: &ApiKey,
+    key: Option<&ApiKey>,
 ) -> ProviderError {
     let summary = serde_json::from_str::<JsonValue>(body)
         .ok()
@@ -83,7 +87,7 @@ pub(crate) fn status_error(
             })
         })
         .unwrap_or_else(|| body.trim().to_string());
-    let message: String = key.redact(&summary).chars().take(MAX_ERROR_CHARS).collect();
+    let message: String = scrub(key, &summary).chars().take(MAX_ERROR_CHARS).collect();
     ProviderError::Status {
         status,
         retry_after: retry_after
@@ -113,7 +117,7 @@ mod tests {
     #[test]
     fn error_message_and_type_are_summarized() {
         let body = r#"{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}"#;
-        let err = status_error(402, None, body, &key());
+        let err = status_error(402, None, body, Some(&key()));
         assert!(
             matches!(&err, ProviderError::Status { status: 402, retry_after: None, message }
                 if message == "unknown_error: Insufficient Balance"),
@@ -124,14 +128,14 @@ mod tests {
 
     #[test]
     fn rate_limit_keeps_retry_after_seconds() {
-        let err = status_error(429, Some(" 7 "), "{}", &key());
+        let err = status_error(429, Some(" 7 "), "{}", Some(&key()));
         assert!(
             matches!(&err, ProviderError::Status { status: 429, retry_after: Some(delay), .. }
                 if *delay == Duration::from_secs(7)),
             "{err:?}"
         );
         assert!(err.retryable());
-        let dated = status_error(429, Some("Wed, 21 Oct 2015 07:28:00 GMT"), "", &key());
+        let dated = status_error(429, Some("Wed, 21 Oct 2015 07:28:00 GMT"), "", Some(&key()));
         assert!(matches!(
             dated,
             ProviderError::Status {
@@ -146,7 +150,7 @@ mod tests {
         let body = format!(
             r#"{{"error":{{"message":"Authentication Fails, header Authorization: Bearer {SECRET} is invalid","type":"authentication_error"}}}}"#
         );
-        let err = status_error(401, None, &body, &key());
+        let err = status_error(401, None, &body, Some(&key()));
         assert_clean(&err);
         assert!(err.to_string().contains("Bearer [redacted]"), "{err}");
     }
@@ -156,14 +160,14 @@ mod tests {
         let body = format!(
             "429 Too Many Requests\nrequest headers: authorization=Bearer {SECRET}; x-api-key={SECRET}"
         );
-        let err = status_error(429, Some("2"), &body, &key());
+        let err = status_error(429, Some("2"), &body, Some(&key()));
         assert_clean(&err);
     }
 
     #[test]
     fn a_long_body_is_redacted_before_it_is_cut() {
         let body = format!("{}{SECRET}", "x".repeat(MAX_ERROR_CHARS - 5));
-        let err = status_error(500, None, &body, &key());
+        let err = status_error(500, None, &body, Some(&key()));
         assert_clean(&err);
         assert!(
             matches!(&err, ProviderError::Status { message, .. } if message.chars().count() == MAX_ERROR_CHARS)

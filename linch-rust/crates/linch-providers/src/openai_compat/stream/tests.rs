@@ -5,20 +5,26 @@ use linch_core::{ContentBlock, ProviderError, ProviderEvent, StopReason, Usage, 
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::{Translator, events};
+use super::{ReasoningField, Translator, events};
 use crate::ApiKey;
 use crate::deepseek::usage;
+
+mod frames;
 
 const TEXT: &str = include_str!("../../../tests/fixtures/deepseek_text_thinking.sse");
 const TOOLS: &str = include_str!("../../../tests/fixtures/deepseek_parallel_tools.sse");
 const EDGE: &str = include_str!("../../../tests/fixtures/edge_stop_with_tool_calls.sse");
 
-fn key() -> ApiKey {
-    ApiKey::new("sk-test").unwrap()
+fn key() -> Option<ApiKey> {
+    ApiKey::new("sk-test")
 }
 
 fn translator() -> Translator {
-    Translator::new("deepseek-v4-flash".into(), usage)
+    Translator::new(
+        "deepseek-v4-flash".into(),
+        Some(ReasoningField::ReasoningContent),
+        usage,
+    )
 }
 
 /// Run `sse` through the stream driver, split into `chunk`-byte pieces.

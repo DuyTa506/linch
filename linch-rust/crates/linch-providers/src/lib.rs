@@ -8,7 +8,11 @@
 
 mod api_key;
 pub mod deepseek;
+pub mod openai;
 mod openai_compat;
+pub mod servers;
 
 pub use api_key::ApiKey;
 pub use deepseek::{DeepSeek, DeepSeekOptions};
+pub use openai::{OpenAiChat, OpenAiChatOptions};
+pub use servers::{Server, ServerOptions};

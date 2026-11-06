@@ -1,0 +1,6 @@
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1762400000,"id":"chatcmpl-Er","model":"gpt-oss-20b","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":"Partial"}}],"created":1762400000,"id":"chatcmpl-Er","model":"gpt-oss-20b","object":"chat.completion.chunk"}
+
+data: {"error":{"code":500,"message":"slot unavailable","type":"server_error"}}
+

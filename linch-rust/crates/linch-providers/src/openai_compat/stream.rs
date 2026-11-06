@@ -12,90 +12,30 @@ use linch_core::provider::{
     MessageEndEvent, MessageStartEvent, TextDeltaEvent, ThinkingDeltaEvent, ToolUseEndEvent,
     ToolUseInputDeltaEvent, ToolUseStartEvent,
 };
-use linch_core::{ProviderError, ProviderEvent, ProviderStream, StopReason, Usage};
-use serde::Deserialize;
+use linch_core::{JsonValue, ProviderError, ProviderEvent, ProviderStream, StopReason, Usage};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
+use crate::api_key::scrub;
 
-// Vendor chunks are read leniently: unknown fields (`system_fingerprint`,
-// `logprobs`, new usage buckets) are ignored, and nulls read as absent.
+mod wire;
 
-#[derive(Deserialize)]
-struct Chunk {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    choices: Option<Vec<Choice>>,
-    #[serde(default)]
-    usage: Option<WireUsage>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    #[serde(default)]
-    delta: Option<Delta>,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Delta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<ToolCallDelta>>,
-}
-
-#[derive(Deserialize)]
-struct ToolCallDelta {
-    index: u32,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    function: Option<FunctionDelta>,
-}
-
-#[derive(Deserialize)]
-struct FunctionDelta {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<String>,
-}
-
-/// The `usage` object of a chunk, for an adapter's usage normalizer.
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct WireUsage {
-    #[serde(default)]
-    pub prompt_tokens: u64,
-    #[serde(default)]
-    pub completion_tokens: u64,
-    #[serde(default)]
-    pub prompt_tokens_details: Option<PromptTokensDetails>,
-    /// DeepSeek's cache-hit count; `prompt_tokens` = hit + miss.
-    #[serde(default)]
-    pub prompt_cache_hit_tokens: Option<u64>,
-}
-
-/// `usage.prompt_tokens_details`.
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct PromptTokensDetails {
-    #[serde(default)]
-    pub cached_tokens: Option<u64>,
-}
+use wire::{Chunk, Delta};
+pub(crate) use wire::{ReasoningField, WireUsage};
 
 /// A tool call seen on the stream, in first-seen order.
+#[derive(Default)]
 struct Call {
     id: String,
+    name: String,
+    started: bool,
     has_arguments: bool,
 }
 
 /// Turns chunk payloads into events for one response.
 pub(crate) struct Translator {
     fallback_model: String,
+    reasoning_field: Option<ReasoningField>,
     usage_of: fn(&WireUsage) -> Usage,
     started: bool,
     calls: Vec<Call>,
@@ -105,10 +45,16 @@ pub(crate) struct Translator {
 }
 
 impl Translator {
-    /// `fallback_model` names the model when no chunk reports one.
-    pub(crate) fn new(fallback_model: String, usage_of: fn(&WireUsage) -> Usage) -> Self {
+    /// `fallback_model` names the model when no chunk reports one;
+    /// `reasoning_field` is the delta field read as reasoning, if any.
+    pub(crate) fn new(
+        fallback_model: String,
+        reasoning_field: Option<ReasoningField>,
+        usage_of: fn(&WireUsage) -> Usage,
+    ) -> Self {
         Self {
             fallback_model,
+            reasoning_field,
             usage_of,
             started: false,
             calls: Vec::new(),
@@ -124,9 +70,11 @@ impl Translator {
         data: &str,
         out: &mut VecDeque<ProviderEvent>,
     ) -> Result<(), ProviderError> {
-        let chunk: Chunk = serde_json::from_str(data).map_err(|err| ProviderError::Transport {
-            message: format!("malformed stream chunk: {err}"),
-        })?;
+        let chunk: Chunk = serde_json::from_str(data)
+            .map_err(|err| transport(&format!("malformed stream chunk: {err}")))?;
+        if let Some(error) = chunk.error.filter(|error| !error.is_null()) {
+            return Err(stream_error(&error));
+        }
         if !self.started {
             self.started = true;
             let model = chunk
@@ -153,7 +101,12 @@ impl Translator {
     }
 
     fn push_delta(&mut self, delta: Delta, out: &mut VecDeque<ProviderEvent>) {
-        if let Some(text) = delta.reasoning_content.filter(|text| !text.is_empty()) {
+        let reasoning = match self.reasoning_field {
+            Some(ReasoningField::ReasoningContent) => delta.reasoning_content,
+            Some(ReasoningField::Reasoning) => delta.reasoning,
+            None => None,
+        };
+        if let Some(text) = reasoning.filter(|text| !text.is_empty()) {
             out.push_back(ProviderEvent::ThinkingDelta(ThinkingDeltaEvent {
                 text,
                 signature: None,
@@ -162,31 +115,30 @@ impl Translator {
         if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
             out.push_back(ProviderEvent::TextDelta(TextDeltaEvent { text }));
         }
-        for call in delta.tool_calls.unwrap_or_default() {
-            let (name, arguments) = call
+        for piece in delta.tool_calls.unwrap_or_default() {
+            let (name, arguments) = piece
                 .function
                 .map(|function| (function.name, function.arguments))
                 .unwrap_or_default();
-            let slot = match self.by_index.get(&call.index) {
-                Some(&slot) => slot,
-                None => {
-                    // Only a call's first chunk carries its id and name; an
-                    // empty one is left for the assembler to reject.
-                    let id = call.id.unwrap_or_default();
-                    out.push_back(ProviderEvent::ToolUseStart(ToolUseStartEvent {
-                        id: id.clone(),
-                        name: name.unwrap_or_default(),
-                    }));
-                    self.by_index.insert(call.index, self.calls.len());
-                    self.calls.push(Call {
-                        id,
-                        has_arguments: false,
-                    });
-                    self.calls.len() - 1
+            let slot = *self.by_index.entry(piece.index).or_insert_with(|| {
+                self.calls.push(Call::default());
+                self.calls.len() - 1
+            });
+            let call = &mut self.calls[slot];
+            // A call opens at its first argument piece. Until then a later
+            // chunk may complete its id or name: llama.cpp re-sends a name
+            // that grew while it was parsed. An id that stays empty is left
+            // for the assembler to reject.
+            if !call.started {
+                if let Some(id) = piece.id.filter(|id| !id.is_empty()) {
+                    call.id = id;
                 }
-            };
+                if let Some(name) = name.filter(|name| !name.is_empty()) {
+                    call.name = name;
+                }
+            }
             if let Some(json_delta) = arguments.filter(|arguments| !arguments.is_empty()) {
-                let call = &mut self.calls[slot];
+                open(call, out);
                 call.has_arguments = true;
                 out.push_back(ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
                     id: call.id.clone(),
@@ -215,7 +167,8 @@ impl Translator {
         } else {
             StopReason::ToolUse
         };
-        for call in std::mem::take(&mut self.calls) {
+        for mut call in std::mem::take(&mut self.calls) {
+            open(&mut call, out);
             if !call.has_arguments {
                 out.push_back(ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
                     id: call.id.clone(),
@@ -235,9 +188,19 @@ impl Translator {
     }
 }
 
+fn open(call: &mut Call, out: &mut VecDeque<ProviderEvent>) {
+    if !call.started {
+        call.started = true;
+        out.push_back(ProviderEvent::ToolUseStart(ToolUseStartEvent {
+            id: call.id.clone(),
+            name: call.name.clone(),
+        }));
+    }
+}
+
 /// `finish_reason` to a stop reason. A reason that is not a normal stop
-/// (`insufficient_system_resource`, `aborted`, anything new) fails the
-/// call as a retryable transport error.
+/// (`insufficient_system_resource`, `aborted`, `abort`, anything new)
+/// fails the call as a retryable transport error.
 fn stop_reason(reason: &str) -> Result<StopReason, ProviderError> {
     match reason {
         "stop" => Ok(StopReason::EndTurn),
@@ -247,6 +210,33 @@ fn stop_reason(reason: &str) -> Result<StopReason, ProviderError> {
         other => Err(transport(&format!(
             "response ended with finish_reason {other:?}"
         ))),
+    }
+}
+
+/// An error frame (`{"error": {...}}`) sent after the stream started. A
+/// numeric `code` that is an HTTP error status keeps that status, so
+/// retrying follows the server's own classification.
+fn stream_error(error: &JsonValue) -> ProviderError {
+    let text = |key: &str| error.get(key).and_then(JsonValue::as_str);
+    let detail = text("message")
+        .or(error.as_str())
+        .unwrap_or("unknown error");
+    let message = match text("type") {
+        Some(kind) => format!("stream error: {kind}: {detail}"),
+        None => format!("stream error: {detail}"),
+    };
+    let status = error
+        .get("code")
+        .and_then(JsonValue::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+        .filter(|code| (400..=599).contains(code));
+    match status {
+        Some(status) => ProviderError::Status {
+            status,
+            retry_after: None,
+            message,
+        },
+        None => transport(&message),
     }
 }
 
@@ -261,17 +251,17 @@ struct State<S> {
     translator: Translator,
     pending: VecDeque<ProviderEvent>,
     cancel: CancellationToken,
-    key: ApiKey,
+    key: Option<ApiKey>,
     done: bool,
 }
 
 /// Drive `translator` over an SSE byte stream until `[DONE]`, an error or
-/// `cancel`. Transport error text is redacted with `key`.
+/// `cancel`. Error text is scrubbed of `key` and bearer tokens.
 pub(crate) fn events<S, B, E>(
     bytes: S,
     translator: Translator,
     cancel: CancellationToken,
-    key: ApiKey,
+    key: Option<ApiKey>,
 ) -> ProviderStream
 where
     S: Stream<Item = Result<B, E>> + Send + 'static,
@@ -312,12 +302,13 @@ where
         let failure = match state.cancel.run_until_cancelled(state.sse.next()).await {
             None => ProviderError::Cancelled,
             Some(None) => transport("stream closed before [DONE]"),
-            Some(Some(Err(err))) => transport(&state.key.redact(&err.to_string())),
+            Some(Some(Err(err))) => transport(&err.to_string()),
             Some(Some(Ok(event))) => match on_data(state, &event.data) {
                 Ok(()) => continue,
                 Err(err) => err,
             },
         };
+        let failure = scrubbed(state.key.as_ref(), failure);
         return Some(Err(stop(state, failure)));
     }
 }
@@ -330,6 +321,23 @@ fn on_data<S>(state: &mut State<S>, data: &str) -> Result<(), ProviderError> {
             state.translator.finish(&mut state.pending)
         }
         data => state.translator.push(data, &mut state.pending),
+    }
+}
+
+/// Server and transport text can echo request headers; scrub it.
+fn scrubbed(key: Option<&ApiKey>, err: ProviderError) -> ProviderError {
+    match err {
+        ProviderError::Transport { message } => transport(&scrub(key, &message)),
+        ProviderError::Status {
+            status,
+            retry_after,
+            message,
+        } => ProviderError::Status {
+            status,
+            retry_after,
+            message: scrub(key, &message),
+        },
+        other => other,
     }
 }
 

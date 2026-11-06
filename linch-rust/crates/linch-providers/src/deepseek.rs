@@ -22,7 +22,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
-use crate::openai_compat::stream::{Translator, WireUsage};
+use crate::openai_compat::stream::{ReasoningField, Translator, WireUsage};
 use crate::openai_compat::{http, payload, stream};
 
 /// DeepSeek's API root.
@@ -82,7 +82,7 @@ impl DeepSeek {
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()
-            .map_err(|err| http::transport(&options.api_key, &err))?;
+            .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
     }
 }
@@ -104,13 +104,14 @@ impl Provider for DeepSeek {
             self.options.base_url.trim_end_matches('/')
         );
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, key, &body, &cancel).await?;
-        let translator = Translator::new(request.model, usage);
+        let response = http::post(&self.client, &url, Some(key), &body, &cancel).await?;
+        let translator =
+            Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage);
         Ok(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
-            key.clone(),
+            Some(key.clone()),
         ))
     }
 }
