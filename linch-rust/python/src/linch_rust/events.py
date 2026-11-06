@@ -129,6 +129,18 @@ class SuspendedEvent:
 
 
 @dataclass(frozen=True)
+class ContextBuildEvent:
+    """The context of the next provider request was assembled; the call starts."""
+
+    type: ClassVar[str] = "context_build"
+    system_blocks: int
+    messages: int
+    budget: JsonObject
+    metadata: JsonObject
+    selected_tools: list[str] | None = None
+
+
+@dataclass(frozen=True)
 class CompactionEvent:
     """The provider view was compacted into a summary."""
 
@@ -211,6 +223,7 @@ Event = (
     | ToolProgressEvent
     | PermissionRequestEvent
     | SuspendedEvent
+    | ContextBuildEvent
     | CompactionEvent
     | LoopGuardEvent
     | HookEvent
@@ -232,6 +245,7 @@ _KINDS: dict[str, type[Any]] = {
         ToolProgressEvent,
         PermissionRequestEvent,
         SuspendedEvent,
+        ContextBuildEvent,
         CompactionEvent,
         LoopGuardEvent,
         HookEvent,

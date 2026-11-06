@@ -34,6 +34,7 @@ from .errors import (
 from .events import (
     AssistantEvent,
     CompactionEvent,
+    ContextBuildEvent,
     Envelope,
     ErrorEvent,
     Event,
@@ -64,6 +65,7 @@ __all__ = [
     "Callback",
     "CompactionEvent",
     "ConnectionClosed",
+    "ContextBuildEvent",
     "ContractMismatch",
     "Decision",
     "Deny",

@@ -4,10 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from typing import Protocol
 
 from ._rpc import Connection, JsonObject, RunEnd, RunItem
 from .errors import LinchError
 from .events import Envelope, ResultEvent, SuspendedEvent, decode_envelope
+
+
+class Observer(Protocol):
+    """What a run tells its tracer (`linch_rust.otel.RunObserver`)."""
+
+    def observe(self, envelope: Envelope) -> None:
+        """Trace one envelope, in stream order."""
+        ...
+
+    def fail(self, error_type: str) -> None:
+        """The stream ended with an error of this type."""
+        ...
+
+    def close(self) -> None:
+        """The stream ended; end what its events did not."""
+        ...
 
 
 class Run:
@@ -23,10 +40,17 @@ class Run:
             `Agent.events`.
     """
 
-    def __init__(self, conn: Connection, run_id: str, queue: asyncio.Queue[RunItem]) -> None:
+    def __init__(
+        self,
+        conn: Connection,
+        run_id: str,
+        queue: asyncio.Queue[RunItem],
+        observer: Observer | None = None,
+    ) -> None:
         self.id = run_id
         self._conn = conn
         self._queue = queue
+        self._observer = observer
         # Envelopes received and not yet yielded, still raw.
         self._received: deque[JsonObject] = deque()
         self._end: RunEnd | None = None
@@ -79,8 +103,16 @@ class Run:
             envelope = decode_envelope(self._received.popleft())
             if isinstance(envelope.event, ResultEvent | SuspendedEvent):
                 self._terminal = envelope.event
+            if self._observer is not None:
+                self._observer.observe(envelope)
             return envelope
         assert self._end is not None
-        if self._end.error is not None:
-            raise self._end.error
+        error = self._end.error
+        if self._observer is not None:
+            if error is not None:
+                self._observer.fail(type(error).__name__)
+            else:
+                self._observer.close()
+        if error is not None:
+            raise error
         return None
