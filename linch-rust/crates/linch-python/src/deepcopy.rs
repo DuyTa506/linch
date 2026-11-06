@@ -85,7 +85,8 @@ fn refs(py: Python<'_>) -> PyResult<&'static Refs> {
     })
 }
 
-/// How one type is copied, decided once per `deepcopy` call.
+/// How one type is copied, decided once per `deepcopy` call and again if
+/// what it was read from changes (see [`Sources`]).
 #[derive(Clone, Copy)]
 enum Plan {
     Atomic,
@@ -103,13 +104,34 @@ enum Plan {
     },
 }
 
+/// The mappings a cached answer was read from, each with its size then: the
+/// namespace of every MRO base below `object`, plus `copyreg.dispatch_table`
+/// for a slots plan.
+///
+/// Code run mid-copy (a sibling's hook or reducer) can add `__deepcopy__`,
+/// `__setstate__`, a pickle hook or a `copyreg` reducer, and the stdlib looks
+/// these up on every object. Each addition grows one of the mappings, so a
+/// cached answer is reused only while all of them keep their size. A change
+/// that keeps every size (deleting one entry and adding another) or a
+/// `__bases__` assignment is not seen.
+type Sources<'py> = Vec<(Bound<'py, PyAny>, usize)>;
+
+fn unchanged(sources: &Sources<'_>) -> PyResult<bool> {
+    for (mapping, size) in sources {
+        if mapping.len()? != *size {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 struct Copier<'py> {
     py: Python<'py>,
     refs: &'static Refs,
     memo: Bound<'py, PyDict>,
     depth: usize,
-    plans: HashMap<usize, Plan>,
-    setstate_absent: HashMap<usize, bool>,
+    plans: HashMap<usize, (Plan, Sources<'py>)>,
+    setstate_absent: HashMap<usize, (bool, Sources<'py>)>,
     slots: HashMap<usize, Vec<Py<PyString>>>,
 }
 
@@ -171,6 +193,20 @@ impl<'py> Copier<'py> {
         Ok(true)
     }
 
+    fn namespaces(&self, cls: &Bound<'py, PyType>) -> PyResult<Sources<'py>> {
+        let object = self.refs.object.bind(self.py);
+        let mut namespaces = Vec::new();
+        for base in cls.getattr("__mro__")?.try_iter()? {
+            let base = base?;
+            if !base.is(object) {
+                let namespace = base.getattr("__dict__")?;
+                let size = namespace.len()?;
+                namespaces.push((namespace, size));
+            }
+        }
+        Ok(namespaces)
+    }
+
     fn in_mro(&self, cls: &Bound<'py, PyType>, name: &str) -> PyResult<bool> {
         for base in cls.getattr("__mro__")?.try_iter()? {
             if base?.getattr("__dict__")?.contains(name)? {
@@ -221,7 +257,9 @@ impl<'py> Copier<'py> {
 
     fn plan(&mut self, cls: &Bound<'py, PyType>) -> PyResult<Plan> {
         let key = cls.as_ptr() as usize;
-        if let Some(plan) = self.plans.get(&key) {
+        if let Some((plan, sources)) = self.plans.get(&key)
+            && unchanged(sources)?
+        {
             return Ok(*plan);
         }
         let refs = self.refs;
@@ -250,18 +288,31 @@ impl<'py> Copier<'py> {
                     && !self.in_mro(cls, "__deepcopy__")?,
             }
         };
-        self.plans.insert(key, plan);
+        // Read after `_slotnames`, which may store `__slotnames__` on `cls`.
+        let mut sources = match plan {
+            Plan::Slots | Plan::Reduce { .. } => self.namespaces(cls)?,
+            _ => Vec::new(),
+        };
+        // The reduce arm reads `dispatch_table` on every object instead.
+        if let Plan::Slots = plan {
+            let table = refs.dispatch_table.bind(self.py);
+            sources.push((table.as_any().clone(), table.len()));
+        }
+        self.plans.insert(key, (plan, sources));
         Ok(plan)
     }
 
     fn setstate_absent(&mut self, y: &Bound<'py, PyAny>) -> PyResult<bool> {
         let cls = y.get_type();
         let key = cls.as_ptr() as usize;
-        if let Some(absent) = self.setstate_absent.get(&key) {
+        if let Some((absent, sources)) = self.setstate_absent.get(&key)
+            && unchanged(sources)?
+        {
             return Ok(*absent);
         }
         let absent = self.lookup_is_static(&cls)? && !self.in_mro(&cls, "__setstate__")?;
-        self.setstate_absent.insert(key, absent);
+        let sources = self.namespaces(&cls)?;
+        self.setstate_absent.insert(key, (absent, sources));
         Ok(absent)
     }
 

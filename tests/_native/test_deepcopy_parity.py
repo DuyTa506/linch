@@ -8,6 +8,7 @@ including which nodes are shared with each other and with the original.
 from __future__ import annotations
 
 import copy
+import copyreg
 import datetime
 import enum
 import random
@@ -305,6 +306,63 @@ def test_slotted_fast_path_edges_match_stdlib() -> None:
     expected, copied = copy.deepcopy(hooked), native_deepcopy(hooked)
     assert copied.v == expected.v == ("from-getstate", [3])
     assert not hasattr(copied, "w") and not hasattr(expected, "w")
+
+
+@pytest.mark.parametrize("via", ["reduce", "deepcopy"])
+@pytest.mark.parametrize(
+    ("hooked", "registration"),
+    [
+        (False, "deepcopy"),
+        (False, "copyreg"),
+        (False, "setstate"),
+        (True, "deepcopy"),
+        (True, "setstate"),
+    ],
+)
+def test_hook_registered_mid_copy_applies_to_later_objects(
+    hooked: bool, registration: str, via: str
+) -> None:
+    # The stdlib looks hooks up on every object, so a hook that copying an
+    # earlier sibling registers applies to the later instances.
+    def outcome(fn: Any) -> list[Any]:
+        class Target:
+            __slots__ = ("v",)
+
+            def __init__(self, v: Any) -> None:
+                self.v = v
+
+        if hooked:  # a pickle hook moves the class off the plain-slots path
+            Target.__getstate__ = lambda self: (None, {"v": self.v})
+
+        def register() -> None:
+            if registration == "copyreg":
+                copyreg.pickle(Target, lambda obj: (Target, ("copyreg",)))
+            elif registration == "setstate":
+                Target.__setstate__ = lambda self, state: setattr(self, "v", "setstate")  # type: ignore[attr-defined]
+            else:
+                Target.__deepcopy__ = lambda self, memo: Target("deepcopy")  # type: ignore[attr-defined]
+
+        class Registrar:
+            if via == "reduce":
+
+                def __reduce_ex__(self, protocol: object) -> tuple[Any, ...]:
+                    register()
+                    return (Registrar, ())
+            else:
+
+                def __deepcopy__(self, memo: dict[int, Any]) -> Registrar:
+                    register()
+                    return Registrar()
+
+        try:
+            copied = fn([Target(1), Registrar(), Target(2)])
+            return [getattr(item, "v", type(item).__name__) for item in copied]
+        finally:
+            copyreg.dispatch_table.pop(Target, None)
+
+    expected = outcome(copy.deepcopy)
+    assert expected == [1, "Registrar", registration]
+    assert outcome(native_deepcopy) == expected
 
 
 class BadSlotState:
