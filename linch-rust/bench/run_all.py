@@ -227,15 +227,16 @@ class Runner:
         return json.loads(proc.stdout) if action == "stats" else None
 
     def pg_writes(self, schema: str) -> dict:
-        # Backends flush their table stats when they exit; wait until two
-        # reads agree.
+        # Backends flush their table stats when they exit, a moment after the
+        # side process: wait until two reads agree on a count above zero
+        # (zero only if it stays zero for 5 s).
         last = None
-        for _ in range(20):
+        for attempt in range(20):
+            time.sleep(0.25)
             stats = self.pg_admin("stats", schema)
-            if stats == last:
+            if stats == last and (any(stats.values()) or attempt >= 19):
                 break
             last = stats
-            time.sleep(0.25)
         return last or {}
 
     # ---------------------------------------------------------------- jobs
