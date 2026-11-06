@@ -6,8 +6,8 @@ use super::sink::JournalSink;
 use super::turn::{Batch, Runner, Step};
 use crate::agent::RunError;
 use crate::events::kinds::{
-    PermissionRequestEvent, PermissionRequestItem, SuspendStatus, SuspendedEvent, UserEvent,
-    UserEventSubtype,
+    PermissionRequestEvent, PermissionRequestItem, SuspendStatus, SuspendedEvent, ToolCallEndEvent,
+    UserEvent, UserEventSubtype,
 };
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
@@ -32,9 +32,21 @@ impl Runner {
             .iter()
             .filter_map(|call| match call {
                 ToolRecovery::Replan(block) => Some(block.clone()),
-                ToolRecovery::Done(_) | ToolRecovery::Interrupted(_) => None,
+                ToolRecovery::Done(_) | ToolRecovery::Interrupted { .. } => None,
             })
             .collect();
+        // A placeholder is the end of its tool's durable start; it rides
+        // the next barrier.
+        for call in &calls {
+            if let ToolRecovery::Interrupted { tool_name, result } = call {
+                self.journal.stage(Event::ToolCallEnd(ToolCallEndEvent {
+                    tool_name: tool_name.clone(),
+                    result: result.clone(),
+                    duration_ms: 0,
+                    canonical_output: None,
+                }));
+            }
+        }
         let (agent, run) = (&self.agent, &self.run);
         let plan = scheduler::plan(
             &blocks,
@@ -64,7 +76,7 @@ impl Runner {
         .await?;
         let mut fresh = self.execute(plan).await?.into_iter();
         let results = calls.into_iter().map(|call| match call {
-            ToolRecovery::Done(block) | ToolRecovery::Interrupted(block) => block,
+            ToolRecovery::Done(block) | ToolRecovery::Interrupted { result: block, .. } => block,
             ToolRecovery::Replan(_) => fresh.next().expect("execute returns one result per call"),
         });
         let message = Message::new(Role::User, results.map(ContentBlock::ToolResult).collect());

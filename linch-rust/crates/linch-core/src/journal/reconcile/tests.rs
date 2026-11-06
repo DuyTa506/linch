@@ -323,7 +323,10 @@ fn a_tool_batch_reuses_ends_and_never_reruns_a_started_tool() {
         decisions,
         calls: vec![
             ToolRecovery::Done(ToolResultBlock::text("c1", "c1 ok", false)),
-            ToolRecovery::Interrupted(ToolResultBlock::text("c2", INTERRUPTED_TOOL_TEXT, true)),
+            ToolRecovery::Interrupted {
+                tool_name: "Read".into(),
+                result: ToolResultBlock::text("c2", INTERRUPTED_TOOL_TEXT, true),
+            },
             ToolRecovery::Replan(call("c3", "Write")),
         ],
     };

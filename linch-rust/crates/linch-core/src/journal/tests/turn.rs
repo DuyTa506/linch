@@ -169,7 +169,10 @@ async fn a_crash_recovers_from_the_durable_state() {
     assert_eq!(
         calls,
         [
-            ToolRecovery::Interrupted(interrupted),
+            ToolRecovery::Interrupted {
+                tool_name: "Read".into(),
+                result: interrupted
+            },
             ToolRecovery::Replan(tool_call(1))
         ]
     );

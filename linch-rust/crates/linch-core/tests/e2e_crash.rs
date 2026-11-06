@@ -166,6 +166,16 @@ async fn check(
         );
     }
     let events = stores.runs.events(NS, run_id, 0).await.unwrap();
+    // Every tool that started ends, an interrupted one with its placeholder.
+    for envelope in &events {
+        if let Event::ToolCallStart(start) = &envelope.event {
+            let id = start.tool_use_id.as_str();
+            let ends = (events.iter())
+                .filter(|e| matches!(&e.event, Event::ToolCallEnd(end) if end.tool_use_id() == id))
+                .count();
+            assert_eq!(ends, 1, "{context}: {id} has {ends} ends");
+        }
+    }
     let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
     assert_eq!(
         seqs,

@@ -105,8 +105,13 @@ pub enum ToolRecovery {
     /// The call has a durable end: reuse its result.
     Done(ToolResultBlock),
     /// The call started but has no durable end: this error result stands in,
-    /// and the tool is not run again.
-    Interrupted(ToolResultBlock),
+    /// and the tool is not run again. The run stages it as the call's end.
+    Interrupted {
+        /// Name of the tool that started.
+        tool_name: String,
+        /// The placeholder result.
+        result: ToolResultBlock,
+    },
     /// The call never started: plan it again, which asks for permission
     /// again unless a recorded decision covers it.
     Replan(ToolUseBlock),
@@ -317,7 +322,10 @@ fn recover_call(call: &ToolUseBlock, batch: &[&Envelope]) -> ToolRecovery {
         }
     }
     if started {
-        ToolRecovery::Interrupted(ToolResultBlock::text(&call.id, INTERRUPTED_TOOL_TEXT, true))
+        ToolRecovery::Interrupted {
+            tool_name: call.name.clone(),
+            result: ToolResultBlock::text(&call.id, INTERRUPTED_TOOL_TEXT, true),
+        }
     } else {
         ToolRecovery::Replan(call.clone())
     }
