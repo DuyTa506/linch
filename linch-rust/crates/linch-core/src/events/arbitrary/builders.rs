@@ -89,7 +89,7 @@ pub(super) fn tool_call_end_event() -> impl Strategy<Value = ToolCallEndEvent> {
         short_string(),
         tool_result_block(),
         any::<u64>(),
-        option::of(non_null_json_value(1)),
+        option::of(json_value(1)),
     )
         .prop_map(
             |(tool_name, result, duration_ms, canonical_output)| ToolCallEndEvent {

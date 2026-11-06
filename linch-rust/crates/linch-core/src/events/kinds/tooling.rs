@@ -3,7 +3,7 @@
 
 use crate::json::{JsonObject, JsonValue};
 use crate::message::ToolResultBlock;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The start of one tool invocation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,12 +36,35 @@ pub struct ToolCallEndEvent {
     /// Canonical JSON projection of a structured tool output, when the tool
     /// returned one.
     ///
-    /// `Some(JsonValue::Null)` is not representable on the wire: it encodes
-    /// to the same `null` as an absent field and always decodes back as
-    /// `None`. A producer with a canonical output of JSON `null` has no way
-    /// to distinguish that from "no canonical output" over this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `None` is an absent field: no canonical output. `Some(JsonValue::Null)`
+    /// is a present field whose value is JSON `null`: the tool had a
+    /// canonical output, and that output is `null`. `deserialize_canonical_output`
+    /// keeps these distinct; serde's built-in `Option<T>` deserialization
+    /// would otherwise collapse a present `null` to `None`, the same as the
+    /// field being absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_canonical_output"
+    )]
     pub canonical_output: Option<JsonValue>,
+}
+
+/// Decode a present `canonical_output` field as `Some`, including when its
+/// value is JSON `null`.
+///
+/// `#[serde(default, deserialize_with = "...")]` only calls this when the
+/// field key is present on the wire; a missing key uses `default`
+/// (`Option::default()`, i.e. `None`) without calling it at all. So the
+/// three wire states (absent, present-and-null, present-and-a-value) map
+/// one-to-one onto `None`, `Some(JsonValue::Null)`, and `Some(other)`,
+/// instead of serde's usual `Option<T>` behavior of collapsing a present
+/// `null` into `None`.
+fn deserialize_canonical_output<'de, D>(deserializer: D) -> Result<Option<JsonValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    JsonValue::deserialize(deserializer).map(Some)
 }
 
 impl ToolCallEndEvent {
@@ -118,6 +141,38 @@ mod tests {
                 "result": {"tool_use_id": "c1", "content": [{"type": "text", "text": "done"}]},
                 "duration_ms": 12,
             })
+        );
+    }
+
+    fn end_with(canonical_output: Option<JsonValue>) -> ToolCallEndEvent {
+        ToolCallEndEvent {
+            tool_name: "Read".into(),
+            result: ToolResultBlock::text("c1", "done", false),
+            duration_ms: 12,
+            canonical_output,
+        }
+    }
+
+    #[test]
+    fn absent_canonical_output_omits_the_field() {
+        let value = serde_json::to_value(end_with(None)).unwrap();
+        assert!(value.as_object().unwrap().get("canonical_output").is_none());
+        assert_eq!(
+            serde_json::from_value::<ToolCallEndEvent>(value).unwrap(),
+            end_with(None)
+        );
+    }
+
+    #[test]
+    fn canonical_output_of_json_null_round_trips_distinct_from_absent() {
+        // A present `canonical_output: null` must decode to
+        // `Some(JsonValue::Null)`, not `None` - the bug a plain
+        // `Option<JsonValue>` field would have.
+        let value = serde_json::to_value(end_with(Some(JsonValue::Null))).unwrap();
+        assert_eq!(value.get("canonical_output"), Some(&JsonValue::Null));
+        assert_eq!(
+            serde_json::from_value::<ToolCallEndEvent>(value).unwrap(),
+            end_with(Some(JsonValue::Null))
         );
     }
 }

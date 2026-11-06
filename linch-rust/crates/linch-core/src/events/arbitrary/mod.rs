@@ -132,19 +132,6 @@ fn json_object(depth: u32) -> impl Strategy<Value = JsonObject> {
     })
 }
 
-/// A JSON value that is never `Null`, for wrapping in `Option<JsonValue>`.
-///
-/// `Some(JsonValue::Null)` and `None` both wire-encode as a missing/`null`
-/// field and are indistinguishable once decoded back through
-/// `Option<JsonValue>`'s standard serde behavior (JSON `null` always
-/// deserializes to `None`), so generating it would make the round-trip
-/// property fail for a case the wire format cannot represent.
-fn non_null_json_value(depth: u32) -> BoxedStrategy<JsonValue> {
-    json_value(depth)
-        .prop_filter("canonical_output must not be Null", |v| !v.is_null())
-        .boxed()
-}
-
 /// An arbitrary ignorable event: an unknown type with a few scalar fields.
 fn ignorable_event() -> impl Strategy<Value = Event> {
     ("[a-z_]{1,10}", json_object(1)).prop_map(|(type_name, raw)| {
