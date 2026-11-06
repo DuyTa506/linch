@@ -1,14 +1,27 @@
 //! [`PgSessionStore`]: append-only session logs in Postgres.
 //!
-//! An append locks the session row, compares its length, then writes the
-//! new length and the entries in one transaction, so concurrent appends at
-//! the same length serialize and all but one get `Conflict`.
+//! An append is one statement in autocommit: it moves the session length
+//! only from the expected one and inserts the entries from the moved row,
+//! so concurrent appends at the same length serialize and all but one get
+//! `Conflict`. A refused append reads the length once more to say why.
 
 use async_trait::async_trait;
 use linch_core::{LogEntry, SessionId, SessionStore, StoreError};
 use sqlx::PgPool;
 
-use crate::codec::{backend, decode_entry, encode_entry, not_found, to_i64, to_u64};
+use crate::codec::{backend, decode_entry, encode_entry, not_found, to_u64};
+
+/// An append in one statement. The length moves only from `$3`; the
+/// entries are inserted from the moved row, so they land with it or not at
+/// all.
+const APPEND: &str = "WITH moved AS ( \
+         UPDATE linch_sessions SET len = len + cardinality($4::text[]) \
+         WHERE namespace = $1 AND session_id = $2 AND len = $3 RETURNING len \
+     ), inserted AS ( \
+         INSERT INTO linch_session_entries (namespace, session_id, position, entry) \
+         SELECT $1, $2, $3 + n - 1, entry \
+         FROM moved, unnest($4::text[]) WITH ORDINALITY AS e(entry, n) \
+     ) SELECT len FROM moved";
 
 /// A [`SessionStore`] backed by Postgres; also the
 /// [`TaskStore`](linch_core::TaskStore) of the session tasks.
@@ -85,13 +98,60 @@ impl SessionStore for PgSessionStore {
             .iter()
             .map(encode_entry)
             .collect::<Result<Vec<_>, _>>()?;
-        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
+        for _ in 0..crate::WRITE_TRIES {
+            match self
+                .write(namespace, session_id, expected_len, &texts)
+                .await
+            {
+                Ok(Some(len)) => return to_u64(len, "len"),
+                // `Ok`: the length moved to `expected_len` after the refused write.
+                Ok(None) => self.refusal(namespace, session_id, expected_len).await?,
+                Err(error) if crate::serialization_failure(&error) => {}
+                Err(error) => return Err(backend(error)),
+            }
+        }
+        Err(StoreError::Conflict {
+            message: format!("session {session_id} kept changing during an append"),
+        })
+    }
+}
+
+impl PgSessionStore {
+    /// Run [`APPEND`]; the new length, or `None` when the session refused it.
+    async fn write(
+        &self,
+        namespace: &str,
+        session_id: &SessionId,
+        expected_len: u64,
+        texts: &[String],
+    ) -> Result<Option<i64>, sqlx::Error> {
+        // No log is longer than i64::MAX; the refusal read names the length.
+        let Ok(expected) = i64::try_from(expected_len) else {
+            return Ok(None);
+        };
+        sqlx::query_scalar(APPEND)
+            .bind(namespace)
+            .bind(session_id.as_str())
+            .bind(expected)
+            .bind(texts)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    /// Why the session refuses an append at `expected_len`, read after a
+    /// refused write; `Ok` when that is its length now.
+    async fn refusal(
+        &self,
+        namespace: &str,
+        session_id: &SessionId,
+        expected_len: u64,
+    ) -> Result<(), StoreError> {
         let len: Option<i64> = sqlx::query_scalar(
-            "SELECT len FROM linch_sessions WHERE namespace = $1 AND session_id = $2 FOR UPDATE",
+            "SELECT len FROM linch_sessions WHERE namespace = $1 AND session_id = $2",
         )
         .bind(namespace)
         .bind(session_id.as_str())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&self.pool)
         .await
         .map_err(backend)?;
         let len = len.ok_or_else(|| not_found("session", namespace, session_id.as_str()))?;
@@ -101,31 +161,6 @@ impl SessionStore for PgSessionStore {
                 message: format!("session {session_id} has {len} entries, expected {expected_len}"),
             });
         }
-        let new_len = len + texts.len() as u64;
-        // The session row first, so a crash during the entry insert still
-        // has a landed write to roll back.
-        sqlx::query("UPDATE linch_sessions SET len = $3 WHERE namespace = $1 AND session_id = $2")
-            .bind(namespace)
-            .bind(session_id.as_str())
-            .bind(to_i64(new_len, "len")?)
-            .execute(&mut *tx)
-            .await
-            .map_err(backend)?;
-        if !texts.is_empty() {
-            sqlx::query(
-                "INSERT INTO linch_session_entries (namespace, session_id, position, entry) \
-                 SELECT $1, $2, $3 + n - 1, entry FROM unnest($4::text[]) \
-                 WITH ORDINALITY AS e(entry, n)",
-            )
-            .bind(namespace)
-            .bind(session_id.as_str())
-            .bind(to_i64(len, "len")?)
-            .bind(texts)
-            .execute(&mut *tx)
-            .await
-            .map_err(backend)?;
-        }
-        tx.commit().await.map_err(backend)?;
-        Ok(new_len)
+        Ok(())
     }
 }
