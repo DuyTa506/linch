@@ -241,6 +241,7 @@ impl AgentBuilder {
             child: false,
             pricing: self.pricing,
             mailbox: self.mailbox,
+            families: Default::default(),
             session_close: self.session_close,
             registrations: built_ins.take(),
         });

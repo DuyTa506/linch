@@ -7,7 +7,7 @@ use std::time::Instant;
 use super::batch::{answer_decision, approvals, turn_events, upsert};
 use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
-use super::{Outbox, hooks, inbox};
+use super::{Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
@@ -26,9 +26,10 @@ pub(super) async fn new_run(
     run_id: RunId,
     prompt: String,
     options: RunOptions,
-    outbox: Outbox,
+    shared: Shared,
     parent: Option<RunId>,
 ) -> Result<(), RunError> {
+    let Shared { outbox, family } = shared;
     let started = Instant::now();
     let namespace = agent.namespace.clone();
     if options.run_id.is_some() {
@@ -105,10 +106,13 @@ pub(super) async fn new_run(
             });
         }
     };
+    if let Some(family) = &family {
+        family.register(&agent);
+    }
     outbox.deliver(ready).await;
     let progress = Progress::first(started);
     let run = identity(session_id, run_id, &options.principal);
-    let runner = Runner::new(
+    let mut runner = Runner::new(
         agent,
         journal,
         outbox,
@@ -117,6 +121,7 @@ pub(super) async fn new_run(
         entries,
         progress,
     );
+    runner.family = family;
     let prompt = Step::Prompt {
         prompt,
         appended: false,
@@ -134,8 +139,9 @@ pub(super) async fn continue_run(
     run_id: RunId,
     answers: Option<HashMap<String, ApprovalResponse>>,
     options: RunOptions,
-    outbox: Outbox,
+    shared: Shared,
 ) -> Result<(), RunError> {
+    let Shared { outbox, family } = shared;
     let started = Instant::now();
     if options.cancel.is_cancelled() {
         return Ok(());
@@ -158,6 +164,9 @@ pub(super) async fn continue_run(
         }
         Err(error) => return Err(error.into()),
     };
+    if let Some(family) = &family {
+        family.register(&agent);
+    }
     let record = runs.load(namespace, &run_id).await?;
     check(&record, &agent, answers.as_ref())?;
     let events = runs.events(namespace, &run_id, 0).await?;
@@ -242,6 +251,7 @@ pub(super) async fn continue_run(
         entries,
         progress,
     );
+    runner.family = family;
     if let Some(decisions) = commit {
         runner.commit_decisions(decisions, assistant_seq).await?;
     }

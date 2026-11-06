@@ -24,7 +24,7 @@ use crate::policy::Principal;
 use crate::provider::{Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
-use crate::runner::{self, RunStream};
+use crate::runner::{self, Families, RunStream};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::Roster;
 use crate::usage::Usage;
@@ -121,6 +121,8 @@ pub(crate) struct AgentInner {
     pub(crate) pricing: Option<Pricing>,
     /// The inbox each run of a session drains; `None` without one.
     pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
+    /// The subagent child runs of each live run (see [`runner::Family`]).
+    pub(crate) families: Families,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,

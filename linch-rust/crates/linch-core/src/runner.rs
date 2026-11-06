@@ -52,11 +52,13 @@ use crate::events::Envelope;
 use crate::hooks::ApprovalResponse;
 use crate::ids::RunId;
 pub(crate) use fail::fail;
+pub(crate) use family::{Families, Family};
 
 mod batch;
 mod compact;
 mod end;
 mod fail;
+mod family;
 mod hooks;
 mod inbox;
 mod progress;
@@ -81,15 +83,24 @@ pub struct RunStream {
     run_id: RunId,
     outbox: Outbox,
     run: Option<BoxFuture<'static, Result<(), RunError>>>,
+    /// The subagent child runs this stream drives next to the run; `None`
+    /// for an agent without subagents.
+    family: Option<Arc<Family>>,
     error: Option<RunError>,
 }
 
 impl RunStream {
-    fn new(run_id: RunId, outbox: Outbox, run: BoxFuture<'static, Result<(), RunError>>) -> Self {
+    fn new(
+        run_id: RunId,
+        outbox: Outbox,
+        run: BoxFuture<'static, Result<(), RunError>>,
+        family: Option<Arc<Family>>,
+    ) -> Self {
         Self {
             run_id,
             outbox,
             run: Some(run),
+            family,
             error: None,
         }
     }
@@ -109,6 +120,9 @@ impl Stream for RunStream {
             if let Some(envelope) = this.outbox.pop() {
                 return Poll::Ready(Some(Ok(envelope)));
             }
+            if let Some(family) = &this.family {
+                family.poll(cx);
+            }
             let Some(run) = this.run.as_mut() else {
                 return Poll::Ready(this.error.take().map(Err));
             };
@@ -117,6 +131,8 @@ impl Stream for RunStream {
                     this.run = None;
                     this.error = result.err();
                 }
+                // A child joined while the run was polled: poll it once.
+                Poll::Pending if this.family.as_ref().is_some_and(|f| f.joined()) => {}
                 // The run parked on real I/O; hand over what it queued.
                 Poll::Pending if this.outbox.is_empty() => return Poll::Pending,
                 Poll::Pending => {}
@@ -149,15 +165,27 @@ fn start_under(
     let run_id =
         (options.run_id.clone()).unwrap_or_else(|| RunId::new(uuid::Uuid::new_v4().to_string()));
     let outbox = Outbox::default();
+    let family = family(&agent, &run_id);
     let run = start::new_run(
         agent,
         run_id.clone(),
         prompt,
         options,
-        outbox.clone(),
+        Shared {
+            outbox: outbox.clone(),
+            family: family.clone(),
+        },
         parent,
     );
-    RunStream::new(run_id, outbox, Box::pin(run))
+    RunStream::new(run_id, outbox, Box::pin(run), family)
+}
+
+/// A family for the child runs of `run_id`, when the agent has subagents.
+fn family(agent: &AgentInner, run_id: &RunId) -> Option<Arc<Family>> {
+    agent
+        .subagents
+        .as_ref()
+        .map(|_| Family::new(run_id.clone()))
 }
 
 /// Resume a run, or approve its pending calls when `answers` is set.
@@ -168,8 +196,19 @@ pub(crate) fn resume(
     options: RunOptions,
 ) -> RunStream {
     let outbox = Outbox::default();
-    let run = start::continue_run(agent, run_id.clone(), answers, options, outbox.clone());
-    RunStream::new(run_id, outbox, Box::pin(run))
+    let family = family(&agent, &run_id);
+    let shared = Shared {
+        outbox: outbox.clone(),
+        family: family.clone(),
+    };
+    let run = start::continue_run(agent, run_id.clone(), answers, options, shared);
+    RunStream::new(run_id, outbox, Box::pin(run), family)
+}
+
+/// What a run future shares with its stream.
+pub(super) struct Shared {
+    pub(super) outbox: Outbox,
+    pub(super) family: Option<Arc<Family>>,
 }
 
 /// Envelopes waiting for the caller, shared by the run future and its

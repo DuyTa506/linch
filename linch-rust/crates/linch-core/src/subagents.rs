@@ -21,7 +21,11 @@
 //! - it cannot suspend: a call that needs approval is denied, unless a
 //!   rule or a `permission_request` hook allows it;
 //! - each of its events reaches the parent's log wrapped in a `subagent`
-//!   event, before the call's end, and its final text is the tool result.
+//!   event, before the call's end, and its final text is the tool result;
+//! - the parent's stream drives it, so a call that its timeout or the
+//!   parent's cancel cuts short leaves the child to write its abort, and
+//!   the parent waits for every child run to end before its own terminal
+//!   write.
 //!
 //! The tool is exec-scoped. A call runs alongside other read calls only
 //! when it names a type whose definition lists its tools and every one of

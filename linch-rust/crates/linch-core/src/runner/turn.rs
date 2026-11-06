@@ -6,10 +6,10 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
-use super::Outbox;
 use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
 use super::progress::Progress;
+use super::{Family, Outbox};
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
@@ -116,6 +116,8 @@ pub(super) struct Runner {
     pub(super) stop_reason: StopReason,
     /// When this call of the run started, for the result's `duration_ms`.
     pub(super) started: Instant,
+    /// The run's subagent child runs; `None` without subagents.
+    pub(super) family: Option<Arc<Family>>,
 }
 
 impl Runner {
@@ -145,6 +147,7 @@ impl Runner {
             cost: progress.cost,
             stop_reason: progress.stop_reason,
             started: progress.started,
+            family: None,
         }
     }
 

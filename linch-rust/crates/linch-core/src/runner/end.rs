@@ -14,7 +14,8 @@ use crate::provider::AssistantAssembly;
 use crate::run::{RunStatus, StopReason};
 
 impl Runner {
-    /// End the run with `status` and its `Result`.
+    /// End the run with `status` and its `Result`, once every child run
+    /// still running was cancelled and ended.
     pub(super) async fn end(
         &mut self,
         status: RunStatus,
@@ -22,6 +23,10 @@ impl Runner {
         stop_reason: StopReason,
         final_text: Option<String>,
     ) -> Result<(), RunError> {
+        if let Some(family) = &self.family {
+            family.cancel_all();
+            family.idle().await;
+        }
         let result = ResultEvent {
             subtype,
             stop_reason,

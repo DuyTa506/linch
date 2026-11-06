@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use tokio::sync::oneshot;
 
 use super::SubagentDefinition;
 use crate::agent::{AgentInner, RunOptions};
@@ -18,6 +19,10 @@ use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 /// in `ctx`: start it, resume it if a crash left it unfinished, or read
 /// the result of one that finished. Each event of the child goes into the
 /// parent's log wrapped in a `subagent` event.
+///
+/// The parent run's [`Family`](crate::runner::Family) drives the child, so
+/// a call cut short (by its timeout or the run's cancel, which cancel the
+/// call's token and so the child's) leaves the child to write its abort.
 pub(super) async fn run(
     parent: &AgentInner,
     definition: &SubagentDefinition,
@@ -29,12 +34,13 @@ pub(super) async fn run(
         Err(error) => return Err(failed("could not be built", error)),
     };
     let child_id = RunId::new(ctx.idempotency_key());
+    let cancel = ctx.cancel.child_token();
     let options = RunOptions {
         session_id: SessionId::new(child_id.as_str()),
         run_id: Some(child_id.clone()),
         principal: ctx.principal.clone(),
         owner: "subagent".into(),
-        cancel: ctx.cancel.child_token(),
+        cancel: cancel.clone(),
     };
     let stream = match child.runs.load(&child.namespace, &child_id).await {
         Err(StoreError::NotFound { .. }) => {
@@ -52,7 +58,16 @@ pub(super) async fn run(
         Ok(_) => runner::resume(child, child_id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
     };
-    drive(stream, child_id, ctx).await
+    let Some(family) = parent.family(&ctx.run_id) else {
+        return drive(stream, child_id, ctx).await;
+    };
+    let (done, result) = oneshot::channel();
+    let (id, ctx) = (child_id.clone(), ctx.clone());
+    family.adopt(child_id, cancel, async move {
+        let _ = done.send(drive(stream, id, &ctx).await);
+    });
+    let result = result.await;
+    result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
 }
 
 async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) -> ToolResult {
