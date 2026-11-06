@@ -11,9 +11,9 @@ use common::subagents::*;
 use common::*;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    Agent, AgentBuilder, Event, JsonObject, PermissionMode, RunId, RunOptions, RunStatus, RunStore,
-    ScriptedTurn, SessionId, SubagentDefinition, Tool, ToolContext, ToolOutput, ToolRegistry,
-    ToolResult, ToolScope, Workers,
+    Agent, AgentBuilder, Event, InMemoryMailbox, JsonObject, PermissionMode, RunId, RunOptions,
+    RunStatus, RunStore, ScriptedTurn, SessionId, SubagentDefinition, Tool, ToolContext,
+    ToolOutput, ToolRegistry, ToolResult, ToolScope, Workers,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -222,4 +222,42 @@ async fn an_unkept_child_closes_its_session_when_it_ends() {
         ["x holds"],
         "no worker id without retain"
     );
+}
+
+#[tokio::test]
+async fn the_worker_tools_never_run_in_parallel_and_go_with_their_agent() {
+    let family = Arc::new(Family::new(Vec::new(), Vec::new()));
+    let registry = Arc::new(ToolRegistry::new());
+    let mut scout = SubagentDefinition::new("scout", "Reads around.", "Scout the code.");
+    scout.tools = Some(Vec::new());
+    let stores = Arc::new(Stores::default());
+    let agent = AgentBuilder::new(spec())
+        .provider(family)
+        .tools(registry.clone())
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .subagents(vec![scout])
+        .workers(Workers {
+            background: true,
+            retain: true,
+        })
+        .mailbox(Arc::new(InMemoryMailbox::new()))
+        .build()
+        .unwrap();
+    let names = ["Subagent", "SubagentContinue", "TaskStop", "send_message"];
+    let snapshot = registry.snapshot();
+    for name in &names[1..] {
+        let tool = snapshot.resolve(name).unwrap().tool();
+        assert!(!tool.parallel(&JsonObject::new()), "{name}");
+    }
+    let subagent = snapshot.resolve("Subagent").unwrap().tool();
+    let mut input = object(json!({"subagent_type": "scout", "prompt": "p", "description": "d"}));
+    assert!(subagent.parallel(&input), "a scout reads only");
+    input.insert("run_in_background".into(), json!(true));
+    assert!(!subagent.parallel(&input), "a background call never");
+    drop(agent);
+    let snapshot = registry.snapshot();
+    assert!(names.iter().all(|name| snapshot.resolve(name).is_none()));
 }
