@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::fs::File;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -55,6 +56,26 @@ async fn the_largest_head_limit_still_returns_matches() {
     assert_eq!(text(call(&tool, lines).await), "a.txt:m\na.txt:m");
     let files = json!({"pattern": "m", "head_limit": u64::MAX});
     assert_eq!(text(call(&tool, files).await), "a.txt");
+}
+
+#[tokio::test]
+async fn multiline_search_skips_a_file_over_the_read_cap() {
+    let ws = Workspace::new();
+    ws.put("small.txt", "start\nend\n");
+    // Sparse: a text head longer than the binary check, then a hole up to
+    // one byte past Read's 10 MiB cap.
+    ws.put("big.txt", &format!("start\nend\n{}", "x\n".repeat(40_000)));
+    let big = File::options()
+        .write(true)
+        .open(ws.root().join("big.txt"))
+        .unwrap();
+    big.set_len(10 * 1024 * 1024 + 1).unwrap();
+    let tool = Grep::new(ws.fs.clone());
+    let multiline = json!({"pattern": "start.end", "multiline": true});
+    assert_eq!(text(call(&tool, multiline).await), "small.txt");
+    // A line search streams the file, so it still finds the match.
+    let lines = json!({"pattern": "start"});
+    assert_eq!(text(call(&tool, lines).await), "big.txt\nsmall.txt");
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 //! walks (gitignore, hidden files, type table, `--glob` overrides) and
 //! `grep-searcher` searches, so no process is spawned.
 
+use std::fs::File;
 use std::io;
 use std::path::{Component, Path};
 
@@ -15,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::local::is_hidden;
 use super::{FsError, GlobHit, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery};
 use crate::fs::LocalFs;
+use crate::read::MAX_READ_BYTES;
 
 /// Longest line text kept in content output, in bytes.
 const MAX_LINE: usize = 500;
@@ -27,14 +29,7 @@ pub(super) fn grep(
 ) -> Result<GrepHits, FsError> {
     let target = fs.resolve(query.path.as_deref().unwrap_or("."))?;
     let matcher = matcher(query)?;
-    let content = query.mode == GrepMode::Content;
-    let mut searcher = SearcherBuilder::new()
-        .line_number(true)
-        .multi_line(query.multiline)
-        .binary_detection(BinaryDetection::quit(0))
-        .before_context(if content { query.before } else { 0 })
-        .after_context(if content { query.after } else { 0 })
-        .build();
+    let mut searcher = searcher(query);
     let mut walk = walker(&target, false);
     if let Some(glob) = &query.glob {
         let overrides = OverrideBuilder::new(&target)
@@ -60,12 +55,26 @@ pub(super) fn grep(
         let Some(path) = regular_file(entry) else {
             continue;
         };
+        // A multiline search reads the whole file; skip one over the cap
+        // without reading it. Line searches stream, so any size is fine.
+        if query.multiline
+            && path
+                .metadata()
+                .is_ok_and(|meta| meta.len() > MAX_READ_BYTES)
+        {
+            continue;
+        }
         let budget = match query.mode {
             GrepMode::Content => (query.limit - lines).saturating_add(1),
             _ => usize::MAX,
         };
         let mut sink = Collect::new(query.mode, budget);
-        if searcher.search_path(&matcher, &path, &mut sink).is_err() || sink.binary {
+        let searched = File::open(&path)
+            .and_then(|file| search(&mut searcher, &matcher, file, stop, &mut sink));
+        if stop.is_cancelled() {
+            return Err(FsError::Cancelled);
+        }
+        if searched.is_err() || sink.binary {
             continue;
         }
         // Context lines alone mean the budget ran out before the match.
@@ -160,6 +169,48 @@ fn regular_file(entry: Result<DirEntry, ignore::Error>) -> Option<std::path::Pat
         .file_type()
         .is_some_and(|kind| kind.is_file())
         .then(|| entry.into_path())
+}
+
+/// The searcher for `query`. It holds at most [`MAX_READ_BYTES`] of a file:
+/// the whole file in multiline mode, else the longest line with its context.
+/// A file that needs more fails, so one search cannot exhaust memory.
+fn searcher(query: &GrepQuery) -> Searcher {
+    let content = query.mode == GrepMode::Content;
+    SearcherBuilder::new()
+        .line_number(true)
+        .multi_line(query.multiline)
+        .binary_detection(BinaryDetection::quit(0))
+        .heap_limit(usize::try_from(MAX_READ_BYTES).ok())
+        .before_context(if content { query.before } else { 0 })
+        .after_context(if content { query.after } else { 0 })
+        .build()
+}
+
+/// Search one file's contents into `sink`, failing once `stop` fires.
+fn search(
+    searcher: &mut Searcher,
+    matcher: &RegexMatcher,
+    file: impl io::Read,
+    stop: &CancellationToken,
+    sink: &mut Collect,
+) -> io::Result<()> {
+    searcher.search_reader(matcher, Stoppable { file, stop }, sink)
+}
+
+/// A reader that fails once `stop` fires, so a long file is not read to
+/// the end after the call is cancelled.
+struct Stoppable<'a, R> {
+    file: R,
+    stop: &'a CancellationToken,
+}
+
+impl<R: io::Read> io::Read for Stoppable<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.stop.is_cancelled() {
+            return Err(io::Error::other("search cancelled"));
+        }
+        self.file.read(buf)
+    }
 }
 
 fn matcher(query: &GrepQuery) -> Result<RegexMatcher, FsError> {
@@ -264,3 +315,6 @@ fn line_text(line: &[u8]) -> String {
     }
     format!("{} [... line truncated]", &text[..cut])
 }
+
+#[cfg(test)]
+mod tests;
