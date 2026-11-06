@@ -98,6 +98,7 @@ impl SessionStore for PgSessionStore {
             .iter()
             .map(encode_entry)
             .collect::<Result<Vec<_>, _>>()?;
+        let mut cause = String::new();
         for _ in 0..crate::WRITE_TRIES {
             match self
                 .write(namespace, session_id, expected_len, &texts)
@@ -106,12 +107,14 @@ impl SessionStore for PgSessionStore {
                 Ok(Some(len)) => return to_u64(len, "len"),
                 // `Ok`: the length moved to `expected_len` after the refused write.
                 Ok(None) => self.refusal(namespace, session_id, expected_len).await?,
-                Err(error) if crate::serialization_failure(&error) => {}
+                Err(error) if crate::serialization_failure(&error) => {
+                    cause = format!(" (last: {error})");
+                }
                 Err(error) => return Err(backend(error)),
             }
         }
         Err(StoreError::Conflict {
-            message: format!("session {session_id} kept changing during an append"),
+            message: format!("session {session_id} kept changing during an append{cause}"),
         })
     }
 }

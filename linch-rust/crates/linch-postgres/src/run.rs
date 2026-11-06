@@ -329,6 +329,7 @@ impl RunStore for PgRunStore {
         let fits = commit.status != Some(RunStatus::Pending)
             && check_events(&lease.run_id, after, &commit.events).is_ok();
         let (namespace, run_id) = (&lease.namespace, &lease.run_id);
+        let mut cause = String::new();
         for _ in 0..crate::WRITE_TRIES {
             let written = match fits {
                 true => (self.write(lease, &commit, checkpoint.as_deref(), &events)).await,
@@ -341,12 +342,14 @@ impl RunStore for PgRunStore {
                     // `Ok`: the row moved after the refused write.
                     refusal(lease, &commit, state)?;
                 }
-                Err(error) if crate::serialization_failure(&error) => {}
+                Err(error) if crate::serialization_failure(&error) => {
+                    cause = format!(" (last: {error})");
+                }
                 Err(error) => return Err(backend(error)),
             }
         }
         Err(StoreError::Conflict {
-            message: format!("run {} kept changing during a commit", lease.run_id),
+            message: format!("run {} kept changing during a commit{cause}", lease.run_id),
         })
     }
 

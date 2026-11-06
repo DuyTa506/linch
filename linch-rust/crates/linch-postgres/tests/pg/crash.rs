@@ -1,9 +1,10 @@
-//! A write whose connection dies between statements leaves nothing behind.
+//! A write whose connection dies before it ends leaves nothing behind.
 //!
-//! Each multi-statement write updates its parent row first and inserts the
-//! child rows last. The test locks the child table, waits until the write's
-//! backend blocks on that lock (its earlier statements have run inside the
-//! transaction), terminates that backend, and checks that nothing landed.
+//! Each write touches its parent row and its child rows: a run commit and a
+//! session append in one statement, the other writes as a transaction that
+//! updates the parent row first. The test locks the child table, waits until
+//! the write's backend blocks on that lock, terminates that backend, and
+//! checks that nothing landed.
 
 use std::future::Future;
 use std::time::{Duration, Instant};

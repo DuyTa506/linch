@@ -1,7 +1,7 @@
-//! Every write pins READ COMMITTED. Under a server or role default of
-//! REPEATABLE READ, a write that waited on a row lock would otherwise fail
-//! with a serialization error once the holder commits, instead of reading
-//! the row again.
+//! Under a server or role default of REPEATABLE READ, a write that waited on
+//! a row lock still lands once the holder commits. Transactional writes pin
+//! READ COMMITTED; a run commit or session append is one statement at the
+//! pool's level and retries the serialization error it gets there.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
