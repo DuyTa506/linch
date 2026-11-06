@@ -239,30 +239,33 @@ impl Envelope {
     ///     EventError: If `self.event` fails to encode (see
     ///         [`Event::to_value`]).
     pub fn to_value(&self) -> Result<JsonValue, EventError> {
-        let mut obj = crate::json::JsonObject::new();
-        obj.insert("v".to_string(), JsonValue::from(self.v));
-        obj.insert("seq".to_string(), JsonValue::from(self.seq));
-        obj.insert(
-            "run_id".to_string(),
-            JsonValue::String(self.run_id.as_str().to_string()),
-        );
-        obj.insert("ts_ms".to_string(), JsonValue::from(self.ts_ms));
-        if self.ignorable || self.event.contains_ignorable() {
-            obj.insert("ignorable".to_string(), JsonValue::Bool(true));
-        }
-        obj.insert("event".to_string(), self.event.to_value()?);
-        Ok(JsonValue::Object(obj))
+        serde_json::to_value(self).map_err(|source| EventError::EncodePayload {
+            type_name: self.event.type_name().to_owned(),
+            source,
+        })
     }
 }
 
+/// The wire form, written in one pass: the RPC writer and the stores
+/// encode an envelope straight to its text, with no JSON tree in between.
 impl Serialize for Envelope {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        self.to_value()
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
+        use serde::ser::SerializeMap;
+
+        let ignorable = self.ignorable || self.event.contains_ignorable();
+        let mut map = serializer.serialize_map(Some(5 + usize::from(ignorable)))?;
+        map.serialize_entry("v", &self.v)?;
+        map.serialize_entry("seq", &self.seq)?;
+        map.serialize_entry("run_id", self.run_id.as_str())?;
+        map.serialize_entry("ts_ms", &self.ts_ms)?;
+        if ignorable {
+            map.serialize_entry("ignorable", &true)?;
+        }
+        map.serialize_entry("event", &self.event)?;
+        map.end()
     }
 }
 

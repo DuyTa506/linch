@@ -118,7 +118,7 @@ def rust_kinds() -> dict[str, set[str]]:
     structs = "\n".join([event_rs, *kinds_rs])
     enum = event_rs.split("pub enum Event {", 1)[1].split("\n}", 1)[0]
     payloads = dict(re.findall(r"^\s+(\w+)\((\w+)\),$", enum, re.MULTILINE))
-    tags = dict(re.findall(r'Event::(\w+)\(e\) => tagged\("(\w+)", e\)', event_rs))
+    tags = dict(re.findall(r'Event::(\w+)\(e\) => \{?\s*tagged\("(\w+)", e\)', event_rs))
     tags["Subagent"] = "subagent"
     kinds: dict[str, set[str]] = {}
     for variant, tag in tags.items():
