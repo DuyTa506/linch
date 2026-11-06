@@ -6,10 +6,14 @@ use std::path::PathBuf;
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, Workers};
 use serde::{Deserialize, Serialize};
 
+use crate::profile::Profile;
+
+mod deep_agent;
 mod filesystem;
 mod mcp;
 mod redact;
 
+pub use deep_agent::{DeepAgentConfig, DeepAgentProfileChoice};
 pub use filesystem::FilesystemConfig;
 pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
 
@@ -90,6 +94,17 @@ pub struct AgentConfig {
     /// `auto_allow` gets their names. Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub tasks: bool,
+    /// The deep agent preset: planning, a subagent roster, kept workers and
+    /// file memory (see [`DeepAgentConfig`] for what it turns on). Off
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_agent: Option<DeepAgentConfig>,
+    /// The domain profile the agent's runs take (see [`Profile`]): its
+    /// instructions after the system prompt (and the deep agent's), its
+    /// `max_turns`, and a permission layer denying its `tool_deny`. None
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
 }
 
 fn is_false(value: &bool) -> bool {

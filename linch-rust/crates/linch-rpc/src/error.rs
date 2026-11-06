@@ -185,9 +185,11 @@ impl From<&OpenError> for ErrorObject {
                 Self::new(code::PROVIDER_UNAVAILABLE, message).with_data(json!({ "env": env }))
             }
             OpenError::Provider(_) => Self::new(code::PROVIDER_UNAVAILABLE, message),
-            OpenError::Workspace(_) | OpenError::Tools(_) | OpenError::Policy(_) => {
-                Self::new(code::BUILD_INVALID, message)
-            }
+            OpenError::Workspace(_)
+            | OpenError::Tools(_)
+            | OpenError::Policy(_)
+            | OpenError::DeepAgent(_)
+            | OpenError::Profile(_) => Self::new(code::BUILD_INVALID, message),
             OpenError::Store(_) => Self::new(code::STORE_UNAVAILABLE, message),
             OpenError::Mcp(McpError::Config(_)) => Self::new(code::BUILD_INVALID, message),
             OpenError::Mcp(McpError::Connect { server, .. }) => {

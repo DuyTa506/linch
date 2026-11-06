@@ -1,6 +1,6 @@
 [package]
 name = "linch-ext"
-description = "Extensions on the Linch agent kernel: the eval harness, run reports and workflows."
+description = "Extensions on the Linch agent kernel: the eval harness, run reports, workflows and the deep agent preset."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -35,6 +35,8 @@ tokio-util = "0.7.20"
 uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
+# MemorySessions, for the file memory hook tests.
+linch-tools = { path = "../linch-tools" }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "macros", "time"] }
 
