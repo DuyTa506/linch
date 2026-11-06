@@ -144,7 +144,7 @@ Custom store implementations must follow these changed contracts:
   other existing IDs raise `ValueError`.
 - `mark_failed(..., events=())` commits a failed status and pending terminal
   events together and returns only the event seqs.
-- Run-store writes no longer return a `RunRecord`: `save_checkpoint` and
+- The checkpoint writes no longer return a `RunRecord`: `save_checkpoint` and
   `mark_completed` return `None`, `save_checkpoint_with_events` and
   `mark_failed` return the event seqs. Use `load_run` to read stored state.
 - `RunStore.save_checkpoint_with_events(...)` atomically commits a checkpoint
