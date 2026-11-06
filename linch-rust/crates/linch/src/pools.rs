@@ -34,6 +34,13 @@ pub struct PgPools {
 #[derive(Default)]
 pub(crate) struct Shared(OnceCell<PgPool>);
 
+impl Shared {
+    /// The pool, set once [`PgPools::get`] has returned this slot.
+    pub(crate) fn pool(&self) -> Option<&PgPool> {
+        self.0.get()
+    }
+}
+
 impl PgPools {
     /// No pools yet.
     pub fn new() -> Self {

@@ -6,9 +6,11 @@ use std::path::PathBuf;
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn};
 use serde::{Deserialize, Serialize};
 
+mod filesystem;
 mod mcp;
 mod redact;
 
+pub use filesystem::FilesystemConfig;
 pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
 
 /// Everything needed to open an [`Agent`](linch_core::Agent), as data.
@@ -63,6 +65,10 @@ pub struct AgentConfig {
     /// `subagents` is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_dir: Option<PathBuf>,
+    /// The virtual filesystem tools and large-result offload (see
+    /// [`FilesystemConfig`]). Off when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<FilesystemConfig>,
 }
 
 fn is_false(value: &bool) -> bool {

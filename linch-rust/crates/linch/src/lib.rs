@@ -31,7 +31,8 @@
 //! [`AgentConfig`] covers the declarative tier: the [`AgentSpec`], the
 //! provider by id plus its options, the stores (memory or a Postgres DSN),
 //! the built-in workspace tools from [`tools`], the permission policy, MCP
-//! servers ([`McpConfig`]), and whether the agent loads the skills and
+//! servers ([`McpConfig`]), the virtual filesystem ([`FilesystemConfig`]),
+//! and whether the agent loads the skills and
 //! subagents of its config directory ([`project`]). Provider keys are
 //! never part of it;
 //! [`AgentConfig::open`] reads each one from the process environment.
@@ -45,13 +46,14 @@
 
 mod config;
 mod error;
+mod files;
 mod open;
 mod pools;
 pub mod project;
 
 pub use config::{
-    AgentConfig, McpConfig, McpTransportConfig, ProviderConfig, ReasoningSummaryConfig,
-    ReconnectConfig, StoreConfig,
+    AgentConfig, FilesystemConfig, McpConfig, McpTransportConfig, ProviderConfig,
+    ReasoningSummaryConfig, ReconnectConfig, StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;
