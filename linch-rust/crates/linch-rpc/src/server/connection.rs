@@ -15,9 +15,10 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 
+use super::lines::{Frame, HEAD_BYTES, LineCodec};
 use super::{Server, login};
 use crate::access::Access;
-use crate::error::invalid_request;
+use crate::error::{ErrorObject, code};
 use crate::message::{Id, Notification, Response};
 
 /// Longest request line the server reads, in bytes.
@@ -74,14 +75,14 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let input =
-        FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_LINE_BYTES)).map(|line| {
-            match line {
-                Ok(line) => Inbound::Message(line),
-                Err(LinesCodecError::MaxLineLengthExceeded) => Inbound::TooLong,
-                Err(LinesCodecError::Io(error)) => Inbound::Failed(error),
-            }
-        });
+    let input = FramedRead::new(reader, LineCodec::new(MAX_LINE_BYTES)).map(|frame| match frame {
+        Ok(Frame::Line(line)) => match String::from_utf8(line) {
+            Ok(line) => Inbound::Message(line),
+            Err(_) => Inbound::NotUtf8,
+        },
+        Ok(Frame::TooLong(head)) => Inbound::TooLong(head),
+        Err(error) => Inbound::Failed(error),
+    });
     let output = FramedWrite::new(writer, LinesCodec::new());
     let output = SinkExt::<String>::sink_map_err(output, |error| match error {
         LinesCodecError::Io(error) => error,
@@ -91,7 +92,8 @@ where
 }
 
 /// Serve one client of a message transport (one JSON-RPC message per
-/// frame, as on a WebSocket); otherwise as [`serve_lines`].
+/// frame, as on a WebSocket); otherwise as [`serve_lines`]. A message
+/// over [`MAX_LINE_BYTES`] is refused like an oversized line.
 ///
 /// Args:
 ///     incoming: The client's messages; an error ends the connection.
@@ -114,6 +116,13 @@ where
     K: Sink<String, Error = io::Error> + Unpin + Send + 'static,
 {
     let input = incoming.map(|message| match message {
+        Ok(message) if message.len() > MAX_LINE_BYTES => {
+            let mut cut = HEAD_BYTES;
+            while !message.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            Inbound::TooLong(message.as_bytes()[..cut].to_vec())
+        }
         Ok(message) => Inbound::Message(message),
         Err(error) => Inbound::Failed(error),
     });
@@ -123,8 +132,11 @@ where
 /// What a transport delivered.
 pub(super) enum Inbound {
     Message(String),
-    /// A line over [`MAX_LINE_BYTES`], already discarded.
-    TooLong,
+    /// A line that is not UTF-8, already discarded.
+    NotUtf8,
+    /// A message over [`MAX_LINE_BYTES`], already discarded; its first
+    /// bytes.
+    TooLong(Vec<u8>),
     Failed(io::Error),
 }
 
@@ -163,10 +175,11 @@ where
         match inbound {
             None => break,
             Some(Inbound::Message(message)) => server.receive(&message).await,
-            Some(Inbound::TooLong) => {
-                let error = invalid_request("request line too long");
+            Some(Inbound::NotUtf8) => {
+                let error = ErrorObject::new(code::PARSE_ERROR, "not JSON: the line is not UTF-8");
                 server.0.outbox.send(&Response::err(Id::Null, error)).await;
             }
+            Some(Inbound::TooLong(head)) => server.too_long(&head).await,
             Some(Inbound::Failed(error)) => {
                 failed = Some(error);
                 break;

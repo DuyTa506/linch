@@ -37,7 +37,7 @@ where
         Inbound::Message(message) => serde_json::from_str::<JsonValue>(&message)
             .ok()
             .and_then(|value| Request::from_value(value).ok()),
-        Inbound::TooLong => None,
+        Inbound::TooLong(_) | Inbound::NotUtf8 => None,
         Inbound::Failed(_) => return None,
     };
     let id = (request.as_ref())

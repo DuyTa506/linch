@@ -27,7 +27,11 @@ impl Wire {
     }
 
     async fn send(&mut self, line: &str) {
-        self.input.write_all(line.as_bytes()).await.unwrap();
+        self.send_bytes(line.as_bytes()).await;
+    }
+
+    async fn send_bytes(&mut self, line: &[u8]) {
+        self.input.write_all(line).await.unwrap();
         self.input.write_all(b"\n").await.unwrap();
     }
 
@@ -224,5 +228,40 @@ async fn a_client_answer_reaches_its_server_request_and_a_malformed_one_fails_it
     }
     assert_eq!(ends.len(), 2);
     assert!(ends[0].contains("malformed response"), "{}", ends[0]);
+    // Reported as the server's reading failure, not as the tool's error.
+    assert!(ends[0].contains("answered badly"), "{}", ends[0]);
     assert!(ends[1].contains("fine"), "{}", ends[1]);
+}
+
+const CANCEL: &str =
+    r#"{"jsonrpc":"2.0","id":"after","method":"run.cancel","params":{"run_id":"r"}}"#;
+
+#[tokio::test]
+async fn an_oversized_request_is_refused_under_its_id_and_reading_goes_on() {
+    let mut wire = Wire::new();
+    let padding = "x".repeat(linch_rpc::MAX_LINE_BYTES);
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":41,"method":"agent.open","params":{{"namespace":"{padding}"}}}}"#
+    );
+    for _ in 0..2 {
+        wire.send(&request).await;
+        let refused = wire.recv().await;
+        assert_eq!(refused["error"]["code"], code::INVALID_REQUEST);
+        assert_eq!(refused["id"], 41);
+        wire.send(CANCEL).await;
+        let answer = wire.recv().await;
+        assert_eq!(answer["id"], "after", "{answer}");
+        assert_eq!(answer["result"], json!({"cancelled": false}));
+    }
+}
+
+#[tokio::test]
+async fn a_line_that_is_not_utf8_is_a_parse_error_and_reading_goes_on() {
+    let mut wire = Wire::new();
+    wire.send_bytes(b"\xff").await;
+    let answer = wire.recv().await;
+    assert_eq!(answer["error"]["code"], code::PARSE_ERROR, "{answer}");
+    assert_eq!(answer["id"], json!(null));
+    wire.send(CANCEL).await;
+    assert_eq!(wire.recv().await["result"], json!({"cancelled": false}));
 }

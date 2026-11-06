@@ -28,12 +28,14 @@ mod agents;
 mod callback;
 mod connection;
 mod host;
+mod lines;
 mod login;
 mod peer;
 mod run;
 
 use connection::Outbox;
 pub use connection::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};
+use lines::Head;
 use peer::Peer;
 
 /// Server state shared by every task. Cheap to clone.
@@ -147,13 +149,35 @@ impl Server {
         match serde_json::from_value::<Response>(value) {
             Ok(response) => self.0.peer.answer(response),
             Err(error) => {
-                let error = invalid_request(&format!("malformed response: {error}"));
+                let message = format!("malformed response: {error}");
                 match id {
-                    Some(id) => self.0.peer.answer(Response::err(Id::String(id), error)),
+                    Some(id) => self.0.peer.malformed(&id, message),
                     None => {
+                        let error = invalid_request(&message);
                         self.0.outbox.send(&Response::err(Id::Null, error)).await;
                     }
                 }
+            }
+        }
+    }
+
+    /// A message over the size limit, of which only `head` was kept. An
+    /// answer to a server request fails that request; a request is
+    /// refused under its id when the head shows it.
+    async fn too_long(&self, head: &[u8]) {
+        let head = Head::read(head);
+        let message = format!("message longer than {MAX_LINE_BYTES} bytes");
+        match head.id {
+            Some(Id::String(id)) if head.answer && !head.method => {
+                self.0.peer.malformed(&id, message);
+            }
+            Some(id) if !head.answer => {
+                let error = invalid_request(&message);
+                self.0.outbox.send(&Response::err(id, error)).await;
+            }
+            _ => {
+                let error = invalid_request(&message);
+                self.0.outbox.send(&Response::err(Id::Null, error)).await;
             }
         }
     }

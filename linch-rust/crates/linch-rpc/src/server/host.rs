@@ -101,6 +101,10 @@ impl Tool for HostTool {
                 code: Some(tool_code::TOOL_ERROR.into()),
                 details: error.data,
             }),
+            Err(CallError::Protocol(reason)) => {
+                let message = format!("Host tool {:?} answered badly: {reason}", self.spec.name);
+                Err(failure(tool_code::PROTOCOL_ERROR, message))
+            }
             Err(CallError::Timeout(after)) => {
                 let message = format!(
                     "Host tool {:?} timed out after {}ms",
@@ -123,5 +127,52 @@ fn failure(code: &str, message: impl Into<String>) -> ToolOutputError {
         message: message.into(),
         code: Some(code.into()),
         details: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use linch::{ToolContext, ToolScope};
+    use serde_json::json;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::message::{Id, Response};
+    use crate::server::Outbox;
+
+    /// Run one call of a host tool and settle it with `settle`, given the
+    /// peer and the request id.
+    async fn settled(settle: impl FnOnce(&Peer, &str)) -> ToolOutputError {
+        let (sender, mut lines) = mpsc::channel(4);
+        let peer = Peer::new(Outbox(sender));
+        let tool = HostTool {
+            spec: serde_json::from_value(json!({
+                "name": "lookup", "description": "Find.",
+                "input_schema": {"type": "object"}, "scope": "read"}))
+            .unwrap(),
+            agent: "agent-1".into(),
+            peer: peer.clone(),
+        };
+        assert_eq!(tool.scope(), ToolScope::Read);
+        let cancel = CancellationToken::new();
+        let ctx = ToolContext::new("s".into(), "r".into(), "t", None, cancel, None);
+        let call = tokio::spawn(async move { tool.execute(JsonObject::new(), ctx).await });
+        let request: JsonValue = serde_json::from_str(&lines.recv().await.unwrap()).unwrap();
+        settle(&peer, request["id"].as_str().unwrap());
+        call.await.unwrap().unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_answer_is_a_protocol_error_and_a_client_error_is_not() {
+        let unreadable = settled(|peer, id| peer.malformed(id, "malformed response".into())).await;
+        assert_eq!(unreadable.code.as_deref(), Some(tool_code::PROTOCOL_ERROR));
+        let refused = settled(|peer, id| {
+            let error = ErrorObject::new(7, "no cats here");
+            peer.answer(Response::err(Id::String(id.into()), error));
+        })
+        .await;
+        assert_eq!(refused.code.as_deref(), Some(tool_code::TOOL_ERROR));
+        assert_eq!(refused.message, "no cats here");
     }
 }

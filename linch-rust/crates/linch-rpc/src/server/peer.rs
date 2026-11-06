@@ -31,6 +31,10 @@ pub(crate) enum CallError {
     /// The client answered with an error object.
     #[error("the client answered with an error: {0}")]
     Rpc(ErrorObject),
+    /// The client's answer could not be read (malformed, or over the size
+    /// limit).
+    #[error("the client's answer could not be read: {0}")]
+    Protocol(String),
     /// No answer within the request's timeout.
     #[error("no answer within {} ms", .0.as_millis())]
     Timeout(Duration),
@@ -55,7 +59,14 @@ struct Inner {
 #[derive(Default)]
 struct Calls {
     closed: bool,
-    waiting: HashMap<String, oneshot::Sender<Response>>,
+    waiting: HashMap<String, oneshot::Sender<Answer>>,
+}
+
+/// What came back for a server request.
+enum Answer {
+    Response(Response),
+    /// An answer the server could not read, and why.
+    Malformed(String),
 }
 
 /// Forgets a call that ends without its answer and tells the client.
@@ -107,15 +118,18 @@ impl Peer {
         if !self.0.outbox.send(&request).await {
             return Err(CallError::Closed);
         }
-        let response = tokio::select! {
+        let answer = tokio::select! {
             biased;
-            response = answered => response.map_err(|_| CallError::Closed)?,
+            answer = answered => answer.map_err(|_| CallError::Closed)?,
             () = fired(cancel) => return Err(CallError::Cancelled),
             () = elapsed(timeout) => {
                 return Err(CallError::Timeout(timeout.unwrap_or_default()));
             }
         };
-        response.into_result().map_err(CallError::Rpc)
+        match answer {
+            Answer::Response(response) => response.into_result().map_err(CallError::Rpc),
+            Answer::Malformed(reason) => Err(CallError::Protocol(reason)),
+        }
     }
 
     /// Hand a client's response to the call waiting for it. A response to
@@ -124,7 +138,16 @@ impl Peer {
         let Id::String(id) = &response.id else { return };
         let waiter = lock(&self.0.calls).waiting.remove(id);
         if let Some(waiter) = waiter {
-            let _ = waiter.send(response);
+            let _ = waiter.send(Answer::Response(response));
+        }
+    }
+
+    /// Fail the call waiting for `id` because its answer could not be
+    /// read. An id nobody waits for is ignored.
+    pub(crate) fn malformed(&self, id: &str, reason: String) {
+        let waiter = lock(&self.0.calls).waiting.remove(id);
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(Answer::Malformed(reason));
         }
     }
 

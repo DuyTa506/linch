@@ -222,3 +222,34 @@ async fn only_read_scope_host_calls_overlap() {
     assert_eq!(counts["peek"].1, 2, "read calls run together");
     assert_eq!(counts["poke"].1, 1, "exec calls run alone");
 }
+
+#[tokio::test]
+async fn an_oversized_answer_fails_only_its_call() {
+    let mut rpc = Rpc::with_handler(handler(|_, params, _| async move {
+        let call = call_of(params);
+        let size = if call.tool_use_id == "call_1" {
+            linch_rpc::MAX_LINE_BYTES
+        } else {
+            4
+        };
+        Ok(json!({"value": "x".repeat(size)}))
+    }));
+    let turns = vec![
+        tool_turn("call_1", "lookup", json!({})),
+        tool_turn("call_2", "lookup", json!({})),
+        text_turn("Done."),
+    ];
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let agent = rpc.open(hosted(turns, "default", tools)).await;
+    let run_id = rpc.start(&agent, "s1", "Look twice.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    let results = tool_results(&ended);
+    assert_eq!(results[0]["is_error"], true, "{results:?}");
+    assert!(
+        results[0].to_string().contains("answered badly"),
+        "{results:?}"
+    );
+    assert!(results[1].to_string().contains("xxxx"), "{results:?}");
+    assert_eq!(subtype(&ended), ResultSubtype::Success);
+}

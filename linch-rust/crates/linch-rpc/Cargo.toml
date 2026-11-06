@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
+# The line decoder that keeps the head of an oversized line.
+bytes = "1.12.1"
 futures = "0.3.34"
 linch = { path = "../linch" }
 serde = { version = "1.0.229", features = ["derive"] }
