@@ -250,12 +250,20 @@ async def test_paid_compaction_from_an_earlier_run_is_resumable(
     )
 
 
-@pytest.mark.parametrize("prior_compaction", [False, True])
-async def test_paid_then_micro_compaction_snapshot_is_resumable(prior_compaction: bool) -> None:
-    # Both kept cells crash with the tail durably written after the micro
-    # snapshot (_CrashAfterMicroTail): that leaves a strict superset of what
-    # crashing mid-write would leave, and resume doesn't branch on which
-    # store took the last write -- only on whether the snapshot exists.
+@pytest.mark.parametrize(
+    ("prior_compaction", "tail_after_micro"),
+    [
+        (False, True),
+        (True, True),
+        # Crashes inside the session-store append of an assistant message
+        # (_CrashOnNthAssistant), not after a run-store checkpoint past the
+        # micro tail: resume starts from a different durable state.
+        (True, False),
+    ],
+)
+async def test_paid_then_micro_compaction_snapshot_is_resumable(
+    prior_compaction: bool, tail_after_micro: bool
+) -> None:
     from linch import CompactionLadder
     from linch.types import Message, TextBlock
     from tests.support.tools import StubTool, tool_registry
@@ -267,8 +275,8 @@ async def test_paid_then_micro_compaction_snapshot_is_resumable(prior_compaction
         [event async for event in prior.run("earlier run")]
     provider = _ToolProvider()
     agent = _agent(
-        sessions,
-        _CrashAfterMicroTail(runs),
+        sessions if tail_after_micro else _CrashOnNthAssistant(sessions, 4),
+        _CrashAfterMicroTail(runs) if tail_after_micro else runs,
         provider,
         tools=tool_registry(StubTool("Big", output="R" * 600)),
         compaction_ladder=CompactionLadder(keep_recent_turns=1),

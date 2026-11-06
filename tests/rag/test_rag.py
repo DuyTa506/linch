@@ -357,7 +357,7 @@ async def test_checkpoint_preserves_query_ids_and_correction_bound():
     await agent.close()
 
 
-@pytest.mark.parametrize("id", ["", "a]b", "a\nb"])  # \r hits the same control-char check as \n
+@pytest.mark.parametrize("id", ["", "a]b", "a\nb", "a\rb"])
 async def test_uncitable_ids_fail_visibly(id):
     from linch import register_rag_connector
 

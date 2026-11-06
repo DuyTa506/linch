@@ -134,7 +134,7 @@ def test_new_generated_python_parses(tmp_path):
         _assert_only_top_level_linch_imports(path)
 
 
-@pytest.mark.parametrize("name", ["1bad", "class", "linch", "has space", "-leading"])
+@pytest.mark.parametrize("name", ["1bad", "Class", "class", "linch", "has space", "-leading"])
 def test_new_rejects_invalid_names(tmp_path, capsys, name):
     assert main(["new", name, "--dir", str(tmp_path)]) == 2
     assert "error" in capsys.readouterr().err.lower()

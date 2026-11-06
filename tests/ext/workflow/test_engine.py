@@ -1122,6 +1122,7 @@ async def test_changed_prompt_invalidates_cache(
         (None, False),  # schema_version missing entirely
         (None, True),  # ...and existing journal events still can't bless it
         (1, False),  # a plain wrong version number
+        (4, False),  # a future version: never read ahead of this code
         (True, False),  # bool is an int subclass: True must not pass as version 1
         ("3", False),  # a stringified correct version must not pass
         (3.0, False),  # loose equality: 3.0 == 3 in Python; strict check must still reject it

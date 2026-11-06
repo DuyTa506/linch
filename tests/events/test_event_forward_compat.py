@@ -29,7 +29,8 @@ def test_unknown_without_flag_still_raises() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        {"ignorable": True},  # missing/invalid "type" (None, int, "" all fail the same check)
+        {"ignorable": True},  # missing "type" fails the isinstance(str) half of the check
+        {"type": "", "ignorable": True},  # a str "type" that is empty fails the non-empty half
         {"type": "future_event", "ignorable": 1},  # must be exactly True, not merely truthy
     ],
 )

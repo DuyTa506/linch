@@ -352,13 +352,16 @@ async def test_chat_client_close_resets_fields_before_close_and_preserves_errors
 
 
 @pytest.mark.parametrize("provider_name", ["OpenAIChatCompletionsProvider", "DeepSeekProvider"])
+@pytest.mark.parametrize("arguments", ["", " \n\t"])
 @pytest.mark.parametrize("finish_reason", ["tool_calls", "stop"])
 async def test_stream_normalizes_empty_tool_arguments(
-    finish_reason: str, provider_name: str
+    finish_reason: str, provider_name: str, arguments: str
 ) -> None:
-    # `arguments` is not parametrized here: the normalization checks
-    # `tool_input[tid].strip()`, so "" and " \n\t" are the same branch.
-    # `finish_reason` *does* select between two distinct code paths — the
+    # `arguments` takes two distinct paths: "" is falsy, so it is never
+    # buffered or forwarded as a delta, while " \n\t" is buffered and
+    # forwarded and is only recognized as empty by `tool_input[tid].strip()`
+    # (a plain truthiness check would pass "" and miss it).
+    # `finish_reason` also selects between two distinct code paths — the
     # inline tool_calls-triggered flush vs. the end-of-stream fallback for
     # servers (e.g. llama.cpp) that close with "stop" instead — so that axis
     # stays. `provider_name` is kept at two values (not the original five):
@@ -383,7 +386,7 @@ async def test_stream_normalizes_empty_tool_arguments(
                     SimpleNamespace(
                         index=0,
                         id="call_1",
-                        function=SimpleNamespace(name="NoArgs", arguments=""),
+                        function=SimpleNamespace(name="NoArgs", arguments=arguments),
                     )
                 ],
             ),

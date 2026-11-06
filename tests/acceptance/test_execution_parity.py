@@ -304,7 +304,7 @@ async def _wait(path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("variant", ["default", "allow"])
+@pytest.mark.parametrize("variant", ["default", "trusted", "allow"])
 async def test_mcp_terminal(variant: str, tmp_path: Path, model: Any) -> None:
     pytest.importorskip("mcp")
     from linch import FeatureFlags, McpStdioServerConfig

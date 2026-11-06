@@ -591,7 +591,8 @@ async def test_valid_non_envelope_routes_have_no_reliability_effect(text, stop):
 @pytest.mark.parametrize(
     "raw",
     [
-        None,  # {} fails the same "no persisted state" check
+        None,  # not a dict
+        {},  # a dict without the exact {"v", "corrections", "succeeded"} keys
         {"v": 2, "corrections": 0, "succeeded": []},
         {"v": True, "corrections": 0, "succeeded": []},
         {"v": 1, "corrections": True, "succeeded": []},

@@ -87,14 +87,19 @@ def test_durable_storage_validation_precedes_agent_creation(
 
 
 @pytest.mark.parametrize("durable", [True, False])
-async def test_deep_agent_preserves_explicit_host_adapters(tmp_path: Path, durable: bool) -> None:
+@pytest.mark.parametrize("host_adapters", [True, False])
+async def test_deep_agent_preserves_explicit_host_adapters(
+    tmp_path: Path, durable: bool, host_adapters: bool
+) -> None:
     from linch import InMemoryRunStore, InMemorySessionStore
     from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem import StateFileBackend
 
-    sessions: Any = HostAdapter(InMemorySessionStore())
-    runs: Any = HostAdapter(InMemoryRunStore())
-    filesystem: Any = HostAdapter(StateFileBackend())
+    sessions: Any = InMemorySessionStore()
+    runs: Any = InMemoryRunStore()
+    filesystem: Any = StateFileBackend()
+    if host_adapters:
+        sessions, runs, filesystem = (HostAdapter(store) for store in (sessions, runs, filesystem))
     agent = create_deep_agent(
         model="offline",
         provider=OfflineProvider(),
