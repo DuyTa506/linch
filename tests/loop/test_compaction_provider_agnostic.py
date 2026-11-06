@@ -42,17 +42,6 @@ class _FakeNonOpenAIProvider(ScriptedProvider):
         return self.requests
 
 
-_DETAILED_SUMMARY = """\
-<summary>
-1. Primary Request and Intent: Implement the requested change.
-2. Key Information and Artifacts: src/example.py was inspected.
-3. Errors and Fixes: None.
-4. Pending Tasks: Run tests.
-5. Current Work: Preparing verification.
-6. Next Step: Run pytest.
-</summary>"""
-
-
 def _make_messages(n: int = 30) -> list[Message]:
     """Create alternating user/assistant messages."""
     msgs = []

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import os
 import sys
@@ -30,72 +29,6 @@ def _postgres_available() -> bool:
 needs_postgres = pytest.mark.skipif(
     not _postgres_available(), reason="AGENT_KIT_TEST_PG_DSN or asyncpg unavailable"
 )
-
-
-class _RollbackTransaction:
-    """Proxy a real asyncpg transaction and force rollback at context exit."""
-
-    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
-        self._real = real
-        self._failure_type = failure_type
-
-    async def __aenter__(self) -> Any:
-        return await self._real.__aenter__()
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        failure = (
-            asyncio.CancelledError()
-            if self._failure_type is asyncio.CancelledError
-            else RuntimeError("forced claim transaction failure")
-        )
-        await self._real.__aexit__(self._failure_type, failure, tb)
-        raise failure
-
-
-class _RollbackConnection:
-    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
-        self._real = real
-        self._failure_type = failure_type
-
-    def transaction(self, *args: Any, **kwargs: Any) -> _RollbackTransaction:
-        return _RollbackTransaction(self._real.transaction(*args, **kwargs), self._failure_type)
-
-    async def fetchrow(self, query: str, *args: Any) -> Any:
-        if "UPDATE runs" in query and "lease_owner" in query:
-            failure = (
-                asyncio.CancelledError()
-                if self._failure_type is asyncio.CancelledError
-                else RuntimeError("forced lease statement failure")
-            )
-            raise failure
-        return await self._real.fetchrow(query, *args)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
-
-
-class _RollbackAcquire:
-    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
-        self._real = real
-        self._failure_type = failure_type
-
-    async def __aenter__(self) -> _RollbackConnection:
-        return _RollbackConnection(await self._real.__aenter__(), self._failure_type)
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        return await self._real.__aexit__(exc_type, exc, tb)
-
-
-class _RollbackPool:
-    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
-        self._real = real
-        self._failure_type = failure_type
-
-    def acquire(self, *args: Any, **kwargs: Any) -> _RollbackAcquire:
-        return _RollbackAcquire(self._real.acquire(*args, **kwargs), self._failure_type)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
 
 
 class _TraceConnection:
