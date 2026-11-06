@@ -179,7 +179,6 @@ impl Supervisor {
             if close.is_cancelled() {
                 break;
             }
-            self.link.status.send_replace(ServerStatus::Reconnecting);
             let Some((next, tools)) = self.reconnect(&close).await else {
                 break;
             };
@@ -226,6 +225,10 @@ impl Supervisor {
                 },
             }
         };
+        // Status first, so a call that finds no connection says why.
+        if !close.is_cancelled() {
+            self.link.status.send_replace(ServerStatus::Reconnecting);
+        }
         self.link.conn.send_replace(None);
         if let Some(listener) = listener {
             listener.stop().await;
@@ -284,13 +287,14 @@ impl Supervisor {
         }
     }
 
-    /// Register `tools` and route calls to `live`.
+    /// Route calls to `live`, then register `tools`, so a tool is never
+    /// visible before it can be called.
     fn install(&self, live: &Live, tools: Vec<rmcp::model::Tool>) {
-        self.sync(tools);
         self.link.conn.send_replace(Some(Conn {
             peer: live.service.peer().clone(),
             lost: live.lost.clone(),
         }));
+        self.sync(tools);
         self.link.status.send_replace(ServerStatus::Connected);
     }
 
