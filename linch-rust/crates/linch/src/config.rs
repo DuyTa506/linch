@@ -1,0 +1,175 @@
+//! [`AgentConfig`]: an agent as one strict serde value.
+
+use std::fmt;
+use std::path::PathBuf;
+
+use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn};
+use serde::{Deserialize, Serialize};
+
+/// Everything needed to open an [`Agent`](linch_core::Agent), as data.
+///
+/// Decoding rejects unknown fields at every level, so a misspelt or
+/// unsupported option (an `api_key`, say) fails instead of being ignored.
+/// Open it with [`AgentConfig::open`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Store key space for this agent's runs and sessions.
+    pub namespace: String,
+    /// The model, instructions and loop limits.
+    pub spec: AgentSpec,
+    /// The model provider and its options.
+    pub provider: ProviderConfig,
+    /// Where runs and sessions are stored; memory when absent.
+    #[serde(default)]
+    pub stores: StoreConfig,
+    /// Workspace root for the built-in tools (`Read`, `Write`, `Edit`,
+    /// `Grep`, `Glob`, `Bash`). It must be an existing directory; a relative
+    /// path resolves against the process's working directory. Absent: the
+    /// agent has no tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
+    /// Permission rules. Absent: mode `default` (read tools run, write and
+    /// exec tools ask) with the workspace root, or `/`, as project root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionPolicy>,
+}
+
+/// The model provider, chosen by `id`.
+///
+/// Each live provider reads its key from the process environment when the
+/// agent opens; a config never carries a key. `base_url` overrides the
+/// provider's public endpoint.
+///
+/// | `id` | Key variable | Default endpoint |
+/// |---|---|---|
+/// | `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` |
+/// | `openai-chat` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+/// | `openai-responses` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+/// | `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`, else `https://api.anthropic.com` |
+/// | `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com` |
+/// | `vllm` | `VLLM_API_KEY`, optional | none, `base_url` required |
+/// | `sglang` | `SGLANG_API_KEY`, optional | none, `base_url` required |
+/// | `llamacpp` | `LLAMA_API_KEY`, optional | none, `base_url` required |
+/// | `scripted` | none | none: replays `turns` |
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "id", deny_unknown_fields)]
+pub enum ProviderConfig {
+    /// DeepSeek's Chat Completions API.
+    #[serde(rename = "deepseek")]
+    DeepSeek {
+        /// API root; the public endpoint when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// OpenAI Chat Completions.
+    #[serde(rename = "openai-chat")]
+    OpenAiChat {
+        /// API root; the public endpoint when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// The OpenAI Responses API.
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses {
+        /// API root; the public endpoint when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        /// Reasoning summary to stream as thinking; none when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_summary: Option<ReasoningSummaryConfig>,
+        /// Whether OpenAI stores each response (default `true`).
+        #[serde(default = "yes")]
+        store: bool,
+    },
+    /// The Anthropic Messages API.
+    #[serde(rename = "anthropic")]
+    Anthropic {
+        /// API root; `ANTHROPIC_BASE_URL` or the public endpoint when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// Gemini `streamGenerateContent`.
+    #[serde(rename = "gemini")]
+    Gemini {
+        /// API root; the public endpoint when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// A vLLM OpenAI-compatible server.
+    #[serde(rename = "vllm")]
+    Vllm {
+        /// API root including `/v1`.
+        base_url: String,
+    },
+    /// An SGLang OpenAI-compatible server.
+    #[serde(rename = "sglang")]
+    SgLang {
+        /// API root including `/v1`.
+        base_url: String,
+    },
+    /// A llama.cpp server.
+    #[serde(rename = "llamacpp")]
+    LlamaCpp {
+        /// API root including `/v1`.
+        base_url: String,
+    },
+    /// Replays `turns` in call order, for tests and evals (see
+    /// [`linch_core::ScriptedFixture`] for the turn shape).
+    #[serde(rename = "scripted")]
+    Scripted {
+        /// One turn per provider call.
+        turns: Vec<ScriptedTurn>,
+    },
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// How much reasoning the Responses API summarizes back as thinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummaryConfig {
+    /// The most detailed summary the model supports.
+    Auto,
+    /// A short summary.
+    Concise,
+    /// A detailed summary.
+    Detailed,
+}
+
+/// Where an agent's runs and sessions live.
+///
+/// `Debug` hides the DSN, which usually holds a password.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreConfig {
+    /// In-process memory stores owned by the opened agent, for tests and
+    /// development. They are dropped with the agent.
+    Memory {},
+    /// Postgres stores. Opening connects a pool and applies the
+    /// migrations.
+    Postgres {
+        /// Connection string, for example `postgres://user:pass@host/db`.
+        dsn: String,
+    },
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self::Memory {}
+    }
+}
+
+impl fmt::Debug for StoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory {} => f.write_str("Memory"),
+            Self::Postgres { .. } => f
+                .debug_struct("Postgres")
+                .field("dsn", &"[redacted]")
+                .finish(),
+        }
+    }
+}

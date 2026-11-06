@@ -1540,6 +1540,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "linch"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "linch-core",
+ "linch-postgres",
+ "linch-providers",
+ "linch-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "linch-core"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,26 @@
+[package]
+name = "linch"
+description = "Rust facade of the Linch agent kernel: the public API plus one serde config that opens an agent."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+linch-core = { path = "../linch-core" }
+linch-postgres = { path = "../linch-postgres" }
+linch-providers = { path = "../linch-providers" }
+linch-tools = { path = "../linch-tools" }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt"] }
+
+[dev-dependencies]
+futures = "0.3.34"
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
