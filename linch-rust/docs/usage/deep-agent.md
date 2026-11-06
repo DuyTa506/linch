@@ -35,7 +35,7 @@ already sets:
 
 It adds no workspace. Without one the agent has no `Read`, `Write`, `Edit`,
 `Grep`, `Glob` or `Bash`, and the roster's definitions name tools the agent
-does not have (a child simply lacks them).
+does not have (the child does not get them).
 
 ---
 
