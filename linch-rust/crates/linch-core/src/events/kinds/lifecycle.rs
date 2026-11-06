@@ -103,9 +103,12 @@ pub struct ResultEvent {
     pub subtype: ResultSubtype,
     /// Reason the loop stopped.
     pub stop_reason: StopReason,
-    /// Usage accumulated across the run, or `None` if any turn's usage is
-    /// unknown (never a zero [`Usage`] standing in for "unknown").
-    pub total_usage: Option<Usage>,
+    /// Usage summed across every turn whose usage is known.
+    pub total_usage: Usage,
+    /// Whether `total_usage` accounts for every turn. `false` means at
+    /// least one turn's usage was unknown and is excluded from the sum
+    /// (never folded in as a zero [`Usage`]).
+    pub usage_complete: bool,
     /// Optional final textual answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_text: Option<String>,
@@ -128,5 +131,44 @@ mod tests {
     #[test]
     fn unknown_fields_are_rejected() {
         assert!(serde_json::from_value::<ErrorEvent>(json!({"error": {}, "extra": 1})).is_err());
+    }
+
+    fn result_value(
+        total_usage: serde_json::Value,
+        usage_complete: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "subtype": "success",
+            "stop_reason": "end_turn",
+            "total_usage": total_usage,
+            "usage_complete": usage_complete,
+        })
+    }
+
+    #[test]
+    fn result_event_requires_total_usage_and_usage_complete() {
+        // Neither field has a default: a run whose usage accounting is
+        // incomplete must say so explicitly, and a missing field is a
+        // decode error rather than a silently-assumed default.
+        let missing_usage =
+            json!({"subtype": "success", "stop_reason": "end_turn", "usage_complete": true});
+        assert!(serde_json::from_value::<ResultEvent>(missing_usage).is_err());
+
+        let missing_complete =
+            json!({"subtype": "success", "stop_reason": "end_turn", "total_usage": {}});
+        assert!(serde_json::from_value::<ResultEvent>(missing_complete).is_err());
+    }
+
+    #[test]
+    fn result_event_total_usage_and_usage_complete_round_trip() {
+        let zero_usage = json!({
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        });
+        let value = result_value(zero_usage, json!(false));
+        let event: ResultEvent = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(event.total_usage, Usage::default());
+        assert!(!event.usage_complete);
+        assert_eq!(serde_json::to_value(&event).unwrap(), value);
     }
 }

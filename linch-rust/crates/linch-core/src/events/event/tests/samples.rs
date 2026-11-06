@@ -145,7 +145,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
         Event::Result(ResultEvent {
             subtype: ResultSubtype::Success,
             stop_reason: StopReason::EndTurn,
-            total_usage: Some(Usage::default()),
+            total_usage: Usage::default(),
+            usage_complete: true,
             final_text: None,
             structured_output: None,
             structured_error: None,
