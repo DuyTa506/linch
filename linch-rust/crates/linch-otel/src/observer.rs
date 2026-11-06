@@ -27,13 +27,14 @@ use crate::{Telemetry, keys, provider_name, span_trace_id};
 /// the error's type name, or drop the observer: either ends every open
 /// span at the wall clock.
 ///
-/// A stream that does not start with `init` is a resumed call
-/// (`linch.resumed` is true). It carries no session, model or turn, so give
-/// those with [`RunObserver::session_id`], [`RunObserver::model`] and
-/// [`RunObserver::turn`] when the host knows them; otherwise the attributes
-/// are left out. Events in an order no run produces are traced as far as
-/// they make sense and never panic; an envelope of another run, or anything
-/// after the run's end, is ignored.
+/// Every call starts with `init`: a resume or approve's is `resumed`
+/// (`linch.resumed` is true) and names the turn it continues in. A stream
+/// that starts with anything else is traced as resumed too; give its
+/// session, model and turn with [`RunObserver::session_id`],
+/// [`RunObserver::model`] and [`RunObserver::turn`] when the host knows
+/// them, otherwise the attributes are left out. Events in an order no run
+/// produces are traced as far as they make sense and never panic; an
+/// envelope of another run, or anything after the run's end, is ignored.
 pub struct RunObserver {
     telemetry: Telemetry,
     parent: Context,
@@ -91,21 +92,22 @@ impl RunObserver {
         self
     }
 
-    /// The model, for a resumed call; a run's `init` event overrides it.
+    /// The model, for a stream without `init`; an `init` event overrides
+    /// it.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    /// The session id, for a resumed call; a run's `init` event overrides
-    /// it.
+    /// The session id, for a stream without `init`; an `init` event
+    /// overrides it.
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
     }
 
-    /// The turn a resumed call starts in (the run checkpoint's turn); a
-    /// run's `init` event starts at 0.
+    /// The turn a stream without `init` starts in (the run checkpoint's
+    /// turn); an `init` event names its own.
     pub fn turn(mut self, turn: u64) -> Self {
         self.turn = Some(turn);
         self
@@ -210,8 +212,8 @@ impl RunObserver {
                 self.session_id = Some(init.session_id.as_str().to_owned());
                 self.model = Some(init.model.clone());
                 self.provider = Some(provider_name(&init.provider).to_owned());
-                self.turn = Some(0);
-                false
+                self.turn = Some(init.turn);
+                init.resumed
             }
             _ => true,
         };

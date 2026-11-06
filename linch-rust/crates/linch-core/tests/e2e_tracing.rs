@@ -271,6 +271,15 @@ async fn the_trace_id_of_a_run_is_echoed_on_init_result_and_tool_calls_after_an_
     let answers = [("c2".to_owned(), ApprovalResponse::Allow)];
     let approved = agent.approve(run_id, answers.into(), RunOptions::new(""));
     let second = finish(approved).await;
+    let Event::Init(resumed) = &second[0].event else {
+        panic!("a resumed call starts with init: {:?}", second[0]);
+    };
+    assert!(resumed.resumed && !init(&first).resumed);
+    assert_eq!((resumed.turn, init(&first).turn), (1, 0));
+    assert_eq!(resumed.trace_id.as_deref(), Some("trace-7"));
+    assert_eq!(resumed.run_id, init(&first).run_id);
+    assert_eq!(resumed.tools, ["Look", "Write"]);
+    assert_eq!(resumed.provider, "scripted");
     assert_eq!(result_of(&second).trace_id.as_deref(), Some("trace-7"));
     let seen = seen.lock().unwrap().clone();
     let traced = Some("trace-7".to_owned());

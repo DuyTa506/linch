@@ -85,6 +85,8 @@ pub(super) async fn new_run(
         provider: agent.provider.id().to_owned(),
         tools: tools.into_iter().map(|tool| tool.name).collect(),
         trace_id: options.trace_id.clone(),
+        resumed: false,
+        turn: 0,
     }));
     journal.stage(Event::User(UserEvent {
         message: prompt.clone(),
@@ -251,9 +253,22 @@ pub(super) async fn continue_run(
             appended,
         },
     };
-    let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
+    let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     let progress = Progress::of(checkpoint, last_stop(&events), started);
     let trace_id = trace_of(&events);
+    // This call's start, for observers; it rides the first barrier.
+    let tools = agent.snapshot().definitions();
+    journal.stage(Event::Init(InitEvent {
+        session_id: record.session_id.clone(),
+        run_id: run_id.clone(),
+        parent_run_id: record.parent_run_id.clone(),
+        model: agent.spec.model.clone(),
+        provider: agent.provider.id().to_owned(),
+        tools: tools.into_iter().map(|tool| tool.name).collect(),
+        trace_id: trace_id.clone(),
+        resumed: true,
+        turn: u64::from(checkpoint.turn),
+    }));
     let run = identity(
         record.session_id.clone(),
         run_id,

@@ -10,6 +10,10 @@ use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 
 /// Run initialization: the session, run, model, and tools offered.
+///
+/// A new run starts with one. Each resume or approve of the run starts
+/// with another, `resumed` and with the `turn` it continues in, durable
+/// with its first barrier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitEvent {
@@ -30,6 +34,12 @@ pub struct InitEvent {
     /// Trace identifier correlating this run with host observability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Whether this call continues the run (a resume or an approve).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
+    /// The turn the call starts in, from 0.
+    #[serde(default, skip_serializing_if = "super::is_zero")]
+    pub turn: u64,
 }
 
 /// Why a [`UserEvent`] was emitted.

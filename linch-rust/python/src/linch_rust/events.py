@@ -17,7 +17,11 @@ JsonObject = dict[str, Any]
 
 @dataclass(frozen=True)
 class InitEvent:
-    """The run started: its session, model, provider id and tool names."""
+    """A call of the run started: its session, model, provider id and tools.
+
+    A new run starts with one; each resume or approve starts with another,
+    `resumed` and naming the `turn` it continues in.
+    """
 
     type: ClassVar[str] = "init"
     session_id: str
@@ -27,6 +31,8 @@ class InitEvent:
     tools: list[str]
     parent_run_id: str | None = None
     trace_id: str | None = None
+    resumed: bool = False
+    turn: int = 0
 
 
 @dataclass(frozen=True)

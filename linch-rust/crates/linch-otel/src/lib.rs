@@ -107,8 +107,9 @@
 //! metric is not built here. It does not carry the request's messages (a
 //! chat span's `gen_ai.input.messages`). The provider comes from `init` and
 //! the model that served a call (`gen_ai.response.model`) from its `usage`.
-//! A resumed call has no `init` event, so its session, model and turn come
-//! from the host through the observer's setters. Subagent events reach the
+//! A resume or approve starts with a `resumed` `init` naming its session,
+//! model and turn; for a stream without one they come from the host through
+//! the observer's setters. Subagent events reach the
 //! parent's stream wrapped, after the fact and without their own times, so
 //! they are not traced.
 

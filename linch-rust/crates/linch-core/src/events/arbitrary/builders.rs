@@ -19,9 +19,10 @@ pub(super) fn init_event() -> impl Strategy<Value = InitEvent> {
         short_string(),
         vec(short_string(), 0..3),
         option::of(short_string()),
+        (any::<bool>(), any::<u64>()),
     )
         .prop_map(
-            |(session_id, run_id, parent_run_id, model, provider, tools, trace_id)| InitEvent {
+            |(session_id, run_id, parent_run_id, model, provider, tools, trace_id, at)| InitEvent {
                 session_id,
                 run_id,
                 parent_run_id,
@@ -29,6 +30,8 @@ pub(super) fn init_event() -> impl Strategy<Value = InitEvent> {
                 provider,
                 tools,
                 trace_id,
+                resumed: at.0,
+                turn: at.1,
             },
         )
 }

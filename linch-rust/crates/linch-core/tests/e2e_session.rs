@@ -193,9 +193,11 @@ async fn resume_appends_the_prompt_after_runs_that_ended_before_it() {
 
     let before = stores.log.lock().unwrap().len();
     finish(agent.resume(b_id.clone(), RunOptions::new("s1"))).await;
-    // Claim, `Started` at the new length, then the prompt append.
+    // Claim, `Started` at the new length (with the resume's `init`), then
+    // the prompt append.
     let writes = stores.log.lock().unwrap()[before..before + 3].to_vec();
-    assert_eq!(writes, [Write::Setup, Write::Commit(vec![]), Write::Append]);
+    let started = Write::Commit(vec!["init".into()]);
+    assert_eq!(writes, [Write::Setup, started, Write::Append]);
     let log = messages(&*stores, "s1").await;
     assert_eq!(texts(&log), ["from a", "answer a", "from b", "answer b"]);
     let record = stores.runs.load(NS, &b_id).await.unwrap();

@@ -132,21 +132,25 @@ so a sampled-out span costs nothing extra (`span.rs:52-55`).
    providers instead; nothing else in the crate reads or installs global state.
 3. For every run, resume or approve, make an observer with
    `telemetry.observer()` and set what the stream does not carry:
-   `.provider(id)`, and for a resumed call `.session_id(..)`, `.model(..)` and
-   `.turn(..)` (a resumed stream has no `init` event, so `linch.resumed` is
-   true and those attributes come from the host) (`observer.rs:84-110`).
+   `.provider(id)` before the `init` event names it, and, for a stream that
+   does not start with `init`, `.session_id(..)`, `.model(..)` and `.turn(..)`.
+   Every run, resume and approve stream starts with `init` (a resume's is
+   `resumed`, with the checkpoint's `turn`); a stream without one is traced
+   as resumed with those attributes from the host (`observer.rs:86-112`).
    `.parent(cx)` nests the run span under the host's request span; without it
    the run span is a trace root.
-4. Feed every envelope, in order, with `observe` (`observer.rs:133`). When the
+4. Feed every envelope, in order, with `observe` (`observer.rs:137`). When the
    stream ends with an error, call `fail` with the error's type name, or drop
    the observer: either ends every open span at the wall clock
-   (`observer.rs:168`, `observer.rs:324-331`).
-5. Read `trace_id()` (`observer.rs:128`) to correlate logs or a response with
-   the trace. The core leaves `Result.trace_id` unset.
+   (`observer.rs:172`, `observer.rs:329-335`).
+5. Read `trace_id()` (`observer.rs:132`) to correlate logs or a response with
+   the trace. The events' own `trace_id` (on `init`, `result` and each
+   `ToolContext`) is the one the host gave in `RunOptions::trace_id`, kept
+   with the run; pass the span's there to have both agree.
 
 The observer never panics on an order no run produces: it traces as far as
 the events make sense, and ignores envelopes of another run or anything after
-the run's end (`observer.rs:30-36`). `Telemetry` and `RunObserver` are `Send`,
+the run's end (`observer.rs:30-37`). `Telemetry` and `RunObserver` are `Send`,
 so an observer can move between tasks with its stream (`lib.rs:260-265`).
 
 ## Example

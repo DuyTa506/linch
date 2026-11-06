@@ -30,8 +30,8 @@ Content (the prompt, answers, tool input and results) is left out unless
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`.
 
 The run span is a child of the context current when `Agent.run`,
-`resume` or `approve` is called. A resumed or approved call has no `init`
-event, so its spans carry no session id or turn. A run whose stream is
+`resume` or `approve` is called. A resumed or approved call starts with a
+`resumed` `init` naming its session and turn. A run whose stream is
 left before its end keeps its spans open, and they are never exported:
 read every run to its end, or `Run.result()`. `Run.trace_id` is the trace
 id of its spans, for log lines.
@@ -180,8 +180,10 @@ class Telemetry:
         Args:
             provider: The Linch provider id, reported through `provider_name`.
             model: The model; a run's `init` event overrides it.
-            session_id: The session, for a resumed call; `init` overrides it.
-            turn: The turn a resumed call starts in; `init` starts at 0.
+            session_id: The session, for a stream without `init`; `init`
+                overrides it.
+            turn: The turn a stream without `init` starts in; `init` names
+                its own.
             parent: The context the run span is a child of; the current
                 context when absent.
             capture_content: Whether to keep content on the spans;
@@ -423,8 +425,8 @@ class RunObserver:
             self._session_id = event.session_id
             self._model = event.model
             self._provider = provider_name(event.provider)
-            self._turn = 0
-            resumed = False
+            self._turn = event.turn
+            resumed = event.resumed
         attributes = self._attributes(INVOKE_AGENT, False)
         attributes[RESUMED] = resumed
         self._run = self._start(self._parent, INVOKE_AGENT, SpanKind.INTERNAL, at, attributes)

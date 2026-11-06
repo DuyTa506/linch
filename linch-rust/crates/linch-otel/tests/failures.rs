@@ -114,14 +114,11 @@ async fn a_suspended_run_ends_its_spans_and_the_approve_is_a_resumed_run() {
     assert_eq!(error_type(run), None);
     assert_eq!(span(&spans, "step").end_time, run.end_time);
 
-    // The approve continues the trace under a host-held parent span.
+    // The approve continues the trace under a host-held parent span; its
+    // `init` names the session, model and turn.
     let parent_span = sdk.host_span();
     let parent = Context::new().with_span(parent_span);
-    let mut second = sdk
-        .observer()
-        .parent(parent.clone())
-        .session_id("s1")
-        .turn(0);
+    let mut second = sdk.observer().parent(parent.clone());
     let allow = HashMap::from([("call_0_0".to_string(), ApprovalResponse::Allow)]);
     let stream = agent.approve(run_id, allow, RunOptions::new("s1"));
     let resumed = observe(stream, &mut second).await;
@@ -140,6 +137,7 @@ async fn a_suspended_run_ends_its_spans_and_the_approve_is_a_resumed_run() {
     assert_eq!(again.parent_span_id, parent.span().span_context().span_id());
     assert_eq!(again.start_time, at(resumed[0].ts_ms));
     assert_eq!(text(again, "gen_ai.conversation.id").unwrap(), "s1");
+    assert_eq!(text(again, "gen_ai.request.model").unwrap(), MODEL);
     let steps: Vec<_> = all(&spans, "step")
         .into_iter()
         .filter(|s| is_child(s, again))

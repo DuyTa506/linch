@@ -219,13 +219,14 @@ Each model call records two histograms with the SDK's default buckets:
 | Cause | `error.type` |
 |---|---|
 | An `error` event, such as a failed provider call | Its `name`; it marks the chat, the step and the run |
-| A tool call that ended in error | `tool_error` |
+| A tool call that ended in error | Its `tool_call_end` `error_code`, else `tool_error` |
 | A tool end whose start was in an earlier stream (a call a crash interrupted) | `interrupted` |
 | A `result` that is not `success`, with no `error` event | Its subtype, such as `aborted` |
 | A stream that failed | The exception's class name, such as `RunError` or `ConnectionClosed` |
 
-A resumed or approved call has no `init` event: its spans have
-`linch.resumed: true` and no session id or turn index. A subagent's child run
+A resumed or approved call starts with a `resumed` `init` event: its spans
+have `linch.resumed: true`, and its session id and turn index come from that
+event. A subagent's child run
 reaches the parent's stream as wrapped events and gets no spans of its own.
 
 ---

@@ -432,10 +432,10 @@ async def test_a_suspended_run_ends_its_spans_and_its_approval_is_a_resumed_run(
     assert again.parent is not None and again.parent.span_id == host.get_span_context().span_id
     assert again.start_time == at(resumed[0].ts_ms)
     assert attr(again, "gen_ai.request.model") == MODEL, "the agent's model"
-    assert attr(again, "gen_ai.conversation.id") is None, "a resumed call has no init"
+    assert attr(again, "gen_ai.conversation.id") == "s1", "from the resumed init"
     steps = [s for s in all_named(spans, "step") if is_child(s, again)]
     assert len(steps) == 2
-    assert [attr(s, "linch.turn_index") for s in steps] == [None, None]
+    assert [attr(s, "linch.turn_index") for s in steps] == [0, 1]
     tool_span = one(spans, "execute_tool save")
     assert is_child(tool_span, steps[0]) and error_type(tool_span) is None
 

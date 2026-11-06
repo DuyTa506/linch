@@ -198,6 +198,8 @@ fn without_a_record_the_status_follows_the_stream() {
         tools: Vec::new(),
         trace_id: None,
         provider: "scripted".into(),
+        resumed: false,
+        turn: 0,
     });
     let running = report(vec![init.clone()]);
     assert_eq!(

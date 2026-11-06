@@ -85,3 +85,13 @@ def test_the_stream_names_the_provider_the_served_model_and_a_tool_error_code() 
     assert isinstance(usage, UsageEvent) and usage.actual_model == "claude-served"
     assert isinstance(end, ToolCallEndEvent) and end.error_code == "not_found"
     assert isinstance(compaction, CompactionEvent) and compaction.duration_ms == 12
+
+
+def test_a_resumed_init_names_the_turn_it_continues_in() -> None:
+    fields = {"type": "init", "session_id": "s1", "run_id": "r1", "model": "m"}
+    fields |= {"provider": "scripted", "tools": []}
+    first = decode_event(fields)
+    again = decode_event({**fields, "resumed": True, "turn": 2})
+
+    assert isinstance(first, InitEvent) and (first.resumed, first.turn) == (False, 0)
+    assert isinstance(again, InitEvent) and (again.resumed, again.turn) == (True, 2)

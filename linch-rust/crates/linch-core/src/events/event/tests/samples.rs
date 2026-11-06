@@ -29,6 +29,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             provider: "anthropic".into(),
             tools: vec![],
             trace_id: None,
+            resumed: true,
+            turn: 3,
         }),
         Event::User(UserEvent {
             message: crate::message::Message::user_text("hi"),
