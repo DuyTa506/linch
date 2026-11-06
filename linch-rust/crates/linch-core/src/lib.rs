@@ -18,12 +18,17 @@
 
 pub mod canonical;
 pub mod events;
+pub mod hooks;
 pub mod ids;
 pub mod json;
 pub mod message;
+pub mod permissions;
+pub mod policy;
 pub mod provider;
+pub mod registry;
 pub mod run;
 pub mod session_log;
+pub mod tool;
 pub mod usage;
 
 pub use canonical::{
@@ -39,10 +44,14 @@ pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,
     Role, SystemBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultPart, ToolUseBlock,
 };
+pub use policy::{FailMode, HookPoint, PermissionDecision, Principal, PrincipalError};
 pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
     ProviderRequest, ReasoningEffort, StreamError, ToolChoice, ToolDefinition, assemble,
 };
 pub use run::{RunStatus, StopReason};
 pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
+pub use tool::{
+    Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
+};
 pub use usage::Usage;
