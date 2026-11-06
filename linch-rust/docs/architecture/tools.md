@@ -109,8 +109,9 @@ user message the run logs anyway, so it costs no write.
 - A compaction never rewrites the prefix; its summary restates the changes.
 
 `Agent::reload_skills` and `Agent::reload_subagents` (and
-`OpenedAgent::reload_*`, which rescan the config directory) are reversible
-registrations of the same kind. The run contract stays the one the agent was
+`OpenedAgent::reload_*`, which rescan the config directory for a kind the
+config turned on, and otherwise only re-apply a deep agent's roster and the
+built-in skills) are reversible registrations of the same kind. The run contract stays the one the agent was
 built with.
 
 `AgentBuilder::tool_search(ToolSearch)` defers a large catalog

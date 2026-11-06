@@ -186,6 +186,8 @@ impl AgentConfig {
                     pool,
                     skipped,
                     config_dir,
+                    skills: self.skills,
+                    subagents: self.subagents,
                     tools: registry,
                     deep,
                 })
@@ -211,6 +213,10 @@ pub struct OpenedAgent {
     skipped: Vec<Skipped>,
     /// Where [`Self::reload_skills`] and [`Self::reload_subagents`] scan.
     config_dir: PathBuf,
+    /// The config's `skills` and `subagents`: a reload reads the config
+    /// directory only for a kind that was on, as the open did.
+    skills: bool,
+    subagents: bool,
     tools: Arc<ToolRegistry>,
     /// The deep agent preset, whose roster a reload keeps.
     deep: Option<DeepAgent>,

@@ -283,6 +283,49 @@ async fn a_reload_keeps_the_roster_and_the_skill_tool() {
 }
 
 #[tokio::test]
+async fn a_reload_reads_no_config_dir_kind_the_config_left_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let linch = dir.path().join(".linch");
+    std::fs::create_dir_all(linch.join("agents")).unwrap();
+    std::fs::create_dir_all(linch.join("skills/sneaky")).unwrap();
+    let intruder = "---\ndescription: Gets in.\n---\nIntrude.";
+    std::fs::write(linch.join("agents/intruder.md"), intruder).unwrap();
+    let sneaky = "---\ndescription: Sneaks in.\n---\nBody.";
+    std::fs::write(linch.join("skills/sneaky/SKILL.md"), sneaky).unwrap();
+    let turns = vec![
+        call("c1", "Skill", json!({"skill": "sneaky"})),
+        call("c2", "Skill", json!({"skill": "verify"})),
+        text("Done."),
+    ];
+    let extra = with(ephemeral(), json!({"workspace": dir.path()}));
+    let (opened, tools) = open(config(turns, extra)).await;
+
+    let (_subagents, skipped) = opened.reload_subagents().await.unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let (_skills, skipped) = opened.reload_skills().await.unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+
+    let listing = description(&tools, "Subagent");
+    assert!(!listing.contains("intruder"), "{listing}");
+    assert!(
+        listing.contains("\n- researcher: "),
+        "the roster stays: {listing}"
+    );
+    let ends: Vec<(String, bool)> = (run(&opened, "s1").await.into_iter())
+        .filter_map(|event| match event {
+            Event::ToolCallEnd(end) => {
+                let result = serde_json::to_value(&end.result).unwrap();
+                let text = result["content"][0]["text"].as_str().unwrap().to_owned();
+                Some((text, end.is_error()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends[0], ("Unknown skill: sneaky".to_owned(), true));
+    assert!(!ends[1].1, "the built-in skill stays: {}", ends[1].0);
+}
+
+#[tokio::test]
 async fn a_retained_worker_answers_with_its_id() {
     let turns = vec![
         call(
