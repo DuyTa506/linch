@@ -27,6 +27,7 @@ impl Runner {
             family.cancel_all();
             family.idle().await;
         }
+        self.stage_children();
         let result = ResultEvent {
             subtype,
             stop_reason,

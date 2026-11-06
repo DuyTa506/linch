@@ -165,7 +165,7 @@ fn start_under(
     let run_id =
         (options.run_id.clone()).unwrap_or_else(|| RunId::new(uuid::Uuid::new_v4().to_string()));
     let outbox = Outbox::default();
-    let family = family(&agent, &run_id);
+    let family = family(&agent, &run_id, &options);
     let run = start::new_run(
         agent,
         run_id.clone(),
@@ -181,11 +181,9 @@ fn start_under(
 }
 
 /// A family for the child runs of `run_id`, when the agent has subagents.
-fn family(agent: &AgentInner, run_id: &RunId) -> Option<Arc<Family>> {
-    agent
-        .subagents
-        .as_ref()
-        .map(|_| Family::new(run_id.clone()))
+fn family(agent: &AgentInner, run_id: &RunId, options: &RunOptions) -> Option<Arc<Family>> {
+    let family = || Family::new(run_id.clone(), options.cancel.clone());
+    agent.subagents.as_ref().map(|_| family())
 }
 
 /// Resume a run, or approve its pending calls when `answers` is set.
@@ -196,7 +194,7 @@ pub(crate) fn resume(
     options: RunOptions,
 ) -> RunStream {
     let outbox = Outbox::default();
-    let family = family(&agent, &run_id);
+    let family = family(&agent, &run_id, &options);
     let shared = Shared {
         outbox: outbox.clone(),
         family: family.clone(),

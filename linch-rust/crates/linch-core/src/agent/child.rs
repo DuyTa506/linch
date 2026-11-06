@@ -86,6 +86,7 @@ impl AgentInner {
             skills: self.skills,
             skill_listing: self.skill_listing.clone(),
             subagents: None,
+            worker_registry: Default::default(),
             child: true,
             pricing: self.pricing.clone(),
             mailbox: self.mailbox.clone(),

@@ -47,13 +47,7 @@ pub(super) async fn run(
             runner::start_child(child, prompt, options, ctx.run_id.clone())
         }
         Ok(record) if record.status.is_terminal() => {
-            let events = (child.runs.events(&child.namespace, &child_id, 0)).await;
-            let events = events.map_err(|error| failed("could not be read", error))?;
-            let mut outcome = Outcome::default();
-            events
-                .iter()
-                .for_each(|envelope| outcome.see(&envelope.event));
-            return outcome.result();
+            return finished(&child, &child_id).await?.result();
         }
         Ok(_) => runner::resume(child, child_id.clone(), None, options),
         Err(error) => return Err(failed("could not be read", error)),
@@ -63,11 +57,23 @@ pub(super) async fn run(
     };
     let (done, result) = oneshot::channel();
     let (id, ctx) = (child_id.clone(), ctx.clone());
-    family.adopt(child_id, cancel, async move {
+    family.adopt(child_id, cancel, false, async move {
         let _ = done.send(drive(stream, id, &ctx).await);
     });
     let result = result.await;
     result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
+}
+
+/// How the finished child run `child_id` ended, read back from its events.
+pub(super) async fn finished(
+    child: &AgentInner,
+    child_id: &RunId,
+) -> Result<Outcome, ToolOutputError> {
+    let events = (child.runs.events(&child.namespace, child_id, 0)).await;
+    let events = events.map_err(|error| failed("could not be read", error))?;
+    let mut outcome = Outcome::default();
+    (events.iter()).for_each(|envelope| outcome.see(&envelope.event));
+    Ok(outcome)
 }
 
 async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) -> ToolResult {
@@ -83,22 +89,22 @@ async fn drive(mut stream: RunStream, child_run_id: RunId, ctx: &ToolContext) ->
     outcome.result()
 }
 
-fn failed(what: &str, error: impl std::fmt::Display) -> ToolOutputError {
+pub(super) fn failed(what: &str, error: impl std::fmt::Display) -> ToolOutputError {
     ToolOutputError::new(format!("The subagent run {what}: {error}"))
 }
 
 /// What the child's events say about how it ended.
 #[derive(Default)]
-struct Outcome {
+pub(super) struct Outcome {
     /// The final text, else the last response's text.
-    text: String,
+    pub(super) text: String,
     /// The last error, as `name: message`.
-    error: Option<String>,
-    ended: Option<ResultSubtype>,
+    pub(super) error: Option<String>,
+    pub(super) ended: Option<ResultSubtype>,
 }
 
 impl Outcome {
-    fn see(&mut self, event: &Event) {
+    pub(super) fn see(&mut self, event: &Event) {
         match event {
             Event::Assistant(response) => self.text = response.message.text(),
             Event::Error(error) => self.error = Some(error_text(&error.error)),
@@ -114,7 +120,7 @@ impl Outcome {
 
     /// The tool result: the text of a successful child, else an error that
     /// keeps any partial output.
-    fn result(self) -> ToolResult {
+    pub(super) fn result(self) -> ToolResult {
         let partial = |message: String| {
             let message = match self.text.is_empty() {
                 true => message,

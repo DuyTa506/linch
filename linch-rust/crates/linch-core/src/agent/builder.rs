@@ -15,7 +15,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{self, Skill, SkillTool};
 use crate::store::{RunStore, SessionStore};
-use crate::subagents::{Roster, SubagentDefinition, SubagentTool};
+use crate::subagents::{Roster, SubagentDefinition, SubagentTool, Workers};
 use crate::usage::Usage;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
@@ -37,6 +37,7 @@ pub struct AgentBuilder {
     subagents: Option<Vec<SubagentDefinition>>,
     pricing: Option<Pricing>,
     mailbox: Option<Arc<dyn Mailbox>>,
+    workers: Option<Workers>,
 }
 
 impl AgentBuilder {
@@ -56,6 +57,7 @@ impl AgentBuilder {
             subagents: None,
             pricing: None,
             mailbox: None,
+            workers: None,
         }
     }
 
@@ -152,6 +154,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Keep the `Subagent` tool's workers as `workers` says (see
+    /// [`crate::subagents`]); it needs [`Self::subagents`]. The setting is
+    /// part of the run contract.
+    pub fn workers(mut self, workers: Workers) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
     /// Give the agent a mailbox for peer messages (see
     /// [`crate::coordination`]).
     ///
@@ -208,12 +218,21 @@ impl AgentBuilder {
         }
         let handle = Arc::new(OnceLock::new());
         let mut subagents = None;
+        if self.workers.is_some() && self.subagents.is_none() {
+            return Err(BuildError::Invalid("workers need subagents".into()));
+        }
+        if let Some(workers) = self.workers {
+            let value =
+                serde_json::to_value(workers).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            features.insert("workers".into(), value);
+        }
+        let workers = self.workers.unwrap_or_default();
         if let Some(definitions) = self.subagents {
             let roster = Arc::new(Roster::new(definitions));
             let value =
                 serde_json::to_value(&*roster).map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("subagents".into(), value);
-            let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle));
+            let tool = SubagentTool::new(Arc::clone(&roster), Arc::clone(&handle), workers);
             built_ins.register(&self.tools, Arc::new(tool))?;
             subagents = Some(roster);
         }
@@ -238,6 +257,7 @@ impl AgentBuilder {
             skills: skills_on,
             skill_listing: listing,
             subagents,
+            worker_registry: Default::default(),
             child: false,
             pricing: self.pricing,
             mailbox: self.mailbox,

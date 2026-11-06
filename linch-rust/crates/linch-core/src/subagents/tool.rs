@@ -5,8 +5,9 @@ use std::sync::{Arc, OnceLock, Weak};
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{Roster, SUBAGENT_TOOL, run};
+use super::{Roster, SUBAGENT_TOOL, Workers, background, run};
 use crate::agent::AgentInner;
+use crate::ids::RunId;
 use crate::json::{JsonObject, JsonValue};
 use crate::tool::{Tool, ToolContext, ToolOutputError, ToolResult, ToolScope};
 
@@ -32,12 +33,17 @@ pub(crate) struct SubagentTool {
     /// The agent this tool belongs to, set once it is built. Weak, since
     /// the agent holds the registry that holds this tool.
     agent: Arc<OnceLock<Weak<AgentInner>>>,
+    workers: Workers,
     description: String,
     schema: JsonObject,
 }
 
 impl SubagentTool {
-    pub(crate) fn new(roster: Arc<Roster>, agent: Arc<OnceLock<Weak<AgentInner>>>) -> Self {
+    pub(crate) fn new(
+        roster: Arc<Roster>,
+        agent: Arc<OnceLock<Weak<AgentInner>>>,
+        workers: Workers,
+    ) -> Self {
         let mut description = HEADER.to_owned();
         if !roster.listed().is_empty() {
             description.push_str("\n\nAvailable subagent types:");
@@ -65,6 +71,13 @@ impl SubagentTool {
                     "description": "Optional: pick from the listed agent types. Omit to spawn \
                                     a general-purpose subagent with full tool access.",
                 },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "When true, the subagent runs in the background. The tool \
+                                    returns immediately with an acknowledgement. A \
+                                    <task-notification> message is injected into your \
+                                    conversation when the worker finishes.",
+                },
             },
             "required": ["description", "prompt"],
         });
@@ -74,6 +87,7 @@ impl SubagentTool {
         Self {
             roster,
             agent,
+            workers,
             description,
             schema,
         }
@@ -86,6 +100,10 @@ impl SubagentTool {
 
 fn text<'a>(input: &'a JsonObject, field: &str) -> Option<&'a str> {
     input.get(field).and_then(JsonValue::as_str)
+}
+
+fn in_background(input: &JsonObject) -> bool {
+    (input.get("run_in_background")).is_some_and(|value| value.as_bool() == Some(true))
 }
 
 #[async_trait]
@@ -106,9 +124,13 @@ impl Tool for SubagentTool {
         ToolScope::Exec
     }
 
-    /// Only a named type whose definition lists its tools, each of them a
-    /// registered read-scope tool; anything unknown fails closed.
+    /// Only a foreground call of a named type whose definition lists its
+    /// tools, each of them a registered read-scope tool; anything unknown
+    /// fails closed.
     fn parallel(&self, input: &JsonObject) -> bool {
+        if in_background(input) {
+            return false;
+        }
         let Some(name) = text(input, "subagent_type") else {
             return false;
         };
@@ -162,7 +184,21 @@ impl Tool for SubagentTool {
         let Some(agent) = self.agent() else {
             return Err(ToolOutputError::new("The agent of this tool is gone."));
         };
+        let background = in_background(&input);
+        if background && !self.workers.background {
+            return Err(ToolOutputError::new(
+                "Background subagents are not enabled for this agent. Run this Subagent \
+                 without run_in_background.",
+            ));
+        }
         let prompt = text(&input, "prompt").unwrap_or("").to_owned();
-        run::run(&agent, definition, prompt, &ctx).await
+        let id = RunId::new(ctx.idempotency_key());
+        let general = std::ptr::eq(definition, self.roster.general());
+        let registry = &agent.worker_registry;
+        let worker = registry.enlist(&ctx.session_id, &id, definition, general);
+        match background {
+            true => background::launch(&agent, worker, prompt, &ctx).await,
+            false => run::run(&agent, definition, prompt, &ctx).await,
+        }
     }
 }

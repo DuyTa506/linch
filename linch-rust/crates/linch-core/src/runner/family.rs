@@ -8,6 +8,9 @@
 //! finish its own abort, and the run waits for every child before its
 //! terminal write. Dropping the stream drops the children with it, like a
 //! crash; resuming the run picks them up again.
+//!
+//! A background child also leaves its durable events, wrapped, for the
+//! run's next turn, and its end as a [`Completion`] in the family's inbox.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,19 +26,37 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentInner;
+use crate::events::Event;
 use crate::ids::RunId;
+use crate::subagents::Completion;
 
 /// The child runs one run drives.
 pub(crate) struct Family {
     run_id: RunId,
+    /// The run's cancel token: background children stop with the run.
+    cancel: CancellationToken,
     /// The agent whose [`Families`] lists this family once it is live.
     agent: Mutex<Weak<AgentInner>>,
     children: Mutex<FuturesUnordered<BoxFuture<'static, ()>>>,
     /// A child joined since the stream last polled the children.
     joined: AtomicBool,
-    /// The children still running, with their cancel tokens.
-    live: Mutex<HashMap<RunId, CancellationToken>>,
+    state: Mutex<State>,
     changed: Notify,
+}
+
+#[derive(Default)]
+struct State {
+    /// The children still running.
+    live: HashMap<RunId, Live>,
+    /// Background children that ended, not delivered yet.
+    done: Vec<Completion>,
+    /// Wrapped events of background children, for the run's log.
+    log: Vec<Event>,
+}
+
+struct Live {
+    cancel: CancellationToken,
+    background: bool,
 }
 
 /// The guarded value even if a holder panicked; nothing panics while
@@ -45,13 +66,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Family {
-    pub(crate) fn new(run_id: RunId) -> Arc<Self> {
+    /// The family of `run_id`, whose background children stop on `cancel`.
+    pub(crate) fn new(run_id: RunId, cancel: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             run_id,
+            cancel,
             agent: Mutex::new(Weak::new()),
             children: Mutex::new(FuturesUnordered::new()),
             joined: AtomicBool::new(false),
-            live: Mutex::new(HashMap::new()),
+            state: Mutex::new(State::default()),
             changed: Notify::new(),
         })
     }
@@ -65,26 +88,45 @@ impl Family {
         families.insert(self.run_id.clone(), Arc::downgrade(self));
     }
 
+    /// A cancel token for a background child: cancelled with the run.
+    pub(crate) fn child_token(&self) -> CancellationToken {
+        self.cancel.child_token()
+    }
+
     /// Drive `child` with `drive`, which ends once the child's stream does.
     /// `cancel` stops the child: the run cancels every child still running
-    /// before it ends.
+    /// before it ends. A `background` child keeps the run's text answer
+    /// from ending the run while it runs.
     pub(crate) fn adopt(
         self: &Arc<Self>,
         child: RunId,
         cancel: CancellationToken,
+        background: bool,
         drive: impl Future<Output = ()> + Send + 'static,
     ) {
-        lock(&self.live).insert(child.clone(), cancel);
+        let live = Live { cancel, background };
+        lock(&self.state).live.insert(child.clone(), live);
         let family = Arc::downgrade(self);
         let task = async move {
             drive.await;
             if let Some(family) = family.upgrade() {
-                lock(&family.live).remove(&child);
+                lock(&family.state).live.remove(&child);
                 family.changed.notify_waiters();
             }
         };
         lock(&self.children).push(Box::pin(task));
         self.joined.store(true, Ordering::SeqCst);
+    }
+
+    /// Keep a background child's wrapped event for the run's log.
+    pub(crate) fn report(&self, event: Event) {
+        lock(&self.state).log.push(event);
+    }
+
+    /// Put a background child's end in the inbox.
+    pub(crate) fn complete(&self, completion: Completion) {
+        lock(&self.state).done.push(completion);
+        self.changed.notify_waiters();
     }
 
     /// Poll every child once it can go on.
@@ -100,20 +142,48 @@ impl Family {
         self.joined.load(Ordering::SeqCst)
     }
 
+    /// The wrapped events kept so far, in order.
+    pub(super) fn take_log(&self) -> Vec<Event> {
+        std::mem::take(&mut lock(&self.state).log)
+    }
+
+    /// The background ends not delivered yet, in order.
+    pub(super) fn take_done(&self) -> Vec<Completion> {
+        std::mem::take(&mut lock(&self.state).done)
+    }
+
+    /// Whether a background child runs, or one ended undelivered.
+    pub(super) fn has_background(&self) -> bool {
+        let state = lock(&self.state);
+        !state.done.is_empty() || state.live.values().any(|live| live.background)
+    }
+
+    /// Wait until a background end is undelivered or no background child
+    /// runs. The stream keeps polling the children meanwhile.
+    pub(super) async fn settled(&self) {
+        self.wait(|state| {
+            !state.done.is_empty() || !state.live.values().any(|live| live.background)
+        })
+        .await;
+    }
+
     /// Cancel every child still running.
     pub(super) fn cancel_all(&self) {
-        for cancel in lock(&self.live).values() {
-            cancel.cancel();
+        for live in lock(&self.state).live.values() {
+            live.cancel.cancel();
         }
     }
 
-    /// Wait until no child runs. The stream keeps polling the children
-    /// meanwhile.
+    /// Wait until no child runs.
     pub(super) async fn idle(&self) {
+        self.wait(|state| state.live.is_empty()).await;
+    }
+
+    async fn wait(&self, ready: impl Fn(&State) -> bool) {
         loop {
             let mut changed = pin!(self.changed.notified());
             changed.as_mut().enable();
-            if lock(&self.live).is_empty() {
+            if ready(&lock(&self.state)) {
                 return;
             }
             changed.await;

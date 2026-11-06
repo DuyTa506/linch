@@ -91,7 +91,7 @@ pub use store::{
     Commit, Lease, NewRun, NewTask, RunRecord, RunStore, SessionStore, StoreError, Task, TaskPatch,
     TaskStatus, TaskStore,
 };
-pub use subagents::SubagentDefinition;
+pub use subagents::{SubagentDefinition, Workers};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };

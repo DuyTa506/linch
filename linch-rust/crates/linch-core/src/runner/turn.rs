@@ -236,6 +236,7 @@ impl Runner {
             self.max_turns(max).await?;
             return Ok(None);
         }
+        self.stage_children();
         self.snapshot = self.agent.snapshot();
         let view = self.log.provider_view();
         let mut messages: Vec<Message> =
@@ -343,6 +344,9 @@ impl Runner {
             self.append(message).await?;
         }
         if calls.is_empty() {
+            if let Some(next) = self.hear_back().await? {
+                return Ok(next);
+            }
             match self.stop(&text).await? {
                 Stopping::Stop => {}
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),

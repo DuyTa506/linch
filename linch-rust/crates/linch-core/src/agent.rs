@@ -26,7 +26,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::runner::{self, Families, RunStream};
 use crate::store::{RunStore, SessionStore};
-use crate::subagents::Roster;
+use crate::subagents::{Registry, Roster};
 use crate::usage::Usage;
 
 mod builder;
@@ -114,6 +114,8 @@ pub(crate) struct AgentInner {
     pub(crate) skill_listing: Option<SystemBlock>,
     /// The subagents the `Subagent` tool runs; `None` when they are off.
     pub(crate) subagents: Option<Arc<Roster>>,
+    /// The workers of each parent session.
+    pub(crate) worker_registry: Registry,
     /// Whether this is a subagent's agent: its runs cannot suspend, so a
     /// call that needs approval is denied.
     pub(crate) child: bool,
