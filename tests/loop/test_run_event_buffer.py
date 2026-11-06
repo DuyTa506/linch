@@ -172,6 +172,32 @@ class _InterleavingRunStore(InMemoryRunStore):
         )
 
 
+class _StatusRecordingRunStore(InMemoryRunStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[tuple[str, list[Any]]] = []
+
+    async def append_events(
+        self, run_id: str, events: list[Any], *, lease: RunLease | None = None
+    ) -> list[int]:
+        self.writes.append(("running", list(events)))
+        return await super().append_events(run_id, events, lease=lease)
+
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Any,
+        *,
+        status: str = "running",
+        lease: RunLease | None = None,
+    ) -> list[int]:
+        self.writes.append((status, list(events)))
+        return await super().save_checkpoint_with_events(
+            run_id, checkpoint, events, status=status, lease=lease
+        )
+
+
 class _FailOnceBatchStore:
     def __init__(self) -> None:
         self.fail = True
@@ -651,3 +677,47 @@ async def test_session_barrier_keeps_uncovered_events_ahead_of_later_appends() -
     rows = await store.load_events(record.id)
     assert [row.event for row in rows] == [covered, uncovered, appended]
     assert [row.seq for row in rows] == [1, 2, 3]
+
+
+@pytest.mark.parametrize("barrier", [False, True])
+async def test_terminal_cleanup_cannot_commit_the_result_as_running(barrier: bool) -> None:
+    from linch import Context
+    from linch.events import ResultEvent
+
+    store = _StatusRecordingRunStore()
+    record = await store.create_run("s1", id="r1")
+    buffer = RunEventBuffer(store, record.id)
+    late = PartialAssistantEvent(delta={"text": "late"})
+
+    class _Processes:
+        async def close(self) -> None:
+            # A model call left running past its compaction records here.
+            await _persist_event(session, record.id, late)
+            if barrier:
+                await buffer.flush()  # its dispatch marker or receipt is a barrier
+
+    session = SimpleNamespace(
+        _event_journal=buffer,
+        _processes=_Processes(),
+        agent=SimpleNamespace(run_store=store, context=Context()),
+        active_run_id=None,
+    )
+    await buffer.append(PartialAssistantEvent(delta={"text": "turn"}))
+    buffer.defer_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
+    result = ResultEvent(
+        subtype="success", stop_reason="end_turn", total_usage=Usage(), duration_ms=0
+    )
+    await _persist_event(session, record.id, result)
+
+    await _complete_with_pending_events(
+        session, record.id, RunCheckpoint("turn_complete", "hi", 0, Usage())
+    )
+
+    assert all(
+        event is not result
+        for status, events in store.writes
+        if status == "running"
+        for event in events
+    )
+    status, events = store.writes[-1]
+    assert status == "completed" and events[-1] is result
