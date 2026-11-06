@@ -5,9 +5,10 @@
 //!    summarize the older part and log the projection (see `compact`);
 //!    snapshot the tools and build the request from the provider view, with
 //!    the `context_build` blocks added to its tail, never logged;
-//! 2. stage the model-call delivery and flush it with the held
-//!    `ProviderPending` checkpoint, then drive the call (deltas go to the
-//!    caller at once);
+//! 2. stage a `context_build` event (the request's system block, message
+//!    and tool counts) and the model-call delivery, and flush them with the
+//!    held `ProviderPending` checkpoint, then drive the call (deltas go to
+//!    the caller at once);
 //! 3. stage the receipt, the `Assistant` event and its `Usage`, and write
 //!    them through with `AssistantReceived`. A response the output limit
 //!    cut off before it held any text or whole tool call is not an answer:

@@ -13,14 +13,18 @@ use std::sync::Arc;
 use super::Outbox;
 use super::turn::{Runner, Step};
 use crate::agent::{AgentInner, RunError};
-use crate::events::kinds::{HookEvent, HookOutcome, UserEvent, UserEventSubtype};
+use crate::events::kinds::{
+    ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype,
+};
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
     ContextBuildRequest, HookRecord, HookStatus, PostTurnRequest, StopOutcome, StopRequest,
     UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
+use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, TextBlock};
+use crate::provider::ProviderRequest;
 use crate::run::{Phase, StopReason};
 
 /// What a text-only response leads to, after the `stop` chain.
@@ -148,6 +152,21 @@ impl Runner {
         let blocks = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
         blocks
+    }
+
+    /// Stage the `context_build` event of the primary `request`: what it
+    /// was built from. It rides the call's `ProviderPending` barrier. The
+    /// kernel keeps no context budget and trims nothing, so `budget` and
+    /// `metadata` are empty.
+    pub(super) fn stage_context(&mut self, request: &ProviderRequest) {
+        let tools = request.tools.iter().map(|tool| tool.name.clone());
+        self.journal.stage(Event::ContextBuild(ContextBuildEvent {
+            system_blocks: request.system.len() as u64,
+            messages: request.messages.len() as u64,
+            selected_tools: Some(tools.collect()),
+            budget: JsonObject::new(),
+            metadata: JsonObject::new(),
+        }));
     }
 
     /// Run `stop` on a text-only response.
