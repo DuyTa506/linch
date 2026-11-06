@@ -145,7 +145,10 @@
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
 //! config's `mcp_servers` are connected in order before the result is sent.
 //! The result is [`AgentOpened`](protocol::AgentOpened):
-//! `{"agent": "agent-1", "contract": "<hex digest>"}`. The contract covers
+//! `{"agent": "agent-1", "contract": "<hex digest>", "skipped"?: [...]}`;
+//! `skipped` lists each skill directory or subagent file of the config
+//! directory that was left out, `{path, reason, detail}`
+//! ([`Skipped`](protocol::Skipped)), and is absent when none was. The contract covers
 //! the spec, every tool registered at open (host, workspace, then MCP),
 //! each with its scope, and the hook policies; a tool an MCP server adds
 //! later is outside it. A

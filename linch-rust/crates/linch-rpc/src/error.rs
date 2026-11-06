@@ -232,7 +232,10 @@ mod tests {
             format!("run r1 has contract {run}, this agent has {agent}")
         );
         let data = object.data.unwrap();
-        assert_eq!(data["expected"], run, "the run's contract, which a resume needs");
+        assert_eq!(
+            data["expected"], run,
+            "the run's contract, which a resume needs"
+        );
         assert_eq!(data["found"], agent, "the contract this agent has");
     }
 }

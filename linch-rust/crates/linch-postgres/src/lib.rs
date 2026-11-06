@@ -112,7 +112,10 @@ pub async fn connect(
         Ok(connected) => connected,
         Err(_) => {
             let message = format!("cannot reach Postgres at {target} within {timeout:?}");
-            Err(sqlx::Error::Io(io::Error::new(io::ErrorKind::TimedOut, message)))
+            Err(sqlx::Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                message,
+            )))
         }
     }
 }

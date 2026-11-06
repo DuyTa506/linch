@@ -8,7 +8,7 @@ use linch::{Agent, JsonObject, JsonValue, OpenedAgent};
 use super::{Server, Tables, callback, host, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
-    AgentOpened, CloseParams, Events, EventsParams, OpenParams, SessionCloseParams,
+    AgentOpened, CloseParams, Events, EventsParams, OpenParams, SessionCloseParams, Skipped,
 };
 
 impl Server {
@@ -30,10 +30,12 @@ impl Server {
             .await
             .map_err(|error| ErrorObject::from(&error))?;
         let contract = opened.agent().contract().to_string();
+        let skipped = opened.skipped().iter().map(Skipped::from).collect();
         lock(&self.0.tables).agents.insert(handle.clone(), opened);
         to_value(&AgentOpened {
             agent: handle,
             contract,
+            skipped,
         })
     }
 

@@ -88,6 +88,46 @@ pub struct AgentOpened {
     pub agent: String,
     /// The agent's run contract digest, hex.
     pub contract: String,
+    /// The skill directories and subagent files of the config directory
+    /// that were left out; absent when none was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
+}
+
+/// A skill directory or subagent file `agent.open` left out
+/// ([`linch::project::Skipped`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skipped {
+    /// The skill directory or subagent file.
+    pub path: String,
+    /// Why: `missing_skill_md`, `missing_frontmatter`,
+    /// `invalid_frontmatter`, `io_error`, `name_collision_tool`,
+    /// `name_collision_skill` or `name_collision`
+    /// ([`linch::project::SkipReason`]).
+    pub reason: String,
+    /// What exactly is wrong, for a person to read.
+    pub detail: String,
+}
+
+impl From<&linch::project::Skipped> for Skipped {
+    fn from(skipped: &linch::project::Skipped) -> Self {
+        use linch::project::SkipReason;
+        let reason = match skipped.reason {
+            SkipReason::MissingSkillMd => "missing_skill_md",
+            SkipReason::MissingFrontmatter => "missing_frontmatter",
+            SkipReason::InvalidFrontmatter => "invalid_frontmatter",
+            SkipReason::IoError => "io_error",
+            SkipReason::NameCollisionTool => "name_collision_tool",
+            SkipReason::NameCollisionSkill => "name_collision_skill",
+            SkipReason::NameCollision => "name_collision",
+        };
+        Self {
+            path: skipped.path.display().to_string(),
+            reason: reason.into(),
+            detail: skipped.detail.clone(),
+        }
+    }
 }
 
 /// Params of `agent.close`. The result is `{}`.
