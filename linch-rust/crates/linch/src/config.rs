@@ -74,6 +74,12 @@ pub struct AgentConfig {
     /// [`FilesystemConfig`]). Off when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem: Option<FilesystemConfig>,
+    /// Whether the agent has the session task tools (`TaskCreate`,
+    /// `TaskList`, `TaskGet`, `TaskUpdate`), kept in the session store. As
+    /// in Python they run without approval in every mode: the policy's
+    /// `auto_allow` gets their names. Off when absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tasks: bool,
 }
 
 fn is_false(value: &bool) -> bool {

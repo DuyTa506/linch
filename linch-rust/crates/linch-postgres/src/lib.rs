@@ -3,6 +3,8 @@
 //! [`PgRunStore`] and [`PgSessionStore`] implement linch-core's
 //! [`RunStore`](linch_core::RunStore) and
 //! [`SessionStore`](linch_core::SessionStore) and pass its conformance suite;
+//! [`PgSessionStore`] also implements [`TaskStore`](linch_core::TaskStore)
+//! and passes its suite;
 //! [`PgFileBackend`] implements linch-core's
 //! [`FileBackend`](linch_core::vfs::FileBackend) and passes its suite. All
 //! take a [`PgPool`]; tables are created by [`migrate`], which the host runs
@@ -33,6 +35,7 @@ mod codec;
 mod files;
 mod run;
 mod session;
+mod tasks;
 
 pub use codec::CodecError;
 pub use files::PgFileBackend;
@@ -108,6 +111,13 @@ fn migrator() -> Migrator {
             Cow::Borrowed("files"),
             MigrationType::Simple,
             include_str!("../migrations/0003_files.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            4,
+            Cow::Borrowed("tasks"),
+            MigrationType::Simple,
+            include_str!("../migrations/0004_tasks.sql").into_sql_str(),
             false,
         ),
     ];

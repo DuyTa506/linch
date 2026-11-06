@@ -22,6 +22,11 @@ async fn memory_session_store_passes_the_conformance_suite() {
     conformance::session_store_suite(&MemorySessionStore::new()).await;
 }
 
+#[tokio::test]
+async fn memory_session_store_passes_the_task_suite() {
+    conformance::task_store_suite(&MemorySessionStore::new()).await;
+}
+
 fn new_run(run_id: &str) -> NewRun {
     NewRun {
         namespace: "ns".into(),

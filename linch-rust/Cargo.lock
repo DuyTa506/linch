@@ -1647,6 +1647,7 @@ dependencies = [
 name = "linch"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures",
  "linch-core",
  "linch-ext",
@@ -1654,13 +1655,16 @@ dependencies = [
  "linch-postgres",
  "linch-providers",
  "linch-tools",
+ "linch-worker",
  "rmcp",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "url",
  "yaml-rust2",
 ]

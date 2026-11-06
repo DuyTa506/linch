@@ -10,13 +10,14 @@ use sqlx::PgPool;
 
 use crate::codec::{backend, decode_entry, encode_entry, not_found, to_i64, to_u64};
 
-/// A [`SessionStore`] backed by Postgres.
+/// A [`SessionStore`] backed by Postgres; also the
+/// [`TaskStore`](linch_core::TaskStore) of the session tasks.
 ///
 /// Logs are keyed by `(namespace, session_id)`. Run [`crate::migrate`] on the
 /// database before the first call.
 #[derive(Debug, Clone)]
 pub struct PgSessionStore {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PgSessionStore {

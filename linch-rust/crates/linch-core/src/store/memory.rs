@@ -2,7 +2,8 @@
 //!
 //! Both follow the lifecycle that [`super::conformance`] checks and count
 //! every write that lands, per method, so a bench can report store writes
-//! per turn. A rejected write changes nothing and is not counted.
+//! per turn. A rejected write changes nothing and is not counted. The
+//! session store also keeps the session tasks; task writes are not counted.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -15,6 +16,7 @@ use crate::run::RunStatus;
 use crate::session_log::LogEntry;
 use crate::store::{Commit, Lease, NewRun, RunRecord, RunStore, SessionStore, StoreError};
 
+mod tasks;
 #[cfg(test)]
 mod tests;
 
@@ -229,6 +231,8 @@ pub struct MemorySessionStore {
 #[derive(Debug, Default)]
 struct SessionState {
     logs: HashMap<String, HashMap<SessionId, Vec<LogEntry>>>,
+    /// Session tasks ([`crate::store::TaskStore`]), by namespace and session.
+    boards: HashMap<String, HashMap<SessionId, tasks::Board>>,
     writes: SessionWrites,
 }
 
@@ -286,7 +290,7 @@ impl SessionStore for MemorySessionStore {
         entries: Vec<LogEntry>,
     ) -> Result<u64, StoreError> {
         let mut state = lock(&self.state);
-        let SessionState { logs, writes } = &mut *state;
+        let SessionState { logs, writes, .. } = &mut *state;
         let log = find_log(logs, namespace, session_id)?;
         let len = log.len() as u64;
         if len != expected_len {
