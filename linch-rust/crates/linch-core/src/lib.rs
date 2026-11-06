@@ -37,6 +37,7 @@ pub mod store;
 pub mod tool;
 pub mod usage;
 
+pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, RunError, RunOptions};
 pub use canonical::{
     CanonicalError, Digest, JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth, digest,
     digest_with_domain, to_canonical_string,
@@ -71,6 +72,7 @@ pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
 };
 pub use run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
+pub use runner::RunStream;
 pub use scheduler::{
     BatchPlan, CallOutcome, ExecuteOptions, PlannedAction, PlannedCall, RecordedApproval,
     RunIdentity, ToolSink,

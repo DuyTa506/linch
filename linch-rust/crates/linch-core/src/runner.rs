@@ -1,1 +1,170 @@
-//! The run state machine (card P4-D).
+//! The run state machine (card P4-D) and the caller-driven [`RunStream`].
+//!
+//! One turn:
+//! 1. snapshot the tools and build the request from the session's provider
+//!    view;
+//! 2. stage the model-call delivery and flush it with the held
+//!    `ProviderPending` checkpoint, then drive the call (deltas go to the
+//!    caller at once);
+//! 3. stage the receipt, the `Assistant` event and its `Usage`, and write
+//!    them through with `AssistantReceived`;
+//! 4. append the response to the session (the held checkpoint is flushed
+//!    first); a text-only response ends the run;
+//! 5. plan the tool calls. A call awaiting approval suspends the run with a
+//!    write-through `AwaitingApproval`. Otherwise the plan's decisions are
+//!    held in `ToolBatch` and the batch runs: every tool that really runs
+//!    flushes its start before it runs and its end after;
+//! 6. hold `ToolResults`, append the results to the session, next turn.
+//!
+//! A tool turn with `k` started tools costs `3 + 2k` run writes and 2 session
+//! writes. The core spawns no task: [`RunStream`] holds the run future and
+//! polls it only while the caller polls the stream.
+
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
+
+use futures::Stream;
+use futures::future::BoxFuture;
+
+use crate::agent::{AgentInner, RunError, RunOptions};
+use crate::events::Envelope;
+use crate::hooks::ApprovalResponse;
+use crate::ids::RunId;
+
+mod batch;
+mod sink;
+mod start;
+mod turn;
+
+/// The envelopes of one run, in order, as the caller polls for them.
+///
+/// Durable kinds arrive only after the write that made them durable; deltas
+/// and tool progress arrive at once and carry the last durable seq. The
+/// stream ends after the `Result` or `Suspended` envelope. When the run
+/// cannot continue durably, the last item is `Err(RunError)`.
+///
+/// Dropping the stream drops the run where it stands, like a crash: the run
+/// keeps its last durable state and [`crate::agent::Agent::resume`] continues
+/// it.
+pub struct RunStream {
+    run_id: RunId,
+    outbox: Outbox,
+    run: Option<BoxFuture<'static, Result<(), RunError>>>,
+    error: Option<RunError>,
+}
+
+impl RunStream {
+    fn new(run_id: RunId, outbox: Outbox, run: BoxFuture<'static, Result<(), RunError>>) -> Self {
+        Self {
+            run_id,
+            outbox,
+            run: Some(run),
+            error: None,
+        }
+    }
+
+    /// The run this stream drives.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+}
+
+impl Stream for RunStream {
+    type Item = Result<Envelope, RunError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(envelope) = this.outbox.pop() {
+                return Poll::Ready(Some(Ok(envelope)));
+            }
+            let Some(run) = this.run.as_mut() else {
+                return Poll::Ready(this.error.take().map(Err));
+            };
+            match run.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    this.run = None;
+                    this.error = result.err();
+                }
+                // The run parked on real I/O; hand over what it queued.
+                Poll::Pending if this.outbox.is_empty() => return Poll::Pending,
+                Poll::Pending => {}
+            }
+        }
+    }
+}
+
+/// Start a new run (see [`crate::agent::Agent::run`]).
+pub(crate) fn start(agent: Arc<AgentInner>, prompt: String, options: RunOptions) -> RunStream {
+    let run_id = RunId::new(uuid::Uuid::new_v4().to_string());
+    let outbox = Outbox::default();
+    let run = start::new_run(agent, run_id.clone(), prompt, options, outbox.clone());
+    RunStream::new(run_id, outbox, Box::pin(run))
+}
+
+/// Resume a run, or approve its pending calls when `answers` is set.
+pub(crate) fn resume(
+    agent: Arc<AgentInner>,
+    run_id: RunId,
+    answers: Option<HashMap<String, ApprovalResponse>>,
+    options: RunOptions,
+) -> RunStream {
+    let outbox = Outbox::default();
+    let run = start::continue_run(agent, run_id.clone(), answers, options, outbox.clone());
+    RunStream::new(run_id, outbox, Box::pin(run))
+}
+
+/// Envelopes waiting for the caller, shared by the run future and its
+/// stream.
+#[derive(Clone, Default)]
+pub(crate) struct Outbox(Arc<Mutex<VecDeque<Envelope>>>);
+
+impl Outbox {
+    /// Queue one envelope without yielding (deltas and progress, from sync
+    /// callbacks).
+    fn push(&self, envelope: Envelope) {
+        self.lock().push_back(envelope);
+    }
+
+    /// Queue `envelopes` and yield once, so the stream hands them over
+    /// before the run goes on.
+    async fn deliver(&self, envelopes: Vec<Envelope>) {
+        if envelopes.is_empty() {
+            return;
+        }
+        self.lock().extend(envelopes);
+        YieldOnce(false).await;
+    }
+
+    fn pop(&self) -> Option<Envelope> {
+        self.lock().pop_front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, VecDeque<Envelope>> {
+        // Nothing panics while holding the lock.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Pending once, then ready: returns control to [`RunStream::poll_next`].
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            return Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}

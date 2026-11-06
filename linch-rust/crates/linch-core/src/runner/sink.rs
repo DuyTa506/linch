@@ -1,0 +1,123 @@
+//! [`JournalSink`]: the scheduler's [`ToolSink`] backed by the run journal.
+//!
+//! A tool that really runs costs two barriers: its start is staged and
+//! flushed before it runs, its end is staged and flushed after. A call that
+//! runs nothing (served, refused, or aborted before it started) gets its
+//! start and end staged without a flush; they reach the store with the next
+//! barrier, which keeps a tool turn at `3 + 2k` run writes.
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+use async_trait::async_trait;
+
+use super::Outbox;
+use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent};
+use crate::events::{Envelope, Event, WIRE_VERSION};
+use crate::ids::RunId;
+use crate::journal::{Journal, JournalError};
+use crate::scheduler::{CallOutcome, PlannedCall, ToolSink};
+use crate::tool::ToolProgress;
+
+/// Makes each tool start and end durable and hands it to the caller.
+pub(super) struct JournalSink<'a> {
+    /// Held across each flush: concurrent calls of a read group take turns.
+    journal: tokio::sync::Mutex<&'a mut Journal>,
+    outbox: &'a Outbox,
+    run_id: RunId,
+    /// Last durable seq, for progress envelopes (sync, so no journal lock).
+    durable: AtomicU64,
+    /// Calls whose tool started, so `tool_finished` knows which ones ran.
+    started: Mutex<HashSet<String>>,
+}
+
+impl<'a> JournalSink<'a> {
+    pub(super) fn new(journal: &'a mut Journal, outbox: &'a Outbox, run_id: RunId) -> Self {
+        let durable = AtomicU64::new(journal.durable_seq());
+        Self {
+            journal: tokio::sync::Mutex::new(journal),
+            outbox,
+            run_id,
+            durable,
+            started: Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn started(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        // Nothing panics while holding the lock.
+        self.started.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stage `events`, then flush when `barrier` is set.
+    async fn write(&self, events: Vec<Event>, barrier: bool) -> Result<(), JournalError> {
+        let ready = {
+            let mut journal = self.journal.lock().await;
+            for event in events {
+                journal.stage(event);
+            }
+            if !barrier {
+                return Ok(());
+            }
+            let ready = journal.flush().await?;
+            self.durable.store(journal.durable_seq(), Ordering::SeqCst);
+            ready
+        };
+        self.outbox.deliver(ready).await;
+        Ok(())
+    }
+}
+
+fn start_event(call: &PlannedCall) -> Event {
+    Event::ToolCallStart(ToolCallStartEvent {
+        tool_use_id: call.tool_use_id.clone(),
+        tool_name: call.tool_name.clone(),
+        input: call.input.clone(),
+        summary: call.summary.clone(),
+    })
+}
+
+#[async_trait]
+impl ToolSink for JournalSink<'_> {
+    type Error = JournalError;
+
+    async fn tool_starting(&self, call: &PlannedCall) -> Result<(), JournalError> {
+        self.started().insert(call.tool_use_id.clone());
+        self.write(vec![start_event(call)], true).await
+    }
+
+    async fn tool_finished(
+        &self,
+        call: &PlannedCall,
+        outcome: &CallOutcome,
+    ) -> Result<(), JournalError> {
+        let ran = self.started().remove(&call.tool_use_id);
+        let end = Event::ToolCallEnd(ToolCallEndEvent {
+            tool_name: call.tool_name.clone(),
+            result: outcome.block.clone(),
+            duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
+            canonical_output: None,
+        });
+        let events = if ran {
+            vec![end]
+        } else {
+            vec![start_event(call), end]
+        };
+        self.write(events, ran).await
+    }
+
+    fn tool_progress(&self, call: &PlannedCall, progress: ToolProgress) {
+        self.outbox.push(Envelope {
+            v: WIRE_VERSION,
+            seq: self.durable.load(Ordering::SeqCst),
+            run_id: self.run_id.clone(),
+            ignorable: false,
+            event: Event::ToolProgress(ToolProgressEvent {
+                tool_use_id: call.tool_use_id.clone(),
+                tool_name: call.tool_name.clone(),
+                message: progress.message,
+                data: progress.data,
+            }),
+        });
+    }
+}
