@@ -10,11 +10,14 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
+
+use crate::error::{ErrorObject, limit_reached};
 
 mod admit;
 mod allowlists;
 
-pub use allowlists::Allowlists;
+pub use allowlists::{Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, McpCommand};
 
 /// How a connection's client is trusted.
 #[derive(Debug, Clone)]
@@ -30,12 +33,15 @@ pub enum Access {
     Login(Arc<Tokens>),
 }
 
-/// A tenant: the name its agents and runs belong to, and what its agents
-/// may use.
+/// A tenant: the name its agents and runs belong to, what its agents may
+/// use, and its places for live runs and connections, shared by every
+/// connection that acts for it (share one `Arc<Tenant>` among them).
 #[derive(Debug)]
 pub struct Tenant {
     name: String,
     allow: Allowlists,
+    runs: Arc<Semaphore>,
+    connections: Arc<Semaphore>,
 }
 
 impl Tenant {
@@ -52,7 +58,23 @@ impl Tenant {
         if !valid {
             return Err(AccessError::TenantName { name });
         }
-        Ok(Self { name, allow })
+        let places = |max: usize| Arc::new(Semaphore::new(max.min(Semaphore::MAX_PERMITS)));
+        Ok(Self {
+            name,
+            runs: places(allow.max_runs),
+            connections: places(allow.max_connections),
+            allow,
+        })
+    }
+
+    /// A place among the tenant's live runs, or `-32005`.
+    pub(crate) fn run_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
+        take(&self.runs, "runs", self.allow.max_runs)
+    }
+
+    /// A place among the tenant's connections, or `-32005`.
+    pub(crate) fn connection_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
+        take(&self.connections, "connections", self.allow.max_connections)
     }
 
     /// The tenant name.
@@ -66,18 +88,36 @@ impl Tenant {
     }
 }
 
+/// Socket connections that may wait for their login at once, across every
+/// connection checked against one [`Tokens`]: each may buffer up to a
+/// 16 MiB line for up to 10 s, so this bounds that to 512 MiB. One past it
+/// gets `-32005` and closes without being read.
+pub const MAX_PENDING_LOGINS: usize = 32;
+
 /// Bearer tokens and the tenant each one names.
 ///
 /// Tokens are kept only as SHA-256 digests, and a presented token is
-/// compared with every one in constant time. `Debug` shows tenant names
-/// only.
-#[derive(Default)]
-pub struct Tokens(Vec<([u8; 32], Arc<Tenant>)>);
+/// compared with every one in constant time. They also count the socket
+/// connections waiting for their login ([`MAX_PENDING_LOGINS`]). `Debug`
+/// shows tenant names only.
+pub struct Tokens(Vec<([u8; 32], Arc<Tenant>)>, Semaphore);
+
+impl Default for Tokens {
+    fn default() -> Self {
+        Self(Vec::new(), Semaphore::new(MAX_PENDING_LOGINS))
+    }
+}
 
 impl Tokens {
     /// No tokens: every presented token is refused.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A place among the connections waiting for their login, or
+    /// `-32005`.
+    pub(crate) fn pending_place(&self) -> Result<SemaphorePermit<'_>, ErrorObject> {
+        (self.1.try_acquire()).map_err(|_| limit_reached("logins", MAX_PENDING_LOGINS))
     }
 
     /// Accept `token` for `tenant`.
@@ -125,6 +165,16 @@ impl fmt::Debug for Tokens {
     }
 }
 
+fn take(
+    places: &Arc<Semaphore>,
+    kind: &str,
+    max: usize,
+) -> Result<OwnedSemaphorePermit, ErrorObject> {
+    Arc::clone(places)
+        .try_acquire_owned()
+        .map_err(|_| limit_reached(kind, max))
+}
+
 fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
@@ -148,6 +198,15 @@ pub enum AccessError {
         list: &'static str,
         /// Its position in the list.
         index: usize,
+    },
+    /// An `mcp_commands` entry lets a client set `PATH` or a variable that
+    /// decides what code a program loads.
+    #[error("mcp_commands[{index}].env may not list {name}: it decides what code the server runs")]
+    McpEnv {
+        /// The entry's position in the list.
+        index: usize,
+        /// The refused variable.
+        name: String,
     },
     /// A workspace root does not exist or cannot be resolved.
     #[error("workspace root {} cannot be resolved: {source}", root.display())]

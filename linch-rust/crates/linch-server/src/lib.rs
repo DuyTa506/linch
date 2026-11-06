@@ -28,11 +28,15 @@
 //!      "tokens": [{"env": "LINCH_TOKEN_ACME"}, {"value": "a-long-random-token"}],
 //!      "allow": {
 //!        "scripted_provider": false,
+//!        "exec_tools": false,
+//!        "max_runs": 16,
+//!        "max_connections": 8,
 //!        "provider_base_urls": ["http://vllm.internal:8000/v1"],
 //!        "permission_modes": ["default", "accept_edits"],
 //!        "workspace_roots": ["/srv/linch/acme"],
-//!        "postgres_dsns": ["postgres://db.internal:5432/linch"],
-//!        "mcp_commands": ["/usr/local/bin/git-mcp"],
+//!        "postgres_dsns": ["postgres://linch_acme@db.internal:5432/linch"],
+//!        "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
+//!                          "args": ["--read-only"], "env": ["GIT_TOKEN"]}],
 //!        "mcp_urls": ["https://mcp.internal"]}}}}
 //! ```
 //!
@@ -40,8 +44,11 @@
 //! token. Each token names its tenant: a token is given inline or as the
 //! name of an environment variable read at startup. Every `allow` list
 //! is empty when absent (it allows nothing), except `permission_modes`,
-//! which defaults to `default` and `accept_edits`. See
-//! [`linch_rpc::Allowlists`] for how each list matches.
+//! which defaults to `default` and `accept_edits`; `scripted_provider`
+//! and `exec_tools` (`Bash` for workspace agents) are off when absent;
+//! `max_runs` and `max_connections`, the tenant's caps across all its
+//! connections, default to 16 and 8. See [`linch_rpc::Allowlists`] for
+//! how each entry matches.
 //!
 //! # Transports
 //!

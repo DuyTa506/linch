@@ -44,9 +44,14 @@ pub mod code {
     /// the connection.
     pub const UNAUTHENTICATED: i64 = -32003;
     /// Outside the tenant's allowlists, or naming another tenant;
-    /// `data.kind` says which check refused: `namespace`, `principal`,
-    /// `provider_base_url`, `workspace` or `mcp_command`.
+    /// `data.kind` names the check that refused (the crate docs list
+    /// them).
     pub const NOT_ALLOWED: i64 = -32004;
+    /// A cap is reached and nothing was started; try again once a run or
+    /// connection ends. `data` is `{kind, max}`: `kind` is `runs` or
+    /// `connections` (the tenant's, across its connections) or `logins`
+    /// (socket connections waiting to log in), `max` the cap.
+    pub const LIMIT_REACHED: i64 = -32005;
     /// `BuildError::Missing`: a required binding was not set.
     pub const BUILD_MISSING: i64 = -32010;
     /// `BuildError::Invalid`, or a workspace, policy or tool error.
@@ -112,6 +117,12 @@ pub(crate) fn invalid_request(message: &str) -> ErrorObject {
 
 pub(crate) fn invalid_params(message: &str) -> ErrorObject {
     ErrorObject::new(code::INVALID_PARAMS, message)
+}
+
+/// The cap on `kind` (`runs`, `connections` or `logins`), `max`, is reached.
+pub(crate) fn limit_reached(kind: &str, max: usize) -> ErrorObject {
+    let message = format!("at most {max} {kind} at once; try again once one ends");
+    ErrorObject::new(code::LIMIT_REACHED, message).with_data(json!({ "kind": kind, "max": max }))
 }
 
 /// `error`'s text followed by each cause not already part of it.

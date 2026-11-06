@@ -170,6 +170,18 @@ pub fn tenant(name: &str, allow: Allowlists) -> Access {
     Access::Tenant(Arc::new(Tenant::new(name, allow).unwrap()))
 }
 
+/// The `data.kind` of an `agent.open` of `config` refused as not allowed;
+/// `None` when it opened or failed otherwise.
+pub async fn refused(rpc: &Rpc, config: Value) -> Option<String> {
+    match rpc.call(method::AGENT_OPEN, config).await {
+        Ok(_) => None,
+        Err(error) => match refusal(error) {
+            (linch_rpc::code::NOT_ALLOWED, kind) => kind,
+            _ => None,
+        },
+    }
+}
+
 /// The code of a failed call.
 pub fn code_of(error: ClientError) -> i64 {
     match error {

@@ -35,11 +35,16 @@ pub struct AgentConfig {
     #[serde(default)]
     pub stores: StoreConfig,
     /// Workspace root for the built-in tools (`Read`, `Write`, `Edit`,
-    /// `Grep`, `Glob`, `Bash`). It must be an existing directory; a relative
-    /// path resolves against the process's working directory. Absent: the
-    /// agent has no tools.
+    /// `Grep`, `Glob`, and `Bash` unless `bash` is off). It must be an
+    /// existing directory; a relative path resolves against the process's
+    /// working directory. Absent: the agent has no tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
+    /// Whether the workspace tools include `Bash`, which runs commands
+    /// unconfined, as the process's user. On when absent; unused without a
+    /// workspace.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub bash: bool,
     /// Permission rules. Absent: mode `default` (read tools run, write and
     /// exec tools ask) with the workspace root, or `/`, as project root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +78,10 @@ pub struct AgentConfig {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// The model provider, chosen by `id`.
@@ -194,7 +203,7 @@ pub enum StoreConfig {
     /// [`PgPools`](crate::PgPools) it is given; when no open agent uses
     /// one, it connects, giving up after
     /// [`linch_postgres::CONNECT_TIMEOUT`] when the server cannot be
-    /// reached, and applies the migrations.
+    /// reached, and applies the migrations, giving up after 30 s.
     Postgres {
         /// Connection string, for example `postgres://user:pass@host/db`.
         #[serde(serialize_with = "redact::dsn")]

@@ -104,7 +104,7 @@ async fn a_websocket_and_a_socket_connection_share_a_postgres_pool() {
         &json!({"socket": path, "http": "127.0.0.1:0",
                 "tenants": {"acme": {"tokens": [{"value": TOKEN}],
                                      "allow": {"scripted_provider": true,
-                                               "postgres_dsns": [db.base]}}}})
+                                               "postgres_dsns": [db.dsn]}}}})
         .to_string(),
     )
     .unwrap();

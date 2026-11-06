@@ -14,9 +14,12 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
         "tenants": {
             "acme": {
                 "tokens": [{"env": "ACME_TOKEN"}, {"value": "tok-acme-inline-0001"}],
-                "allow": {"provider_base_urls": ["http://10.0.0.5:8000/v1"],
+                "allow": {"exec_tools": true, "max_runs": 3, "max_connections": 2,
+                          "provider_base_urls": ["http://10.0.0.5:8000/v1"],
                           "permission_modes": ["skip_dangerous"],
-                          "mcp_commands": ["/usr/local/bin/git-mcp"]}
+                          "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
+                                            "args": ["--read-only"],
+                                            "env": ["GIT_TOKEN"]}]}
             },
             "beta": {"tokens": [{"value": "tok-beta-inline-0001"}]}
         }
@@ -24,6 +27,10 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
     .to_string();
     let config = ServerConfig::from_json(&text).unwrap();
     assert_eq!(config.http, Some("127.0.0.1:8731".parse().unwrap()));
+    let (acme, beta) = (&config.tenants["acme"].allow, &config.tenants["beta"].allow);
+    assert!(acme.exec_tools && !beta.exec_tools);
+    assert_eq!((acme.max_runs, acme.max_connections), (Some(3), Some(2)));
+    assert_eq!((beta.max_runs, beta.max_connections), (None, None));
     let debug = format!("{config:?}");
     assert!(!debug.contains("tok-acme-inline-0001"), "{debug}");
     let env = |name: &str| (name == "ACME_TOKEN").then(|| "tok-acme-env-0001".to_owned());
@@ -49,6 +56,12 @@ fn bad_configs_are_refused_without_echoing_tokens() {
         (
             json!({"http": "127.0.0.1:1", "tenants": {"a": {"tokens": [{"file": "x"}]}}}),
             "unknown variant",
+        ),
+        // An MCP entry is an object: a program alone names no arguments.
+        (
+            json!({"http": "127.0.0.1:1", "tenants": {"a": {"tokens": [],
+                   "allow": {"mcp_commands": ["/usr/local/bin/git-mcp"]}}}}),
+            "invalid type",
         ),
     ];
     for (text, expected) in cases {
@@ -76,4 +89,8 @@ fn bad_configs_are_refused_without_echoing_tokens() {
     let error = built(json!({"acme": {"tokens": [{"value": "t"}],
                                       "allow": {"workspace_roots": ["/nonexistent/p11c"]}}}));
     assert!(error.to_string().contains("/nonexistent/p11c"), "{error}");
+    let error = built(json!({"acme": {"tokens": [{"value": "t"}],
+                                      "allow": {"mcp_commands": [{"command": "/bin/x",
+                                                                  "env": ["LD_PRELOAD"]}]}}}));
+    assert!(error.to_string().contains("LD_PRELOAD"), "{error}");
 }

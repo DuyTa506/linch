@@ -9,11 +9,12 @@ use url::Url;
 
 use super::{AgentConfig, McpTransportConfig, StoreConfig};
 
-/// Written in place of an env or header value, or a DSN that is not a URL.
-const REDACTED: &str = "[redacted]";
+/// Written in place of an env or header value, an argument, or a DSN or
+/// URL that is not a URL.
+pub(super) const REDACTED: &str = "[redacted]";
 
-/// Written in place of a password inside a DSN URL. `[redacted]` would be
-/// percent-encoded there.
+/// Written in place of a password, userinfo or query inside a URL.
+/// `[redacted]` would be percent-encoded there.
 const REDACTED_IN_URL: &str = "redacted";
 
 /// Serialize `dsn` with its password replaced, in the userinfo and in a
@@ -28,6 +29,33 @@ pub(super) fn values<S: Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.collect_map(map.keys().map(|key| (key, REDACTED)))
+}
+
+/// Serialize `args` with each one replaced; their count stays.
+pub(super) fn args<S: Serializer>(args: &[String], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(args.iter().map(|_| REDACTED))
+}
+
+/// Serialize `url` as [`redact_url`] writes it.
+pub(super) fn url<S: Serializer>(url: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&redact_url(url))
+}
+
+/// `url` with its user name, password and query replaced; the scheme,
+/// host, port and path stay. A URL that does not parse is replaced whole.
+pub(super) fn redact_url(url: &str) -> String {
+    let Ok(mut url) = Url::parse(url) else {
+        return REDACTED.into();
+    };
+    let user = url.username().is_empty() || url.set_username(REDACTED_IN_URL).is_ok();
+    let password = url.password().is_none() || url.set_password(Some(REDACTED_IN_URL)).is_ok();
+    if !(user && password) {
+        return REDACTED.into();
+    }
+    if url.query().is_some() {
+        url.set_query(Some(REDACTED_IN_URL));
+    }
+    url.into()
 }
 
 fn redact_dsn(dsn: &str) -> String {
@@ -56,9 +84,9 @@ fn redact_dsn(dsn: &str) -> String {
 
 impl AgentConfig {
     /// The config as JSON with its secrets: the DSN as given, MCP env and
-    /// header values. This is what `agent.open` sends and what decoding an
-    /// `AgentConfig` reads back; `Serialize` writes them redacted, for logs
-    /// and echoes.
+    /// header values, stdio args and HTTP URLs. This is what `agent.open`
+    /// sends and what decoding an `AgentConfig` reads back; `Serialize`
+    /// writes them redacted, for logs and echoes.
     ///
     /// Raises:
     ///     serde_json::Error: If a part of the config does not encode,
@@ -69,11 +97,17 @@ impl AgentConfig {
             value["stores"]["dsn"] = JsonValue::from(dsn.as_str());
         }
         for (index, server) in self.mcp_servers.iter().enumerate() {
-            let (key, secrets) = match &server.transport {
-                McpTransportConfig::Stdio { env, .. } => ("env", env),
-                McpTransportConfig::Http { headers, .. } => ("headers", headers),
-            };
-            value["mcp_servers"][index]["transport"][key] = serde_json::to_value(secrets)?;
+            let transport = &mut value["mcp_servers"][index]["transport"];
+            match &server.transport {
+                McpTransportConfig::Stdio { args, env, .. } => {
+                    transport["args"] = serde_json::to_value(args)?;
+                    transport["env"] = serde_json::to_value(env)?;
+                }
+                McpTransportConfig::Http { url, headers } => {
+                    transport["url"] = JsonValue::from(url.as_str());
+                    transport["headers"] = serde_json::to_value(headers)?;
+                }
+            }
         }
         Ok(value)
     }

@@ -96,6 +96,8 @@ async fn another_tenants_handles_and_runs_are_unknown() {
         json!({"tools": [host_tool("lookup", "read")]}),
     );
     config["namespace"] = json!("acme");
+    // The default policy (mode `default`); acme has no root to name.
+    config.as_object_mut().unwrap().remove("permissions");
     let agent = owner.open(config).await;
     let run_id = owner.start(&agent, "s1", "Look it up.").await;
     calls.recv().await.expect("the run waits in its tool");

@@ -24,7 +24,9 @@
 //!   **`connection.auth`** `{token}` ([`AuthParams`](protocol::AuthParams)),
 //!   answered with [`Authenticated`](protocol::Authenticated)
 //!   `{"tenant": "acme"}`. Any other first message or an unknown token gets
-//!   `-32003` and the connection closes; so does silence for 10 s.
+//!   `-32003` and the connection closes; so does silence for 10 s. At most
+//!   [`MAX_PENDING_LOGINS`] connections wait for their login at once; one
+//!   more gets `-32005` (`kind: logins`) at once and closes.
 //! - **HTTP** ([`serve_messages`] with [`Access::Tenant`]): `GET /rpc` with
 //!   `Authorization: Bearer <token>` upgrades to a WebSocket carrying one
 //!   message per text frame (a binary frame that is not UTF-8 ends the
@@ -41,19 +43,36 @@
 //!   another tenant's runs and sessions look missing (`-32021`).
 //! - `run.start`, `run.resume`, `run.approve`: a `principal`, if given, has
 //!   the tenant's name as its `tenant`. The server does not fill one in.
-//! - `agent.open`: the config passes the tenant's [`Allowlists`]: the
-//!   scripted provider only if allowed; a client-chosen provider
-//!   `base_url` (always present for vllm, sglang and llama.cpp) only at an
-//!   allowed origin, since the server's key goes there; a permission mode
-//!   in the allowed list (by default `default` and `accept_edits`, not
-//!   `skip_dangerous`); a `workspace` that is an existing directory under
-//!   an allowed root, replaced by its canonical path; a Postgres DSN only
-//!   for an allowed host, port, socket and database; MCP stdio commands
-//!   exactly as listed and MCP HTTP URLs at allowed origins.
+//! - `agent.open`: the config passes the tenant's [`Allowlists`]:
+//!   - the scripted provider only if allowed, and a client-chosen provider
+//!     `base_url` (always present for vllm, sglang and llama.cpp) only at
+//!     an allowed origin, since the server's key goes there;
+//!   - a permission mode in the allowed list (by default `default` and
+//!     `accept_edits`); `auto_allow` entries and rules that allow only
+//!     with `skip_dangerous` in it, since they let calls run unasked;
+//!   - a `workspace` and a `permissions.project_root` only as existing
+//!     directories under an allowed root, each replaced by its canonical
+//!     path (without a root, a config keeps the default policy);
+//!   - `Bash` only when the tenant allows exec tools; otherwise the config's
+//!     `bash` is turned off and the agent opens without it;
+//!   - a Postgres DSN only with an allowed host, port, socket, database,
+//!     user and options;
+//!   - an MCP stdio server only with the `command` and `args` of an entry,
+//!     setting only the `env` names that entry lists ([`McpCommand`]); an
+//!     MCP HTTP URL only at an allowed origin.
 //!
 //! A refusal is `-32004` with `data.kind` naming the check: `namespace`,
 //! `principal`, `provider`, `provider_base_url`, `permission_mode`,
-//! `workspace`, `postgres`, `mcp_command` or `mcp_url`.
+//! `auto_allow`, `permission_rule`, `workspace`, `project_root`,
+//! `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
+//!
+//! A tenant also has caps, counted across all its connections: at most
+//! `max_runs` runs driven at once (default [`DEFAULT_MAX_RUNS`]; a run
+//! holds its place until its `run.end`) and `max_connections` connections
+//! (default [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is
+//! refused with `-32005` and `data: {kind: "runs" | "connections", max}`;
+//! a refused connection gets that error (under the `connection.auth` id on
+//! the socket, a null id on HTTP) and closes. A local connection has none.
 //!
 //! # Framing
 //!
@@ -112,9 +131,9 @@
 //! Postgres DSN share one pool across all connections of a server process
 //! (the [`PgPools`](linch::PgPools) given to [`serve_lines`] or
 //! [`serve_messages`]); only an open that finds no pool in use connects,
-//! giving up after 5 s, and runs the migrations, and `agent.close` never
-//! closes a pool another agent uses. Provider keys are read from the server's
-//! environment (`DEEPSEEK_API_KEY`, ...; see
+//! giving up after 5 s, and runs the migrations, giving up after 30 s;
+//! `agent.close` never closes a pool another agent uses. Provider keys are
+//! read from the server's environment (`DEEPSEEK_API_KEY`, ...; see
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
 //! config's `mcp_servers` are connected in order before the result is sent.
 //! The result is [`AgentOpened`](protocol::AgentOpened):
@@ -285,11 +304,12 @@
 //! | -32002 | run busy | the connection already drives that run; `agent.close` of an agent with a driven run |
 //! | -32003 | unauthenticated | the socket's first message is not `connection.auth` with a known token |
 //! | -32004 | not allowed | a tenant check refused the request; `data: {kind}` |
+//! | -32005 | limit reached | a cap on runs, connections or pending logins; nothing started; `data: {kind, max}` |
 //! | -32010 | missing binding | `BuildError::Missing` |
 //! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash |
 //! | -32012 | contract not digestible | `BuildError::Contract` |
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
-//! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate |
+//! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate (or its 30 s timeout) |
 //! | -32015 | MCP server unavailable | first connect failed; `data.server` names it |
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |
@@ -326,7 +346,10 @@ mod message;
 pub mod protocol;
 mod server;
 
-pub use access::{Access, AccessError, Allowlists, Tenant, Tokens};
+pub use access::{
+    Access, AccessError, Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, MAX_PENDING_LOGINS,
+    McpCommand, Tenant, Tokens,
+};
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};

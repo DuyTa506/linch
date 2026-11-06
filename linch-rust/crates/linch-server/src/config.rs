@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use linch::PermissionMode;
-use linch_rpc::{AccessError, Allowlists, Tenant, Tokens};
+use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -67,17 +67,29 @@ impl fmt::Debug for TokenSource {
 pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub scripted_provider: bool,
+    /// Whether a workspace agent gets `Bash`, which runs commands
+    /// unconfined, as the server's user; off when absent.
+    pub exec_tools: bool,
+    /// Runs the tenant's connections may drive at once, together;
+    /// [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
+    pub max_runs: Option<usize>,
+    /// Connections that may act for the tenant at once;
+    /// [`linch_rpc::DEFAULT_MAX_CONNECTIONS`] when absent.
+    pub max_connections: Option<usize>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
-    /// when absent.
+    /// when absent. `auto_allow` and rules that allow need
+    /// `skip_dangerous` here.
     pub permission_modes: Option<Vec<PermissionMode>>,
-    /// Directories a workspace may be or lie under.
+    /// Directories a workspace and a project root may be or lie under.
     pub workspace_roots: Vec<PathBuf>,
-    /// Postgres servers a store DSN may connect to.
+    /// Postgres servers, databases, users and options a store DSN may use.
     pub postgres_dsns: Vec<String>,
-    /// Programs an MCP `stdio` transport may run.
-    pub mcp_commands: Vec<String>,
+    /// MCP `stdio` servers a transport may start, each
+    /// `{"command", "args"?, "env"?}`: the program and its arguments, and
+    /// the names of the variables a transport may set.
+    pub mcp_commands: Vec<McpCommand>,
     /// Endpoints an MCP `http` transport may name.
     pub mcp_urls: Vec<String>,
 }
@@ -175,15 +187,18 @@ impl AllowConfig {
     /// The [`Allowlists`] this describes.
     ///
     /// Raises:
-    ///     AccessError: If a URL or DSN is invalid or a root cannot be
-    ///         resolved.
+    ///     AccessError: If a URL or DSN is invalid, a root cannot be
+    ///         resolved, or an MCP entry lists a refused variable.
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
+            .exec_tools(self.exec_tools)
+            .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
+            .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?
-            .mcp_commands(&self.mcp_commands)
+            .mcp_commands(&self.mcp_commands)?
             .mcp_urls(&self.mcp_urls)?;
         if let Some(modes) = &self.permission_modes {
             allow = allow.permission_modes(modes);

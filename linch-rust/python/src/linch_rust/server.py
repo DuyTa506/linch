@@ -27,12 +27,22 @@ class Server:
     server's input: it drops its runs where they stand (a Postgres run stays
     resumable), exits, and is killed if it has not after 10 seconds.
 
+    The server keeps provider keys from the processes it starts (`Bash`, a
+    stdio MCP server) and, on Linux, from `/proc/<server pid>/environ`. This
+    process is not protected that way: keys in its own environment when it
+    started stay readable to any process of the same user, the server's
+    children included, through `/proc/<this pid>/environ`, and `env` does
+    not change that. When agents run untrusted commands, keep keys out of
+    this process's environment (read them from a secret store) and hand
+    them to the server in `env`.
+
     Args:
         binary: Path of the server binary; found by `find_server` when absent
             (the wheel's bundled binary, then `LINCH_SERVER_BIN`, then cargo's
             target dir).
-        env: The server's environment, where provider keys such as
-            `DEEPSEEK_API_KEY` are read; this process's when absent.
+        env: The server's whole environment, where it reads provider keys
+            such as `DEEPSEEK_API_KEY`; nothing else is passed on. This
+            process's environment when absent.
     """
 
     def __init__(

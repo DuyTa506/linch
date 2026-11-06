@@ -10,7 +10,7 @@ use std::time::Duration;
 use common::*;
 use linch::PgPools;
 use linch_rpc::protocol::{Authenticated, method};
-use linch_rpc::{Access, Allowlists, ClientError, Tenant, Tokens, code};
+use linch_rpc::{Access, Allowlists, ClientError, MAX_PENDING_LOGINS, Tenant, Tokens, code};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -127,4 +127,48 @@ async fn stop_ends_a_connection_that_waits_for_its_login() {
     stop.cancel();
     let ended = tokio::time::timeout(Duration::from_secs(5), serving).await;
     ended.expect("stop ends the login wait").unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn past_max_pending_logins_a_new_connection_is_refused_at_once() {
+    let access = login();
+    let stop = CancellationToken::new();
+    let connect = || {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(theirs);
+        let pools = Arc::new(PgPools::new());
+        let serve = linch_rpc::serve_lines(reader, writer, access.clone(), pools, stop.clone());
+        (tokio::io::split(ours), tokio::spawn(serve))
+    };
+    let mut waiting: Vec<_> = (0..MAX_PENDING_LOGINS).map(|_| connect()).collect();
+    // Let every one of them reach its login.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let first_line = |reader| async move {
+        let mut lines = BufReader::new(reader).lines();
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+        let line = line.expect("an answer well before the login timeout");
+        serde_json::from_str::<Value>(&line.unwrap().unwrap()).unwrap()
+    };
+    let ((reader, _writer), serving) = connect();
+    let refused = first_line(reader).await;
+    assert_eq!(refused["error"]["code"], code::LIMIT_REACHED);
+    let expected = json!({"kind": "logins", "max": MAX_PENDING_LOGINS});
+    assert_eq!(refused["error"]["data"], expected);
+    serving.await.unwrap().unwrap();
+    // A login that completes frees its place for a new connection.
+    let ((reader, mut writer), _serving) = waiting.pop().unwrap();
+    let auth = json!({"jsonrpc": "2.0", "id": 1, "method": "connection.auth",
+                      "params": {"token": TOKEN}});
+    writer
+        .write_all(format!("{auth}\n").as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(first_line(reader).await["result"]["tenant"], "acme");
+    let ((reader, mut writer), _serving) = connect();
+    writer
+        .write_all(format!("{auth}\n").as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(first_line(reader).await["result"]["tenant"], "acme");
+    stop.cancel();
 }
