@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from ._rpc import Connection
 from .events import Envelope, decode_envelope
-from .run import Run
+from .run import Observer, Run
 
 
 @dataclass(frozen=True)
@@ -39,10 +39,18 @@ class Agent:
             resumed or approved only under the contract it started with.
     """
 
-    def __init__(self, conn: Connection, handle: str, contract: str) -> None:
+    def __init__(
+        self,
+        conn: Connection,
+        handle: str,
+        contract: str,
+        observer: Callable[[], Observer | None] | None = None,
+    ) -> None:
         self.handle = handle
         self.contract = contract
         self._conn = conn
+        # Makes the tracer of each run, resume or approve; None when untraced.
+        self._observer = observer
 
     async def run(self, session_id: str, prompt: str, *, run_id: str | None = None) -> Run:
         """Start a run of `prompt` in a session, which is created when missing.
@@ -122,8 +130,9 @@ class Agent:
         return [decode_envelope(raw) for raw in answer["events"]]
 
     async def _start(self, method: str, params: dict[str, Any]) -> Run:
+        observer = self._observer() if self._observer is not None else None
         run_id, queue = await self._conn.request_run(method, params)
-        return Run(self._conn, run_id, queue)
+        return Run(self._conn, run_id, queue, observer)
 
 
 def _decision(decision: Decision) -> dict[str, str]:

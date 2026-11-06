@@ -42,6 +42,17 @@ impl Tenant {
                 format!("permission mode {mode:?} is not in the tenant's permission_modes");
             return Err(refused("permission_mode", message));
         }
+        let unasked = config.tasks || config.deep_agent.is_some();
+        if unasked
+            && !allow
+                .permission_modes
+                .contains(&PermissionMode::SkipDangerous)
+        {
+            // The facade adds the task tools to `auto_allow` after these checks.
+            let message = "tasks and deep_agent auto-allow the task tools, so they need \
+                           skip_dangerous in the tenant's permission_modes";
+            return Err(refused("auto_allow", message.into()));
+        }
         if let Some(policy) = &mut config.permissions {
             allow.admit_grants(policy)?;
             let root = PathBuf::from(&policy.project_root);

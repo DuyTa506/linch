@@ -51,7 +51,8 @@
 //!     an allowed origin, since the server's key goes there;
 //!   - a permission mode in the allowed list (by default `default` and
 //!     `accept_edits`); `auto_allow` entries and rules that allow only
-//!     with `skip_dangerous` in it, since they let calls run unasked;
+//!     with `skip_dangerous` in it, since they let calls run unasked, and
+//!     so too `tasks` and `deep_agent`, which auto-allow the task tools;
 //!   - a `workspace` and a `permissions.project_root` only as existing
 //!     directories under an allowed root, each replaced by its canonical
 //!     path (without a root, a config keeps the default policy);

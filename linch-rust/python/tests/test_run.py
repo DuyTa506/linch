@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+from typing import cast
 
 import pytest
 from scripted import config, text_turn
 
 from linch_rust import (
+    AgentConfig,
     AssistantEvent,
     InitEvent,
     OpenError,
@@ -73,8 +75,8 @@ async def test_events_replays_the_durable_envelopes_after_a_seq() -> None:
 
 async def test_an_invalid_config_is_refused_at_open() -> None:
     async with Server() as server:
-        bad = config([text_turn("x")])
-        bad["api_key"] = "sk-never"
+        # Only a cast gets an unknown field past the type checker.
+        bad = cast(AgentConfig, {**config([text_turn("x")]), "api_key": "sk-never"})
         with pytest.raises(ProtocolError) as raised:
             await server.open_agent(bad)
     assert raised.value.code == -32602
@@ -101,7 +103,7 @@ async def test_the_server_reads_keys_only_from_the_env_it_is_given(
 ) -> None:
     # A fake key; opening builds the client offline and no run is started.
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-p11e-not-a-real-key")
-    deepseek = {
+    deepseek: AgentConfig = {
         "namespace": "p12",
         "spec": {"model": "deepseek-chat"},
         "provider": {"id": "deepseek"},

@@ -116,6 +116,29 @@ async fn auto_allow_and_allow_rules_need_skip_dangerous() {
 }
 
 #[tokio::test]
+async fn the_task_tools_and_the_deep_agent_need_skip_dangerous() {
+    // Both put the task tools in `auto_allow` after the checks, so they
+    // run unasked in every mode.
+    let dir = tempfile::tempdir().unwrap();
+    let asks = [
+        json!({"tasks": true}),
+        json!({"deep_agent": {"durable": false}}),
+    ];
+    let rpc = Rpc::remote(acme(dir.path(), |allow| allow));
+    for extra in &asks {
+        let refusal = refused(&rpc, config(extra.clone())).await;
+        assert_eq!(refusal.as_deref(), Some("auto_allow"), "{extra}");
+    }
+    let modes = [PermissionMode::Default, PermissionMode::SkipDangerous];
+    let consenting = Rpc::remote(acme(dir.path(), |allow| allow.permission_modes(&modes)));
+    let local = Rpc::new();
+    for extra in asks {
+        consenting.open(config(extra.clone())).await;
+        local.open(config(extra)).await;
+    }
+}
+
+#[tokio::test]
 async fn a_project_root_must_lie_under_an_allowed_root() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("acme");

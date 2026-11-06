@@ -10,7 +10,7 @@ ENV_VAR = "LINCH_SERVER_BIN"
 _NAME = "linch-server"
 _DIST = "linch-rust"
 # src/linch_rust/_binary.py -> linch-rust/, the cargo workspace.
-_WORKSPACE = Path(__file__).resolve().parents[3]
+WORKSPACE = Path(__file__).resolve().parents[3]
 
 
 def find_server() -> Path:
@@ -31,13 +31,13 @@ def find_server() -> Path:
     explicit = os.environ.get(ENV_VAR)
     if explicit:
         return Path(explicit)
-    target = Path(os.environ.get("CARGO_TARGET_DIR") or _WORKSPACE / "target")
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or WORKSPACE / "target")
     builds = [target / profile / _NAME for profile in ("debug", "release")]
     found = [build for build in builds if build.is_file()]
     if not found:
         raise FileNotFoundError(
             f"no {_NAME} binary: install the {_DIST} wheel, set {ENV_VAR}, or run "
-            f"`cargo build -p {_NAME}` in {_WORKSPACE} (looked in {target})"
+            f"`cargo build -p {_NAME}` in {WORKSPACE} (looked in {target})"
         )
     return max(found, key=lambda build: build.stat().st_mtime)
 

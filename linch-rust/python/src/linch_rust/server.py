@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._binary import find_server
 from ._rpc import Connection
 from .agent import Agent
 from .callbacks import Callback
+from .config import AgentConfig
 from .errors import LinchError
+from .run import Observer
 from .tools import HostTool
+
+if TYPE_CHECKING:
+    from .otel import Telemetry
 
 # Server lines carry whole envelopes, tool results included.
 _LINE_LIMIT = 64 * 1024 * 1024
@@ -99,20 +105,26 @@ class Server:
 
     async def open_agent(
         self,
-        config: Mapping[str, Any],
+        config: AgentConfig,
         tools: Sequence[HostTool] = (),
         callbacks: Sequence[Callback] = (),
+        *,
+        telemetry: Telemetry | None = None,
     ) -> Agent:
         """Open an agent from its config, with host tools and callbacks.
 
         Args:
-            config: The `AgentConfig` as JSON (`namespace`, `spec`,
-                `provider`, and optionally `stores`, `workspace`,
-                `permissions`, `mcp_servers`); the `linch-rpc` crate docs
-                show its shape. It never carries a provider key.
+            config: The agent as data: `namespace`, `spec` and `provider`,
+                and optionally `stores`, `workspace`, `bash`, `permissions`,
+                `mcp_servers`, `skills`, `subagents`, `workers`, `mailbox`,
+                `config_dir`, `filesystem` and `tasks` (see `AgentConfig`).
+                It never carries a provider key.
             tools: Host tools made with `tool`, run in this process.
             callbacks: Intercept callbacks made with `callback`, answered in
                 this process.
+            telemetry: The OpenTelemetry providers its runs are traced and
+                measured with (see `linch_rust.otel`); the global ones when
+                absent and the `otel` extra is installed, none otherwise.
 
         Returns:
             The opened agent.
@@ -122,7 +134,7 @@ class Server:
             ProtocolError: The config or a declaration is invalid.
         """
         _, conn = self._started()
-        params = dict(config)
+        params: dict[str, Any] = dict(config)
         if tools:
             params["tools"] = [host_tool.spec() for host_tool in tools]
         if callbacks:
@@ -134,9 +146,28 @@ class Server:
             {host_tool.name: host_tool for host_tool in tools},
             {(declared.point, declared.policy_id): declared for declared in callbacks},
         )
-        return Agent(conn, handle, str(opened["contract"]))
+        return Agent(conn, handle, str(opened["contract"]), _observers(config, telemetry))
 
     def _started(self) -> tuple[asyncio.subprocess.Process, Connection]:
         if self._process is None or self._conn is None:
             raise LinchError("the server is not started; use `async with Server()`")
         return self._process, self._conn
+
+
+def _observers(
+    config: AgentConfig, telemetry: Telemetry | None
+) -> Callable[[], Observer | None] | None:
+    """Make each run's tracer, preset with the config's provider and model."""
+    if telemetry is None:
+        try:
+            from .otel import Telemetry
+        except ImportError:  # the `otel` extra is not installed
+            return None
+        telemetry = Telemetry()
+    provider = config["provider"].get("id")
+    model = config["spec"].get("model")
+    return functools.partial(
+        telemetry.observer,
+        provider=provider if isinstance(provider, str) else None,
+        model=model if isinstance(model, str) else None,
+    )

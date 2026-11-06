@@ -7,6 +7,11 @@ license = "MIT"
 # orjson parses the server's lines: about three times faster than `json`.
 dependencies = ["orjson>=3.10"]
 
+[project.optional-dependencies]
+# Spans and metrics of each run through the host's OpenTelemetry providers
+# (`linch_rust.otel`); the API only, as in Python Linch: the host owns the SDK.
+otel = ["opentelemetry-api>=1.20"]
+
 [build-system]
 requires = ["maturin>=1.16,<2"]
 build-backend = "maturin"
@@ -18,6 +23,18 @@ bindings = "bin"
 manifest-path = "../crates/linch-server/Cargo.toml"
 python-source = "src"
 module-name = "linch_rust"
+# The `linch-rust` console script (`linch_rust.cli:main`). maturin refuses
+# `[project.scripts]` next to a binary, so it ships as a wheel data script
+# whose `#!python` line the installer points at its interpreter (the sdist
+# carries it by the `data/**/*` include below).
+data = "data"
+# `src/linch_rust/_docs` links to linch-rust/docs, which maturin does not walk
+# into: the globs copy its files, as files, into the sdist and the wheel.
+include = [
+    { path = "linch_rust/_docs/**/*", format = "sdist" },
+    { path = "linch_rust/_docs/**/*", format = "wheel" },
+    { path = "data/**/*", format = "sdist" },
+]
 
 [dependency-groups]
 dev = [
@@ -27,6 +44,8 @@ dev = [
     "pyright>=1.1.390",
     # Test-only: creates and drops the Postgres schema of the resume test.
     "psycopg[binary]>=3.2",
+    # Test-only: the in-memory span and metric exporters the otel tests read.
+    "opentelemetry-sdk>=1.20",
 ]
 
 # The dev venv does not install the project: an editable maturin install
