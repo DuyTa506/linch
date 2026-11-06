@@ -90,23 +90,28 @@ are logged and retried on the next poll.
 
 ### Concurrency limits
 
-`set_queue_limit(pool, queue, limit)` (`crates/linch-worker/src/lease.rs:72`)
+`set_queue_limit(pool, queue, limit)` (`crates/linch-worker/src/lease.rs:107`)
 stores a queue's limit with the queue, so every worker enforces the same one;
 0 means none. A dequeue on a limited queue takes a transaction-scoped advisory
 lock for that queue, counts the jobs held by live workers anywhere (owned,
 still hidden, not failed), and takes nothing at the limit
-(`lease.rs:99-122`). Jobs held when the limit is lowered keep running.
+(`lease.rs:134-157`). Jobs held when the limit is lowered keep running.
 
 ## Leases and fencing
 
 Two fences protect a run, one per layer:
 
-- **The job.** A dequeue (`lease.rs:90`) takes the oldest visible job of the
+- **The job.** A dequeue (`lease.rs:125`) takes the oldest visible job of the
   queue in the worker's namespaces with `FOR UPDATE SKIP LOCKED`, hides it for
   the visibility timeout, sets `owner` and adds 1 to `attempts`. That
   `attempts` value is the fencing token: heartbeat, record-run, ack, release
   and fail all match on it, so a worker that lost the job changes nothing
-  (`lease.rs:1-4`).
+  (`lease.rs:1-6`). Each is one autocommit statement at the pool's default
+  isolation. Above `READ COMMITTED`, one that waited on another update of
+  the job row (the attempt's own heartbeat still in flight when the run
+  ends, or another worker's dequeue) fails with a serialization error
+  (`40001`) once that update commits; it wrote nothing and runs again, up to
+  three tries in all (`lease.rs:57-87`).
 - **The run.** Driving the run claims it in the run store, which adds 1 to its
   epoch and fences out every earlier holder
   ([stores](./stores.md#fencing)).
@@ -161,7 +166,7 @@ busy session never counts, so a start job is never given up on for that.
 
 A failed job is the dead letter: `failed_at` and `error` are set, it is never
 dequeued again, and it no longer counts against the one-job-per-run index or
-a queue limit (`lease.rs:247-258`). `error` holds the whole error chain
+a queue limit (`lease.rs:288-302`). `error` holds the whole error chain
 (`crates/linch-worker/src/error.rs:40-49`). When a run is failed with its job,
 the run goes first: a crash in between leaves a terminal run, which the job's
 next attempt acks (`settle.rs:46-56`).
@@ -257,7 +262,9 @@ listener; see [connecting and sizing a pool](./stores.md#connecting-and-sizing-a
 `crates/linch-worker/tests/pg/` covers one job per run, exclusive holds and
 queue limits, retries and back-off, busy sessions, suspend and approve,
 takeover after a lost heartbeat, schedule firing, and the `READ COMMITTED`
-pin. Each test skips when `LINCH_TEST_PG_DSN` is unset.
+pin; `crates/linch-worker/src/lease/tests.rs` runs each fenced write behind
+another update of its job row under `REPEATABLE READ`. Each test skips when
+`LINCH_TEST_PG_DSN` is unset.
 
 ---
 
