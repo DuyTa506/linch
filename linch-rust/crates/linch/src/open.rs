@@ -41,7 +41,8 @@ impl AgentConfig {
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: connects a pool and runs the migrations), connects the
     /// MCP servers in order, then builds the agent. Nothing is written to
-    /// the stores.
+    /// the stores. [`Agent::close_session`] drops what the workspace tools
+    /// recorded as read in that session, so its next write must read again.
     ///
     /// Args:
     ///     tools: Registry the agent runs with. Tools already in it come
@@ -65,8 +66,9 @@ impl AgentConfig {
         hooks: Arc<Hooks>,
     ) -> Result<OpenedAgent, OpenError> {
         let provider = provider(self.provider)?;
+        let reads = Arc::new(ReadTracker::new());
         let root = match self.workspace {
-            Some(root) => Some(register_workspace(&tools, root).await?),
+            Some(root) => Some(register_workspace(&tools, root, Arc::clone(&reads)).await?),
             None => None,
         };
         let policy = self.permissions.unwrap_or_else(|| {
@@ -84,6 +86,7 @@ impl AgentConfig {
             .run_store(runs)
             .session_store(sessions)
             .namespace(self.namespace)
+            .on_session_close(move |session| reads.forget(session))
             .build();
         match built {
             Ok(agent) => Ok(OpenedAgent { agent, mcp }),
@@ -159,9 +162,13 @@ async fn disconnect(servers: Vec<McpServer>) {
     }
 }
 
-/// Register the six workspace tools over `root`; returns the canonical
-/// root as a string.
-async fn register_workspace(tools: &ToolRegistry, root: PathBuf) -> Result<String, OpenError> {
+/// Register the six workspace tools over `root`, sharing `reads`; returns
+/// the canonical root as a string.
+async fn register_workspace(
+    tools: &ToolRegistry,
+    root: PathBuf,
+    reads: Arc<ReadTracker>,
+) -> Result<String, OpenError> {
     // `LocalFs::new` canonicalizes the root: blocking file system calls.
     let fs = match tokio::task::spawn_blocking(move || LocalFs::new(root)).await {
         Ok(fs) => fs.map_err(OpenError::Workspace)?,
@@ -169,7 +176,7 @@ async fn register_workspace(tools: &ToolRegistry, root: PathBuf) -> Result<Strin
     };
     let fs = Arc::new(fs);
     let canonical = fs.root().display().to_string();
-    for tool in workspace_tools(fs, Arc::new(ReadTracker::new())) {
+    for tool in workspace_tools(fs, reads) {
         // The registry lives as long as the agent; the handle is not needed.
         let _ = tools.register(tool)?;
     }

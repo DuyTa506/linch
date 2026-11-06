@@ -97,6 +97,58 @@ async fn a_scripted_agent_reads_a_workspace_file() {
 }
 
 #[tokio::test]
+async fn closing_a_session_forgets_what_it_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "alpha\n").unwrap();
+    let turn = |id: &str, tool: &str, input: Value| {
+        TurnBuilder::new("scripted-model")
+            .tool_call(id, tool, &input)
+            .build()
+    };
+    let text = |text: &str| TurnBuilder::new("scripted-model").text(text).build();
+    let turns = json!([
+        turn("call_1", "Read", json!({"file_path": "notes.txt"})),
+        text("Read it."),
+        turn(
+            "call_2",
+            "Write",
+            json!({"file_path": "notes.txt", "content": "beta\n"})
+        ),
+        text("Tried."),
+    ]);
+    let mut config = scripted(turns, dir.path().to_str());
+    config.permissions = Some(
+        serde_json::from_value(json!({"mode": "accept_edits", "project_root": dir.path()}))
+            .unwrap(),
+    );
+    let opened = config.open().await.unwrap();
+    let agent = opened.agent();
+    let mut writes = 0;
+    for prompt in ["Read notes.txt", "Overwrite notes.txt"] {
+        if prompt.starts_with("Overwrite") {
+            agent.close_session(&"s1".into());
+        }
+        let mut stream = agent.run(prompt, RunOptions::new("s1"));
+        while let Some(item) = stream.next().await {
+            if let Event::ToolCallEnd(end) = item.unwrap().event
+                && end.tool_name == "Write"
+            {
+                writes += 1;
+                let result = serde_json::to_string(&end.result).unwrap();
+                assert!(end.result.is_error, "{result}");
+                assert!(
+                    result.contains("Read notes.txt before changing it"),
+                    "{result}"
+                );
+            }
+        }
+    }
+    assert_eq!(writes, 1);
+    let kept = std::fs::read_to_string(dir.path().join("notes.txt")).unwrap();
+    assert_eq!(kept, "alpha\n");
+}
+
+#[tokio::test]
 async fn a_missing_workspace_or_blank_model_fails_to_open() {
     let missing = scripted(json!([]), Some("/nonexistent/linch-p11"));
     assert!(matches!(missing.open().await, Err(OpenError::Workspace(_))));
