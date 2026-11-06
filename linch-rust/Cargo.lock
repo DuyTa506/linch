@@ -1719,6 +1719,7 @@ dependencies = [
  "async-trait",
  "futures",
  "linch",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

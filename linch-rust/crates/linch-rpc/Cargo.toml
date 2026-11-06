@@ -21,5 +21,7 @@ tokio = { version = "1.54.1", features = ["io-util", "macros", "rt", "sync", "ti
 tokio-util = { version = "0.7.20", features = ["codec", "rt"] }
 
 [dev-dependencies]
+# The `mcp_server` example serves linch-mcp's test server on stdio.
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "rt", "sync", "time"] }

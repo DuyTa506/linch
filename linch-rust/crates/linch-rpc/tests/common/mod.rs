@@ -53,7 +53,8 @@ impl Rpc {
         Self::connected(Client::in_process_with(handler))
     }
 
-    fn connected((client, notifications): (Client, Notifications)) -> Self {
+    /// Wrap a connected client.
+    pub fn connected((client, notifications): (Client, Notifications)) -> Self {
         Self {
             client,
             notifications,
