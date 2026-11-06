@@ -7,6 +7,7 @@ use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn};
 use serde::{Deserialize, Serialize};
 
 mod mcp;
+mod redact;
 
 pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
 
@@ -15,6 +16,10 @@ pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
 /// Decoding rejects unknown fields at every level, so a misspelt or
 /// unsupported option (an `api_key`, say) fails instead of being ignored.
 /// Open it with [`AgentConfig::open`].
+///
+/// Serializing is for logs and echoes, so it hides the secrets: the DSN
+/// password and the MCP env and header values. Send or store a config
+/// with [`AgentConfig::to_value_with_secrets`], which keeps them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
@@ -150,7 +155,9 @@ pub enum ReasoningSummaryConfig {
 
 /// Where an agent's runs and sessions live.
 ///
-/// `Debug` hides the DSN, which usually holds a password.
+/// `Debug` hides the DSN, which usually holds a password; serializing
+/// writes it with the password replaced (see
+/// [`AgentConfig::to_value_with_secrets`]).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreConfig {
@@ -162,6 +169,7 @@ pub enum StoreConfig {
     /// reached, and applies the migrations.
     Postgres {
         /// Connection string, for example `postgres://user:pass@host/db`.
+        #[serde(serialize_with = "redact::dsn")]
         dsn: String,
     },
 }

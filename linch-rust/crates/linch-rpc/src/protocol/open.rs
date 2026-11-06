@@ -15,6 +15,8 @@ use super::CallbackSpec;
 ///
 /// Decoding is strict at every level: `tools` and `callbacks` are taken
 /// out, and the remaining members must form a valid [`AgentConfig`].
+/// Encoding writes the config's secrets, since this is what a client
+/// sends ([`AgentConfig::to_value_with_secrets`]); log the config instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenParams {
     /// The agent config.
@@ -48,7 +50,9 @@ pub struct HostToolSpec {
 
 impl Serialize for OpenParams {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut object = match serde_json::to_value(&self.config).map_err(S::Error::custom)? {
+        // The server needs the DSN and the MCP env and headers as given.
+        let config = self.config.to_value_with_secrets();
+        let mut object = match config.map_err(S::Error::custom)? {
             JsonValue::Object(object) => object,
             _ => return Err(S::Error::custom("an agent config encodes as an object")),
         };
@@ -135,5 +139,30 @@ mod tests {
         let mut unknown = bare;
         unknown["hooks"] = json!([]);
         assert!(serde_json::from_value::<OpenParams>(unknown).is_err());
+    }
+
+    #[test]
+    fn open_params_send_the_secrets_the_config_hides() {
+        let wire = json!({
+            "namespace": "t",
+            "spec": {"model": "m"},
+            "provider": {"id": "deepseek"},
+            "stores": {"type": "postgres", "dsn": "postgres://linch:pw-1@db/linch"},
+            "mcp_servers": [
+                {"name": "git", "transport": {"type": "stdio", "command": "git-mcp",
+                                              "env": {"TOKEN": "tok-1"}}},
+                {"name": "web", "transport": {"type": "http", "url": "https://mcp.internal",
+                                              "headers": {"Authorization": "Bearer tok-2"}}},
+            ],
+        });
+        let params: OpenParams = serde_json::from_value(wire).unwrap();
+        let logged = serde_json::to_string(&params.config).unwrap();
+        assert!(
+            !logged.contains("pw-1") && !logged.contains("tok-"),
+            "{logged}"
+        );
+        let sent = serde_json::to_value(&params).unwrap();
+        assert_eq!(sent["stores"]["dsn"], "postgres://linch:pw-1@db/linch");
+        assert_eq!(serde_json::from_value::<OpenParams>(sent).unwrap(), params);
     }
 }

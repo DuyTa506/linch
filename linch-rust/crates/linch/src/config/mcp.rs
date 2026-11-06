@@ -37,7 +37,9 @@ pub struct McpConfig {
 /// How to reach one MCP server, by `type`.
 ///
 /// `Debug` shows environment and header names but not their values, which
-/// often hold secrets. Serializing writes the values.
+/// often hold secrets, and serializing writes each value as `[redacted]`.
+/// [`AgentConfig::to_value_with_secrets`](super::AgentConfig::to_value_with_secrets)
+/// keeps them.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpTransportConfig {
@@ -51,7 +53,7 @@ pub enum McpTransportConfig {
         /// Extra environment variables. Of the server's own environment the
         /// child sees only `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM` and
         /// `USER`.
-        #[serde(default)]
+        #[serde(default, serialize_with = "super::redact::values")]
         env: BTreeMap<String, String>,
     },
     /// A streamable HTTP endpoint.
@@ -59,7 +61,7 @@ pub enum McpTransportConfig {
         /// Endpoint URL, for example `http://127.0.0.1:8000/mcp`.
         url: String,
         /// Headers sent with every request, for example `Authorization`.
-        #[serde(default)]
+        #[serde(default, serialize_with = "super::redact::values")]
         headers: BTreeMap<String, String>,
     },
 }
