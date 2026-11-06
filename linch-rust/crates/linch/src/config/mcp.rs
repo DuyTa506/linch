@@ -8,6 +8,8 @@ use std::time::Duration;
 use linch_mcp::{McpServerConfig, McpTransport, ReconnectPolicy};
 use serde::{Deserialize, Serialize};
 
+use super::redact;
+
 /// One MCP server. The agent connects it when it opens, registers its tools
 /// as `mcp__<name>__<tool>`, and disconnects it when it closes.
 ///
@@ -36,8 +38,10 @@ pub struct McpConfig {
 
 /// How to reach one MCP server, by `type`.
 ///
-/// `Debug` shows environment and header names but not their values, which
-/// often hold secrets, and serializing writes each value as `[redacted]`.
+/// `Debug` and serializing show environment and header names but not their
+/// values, which often hold secrets, nor the stdio arguments or a URL's
+/// user name, password and query: each is written as `[redacted]` (inside
+/// a URL, `redacted`).
 /// [`AgentConfig::to_value_with_secrets`](super::AgentConfig::to_value_with_secrets)
 /// keeps them.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +52,7 @@ pub enum McpTransportConfig {
         /// Program to run, looked up on `PATH`.
         command: String,
         /// Arguments passed to the program.
-        #[serde(default)]
+        #[serde(default, serialize_with = "super::redact::args")]
         args: Vec<String>,
         /// Extra environment variables. Of the server's own environment the
         /// child sees only `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM` and
@@ -59,6 +63,7 @@ pub enum McpTransportConfig {
     /// A streamable HTTP endpoint.
     Http {
         /// Endpoint URL, for example `http://127.0.0.1:8000/mcp`.
+        #[serde(serialize_with = "super::redact::url")]
         url: String,
         /// Headers sent with every request, for example `Authorization`.
         #[serde(default, serialize_with = "super::redact::values")]
@@ -129,12 +134,12 @@ impl fmt::Debug for McpTransportConfig {
             Self::Stdio { command, args, env } => f
                 .debug_struct("Stdio")
                 .field("command", command)
-                .field("args", args)
+                .field("args", &vec![redact::REDACTED; args.len()])
                 .field("env", &env.keys().collect::<Vec<_>>())
                 .finish(),
             Self::Http { url, headers } => f
                 .debug_struct("Http")
-                .field("url", url)
+                .field("url", &redact::redact_url(url))
                 .field("headers", &headers.keys().collect::<Vec<_>>())
                 .finish(),
         }
