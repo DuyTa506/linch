@@ -43,6 +43,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
         Event::Usage(UsageEvent {
             usage: Usage::default(),
             cumulative: Usage::default(),
+            cost_usd: Some(0.25),
+            cumulative_cost_usd: Some(1.5),
         }),
         Event::ToolCallStart(ToolCallStartEvent {
             tool_use_id: "c1".into(),
@@ -55,6 +57,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             result: ToolResultBlock::text("c1", "done", false),
             duration_ms: 1,
             canonical_output: None,
+            metadata: JsonObject::new(),
         }),
         Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),
@@ -156,6 +159,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             stop_reason: StopReason::EndTurn,
             total_usage: Usage::default(),
             usage_complete: true,
+            duration_ms: 0,
+            total_cost_usd: Some(1.5),
             final_text: None,
             structured_output: None,
             structured_error: None,

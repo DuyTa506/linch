@@ -2,21 +2,24 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
 use super::Outbox;
+use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
+use super::progress::Progress;
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
-use crate::events::model_call::ModelCallReceiptEvent;
+use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
 use crate::journal::{Journal, ToolRecovery};
 use crate::message::Message;
 use crate::provider::call::ModelCall;
 use crate::provider::{AssistantAssembly, ProviderError};
 use crate::registry::ToolSnapshot;
-use crate::run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
+use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
 use crate::usage::Usage;
@@ -76,40 +79,6 @@ pub(super) struct Batch {
     pub(super) after_seq: Option<u64>,
 }
 
-/// Turn index, usage and last stop reason carried over from durable state.
-#[derive(Clone, Copy)]
-pub(super) struct Progress {
-    pub(super) turn: u32,
-    pub(super) usage: Usage,
-    pub(super) usage_complete: bool,
-    /// Why the last response stopped, for `post_turn`.
-    pub(super) stop_reason: StopReason,
-}
-
-impl Progress {
-    /// A new run: turn 0, nothing spent.
-    pub(super) const FIRST: Self = Self {
-        turn: 0,
-        usage: Usage {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-        },
-        usage_complete: true,
-        stop_reason: StopReason::EndTurn,
-    };
-
-    pub(super) fn of(checkpoint: &Checkpoint, stop_reason: StopReason) -> Self {
-        Self {
-            turn: checkpoint.turn,
-            usage: checkpoint.usage,
-            usage_complete: checkpoint.usage_complete,
-            stop_reason,
-        }
-    }
-}
-
 /// The in-memory log of the stored session `entries`.
 pub(super) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
     let mut log = SessionLog::new();
@@ -141,8 +110,12 @@ pub(super) struct Runner {
     pub(super) turn: u32,
     pub(super) usage: Usage,
     pub(super) usage_complete: bool,
+    /// Cost of the priced calls so far; `None` until one was priced.
+    pub(super) cost: Option<f64>,
     /// Why the last response stopped, for `post_turn`.
     pub(super) stop_reason: StopReason,
+    /// When this call of the run started, for the result's `duration_ms`.
+    pub(super) started: Instant,
 }
 
 impl Runner {
@@ -169,7 +142,9 @@ impl Runner {
             turn: progress.turn,
             usage: progress.usage,
             usage_complete: progress.usage_complete,
+            cost: progress.cost,
             stop_reason: progress.stop_reason,
+            started: progress.started,
         }
     }
 
@@ -244,8 +219,8 @@ impl Runner {
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
     ) -> Result<Option<Step>, RunError> {
-        if let Some(receipt) = abandoned {
-            self.settle(&receipt);
+        if let Some(mut receipt) = abandoned {
+            self.settle(&mut receipt);
             self.journal.stage(Event::ModelCallReceipt(receipt));
         }
         if self.cancel.is_cancelled() {
@@ -268,6 +243,7 @@ impl Runner {
         };
         add_context(&mut messages, context);
         let request = self.agent.request(self.snapshot.definitions(), messages);
+        self.stage_context(&request);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
@@ -286,15 +262,26 @@ impl Runner {
             call.drive(provider, request, &self.cancel, Some(&mut on_delta))
                 .await
         };
-        self.settle(&outcome.receipt);
-        let usage = outcome.receipt.usage;
-        self.journal.stage(Event::ModelCallReceipt(outcome.receipt));
+        let mut receipt = outcome.receipt;
+        self.settle(&mut receipt);
+        let (usage, cost) = (receipt.usage, receipt.cost_usd);
+        let empty = matches!(&outcome.result, Ok(assembly) if cut_empty(assembly));
+        if empty {
+            receipt.disposition = CallDisposition::Rejected;
+        }
+        self.journal.stage(Event::ModelCallReceipt(receipt));
         let failure = match outcome.result {
-            Ok(assembly) => return self.accept(assembly).await.map(Some),
+            // One terminal write: the paid receipt, usage, error and result.
+            Ok(_) if empty => {
+                self.stage_usage(usage, cost);
+                self.output_limit().await?;
+                return Ok(None);
+            }
+            Ok(assembly) => return self.accept(assembly, cost).await.map(Some),
             Err(failure) => failure,
         };
         // A call that failed or was cancelled may still have been paid.
-        self.stage_usage(usage);
+        self.stage_usage(usage, cost);
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);
@@ -306,7 +293,13 @@ impl Runner {
         Ok(None)
     }
 
-    async fn accept(&mut self, assembly: AssistantAssembly) -> Result<Step, RunError> {
+    /// Stage the response and its `Usage` (with the call's `cost`), and
+    /// write them through with `AssistantReceived`.
+    async fn accept(
+        &mut self,
+        assembly: AssistantAssembly,
+        cost: Option<f64>,
+    ) -> Result<Step, RunError> {
         let AssistantAssembly {
             message,
             stop_reason,
@@ -317,7 +310,7 @@ impl Runner {
             message: message.clone(),
             stop_reason,
         }));
-        self.stage_usage(usage);
+        self.stage_usage(usage, cost);
         let phase = Phase::AssistantReceived {
             message: message.clone(),
             stop_reason,

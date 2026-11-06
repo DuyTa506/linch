@@ -151,6 +151,7 @@ pub fn envelopes(events: Vec<Event>) -> Vec<Envelope> {
             v: WIRE_VERSION,
             seq,
             run_id: RunId::new("r1"),
+            ts_ms: 0,
             ignorable: false,
             event,
         })

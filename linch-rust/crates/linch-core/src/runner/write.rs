@@ -91,6 +91,7 @@ impl Runner {
             turn: self.turn,
             usage: self.usage,
             usage_complete: self.usage_complete,
+            cost_usd: self.cost,
             session_len: self.session_len,
             phase,
         };
@@ -100,20 +101,35 @@ impl Runner {
     }
 
     /// Count a settled receipt: known usage adds up, unknown usage makes
-    /// the total incomplete (never a zero fill).
-    pub(super) fn settle(&mut self, receipt: &ModelCallReceiptEvent) {
-        match receipt.usage {
-            Some(usage) => self.usage += usage,
-            None => self.usage_complete = false,
+    /// the total incomplete (never a zero fill). A receipt with usage is
+    /// priced first, by the model that served it (the agent's model when
+    /// the provider named none), and a known cost adds up too.
+    pub(super) fn settle(&mut self, receipt: &mut ModelCallReceiptEvent) {
+        let Some(usage) = receipt.usage else {
+            self.usage_complete = false;
+            return;
+        };
+        self.usage += usage;
+        if receipt.cost_usd.is_none() {
+            let model = receipt.actual_model.as_deref();
+            let model = model.unwrap_or(&self.agent.spec.model);
+            receipt.cost_usd = self.agent.price(model, &usage);
+        }
+        if let Some(cost) = receipt.cost_usd {
+            self.cost = Some(self.cost.unwrap_or(0.0) + cost);
         }
     }
 
-    /// Stage the `Usage` event of a call that reported `usage`.
-    pub(super) fn stage_usage(&mut self, usage: Option<Usage>) {
+    /// Stage the `Usage` event of a call that reported `usage`, with the
+    /// call's `cost` and the run's so far.
+    pub(super) fn stage_usage(&mut self, usage: Option<Usage>, cost: Option<f64>) {
         if let Some(usage) = usage {
-            let cumulative = self.usage;
-            self.journal
-                .stage(Event::Usage(UsageEvent { usage, cumulative }));
+            self.journal.stage(Event::Usage(UsageEvent {
+                usage,
+                cumulative: self.usage,
+                cost_usd: cost,
+                cumulative_cost_usd: self.cost,
+            }));
         }
     }
 }

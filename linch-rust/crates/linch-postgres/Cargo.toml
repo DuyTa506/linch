@@ -13,8 +13,6 @@ workspace = true
 [dependencies]
 async-trait = "0.1.92"
 linch-core = { path = "../linch-core" }
-# `vfs::FileBackend`, which `PgFileBackend` implements.
-linch-tools = { path = "../linch-tools" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate"] }

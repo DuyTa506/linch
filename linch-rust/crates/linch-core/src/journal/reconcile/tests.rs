@@ -23,6 +23,7 @@ fn checkpoint(phase: Phase) -> Checkpoint {
         turn: 2,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: LEN,
         phase,
     }
@@ -54,6 +55,7 @@ fn envelopes(events: Vec<Event>) -> Vec<Envelope> {
             v: WIRE_VERSION,
             seq,
             run_id: RunId::new("r1"),
+            ts_ms: 0,
             ignorable: false,
             event,
         })
@@ -88,6 +90,7 @@ fn end(id: &str, name: &str) -> Event {
         result: ToolResultBlock::text(id, format!("{id} ok"), false),
         duration_ms: 1,
         canonical_output: None,
+        metadata: JsonObject::new(),
     })
 }
 

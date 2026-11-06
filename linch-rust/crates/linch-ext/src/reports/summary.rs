@@ -152,7 +152,8 @@ pub(super) fn summary(report: &RunReport) -> ReportSummary {
     let mut prompt_cache = PromptCacheSummary::default();
     let mut event_counts = BTreeMap::new();
     for envelope in &report.timeline {
-        *event_counts.entry(event_type(&envelope.event)).or_default() += 1;
+        let name = envelope.event.type_name().to_owned();
+        *event_counts.entry(name).or_default() += 1;
         count_recovery(&envelope.event, &mut recovery, &mut prompt_cache);
     }
     prompt_cache.cache_read_ratio = cache_read_ratio(&usage);
@@ -303,41 +304,4 @@ pub(super) fn ratio(part: u64, whole: u64, places: i32) -> f64 {
 fn round(value: f64, places: i32) -> f64 {
     let places = usize::try_from(places).unwrap_or(0);
     format!("{value:.places$}").parse().unwrap_or(value)
-}
-
-/// The event's wire `type`. Exhaustive, so a new kind must be named here.
-fn event_type(event: &Event) -> String {
-    let name = match event {
-        Event::Init(_) => "init",
-        Event::User(_) => "user",
-        Event::Assistant(_) => "assistant",
-        Event::PartialAssistant(_) => "partial_assistant",
-        Event::Usage(_) => "usage",
-        Event::ToolCallStart(_) => "tool_call_start",
-        Event::ToolCallEnd(_) => "tool_call_end",
-        Event::ToolProgress(_) => "tool_progress",
-        Event::PermissionRequest(_) => "permission_request",
-        Event::InputRequest(_) => "input_request",
-        Event::Suspended(_) => "suspended",
-        Event::ContextBuild(_) => "context_build",
-        Event::Compaction(_) => "compaction",
-        Event::LoopGuard(_) => "loop_guard",
-        Event::Budget(_) => "budget",
-        Event::PromptCacheAdvisory(_) => "prompt_cache_advisory",
-        Event::SkillsLoaded(_) => "skills_loaded",
-        Event::SkillInvoked(_) => "skill_invoked",
-        Event::SkillCompleted(_) => "skill_completed",
-        Event::Subagent(_) => "subagent",
-        Event::ChildRunStatus(_) => "child_run_status",
-        Event::Workflow(_) => "workflow",
-        Event::Verification(_) => "verification",
-        Event::Hook(_) => "hook",
-        Event::Error(_) => "error",
-        Event::Result(_) => "result",
-        Event::ModelCallDelivery(_) => "model_call_delivery",
-        Event::ModelCallReceipt(_) => "model_call_receipt",
-        Event::ModelCallUsageSettlement(_) => "model_call_usage_settlement",
-        Event::Ignorable(ignorable) => ignorable.type_name(),
-    };
-    name.to_owned()
 }

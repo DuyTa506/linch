@@ -34,6 +34,7 @@ fn end(id: &str, tool: &str, is_error: bool) -> Event {
         result: ToolResultBlock::text(id, "out", is_error),
         duration_ms: 1,
         canonical_output: None,
+        metadata: JsonObject::new(),
     })
 }
 
@@ -53,6 +54,8 @@ fn result(subtype: ResultSubtype) -> Event {
         stop_reason: StopReason::EndTurn,
         total_usage: Usage::default(),
         usage_complete: true,
+        duration_ms: 0,
+        total_cost_usd: None,
         final_text: None,
         structured_output: None,
         structured_error: None,

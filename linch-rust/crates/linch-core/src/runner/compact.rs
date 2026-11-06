@@ -47,8 +47,8 @@ impl Runner {
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
     ) -> Result<Option<Step>, RunError> {
-        if let Some(receipt) = abandoned {
-            self.settle(&receipt);
+        if let Some(mut receipt) = abandoned {
+            self.settle(&mut receipt);
             self.journal.stage(Event::ModelCallReceipt(receipt));
         }
         if self.cancel.is_cancelled() {
@@ -86,11 +86,12 @@ impl Runner {
         self.outbox.deliver(ready).await;
         // The summary is not the assistant's answer: no deltas.
         let outcome = (call.drive(&*agent.provider, request, &self.cancel, None)).await;
-        self.settle(&outcome.receipt);
-        let usage = outcome.receipt.usage;
-        self.journal.stage(Event::ModelCallReceipt(outcome.receipt));
+        let mut receipt = outcome.receipt;
+        self.settle(&mut receipt);
+        let (usage, cost) = (receipt.usage, receipt.cost_usd);
+        self.journal.stage(Event::ModelCallReceipt(receipt));
         // Paid whether or not it gave a summary.
-        self.stage_usage(usage);
+        self.stage_usage(usage, cost);
         let text = match outcome.result {
             Ok(assembly) => assembly.message.text(),
             Err(failure) if matches!(failure.error, ProviderError::Cancelled) => {

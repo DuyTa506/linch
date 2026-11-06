@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::batch::{answer_decision, approvals, turn_events, upsert};
-use super::turn::{Batch, Progress, Runner, Step};
+use super::progress::Progress;
+use super::turn::{Batch, Runner, Step};
 use super::{Outbox, hooks};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::{InitEvent, UserEvent, UserEventSubtype};
@@ -12,7 +14,6 @@ use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, reconcile};
-use crate::policy::PermissionDecision;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
@@ -28,6 +29,7 @@ pub(super) async fn new_run(
     outbox: Outbox,
     parent: Option<RunId>,
 ) -> Result<(), RunError> {
+    let started = Instant::now();
     let namespace = agent.namespace.clone();
     if options.run_id.is_some() {
         // A caller-chosen id may be taken: refuse it before any write.
@@ -74,6 +76,7 @@ pub(super) async fn new_run(
         turn: 0,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: entries.len() as u64,
         phase: Phase::Started {
             prompt: prompt.clone(),
@@ -93,7 +96,7 @@ pub(super) async fn new_run(
         Err(error) => return Err(error.into()),
     };
     outbox.deliver(ready).await;
-    let progress = Progress::FIRST;
+    let progress = Progress::first(started);
     let run = identity(session_id, run_id, &options.principal);
     let runner = Runner::new(
         agent,
@@ -113,9 +116,9 @@ pub(super) async fn new_run(
 }
 
 /// Claim an existing run, check it may continue, reconcile its durable
-/// state, and go on from there. `answers` is set for an approve; on a run
-/// whose answers are already committed (an approve that failed after its
-/// first commit) they are ignored and the run continues like a resume.
+/// state, and go on from there. `answers` is set for an approve, which is
+/// accepted only on a run awaiting approval. With a token that is already
+/// cancelled, nothing is claimed or written and the stream ends empty.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
@@ -123,6 +126,10 @@ pub(super) async fn continue_run(
     options: RunOptions,
     outbox: Outbox,
 ) -> Result<(), RunError> {
+    let started = Instant::now();
+    if options.cancel.is_cancelled() {
+        return Ok(());
+    }
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
     // Check before claiming, so a mistaken call does not fence a live owner;
     // check again after, against the state the claim fixed.
@@ -214,7 +221,7 @@ pub(super) async fn continue_run(
         },
     };
     let journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
-    let progress = Progress::of(checkpoint, last_stop(&events));
+    let progress = Progress::of(checkpoint, last_stop(&events), started);
     let run = identity(record.session_id.clone(), run_id, &options.principal);
     let mut runner = Runner::new(
         agent,
@@ -250,8 +257,10 @@ fn last_stop(events: &[Envelope]) -> StopReason {
 }
 
 /// Refuse a terminal run, a run of another contract, and an approve on a
-/// run that is neither suspended nor in a batch that already decided every
-/// call the approve answers.
+/// run that is not awaiting approval. A run whose approve committed its
+/// answers is in its tool batch and may still have a live owner, so an
+/// approve of it (a retry, or a second click) is refused too: the host
+/// resumes it.
 fn check(
     record: &RunRecord,
     agent: &AgentInner,
@@ -270,18 +279,8 @@ fn check(
             found: record.contract,
         });
     }
-    let approvable = |answers: &HashMap<String, ApprovalResponse>| match &record.checkpoint.phase {
-        Phase::AwaitingApproval { .. } => true,
-        // An approve that failed after committing its answers.
-        Phase::ToolBatch { decisions, .. } => answers.keys().all(|id| {
-            decisions.iter().any(|recorded| {
-                &recorded.tool_use_id == id
-                    && !matches!(recorded.decision, PermissionDecision::Ask { .. })
-            })
-        }),
-        _ => false,
-    };
-    if answers.is_some_and(|answers| !approvable(answers)) {
+    let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
+    if answers.is_some() && !suspended {
         return Err(RunError::NotSuspended {
             run_id: record.run_id.clone(),
         });

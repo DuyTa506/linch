@@ -78,8 +78,8 @@ pub struct CallOutcome {
     /// Time from the tool's start to its final result. Zero for a call that
     /// ran no tool.
     pub duration: Duration,
-    /// Set when a success value broke the tool's `output_schema`; `result`
-    /// is then an error.
+    /// Set when the tool's success value broke its `output_schema`; the
+    /// result became an error before `post_tool_use`, which may replace it.
     pub contract_error: Option<OutputContractError>,
     /// The `post_tool_use` hooks called, in call order.
     pub hook_records: Vec<HookRecord>,
@@ -105,9 +105,9 @@ pub struct ExecuteOptions {
 /// concurrently, in groups of at most [`ExecuteOptions::max_concurrency`];
 /// any other call runs alone, so a call after it waits for it. Calls that run no tool join a
 /// read group. Each tool gets a child of the run's cancel token, cancelled
-/// when the call ends. The `post_tool_use` chain of `hooks` runs on every
-/// result of a run or served call, then a success value is checked against
-/// the tool's `output_schema`.
+/// when the call ends. A success value of a run or served call is checked
+/// against the tool's `output_schema`, then the `post_tool_use` chain of
+/// `hooks` runs on the result (a violation reaches it as an error).
 ///
 /// A run abort is not an error: the calls it stops get an aborted error
 /// result, and a tool that panics gets an error result naming the panic.
@@ -301,10 +301,22 @@ impl<S: ToolSink> Runner<'_, S> {
             })
     }
 
-    /// Run the `post_tool_use` chain, then check a success value against
-    /// the tool's output schema.
+    /// Check a success value against the tool's output schema, then run
+    /// the `post_tool_use` chain on the result. The schema describes what
+    /// the tool returns, so a hook may replace a valid value (with an
+    /// offload pointer, say) without breaking it, and gets a violation as
+    /// an error result.
     async fn finish(&self, call: &PlannedCall, result: ToolResult) -> Finished {
         let mut finished = Finished::from(result);
+        if let (Ok(output), Some(tool)) = (&finished.result, &call.tool)
+            && let Err(violation) = tool.validate_output(output)
+        {
+            finished.result = Err(ToolOutputError::new(format!(
+                "Tool {:?} returned output that does not match its output schema",
+                call.tool_name
+            )));
+            finished.contract_error = Some(violation);
+        }
         if !self.hooks.post_tool_use.is_empty() {
             let chain = self
                 .hooks
@@ -320,15 +332,6 @@ impl<S: ToolSink> Runner<'_, S> {
                 .await;
             finished.result = chain.outcome;
             finished.hook_records = chain.records;
-        }
-        if let (Ok(output), Some(tool)) = (&finished.result, &call.tool)
-            && let Err(violation) = tool.validate_output(output)
-        {
-            finished.result = Err(ToolOutputError::new(format!(
-                "Tool {:?} returned output that does not match its output schema",
-                call.tool_name
-            )));
-            finished.contract_error = Some(violation);
         }
         finished
     }

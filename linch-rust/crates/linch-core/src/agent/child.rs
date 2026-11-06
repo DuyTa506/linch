@@ -87,6 +87,7 @@ impl AgentInner {
             skill_listing: self.skill_listing.clone(),
             subagents: None,
             child: true,
+            pricing: self.pricing.clone(),
             session_close: Vec::new(),
             registrations: Vec::new(),
         })

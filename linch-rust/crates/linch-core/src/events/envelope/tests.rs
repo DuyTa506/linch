@@ -9,7 +9,8 @@ fn minimal_known_event() -> JsonValue {
 
 #[test]
 fn wrong_version_is_rejected() {
-    let value = json!({"v": 2, "seq": 1, "run_id": "r1", "event": minimal_known_event()});
+    let value =
+        json!({"v": 2, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": minimal_known_event()});
     let err = Envelope::from_value(value).unwrap_err();
     assert!(matches!(
         err,
@@ -20,7 +21,7 @@ fn wrong_version_is_rejected() {
 #[test]
 fn unknown_type_is_rejected_when_not_ignorable() {
     let value = json!({
-        "v": WIRE_VERSION, "seq": 1, "run_id": "r1",
+        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7,
         "event": {"type": "from_the_future", "x": 1},
     });
     let err = Envelope::from_value(value).unwrap_err();
@@ -30,7 +31,7 @@ fn unknown_type_is_rejected_when_not_ignorable() {
 #[test]
 fn unknown_type_round_trips_as_ignorable_when_flagged() {
     let value = json!({
-        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ignorable": true,
+        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "ignorable": true,
         "event": {"type": "from_the_future", "x": 1},
     });
     let envelope = Envelope::from_value(value.clone()).unwrap();
@@ -40,7 +41,7 @@ fn unknown_type_round_trips_as_ignorable_when_flagged() {
 #[test]
 fn malformed_known_event_is_rejected_even_when_ignorable() {
     let value = json!({
-        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ignorable": true,
+        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "ignorable": true,
         // "error" is known but requires an object "error" field.
         "event": {"type": "error"},
     });
@@ -53,7 +54,7 @@ fn malformed_known_event_is_rejected_even_when_ignorable() {
 #[test]
 fn unexpected_envelope_field_is_rejected() {
     let value = json!({
-        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "extra": true,
+        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "extra": true,
         "event": minimal_known_event(),
     });
     let err = Envelope::from_value(value).unwrap_err();
@@ -65,14 +66,15 @@ fn nested_subagent_unknown_type_obeys_the_same_ignorable_rule() {
     let nested = json!({"type": "mystery"});
     let subagent = json!({"type": "subagent", "child_run_id": "child-1", "event": nested});
 
-    let strict = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "event": subagent.clone()});
+    let strict =
+        json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": subagent.clone()});
     assert!(matches!(
         Envelope::from_value(strict).unwrap_err(),
         EventError::UnknownType(ref t) if t == "mystery"
     ));
 
     let ignorable = json!({
-        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ignorable": true, "event": subagent,
+        "v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "ignorable": true, "event": subagent,
     });
     let envelope = Envelope::from_value(ignorable.clone()).unwrap();
     assert_eq!(serde_json::to_value(&envelope).unwrap(), ignorable);
@@ -88,7 +90,7 @@ fn subagent_nesting_past_the_limit_is_rejected() {
             "event": event,
         });
     }
-    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "event": event});
+    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": event});
     let err = Envelope::from_value(value).unwrap_err();
     assert!(matches!(err, EventError::NestingTooDeep { max, .. } if max == MAX_SUBAGENT_DEPTH));
 }
@@ -103,14 +105,13 @@ fn subagent_nesting_at_the_limit_is_accepted() {
             "event": event,
         });
     }
-    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "event": event});
+    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": event});
     assert!(Envelope::from_value(value).is_ok());
 }
 
 #[test]
 fn ignorable_flag_is_omitted_when_false() {
-    let value =
-        json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "event": minimal_known_event()});
+    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": minimal_known_event()});
     let envelope = Envelope::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(&envelope).unwrap(), value);
 }
@@ -123,6 +124,7 @@ fn encoding_a_non_finite_monetary_field_fails_the_whole_envelope() {
         v: WIRE_VERSION,
         seq: 1,
         run_id: RunId::new("r1"),
+        ts_ms: 7,
         ignorable: false,
         event: Event::Budget(BudgetEvent {
             kind: BudgetKind::Exceeded,
@@ -146,7 +148,7 @@ fn from_str_rejects_invalid_json() {
 
 #[test]
 fn missing_v_is_rejected() {
-    let value = json!({"seq": 1, "run_id": "r1", "event": minimal_known_event()});
+    let value = json!({"seq": 1, "run_id": "r1", "ts_ms": 7, "event": minimal_known_event()});
     assert!(matches!(
         Envelope::from_value(value).unwrap_err(),
         EventError::MissingField("v")
@@ -155,7 +157,8 @@ fn missing_v_is_rejected() {
 
 #[test]
 fn missing_seq_is_rejected() {
-    let value = json!({"v": WIRE_VERSION, "run_id": "r1", "event": minimal_known_event()});
+    let value =
+        json!({"v": WIRE_VERSION, "run_id": "r1", "ts_ms": 7, "event": minimal_known_event()});
     assert!(matches!(
         Envelope::from_value(value).unwrap_err(),
         EventError::MissingField("seq")
@@ -164,7 +167,7 @@ fn missing_seq_is_rejected() {
 
 #[test]
 fn missing_run_id_is_rejected() {
-    let value = json!({"v": WIRE_VERSION, "seq": 1, "event": minimal_known_event()});
+    let value = json!({"v": WIRE_VERSION, "seq": 1, "ts_ms": 7, "event": minimal_known_event()});
     assert!(matches!(
         Envelope::from_value(value).unwrap_err(),
         EventError::MissingField("run_id")
@@ -172,8 +175,33 @@ fn missing_run_id_is_rejected() {
 }
 
 #[test]
+fn missing_ts_ms_is_rejected() {
+    let value =
+        json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "event": minimal_known_event()});
+    assert!(matches!(
+        Envelope::from_value(value).unwrap_err(),
+        EventError::MissingField("ts_ms")
+    ));
+}
+
+#[test]
+fn ts_ms_is_written_after_run_id() {
+    let value = json!({
+        "v": WIRE_VERSION, "seq": 3, "run_id": "r1", "ts_ms": 1_762_400_000_000_u64,
+        "event": minimal_known_event(),
+    });
+    let envelope = Envelope::from_value(value.clone()).unwrap();
+    assert_eq!(envelope.ts_ms, 1_762_400_000_000);
+    let text = serde_json::to_string(&envelope).unwrap();
+    assert!(
+        text.starts_with(r#"{"v":1,"seq":3,"run_id":"r1","ts_ms":1762400000000,"#),
+        "{text}"
+    );
+}
+
+#[test]
 fn missing_event_is_rejected() {
-    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1"});
+    let value = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7});
     assert!(matches!(
         Envelope::from_value(value).unwrap_err(),
         EventError::MissingField("event")
@@ -190,6 +218,7 @@ fn ignorable_flag_is_forced_true_when_an_ignorable_event_is_constructed_directly
         v: WIRE_VERSION,
         seq: 1,
         run_id: RunId::new("r1"),
+        ts_ms: 7,
         ignorable: false,
         event,
     };
@@ -209,6 +238,7 @@ fn ignorable_flag_is_forced_true_for_a_nested_subagent_ignorable_event() {
         v: WIRE_VERSION,
         seq: 1,
         run_id: RunId::new("r1"),
+        ts_ms: 7,
         ignorable: false,
         event,
     };
@@ -230,6 +260,7 @@ proptest::proptest! {
     #[test]
     fn envelope_round_trips_through_json_text(
         seq in proptest::prelude::any::<u64>(),
+        ts_ms in proptest::prelude::any::<u64>(),
         run_id in "[a-zA-Z0-9_-]{1,8}",
         declared in proptest::prelude::any::<bool>(),
         event in super::super::arbitrary::event(3),
@@ -238,6 +269,7 @@ proptest::proptest! {
             v: WIRE_VERSION,
             seq,
             run_id: RunId::new(run_id),
+            ts_ms,
             ignorable: declared,
             event,
         };
@@ -245,6 +277,7 @@ proptest::proptest! {
         let decoded: Envelope = text.parse().unwrap();
         proptest::prop_assert_eq!(decoded.v, envelope.v);
         proptest::prop_assert_eq!(decoded.seq, envelope.seq);
+        proptest::prop_assert_eq!(decoded.ts_ms, envelope.ts_ms);
         proptest::prop_assert_eq!(&decoded.run_id, &envelope.run_id);
         proptest::prop_assert_eq!(&decoded.event, &envelope.event);
         proptest::prop_assert_eq!(decoded.ignorable, declared || envelope.event.contains_ignorable());

@@ -6,7 +6,7 @@
 //! serialize and none is lost.
 
 use async_trait::async_trait;
-use linch_tools::vfs::{FileBackend, VfsError, apply_edit, file_path, normalize_path};
+use linch_core::vfs::{FileBackend, VfsError, apply_edit, file_path, normalize_path};
 use sqlx::PgPool;
 
 /// A [`FileBackend`] backed by the `linch_files` table.

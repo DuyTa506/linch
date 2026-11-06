@@ -5,21 +5,26 @@
 //! [`Event::Hook`] carrying the last durable seq. A chain with no hook is
 //! skipped before its request is built, so a run without hooks does no
 //! hook work. A run cancel drops a chain the run waits on (a dropped RPC
-//! callback is cancelled on the client), and the run aborts.
+//! callback is cancelled on the client), and the run aborts; the hooks
+//! that answered before the cancel still have their records sent.
 
 use std::sync::Arc;
 
 use super::Outbox;
 use super::turn::{Runner, Step};
 use crate::agent::{AgentInner, RunError};
-use crate::events::kinds::{HookEvent, HookOutcome, UserEvent, UserEventSubtype};
-use crate::events::{Envelope, Event, WIRE_VERSION};
+use crate::events::kinds::{
+    ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype,
+};
+use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
     ContextBuildRequest, HookRecord, HookStatus, PostTurnRequest, StopOutcome, StopRequest,
     UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
+use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, TextBlock};
+use crate::provider::ProviderRequest;
 use crate::run::{Phase, StopReason};
 
 /// What a text-only response leads to, after the `stop` chain.
@@ -46,6 +51,7 @@ pub(super) fn push_records(
             v: WIRE_VERSION,
             seq,
             run_id: run_id.clone(),
+            ts_ms: now_ms(),
             ignorable: false,
             event: Event::Hook(hook_event(record, tool_use_id)),
         });
@@ -141,9 +147,26 @@ impl Runner {
             run_id: self.run.run_id.clone(),
             messages,
         };
-        let result = self.cancel.run_until_cancelled(chain.run(&request)).await?;
-        self.push_records(result.records, None);
-        Some(result.outcome)
+        let mut records = Vec::new();
+        let run = chain.run_into(&request, &mut records);
+        let blocks = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        blocks
+    }
+
+    /// Stage the `context_build` event of the primary `request`: what it
+    /// was built from. It rides the call's `ProviderPending` barrier. The
+    /// kernel keeps no context budget and trims nothing, so `budget` and
+    /// `metadata` are empty.
+    pub(super) fn stage_context(&mut self, request: &ProviderRequest) {
+        let tools = request.tools.iter().map(|tool| tool.name.clone());
+        self.journal.stage(Event::ContextBuild(ContextBuildEvent {
+            system_blocks: request.system.len() as u64,
+            messages: request.messages.len() as u64,
+            selected_tools: Some(tools.collect()),
+            budget: JsonObject::new(),
+            metadata: JsonObject::new(),
+        }));
     }
 
     /// Run `stop` on a text-only response.
@@ -157,12 +180,15 @@ impl Runner {
             run_id: self.run.run_id.clone(),
             text: text.to_owned(),
         };
-        let Some(result) = self.cancel.run_until_cancelled(chain.run(&request)).await else {
+        let mut records = Vec::new();
+        let run = chain.run_into(&request, &mut records);
+        let outcome = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        let Some(outcome) = outcome else {
             self.abort().await?;
             return Ok(Stopping::Ended);
         };
-        self.push_records(result.records, None);
-        let feedback = match result.outcome {
+        let feedback = match outcome {
             StopOutcome::Stop => return Ok(Stopping::Stop),
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Failed { reason } => {
@@ -200,11 +226,12 @@ impl Runner {
             turn: self.turn,
             stop_reason,
         };
-        let Some(result) = self.cancel.run_until_cancelled(chain.run(&request)).await else {
-            return false;
-        };
-        self.push_records(result.records, None);
-        true
+        let mut records = Vec::new();
+        let run = chain.run_into(&request, &mut records);
+        let ran = self.cancel.run_until_cancelled(run).await.is_some();
+        // The hooks that answered before a cancel keep their records.
+        self.push_records(records, None);
+        ran
     }
 }
 

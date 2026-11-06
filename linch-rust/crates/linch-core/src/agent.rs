@@ -26,6 +26,7 @@ use crate::registry::ToolRegistry;
 use crate::runner::{self, RunStream};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::Roster;
+use crate::usage::Usage;
 
 mod builder;
 mod child;
@@ -55,7 +56,9 @@ pub struct RunOptions {
     pub principal: Option<Principal>,
     /// Lease owner name written with the claim, for diagnostics.
     pub owner: String,
-    /// Aborts the run: it ends with `Result{subtype: aborted}`.
+    /// Aborts the run: it ends with `Result{subtype: aborted}`. A resume or
+    /// approve given a token that is already cancelled does nothing: it
+    /// claims and writes nothing, and its stream ends with no item.
     pub cancel: CancellationToken,
 }
 
@@ -75,6 +78,9 @@ impl RunOptions {
 
 /// A callback that [`Agent::close_session`] runs.
 type SessionClose = Arc<dyn Fn(&SessionId) + Send + Sync>;
+
+/// The host's price of a model call (see [`AgentBuilder::pricing`]).
+type Pricing = Arc<dyn Fn(&str, &Usage) -> Option<f64> + Send + Sync>;
 
 /// A built agent. Cheap to clone; clones share every binding.
 #[derive(Clone)]
@@ -110,6 +116,8 @@ pub(crate) struct AgentInner {
     /// Whether this is a subagent's agent: its runs cannot suspend, so a
     /// call that needs approval is denied.
     pub(crate) child: bool,
+    /// Prices each paid call; `None` reports no cost.
+    pub(crate) pricing: Option<Pricing>,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
@@ -125,6 +133,14 @@ impl AgentInner {
         let mut request = self.spec.request(tools, messages);
         request.system = self.system.clone();
         request
+    }
+
+    /// What `usage` on `model` cost in USD, by the host's pricing; `None`
+    /// without pricing, for a model it has no price for, or for a price
+    /// that is not finite.
+    pub(crate) fn price(&self, model: &str, usage: &Usage) -> Option<f64> {
+        let price = (self.pricing.as_ref()?)(model, usage)?;
+        price.is_finite().then_some(price)
     }
 }
 
@@ -180,9 +196,16 @@ impl Agent {
 
     /// Answer the pending tool calls of a suspended run and continue it.
     ///
-    /// Retrying an approve that failed after its answers were committed is
-    /// safe: when the run's batch already decided every call answered, the
-    /// run continues like a resume and the committed decisions stand.
+    /// Only a run awaiting approval takes an approve; any other run gets
+    /// `RunError::NotSuspended` before anything is claimed or written, so an
+    /// approve never fences out the run's live owner. Once an approve has
+    /// committed its answers the run is no longer suspended: retrying that
+    /// approve (after a timeout, a crash, or a second click) gets
+    /// `NotSuspended`, and the host continues the run with [`Agent::resume`],
+    /// under the committed decisions. Two approves that race on one
+    /// suspended run can still both pass this check: the later claim fences
+    /// the earlier approve, then gets `NotSuspended`, which leaves the run
+    /// `running` for a resume.
     ///
     /// Args:
     ///     run_id: A run whose checkpoint is awaiting approval.

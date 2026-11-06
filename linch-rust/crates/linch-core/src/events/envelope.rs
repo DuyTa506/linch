@@ -8,6 +8,7 @@ use super::wire::{
 use crate::ids::RunId;
 use crate::json::JsonValue;
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Wire version this crate reads and writes. A stored or received envelope
 /// with a different `v` is rejected rather than guessed at.
@@ -145,7 +146,9 @@ pub enum EventError {
 ///
 /// `seq` is a monotonic sequence number assigned by the producer so a
 /// client can resume a stream from a known point; ordering it is the
-/// caller's job, but carrying it is mandatory on every envelope. `ignorable`
+/// caller's job, but carrying it is mandatory on every envelope. `ts_ms` is
+/// the producer's wall clock when it made the envelope; it is mandatory too,
+/// but order by `seq`, never by `ts_ms`. `ignorable`
 /// is the producer's promise that an unknown `event.type` is safe to skip
 /// (see `Event::decode` and `docs/architecture/events.md`); it does not
 /// rescue a malformed *known* event.
@@ -164,11 +167,25 @@ pub struct Envelope {
     pub seq: u64,
     /// Run this envelope belongs to.
     pub run_id: RunId,
+    /// Unix time in milliseconds when the producer made this envelope. For
+    /// a run's events that is when the run staged the event, just before
+    /// the write that made a durable one durable. Clocks of two processes
+    /// (a crashed run and its resume) need not agree.
+    pub ts_ms: u64,
     /// Whether an unknown `event.type` should decode to
     /// [`super::IgnorableEvent`] instead of failing.
     pub ignorable: bool,
     /// The event itself.
     pub event: Event,
+}
+
+/// The wall clock now, in Unix milliseconds, for [`Envelope::ts_ms`]. A
+/// clock set before 1970 reads 0.
+pub(crate) fn now_ms() -> u64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH);
+    since.map_or(0, |elapsed| {
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+    })
 }
 
 impl Envelope {
@@ -195,6 +212,7 @@ impl Envelope {
         }
         let seq = take_u64(&mut obj, "seq")?;
         let run_id = RunId::from(take_string(&mut obj, "run_id")?);
+        let ts_ms = take_u64(&mut obj, "ts_ms")?;
         let ignorable = take_bool_default_false(&mut obj, "ignorable")?;
         let event_value = obj
             .remove("event")
@@ -205,6 +223,7 @@ impl Envelope {
             v: v as u32,
             seq,
             run_id,
+            ts_ms,
             ignorable,
             event,
         })
@@ -227,6 +246,7 @@ impl Envelope {
             "run_id".to_string(),
             JsonValue::String(self.run_id.as_str().to_string()),
         );
+        obj.insert("ts_ms".to_string(), JsonValue::from(self.ts_ms));
         if self.ignorable || self.event.contains_ignorable() {
             obj.insert("ignorable".to_string(), JsonValue::Bool(true));
         }

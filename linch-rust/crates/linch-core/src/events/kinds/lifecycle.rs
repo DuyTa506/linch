@@ -1,6 +1,7 @@
 //! Run lifecycle kinds: init, user/assistant messages, error, and the
 //! terminal result.
 
+use crate::events::wire::serialize_finite_f64_option;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::Message;
@@ -109,6 +110,21 @@ pub struct ResultEvent {
     /// least one turn's usage was unknown and is excluded from the sum
     /// (never folded in as a zero [`Usage`]).
     pub usage_complete: bool,
+    /// Wall time in milliseconds of the call that ended the run (the run,
+    /// or the resume or approve that continued it), from its start to this
+    /// result. The whole run's span is this envelope's `ts_ms` minus the
+    /// `init` envelope's.
+    pub duration_ms: u64,
+    /// Cost of the run's priced calls in USD; `None` when no call was
+    /// priced. A call with no price adds nothing, so with several models
+    /// this can be a partial sum. Encoding a NaN or infinite value is an
+    /// error.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
+    pub total_cost_usd: Option<f64>,
     /// Optional final textual answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_text: Option<String>,
@@ -142,21 +158,27 @@ mod tests {
             "stop_reason": "end_turn",
             "total_usage": total_usage,
             "usage_complete": usage_complete,
+            "duration_ms": 12,
         })
     }
 
     #[test]
-    fn result_event_requires_total_usage_and_usage_complete() {
-        // Neither field has a default: a run whose usage accounting is
-        // incomplete must say so explicitly, and a missing field is a
+    fn result_event_requires_total_usage_usage_complete_and_duration_ms() {
+        // None of these fields has a default: a run whose usage accounting
+        // is incomplete must say so explicitly, and a missing field is a
         // decode error rather than a silently-assumed default.
-        let missing_usage =
-            json!({"subtype": "success", "stop_reason": "end_turn", "usage_complete": true});
-        assert!(serde_json::from_value::<ResultEvent>(missing_usage).is_err());
-
-        let missing_complete =
-            json!({"subtype": "success", "stop_reason": "end_turn", "total_usage": {}});
-        assert!(serde_json::from_value::<ResultEvent>(missing_complete).is_err());
+        let zero = json!({
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        });
+        let full = result_value(zero, json!(true));
+        for field in ["total_usage", "usage_complete", "duration_ms"] {
+            let mut missing = full.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let decoded = serde_json::from_value::<ResultEvent>(missing);
+            assert!(decoded.is_err(), "{field} is required");
+        }
+        assert!(serde_json::from_value::<ResultEvent>(full).is_ok());
     }
 
     #[test]

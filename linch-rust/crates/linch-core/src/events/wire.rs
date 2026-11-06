@@ -105,7 +105,7 @@ where
 
 /// As [`serialize_finite_f64`], for the `Option<f64>` fields this crate
 /// uses for an optional monetary amount.
-pub(super) fn serialize_finite_f64_option<S>(
+pub(crate) fn serialize_finite_f64_option<S>(
     value: &Option<f64>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>

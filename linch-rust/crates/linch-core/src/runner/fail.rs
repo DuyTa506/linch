@@ -2,9 +2,11 @@
 //! [`crate::agent::Agent::fail`]).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::json;
 
+use super::end::millis;
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::{ErrorEvent, ResultEvent, ResultSubtype};
 use crate::events::{Envelope, Event};
@@ -21,6 +23,7 @@ pub(crate) async fn fail(
     reason: String,
     options: RunOptions,
 ) -> Result<Vec<Envelope>, RunError> {
+    let started = Instant::now();
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
     let lease = match runs.claim(namespace, &run_id, &options.owner).await {
         Ok(lease) => lease,
@@ -50,6 +53,8 @@ pub(crate) async fn fail(
         stop_reason: StopReason::Error,
         total_usage: checkpoint.usage,
         usage_complete: checkpoint.usage_complete && !unsettled,
+        duration_ms: millis(started.elapsed()),
+        total_cost_usd: checkpoint.cost_usd,
         final_text: None,
         structured_output: None,
         structured_error: None,

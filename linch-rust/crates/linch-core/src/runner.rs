@@ -5,11 +5,15 @@
 //!    summarize the older part and log the projection (see `compact`);
 //!    snapshot the tools and build the request from the provider view, with
 //!    the `context_build` blocks added to its tail, never logged;
-//! 2. stage the model-call delivery and flush it with the held
-//!    `ProviderPending` checkpoint, then drive the call (deltas go to the
-//!    caller at once);
+//! 2. stage a `context_build` event (the request's system block, message
+//!    and tool counts) and the model-call delivery, and flush them with the
+//!    held `ProviderPending` checkpoint, then drive the call (deltas go to
+//!    the caller at once);
 //! 3. stage the receipt, the `Assistant` event and its `Usage`, and write
-//!    them through with `AssistantReceived`;
+//!    them through with `AssistantReceived`. A response the output limit
+//!    cut off before it held any text or whole tool call is not an answer:
+//!    its receipt (rejected) and `Usage` go out with an `OutputLimitError`
+//!    in the failed terminal write, and the session gets nothing;
 //! 4. append the response to the session (the held checkpoint is flushed
 //!    first); a text-only response ends the run unless a `stop` hook keeps
 //!    it going with feedback for the next turn;
@@ -54,6 +58,7 @@ mod compact;
 mod end;
 mod fail;
 mod hooks;
+mod progress;
 mod sink;
 mod start;
 mod turn;
@@ -64,7 +69,9 @@ mod write;
 /// Durable kinds arrive only after the write that made them durable; deltas
 /// and tool progress arrive at once and carry the last durable seq. The
 /// stream ends after the `Result` or `Suspended` envelope. When the run
-/// cannot continue durably, the last item is `Err(RunError)`.
+/// cannot continue durably, the last item is `Err(RunError)`. A resume or
+/// approve whose cancel token is already cancelled ends with no item at
+/// all: it leaves the run as it was.
 ///
 /// Dropping the stream drops the run where it stands, like a crash: the run
 /// keeps its last durable state and [`crate::agent::Agent::resume`] continues

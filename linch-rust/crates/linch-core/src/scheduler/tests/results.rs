@@ -62,42 +62,57 @@ async fn a_served_result_skips_the_tool_but_not_post_tool_use() {
     assert_eq!(sink.outcome("r").hook_records.len(), 1);
 }
 
+/// The schema checks the value the tool returned, before `post_tool_use`:
+/// a hook may replace a valid value with one the schema does not describe
+/// (an offload pointer), and gets a violation as the error it became.
 #[tokio::test]
-async fn post_tool_use_replaces_and_the_output_schema_is_checked() {
+async fn the_output_schema_checks_the_tool_value_before_post_tool_use() {
     let log = new_log();
     let fx = Fixture::new(PermissionMode::Default);
     let schema = json!({"type": "object", "required": ["n"]});
     fx.tool(TestTool::new("Read", ToolScope::Read, &log).output_schema(schema));
-    let post = hook::<PostToolUse>("post", &log, |request| {
-        let value = if request.tool_use_id == "good" {
-            json!({"z": 1, "n": "é"})
+    let seen = Arc::clone(&log);
+    let post = hook::<PostToolUse>("post", &log, move |request| {
+        let ok = if request.result.is_ok() {
+            "ok"
         } else {
-            json!({"m": 2})
+            "error"
         };
-        PostToolUseResponse::Replace {
-            result: Ok(ToolOutput::new(value)),
+        push(&seen, format!("saw {} {ok}", request.tool_use_id));
+        match request.tool_use_id.as_str() {
+            "pointer" => PostToolUseResponse::Replace {
+                result: Ok(ToolOutput::new("saved to /results/pointer")),
+            },
+            _ => PostToolUseResponse::Continue,
         }
     });
     let _post = fx.hooks.post_tool_use.register(post).unwrap();
     let sink = RecSink::default();
 
     let blocks = [
-        use_block("good", "Read", json!({})),
-        use_block("bad", "Read", json!({})),
+        use_block("pointer", "Read", json!({"n": 1})),
+        use_block("plain", "Read", json!({"z": 1, "n": "é"})),
+        use_block("bad", "Read", json!({"m": 2})),
     ];
     let results = fx.run(&blocks, &sink, 4).await;
 
+    assert_eq!(text(&results[0]), "saved to /results/pointer");
+    assert!(!results[0].is_error);
+    assert!(sink.outcome("pointer").contract_error.is_none());
     assert_eq!(
-        text(&results[0]),
+        text(&results[1]),
         r#"{"n":"é","z":1}"#,
         "compact canonical JSON"
     );
-    assert!(!results[0].is_error);
     let bad = sink.outcome("bad");
-    assert!(results[1].is_error);
-    assert!(text(&results[1]).contains("does not match its output schema"));
+    assert!(results[2].is_error);
+    assert!(text(&results[2]).contains("does not match its output schema"));
     assert!(bad.result.is_err());
     assert_eq!(bad.contract_error.expect("recorded").tool, "Read");
+    let saw = lines(&log);
+    for line in ["saw pointer ok", "saw plain ok", "saw bad error"] {
+        assert!(saw.iter().any(|seen| seen == line), "{saw:?}");
+    }
 }
 
 #[tokio::test]

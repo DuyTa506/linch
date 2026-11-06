@@ -41,6 +41,7 @@ async fn a_text_only_run_delivers_durable_events_in_seq_order() {
         [
             "init",
             "user",
+            "context_build",
             "partial_assistant",
             "assistant",
             "usage",
@@ -248,7 +249,8 @@ async fn a_provider_error_fails_the_run_with_an_error_result() {
     let stream = agent.run("hi", RunOptions::new("s1"));
     let run_id = stream.run_id().clone();
     let envelopes = finish(stream).await;
-    assert_eq!(kinds(&envelopes), ["init", "user", "error", "result"]);
+    let expected = ["init", "user", "context_build", "error", "result"];
+    assert_eq!(kinds(&envelopes), expected);
     let result = result(&envelopes);
     assert_eq!(
         (result.subtype, result.stop_reason),

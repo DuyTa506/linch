@@ -88,6 +88,7 @@ pub fn envelope(run_id: &RunId, seq: u64) -> Envelope {
         v: WIRE_VERSION,
         seq,
         run_id: run_id.clone(),
+        ts_ms: 1_762_400_000_000 + seq,
         ignorable: false,
         event: Event::Error(ErrorEvent { error }),
     }
@@ -98,6 +99,7 @@ pub fn checkpoint(turn: u32) -> Checkpoint {
         turn,
         usage: Usage::default(),
         usage_complete: true,
+        cost_usd: None,
         session_len: 0,
         phase: Phase::Started {
             prompt: Message::user_text("hi"),

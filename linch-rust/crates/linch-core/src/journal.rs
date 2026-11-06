@@ -38,7 +38,7 @@ use thiserror::Error;
 
 use crate::canonical::Digest;
 use crate::events::kinds::ResultEvent;
-use crate::events::{Envelope, Event, Persistence, WIRE_VERSION};
+use crate::events::{Envelope, Event, Persistence, WIRE_VERSION, now_ms};
 use crate::ids::{RunId, SessionId};
 use crate::run::{Checkpoint, Phase, RunStatus};
 use crate::store::{Commit, Lease, NewRun, RunStore, StoreError};
@@ -299,6 +299,7 @@ impl Journal {
             v: WIRE_VERSION,
             seq,
             run_id: self.lease.run_id.clone(),
+            ts_ms: now_ms(),
             ignorable: false,
             event,
         }

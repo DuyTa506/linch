@@ -52,6 +52,8 @@ async fn tool_turn(
     journal.stage(Event::Usage(UsageEvent {
         usage: Usage::default(),
         cumulative: Usage::default(),
+        cost_usd: None,
+        cumulative_cost_usd: None,
     }));
     let phase = Phase::AssistantReceived {
         message: message.clone(),
@@ -80,6 +82,7 @@ async fn tool_turn(
             result: result.clone(),
             duration_ms: 1,
             canonical_output: None,
+            metadata: JsonObject::new(),
         }));
         journal.flush().await?;
         results.push(ContentBlock::ToolResult(result));

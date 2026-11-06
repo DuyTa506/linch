@@ -248,3 +248,20 @@ fn every_kind_round_trips_through_decode() {
         assert_eq!(decoded, event);
     }
 }
+
+#[test]
+fn type_name_is_the_wire_type_tag() {
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::{Config, TestRunner};
+
+    let tag = |event: &Event| event.to_value().expect("encodable")["type"].clone();
+    for event in one_of_every_kind() {
+        assert_eq!(tag(&event), event.type_name(), "{event:?}");
+    }
+    let mut runner = TestRunner::new(Config::default());
+    let strategy = super::super::arbitrary::event(3);
+    for _ in 0..256 {
+        let event = strategy.new_tree(&mut runner).unwrap().current();
+        assert_eq!(tag(&event), event.type_name(), "{event:?}");
+    }
+}
