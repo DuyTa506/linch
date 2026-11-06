@@ -27,14 +27,14 @@ pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a
 pub enum Recovery {
     /// `Started`: append the prompt unless `appended`, then dispatch.
     ///
-    /// Unlike the other pending appends, a session that moved on since the
-    /// checkpoint (another run on the session appended first) is not a
-    /// conflict: the prompt is not in it, and goes at its current end.
+    /// A session that grew past the checkpoint's `session_len` by entries
+    /// other than the prompt is not a conflict: runs that ended before this
+    /// one was created appended them (the store admits one live run per
+    /// session). `appended` is then false, and the prompt goes at the end.
     Started {
         /// The user prompt.
         prompt: Message,
-        /// Whether the prompt is already in the session, at the
-        /// checkpoint's `session_len`.
+        /// Whether the prompt is already in the session.
         appended: bool,
     },
     /// `ProviderPending` without an accepted receipt: write `abandoned`, if

@@ -42,7 +42,9 @@ pub enum RunError {
         reason: String,
     },
     /// A store read or write failed, including a lost lease
-    /// ([`StoreError::LeaseLost`]) and a session append conflict.
+    /// ([`StoreError::LeaseLost`]), a session append conflict, and a new
+    /// run on a session that already has a live run
+    /// ([`StoreError::SessionBusy`], nothing written).
     #[error(transparent)]
     Store(#[from] StoreError),
     /// A journal write failed; the journal is poisoned for this attempt.

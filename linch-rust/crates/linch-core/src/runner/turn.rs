@@ -24,8 +24,8 @@ use crate::usage::Usage;
 /// What the run does next.
 pub(super) enum Step {
     /// Append the prompt unless `appended`, then start the turn. `moved`:
-    /// the session grew since the `Started` checkpoint, which is saved
-    /// again at the current length before the append.
+    /// the session grew past the `Started` checkpoint before this run was
+    /// created, so `Started` is saved again at its length first.
     Prompt {
         prompt: Message,
         appended: bool,
@@ -110,6 +110,23 @@ impl Progress {
     }
 }
 
+/// The in-memory log of the stored session `entries`.
+pub(super) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
+    let mut log = SessionLog::new();
+    for entry in entries {
+        match entry {
+            LogEntry::Message(entry) => {
+                let message = Arc::unwrap_or_clone(entry.message);
+                log.append(message, entry.visible, entry.historical);
+            }
+            LogEntry::Projection(entry) => {
+                log.record_projection(entry.replacement, entry.reason);
+            }
+        }
+    }
+    log
+}
+
 /// One run in progress: its journal, its session view and its accounting.
 pub(super) struct Runner {
     pub(super) agent: Arc<AgentInner>,
@@ -139,18 +156,7 @@ impl Runner {
         progress: Progress,
     ) -> Self {
         let session_len = entries.len() as u64;
-        let mut log = SessionLog::new();
-        for entry in entries {
-            match entry {
-                LogEntry::Message(entry) => {
-                    let message = Arc::unwrap_or_clone(entry.message);
-                    log.append(message, entry.visible, entry.historical);
-                }
-                LogEntry::Projection(entry) => {
-                    log.record_projection(entry.replacement, entry.reason);
-                }
-            }
-        }
+        let log = session_log(entries);
         Self {
             snapshot: agent.tools.snapshot(),
             agent,

@@ -43,7 +43,8 @@ pub(super) fn new_run(namespace: &str, run_id: &str, events: u64) -> NewRun {
     NewRun {
         namespace: namespace.into(),
         run_id: RunId::new(run_id),
-        session_id: SessionId::new("s1"),
+        // A session per run: one session holds one live run at a time.
+        session_id: SessionId::new(format!("s-{run_id}")),
         parent_run_id: Some(RunId::new("parent")),
         contract: contract(),
         checkpoint: Checkpoint {

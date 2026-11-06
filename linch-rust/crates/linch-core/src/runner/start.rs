@@ -39,8 +39,8 @@ pub(super) async fn new_run(
     let sessions = &agent.sessions;
     let entries = match sessions.load(&namespace, &session_id).await {
         Ok(entries) => entries,
-        // When another run created the session first, this run still saw it
-        // empty: the prompt append decides which run goes first.
+        // When another run created the session first, it is still empty as
+        // far as this run knows: the run create admits one of the two.
         Err(StoreError::NotFound { .. }) => match sessions.create(&namespace, &session_id).await {
             Ok(()) | Err(StoreError::Conflict { .. }) => Vec::new(),
             Err(error) => return Err(error.into()),
@@ -82,8 +82,11 @@ pub(super) async fn new_run(
         .await
     {
         Ok(ready) => ready,
-        // Another start with the same id created it first.
-        Err(JournalError::Store(error @ StoreError::Conflict { .. })) => return Err(error.into()),
+        // Another start with the same id created it first, or the session
+        // already has a run that is not terminal: nothing was written.
+        Err(JournalError::Store(
+            error @ (StoreError::Conflict { .. } | StoreError::SessionBusy { .. }),
+        )) => return Err(error.into()),
         Err(error) => return Err(error.into()),
     };
     outbox.deliver(ready).await;
@@ -144,7 +147,7 @@ pub(super) async fn continue_run(
         Recovery::Started { prompt, appended } => Step::Prompt {
             prompt,
             appended,
-            // Another run on the session appended after the checkpoint.
+            // Runs that ended before this one was created appended since.
             moved: !appended && entries.len() as u64 != checkpoint.session_len,
         },
         Recovery::Redispatch { attempt, abandoned } => Step::Dispatch { attempt, abandoned },

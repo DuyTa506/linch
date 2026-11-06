@@ -13,6 +13,11 @@ async fn memory_run_store_passes_the_conformance_suite() {
 }
 
 #[tokio::test]
+async fn memory_run_store_admits_one_live_run_per_session() {
+    conformance::run_admission_suite(&MemoryRunStore::new()).await;
+}
+
+#[tokio::test]
 async fn memory_session_store_passes_the_conformance_suite() {
     conformance::session_store_suite(&MemorySessionStore::new()).await;
 }

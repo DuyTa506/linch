@@ -120,6 +120,14 @@ impl RunStore for MemoryRunStore {
                 message: format!("run {} already exists in {}", run.run_id, run.namespace),
             });
         }
+        let active = (space.values().map(|stored| &stored.record))
+            .find(|record| record.session_id == run.session_id && !record.status.is_terminal());
+        if let Some(active) = active {
+            return Err(StoreError::SessionBusy {
+                session_id: run.session_id,
+                run_id: active.run_id.clone(),
+            });
+        }
         let record = RunRecord {
             namespace: run.namespace,
             run_id: run.run_id,

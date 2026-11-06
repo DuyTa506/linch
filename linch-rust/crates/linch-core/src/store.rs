@@ -122,6 +122,16 @@ pub enum StoreError {
         /// What conflicted.
         message: String,
     },
+    /// A run create named a session that already has a run that is not
+    /// terminal; a session holds at most one per namespace. Resume, approve
+    /// or fail `run_id` first.
+    #[error("session {session_id} is busy with run {run_id}")]
+    SessionBusy {
+        /// The busy session.
+        session_id: SessionId,
+        /// Its run that is not terminal.
+        run_id: RunId,
+    },
     /// Event seqs did not continue the stored sequence.
     #[error("event seq gap: expected {expected}, got {got}")]
     SeqGap {
@@ -147,6 +157,12 @@ pub enum StoreError {
 #[async_trait]
 pub trait RunStore: Send + Sync {
     /// Create a run with its first checkpoint and events, in one write.
+    ///
+    /// Refuses, writing nothing, with `Conflict` when the run id exists and
+    /// with [`StoreError::SessionBusy`] when the namespace already holds a
+    /// run of the same session that is not terminal. The check and the
+    /// insert are one atomic step, so of two creates racing on one session
+    /// exactly one lands.
     async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError>;
 
     /// Take ownership of a run, fencing out any earlier lease. A suspended

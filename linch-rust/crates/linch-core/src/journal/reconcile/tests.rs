@@ -170,24 +170,12 @@ fn a_pending_session_append_is_checked_against_the_log() {
 }
 
 #[test]
-fn a_started_prompt_is_found_at_its_slot_or_goes_after_other_runs() {
+fn a_started_prompt_goes_after_runs_that_ended_before_it() {
     let prompt = Message::user_text("pending");
     let other = Message::user_text("other");
     let cp = checkpoint(Phase::Started {
         prompt: prompt.clone(),
     });
-    let landed = |extra: &[&Message]| {
-        let mut log = session(LEN, None);
-        log.push(entry(&prompt));
-        log.extend(extra.iter().map(|m| entry(m)));
-        log
-    };
-    let projection = LogEntry::Projection(crate::session_log::ProjectionEntry {
-        replacement: vec![Arc::new(prompt.clone())],
-        reason: "compaction".into(),
-    });
-    let mut projected = session(LEN, None);
-    projected.push(projection);
     let started = |appended| {
         Ok(Recovery::Started {
             prompt: prompt.clone(),
@@ -196,14 +184,10 @@ fn a_started_prompt_is_found_at_its_slot_or_goes_after_other_runs() {
     };
     let cases = [
         (session(LEN, None), started(false)),
-        (landed(&[]), started(true)),
-        // Another run on the session appended after the prompt landed.
-        (landed(&[&other, &other]), started(true)),
-        // Another run appended first: the prompt is not in the session,
-        // even when an identical message came later.
+        (session(LEN + 1, Some(&prompt)), started(true)),
+        // Entries of runs that ended before this one was created.
         (session(LEN + 1, Some(&other)), started(false)),
         (session(LEN + 2, Some(&prompt)), started(false)),
-        (projected, started(false)),
         (session(LEN - 1, None), conflict(LEN - 1)),
     ];
     for (log, expected) in cases {

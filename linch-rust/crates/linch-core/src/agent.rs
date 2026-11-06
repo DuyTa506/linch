@@ -234,9 +234,11 @@ impl Agent {
     /// Start a new run on `prompt` in `options.session_id`, creating the
     /// session if it does not exist.
     ///
-    /// When another run on the session appends first, this run ends with
-    /// [`RunError::Store`] (a conflict) before its prompt is in the session;
-    /// [`Agent::resume`] appends the prompt after the other run's entries.
+    /// A session holds at most one run that is not terminal. On a session
+    /// that has one, the stream ends with
+    /// `RunError::Store(StoreError::SessionBusy { session_id, run_id })`,
+    /// naming that run, and this run is never created; resume, approve or
+    /// fail the named run first.
     ///
     /// Returns:
     ///     The run's stream. Its [`RunStream::run_id`] is known at once

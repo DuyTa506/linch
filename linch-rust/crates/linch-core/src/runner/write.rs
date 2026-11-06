@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::turn::Runner;
+use super::turn::{Runner, session_log};
 use crate::agent::RunError;
 use crate::events::Event;
 use crate::events::kinds::UsageEvent;
@@ -26,34 +26,38 @@ impl Runner {
         Ok(())
     }
 
-    /// Session write: append the run's prompt at the `Started`
-    /// checkpoint's length, so a crash after it reconciles as appended.
+    /// Session write: append the run's prompt at the session's end.
     ///
-    /// When the session `moved` since that checkpoint, `Started` is saved
-    /// again at the current length first. When another run on the session
-    /// appends first, `Started` is saved at the new length and the conflict
-    /// is returned: resume appends the prompt after that run's entries
-    /// instead of in the middle of its turn, which would break it.
+    /// The store admits one live run per session, so once this run exists
+    /// no other run appends. The session may still have grown between this
+    /// run's load and its create, by a run that ended in between: the first
+    /// append then conflicts, and the run reads the session again, saves
+    /// `Started` at its length and appends there. `moved`: resume found the
+    /// session grown already. Either way the prompt lands exactly at the
+    /// checkpoint's `session_len`, so a crash after it reconciles.
     pub(super) async fn append_prompt(
         &mut self,
         prompt: Message,
         moved: bool,
     ) -> Result<(), RunError> {
         if moved {
-            let phase = Phase::Started {
-                prompt: prompt.clone(),
-            };
-            self.save(phase).await?;
+            self.save_started(&prompt).await?;
         }
-        let conflict = match self.append(prompt.clone()).await {
-            Err(RunError::Store(conflict @ StoreError::Conflict { .. })) => conflict,
+        match self.append(prompt.clone()).await {
+            Err(RunError::Store(StoreError::Conflict { .. })) => {}
             done => return done,
-        };
+        }
         let (sessions, namespace) = (&self.agent.sessions, &self.agent.namespace);
         let entries = sessions.load(namespace, &self.run.session_id).await?;
         self.session_len = entries.len() as u64;
-        self.save(Phase::Started { prompt }).await?;
-        Err(conflict.into())
+        self.log = session_log(entries);
+        self.save_started(&prompt).await?;
+        self.append(prompt).await
+    }
+
+    async fn save_started(&mut self, prompt: &Message) -> Result<(), RunError> {
+        let prompt = prompt.clone();
+        self.save(Phase::Started { prompt }).await
     }
 
     /// Session write: flush the held checkpoint, then append the

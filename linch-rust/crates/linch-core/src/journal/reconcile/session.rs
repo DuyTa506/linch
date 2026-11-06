@@ -45,27 +45,25 @@ pub(super) fn appended(
     }
 }
 
-/// Whether a `Started` run's `prompt` was already appended. The runner
-/// appends a prompt only at the checkpoint's `session_len` (it saves a new
-/// `Started` first when the session moved), so the prompt is in the log
-/// exactly when that slot holds it. Other runs may have appended after it,
-/// or in its place: then the session moved on and the prompt is not in it.
+/// Whether a `Started` run's `prompt` was already appended: like
+/// [`appended()`], except that a session that grew by other entries is not
+/// a conflict. The store admits one live run per session, so those entries
+/// came from runs that ended before this run was created, and the prompt is
+/// not in the session yet.
 pub(super) fn prompt_appended(
     checkpoint: &Checkpoint,
     session: &[LogEntry],
     prompt: &Message,
 ) -> Result<bool, ReconcileError> {
     let found = session.len() as u64;
-    let slot = usize::try_from(checkpoint.session_len).ok();
-    match slot.and_then(|slot| session.get(slot)) {
-        Some(LogEntry::Message(entry)) => Ok(*entry.message == *prompt),
-        Some(LogEntry::Projection(_)) => Ok(false),
-        None if found == checkpoint.session_len => Ok(false),
-        None => Err(ReconcileError::SessionConflict {
+    if found < checkpoint.session_len {
+        return Err(ReconcileError::SessionConflict {
             expected: checkpoint.session_len,
             found,
-        }),
+        });
     }
+    let last = |entry: &LogEntry| matches!(entry, LogEntry::Message(e) if *e.message == *prompt);
+    Ok(found == checkpoint.session_len + 1 && session.last().is_some_and(last))
 }
 
 /// Whether the compaction projection was already appended: like
