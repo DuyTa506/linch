@@ -55,9 +55,10 @@ pub(super) fn grep(
         let Some(path) = regular_file(entry) else {
             continue;
         };
-        // A multiline search reads the whole file; skip one over the cap
-        // without reading it. Line searches stream, so any size is fine.
-        if query.multiline
+        // A pattern that can match a newline makes the searcher read the
+        // whole file; skip one over the cap without reading it. Other
+        // searches stream, so any size is fine.
+        if searcher.multi_line_with_matcher(&matcher)
             && path
                 .metadata()
                 .is_ok_and(|meta| meta.len() > MAX_READ_BYTES)
