@@ -21,7 +21,10 @@ use thiserror::Error;
 /// One finished call's result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalRecord {
-    /// Content key of the call ([`step_key`], [`interrupt_key`]).
+    /// Content key of the call ([`step_key`], [`agent_key`],
+    /// [`interrupt_key`]). A call inside a `parallel` or `settled`
+    /// branch adds `@` and its branch path: the branch index at each level,
+    /// outermost first, such as `@1` or `@0.2`.
     pub call_key: String,
     /// Which call with this key it was, counting from 0 in call order.
     pub occurrence: u64,

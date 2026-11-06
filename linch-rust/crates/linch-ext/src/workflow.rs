@@ -50,6 +50,13 @@
 //! on a journaled value is fine, branching on the clock, randomness or the
 //! environment is not, unless that value comes from a step.
 //!
+//! Inside [`WorkflowContext::parallel`] and [`WorkflowContext::settled`],
+//! each branch counts occurrences on its own, under its branch path
+//! ([`JournalRecord::call_key`]), since branches reach their calls in
+//! another order on replay. Concurrency built some other way (`join!` or
+//! `select!`, or a spawned task, which does not inherit the path) gets no
+//! path of its own, so calls there need distinct names or keys.
+//!
 //! ## Running across processes
 //!
 //! With a durable store, any process with the same workflow function can

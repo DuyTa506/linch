@@ -123,7 +123,7 @@ stored records. The journaled calls:
 Everything else in the function runs again on every resume. `parallel` and
 `settled` fan branches out, at most `max_concurrency` at once per call
 (default 4): `parallel` fails fast and drops the other branches, `settled`
-returns every outcome (`crates/linch-ext/src/workflow/fanout.rs:32`, `fanout.rs:56`).
+returns every outcome (`crates/linch-ext/src/workflow/fanout.rs:34`, `fanout.rs:59`).
 Nothing is spawned; every branch runs in the caller's task. `phase(title)`
 emits a progress event. Every call emits a `WorkflowEvent` to the optional
 `on_event` sink, with a kind of `phase`, `step_start`, `step_end`,
@@ -138,13 +138,26 @@ that key came before it in this run (`workflow.rs:43-51`). Keys are
 domain-separated digests: `step_key` of the name and the optional input key,
 `agent_key` of the name and the prompt, `interrupt_key` of the key alone, so a
 payload may change across resumes without losing the answer
-(`journal.rs:161-193`). The function must take the same path again: branching
+(`journal.rs:164-196`). The function must take the same path again: branching
 on a journaled value is fine, branching on the clock, randomness or the
 environment is not unless the value comes from a step.
 
+Inside `parallel` and `settled`, each branch counts its own occurrences: the
+journal key of a call there is its content key, `@`, and its branch path (the
+branch index at each level, outermost first, such as `@1` or `@0.2`). On
+replay, journaled calls return at once, so branches reach a shared name in
+another order than they did live; a count shared across branches would hand
+one branch another's record and run a journaled step again. The path is a
+task-local that each branch is polled under
+(`crates/linch-ext/src/workflow/context.rs:110`, `context.rs:161-183`).
+Concurrency built some other way (`join!` or `select!`, or a spawned task,
+which does not inherit the path) gets no path of its own, so calls there need
+distinct names or keys. Python counts one occurrence per key across the whole
+run, branches included.
+
 A step's value is durable before `step` returns. A process that crashes after
 `f` ran but before the record landed runs `f` again on resume, so side effects
-should be idempotent (`crates/linch-ext/src/workflow/step.rs:47-54`). With a
+should be idempotent (`crates/linch-ext/src/workflow/step.rs:48-55`). With a
 `Retry` policy (`crates/linch-ext/src/workflow/policy.rs:18`), only the winning
 attempt is journaled. Step errors and timeouts are retried; encode errors and
 a cancelled workflow are not.
@@ -158,7 +171,7 @@ call fails, and the next resume starts a fresh run with the next generation.
 A run that stops for approval fails the call; approve it with `Agent::approve`,
 then resume the workflow, which reads the finished run's text. Step timeouts
 and retries do not apply to an agent call; the workflow deadline and cancel
-token do (`agent.rs:17-37`).
+token do (`agent.rs:17-38`).
 
 An interrupt without an answer returns `WorkflowError::Suspended`;
 `run_workflow` then stores the workflow as `awaiting_input` with the question,
@@ -178,13 +191,13 @@ replays still return. Dropping the future is a crash: the status stays
 
 ### Journal stores and leases
 
-`JournalStore` (`journal.rs:120`) has `claim`, `load`, `append` and
+`JournalStore` (`journal.rs:123`) has `claim`, `load`, `append` and
 `set_status`. Leases follow the core's model: `claim` always wins, creates the
 workflow when new, and adds 1 to the epoch; every write under an older epoch
 fails with `LeaseLost`. There is no expiry and no heartbeat, so keep one
 runner per workflow, for example with a job queue. Any status can be claimed
 again: a failed workflow resumes from its journal and a completed one replays
-to the end (`journal.rs:41-56`). A suspended workflow holds no process; any
+to the end (`journal.rs:44-59`). A suspended workflow holds no process; any
 process can read its question with `load`.
 
 | Store | Notes |

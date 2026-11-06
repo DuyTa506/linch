@@ -19,10 +19,11 @@ impl WorkflowContext {
     ///
     /// Each call is its own run of `agent`, on a new session, with a run id
     /// derived from the workflow, the call's key ([`agent_key`] of `name`
-    /// and `prompt`) and its occurrence. So when a process crashes during
-    /// the call, the next [`run_workflow`](super::run_workflow) continues
-    /// that run instead of starting over, and never pays a model call twice
-    /// (the run's own journal sees to that). The final text is journaled
+    /// and `prompt`, plus its branch path inside a fan-out) and its
+    /// occurrence. So when a process crashes during the call, the next
+    /// [`run_workflow`](super::run_workflow) continues that run instead of
+    /// starting over, and never pays a model call twice (the run's own
+    /// journal sees to that). The final text is journaled
     /// once the run succeeds; a resume after that replays it without
     /// touching the agent.
     ///
@@ -58,8 +59,7 @@ impl WorkflowContext {
         prompt: &str,
     ) -> Result<String, WorkflowError> {
         let label = format!("agent {name}");
-        let call_key = agent_key(name, prompt);
-        let (occurrence, cached) = self.next_occurrence(&call_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&agent_key(name, prompt));
         let emit = |kind, result_text: Option<&str>| {
             let mut event = event(kind, name.to_owned(), call_key.clone(), occurrence);
             event.subagent_type = name.to_owned();
