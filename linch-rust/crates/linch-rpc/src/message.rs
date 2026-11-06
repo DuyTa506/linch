@@ -27,17 +27,24 @@ pub enum Id {
     Null,
 }
 
-/// A call or notification from a client.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// A call or notification: from a client, or a server request
+/// (`tool.call`, `hook.call`) to a client.
+///
+/// The server reads requests with [`Request::from_value`], which tells an
+/// invalid request from invalid params; a client decodes the server's with
+/// serde.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     /// Always 2.0.
     pub jsonrpc: Version,
     /// Absent for a notification, which gets no response.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Id>,
     /// Method name.
     pub method: String,
     /// Named parameters; an absent `params` reads as an empty object.
+    #[serde(default)]
     pub params: JsonObject,
 }
 
@@ -57,7 +64,8 @@ pub struct Response {
     pub error: Option<ErrorObject>,
 }
 
-/// A server-to-client notification (`run.event`, `run.end`).
+/// A server-to-client notification (`run.event`, `run.end`,
+/// `$/cancelRequest`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Notification {
@@ -69,7 +77,9 @@ pub struct Notification {
     pub params: JsonValue,
 }
 
-/// What a client reads from the server: a response or a notification.
+/// What a client reads from the server: a response, a notification or a
+/// server request. The variants are tried in this order; each rejects
+/// unknown members, so a line matches exactly one.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
@@ -77,6 +87,8 @@ pub enum Message {
     Response(Response),
     /// A server notification.
     Notification(Notification),
+    /// A server request the client must answer.
+    Request(Request),
 }
 
 impl Request {

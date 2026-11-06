@@ -1,5 +1,5 @@
-//! Method names and the typed params and results of each method. Every
-//! params object rejects unknown fields.
+//! Method names and the typed params and results of each method, in both
+//! directions. Every params object rejects unknown fields.
 
 use std::collections::BTreeMap;
 
@@ -9,9 +9,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorObject;
 
+mod call;
+mod open;
+
+pub use call::{CancelRequestParams, ToolCallParams, tool_code};
+pub use open::{HostToolSpec, OpenParams};
+
 /// Method and notification names.
 pub mod method {
-    /// Open an agent from an `AgentConfig`.
+    /// Open an agent from an `AgentConfig` plus host tools and callbacks.
     pub const AGENT_OPEN: &str = "agent.open";
     /// Start a run.
     pub const RUN_START: &str = "run.start";
@@ -27,6 +33,11 @@ pub mod method {
     pub const RUN_EVENT: &str = "run.event";
     /// Notification: the server stopped driving a run.
     pub const RUN_END: &str = "run.end";
+    /// Server request: run a host tool in the client.
+    pub const TOOL_CALL: &str = "tool.call";
+    /// Notification from the server: it no longer waits for the answer to
+    /// one of its requests.
+    pub const CANCEL_REQUEST: &str = "$/cancelRequest";
 }
 
 /// Result of `agent.open`.

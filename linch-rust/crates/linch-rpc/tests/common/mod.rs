@@ -4,13 +4,17 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use linch::provider::scripted::TurnBuilder;
-use linch::{Envelope, Event, RunId, ScriptedTurn};
+use linch::{Envelope, Event, JsonObject, RunId, ScriptedTurn};
 use linch_rpc::protocol::{AgentOpened, RunAccepted, RunEnd, method};
-use linch_rpc::{Client, ClientError, ErrorObject, Notifications};
+use linch_rpc::{Client, ClientError, ErrorObject, Notifications, RequestHandler};
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 pub const MODEL: &str = "scripted-model";
 
@@ -41,7 +45,15 @@ pub struct Rpc {
 
 impl Rpc {
     pub fn new() -> Self {
-        let (client, notifications) = Client::in_process();
+        Self::connected(Client::in_process())
+    }
+
+    /// A client whose server requests go to `handler`.
+    pub fn with_handler(handler: Arc<dyn RequestHandler>) -> Self {
+        Self::connected(Client::in_process_with(handler))
+    }
+
+    fn connected((client, notifications): (Client, Notifications)) -> Self {
         Self {
             client,
             notifications,
@@ -138,4 +150,63 @@ pub fn tool_turn(id: &str, tool: &str, input: Value) -> ScriptedTurn {
 
 pub fn text_turn(text: &str) -> ScriptedTurn {
     TurnBuilder::new(MODEL).text(text).build()
+}
+
+/// A scripted agent config with no workspace, permission mode `mode`
+/// (project root `/`), and the members of `extra` (`tools`, ...) added.
+pub fn hosted(turns: Vec<ScriptedTurn>, mode: &str, extra: Value) -> Value {
+    let mut config = scripted(turns, None, mode);
+    config["permissions"] = json!({"mode": mode, "project_root": "/"});
+    for (key, value) in extra.as_object().expect("extra is an object") {
+        config[key] = value.clone();
+    }
+    config
+}
+
+/// A host tool declaration taking an optional string `q`.
+pub fn host_tool(name: &str, scope: &str) -> Value {
+    json!({
+        "name": name,
+        "description": format!("The {name} tool."),
+        "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+        "scope": scope,
+    })
+}
+
+/// The `result` block of each `tool_call_end`, as JSON, in order.
+pub fn tool_results(ended: &Ended) -> Vec<Value> {
+    (ended.envelopes.iter())
+        .filter_map(|envelope| match &envelope.event {
+            Event::ToolCallEnd(end) => Some(serde_json::to_value(&end.result).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A [`RequestHandler`] from an async closure over the method, the params
+/// and the cancel token.
+pub fn handler<F, Fut>(answer: F) -> Arc<dyn RequestHandler>
+where
+    F: Fn(String, JsonObject, CancellationToken) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, ErrorObject>> + Send + 'static,
+{
+    Arc::new(Closure(answer))
+}
+
+struct Closure<F>(F);
+
+#[async_trait]
+impl<F, Fut> RequestHandler for Closure<F>
+where
+    F: Fn(String, JsonObject, CancellationToken) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, ErrorObject>> + Send + 'static,
+{
+    async fn handle(
+        &self,
+        method: &str,
+        params: JsonObject,
+        cancel: CancellationToken,
+    ) -> Result<Value, ErrorObject> {
+        (self.0)(method.to_owned(), params, cancel).await
+    }
 }

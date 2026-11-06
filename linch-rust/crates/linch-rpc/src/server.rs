@@ -1,10 +1,11 @@
 //! The server: newline-delimited JSON-RPC over any byte stream pair.
 //!
 //! One read loop parses lines and spawns a task per call, so a slow
-//! `agent.open` never holds up `run.cancel`. One writer task owns the
-//! output and writes every response and notification from a bounded queue;
-//! when the client reads slowly the queue fills and the runs pause, since a
-//! run only advances while its stream is polled.
+//! `agent.open` never holds up `run.cancel`; it hands the client's answers
+//! to server requests straight to their waiting calls. One writer task owns
+//! the output and writes every response, notification and server request
+//! from a bounded queue; when the client reads slowly the queue fills and
+//! the runs pause, since a run only advances while its stream is polled.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -13,20 +14,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::StreamExt;
-use linch::{Agent, AgentConfig, JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
+use linch::{Agent, Hooks, JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::error::{ErrorObject, code, invalid_params, invalid_request};
 use crate::message::{Id, Notification, Request, Response};
-use crate::protocol::{AgentOpened, Events, EventsParams, RunAccepted, method};
+use crate::protocol::{AgentOpened, Events, EventsParams, OpenParams, RunAccepted, method};
 
+mod host;
+mod peer;
 mod run;
+
+use peer::Peer;
 
 /// Longest request line the server reads, in bytes.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -36,10 +41,12 @@ const OUTBOX_CAPACITY: usize = 1024;
 
 /// Serve one client until its input ends.
 ///
-/// Every line of `reader` is one request; every line written to `writer`
-/// is one response or notification. At end of input the server stops: each
-/// active run is dropped where it stands, as in a crash, so it stays
-/// resumable from its last durable state; queued output is written; then
+/// Every line of `reader` is one request, or the answer to a server
+/// request; every line written to `writer` is one response, notification or
+/// server request. At end of input the server stops: each active run is
+/// dropped where it stands, as in a crash, so it stays resumable from its
+/// last durable state; every server request still waiting fails; every
+/// agent's MCP servers are disconnected; queued output is written; then
 /// this returns.
 ///
 /// Args:
@@ -55,11 +62,13 @@ where
 {
     let (sender, queue) = mpsc::channel(OUTBOX_CAPACITY);
     let writing = tokio::spawn(write_lines(writer, queue));
+    let outbox = Outbox(sender);
     let server = Server(Arc::new(State {
         agents: Mutex::new(HashMap::new()),
         runs: Mutex::new(HashMap::new()),
         next_agent: AtomicU64::new(0),
-        outbox: Outbox(sender),
+        peer: Peer::new(outbox.clone()),
+        outbox,
         shutdown: CancellationToken::new(),
         tasks: TaskTracker::new(),
     }));
@@ -78,7 +87,10 @@ where
             }
         }
     }
+    // Drop the runs first, so none sees the closed connection as a tool or
+    // hook failure, then fail what still waits on the client.
     server.0.shutdown.cancel();
+    server.0.peer.close();
     server.0.tasks.close();
     server.0.tasks.wait().await;
     // Disconnect every agent's MCP servers, so no server process outlives
@@ -115,16 +127,34 @@ async fn write_lines<W: AsyncWrite + Unpin>(
 struct Outbox(mpsc::Sender<String>);
 
 impl Outbox {
-    async fn send<T: Serialize>(&self, message: &T) {
-        // Messages hold only JSON values and strings, which always encode.
-        let line = serde_json::to_string(message).expect("a JSON-RPC message encodes");
-        // A closed queue means the writer failed; serve reports that.
-        let _ = self.0.send(line).await;
+    /// Queue `message`; `false` when the writer has stopped (it failed, and
+    /// serve reports that).
+    async fn send<T: Serialize>(&self, message: &T) -> bool {
+        self.0.send(encode(message)).await.is_ok()
+    }
+
+    /// Queue `message` without waiting, from code that cannot await (a
+    /// drop). When the queue is full a task sends it later.
+    fn send_now<T: Serialize>(&self, message: &T) {
+        match self.0.try_send(encode(message)) {
+            Ok(()) | Err(TrySendError::Closed(_)) => {}
+            Err(TrySendError::Full(line)) => {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let sender = self.0.clone();
+                    runtime.spawn(async move { sender.send(line).await });
+                }
+            }
+        }
     }
 
     async fn notify(&self, method: &str, params: JsonValue) {
         self.send(&Notification::new(method, params)).await;
     }
+}
+
+fn encode<T: Serialize>(message: &T) -> String {
+    // Messages hold only JSON values and strings, which always encode.
+    serde_json::to_string(message).expect("a JSON-RPC message encodes")
 }
 
 /// Server state shared by every task. Cheap to clone.
@@ -137,6 +167,8 @@ struct State {
     runs: Mutex<HashMap<RunId, CancellationToken>>,
     next_agent: AtomicU64,
     outbox: Outbox,
+    /// Requests from the server to the client.
+    peer: Peer,
     shutdown: CancellationToken,
     tasks: TaskTracker,
 }
@@ -157,18 +189,47 @@ impl Server {
             Ok(value) => value,
             Err(error) => {
                 let error = ErrorObject::new(code::PARSE_ERROR, format!("not JSON: {error}"));
-                return self.0.outbox.send(&Response::err(Id::Null, error)).await;
+                self.0.outbox.send(&Response::err(Id::Null, error)).await;
+                return;
             }
         };
+        if is_response(&value) {
+            return self.answer(value).await;
+        }
         let request = match Request::from_value(value) {
             Ok(request) => request,
-            Err(rejected) => return self.0.outbox.send(&rejected).await,
+            Err(rejected) => {
+                self.0.outbox.send(&rejected).await;
+                return;
+            }
         };
         // This protocol defines no client notifications; JSON-RPC forbids
         // answering one, so it is dropped.
         let Some(id) = request.id else { return };
         let server = self.clone();
         self.spawn(async move { server.handle(id, &request.method, request.params).await });
+    }
+
+    /// Hand the client's answer to the server request it names. A
+    /// malformed answer fails that request; with no readable id it gets a
+    /// `-32600` error line, as any unreadable message does.
+    async fn answer(&self, value: JsonValue) {
+        let id = value
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned);
+        match serde_json::from_value::<Response>(value) {
+            Ok(response) => self.0.peer.answer(response),
+            Err(error) => {
+                let error = invalid_request(&format!("malformed response: {error}"));
+                match id {
+                    Some(id) => self.0.peer.answer(Response::err(Id::String(id), error)),
+                    None => {
+                        self.0.outbox.send(&Response::err(Id::Null, error)).await;
+                    }
+                }
+            }
+        }
     }
 
     /// Run `task` until it ends or the server shuts down.
@@ -185,7 +246,9 @@ impl Server {
 
     async fn handle(&self, id: Id, method: &str, params: JsonObject) {
         match self.dispatch(method, params).await {
-            Ok(Reply::Value(result)) => self.0.outbox.send(&Response::ok(id, result)).await,
+            Ok(Reply::Value(result)) => {
+                self.0.outbox.send(&Response::ok(id, result)).await;
+            }
             Ok(Reply::Run(stream)) => {
                 let accepted = RunAccepted {
                     run_id: stream.run_id().clone(),
@@ -196,7 +259,9 @@ impl Server {
                 let server = self.clone();
                 self.spawn(async move { server.drive(stream).await });
             }
-            Err(error) => self.0.outbox.send(&Response::err(id, error)).await,
+            Err(error) => {
+                self.0.outbox.send(&Response::err(id, error)).await;
+            }
         }
     }
 
@@ -215,15 +280,20 @@ impl Server {
         }
     }
 
-    async fn open(&self, config: AgentConfig) -> Result<JsonValue, ErrorObject> {
-        let agent = config
-            .open()
-            .await
-            .map_err(|error| ErrorObject::from(&error))?;
+    /// Open an agent whose host tools call back over this connection.
+    async fn open(&self, params: OpenParams) -> Result<JsonValue, ErrorObject> {
+        // The handle is named first: the host tools carry it in each call.
         let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
         let handle = format!("agent-{number}");
-        let contract = agent.agent().contract().to_string();
-        lock(&self.0.agents).insert(handle.clone(), agent);
+        let tools = host::registry(params.tools, &handle, &self.0.peer)?;
+        let hooks = Arc::new(Hooks::default());
+        let opened = params
+            .config
+            .open_with(tools, hooks)
+            .await
+            .map_err(|error| ErrorObject::from(&error))?;
+        let contract = opened.agent().contract().to_string();
+        lock(&self.0.agents).insert(handle.clone(), opened);
         to_value(&AgentOpened {
             agent: handle,
             contract,
@@ -241,13 +311,20 @@ impl Server {
 
     fn agent(&self, handle: &str) -> Result<Agent, ErrorObject> {
         let agents = lock(&self.0.agents);
-        agents
-            .get(handle)
-            .map(|opened| opened.agent().clone())
-            .ok_or_else(|| {
-                ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
-            })
+        let opened = agents.get(handle).ok_or_else(|| {
+            ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
+        })?;
+        Ok(opened.agent().clone())
     }
+}
+
+/// An object with no `method` but a `result` or `error` answers a server
+/// request; anything else is read as a request.
+fn is_response(value: &JsonValue) -> bool {
+    value.as_object().is_some_and(|object| {
+        !object.contains_key("method")
+            && (object.contains_key("result") || object.contains_key("error"))
+    })
 }
 
 fn parse<P: DeserializeOwned>(params: JsonObject) -> Result<P, ErrorObject> {

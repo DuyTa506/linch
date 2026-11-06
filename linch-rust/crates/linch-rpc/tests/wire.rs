@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{scripted, text_turn};
+use common::{host_tool, hosted, scripted, text_turn, tool_turn};
 use linch_rpc::code;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, WriteHalf};
@@ -176,4 +176,53 @@ async fn the_start_result_comes_before_the_run_notifications() {
             .iter()
             .all(|m| m == "run.event")
     );
+}
+
+#[tokio::test]
+async fn a_client_answer_reaches_its_server_request_and_a_malformed_one_fails_it() {
+    let mut wire = Wire::new();
+    let turns = vec![
+        tool_turn("call_1", "lookup", json!({})),
+        tool_turn("call_2", "lookup", json!({})),
+        text_turn("Done."),
+    ];
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let open = json!({"jsonrpc": "2.0", "id": 1, "method": "agent.open",
+                      "params": hosted(turns, "default", tools)});
+    wire.send(&open.to_string()).await;
+    let agent = wire.recv().await["result"]["agent"].clone();
+    let start = json!({"jsonrpc": "2.0", "id": 2, "method": "run.start",
+                       "params": {"agent": agent, "session_id": "s1", "prompt": "go"}});
+    wire.send(&start.to_string()).await;
+
+    let mut answers = [
+        json!({"result": {"value": 1}, "extra": true}),
+        json!({"result": {"value": "fine"}}),
+    ]
+    .into_iter();
+    let mut ends = Vec::new();
+    loop {
+        let message = wire.recv().await;
+        match message["method"].as_str() {
+            Some("tool.call") => {
+                let id = message["id"].as_str().expect("a request id").to_owned();
+                assert!(id.starts_with("srv-"), "{message}");
+                let mut answer = answers.next().expect("two calls");
+                answer["jsonrpc"] = json!("2.0");
+                answer["id"] = json!(id);
+                wire.send(&answer.to_string()).await;
+            }
+            Some("run.event") if message["params"]["event"]["type"] == "tool_call_end" => {
+                ends.push(message["params"]["event"]["result"].to_string());
+            }
+            Some("run.end") => break,
+            Some(_) => {}
+            // Only the run.start result has no method; any other is the
+            // server answering a response.
+            None => assert_eq!(message["id"], 2, "{message}"),
+        }
+    }
+    assert_eq!(ends.len(), 2);
+    assert!(ends[0].contains("malformed response"), "{}", ends[0]);
+    assert!(ends[1].contains("fine"), "{}", ends[1]);
 }

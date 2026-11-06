@@ -4,8 +4,9 @@
 //! A process (the `linch-server` sidecar) opens agents from configs and
 //! drives their runs; the client starts, approves, cancels and replays runs
 //! and receives every envelope as a notification. Everything inside a turn
-//! runs in the server. This first slice has no host tools, no intercept
-//! callbacks, no socket or HTTP transport and no auth.
+//! runs in the server; it calls back into the client, on the same
+//! connection, only for what the client declared: host tools. There is no
+//! socket or HTTP transport and no auth yet.
 //!
 //! # Framing
 //!
@@ -23,9 +24,16 @@
 //! object. Calls run concurrently, so responses may arrive in any order;
 //! match them by `id`.
 //!
+//! Both directions carry requests. The server reads a line with a `method`
+//! as a request and a line with no `method` but a `result` or `error` as
+//! the answer to one of its own requests; it never answers an answer. The
+//! client reads each server line as exactly one of a response, a
+//! notification or a request ([`Message`]).
+//!
 //! # Methods
 //!
-//! **`agent.open`**: params are an [`AgentConfig`](linch::AgentConfig):
+//! **`agent.open`**: params are an [`AgentConfig`](linch::AgentConfig) plus
+//! an optional `tools` list ([`OpenParams`](protocol::OpenParams)):
 //!
 //! ```json
 //! {"namespace": "acme",
@@ -33,18 +41,33 @@
 //!  "provider": {"id": "deepseek"},
 //!  "stores": {"type": "postgres", "dsn": "postgres://linch@db/linch"},
 //!  "workspace": "/srv/acme",
-//!  "permissions": {"mode": "accept_edits", "project_root": "/srv/acme"}}
+//!  "permissions": {"mode": "accept_edits", "project_root": "/srv/acme"},
+//!  "mcp_servers": [{"name": "git", "transport": {"type": "stdio",
+//!                   "command": "git-mcp"}}],
+//!  "tools": [{"name": "crm_lookup", "description": "Find a customer.",
+//!             "input_schema": {"type": "object",
+//!                              "properties": {"email": {"type": "string"}}},
+//!             "scope": "read"}]}
 //! ```
 //!
 //! `stores` defaults to `{"type": "memory"}`: stores owned by this agent
 //! handle, so resume and approve must use the same handle. Provider keys are
 //! read from the server's environment (`DEEPSEEK_API_KEY`, ...; see
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
-//! result is [`AgentOpened`](protocol::AgentOpened):
-//! `{"agent": "agent-1", "contract": "<hex digest>"}`. Handles live as long
-//! as the server. The config's `mcp_servers` are connected before the
-//! result is sent (a server's tools at that moment enter the contract) and
-//! disconnected when the server stops.
+//! config's `mcp_servers` are connected in order before the result is sent
+//! and disconnected when the server stops. The result is
+//! [`AgentOpened`](protocol::AgentOpened):
+//! `{"agent": "agent-1", "contract": "<hex digest>"}`. The contract covers
+//! the spec, every tool registered at open (host, workspace, then MCP) and
+//! the hook policies; a tool an MCP server adds later is outside it.
+//! Handles live as long as the server.
+//!
+//! Each of `tools` ([`HostToolSpec`](protocol::HostToolSpec)) is
+//! `{name, description, input_schema, scope, timeout_ms?}`. `scope` is
+//! required: `read`, `write` or `exec`. It decides approval like any tool's
+//! (in mode `default`, `write` and `exec` calls ask), and only `read` calls
+//! run in parallel. `timeout_ms` defaults to 300 000. A host tool is run
+//! with `tool.call` on the connection that opened the agent.
 //!
 //! **`run.start`** `{agent, session_id, prompt, principal?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
@@ -77,6 +100,28 @@
 //! greater than `after_seq` (default 0), in order, for replay after a
 //! reconnect.
 //!
+//! # Server requests
+//!
+//! The server sends these to the client, which answers each with a
+//! response carrying the same `id`. Their ids are strings `srv-<n>`, so
+//! they never equal the numeric ids [`Client`] uses. Each request has a
+//! timeout; when the server stops waiting (the timeout, a run cancel, or
+//! the call being dropped) it sends the notification
+//! **`$/cancelRequest`** `{id}`
+//! ([`CancelRequestParams`](protocol::CancelRequestParams)). The client may
+//! then stop work and need not answer; an answer that still arrives is
+//! ignored. When the connection closes, every request still waiting fails
+//! at once.
+//!
+//! **`tool.call`** `{agent, name, input, session_id, run_id, tool_use_id,
+//! principal?}` ([`ToolCallParams`](protocol::ToolCallParams)) runs a host
+//! tool on input already checked against its schema. The result is a
+//! `ToolOutput`, `{"value": <any>, "metadata"?: {...}}`; `value` is what the
+//! model sees and `metadata` is for the host only. An error object is a
+//! tool error the model reads: its `message` is shown and its `data` kept
+//! as details. Every way a call can fail without a result has a code in
+//! [`tool_code`](protocol::tool_code).
+//!
 //! # Notifications
 //!
 //! **`run.event`**: params are one [`Envelope`](linch::Envelope),
@@ -101,14 +146,14 @@
 //! | Code | Meaning | From |
 //! |---|---|---|
 //! | -32700 | parse error | the line is not JSON |
-//! | -32600 | invalid request | bad request object, batch, line too long |
+//! | -32600 | invalid request | bad request object, batch, line too long, malformed answer |
 //! | -32601 | method not found | |
-//! | -32602 | invalid params | unknown, missing or mistyped field |
+//! | -32602 | invalid params | unknown, missing or mistyped field; invalid host tool |
 //! | -32603 | internal error | a result or envelope did not encode |
 //! | -32001 | agent not found | unknown `agent` handle |
 //! | -32002 | run busy | the server already drives that run |
 //! | -32010 | missing binding | `BuildError::Missing` |
-//! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tools |
+//! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash |
 //! | -32012 | contract not digestible | `BuildError::Contract` |
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
 //! | -32014 | store unavailable | Postgres connect or migrate |
@@ -125,14 +170,16 @@
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
-//! come in `run.end` for a run and as the error of `run.events`.
+//! come in `run.end` for a run and as the error of `run.events`. A
+//! malformed answer to a server request with a readable `id` fails that
+//! request with `-32600` instead of being answered.
 //!
 //! # End of input
 //!
 //! When the input ends, [`serve`] drops every active run where it stands,
-//! like a crash, so a durable (Postgres) run stays resumable; it then
-//! disconnects every agent's MCP servers, writes the queued output and
-//! returns.
+//! like a crash, so a durable (Postgres) run stays resumable; it fails the
+//! server requests still waiting, disconnects every agent's MCP servers,
+//! writes the queued output and returns.
 
 #![forbid(unsafe_code)]
 
@@ -142,7 +189,7 @@ mod message;
 pub mod protocol;
 mod server;
 
-pub use client::{Client, ClientError, Notifications};
+pub use client::{Client, ClientError, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};
 pub use server::{MAX_LINE_BYTES, serve};
