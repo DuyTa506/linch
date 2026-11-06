@@ -148,8 +148,8 @@ type DueRow = (
 );
 
 /// Fire every due schedule once: enqueue its start job and move its next
-/// fire past the database's current time. Workers call this on every poll;
-/// a host may call it too.
+/// fire past the database's current time. Workers call this once per poll
+/// interval; a host may call it too.
 ///
 /// A stored pattern that no longer parses disables its schedule (logged)
 /// instead of blocking the others.

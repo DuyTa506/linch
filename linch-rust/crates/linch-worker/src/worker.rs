@@ -10,6 +10,7 @@ use linch_postgres::{PgPool, PgRunStore};
 use sqlx::postgres::PgListener;
 use tokio::sync::Notify;
 use tokio::task::{JoinError, JoinHandle, JoinSet};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::CHANNEL;
@@ -35,8 +36,9 @@ pub struct WorkerConfig {
     /// How long a dequeued job stays hidden without a heartbeat. The
     /// heartbeat runs every third of it.
     pub visibility_timeout: Duration,
-    /// Longest wait between polls when no notification arrives; schedules
-    /// are checked on every poll.
+    /// Longest wait between polls when no notification arrives. Due
+    /// schedules are fired at most once per interval, however often
+    /// notifications wake the worker.
     pub poll_interval: Duration,
     /// Wait before a job's second attempt, after an error or while its
     /// session is busy; it doubles with every attempt, up to 5 minutes. A
@@ -140,7 +142,14 @@ impl Worker {
             retry_delay: self.config.retry_delay,
         });
         let mut jobs = JoinSet::new();
+        let mut fired = None;
         while !shutdown.is_cancelled() {
+            if schedules_due(fired, self.config.poll_interval) {
+                fired = Some(Instant::now());
+                if let Err(error) = fire_due_schedules(&shared.pool).await {
+                    tracing::warn!(error = chain(&error), "firing schedules failed");
+                }
+            }
             poll(&self.config, &shared, &namespaces, &mut jobs).await;
             tokio::select! {
                 () = shutdown.cancelled() => {}
@@ -156,17 +165,20 @@ impl Worker {
     }
 }
 
-/// Fire due schedules, then take one job from each queue in turn until the
-/// worker is full or every queue is empty.
+/// Whether to fire due schedules now: on the first poll, then once per
+/// `interval` since `last`.
+fn schedules_due(last: Option<Instant>, interval: Duration) -> bool {
+    last.is_none_or(|last| last.elapsed() >= interval)
+}
+
+/// Take one job from each queue in turn until the worker is full or every
+/// queue is empty.
 async fn poll(
     config: &WorkerConfig,
     shared: &Arc<Shared>,
     namespaces: &[String],
     jobs: &mut JoinSet<()>,
 ) {
-    if let Err(error) = fire_due_schedules(&shared.pool).await {
-        tracing::warn!(error = chain(&error), "firing schedules failed");
-    }
     let mut queues: Vec<&String> = config.queues.iter().collect();
     while !queues.is_empty() {
         let mut i = 0;
@@ -233,6 +245,15 @@ impl Drop for AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedules_are_fired_once_per_poll_interval() {
+        let interval = Duration::from_secs(60);
+        assert!(schedules_due(None, interval));
+        assert!(!schedules_due(Some(Instant::now()), interval));
+        let earlier = Instant::now().checked_sub(interval).unwrap();
+        assert!(schedules_due(Some(earlier), interval));
+    }
 
     #[test]
     fn the_config_is_checked() {

@@ -1,10 +1,12 @@
 //! A due schedule fires once across many pollers, and its fire becomes a
 //! run.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use linch_core::{RunStatus, SessionId, ToolScope};
-use linch_worker::{Schedule, cancel_schedule, create_schedule, fire_due_schedules};
+use linch_worker::{Schedule, cancel_schedule, create_schedule, enqueue_run, fire_due_schedules};
 
 use crate::common::*;
 
@@ -124,5 +126,42 @@ async fn a_broken_stored_pattern_disables_only_its_schedule() {
         enabled,
         vec![("broken".to_owned(), false), ("good".to_owned(), true)]
     );
+    db.finish().await;
+}
+
+/// Run a start job per session in `sessions`, and wait until they end.
+async fn run_jobs(db: &TestDb, probe: &Probe, sessions: std::ops::Range<u32>) {
+    for i in sessions.clone() {
+        let session = SessionId::new(format!("s{i}"));
+        enqueue_run(&db.pool, "default", NS, &session, "go")
+            .await
+            .unwrap();
+    }
+    wait_until("the jobs end", || async {
+        probe.started() >= sessions.end && db.jobs().await == 0
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_checks_schedules_once_per_poll_interval() {
+    let Some(db) = TestDb::new("throttle").await else {
+        return;
+    };
+    create_schedule(&db.pool, &hourly("h")).await.unwrap();
+    let mut slow = config("w1");
+    slow.poll_interval = Duration::from_secs(30);
+    let probe = Probe::new("Lookup", ToolScope::Read, Hold::None);
+    let worker = Running::spawn(&db.pool, slow, agent(&db.pool, probe.clone()));
+    // A job the worker ran: it has polled, and checked the schedules.
+    run_jobs(&db, &probe, 0..1).await;
+    db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '1 second'")
+        .await;
+    // Every enqueue wakes the worker, but the schedules wait for the poll
+    // interval, so the overdue fire stays due.
+    run_jobs(&db, &probe, 1..6).await;
+    let (next, now) = (next_fire(&db, "h").await, now(&db).await);
+    assert!(next < now, "the schedule fired on a wake");
+    worker.stop().await;
     db.finish().await;
 }
