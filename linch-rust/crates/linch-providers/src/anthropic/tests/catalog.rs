@@ -61,6 +61,34 @@ fn wire_tool(name: &str) -> Value {
 }
 
 #[test]
+fn the_wire_prefix_keeps_its_bytes_across_an_addition() {
+    let before = vec![Message::user_text("hi")];
+    let mut after = before.clone();
+    after.push(Message::assistant_text("ok"));
+    after.push(user(vec![notice(&["Late"], &[], vec![row("Late")])]));
+    let mut first = native(vec![row("Read")], before);
+    let mut later = native(vec![row("Read"), row("Late")], after);
+    for request in [&mut first, &mut later] {
+        request.system = vec![linch_core::SystemBlock {
+            text: "You help.".into(),
+            cacheable: true,
+        }];
+        request.cache_control = Some(linch_core::CacheControl { ttl: None });
+    }
+    let (first, later) = (
+        payload::build(&first, true).unwrap(),
+        payload::build(&later, true).unwrap(),
+    );
+    let bytes = |body: &Value, key: &str| serde_json::to_string(&body[key]).unwrap();
+    assert_eq!(bytes(&later, "tools"), bytes(&first, "tools"));
+    assert_eq!(bytes(&later, "system"), bytes(&first, "system"));
+    // The first message moved its cache breakpoint to the new last user
+    // message, as any turn does; its content is otherwise the same.
+    let text = |body: &Value| body["messages"][0]["content"][0]["text"].clone();
+    assert_eq!(text(&later), text(&first));
+}
+
+#[test]
 fn a_tool_added_by_value_moves_from_tools_to_a_system_message_at_its_notice() {
     let tools = vec![row("Read"), row("Write"), row("Late")];
     let messages = vec![
