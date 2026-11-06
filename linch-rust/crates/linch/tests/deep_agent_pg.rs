@@ -13,7 +13,7 @@ use sqlx::{AssertSqlSafe, PgPool};
 const DSN_VAR: &str = "LINCH_TEST_PG_DSN";
 const MODEL: &str = "scripted-model";
 
-/// A fresh schema `p10d_<name>` and a DSN whose connections use it.
+/// A fresh schema `deep_<name>` and a DSN whose connections use it.
 struct TestDb {
     admin: PgPool,
     schema: String,
@@ -26,7 +26,7 @@ impl TestDb {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p10d_{name}");
+        let schema = format!("deep_{name}");
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&dsn)
@@ -86,7 +86,7 @@ async fn memory_hooks(agent: &linch::Agent, session: &str) -> Vec<HookOutcome> {
 
 #[tokio::test]
 async fn a_balanced_deep_agent_keeps_its_memory_in_postgres() {
-    let Some(db) = TestDb::empty("deep_memory").await else {
+    let Some(db) = TestDb::empty("memory").await else {
         return;
     };
     let index = json!({"path": "/memories/MEMORY.md", "content": "- [Style](style.md)"});
@@ -96,7 +96,7 @@ async fn a_balanced_deep_agent_keeps_its_memory_in_postgres() {
         text("Hello again."),
     ];
     let config: AgentConfig = serde_json::from_value(json!({
-        "namespace": "p10d-tenant",
+        "namespace": "deep-tenant",
         "spec": {"model": MODEL},
         "provider": {"id": "scripted", "turns": turns},
         "stores": {"type": "postgres", "dsn": db.dsn},
@@ -115,7 +115,7 @@ async fn a_balanced_deep_agent_keeps_its_memory_in_postgres() {
         [answered.clone(), answered.clone()],
         "one per request"
     );
-    let rows = vec![("p10d-tenant".to_owned(), "/memories/MEMORY.md".to_owned())];
+    let rows = vec![("deep-tenant".to_owned(), "/memories/MEMORY.md".to_owned())];
     assert_eq!(db.files().await, rows);
     let second = memory_hooks(opened.agent(), "s2").await;
     assert_eq!(second, [answered]);
