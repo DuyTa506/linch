@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use common::*;
 use linch_core::{
-    AgentBuilder, AgentSpec, BuildError, PermissionMode, RunId, RunOptions, ScriptedProvider,
-    Skill, SubagentDefinition, SystemBlock,
+    AgentBuilder, AgentSpec, BuildError, CacheControl, PermissionMode, RunId, RunOptions,
+    ScriptedProvider, Skill, SubagentDefinition, SystemBlock,
 };
 
 fn block(text: &str, cacheable: bool) -> SystemBlock {
@@ -58,6 +58,13 @@ async fn host_blocks_go_before_the_system_prompt_with_their_flags() {
         ]
     );
     assert_eq!(requests[1].system, requests[0].system, "the frozen prefix");
+    // Python sends `cache_prompt=True` with every primary call.
+    let asked = requests.iter().map(|r| r.cache_control);
+    assert!(
+        asked
+            .into_iter()
+            .all(|c| c == Some(CacheControl { ttl: None }))
+    );
 }
 
 #[tokio::test]

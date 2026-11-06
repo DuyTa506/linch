@@ -93,7 +93,8 @@ required fields and optional controls an adapter may ignore or refuse:
 | `model`, `system`, `tools`, `messages` | Always set by the runner. |
 | `max_output_tokens`, `temperature`, `stop_sequences` | Optional. |
 | `effort` (`ReasoningEffort`), `thinking` (`Thinking`) | `None` keeps the provider default. Each adapter maps them itself. |
-| `cache_control`, `output_schema`, `tool_choice` | Optional. |
+| `cache_control` | Set (no TTL) on every primary call of a run, as Python's `cache_prompt=True`; a compaction summary call has none (`crates/linch-core/src/agent.rs`). |
+| `output_schema`, `tool_choice` | Optional. |
 | `appended_tools` | The names of the `tools` a session added after its frozen prefix; empty outside a session's catalog. Only the native catalog changes of the Anthropic and Responses adapters read it. |
 
 There is no cancel signal, retry budget or native-catalog switch in the
