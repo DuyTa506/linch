@@ -39,7 +39,7 @@ pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue
         ));
     }
     let cache = request.cache_control.map(cache_block);
-    let mut catalog = native.then(|| Native::new(&request.tools, &request.messages));
+    let mut catalog = native.then(|| Native::new(request));
     let mut body = json!({
         "model": request.model,
         "max_tokens": max_tokens,

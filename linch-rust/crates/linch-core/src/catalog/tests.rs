@@ -143,3 +143,22 @@ fn the_restatement_is_every_change_since_the_prefix() {
     assert_eq!(restated.tool_definitions, [c]);
     assert_eq!(restated.skills, [stamp("s", 2)]);
 }
+
+#[test]
+fn the_rows_after_the_prefix_are_marked_appended() {
+    let (a, b) = (tool("A", "a", "x"), tool("B", "b", "x"));
+    let mut catalog = catalog(vec![a.clone(), b], Vec::new());
+    assert!(catalog.appended(None).is_empty());
+    let (c, d) = (tool("C", "c", "x"), tool("D", "d", "x"));
+    tell(&mut catalog, &live(vec![a, c, d], Vec::new()));
+    assert_eq!(catalog.appended(None), ["C", "D"]);
+
+    // A new schema replaces a row where it is, and a removal keeps it:
+    // the marks stay with the rows.
+    let now = live(vec![tool("A", "a", "y"), tool("C", "c", "y")], Vec::new());
+    tell(&mut catalog, &now);
+    assert_eq!(names(&catalog.tools(None)), ["A", "B", "C", "D"]);
+    assert_eq!(catalog.appended(None), ["C", "D"]);
+    let keep = |name: &str| name != "C";
+    assert_eq!(catalog.appended(Some(&keep)), ["D"]);
+}

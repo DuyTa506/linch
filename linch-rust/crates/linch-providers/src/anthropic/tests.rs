@@ -19,6 +19,7 @@ fn request() -> ProviderRequest {
         model: "claude-sonnet-4-6".into(),
         system: vec![],
         tools: vec![],
+        appended_tools: vec![],
         messages: vec![Message::user_text("hi")],
         max_output_tokens: None,
         temperature: None,

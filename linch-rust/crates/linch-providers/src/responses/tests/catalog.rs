@@ -51,6 +51,7 @@ fn changed(model: &str) -> ProviderRequest {
     });
     let mut request = request(model);
     request.tools = vec![row("Read"), row("Write"), row("Late")];
+    request.appended_tools = vec!["Late".into()];
     request.messages = vec![
         Message::user_text("hi"),
         Message::assistant_text("ok"),
@@ -96,6 +97,20 @@ fn an_addition_goes_at_its_notice_and_the_offered_tools_in_allowed_tools() {
     let all = json!([function("Read"), function("Write"), function("Late")]);
     assert_eq!(body["tools"], all);
     assert!(body.get("tool_choice").is_none());
+}
+
+#[test]
+fn a_late_tool_goes_at_its_notice_as_its_row() {
+    // Late's schema changed after it was added: its row has the new one.
+    let mut request = changed(MODEL);
+    let schema = json!({"type": "object", "properties": {"r": {"type": "string"}}});
+    request.tools[2].input_schema = schema.as_object().unwrap().clone();
+    let body = payload::build_payload(&request, &native_options()).unwrap();
+    assert_eq!(body["tools"], json!([function("Read"), function("Write")]));
+    let mut late = function("Late");
+    late["parameters"] = schema;
+    assert_eq!(body["input"][3]["type"], "additional_tools");
+    assert_eq!(body["input"][3]["tools"], json!([late]));
 }
 
 #[test]

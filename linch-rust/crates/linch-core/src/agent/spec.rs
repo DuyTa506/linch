@@ -89,6 +89,7 @@ impl AgentSpec {
             model: self.model.clone(),
             system: Vec::new(),
             tools,
+            appended_tools: Vec::new(),
             messages,
             max_output_tokens: self.max_output_tokens,
             temperature: None,

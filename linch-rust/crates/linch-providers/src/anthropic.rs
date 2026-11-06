@@ -24,7 +24,7 @@ use crate::ApiKey;
 
 mod catalog;
 mod http;
-mod payload;
+pub(crate) mod payload;
 mod stream;
 
 /// The Claude API root.

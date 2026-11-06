@@ -29,7 +29,7 @@ use crate::openai::{API_KEY_ENV, DEFAULT_BASE_URL};
 use crate::openai_compat::http;
 
 mod catalog;
-mod payload;
+pub(crate) mod payload;
 mod stream;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);

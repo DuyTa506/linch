@@ -10,8 +10,9 @@ use crate::message::{Message, SystemBlock};
 /// `model`, `system`, `tools`, and `messages` are always required; every
 /// other field is an optional control a provider may ignore or downgrade.
 /// Host-only concerns from the Python reference — a cancellation signal,
-/// retry budget, and the native-catalog bookkeeping flag — have no place
-/// here and are not ported.
+/// retry budget, and the per-request native-catalog switch — have no place
+/// here and are not ported; [`Self::appended_tools`] is what an adapter
+/// that renders catalog changes natively reads instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderRequest {
@@ -21,6 +22,13 @@ pub struct ProviderRequest {
     pub system: Vec<SystemBlock>,
     /// Tool schemas offered to the model.
     pub tools: Vec<ToolDefinition>,
+    /// Names of the `tools` the session added after its frozen prefix.
+    /// An adapter that renders catalog changes natively sends each one at
+    /// the catalog notice that adds it, instead of in `tools`, so the
+    /// cached prefix keeps its bytes; any other adapter ignores this.
+    /// Empty for a request outside a session's catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub appended_tools: Vec<String>,
     /// Conversation messages included in the request.
     pub messages: Vec<Message>,
     /// Maximum tokens the provider may generate.
@@ -235,6 +243,7 @@ mod tests {
             model: "m".into(),
             system: vec![],
             tools: vec![],
+            appended_tools: vec![],
             messages: vec![],
             max_output_tokens: None,
             temperature: None,

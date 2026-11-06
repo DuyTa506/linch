@@ -16,7 +16,8 @@
 //!   stay put; a call to it is refused as not registered;
 //! - an added tool's definition is appended to the request's tools, which
 //!   costs the provider's cache once (an adapter that can add tools in
-//!   place renders it at the notice instead);
+//!   place renders it at the notice instead: the request names such rows
+//!   in `appended_tools`);
 //! - a changed tool replaces its row only when its input schema changed;
 //!   a new description alone is told in the notice text.
 
@@ -124,6 +125,20 @@ impl Catalog {
             None => rows.cloned().collect(),
             Some(keep) => rows.filter(|row| keep(&row.name)).cloned().collect(),
         }
+    }
+
+    /// The names of the rows of [`Self::tools`] that come after the
+    /// prefix's, in order: what [`ProviderRequest::appended_tools`] says.
+    /// Rows are only ever replaced in place or appended, so these are the
+    /// tools added since the prefix, whatever a compaction did to the
+    /// notices that added them.
+    ///
+    /// [`ProviderRequest::appended_tools`]: crate::provider::ProviderRequest::appended_tools
+    pub(crate) fn appended(&self, keep: Option<&dyn Fn(&str) -> bool>) -> Vec<String> {
+        let rows = self.rows.iter().skip(self.prefix.tools.len());
+        (rows.filter(|row| keep.is_none_or(|keep| keep(&row.name))))
+            .map(|row| row.name.clone())
+            .collect()
     }
 
     /// Fold the catalog changes of a logged `message`.

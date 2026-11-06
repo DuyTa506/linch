@@ -102,7 +102,9 @@ user message the run logs anyway, so it costs no write.
 - A removed tool keeps its row; a call to it is refused as not registered.
 - An added tool is appended to the request's tools, which costs the cache
   once. `native_catalog_changes` on `AnthropicOptions` or `ResponsesOptions`
-  sends it at the notice instead (off by default, not verified live).
+  sends it at the notice instead (off by default, not verified live). The
+  request names those rows in `ProviderRequest::appended_tools`, so the
+  adapter keeps them out of `tools` across a compaction too.
 - A new description is told in text; a new input schema replaces its row.
 - A compaction never rewrites the prefix; its summary restates the changes.
 

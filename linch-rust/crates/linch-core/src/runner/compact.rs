@@ -78,11 +78,12 @@ impl Runner {
             .iter()
             .map(|m| Message::clone(m))
             .collect();
-        let tools = match &self.catalog {
-            Some(catalog) => catalog.tools(None),
-            None => self.snapshot.definitions(),
+        let (tools, appended) = match &self.catalog {
+            Some(catalog) => (catalog.tools(None), catalog.appended(None)),
+            None => (self.snapshot.definitions(), Vec::new()),
         };
-        let request = compaction::summary_request(&agent.spec, spec, tools, older);
+        let mut request = compaction::summary_request(&agent.spec, spec, tools, older);
+        request.appended_tools = appended;
         let call =
             ModelCall::prepare_compaction(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal

@@ -27,7 +27,7 @@ pub(crate) fn build_payload(
         ));
     }
     let native = catalog::enabled(options, &request.model);
-    let mut catalog = native.then(|| Native::new(&request.tools, &request.messages));
+    let mut catalog = native.then(|| Native::new(request));
     let mut body = json!({
         "model": request.model,
         "input": input(&request.messages, catalog.as_mut())?,
