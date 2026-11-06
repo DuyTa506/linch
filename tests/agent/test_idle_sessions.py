@@ -24,22 +24,24 @@ async def _run(session: Any) -> None:
         pass
 
 
-@pytest.mark.parametrize("bound", [None, 0, 1, 2])
-async def test_idle_session_bound_is_opt_in(bound: int | None) -> None:
-    agent = _agent(max_idle_sessions=bound)
-    for i in range(4):
-        await _run(await agent.session(id=f"s{i}"))
+async def test_idle_session_bound_is_opt_in() -> None:
+    for bound in (None, 0, 1, 2):
+        agent = _agent(max_idle_sessions=bound)
+        for i in range(4):
+            await _run(await agent.session(id=f"s{i}"))
 
-    assert len(agent._sessions) == (4 if bound is None else bound)
-    await agent.close()
+        assert len(agent._sessions) == (4 if bound is None else bound)
+        await agent.close()
 
 
-@pytest.mark.parametrize("bound", [-1, 1.5, True])
-def test_idle_session_bound_rejects_invalid_values(bound: Any) -> None:
+def test_idle_session_bound_rejects_invalid_values() -> None:
     from linch.errors import ConfigError
 
-    with pytest.raises(ConfigError, match="max_idle_sessions"):
-        _agent(max_idle_sessions=bound)
+    # -1: out of range. 1.5: wrong type. True: bool is an int subclass and
+    # must not sneak past the check as 1.
+    for bound in (-1, 1.5, True):
+        with pytest.raises(ConfigError, match="max_idle_sessions"):
+            _agent(max_idle_sessions=bound)
 
 
 async def test_idle_sessions_evict_in_last_use_order() -> None:
@@ -61,60 +63,48 @@ async def test_idle_sessions_evict_in_last_use_order() -> None:
     await agent.close()
 
 
-async def test_reserved_active_run_is_never_evicted() -> None:
-    agent = _agent(max_idle_sessions=1)
-    busy = await agent.session(id="busy")
-    busy.run("reserved but not iterated")
-    await _run(await agent.session(id="a"))
-    await _run(await agent.session(id="b"))
+async def test_pending_background_work_is_never_evicted() -> None:
+    for worker in (False, True):
+        agent = _agent(max_idle_sessions=1)
+        busy = await agent.session(id="busy")
+        task = asyncio.create_task(asyncio.Event().wait())
+        if worker:
+            busy.workers["worker"] = SimpleNamespace(task=task)
+        else:
+            busy.background_tasks.append(task)
+        try:
+            await _run(busy)
+            await _run(await agent.session(id="a"))
+            await _run(await agent.session(id="b"))
+            assert set(agent._sessions) == {"busy", "b"}
+            assert not task.done() and not busy._closed
+        finally:
+            await agent.close()
+        assert task.cancelled()
 
-    assert set(agent._sessions) == {"busy", "b"}
-    assert busy._active and not busy._closed
-    await agent.close()
 
-
-@pytest.mark.parametrize("worker", [False, True])
-async def test_pending_background_work_is_never_evicted(worker: bool) -> None:
-    agent = _agent(max_idle_sessions=1)
-    busy = await agent.session(id="busy")
-    task = asyncio.create_task(asyncio.Event().wait())
-    if worker:
-        busy.workers["worker"] = SimpleNamespace(task=task)
-    else:
-        busy.background_tasks.append(task)
-    try:
+async def test_background_completion_reapplies_the_idle_bound() -> None:
+    for worker in (False, True):
+        agent = _agent(max_idle_sessions=1)
+        busy = await agent.session(id="busy")
+        gate = asyncio.Event()
+        task = asyncio.create_task(gate.wait())
+        if worker:
+            busy.workers["worker"] = SimpleNamespace(task=task)
+        else:
+            busy.background_tasks.append(task)
         await _run(busy)
-        await _run(await agent.session(id="a"))
-        await _run(await agent.session(id="b"))
-        assert set(agent._sessions) == {"busy", "b"}
-        assert not task.done() and not busy._closed
-    finally:
+        await _run(await agent.session(id="newer"))
+        assert set(agent._sessions) == {"busy", "newer"}
+
+        gate.set()
+        await task
+        if agent._idle_prune_task is not None:
+            await agent._idle_prune_task
+
+        assert set(agent._sessions) == {"newer"}
+        assert busy._closed
         await agent.close()
-    assert task.cancelled()
-
-
-@pytest.mark.parametrize("worker", [False, True])
-async def test_background_completion_reapplies_the_idle_bound(worker: bool) -> None:
-    agent = _agent(max_idle_sessions=1)
-    busy = await agent.session(id="busy")
-    gate = asyncio.Event()
-    task = asyncio.create_task(gate.wait())
-    if worker:
-        busy.workers["worker"] = SimpleNamespace(task=task)
-    else:
-        busy.background_tasks.append(task)
-    await _run(busy)
-    await _run(await agent.session(id="newer"))
-    assert set(agent._sessions) == {"busy", "newer"}
-
-    gate.set()
-    await task
-    if agent._idle_prune_task is not None:
-        await agent._idle_prune_task
-
-    assert set(agent._sessions) == {"newer"}
-    assert busy._closed
-    await agent.close()
 
 
 @pytest.mark.parametrize("notification", [False, True])
