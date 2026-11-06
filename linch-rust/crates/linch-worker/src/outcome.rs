@@ -9,8 +9,11 @@ use crate::error::chain;
 pub(crate) enum Outcome {
     /// The run is terminal or waits for approval: delete the job.
     Done,
-    /// Try again after the retry delay.
+    /// Try again after the retry delay, counting a failure.
     Retry(String),
+    /// A start job whose session has a live run: try again later, without
+    /// counting a failure.
+    Busy(String),
     /// The job can never succeed: keep it, failed, with this error.
     Fail(String),
     /// The run can never continue either: mark it failed, then the job.
@@ -38,8 +41,11 @@ fn store_error(error: &RunError) -> Option<&StoreError> {
 
 /// Map an error of `run_id` onto the job's outcome.
 pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
-    if let Some(StoreError::LeaseLost { .. }) = store_error(error) {
-        return Outcome::Fenced(chain(error));
+    match store_error(error) {
+        Some(StoreError::LeaseLost { .. }) => return Outcome::Fenced(chain(error)),
+        // Nothing was written; the job waits for that run.
+        Some(StoreError::SessionBusy { .. }) => return Outcome::Busy(chain(error)),
+        _ => {}
     }
     match error {
         RunError::Terminal { .. } => Outcome::Done,
@@ -52,9 +58,7 @@ pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
         RunError::NotSuspended { .. }
         // A user_prompt_submit hook refused the prompt; a retry sends the same prompt.
         | RunError::PromptBlocked { .. } => Outcome::Fail(chain(error)),
-        // Includes a session append conflict, and a start on a session whose
-        // run is not terminal yet (SessionBusy, nothing written): it waits
-        // for that run.
+        // Includes a session append conflict.
         RunError::Store(_) | RunError::Journal(_) => Outcome::Retry(chain(error)),
     }
 }
@@ -98,7 +102,7 @@ mod tests {
             session_id: SessionId::new("s1"),
             run_id: RunId::new("r0"),
         });
-        assert!(matches!(classify(&busy), Outcome::Retry(text) if text.contains("busy")));
+        assert!(matches!(classify(&busy), Outcome::Busy(text) if text.contains("busy")));
         let reconcile = RunError::Reconcile(ReconcileError::MissingToolCalls);
         assert!(fails_run(classify(&reconcile)));
     }

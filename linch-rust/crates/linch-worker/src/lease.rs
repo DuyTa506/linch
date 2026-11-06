@@ -37,6 +37,7 @@ pub(crate) struct JobLease {
     /// at least the timeout from here.
     pub(crate) since: Instant,
     attempts: i32,
+    failures: i32,
 }
 
 type JobRow = (
@@ -46,6 +47,7 @@ type JobRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    i32,
     i32,
 );
 
@@ -94,7 +96,8 @@ pub(crate) async fn dequeue(
          SET visible_at = now() + $3 * interval '1 millisecond', \
              attempts = j.attempts + 1, owner = $4 \
          FROM next WHERE j.id = next.id \
-         RETURNING j.id, j.namespace, j.session_id, j.prompt, j.run_id, j.approvals, j.attempts",
+         RETURNING j.id, j.namespace, j.session_id, j.prompt, j.run_id, j.approvals, \
+                   j.attempts, j.failures",
     )
     .bind(queue)
     .bind(namespaces)
@@ -107,7 +110,7 @@ pub(crate) async fn dequeue(
 }
 
 fn decode(row: JobRow, since: Instant) -> JobLease {
-    let (id, namespace, session_id, prompt, run_id, approvals, attempts) = row;
+    let (id, namespace, session_id, prompt, run_id, approvals, attempts, failures) = row;
     let start = session_id.zip(prompt).map(|(s, p)| (SessionId::new(s), p));
     let approvals = approvals
         .map(|text| serde_json::from_str::<Approvals>(&text).map_err(|error| error.to_string()));
@@ -122,6 +125,7 @@ fn decode(row: JobRow, since: Instant) -> JobLease {
         job,
         since,
         attempts,
+        failures,
     }
 }
 
@@ -129,6 +133,11 @@ impl JobLease {
     /// Which dequeue of the job this hold is: 1 for the first.
     pub(crate) fn attempt(&self) -> i32 {
         self.attempts
+    }
+
+    /// How many earlier attempts failed and released the job for a retry.
+    pub(crate) fn failures(&self) -> i32 {
+        self.failures
     }
 
     /// Hide the job for another `timeout`. `false` means another worker
@@ -176,21 +185,25 @@ impl JobLease {
         Ok(done.rows_affected() == 1)
     }
 
-    /// Give the job back, visible again after `delay`, noting `error`.
+    /// Give the job back, visible again after `delay`, noting `error`;
+    /// `failed` counts this attempt as a failure.
     pub(crate) async fn release(
         &self,
         pool: &PgPool,
         delay: Duration,
         error: &str,
+        failed: bool,
     ) -> Result<bool, WorkerError> {
         let done = sqlx::query(
             "UPDATE linch_worker_jobs SET visible_at = now() + $3 * interval '1 millisecond', \
-             owner = NULL, error = $4 WHERE id = $1 AND attempts = $2",
+             owner = NULL, error = $4, failures = failures + $5 \
+             WHERE id = $1 AND attempts = $2",
         )
         .bind(self.job.id.0)
         .bind(self.attempts)
         .bind(millis(delay))
         .bind(error)
+        .bind(i32::from(failed))
         .execute(pool)
         .await?;
         Ok(done.rows_affected() == 1)

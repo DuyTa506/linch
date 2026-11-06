@@ -5,6 +5,7 @@ mod exclusive;
 mod fixtures;
 mod isolation;
 mod one_job;
+mod retry;
 mod schedule;
 mod session;
 mod suspend;

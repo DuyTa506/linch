@@ -10,9 +10,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, JsonObject, PermissionEngine, PermissionMode, PermissionPolicy,
-    Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderStream, Role, ScriptedTurn,
-    Tool, ToolContext, ToolOutput, ToolRegistry, ToolResult, ToolScope,
+    Agent, AgentBuilder, AgentSpec, ContentBlock, JsonObject, Message, PermissionEngine,
+    PermissionMode, PermissionPolicy, Provider, ProviderError, ProviderEvent, ProviderRequest,
+    ProviderStream, Role, ScriptedTurn, Tool, ToolContext, ToolOutput, ToolRegistry, ToolResult,
+    ToolScope,
 };
 use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
 use serde_json::json;
@@ -139,8 +140,9 @@ impl Tool for Probe {
 }
 
 /// Answers by the request, not by call order: the response to a request
-/// with `n` assistant messages is `turns[n]`, so a resumed run on another
-/// worker gets the right turn.
+/// with `n` assistant messages after its last prompt is `turns[n]`, so a
+/// resumed run on another worker gets the right turn, and a later run in
+/// the session starts again at the first.
 pub struct Replay {
     turns: Vec<ScriptedTurn>,
 }
@@ -156,7 +158,12 @@ impl Provider for Replay {
         request: ProviderRequest,
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let turn = (request.messages.iter())
+        let is_prompt = |message: &&Message| {
+            let result = |block: &ContentBlock| matches!(block, ContentBlock::ToolResult(_));
+            message.role == Role::User && !message.content.iter().any(result)
+        };
+        let prompt = request.messages.iter().rposition(|m| is_prompt(&m));
+        let turn = (request.messages[prompt.map_or(0, |i| i + 1)..].iter())
             .filter(|message| message.role == Role::Assistant)
             .count();
         let events: Vec<Result<ProviderEvent, ProviderError>> =

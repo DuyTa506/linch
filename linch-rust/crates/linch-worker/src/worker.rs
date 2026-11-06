@@ -57,7 +57,10 @@ pub struct WorkerConfig {
     /// Longest wait between polls when no notification arrives; schedules
     /// are checked on every poll.
     pub poll_interval: Duration,
-    /// Delay before a failed attempt at a job is retried.
+    /// Wait before a job's second attempt, after an error or while its
+    /// session is busy; it doubles with every attempt, up to 5 minutes. A
+    /// job whose attempts failed 5 times is failed for good, and so is its
+    /// run; waiting for a busy session never counts.
     pub retry_delay: Duration,
 }
 

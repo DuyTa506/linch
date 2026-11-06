@@ -13,14 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use linch_core::{Agent, Phase, RunError, RunOptions, RunRecord, RunStore, RunStream};
-use linch_core::{RunId, SessionId, StoreError};
+use linch_core::{Agent, Phase, RunOptions, RunRecord, RunStore, RunStream};
+use linch_core::{SessionId, StoreError};
 use linch_postgres::{PgPool, PgRunStore};
 use tokio::time::Instant;
 
 use crate::error::chain;
-use crate::lease::{Job, JobLease};
+use crate::lease::JobLease;
 use crate::outcome::{Outcome, classify};
+use crate::settle::settle;
 
 /// What every job task of one worker shares.
 pub(crate) struct Shared {
@@ -33,7 +34,7 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn options(&self, session_id: SessionId) -> RunOptions {
+    pub(crate) fn options(&self, session_id: SessionId) -> RunOptions {
         let mut options = RunOptions::new(session_id);
         options.owner = self.owner.clone();
         options
@@ -46,46 +47,7 @@ pub(crate) async fn execute(shared: Arc<Shared>, lease: JobLease) {
         outcome = attempt(&shared, &lease) => outcome,
         () = keep_alive(&shared, &lease) => Outcome::Lost,
     };
-    let (pool, id) = (&shared.pool, lease.job.id.0);
-    let settled = match &outcome {
-        Outcome::Done => lease.ack(pool).await,
-        Outcome::Retry(error) => {
-            tracing::warn!(job = id, %error, "retrying a job");
-            lease.release(pool, shared.retry_delay, error).await
-        }
-        Outcome::Fail(error) => {
-            tracing::warn!(job = id, %error, "failing a job");
-            lease.fail(pool, error).await
-        }
-        // The run first: a crash in between leaves a terminal run, which the
-        // job's next attempt acks.
-        Outcome::FailRun { run_id, error } => {
-            match fail_run(&shared, &lease.job, run_id, error).await {
-                Ok(()) => {
-                    tracing::warn!(job = id, run = %run_id, %error, "failing a job and its run");
-                    lease.fail(pool, error).await
-                }
-                Err(why) => {
-                    tracing::warn!(job = id, error = %why, "failing a run failed; retrying the job");
-                    lease.release(pool, shared.retry_delay, &why).await
-                }
-            }
-        }
-        Outcome::Fenced(error) => {
-            tracing::info!(job = id, %error, "another owner claimed the run; dropping the job");
-            lease.ack(pool).await
-        }
-        Outcome::Lost => {
-            tracing::info!(job = id, "lost the job; dropped its run");
-            Ok(true)
-        }
-    };
-    match settled {
-        Ok(true) => {}
-        Ok(false) => tracing::info!(job = id, "the job moved to another worker"),
-        // The job becomes visible again after its timeout.
-        Err(error) => tracing::warn!(job = id, error = chain(&error), "settling a job failed"),
-    }
+    settle(&shared, &lease, outcome).await;
 }
 
 async fn attempt(shared: &Shared, lease: &JobLease) -> Outcome {
@@ -106,20 +68,6 @@ async fn attempt(shared: &Shared, lease: &JobLease) -> Outcome {
         }
     }
     Outcome::Done
-}
-
-/// Mark `run_id` failed with `error`; a run that is already terminal (or
-/// was never created) is left as it is.
-async fn fail_run(shared: &Shared, job: &Job, run_id: &RunId, error: &str) -> Result<(), String> {
-    let Some(agent) = shared.agents.get(&job.namespace) else {
-        return Err(format!("no agent for namespace {}", job.namespace));
-    };
-    let options = shared.options(SessionId::new(""));
-    match agent.fail(run_id.clone(), error, options).await {
-        Ok(_) | Err(RunError::Terminal { .. }) => Ok(()),
-        Err(RunError::Store(StoreError::NotFound { .. })) => Ok(()),
-        Err(other) => Err(chain(&other)),
-    }
 }
 
 /// The stream to drain, `None` when there is nothing to run.

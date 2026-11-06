@@ -16,10 +16,13 @@
 //!   job, and a job whose run another owner claimed is dropped, so two
 //!   holders never take a run from each other. A run that suspends for
 //!   approval ends its job; [`enqueue_approve`] queues the continuation. A
-//!   job that can never succeed is kept as failed; when its run can never
-//!   continue either (its durable state does not reconcile, or it has
-//!   another contract), [`linch_core::Agent::fail`] marks the run failed
-//!   first.
+//!   failed attempt is retried after a delay that doubles each time. A job
+//!   that can never succeed, or whose attempts failed 5 times, is kept as
+//!   failed; when its run can never continue either (its durable state does
+//!   not reconcile, it has another contract, or its job gave up),
+//!   [`linch_core::Agent::fail`] marks the run failed first. A start job
+//!   whose session has a live run waits for it, backing off the same way,
+//!   and is never given up on.
 //! - **Schedules.** A due schedule enqueues one start job and moves its next
 //!   fire forward in one transaction, so a fire happens once however many
 //!   workers poll.
@@ -51,6 +54,7 @@ mod job;
 mod lease;
 mod outcome;
 mod schedule;
+mod settle;
 mod worker;
 
 pub use error::WorkerError;
@@ -95,6 +99,11 @@ fn migrator() -> Migrator {
             2,
             "one job per run",
             include_str!("../migrations/0002_one_job_per_run.sql"),
+        ),
+        simple(
+            3,
+            "job failures",
+            include_str!("../migrations/0003_job_failures.sql"),
         ),
     ];
     Migrator {
