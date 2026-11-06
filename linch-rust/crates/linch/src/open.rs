@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use linch_core::{
     Agent, AgentBuilder, Hooks, MemoryRunStore, MemorySessionStore, PermissionEngine,
-    PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore, Tool,
-    ToolRegistry,
+    PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore,
+    TaskStore, Tool, ToolRegistry,
 };
 use linch_mcp::McpServer;
 use linch_postgres::{PgRunStore, PgSessionStore};
@@ -17,7 +17,7 @@ use linch_providers::{
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
     ServerOptions, anthropic, deepseek, gemini, openai,
 };
-use linch_tools::{LocalFs, ReadTracker, workspace_tools};
+use linch_tools::{LocalFs, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools};
 
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::error::OpenError;
@@ -46,7 +46,9 @@ impl AgentConfig {
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), registers
-    /// the virtual filesystem tools and the offload hook when the config
+    /// the session task tools over the session store when `tasks` is on
+    /// (kept on a failed open, as the workspace tools are), registers the
+    /// virtual filesystem tools and the offload hook when the config
     /// turns them on (see [`FilesystemConfig`](crate::FilesystemConfig); a
     /// failed open takes them back), connects
     /// the MCP servers in order, loads the skills and subagents of the
@@ -91,12 +93,21 @@ impl AgentConfig {
             }
             None => None,
         };
-        let policy = self.permissions.unwrap_or_else(|| {
+        let mut policy = self.permissions.unwrap_or_else(|| {
             let project_root = root.as_deref().unwrap_or("/");
             PermissionPolicy::new(PermissionMode::Default, project_root)
         });
+        if self.tasks {
+            policy.auto_allow.extend(TASK_TOOL_NAMES.map(String::from));
+        }
         let permissions = PermissionEngine::new(policy)?;
-        let (runs, sessions, pool) = stores(self.stores, pools).await?;
+        let (runs, sessions, tasks, pool) = stores(self.stores, pools).await?;
+        if self.tasks {
+            for tool in task_tools(tasks, &self.namespace) {
+                // The registry lives as long as the agent; the handle is not needed.
+                let _ = tools.register(tool)?;
+            }
+        }
         let pg = pool.as_deref().and_then(Shared::pool);
         let files = Files::wire(
             self.filesystem.as_ref(),
@@ -251,28 +262,28 @@ async fn register_workspace(
     Ok(canonical)
 }
 
-/// The run and session stores, and for Postgres the pool's slot in
-/// `pools`, which the opened agent holds.
+/// The run and session stores, the session store again as the task
+/// store, and for Postgres the pool's slot in `pools`, which the opened
+/// agent holds.
 type Stores = (
     Arc<dyn RunStore>,
     Arc<dyn SessionStore>,
+    Arc<dyn TaskStore>,
     Option<Arc<Shared>>,
 );
 
 async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenError> {
     match config {
-        StoreConfig::Memory {} => Ok((
-            Arc::new(MemoryRunStore::default()),
-            Arc::new(MemorySessionStore::default()),
-            None,
-        )),
+        StoreConfig::Memory {} => {
+            let sessions = Arc::new(MemorySessionStore::default());
+            let runs = Arc::new(MemoryRunStore::default());
+            Ok((runs, sessions.clone(), sessions, None))
+        }
         StoreConfig::Postgres { dsn } => {
             let (shared, pool) = pools.get(&dsn).await?;
-            Ok((
-                Arc::new(PgRunStore::new(pool.clone())),
-                Arc::new(PgSessionStore::new(pool)),
-                Some(shared),
-            ))
+            let sessions = Arc::new(PgSessionStore::new(pool.clone()));
+            let runs = Arc::new(PgRunStore::new(pool));
+            Ok((runs, sessions.clone(), sessions, Some(shared)))
         }
     }
 }
