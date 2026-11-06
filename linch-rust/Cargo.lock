@@ -1695,6 +1695,7 @@ dependencies = [
  "futures",
  "jsonschema",
  "linch-core",
+ "linch-postgres",
  "linch-tools",
  "serde",
  "serde_json",
