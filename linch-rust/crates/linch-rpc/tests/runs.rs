@@ -1,14 +1,17 @@
 //! Runs over RPC on the scripted provider and memory stores: a full run,
-//! concurrent runs, replay from a seq, and run errors in `run.end`.
+//! concurrent runs, a run id the client chooses, replay from a seq, and
+//! run errors in `run.end`.
 
 mod common;
+
+use std::future::pending;
 
 use common::*;
 use linch::events::kinds::ResultSubtype;
 use linch::{Event, Persistence, RunId};
-use linch_rpc::code;
-use linch_rpc::protocol::{Events, method};
-use serde_json::json;
+use linch_rpc::protocol::{Cancelled, Events, method};
+use linch_rpc::{ErrorObject, code};
+use serde_json::{Value, json};
 
 fn subtype(event: &Event) -> ResultSubtype {
     match event {
@@ -61,6 +64,54 @@ async fn runs_of_two_agents_progress_concurrently() {
         };
         assert_eq!(result.final_text.as_deref(), Some(text));
     }
+}
+
+#[tokio::test]
+async fn run_start_keeps_the_run_id_the_client_chose() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("done")], None, "")).await;
+    let start = |session: &str| json!({"agent": agent, "session_id": session, "prompt": "go", "run_id": "chosen-1"});
+    let run_id = rpc.accepted(method::RUN_START, start("s1")).await;
+    assert_eq!(run_id, RunId::new("chosen-1"));
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    assert_eq!(subtype(ended.last()), ResultSubtype::Success);
+    assert!(ended.envelopes.iter().all(|e| e.run_id == run_id));
+
+    // The id is stored now: a second start with it writes nothing.
+    let again = rpc.accepted(method::RUN_START, start("s2")).await;
+    let ended = rpc.until_end(&again).await;
+    assert!(ended.envelopes.is_empty());
+    assert_eq!(ended.error.expect("conflict").code, code::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_chosen_run_id_the_connection_drives_is_busy() {
+    let mut rpc = Rpc::with_handler(handler(|_, _, _| pending::<Result<Value, ErrorObject>>()));
+    let turns = vec![
+        tool_turn("call_1", "lookup", json!({"q": "x"})),
+        text_turn("unused"),
+    ];
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let agent = rpc.open(hosted(turns, "default", tools)).await;
+    let start = |session: &str| json!({"agent": agent, "session_id": session, "prompt": "go", "run_id": "held"});
+    let held = rpc.accepted(method::RUN_START, start("s1")).await;
+    loop {
+        let envelope = rpc.next_event(&held).await.expect("still running");
+        if matches!(envelope.event, Event::ToolCallStart(_)) {
+            break;
+        }
+    }
+    let busy = rpc.call(method::RUN_START, start("s2")).await.unwrap_err();
+    assert_eq!(code_of(busy), code::RUN_BUSY);
+
+    // The held run is still the one driven, so cancel reaches it.
+    let cancel = json!({"run_id": held});
+    let cancelled: Cancelled = rpc.client.call(method::RUN_CANCEL, &cancel).await.unwrap();
+    assert!(cancelled.cancelled);
+    let ended = rpc.until_end(&held).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    assert_eq!(subtype(ended.last()), ResultSubtype::Aborted);
 }
 
 #[tokio::test]

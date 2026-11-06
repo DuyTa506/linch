@@ -151,9 +151,12 @@
 //! that agent it is refused with `-32002`; cancel the run or wait for its
 //! `run.end`.
 //!
-//! **`run.start`** `{agent, session_id, prompt, principal?}`
+//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
-//! created when missing. `principal` is `{tenant, user, roles?}`.
+//! created when missing. `run_id` names the new run (a fresh uuid when
+//! absent), so a client can resume it even if it never saw the answer; an
+//! id already stored ends the run with `-32023` and writes nothing.
+//! `principal` is `{tenant, user, roles?}`.
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash

@@ -5,7 +5,7 @@ use std::panic::AssertUnwindSafe;
 use futures::{FutureExt, StreamExt};
 use linch::{Principal, RunId, RunOptions, RunStream};
 
-use super::{Driven, Reply, Server, lock, to_value};
+use super::{Driven, Reply, Server, Tables, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
     ApproveParams, CancelParams, Cancelled, ResumeParams, RunEnd, StartParams, method,
@@ -18,16 +18,21 @@ impl Server {
     pub(super) fn start(&self, params: StartParams) -> Result<Reply, ErrorObject> {
         self.admit_principal(params.principal.as_ref())?;
         let mut options = RunOptions::new(params.session_id);
+        options.run_id = params.run_id;
         options.principal = params.principal;
         options.owner = OWNER.into();
         let cancel = options.cancel.clone();
         let mut tables = lock(&self.0.tables);
-        let stream = tables.agent(&params.agent)?.run(params.prompt, options);
+        let agent = tables.agent(&params.agent)?;
+        // A fresh run id cannot be in use; a chosen one can.
+        if let Some(run_id) = &options.run_id {
+            tables.not_driven(run_id)?;
+        }
+        let stream = agent.run(params.prompt, options);
         let driven = Driven {
             agent: params.agent,
             cancel,
         };
-        // A fresh run id cannot be in use.
         tables.runs.insert(stream.run_id().clone(), driven);
         Ok(Reply::Run(stream))
     }
@@ -70,12 +75,7 @@ impl Server {
         self.admit_principal(principal.as_ref())?;
         let mut tables = lock(&self.0.tables);
         let agent = tables.agent(&handle)?;
-        if tables.runs.contains_key(run_id) {
-            return Err(ErrorObject::new(
-                code::RUN_BUSY,
-                format!("run {run_id} is already running on this server"),
-            ));
-        }
+        tables.not_driven(run_id)?;
         // Resume and approve use the session stored with the run.
         let mut options = RunOptions::new("");
         options.principal = principal;
@@ -125,5 +125,18 @@ impl Server {
         let end = RunEnd { run_id, error };
         let params = to_value(&end).expect("run.end params encode");
         self.0.outbox.notify(method::RUN_END, params).await;
+    }
+}
+
+impl Tables {
+    /// "Run busy" when this server already drives `run_id`.
+    fn not_driven(&self, run_id: &RunId) -> Result<(), ErrorObject> {
+        if self.runs.contains_key(run_id) {
+            return Err(ErrorObject::new(
+                code::RUN_BUSY,
+                format!("run {run_id} is already running on this server"),
+            ));
+        }
+        Ok(())
     }
 }

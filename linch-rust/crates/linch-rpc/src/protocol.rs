@@ -106,6 +106,11 @@ pub struct StartParams {
     pub session_id: SessionId,
     /// The user prompt.
     pub prompt: String,
+    /// Id for the new run; the server picks a fresh one when absent. An id
+    /// the connection drives is refused with `-32002`; an id already stored
+    /// ends the run with `-32023` in `run.end`, and nothing is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
     /// Caller identity for permission rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<Principal>,
