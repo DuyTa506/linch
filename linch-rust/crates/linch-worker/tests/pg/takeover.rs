@@ -260,10 +260,11 @@ async fn a_fenced_worker_drops_its_job_and_leaves_the_run_alone() {
     assert_eq!(worker.finish(), Ok(()));
     let record = db.record(&run_id).await;
     assert_eq!((record.status, record.epoch), (RunStatus::Completed, 2));
-    // The fenced worker's tool output never landed.
+    // The fenced worker's tool output never landed; the placeholder's end
+    // is the only one.
     assert_eq!(probe.started(), 1);
     assert_eq!(db.tool_results("s1").await, vec![INTERRUPTED_TOOL_TEXT]);
-    assert_eq!(tool_ends(&db.events(&run_id).await), 0);
+    assert_eq!(tool_ends(&db.events(&run_id).await), 1);
     assert_eq!(db.jobs().await, 0);
     db.finish().await;
 }
