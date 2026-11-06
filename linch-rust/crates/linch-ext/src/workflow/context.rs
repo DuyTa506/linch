@@ -5,15 +5,17 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use linch_core::JsonValue;
 use linch_core::events::kinds::{WorkflowEvent, WorkflowKind};
+use linch_core::{JsonObject, JsonValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 
 use super::engine::WorkflowOptions;
 use super::error::{BoxError, WorkflowError};
-use super::journal::{JournalLease, JournalRecord, JournalStore, step_key};
+use super::journal::{
+    Interrupt, JournalLease, JournalRecord, JournalStore, interrupt_key, step_key,
+};
 use super::policy::{Retry, attempt_timeout, run_attempts};
 
 /// Receives every [`WorkflowEvent`] a workflow emits, in order.
@@ -38,7 +40,8 @@ pub struct StepOptions {
 /// The orchestration handle passed to a workflow function.
 ///
 /// Cheap to clone; clones share one journal. Only journaled calls
-/// ([`step`](Self::step)) replay on resume: everything else in the
+/// ([`step`](Self::step), [`interrupt`](Self::interrupt)) replay on
+/// resume: everything else in the
 /// workflow function runs again, so its control flow must not depend on
 /// anything the journal never saw (randomness, the clock, the
 /// environment). Put such values inside a step.
@@ -54,6 +57,10 @@ struct Inner {
     on_event: Option<EventSink>,
     step_timeout: Option<Duration>,
     cancel: CancellationToken,
+    /// Answers not used yet, by interrupt key; each is used once.
+    resume: Mutex<HashMap<String, JsonValue>>,
+    /// The first interrupt that suspended this run.
+    suspended: Mutex<Option<Interrupt>>,
 }
 
 /// Journaled results by `(call_key, occurrence)`, and how many calls of
@@ -85,6 +92,8 @@ impl WorkflowContext {
             on_event: options.on_event.clone(),
             step_timeout: options.step_timeout,
             cancel: options.cancel.clone(),
+            resume: Mutex::new(options.resume.clone()),
+            suspended: Mutex::new(None),
         };
         Self {
             inner: Arc::new(inner),
@@ -179,10 +188,83 @@ impl WorkflowContext {
         Ok(output)
     }
 
+    /// Park the workflow until someone answers `key`.
+    ///
+    /// The first time through there is no answer: an `interrupt_requested`
+    /// event carries `payload`, and the call returns
+    /// [`WorkflowError::Suspended`]; [`run_workflow`](super::run_workflow)
+    /// then stores the workflow as awaiting input, with the interrupt, so
+    /// any process can read the question. Calling `run_workflow` again
+    /// with the answer in [`WorkflowOptions::resume`] makes this call
+    /// return it; the answer is journaled, so later resumes replay it
+    /// without a `resume` entry.
+    ///
+    /// An answer is used once: a second interrupt with the same key in one
+    /// run suspends again, so interrupts in a loop need distinct keys.
+    ///
+    /// Args:
+    ///     key: The interrupt's durable identity and the answer's key.
+    ///     payload: Context for whoever answers; it does not affect replay.
+    ///
+    /// Returns:
+    ///     The answer, decoded from its journaled JSON.
+    ///
+    /// Raises:
+    ///     WorkflowError: `Suspended` without an answer, `Aborted` when
+    ///         the cancel token fired, `Encode` when the payload does not
+    ///         encode or the answer does not decode, `Store` when the
+    ///         journal write fails.
+    pub async fn interrupt<A: DeserializeOwned>(
+        &self,
+        key: &str,
+        payload: impl Serialize,
+    ) -> Result<A, WorkflowError> {
+        let label = format!("interrupt {key}");
+        let call_key = interrupt_key(key);
+        let (occurrence, cached) = self.next_occurrence(&call_key);
+        let event = |kind, result_text: Option<&JsonValue>| {
+            let mut event = event(kind, key.to_owned(), call_key.clone(), occurrence);
+            event.result_text = result_text.map(JsonValue::to_string);
+            event
+        };
+        if let Some(answer) = cached {
+            self.emit(event(WorkflowKind::InterruptReplayed, Some(&answer)));
+            return decode(&label, answer);
+        }
+        self.check_cancel(&label)?;
+        let answer = self.lock(&self.inner.resume).remove(key);
+        if let Some(answer) = answer {
+            let decoded = decode(&label, answer.clone())?;
+            self.record(&call_key, occurrence, &answer).await?;
+            self.emit(event(WorkflowKind::InterruptResolved, Some(&answer)));
+            return Ok(decoded);
+        }
+        let payload = serde_json::to_value(payload).map_err(|error| {
+            encode_error(&label, format!("its payload does not encode: {error}"))
+        })?;
+        let mut requested = event(WorkflowKind::InterruptRequested, None);
+        let mut structured = JsonObject::new();
+        structured.insert("payload".into(), payload.clone());
+        requested.structured_output = Some(structured);
+        self.emit(requested);
+        let interrupt = Interrupt {
+            key: key.to_owned(),
+            payload,
+        };
+        self.lock(&self.inner.suspended)
+            .get_or_insert_with(|| interrupt.clone());
+        Err(WorkflowError::Suspended(interrupt))
+    }
+
+    /// The first interrupt that suspended this run, if any did.
+    pub(super) fn suspended(&self) -> Option<Interrupt> {
+        self.lock(&self.inner.suspended).clone()
+    }
+
     /// This call's occurrence of `call_key`, and its journaled value when
     /// a previous run recorded one.
     fn next_occurrence(&self, call_key: &str) -> (u64, Option<JsonValue>) {
-        let mut journal = self.journal();
+        let mut journal = self.lock(&self.inner.journal);
         let counter = journal.counters.entry(call_key.to_owned()).or_default();
         let occurrence = *counter;
         *counter += 1;
@@ -204,7 +286,9 @@ impl WorkflowContext {
         };
         self.inner.store.append(&self.inner.lease, record).await?;
         let key = (call_key.to_owned(), occurrence);
-        self.journal().records.insert(key, value.clone());
+        self.lock(&self.inner.journal)
+            .records
+            .insert(key, value.clone());
         Ok(())
     }
 
@@ -225,10 +309,10 @@ impl WorkflowContext {
         }
     }
 
-    fn journal(&self) -> MutexGuard<'_, Journal> {
-        // Each update is one map write, so a poisoned lock holds no
-        // half-applied change.
-        (self.inner.journal.lock()).unwrap_or_else(PoisonError::into_inner)
+    fn lock<'a, T>(&self, mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        // Each update is one map or option write, so a poisoned lock holds
+        // no half-applied change.
+        mutex.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

@@ -1,9 +1,11 @@
 //! [`run_workflow`] and its [`WorkflowOptions`].
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use linch_core::JsonValue;
 use tokio_util::sync::CancellationToken;
 
 use super::context::{EventSink, WorkflowContext};
@@ -20,6 +22,9 @@ pub struct WorkflowOptions {
     pub namespace: String,
     /// Stable id of this workflow; calling again with it resumes.
     pub workflow_id: String,
+    /// Answers to pending interrupts, by interrupt key. Each answer is
+    /// used once, then journaled.
+    pub resume: HashMap<String, JsonValue>,
     /// Default limit on each step attempt; a step's own
     /// [`StepOptions::timeout`](super::StepOptions::timeout) wins.
     pub step_timeout: Option<Duration>,
@@ -36,7 +41,8 @@ pub struct WorkflowOptions {
 
 impl WorkflowOptions {
     /// Options for workflow `workflow_id` of `namespace`, journaled in
-    /// `journal`, with no timeouts, a fresh cancel token and no event sink.
+    /// `journal`, with no answers, no timeouts, a fresh cancel token and no
+    /// event sink.
     pub fn new(
         journal: Arc<dyn JournalStore>,
         namespace: impl Into<String>,
@@ -46,6 +52,7 @@ impl WorkflowOptions {
             journal,
             namespace: namespace.into(),
             workflow_id: workflow_id.into(),
+            resume: HashMap::new(),
             step_timeout: None,
             deadline: None,
             cancel: CancellationToken::new(),
@@ -61,8 +68,10 @@ impl WorkflowOptions {
 /// any process still running it: that process's next journal write fails
 /// with a lost lease. Then the function runs on a [`WorkflowContext`]
 /// seeded with the stored records. At the end the status is written:
-/// `completed` with the value, `failed` with an error. A lost lease writes
-/// nothing, since another process owns the workflow now.
+/// `awaiting_input` with the interrupt when one suspended the run (even if
+/// the function dropped that error), else `completed` with the value or
+/// `failed` with an error. A lost lease writes nothing, since another
+/// process owns the workflow now.
 ///
 /// Dropping the returned future stops the workflow where it stands, like a
 /// crash: finished calls stay journaled and the status stays `running`.
@@ -76,9 +85,9 @@ impl WorkflowOptions {
 ///     What `workflow` returned.
 ///
 /// Raises:
-///     WorkflowError: The function's own error, `Timeout` past the
-///         deadline, or `Store` when the claim, a journal write or the
-///         final status write fails.
+///     WorkflowError: `Suspended` at an unanswered interrupt, the
+///         function's own error, `Timeout` past the deadline, or `Store`
+///         when the claim, a journal write or the final status write fails.
 pub async fn run_workflow<T, F, Fut>(
     options: WorkflowOptions,
     workflow: F,
@@ -92,7 +101,7 @@ where
     let stored = (journal.load(&options.namespace, &options.workflow_id)).await?;
     let records = stored.map(|run| run.records).unwrap_or_default();
     let context = WorkflowContext::new(lease.clone(), records, &options);
-    let run = workflow(context);
+    let run = workflow(context.clone());
     let outcome = match options.deadline.filter(|deadline| !deadline.is_zero()) {
         Some(after) => tokio::time::timeout(after, run).await.unwrap_or_else(|_| {
             Err(WorkflowError::Timeout {
@@ -102,8 +111,15 @@ where
         }),
         None => run.await,
     };
+    if let Err(WorkflowError::Store(JournalStoreError::LeaseLost { .. })) = outcome {
+        return outcome;
+    }
+    if let Some(interrupt) = context.suspended() {
+        let status = WorkflowStatus::AwaitingInput(interrupt.clone());
+        journal.set_status(&lease, status).await?;
+        return Err(WorkflowError::Suspended(interrupt));
+    }
     match outcome {
-        Err(WorkflowError::Store(JournalStoreError::LeaseLost { .. })) => outcome,
         Ok(value) => {
             journal
                 .set_status(&lease, WorkflowStatus::Completed)

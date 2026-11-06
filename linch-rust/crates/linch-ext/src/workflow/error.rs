@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use super::journal::JournalStoreError;
+use super::journal::{Interrupt, JournalStoreError};
 
 /// The error a step function returns, boxed.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -12,6 +12,12 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// A workflow call or run ended without a value.
 #[derive(Debug, Error)]
 pub enum WorkflowError {
+    /// An interrupt has no answer yet: the workflow is parked at a
+    /// decision point, not failed. Propagate it with `?`; even when the
+    /// workflow function drops it, [`run_workflow`](super::run_workflow)
+    /// still reports the suspend.
+    #[error("workflow suspended at interrupt {}", .0.key)]
+    Suspended(Interrupt),
     /// A step's function returned an error.
     #[error("step {name} failed: {source}")]
     Step {
