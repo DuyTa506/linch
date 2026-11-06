@@ -161,3 +161,27 @@ async fn a_huge_error_body_is_read_only_in_part() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn the_model_is_one_encoded_path_segment() {
+    let sse = include_str!("../../tests/fixtures/gemini_text_thinking.sse");
+    let (url, server) = serve_once(format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{sse}"
+    ));
+    let request = ProviderRequest {
+        model: "models/evil/../files?k=v#f:y z%".into(),
+        ..request()
+    };
+    let stream = provider(url)
+        .stream(request, CancellationToken::new())
+        .await
+        .unwrap();
+    let _: Vec<_> = stream.collect().await;
+    let raw = server.join().unwrap();
+    assert!(
+        raw.starts_with(
+            "POST /v1beta/models/evil%2F..%2Ffiles%3Fk%3Dv%23f%3Ay%20z%25:streamGenerateContent?alt=sse HTTP/1.1"
+        ),
+        "{raw}"
+    );
+}

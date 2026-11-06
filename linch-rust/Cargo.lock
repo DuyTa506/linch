@@ -1700,6 +1700,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "linch-core",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

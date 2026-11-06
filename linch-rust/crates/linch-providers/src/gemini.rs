@@ -4,8 +4,9 @@
 //! (`aistudio.google.com/api-reference/generate-content`) and the Vertex
 //! AI generateContent guides on 2026-11-06; not yet run against a live key:
 //! - `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`
-//!   with `x-goog-api-key`. The stream has no end marker: it closes after
-//!   the chunk with `finishReason`.
+//!   with `x-goog-api-key`, the model percent-encoded as one path segment.
+//!   The stream has no end marker: it closes after the chunk with
+//!   `finishReason`.
 //! - Function calls may carry no `id`; the adapter then makes one from the
 //!   conversation position and never sends it back. Responses to parallel
 //!   calls go in one turn, in call order.
@@ -24,6 +25,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream, Role};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
@@ -43,6 +45,15 @@ pub const PARTS_KEY: &str = "gemini_parts";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Everything but RFC 3986 unreserved characters is encoded, so a model
+/// name stays one path segment: `/`, `?`, `#`, `:` and `%` cannot change
+/// the path, the query or the method.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// Credentials and endpoint for [`Gemini`].
 ///
@@ -104,10 +115,11 @@ impl Provider for Gemini {
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         let body = payload::build(&request)?;
+        let model = request.model.trim_start_matches("models/");
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
             self.options.base_url.trim_end_matches('/'),
-            request.model.trim_start_matches("models/"),
+            utf8_percent_encode(model, PATH_SEGMENT),
         );
         let key = &self.options.api_key;
         let response = http::post(&self.client, &url, key, &body, &cancel).await?;
