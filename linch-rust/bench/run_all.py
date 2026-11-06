@@ -78,11 +78,45 @@ GRID = [
     (8, "workflow", ("memory", "postgres"), "Workflows"),
     (9, "evals", ("scripted",), "Evals"),
     (10, "startup", ("cold",), "Startup"),
-    (11, "concurrency", ("10x1",), "Concurrent sessions"),
+    (11, "concurrency", ("16-sessions-10x1",), "Concurrent sessions"),
     (12, "rpc_overhead", LOOPS, "RPC overhead (rs-client minus rs-kernel)"),
     (13, "live", ("deepseek",), "Live DeepSeek"),
 ]
 PG_CASES = {"pg_loop", "worker"}
+COMPACTION = {
+    # Rust compacts before the provider view reaches this many tokens (its
+    # estimate: text, tool inputs and results at 4 characters a token).
+    "rs_threshold_tokens": 25_000,
+    # Python compacts when estimate + reserve (a fifth of the window) reaches
+    # 80% of the window: 0.6 x 42 833 = 25 700 tokens of its estimate, which
+    # also counts the JSON of each message, so both cross at the same call.
+    "py_context_window": 42_833,
+    "summary_prompt": "Summarize the bench conversation so far.",
+}
+# variant: (fixture, tool calls per run)
+TOOL_FIXTURES = {
+    "Read": ("tools_read.json", 10),
+    "Write": ("tools_write.json", 10),
+    "Edit": ("tools_edit.json", 20),
+    "Grep": ("tools_grep.json", 10),
+    "Glob": ("tools_glob.json", 10),
+    "Bash": ("tools_bash.json", 10),
+    "Grep-2k": ("tools_grep2k.json", 5),
+}
+CONCURRENT_SESSIONS = 16
+LIVE = {
+    "model": "deepseek-flash",
+    "system": LIVE_SYSTEM,
+    "tool": WEATHER,
+    "tool_reply": "Sunny, 21 C, light wind in {city}.",
+    "prompts": LIVE_PROMPTS,
+    "spec": {"thinking": {"type": "disabled"}, "max_turns": 4, "max_output_tokens": 1024},
+}
+DUMMY_KEYS = ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
+NO_RPC = {
+    "py": {"status": "n/a", "reason": "no sidecar: Python runs in process"},
+    "rs-kernel": {"status": "n/a", "reason": "the floor; the difference is on the rs-client row"},
+}
 SECRET = re.compile(
     r"(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$|^(ANTHROPIC|OPENAI|GEMINI|GOOGLE|DEEPSEEK)_"
 )
@@ -90,6 +124,31 @@ SECRET = re.compile(
 
 def scrubbed_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not SECRET.search(key)}
+
+
+def build_workspace(root: Path) -> None:
+    """The tool workspace: `src/` (10 small files) and `tree/` (2000 files).
+
+    Every `src` file has a unique `marker_<i>` for Edit; even ones contain
+    `needle`. In `tree/`, every 50th file contains `needle_hit`.
+    """
+    src = root / "src"
+    src.mkdir(parents=True)
+    for i in range(10):
+        lines = [f"line {n}: alpha beta gamma delta {i}" for n in range(40)]
+        lines.insert(20, f"marker_{i}")
+        if i % 2 == 0:
+            lines.insert(30, "a needle in the file")
+        (src / f"file_{i:02d}.txt").write_text("\n".join(lines) + "\n")
+    for d in range(20):
+        folder = root / "tree" / f"d{d:02d}"
+        folder.mkdir(parents=True)
+        for f in range(100):
+            n = d * 100 + f
+            lines = [f"row {r} of file {n}: lorem ipsum dolor sit amet" for r in range(30)]
+            if n % 50 == 0:
+                lines.insert(15, "here is the needle_hit")
+            (folder / f"f{f:03d}.txt").write_text("\n".join(lines) + "\n")
 
 
 def git_head(path: Path) -> str | None:
@@ -202,22 +261,93 @@ class Runner:
             job["fixture"] = str(FIXTURES / f"loop_{variant}.json")
             if case == "pg_loop":
                 job["stores"] = "postgres"
+        elif case == "compaction":
+            job.update(COMPACTION, fixture=str(FIXTURES / "compaction.json"))
+        elif case == "tools":
+            name, calls = TOOL_FIXTURES[variant]
+            if side == "py" and variant == "Glob":
+                name = "tools_glob_py.json"
+            job.update(fixture=str(FIXTURES / name), calls=calls)
+            job.update(self.workspace(side, variant, with_tree=variant == "Grep-2k"))
+        elif case == "mcp":
+            if not Path(self.args.mcp_server_bin).is_file():
+                return f"MCP server not built: {self.args.mcp_server_bin}"
+            job.update(
+                fixture=str(FIXTURES / "mcp_echo.json"),
+                calls=10,
+                mcp_server_bin=self.args.mcp_server_bin,
+            )
+        elif case == "decode":
+            stream = self.sse_stream(variant)
+            job.update(stream, vendor=variant, system=SYSTEM)
+        elif case == "worker":
+            job.update(fixture=str(FIXTURES / "text.json"), jobs=5 if self.args.quick else 100)
+        elif case == "workflow":
+            job.update(steps=10 if self.args.quick else 100, stores=variant)
+        elif case == "evals":
+            job["fixture"] = str(FIXTURES / "evals.json")
+        elif case == "concurrency":
+            job.update(fixture=str(FIXTURES / "loop_10x1.json"), sessions=CONCURRENT_SESSIONS)
         elif case == "live":
             if not self.args.live:
                 return "live run off; pass --live"
             if "DEEPSEEK_API_KEY" not in os.environ:
                 return "DEEPSEEK_API_KEY not set"
-            job.update(
-                model="deepseek-flash", system=LIVE_SYSTEM, tool=WEATHER, prompts=LIVE_PROMPTS
-            )
+            job.update(LIVE, iterations=len(LIVE["prompts"]), warmup=0)
         else:
-            return "not wired yet"
+            return f"unknown case {case}"
         return job
+
+    def workspace(self, side: str, variant: str, with_tree: bool) -> dict:
+        """A fresh copy of the tool workspace for one cell."""
+        template = self.out / "work" / "template"
+        if not template.exists():
+            build_workspace(template)
+        root = self.out / "work" / f"{side}__tools__{variant}"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        shutil.copytree(template / "src", root / "src")
+        if with_tree:
+            shutil.copytree(template / "tree", root / "tree")
+        return {"workspace": str(root), "pristine": str(template / "src")}
+
+    def sse_stream(self, vendor: str) -> dict:
+        """Start the loopback SSE server once; this vendor's stream details."""
+        dump = self.out / "sse"
+        if self.sse is None:
+            deltas = 2_000 if self.args.quick else 20_000
+            self.sse = subprocess.Popen(
+                [sys.executable, "-I", str(HERE / "sse_server.py"), "--deltas", str(deltas)]
+                + ["--dump", str(dump)],
+                stdout=subprocess.PIPE,
+                text=True,
+                env=scrubbed_env(),
+            )
+            assert self.sse.stdout is not None
+            line = self.sse.stdout.readline()
+            if not line.startswith("PORT "):
+                raise RuntimeError("the SSE server did not start")
+            self.sse_url = f"http://127.0.0.1:{int(line.split()[1])}"
+        info = json.loads((dump / "streams.json").read_text())[vendor]
+        suffix = {"openai-chat": "/v1", "openai-responses": "/v1"}.get(vendor, "")
+        return {
+            "base_url": f"{self.sse_url}/{vendor}{suffix}",
+            "gemini_base_url": f"{self.sse_url}/gemini",
+            "model": info["model"],
+            "stream_bytes": info["bytes"],
+            "stream_events": info["events"],
+            "stream_sha256": info["sha256"],
+        }
 
     def env_for(self, case: str) -> dict[str, str]:
         env = scrubbed_env()
         if case == "live" and "DEEPSEEK_API_KEY" in os.environ:
             env["DEEPSEEK_API_KEY"] = os.environ["DEEPSEEK_API_KEY"]
+        if case == "decode":
+            # The replay server ignores keys; the adapters only need one set.
+            for key in DUMMY_KEYS:
+                env[key] = "bench-dummy-key"
         return env
 
     def run_cell(self, side: str, case: str, variant: str) -> dict:
@@ -275,6 +405,63 @@ class Runner:
         result["process_wall_s"] = time.perf_counter() - started
         return result
 
+    def run_startup(self, side: str) -> dict:
+        """Case 10: time whole cold processes (spawn to reaped), one per iteration.
+
+        CPU and the fallback RSS come from `wait4`, so they include the
+        rs-client sidecar; the RSS shown is what the process reported
+        (rs-client: client plus sidecar).
+        """
+        reason = self.unavailable(side)
+        if reason is not None:
+            return {"status": "n/a", "reason": reason}
+        job = self.base_job("startup", "cold")
+        job["fixture"] = str(FIXTURES / "text.json")
+        name = f"{side}__startup__cold"
+        job_path = self.out / "jobs" / f"{name}.json"
+        job_path.write_text(json.dumps(job, indent=2))
+        walls: list[float] = []
+        cpu = rss = 0.0
+        reported: dict = {}
+        with (self.out / "logs" / f"{name}.log").open("w") as stderr:
+            for i in range(self.warmup + self.iterations):
+                started = time.perf_counter()
+                proc = subprocess.Popen(
+                    self.command(side, job_path),
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                    text=True,
+                    env=self.env_for("startup"),
+                    cwd=self.out / "work",
+                )
+                assert proc.stdout is not None
+                out = proc.stdout.read()
+                proc.stdout.close()
+                _, status, usage = os.wait4(proc.pid, 0)
+                proc.returncode = os.waitstatus_to_exitcode(status)
+                wall = 1000 * (time.perf_counter() - started)
+                lines = [line for line in out.splitlines() if line.startswith("{")]
+                reported = json.loads(lines[-1]) if lines else {}
+                if reported.get("status") != "ok":
+                    return reported or {"status": "error", "error": f"exit {proc.returncode}"}
+                if i >= self.warmup:
+                    walls.append(wall)
+                    cpu += 1000 * (usage.ru_utime + usage.ru_stime)
+                    rss = max(rss, reported.get("peak_rss_mb") or usage.ru_maxrss / 1024)
+        phases = reported.get("phases_ms", {})
+        note = ", ".join(f"{k} {v:.1f}" for k, v in phases.items())
+        return {
+            "status": "ok",
+            "iterations": len(walls),
+            "wall_ms": walls,
+            "cpu_ms": cpu,
+            "ops_per_iter": 1,
+            "op": "process",
+            "peak_rss_mb": rss,
+            "phases_ms": phases,
+            "note": f"last process: {note} ms" if note else "",
+        }
+
     # ------------------------------------------------------------- derived
 
     def derive_rpc(self, variant: str) -> dict:
@@ -317,13 +504,17 @@ class Runner:
                             continue
                         if case == "rpc_overhead":
                             result = (
-                                self.derive_rpc(variant)
-                                if side == "rs-client"
-                                else {"status": "n/a", "reason": "shown on the rs-client row"}
+                                self.derive_rpc(variant) if side == "rs-client" else NO_RPC[side]
                             )
                         else:
                             print(f"[{side}] {key} ...", file=sys.stderr, flush=True)
-                            result = self.run_cell(side, case, variant)
+                            try:
+                                if case == "startup":
+                                    result = self.run_startup(side)
+                                else:
+                                    result = self.run_cell(side, case, variant)
+                            except Exception as error:  # noqa: BLE001 - one cell, not the run
+                                result = {"status": "error", "error": f"harness: {error}"}
                             print(f"[{side}] {key}: {summary(result)}", file=sys.stderr, flush=True)
                         self.results[side][key] = result
         finally:
@@ -370,10 +561,13 @@ def per_op(result: dict) -> str:
     ops, op = result["ops_per_iter"], result["op"]
     if op == "event":
         mb = result.get("bytes_per_iter", 0) / 1e6
-        return f"{mb / (wall / 1000):.1f} MB/s, {ops / (wall / 1000) / 1000:.1f} k ev/s"
-    if op in ("job", "run"):
-        return f"{ops / (wall / 1000):.1f} {op}s/s"
-    return f"{wall / ops:.3f} ms/{op}"
+        text = f"{mb / (wall / 1000):.1f} MB/s, {ops / (wall / 1000) / 1000:.1f} k ev/s"
+    elif op in ("job", "run"):
+        text = f"{ops / (wall / 1000):.1f} {op}s/s"
+    else:
+        text = f"{wall / ops:.3f} ms/{op}"
+    note = result.get("note")
+    return f"{text} ({note})" if note else text
 
 
 def writes(result: dict) -> str:
@@ -465,6 +659,9 @@ def main() -> None:
     args.cases = {c.strip() for c in args.cases.split(",") if c.strip()}
     args.sides = {s.strip() for s in args.sides.split(",") if s.strip()}
     args.client_python = args.client_python or args.py_python
+    # Side processes run in DIR/work, so every path they get is absolute.
+    for name in ("server_bin", "kernel_bin", "mcp_server_bin"):
+        setattr(args, name, str(Path(getattr(args, name)).resolve()))
     unknown = args.sides - set(SIDES)
     if unknown:
         parser.error(f"unknown sides: {', '.join(sorted(unknown))}")

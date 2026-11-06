@@ -20,11 +20,27 @@ READS = ("load", "list", "get", "ready", "close", "connect")
 
 
 class FixtureProvider:
-    """Replays scripted turns in call order, like Rust's `ScriptedProvider`."""
+    """Replays scripted turns in call order, like Rust's `ScriptedProvider`.
+
 
     id = "scripted"
 
-    def __init__(self, turns: list[dict], context_window: int = 128_000) -> None:
+    With `summary_prompt`, a request whose system text is that prompt (a
+    compaction summary call) gets the fixture's `SUMMARY:` turn wherever it
+    comes, and other requests skip that turn: Python may compact at another
+    call than Rust, whose fixture has the summary turn at Rust's call.
+    """
+
+    id = "scripted"
+
+    def __init__(
+        self, turns: list[dict], context_window: int = 128_000, summary_prompt: str | None = None
+    ) -> None:
+        self._summary = None
+        self._prompt = summary_prompt
+        if summary_prompt is not None:
+            self._summary = next(t for t in turns if _text(t).startswith("SUMMARY:"))
+            turns = [t for t in turns if not _text(t).startswith("SUMMARY:")]
         self._turns = turns
         self._index = 0
         self._window = context_window
@@ -35,14 +51,22 @@ class FixtureProvider:
     async def stream(self, req):
         from linch import ProviderError, Usage
 
-        if self._index >= len(self._turns):
+        system = [getattr(block, "text", "") for block in (req.system or [])]
+        if self._prompt is not None and self._prompt in system:
+            turn = self._summary
+        elif self._index >= len(self._turns):
             raise ProviderError(f"scripted provider is out of turns after {self._index}")
-        turn = self._turns[self._index]
-        self._index += 1
+        else:
+            turn = self._turns[self._index]
+            self._index += 1
         for event in turn.get("events", []):
             if event["type"] == "message_end":
                 event = {**event, "usage": Usage(**event["usage"]), "provider_metadata": None}
             yield event
+
+
+def _text(turn: dict) -> str:
+    return "".join(e.get("text", "") for e in turn["events"] if e["type"] == "text_delta")
 
 
 def echo_tool(spec: dict):
@@ -128,9 +152,13 @@ async def run_once(agent, prompt: str = "go") -> list:
 
     session = await agent.session()
     events = [event async for event in session.run(prompt)]
+    failed = [e for e in events if type(e).__name__ == "ToolCallEndEvent" and e.is_error]
+    if failed:
+        raise RuntimeError(f"{failed[0].tool_name} failed: {str(failed[0].result)[:300]}")
     result = next(e for e in events if isinstance(e, ResultEvent))
     if result.subtype != "success":
-        raise RuntimeError(f"run ended {result.subtype}: {getattr(result, 'error', None)}")
+        errors = [repr(e)[:300] for e in events if type(e).__name__ == "ErrorEvent"]
+        raise RuntimeError(f"run ended {result.subtype} ({result.stop_reason}): {errors}")
     return events
 
 
@@ -176,7 +204,152 @@ async def case_loop(job: Job) -> Result:
     )
 
 
-CASES = {"loop": case_loop, "pg_loop": case_loop}
+def reset_workspace(job: Job) -> None:
+    """Put the workspace's `src/` back as `run_all.py` built it (untimed)."""
+    import shutil
+
+    src = Path(job["workspace"]) / "src"
+    shutil.rmtree(src)
+    shutil.copytree(job["pristine"], src)
+
+
+async def timed_runs(job: Job, agent, before=None) -> Clock:
+    clock = Clock()
+    for _ in range(job["warmup"]):
+        if before is not None:
+            before()
+        await run_once(agent)
+    for _ in range(job["iterations"]):
+        if before is not None:
+            before()
+        clock.start()
+        await run_once(agent)
+        clock.stop()
+    return clock
+
+
+async def case_tools(job: Job) -> Result:
+    from linch import workspace_tools
+
+    turns = load_turns(job["fixture"])
+    runs = job["warmup"] + job["iterations"]
+    extras = {"BashProcess", "TaskCreate", "TaskList", "TaskGet", "TaskUpdate"}
+    agent = build_agent(
+        job,
+        FixtureProvider(turns * runs),
+        tools=workspace_tools(exclude=extras),
+        cwd=job["workspace"],
+    )
+    try:
+        clock = await timed_runs(job, agent, lambda: reset_workspace(job))
+    finally:
+        await agent.close()
+    return ok(clock, job["calls"], "call", peak_rss_mb())
+
+
+async def case_mcp(job: Job) -> Result:
+    from linch import FeatureFlags, McpStdioServerConfig, ToolRegistry
+
+    turns = load_turns(job["fixture"])
+    runs = job["warmup"] + job["iterations"]
+    server = McpStdioServerConfig(type="stdio", command=job["mcp_server_bin"], args=[])
+    agent = build_agent(
+        job,
+        FixtureProvider(turns * runs),
+        tools=ToolRegistry(),
+        mcp_servers={"bench": server},
+        features=FeatureFlags(mcp=True),
+    )
+    try:
+        await agent.connect_mcp()
+        clock = await timed_runs(job, agent)
+    finally:
+        await agent.close()
+    return ok(clock, job["calls"], "call", peak_rss_mb())
+
+
+async def case_compaction(job: Job) -> Result:
+    from linch import CompactionEvent, DefaultCompaction
+
+    turns = load_turns(job["fixture"])
+    runs = job["warmup"] + job["iterations"]
+    provider = FixtureProvider(
+        turns * runs,
+        context_window=job["py_context_window"],
+        summary_prompt=job["summary_prompt"],
+    )
+    agent = build_agent(job, provider, compaction=DefaultCompaction(prompt=job["summary_prompt"]))
+    clock = Clock()
+    compactions = []
+    try:
+        for i in range(runs):
+            if i >= job["warmup"]:
+                clock.start()
+            events = await run_once(agent)
+            if i >= job["warmup"]:
+                clock.stop()
+            compactions.append(sum(isinstance(e, CompactionEvent) for e in events))
+    finally:
+        await agent.close()
+    if min(compactions) < 1:
+        raise RuntimeError(f"a run did not compact: {compactions}")
+    turns_per_run = len(turns) - 1  # the summary turn is not a loop turn
+    note = f"{compactions[-1]} compaction(s)/run"
+    return ok(clock, turns_per_run, "turn", peak_rss_mb(), note=note)
+
+
+async def case_concurrency(job: Job) -> Result:
+    turns = load_turns(job["fixture"])
+    runs = job["warmup"] + job["iterations"]
+    agents = [build_agent(job, FixtureProvider(turns * runs)) for _ in range(job["sessions"])]
+    clock = Clock()
+    try:
+        for i in range(runs):
+            if i >= job["warmup"]:
+                clock.start()
+            await asyncio.gather(*(run_once(agent) for agent in agents))
+            if i >= job["warmup"]:
+                clock.stop()
+    finally:
+        for agent in agents:
+            await agent.close()
+    return ok(clock, job["sessions"], "run", peak_rss_mb())
+
+
+async def case_startup(job: Job) -> Result:
+    """One cold process: import, build, first run (`run_all.py` times the process)."""
+    import time
+
+    started = time.perf_counter()
+    import linch  # noqa: F401
+
+    imported = time.perf_counter()
+    agent = build_agent(job, FixtureProvider(load_turns(job["fixture"])))
+    built = time.perf_counter()
+    try:
+        await run_once(agent)
+    finally:
+        await agent.close()
+    done = time.perf_counter()
+    return {
+        "status": "ok",
+        "phases_ms": {
+            "import": 1000 * (imported - started),
+            "build": 1000 * (built - imported),
+            "first_run": 1000 * (done - built),
+        },
+    }
+
+
+CASES = {
+    "loop": case_loop,
+    "pg_loop": case_loop,
+    "tools": case_tools,
+    "mcp": case_mcp,
+    "compaction": case_compaction,
+    "concurrency": case_concurrency,
+    "startup": case_startup,
+}
 
 
 async def pg_admin(action: str, dsn: str, schema: str) -> None:

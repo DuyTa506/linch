@@ -1655,6 +1655,7 @@ dependencies = [
  "linch-postgres",
  "linch-providers",
  "linch-tools",
+ "linch-worker",
  "rmcp",
  "rustix",
  "serde",
@@ -1663,6 +1664,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "url",
  "yaml-rust2",
 ]
