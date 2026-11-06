@@ -15,6 +15,7 @@ use crate::registry::ToolRegistry;
 use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
+use crate::tool_search::{SearchTool, ToolSearch};
 use crate::usage::Usage;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
@@ -37,6 +38,7 @@ pub struct AgentBuilder {
     pricing: Option<Pricing>,
     mailbox: Option<Arc<dyn Mailbox>>,
     workers: Option<Workers>,
+    tool_search: Option<ToolSearch>,
 }
 
 impl AgentBuilder {
@@ -57,6 +59,7 @@ impl AgentBuilder {
             pricing: None,
             mailbox: None,
             workers: None,
+            tool_search: None,
         }
     }
 
@@ -161,6 +164,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Defer part of the catalog past `search`'s sizes, for the model to
+    /// find with the `tool_search` tool (see [`crate::tool_search`]).
+    /// [`Self::build`] registers that tool; the setting is part of the
+    /// contract.
+    pub fn tool_search(mut self, search: ToolSearch) -> Self {
+        self.tool_search = Some(search);
+        self
+    }
+
     /// Give the agent a mailbox for peer messages (see
     /// [`crate::coordination`]).
     ///
@@ -244,6 +256,13 @@ impl AgentBuilder {
                 built_ins.register(&self.tools, Arc::new(tool))?;
             }
         }
+        if let Some(search) = self.tool_search {
+            let value =
+                serde_json::to_value(search).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            features.insert("tool_search".into(), value);
+            let tool = SearchTool::new(Arc::clone(&handle));
+            built_ins.register(&self.tools, Arc::new(tool))?;
+        }
         let tools = self.tools.snapshot().contract_tools();
         let hooks = self.hooks.policy_digest();
         let contract = spec::contract_digest(&self.spec, &tools, hooks, &features)?;
@@ -265,6 +284,7 @@ impl AgentBuilder {
             features,
             skills: skill_versions,
             subagents,
+            tool_search: self.tool_search,
             workers,
             worker_registry: Default::default(),
             child: false,

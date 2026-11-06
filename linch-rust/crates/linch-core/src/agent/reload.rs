@@ -14,7 +14,7 @@ use super::{Agent, AgentInner, BuildError};
 use crate::catalog::LiveSkill;
 use crate::message::SystemBlock;
 use crate::registration::Registration;
-use crate::skills::{Skill, SkillSet};
+use crate::skills::{Skill, SkillSet, deferred_listing};
 use crate::subagents::{Roster, SubagentDefinition, SubagentTool};
 
 impl Agent {
@@ -80,11 +80,16 @@ impl Agent {
 
 impl AgentInner {
     /// The system blocks a new session's prefix takes now: the static
-    /// blocks with the current skill listing in its place.
-    pub(crate) fn system(&self) -> Vec<SystemBlock> {
+    /// blocks with the current skill listing in its place, or a listing
+    /// that only names the `deferred` skills when tool search defers them.
+    pub(crate) fn system(&self, deferred: Option<&[String]>) -> Vec<SystemBlock> {
         let mut system = self.system.clone();
         if let (Some(at), Some(set)) = (self.listing_at, self.skill_set()) {
-            system.splice(at..at, set.listing.clone());
+            let listing = match deferred {
+                Some(names) => Some(deferred_listing(names)),
+                None => set.listing.clone(),
+            };
+            system.splice(at..at, listing);
         }
         system
     }

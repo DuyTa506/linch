@@ -30,8 +30,8 @@ use crate::agent::AgentInner;
 use crate::canonical::Digest;
 use crate::message::{CatalogChangeBlock, ContentBlock, Message, SkillStamp, SystemBlock};
 use crate::provider::ToolDefinition;
-use crate::registry::ToolSnapshot;
 use crate::session_log::{LogEntry, PrefixEntry, SessionLog};
+use crate::tool_search::{self, Loads};
 
 /// The catalog state of one session, folded from its log.
 #[derive(Debug, Clone)]
@@ -52,6 +52,9 @@ pub(crate) struct Live {
     pub(crate) tools: Vec<ToolDefinition>,
     /// The skills the model may invoke, sorted by name.
     pub(crate) skills: Vec<LiveSkill>,
+    /// Every skill's name, when tool search defers the skills: a new
+    /// session's listing names them instead of listing them.
+    pub(crate) deferred_skills: Option<Vec<String>>,
 }
 
 /// One skill of the live catalog.
@@ -101,6 +104,16 @@ impl Catalog {
     /// The system blocks of every request.
     pub(crate) fn system(&self) -> &[SystemBlock] {
         &self.prefix.system
+    }
+
+    /// Whether the model was told the tool `name` is offered.
+    pub(crate) fn offers(&self, name: &str) -> bool {
+        self.told.iter().any(|tool| tool.name == name)
+    }
+
+    /// Whether the model was told of the skill `name`.
+    pub(crate) fn knows_skill(&self, name: &str) -> bool {
+        self.skills.contains_key(name)
     }
 
     /// The tools of the next request, in order. `keep` narrows them for
@@ -185,29 +198,40 @@ fn upsert(
     }
 }
 
-/// The prefix a new session takes: the agent's system blocks and the tools
-/// of `snapshot`, as they are now.
-pub(crate) fn prefix(agent: &AgentInner, snapshot: &ToolSnapshot) -> PrefixEntry {
+/// The prefix a new session takes: the agent's system blocks and what it
+/// offers a session, as they are now.
+pub(crate) fn prefix(agent: &AgentInner) -> PrefixEntry {
+    let live = live(agent, None, &Loads::default());
     PrefixEntry {
-        system: agent.system(),
-        tools: snapshot.definitions(),
-        skills: (agent.listed_skills().into_iter())
-            .map(|skill| skill.stamp)
-            .collect(),
+        system: agent.system(live.deferred_skills.as_deref()),
+        tools: live.tools,
+        skills: live.skills.into_iter().map(|skill| skill.stamp).collect(),
     }
 }
 
-/// What `agent` offers now.
-pub(crate) fn live(agent: &AgentInner) -> Live {
-    Live {
-        tools: agent.snapshot().definitions(),
+/// What `agent` offers now to a session whose model `known` says what it
+/// was told (`None` for a new session), with `loads` a batch's searches
+/// just found. Without tool search: all it has.
+pub(crate) fn live(agent: &AgentInner, known: Option<&Catalog>, loads: &Loads) -> Live {
+    let snapshot = agent.snapshot();
+    let mut live = Live {
+        tools: snapshot.definitions(),
         skills: agent.listed_skills(),
+        deferred_skills: None,
+    };
+    if let Some(search) = &agent.tool_search {
+        let told = |name: &str| known.is_some_and(|c| c.offers(name)) || loads.tools.contains(name);
+        let told_skill =
+            |name: &str| known.is_some_and(|c| c.knows_skill(name)) || loads.skills.contains(name);
+        tool_search::offer(search, &snapshot, &mut live, &told, &told_skill);
     }
+    live
 }
 
 /// A version of what `agent` offers: it moves whenever a registration or
 /// a reload may have changed the live catalog.
-pub(crate) fn version(agent: &AgentInner) -> (u64, u64) {
+pub(crate) fn version(agent: &AgentInner) -> (u64, u64, u64) {
     let skills = (agent.skills.as_ref()).map_or(0, |versions| versions.revision());
-    (agent.tools.generation(), skills)
+    let subagents = (agent.subagents.as_ref()).map_or(0, |versions| versions.revision());
+    (agent.tools.generation(), skills, subagents)
 }

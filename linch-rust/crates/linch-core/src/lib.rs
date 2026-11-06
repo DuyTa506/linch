@@ -40,6 +40,7 @@ pub mod skills;
 pub mod store;
 pub mod subagents;
 pub mod tool;
+pub mod tool_search;
 pub mod usage;
 pub mod vfs;
 
@@ -97,4 +98,5 @@ pub use subagents::{SubagentDefinition, Workers};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };
+pub use tool_search::ToolSearch;
 pub use usage::Usage;

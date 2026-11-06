@@ -32,7 +32,7 @@ impl Runner {
             return self.append(prompt).await;
         }
         let version = catalog::version(&self.agent);
-        let prefix = catalog::prefix(&self.agent, &self.agent.snapshot());
+        let prefix = catalog::prefix(&self.agent);
         let entries = vec![LogEntry::Prefix(prefix.clone()), entry(&prompt)];
         self.write_session(entries).await?;
         self.log.record_prefix(prefix);

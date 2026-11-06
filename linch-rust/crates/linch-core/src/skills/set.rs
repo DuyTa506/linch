@@ -53,10 +53,20 @@ impl SkillSet {
 /// visible to the model.
 fn listing_block(skills: &[Skill]) -> Option<SystemBlock> {
     let listing = listing(skills);
-    (!listing.is_empty()).then(|| SystemBlock {
+    (!listing.is_empty()).then(|| block(&listing))
+}
+
+/// The listing block when tool search defers the skills: their names only.
+pub(crate) fn deferred_listing(names: &[String]) -> SystemBlock {
+    let names = names.join(", ");
+    block(&format!("Deferred skills (use tool_search first): {names}"))
+}
+
+fn block(listing: &str) -> SystemBlock {
+    SystemBlock {
         text: format!(
             "The following skills are available for use with the Skill tool:\n\n{listing}"
         ),
         cacheable: true,
-    })
+    }
 }

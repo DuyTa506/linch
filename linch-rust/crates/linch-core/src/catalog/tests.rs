@@ -49,7 +49,11 @@ fn tell(catalog: &mut Catalog, now: &Live) -> CatalogChangeBlock {
 }
 
 fn live(tools: Vec<ToolDefinition>, skills: Vec<LiveSkill>) -> Live {
-    Live { tools, skills }
+    Live {
+        tools,
+        skills,
+        deferred_skills: None,
+    }
 }
 
 fn names(rows: &[ToolDefinition]) -> Vec<&str> {

@@ -76,6 +76,10 @@ impl Tool for SkillTool {
         Ok(input)
     }
 
+    fn always_load(&self) -> bool {
+        true
+    }
+
     fn summarize(&self, input: &JsonObject) -> String {
         format!("Invoke skill: {}", requested(input))
     }

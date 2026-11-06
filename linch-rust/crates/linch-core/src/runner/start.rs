@@ -19,6 +19,7 @@ use crate::message::ContentBlock;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
+use crate::tool_search::Loads;
 use crate::usage::Usage;
 
 /// Create the run (the `Started` write-through), append the prompt, and go.
@@ -62,7 +63,7 @@ pub(super) async fn new_run(
     prompt.content.extend(inbox::blocks(&peers));
     let seen = Catalog::of_entries(&entries).map(|known| {
         let version = catalog::version(&agent);
-        let change = known.change(&catalog::live(&agent));
+        let change = known.change(&catalog::live(&agent, Some(&known), &Loads::default()));
         prompt
             .content
             .extend(change.map(ContentBlock::CatalogChange));

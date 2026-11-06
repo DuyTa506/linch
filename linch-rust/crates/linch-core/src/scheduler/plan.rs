@@ -38,6 +38,20 @@ impl BatchPlan {
             .any(|call| matches!(call.action, PlannedAction::AwaitingApproval { .. }))
     }
 
+    /// Refuse each call whose tool did not resolve with the error
+    /// `message` gives for its name, when it gives one.
+    pub(crate) fn refuse_unresolved(&mut self, message: impl Fn(&str) -> Option<String>) {
+        for call in &mut self.calls {
+            if call.tool.is_none()
+                && let Some(text) = message(&call.tool_name)
+            {
+                call.action = PlannedAction::Error {
+                    error: ToolOutputError::new(text),
+                };
+            }
+        }
+    }
+
     /// Deny every call awaiting approval with `reason`, for a run that
     /// cannot suspend (a subagent's).
     pub(crate) fn refuse_asks(&mut self, reason: &str) {

@@ -29,6 +29,7 @@ use crate::runner::{self, Families, RunStream};
 use crate::skills::SkillSet;
 use crate::store::{RunStore, SessionStore};
 use crate::subagents::{Registry, Roster, Workers};
+use crate::tool_search::ToolSearch;
 use crate::usage::Usage;
 
 mod builder;
@@ -123,6 +124,8 @@ pub(crate) struct AgentInner {
     /// The subagents the `Subagent` tool runs, which
     /// [`Agent::reload_subagents`] replaces; `None` when they are off.
     pub(crate) subagents: Option<Arc<Versions<Roster>>>,
+    /// When tool search defers part of the catalog; `None` when it is off.
+    pub(crate) tool_search: Option<ToolSearch>,
     /// How the `Subagent` tool keeps its workers.
     pub(crate) workers: Workers,
     /// The workers of each parent session.

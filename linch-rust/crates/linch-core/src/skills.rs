@@ -37,7 +37,7 @@ use crate::message::{ContentBlock, Message, Role, ToolResultPart};
 pub use listing::listing;
 pub use overlay::model_override;
 pub(crate) use overlay::{Overlays, overlay, overlays};
-pub(crate) use set::SkillSet;
+pub(crate) use set::{SkillSet, deferred_listing};
 pub use substitute::{split_args, substitute};
 pub(crate) use tool::SkillTool;
 

@@ -10,10 +10,12 @@ use crate::registry::ToolSnapshot;
 use crate::runner::{self, RunStream};
 use crate::skills::SKILL_TOOL;
 use crate::subagents::{CONTINUE_TOOL, STOP_TOOL, SUBAGENT_TOOL, SubagentDefinition};
+use crate::tool_search::TOOL_SEARCH_TOOL;
 
 /// Which of the parent's tools a child run sees: never `Subagent` (a child
-/// cannot spawn) nor the worker tools (it has no workers), and only the
-/// named ones when the definition names any.
+/// cannot spawn), the worker tools (it has no workers) nor `tool_search`
+/// (it is offered every tool), and only the named ones when the
+/// definition names any.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildTools {
     only: Option<Vec<String>>,
@@ -28,7 +30,7 @@ impl ChildTools {
     }
 
     fn keeps(&self, name: &str) -> bool {
-        ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL].contains(&name)
+        ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL, TOOL_SEARCH_TOOL].contains(&name)
             && (self.only.as_ref()).is_none_or(|only| only.iter().any(|n| n == name))
     }
 
@@ -130,6 +132,7 @@ impl AgentInner {
             features,
             skills: self.skills.clone(),
             subagents: None,
+            tool_search: None,
             workers: Default::default(),
             worker_registry: Default::default(),
             child: true,

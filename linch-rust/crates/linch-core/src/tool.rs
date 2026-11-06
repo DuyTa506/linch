@@ -243,6 +243,12 @@ pub trait Tool: Send + Sync {
         self.scope().is_parallel_safe()
     }
 
+    /// Whether the tool is offered even when tool search defers the others
+    /// (see [`crate::tool_search`]). The default is no.
+    fn always_load(&self) -> bool {
+        false
+    }
+
     /// One-line summary of a call for events and approval prompts.
     fn summarize(&self, input: &JsonObject) -> String {
         let _ = input;

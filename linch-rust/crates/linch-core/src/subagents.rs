@@ -82,7 +82,7 @@ mod workers;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use background::{Completion, reattach};
-pub(crate) use control::{ContinueTool, StopTool};
+pub(crate) use control::{ContinueTool, Handle, StopTool};
 pub(crate) use tool::SubagentTool;
 pub(crate) use workers::Registry;
 
