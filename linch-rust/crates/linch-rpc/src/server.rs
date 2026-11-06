@@ -1,6 +1,7 @@
-//! The server: newline-delimited JSON-RPC over any byte stream pair.
+//! The server: one connection's agents, runs and calls, fed messages by
+//! [`connection`].
 //!
-//! One read loop parses lines and spawns a task per call, so a slow
+//! One read loop parses messages and spawns a task per call, so a slow
 //! `agent.open` never holds up `run.cancel`; it hands the client's answers
 //! to server requests straight to their waiting calls. One writer task owns
 //! the output and writes every response, notification and server request
@@ -9,156 +10,29 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::io;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use futures::StreamExt;
 use linch::{JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::error::{ErrorObject, code, invalid_params, invalid_request};
-use crate::message::{Id, Notification, Request, Response};
+use crate::message::{Id, Request, Response};
 use crate::protocol::{RunAccepted, method};
 
 mod agents;
 mod callback;
+mod connection;
 mod host;
 mod peer;
 mod run;
 
+use connection::Outbox;
+pub use connection::{MAX_LINE_BYTES, serve, serve_messages};
 use peer::Peer;
-
-/// Longest request line the server reads, in bytes.
-pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-
-/// Responses and notifications waiting for the writer.
-const OUTBOX_CAPACITY: usize = 1024;
-
-/// Serve one client until its input ends.
-///
-/// Every line of `reader` is one request, or the answer to a server
-/// request; every line written to `writer` is one response, notification or
-/// server request. At end of input the server stops: each active run is
-/// dropped where it stands, as in a crash, so it stays resumable from its
-/// last durable state; every server request still waiting fails; every
-/// agent's MCP servers are disconnected; queued output is written; then
-/// this returns.
-///
-/// Args:
-///     reader: The client's requests, for example stdin.
-///     writer: Where responses and notifications go, for example stdout.
-///
-/// Raises:
-///     io::Error: If reading the input or writing the output fails.
-pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin + Send + 'static,
-{
-    let (sender, queue) = mpsc::channel(OUTBOX_CAPACITY);
-    let writing = tokio::spawn(write_lines(writer, queue));
-    let outbox = Outbox(sender);
-    let server = Server(Arc::new(State {
-        tables: Mutex::default(),
-        next_agent: AtomicU64::new(0),
-        peer: Peer::new(outbox.clone()),
-        outbox,
-        shutdown: CancellationToken::new(),
-        tasks: TaskTracker::new(),
-    }));
-    let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_LINE_BYTES));
-    let mut failed = None;
-    while let Some(line) = lines.next().await {
-        match line {
-            Ok(line) => server.receive(&line).await,
-            Err(LinesCodecError::MaxLineLengthExceeded) => {
-                let error = invalid_request("request line too long");
-                server.0.outbox.send(&Response::err(Id::Null, error)).await;
-            }
-            Err(LinesCodecError::Io(error)) => {
-                failed = Some(error);
-                break;
-            }
-        }
-    }
-    // Drop the runs first, so none sees the closed connection as a tool or
-    // hook failure, then fail what still waits on the client.
-    server.0.shutdown.cancel();
-    server.0.peer.close();
-    server.0.tasks.close();
-    server.0.tasks.wait().await;
-    // Disconnect every agent's MCP servers, so no server process outlives
-    // this call.
-    let agents: Vec<OpenedAgent> = (lock(&server.0.tables).agents.drain())
-        .map(|(_, agent)| agent)
-        .collect();
-    for agent in agents {
-        agent.close().await;
-    }
-    // The last sender goes with the server; the writer drains and stops.
-    drop(server);
-    let written = writing.await.map_err(io::Error::other)?;
-    match failed {
-        Some(error) => Err(error),
-        None => written,
-    }
-}
-
-async fn write_lines<W: AsyncWrite + Unpin>(
-    mut writer: W,
-    mut queue: mpsc::Receiver<String>,
-) -> io::Result<()> {
-    while let Some(mut line) = queue.recv().await {
-        line.push('\n');
-        writer.write_all(line.as_bytes()).await?;
-        if queue.is_empty() {
-            writer.flush().await?;
-        }
-    }
-    writer.shutdown().await
-}
-
-/// Lines for the writer task.
-#[derive(Clone)]
-struct Outbox(mpsc::Sender<String>);
-
-impl Outbox {
-    /// Queue `message`; `false` when the writer has stopped (it failed, and
-    /// serve reports that).
-    async fn send<T: Serialize>(&self, message: &T) -> bool {
-        self.0.send(encode(message)).await.is_ok()
-    }
-
-    /// Queue `message` without waiting, from code that cannot await (a
-    /// drop). When the queue is full a task sends it later.
-    fn send_now<T: Serialize>(&self, message: &T) {
-        match self.0.try_send(encode(message)) {
-            Ok(()) | Err(TrySendError::Closed(_)) => {}
-            Err(TrySendError::Full(line)) => {
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    let sender = self.0.clone();
-                    runtime.spawn(async move { sender.send(line).await });
-                }
-            }
-        }
-    }
-
-    async fn notify(&self, method: &str, params: JsonValue) {
-        self.send(&Notification::new(method, params)).await;
-    }
-}
-
-fn encode<T: Serialize>(message: &T) -> String {
-    // Messages hold only JSON values and strings, which always encode.
-    serde_json::to_string(message).expect("a JSON-RPC message encodes")
-}
 
 /// Server state shared by every task. Cheap to clone.
 #[derive(Clone)]
@@ -199,6 +73,34 @@ enum Reply {
 }
 
 impl Server {
+    fn new(outbox: Outbox) -> Self {
+        Self(Arc::new(State {
+            tables: Mutex::default(),
+            next_agent: AtomicU64::new(0),
+            peer: Peer::new(outbox.clone()),
+            outbox,
+            shutdown: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+        }))
+    }
+
+    /// The input ended: drop the runs first, so none sees the closed
+    /// connection as a tool or hook failure, then fail what still waits on
+    /// the client, then disconnect every agent's MCP servers, so no server
+    /// process outlives the connection.
+    async fn stop(&self) {
+        self.0.shutdown.cancel();
+        self.0.peer.close();
+        self.0.tasks.close();
+        self.0.tasks.wait().await;
+        let agents: Vec<OpenedAgent> = (lock(&self.0.tables).agents.drain())
+            .map(|(_, agent)| agent)
+            .collect();
+        for agent in agents {
+            agent.close().await;
+        }
+    }
+
     async fn receive(&self, line: &str) {
         if line.trim().is_empty() {
             return;

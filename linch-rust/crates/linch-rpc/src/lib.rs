@@ -243,4 +243,4 @@ mod server;
 pub use client::{Client, ClientError, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};
-pub use server::{MAX_LINE_BYTES, serve};
+pub use server::{MAX_LINE_BYTES, serve, serve_messages};
