@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Minimal asyncio client for the Linch Rust core, over the linch-server sidecar."
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = []
+# orjson parses the server's lines: about three times faster than `json`.
+dependencies = ["orjson>=3.10"]
 
 [build-system]
 requires = ["maturin>=1.16,<2"]

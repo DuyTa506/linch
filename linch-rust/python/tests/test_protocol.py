@@ -10,6 +10,7 @@ import pytest
 
 from linch_rust import (
     AgentNotFound,
+    ConnectionClosed,
     NotSuspended,
     OpenError,
     PromptBlocked,
@@ -83,6 +84,19 @@ async def test_a_run_that_failed_inside_the_server_ends_with_a_run_error() -> No
     # Answering a request, the same code is still a protocol error.
     assert type(error_from(panic)) is ProtocolError
     reader.feed_eof()
+    await conn.finish()
+
+
+async def test_a_server_line_with_a_non_finite_number_closes_the_connection() -> None:
+    reader = asyncio.StreamReader()
+    conn = Connection(reader, cast(asyncio.StreamWriter, Answering(reader, [])))
+    call = asyncio.create_task(conn.request("run.cancel", {"run_id": "r1"}))
+    await asyncio.sleep(0)
+
+    reader.feed_data(b'{"jsonrpc": "2.0", "id": 1, "result": {"cancelled": NaN}}\n')
+
+    with pytest.raises(ConnectionClosed, match="reading the server failed"):
+        await call
     await conn.finish()
 
 

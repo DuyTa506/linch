@@ -4,6 +4,11 @@ One reader task reads every server line: responses resolve pending calls,
 `run.event` (consecutive envelopes of one run, as one list) and `run.end`
 go to the run's queue, and `tool.call` and `hook.call` run as tasks that
 `$/cancelRequest` cancels.
+
+Server lines are parsed with `orjson`, about three times faster than `json`
+on envelopes and stricter (no `NaN` or `Infinity`); what this client sends is
+encoded with `json`, which refuses non-finite numbers instead of writing
+`null`.
 """
 
 from __future__ import annotations
@@ -14,6 +19,8 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+import orjson
 
 from .callbacks import Callback
 from .errors import ConnectionClosed, LinchError, error_from, run_end_error
@@ -132,7 +139,7 @@ class Connection:
         try:
             while line := await self._reader.readline():
                 if line.strip():
-                    self._dispatch(json.loads(line))
+                    self._dispatch(orjson.loads(line))
         except Exception as error:
             reason = f"reading the server failed: {error!r}"
         finally:
