@@ -131,9 +131,9 @@
 //! Postgres DSN share one pool across all connections of a server process
 //! (the [`PgPools`](linch::PgPools) given to [`serve_lines`] or
 //! [`serve_messages`]); only an open that finds no pool in use connects,
-//! giving up after 5 s, and runs the migrations, and `agent.close` never
-//! closes a pool another agent uses. Provider keys are read from the server's
-//! environment (`DEEPSEEK_API_KEY`, ...; see
+//! giving up after 5 s, and runs the migrations, giving up after 30 s;
+//! `agent.close` never closes a pool another agent uses. Provider keys are
+//! read from the server's environment (`DEEPSEEK_API_KEY`, ...; see
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
 //! config's `mcp_servers` are connected in order before the result is sent.
 //! The result is [`AgentOpened`](protocol::AgentOpened):
@@ -309,7 +309,7 @@
 //! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash |
 //! | -32012 | contract not digestible | `BuildError::Contract` |
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
-//! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate |
+//! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate (or its 30 s timeout) |
 //! | -32015 | MCP server unavailable | first connect failed; `data.server` names it |
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |

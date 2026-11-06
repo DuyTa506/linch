@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::Duration;
 
 use linch_postgres::PgPool;
 use tokio::sync::OnceCell;
@@ -80,13 +82,23 @@ impl fmt::Debug for PgPools {
     }
 }
 
+/// Longest wait for the migrations: they wait on a database-wide lock, so
+/// one stuck migration would otherwise hold every open of every DSN on
+/// that database.
+const MIGRATE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn connect(dsn: &str) -> Result<PgPool, OpenError> {
     let pool = linch_postgres::connect(dsn, linch_postgres::CONNECT_TIMEOUT)
         .await
         .map_err(|error| OpenError::Store(Box::new(error)))?;
-    linch_postgres::migrate(&pool)
-        .await
-        .map_err(|error| OpenError::Store(Box::new(error)))?;
+    match tokio::time::timeout(MIGRATE_TIMEOUT, linch_postgres::migrate(&pool)).await {
+        Ok(migrated) => migrated.map_err(|error| OpenError::Store(Box::new(error)))?,
+        Err(_) => {
+            let message = format!("the migrations did not finish within {MIGRATE_TIMEOUT:?}");
+            let error = io::Error::new(io::ErrorKind::TimedOut, message);
+            return Err(OpenError::Store(Box::new(error)));
+        }
+    }
     Ok(pool)
 }
 

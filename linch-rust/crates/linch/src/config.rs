@@ -203,7 +203,7 @@ pub enum StoreConfig {
     /// [`PgPools`](crate::PgPools) it is given; when no open agent uses
     /// one, it connects, giving up after
     /// [`linch_postgres::CONNECT_TIMEOUT`] when the server cannot be
-    /// reached, and applies the migrations.
+    /// reached, and applies the migrations, giving up after 30 s.
     Postgres {
         /// Connection string, for example `postgres://user:pass@host/db`.
         #[serde(serialize_with = "redact::dsn")]
