@@ -313,6 +313,17 @@ async def test_a_postgres_run_suspended_on_the_socket_is_approved_over_the_webso
     assert isinstance(result, ResultEvent) and result.final_text == "Saved."
 
 
+async def test_a_socket_connection_names_its_tenant() -> None:
+    async with listening() as at:
+        async with Server.connect(at.socket, token=TOKEN) as server:
+            assert server.tenant == "acme"
+        # The WebSocket upgrade does not name it.
+        async with Server.connect(at.websocket, token=TOKEN) as server:
+            assert server.tenant is None
+    async with Server() as server:
+        assert server.tenant is None
+
+
 def test_an_address_must_name_a_socket_or_a_websocket() -> None:
     for bad in ["http://127.0.0.1:8731/rpc", "/run/linch/linch.sock", "unix:"]:
         with pytest.raises(ValueError, match="unix:PATH"):

@@ -9,7 +9,16 @@ from typing import Any
 import pytest
 from scripted import config, text_turn, tool_turn
 
-from linch_rust import Agent, ResultEvent, Server, ToolCallEndEvent, ToolOutput, tool
+from linch_rust import (
+    Agent,
+    Principal,
+    ResultEvent,
+    Server,
+    ToolCallEndEvent,
+    ToolContext,
+    ToolOutput,
+    tool,
+)
 
 
 def tool_ends(envelopes: list[Any]) -> list[ToolCallEndEvent]:
@@ -40,6 +49,29 @@ async def test_a_host_tool_runs_in_the_client_and_the_model_reads_its_value() ->
     [end] = tool_ends(envelopes)
     assert end.tool_use_id == "call_1" and not end.is_error
     assert json.loads(result_text(end)) == {"name": "Ada", "email": "ada@example.com"}
+    assert isinstance(result, ResultEvent) and result.final_text == "Found."
+
+
+async def test_a_host_tool_that_declares_a_context_learns_which_call_it_serves() -> None:
+    seen: list[ToolContext] = []
+
+    @tool(scope="read")
+    async def lookup(email: str, ctx: ToolContext) -> str:
+        """Find a customer by email."""
+        seen.append(ctx)
+        return email
+
+    turns = [tool_turn("call_1", "lookup", {"email": "ada@example.com"}), text_turn("Found.")]
+    principal: Principal = {"tenant": "acme", "user": "ada", "roles": ["support"]}
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup])
+        run = await agent.run("s1", "Who is ada@example.com?", run_id="r1", principal=principal)
+        result = await run.result()
+
+    [ctx] = seen
+    assert (ctx.session_id, ctx.run_id, ctx.tool_use_id) == ("s1", "r1", "call_1")
+    assert ctx.principal == principal
+    assert ctx.idempotency_key == "r1:call_1"
     assert isinstance(result, ResultEvent) and result.final_text == "Found."
 
 

@@ -48,6 +48,12 @@ class Link(Protocol):
         """The JSON-RPC connection over it."""
         ...
 
+    @property
+    def tenant(self) -> str | None:
+        """The tenant the login named; `None` over a WebSocket, whose
+        upgrade does not name it."""
+        ...
+
     async def close(self) -> None:
         """End the connection; the server drops its runs where they stand."""
         ...
@@ -74,7 +80,7 @@ class _SocketLink:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, tenant: str
     ) -> None:
         self.connection = Connection(StreamTransport(reader, writer))
-        self.tenant = tenant
+        self.tenant: str | None = tenant
         self._writer = writer
 
     async def close(self) -> None:
@@ -164,6 +170,7 @@ class _WebSocketTransport:
 class _WebSocketLink:
     def __init__(self, socket: ClientConnection) -> None:
         self.connection = Connection(_WebSocketTransport(socket))
+        self.tenant: str | None = None
         self._socket = socket
 
     async def close(self) -> None:

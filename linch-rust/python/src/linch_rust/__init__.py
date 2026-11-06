@@ -72,7 +72,7 @@ from .events import (
 )
 from .run import Run
 from .server import Server
-from .tools import HostTool, Scope, ToolOutput, tool
+from .tools import HostTool, Scope, ToolContext, ToolOutput, tool
 
 __all__ = [
     "Agent",
@@ -128,6 +128,7 @@ __all__ = [
     "SuspendedEvent",
     "ToolCallEndEvent",
     "ToolCallStartEvent",
+    "ToolContext",
     "ToolOutput",
     "ToolProgressEvent",
     "ToolSearch",
