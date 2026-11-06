@@ -10,11 +10,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::StreamExt;
-use linch::{Agent, JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
+use linch::{JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -25,8 +25,9 @@ use tokio_util::task::TaskTracker;
 
 use crate::error::{ErrorObject, code, invalid_params, invalid_request};
 use crate::message::{Id, Notification, Request, Response};
-use crate::protocol::{AgentOpened, Events, EventsParams, OpenParams, RunAccepted, method};
+use crate::protocol::{RunAccepted, method};
 
+mod agents;
 mod callback;
 mod host;
 mod peer;
@@ -65,8 +66,7 @@ where
     let writing = tokio::spawn(write_lines(writer, queue));
     let outbox = Outbox(sender);
     let server = Server(Arc::new(State {
-        agents: Mutex::new(HashMap::new()),
-        runs: Mutex::new(HashMap::new()),
+        tables: Mutex::default(),
         next_agent: AtomicU64::new(0),
         peer: Peer::new(outbox.clone()),
         outbox,
@@ -96,7 +96,9 @@ where
     server.0.tasks.wait().await;
     // Disconnect every agent's MCP servers, so no server process outlives
     // this call.
-    let agents: Vec<OpenedAgent> = lock(&server.0.agents).drain().map(|(_, a)| a).collect();
+    let agents: Vec<OpenedAgent> = (lock(&server.0.tables).agents.drain())
+        .map(|(_, agent)| agent)
+        .collect();
     for agent in agents {
         agent.close().await;
     }
@@ -163,15 +165,30 @@ fn encode<T: Serialize>(message: &T) -> String {
 struct Server(Arc<State>);
 
 struct State {
-    agents: Mutex<HashMap<String, OpenedAgent>>,
-    /// Runs this server drives now, with their cancel tokens.
-    runs: Mutex<HashMap<RunId, CancellationToken>>,
+    /// One lock for both tables, so `agent.close` cannot miss a run that
+    /// starts while it checks.
+    tables: Mutex<Tables>,
     next_agent: AtomicU64,
     outbox: Outbox,
     /// Requests from the server to the client.
     peer: Peer,
     shutdown: CancellationToken,
     tasks: TaskTracker,
+}
+
+#[derive(Default)]
+struct Tables {
+    /// Open agents by handle.
+    agents: HashMap<String, OpenedAgent>,
+    /// Runs this server drives now.
+    runs: HashMap<RunId, Driven>,
+}
+
+/// A run this server drives.
+struct Driven {
+    /// Handle of the agent it runs on.
+    agent: String,
+    cancel: CancellationToken,
 }
 
 /// What a method produced: a result, or a run to drive after the result
@@ -269,6 +286,7 @@ impl Server {
     async fn dispatch(&self, name: &str, params: JsonObject) -> Result<Reply, ErrorObject> {
         match name {
             method::AGENT_OPEN => self.open(parse(params)?).await.map(Reply::Value),
+            method::AGENT_CLOSE => self.close(parse(params)?).await.map(Reply::Value),
             method::RUN_START => self.start(parse(params)?),
             method::RUN_RESUME => self.resume(parse(params)?),
             method::RUN_APPROVE => self.approve(parse(params)?),
@@ -279,45 +297,6 @@ impl Server {
                 format!("no method {other:?}"),
             )),
         }
-    }
-
-    /// Open an agent whose host tools and callbacks call back over this
-    /// connection. They are bound before the agent is built, so the
-    /// contract covers them.
-    async fn open(&self, params: OpenParams) -> Result<JsonValue, ErrorObject> {
-        // The handle is named first: tools and callbacks carry it per call.
-        let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
-        let handle = format!("agent-{number}");
-        let tools = host::registry(params.tools, &handle, &self.0.peer)?;
-        let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
-        let opened = params
-            .config
-            .open_with(tools, hooks)
-            .await
-            .map_err(|error| ErrorObject::from(&error))?;
-        let contract = opened.agent().contract().to_string();
-        lock(&self.0.agents).insert(handle.clone(), opened);
-        to_value(&AgentOpened {
-            agent: handle,
-            contract,
-        })
-    }
-
-    async fn events(&self, params: EventsParams) -> Result<JsonValue, ErrorObject> {
-        let agent = self.agent(&params.agent)?;
-        let events = agent
-            .events(&params.run_id, params.after_seq)
-            .await
-            .map_err(|error| ErrorObject::from(&error))?;
-        to_value(&Events { events })
-    }
-
-    fn agent(&self, handle: &str) -> Result<Agent, ErrorObject> {
-        let agents = lock(&self.0.agents);
-        let opened = agents.get(handle).ok_or_else(|| {
-            ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
-        })?;
-        Ok(opened.agent().clone())
     }
 }
 

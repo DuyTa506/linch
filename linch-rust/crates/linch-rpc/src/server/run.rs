@@ -3,7 +3,7 @@
 use futures::StreamExt;
 use linch::{Principal, RunId, RunOptions, RunStream};
 
-use super::{Reply, Server, lock, to_value};
+use super::{Driven, Reply, Server, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
     ApproveParams, CancelParams, Cancelled, ResumeParams, RunEnd, StartParams, method,
@@ -14,50 +14,61 @@ const OWNER: &str = "linch-rpc";
 
 impl Server {
     pub(super) fn start(&self, params: StartParams) -> Result<Reply, ErrorObject> {
-        let agent = self.agent(&params.agent)?;
         let mut options = RunOptions::new(params.session_id);
         options.principal = params.principal;
         options.owner = OWNER.into();
         let cancel = options.cancel.clone();
-        let stream = agent.run(params.prompt, options);
+        let mut tables = lock(&self.0.tables);
+        let stream = tables.agent(&params.agent)?.run(params.prompt, options);
+        let driven = Driven {
+            agent: params.agent,
+            cancel,
+        };
         // A fresh run id cannot be in use.
-        lock(&self.0.runs).insert(stream.run_id().clone(), cancel);
+        tables.runs.insert(stream.run_id().clone(), driven);
         Ok(Reply::Run(stream))
     }
 
     pub(super) fn resume(&self, params: ResumeParams) -> Result<Reply, ErrorObject> {
-        let agent = self.agent(&params.agent)?;
-        let options = self.claim(&params.run_id, params.principal)?;
-        Ok(Reply::Run(agent.resume(params.run_id, options)))
+        let run_id = params.run_id;
+        self.claim(params.agent, &run_id, params.principal, |agent, options| {
+            agent.resume(run_id.clone(), options)
+        })
     }
 
     pub(super) fn approve(&self, params: ApproveParams) -> Result<Reply, ErrorObject> {
-        let agent = self.agent(&params.agent)?;
-        let options = self.claim(&params.run_id, params.principal)?;
         let decisions = (params.decisions.into_iter())
             .map(|(tool_use_id, decision)| (tool_use_id, decision.into()))
             .collect();
-        Ok(Reply::Run(agent.approve(params.run_id, decisions, options)))
+        let run_id = params.run_id;
+        self.claim(params.agent, &run_id, params.principal, |agent, options| {
+            agent.approve(run_id.clone(), decisions, options)
+        })
     }
 
     pub(super) fn cancel(&self, params: CancelParams) -> Cancelled {
-        let token = lock(&self.0.runs).get(&params.run_id).cloned();
-        if let Some(token) = &token {
-            token.cancel();
+        let tables = lock(&self.0.tables);
+        let driven = tables.runs.get(&params.run_id);
+        if let Some(driven) = driven {
+            driven.cancel.cancel();
         }
         Cancelled {
-            cancelled: token.is_some(),
+            cancelled: driven.is_some(),
         }
     }
 
-    /// Mark `run_id` as driven by this server, unless it already is.
+    /// Continue `run_id` on the agent `handle` with `continue_run`, and
+    /// mark it as driven by this server, unless it already is.
     fn claim(
         &self,
+        handle: String,
         run_id: &RunId,
         principal: Option<Principal>,
-    ) -> Result<RunOptions, ErrorObject> {
-        let mut runs = lock(&self.0.runs);
-        if runs.contains_key(run_id) {
+        continue_run: impl FnOnce(&linch::Agent, RunOptions) -> RunStream,
+    ) -> Result<Reply, ErrorObject> {
+        let mut tables = lock(&self.0.tables);
+        let agent = tables.agent(&handle)?;
+        if tables.runs.contains_key(run_id) {
             return Err(ErrorObject::new(
                 code::RUN_BUSY,
                 format!("run {run_id} is already running on this server"),
@@ -67,8 +78,12 @@ impl Server {
         let mut options = RunOptions::new("");
         options.principal = principal;
         options.owner = OWNER.into();
-        runs.insert(run_id.clone(), options.cancel.clone());
-        Ok(options)
+        let driven = Driven {
+            agent: handle,
+            cancel: options.cancel.clone(),
+        };
+        tables.runs.insert(run_id.clone(), driven);
+        Ok(Reply::Run(continue_run(&agent, options)))
     }
 
     /// Forward every envelope as `run.event`, then send `run.end`.
@@ -90,7 +105,7 @@ impl Server {
         // Dropping the stream first leaves the run at its last durable
         // state before a client can resume it.
         drop(stream);
-        lock(&self.0.runs).remove(&run_id);
+        lock(&self.0.tables).runs.remove(&run_id);
         let end = RunEnd { run_id, error };
         let params = to_value(&end).expect("run.end params encode");
         self.0.outbox.notify(method::RUN_END, params).await;

@@ -24,6 +24,8 @@ pub use open::{HostToolSpec, OpenParams};
 pub mod method {
     /// Open an agent from an `AgentConfig` plus host tools and callbacks.
     pub const AGENT_OPEN: &str = "agent.open";
+    /// Disconnect an agent's MCP servers and free its handle.
+    pub const AGENT_CLOSE: &str = "agent.close";
     /// Start a run.
     pub const RUN_START: &str = "run.start";
     /// Resume a run.
@@ -55,6 +57,14 @@ pub struct AgentOpened {
     pub agent: String,
     /// The agent's run contract digest, hex.
     pub contract: String,
+}
+
+/// Params of `agent.close`. The result is `{}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseParams {
+    /// Agent handle from `agent.open`.
+    pub agent: String,
 }
 
 /// Params of `run.start`.
