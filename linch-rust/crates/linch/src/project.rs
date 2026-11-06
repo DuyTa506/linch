@@ -65,22 +65,25 @@ pub(crate) struct Loaded {
     pub(crate) skipped: Vec<Skipped>,
 }
 
+/// The config directory `dir` names: `.linch` when absent; a relative
+/// one resolves against `root` (the workspace), else the process's
+/// working directory.
+pub(crate) fn dir(dir: Option<PathBuf>, root: Option<&str>) -> PathBuf {
+    let dir = dir.unwrap_or_else(|| PathBuf::from(".linch"));
+    match root {
+        Some(root) => Path::new(root).join(dir),
+        None => std::path::absolute(&dir).unwrap_or(dir),
+    }
+}
+
 /// Load the skills and subagents turned on from `dir` off the async loop.
-/// `dir` defaults to `.linch`; a relative one resolves against `root` (the
-/// workspace), else the process's working directory. No skill may take
-/// the name of a tool in `tools` at this point.
+/// No skill may take the name of a tool in `tools` at this point.
 pub(crate) async fn load(
-    dir: Option<PathBuf>,
-    root: Option<&str>,
+    dir: PathBuf,
     skills: bool,
     subagents: bool,
     tools: &ToolRegistry,
 ) -> Loaded {
-    let dir = dir.unwrap_or_else(|| PathBuf::from(".linch"));
-    let dir = match root {
-        Some(root) => Path::new(root).join(dir),
-        None => std::path::absolute(&dir).unwrap_or(dir),
-    };
     let names = (tools.snapshot().definitions().into_iter())
         .map(|definition| definition.name)
         .collect();

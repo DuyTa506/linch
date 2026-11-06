@@ -45,7 +45,9 @@ const HEADER: &str = "Search deferred tools and skills by keywords or select:a,b
                       schemas and skill descriptions; tools load for the next request.";
 
 /// How large a catalog may grow before tool search defers part of it.
+/// A field left out when deserializing takes its default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolSearch {
     /// The most tools, `tool_search` aside, offered inline; past it only
     /// the tools that always load are, and the rest wait for a search.
