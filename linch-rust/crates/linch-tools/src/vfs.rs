@@ -14,7 +14,9 @@
 //!   and [`ScopedBackend`] exposes one subtree of another backend.
 //!
 //! The `ls`, `read_file`, `write_file` and `edit_file` tools
-//! ([`vfs_tools`]) find a session's backend through [`SessionFiles`]:
+//! ([`vfs_tools`]) and the [`ResultOffload`] hook, which moves oversized
+//! tool results into the filesystem, find a session's backend through
+//! [`SessionFiles`]:
 //! [`MemorySessions`] gives each session a fresh [`MemoryBackend`], and
 //! [`SharedFiles`] gives every session one backend.
 //!
@@ -25,6 +27,7 @@ mod composite;
 pub mod conformance;
 mod disk;
 mod memory;
+mod offload;
 mod scoped;
 mod tools;
 
@@ -37,8 +40,9 @@ use thiserror::Error;
 pub use composite::CompositeBackend;
 pub use disk::DiskBackend;
 pub use memory::{MemoryBackend, MemorySessions};
+pub use offload::{OffloadConfig, ResultOffload};
 pub use scoped::ScopedBackend;
-pub use tools::{EditFile, Ls, ReadFile, WriteFile, vfs_tools};
+pub use tools::{EditFile, Ls, PROMPT, ReadFile, WriteFile, vfs_tools};
 
 /// Boxed error of a storage layer under a backend.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use common::{code, ctx, input, text};
 use linch_core::{Tool, ToolResult, ToolScope};
 use linch_tools::vfs::{
-    EditFile, Ls, MemorySessions, ReadFile, SessionFiles, WriteFile, vfs_tools,
+    EditFile, Ls, MemorySessions, PROMPT, ReadFile, SessionFiles, WriteFile, vfs_tools,
 };
 use serde_json::{Value, json};
 
@@ -193,4 +193,12 @@ async fn sessions_do_not_see_each_others_files() {
     assert_eq!(code(other), "not_found");
     let listed = run(&t.ls, "s2", json!({})).await;
     assert_eq!(text(listed), "No files found.");
+}
+
+#[test]
+fn the_prompt_names_the_tools_and_the_offload_pointer() {
+    for tool in ["ls", "read_file", "write_file", "edit_file"] {
+        assert!(PROMPT.contains(tool), "{tool}");
+    }
+    assert!(PROMPT.contains("read_file(path, offset, limit)"));
 }

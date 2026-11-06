@@ -18,6 +18,19 @@ use super::{SessionFiles, VfsError, file_path};
 use crate::input::{coded, flag, invalid, optional_count, optional_string, schema, string};
 use crate::read::split_lines;
 
+/// System prompt text that teaches the model the virtual filesystem and the
+/// offload pointers. Python adds it as a cacheable block whenever one of
+/// the four tools is offered.
+pub const PROMPT: &str = "Virtual filesystem:\n\n\
+    - You have a virtual filesystem, separate from the real workspace, accessed via \
+    ls, read_file, write_file, and edit_file.\n\
+    - Large tool results may be automatically offloaded here: instead of the full \
+    output you will see a short preview plus a file path. Call read_file(path, \
+    offset, limit) to read the parts you need; do not assume the preview is the \
+    whole result.\n\
+    - Use write_file as a scratchpad for notes, plans, or intermediate results you \
+    want to keep across turns without bloating the conversation.";
+
 /// `ls`, `read_file`, `write_file` and `edit_file` over `files`.
 pub fn vfs_tools(files: Arc<dyn SessionFiles>) -> Vec<Arc<dyn Tool>> {
     vec![
