@@ -145,6 +145,13 @@ async def test_a_mailbox_delivers_a_message_to_another_session() -> None:
     assert "hello b" in texts[-1]
 
 
+async def test_tool_search_adds_its_tool() -> None:
+    on = tools_of(
+        await run_once(config([text_turn("hi")], tasks=True, tool_search={"max_tools": 2}))
+    )
+    assert on == [*TASKS, "tool_search"]
+
+
 async def test_skills_load_from_the_config_dir(tmp_path: Path) -> None:
     skill = tmp_path / "skills" / "notes" / "SKILL.md"
     skill.parent.mkdir(parents=True)

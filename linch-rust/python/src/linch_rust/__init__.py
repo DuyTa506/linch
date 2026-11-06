@@ -14,7 +14,15 @@ this process only for the host tools and callbacks an agent declared::
 from ._binary import find_server
 from .agent import Agent, Allow, Decision, Deny
 from .callbacks import Callback, FailMode, Point, callback
-from .config import AgentConfig, DeepAgent, DeepAgentProfile, Filesystem, Profile, Workers
+from .config import (
+    AgentConfig,
+    DeepAgent,
+    DeepAgentProfile,
+    Filesystem,
+    Profile,
+    ToolSearch,
+    Workers,
+)
 from .errors import (
     AgentNotFound,
     ConnectionClosed,
@@ -103,6 +111,7 @@ __all__ = [
     "ToolCallEndEvent",
     "ToolCallStartEvent",
     "ToolProgressEvent",
+    "ToolSearch",
     "UnknownEvent",
     "UsageEvent",
     "UserEvent",
