@@ -1,13 +1,14 @@
-//! The agent API around runs: caller-chosen run ids and the namespace.
+//! The agent API around runs: caller-chosen run ids, the namespace and
+//! closing a session.
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common::*;
 use linch_core::{
-    PermissionMode, RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider, SessionId,
-    SessionStore, StoreError,
+    AgentBuilder, PermissionMode, RunError, RunId, RunOptions, RunStatus, RunStore,
+    ScriptedProvider, SessionId, SessionStore, StoreError,
 };
 
 fn options(session: &str, run_id: &str) -> RunOptions {
@@ -64,4 +65,31 @@ async fn a_duplicate_run_id_is_a_conflict_and_writes_nothing() {
     let missing = SessionStore::load(&*stores, NS, &SessionId::new("s2")).await;
     assert!(matches!(missing, Err(StoreError::NotFound { .. })));
     assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn closing_a_session_runs_the_callbacks_in_order() {
+    let stores = Arc::new(Stores::default());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (first, second) = (Arc::clone(&seen), Arc::clone(&seen));
+    let provider = Arc::new(ScriptedProvider::new([text_turn("one"), text_turn("two")]));
+    let agent = AgentBuilder::new(spec())
+        .provider(provider)
+        .permissions(policy(PermissionMode::Default))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .on_session_close(move |id| first.lock().unwrap().push(format!("a {id}")))
+        .on_session_close(move |id| second.lock().unwrap().push(format!("b {id}")))
+        .build()
+        .unwrap();
+    finish(agent.run("hi", RunOptions::new("s1"))).await;
+    let writes = stores.log.lock().unwrap().len();
+
+    agent.clone().close_session(&SessionId::new("s1"));
+    assert_eq!(*seen.lock().unwrap(), ["a s1", "b s1"]);
+    // Closing writes nothing, and the session still takes runs.
+    assert_eq!(stores.log.lock().unwrap().len(), writes);
+    finish(agent.run("again", RunOptions::new("s1"))).await;
+    assert_eq!(messages(&*stores, "s1").await.len(), 4);
 }

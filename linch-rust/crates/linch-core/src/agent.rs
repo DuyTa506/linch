@@ -64,10 +64,14 @@ impl RunOptions {
     }
 }
 
+/// A callback that [`Agent::close_session`] runs.
+type SessionClose = Arc<dyn Fn(&SessionId) + Send + Sync>;
+
 /// Binds an [`AgentSpec`] to the values an agent runs with.
 ///
 /// The provider, the permission engine, both stores and a namespace are
-/// required; tools and hooks default to empty. Nothing here does I/O.
+/// required; tools, hooks and session-close callbacks default to none.
+/// Nothing here does I/O.
 pub struct AgentBuilder {
     spec: AgentSpec,
     provider: Option<Arc<dyn Provider>>,
@@ -77,6 +81,7 @@ pub struct AgentBuilder {
     runs: Option<Arc<dyn RunStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
     namespace: Option<String>,
+    session_close: Vec<SessionClose>,
 }
 
 impl AgentBuilder {
@@ -91,6 +96,7 @@ impl AgentBuilder {
             runs: None,
             sessions: None,
             namespace: None,
+            session_close: Vec::new(),
         }
     }
 
@@ -136,6 +142,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Run `callback` on [`Agent::close_session`], after the callbacks
+    /// added before it. A host frees per-session state there, such as the
+    /// read evidence of `linch_tools::ReadTracker::forget`.
+    pub fn on_session_close(
+        mut self,
+        callback: impl Fn(&SessionId) + Send + Sync + 'static,
+    ) -> Self {
+        self.session_close.push(Arc::new(callback));
+        self
+    }
+
     /// Build the agent and compute its contract digest from the spec, the
     /// tools registered now and the hook policies (BLUEPRINT 13.1.2).
     ///
@@ -170,6 +187,7 @@ impl AgentBuilder {
             hooks: self.hooks,
             namespace,
             contract,
+            session_close: self.session_close,
         };
         Ok(Agent {
             inner: Arc::new(inner),
@@ -194,6 +212,7 @@ pub(crate) struct AgentInner {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) namespace: String,
     pub(crate) contract: Digest,
+    session_close: Vec<SessionClose>,
 }
 
 impl Agent {
@@ -247,6 +266,17 @@ impl Agent {
         options: RunOptions,
     ) -> RunStream {
         runner::resume(Arc::clone(&self.inner), run_id, Some(decisions), options)
+    }
+
+    /// Tell the agent the host is done with `session_id`: run every
+    /// [`AgentBuilder::on_session_close`] callback, in the order added.
+    ///
+    /// Nothing is written: the session log and its runs stay, and a later
+    /// run on the session works as before.
+    pub fn close_session(&self, session_id: &SessionId) {
+        for callback in &self.inner.session_close {
+            callback(session_id);
+        }
     }
 
     /// The run's durable envelopes with seq greater than `after_seq`,
