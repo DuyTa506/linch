@@ -13,10 +13,11 @@ use http::{HeaderName, HeaderValue};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, ProcessGroup};
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::service::{
-    ClientInitializeError, NotificationContext, RoleClient, RunningService, ServiceError,
+    ClientInitializeError, NotificationContext, RoleClient, RunningService, RxJsonRpcMessage,
+    ServiceError, TxJsonRpcMessage,
 };
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::{IntoTransport, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::transport::{IntoTransport, StreamableHttpClientTransport, TokioChildProcess, Transport};
 use rmcp::{ClientHandler, ClientLifecycleMode, ClientServiceExt};
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -26,6 +27,11 @@ use crate::config::{ConfigError, McpTransport};
 /// Variables a stdio server inherits from this process; the MCP Python SDK
 /// uses the same list.
 const INHERITED_ENV: [&str; 6] = ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"];
+
+/// Longest wait for a stdio server to close. rmcp's own close takes at most
+/// about 6 s: 3 s for the server to exit once its stdin closes, 3 s more
+/// after `SIGTERM`. This bound only cuts in when closing stdin itself hangs.
+const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
 /// Why one connection attempt failed.
 #[derive(Debug, Error)]
@@ -150,7 +156,34 @@ impl Connector for Stdio {
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader()).wrap(KillGroup);
         let transport = TokioChildProcess::new(command).map_err(ConnectError::Spawn)?;
-        handler.serve(transport).await
+        handler.serve(BoundedClose(transport)).await
+    }
+}
+
+/// rmcp's child-process transport with a bound on closing. When the server
+/// has stopped reading and a write has filled its stdin, rmcp's close waits
+/// for that write forever. After [`CLOSE_GRACE`] the close gives up instead,
+/// and dropping the transport sends `SIGKILL` to the server's group.
+struct BoundedClose(TokioChildProcess);
+
+impl Transport<RoleClient> for BoundedClose {
+    type Error = std::io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.0.send(item)
+    }
+
+    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleClient>>> + Send {
+        self.0.receive()
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        tokio::time::timeout(CLOSE_GRACE, self.0.close())
+            .await
+            .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
     }
 }
 

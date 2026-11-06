@@ -148,7 +148,8 @@ impl McpServer {
     ///
     /// The registrations go at once. Then this waits for the transport to
     /// close; a stdio server gets its stdin closed, then `SIGTERM`, then
-    /// `SIGKILL`, a few seconds apart.
+    /// `SIGKILL`, a few seconds apart. A stdio server that has stopped
+    /// reading, so that closing its stdin hangs, gets `SIGKILL` after 10 s.
     pub async fn disconnect(mut self) {
         self.stop();
         if let Some(task) = self.task.take() {

@@ -82,6 +82,61 @@ async fn stdio_round_trip_and_clean_exit() {
     );
 }
 
+/// Send `signal` (`STOP`, `KILL`) to process `pid`.
+fn signal(signal: &str, pid: u32) {
+    let status = std::process::Command::new("kill")
+        .args([format!("-{signal}"), pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -{signal} {pid} failed");
+}
+
+#[tokio::test]
+async fn disconnect_kills_a_server_that_stopped_reading() {
+    let registry = Arc::new(ToolRegistry::new());
+    let mut config = McpServerConfig::new(
+        "stalled",
+        McpTransport::stdio(stdio_server().to_string_lossy(), Vec::new()),
+    );
+    config.call_timeout = Duration::from_millis(500);
+    let server = McpServer::connect(config, Arc::clone(&registry))
+        .await
+        .expect("connect over stdio");
+    let pid = call(&registry, "mcp__stalled__pid", JsonObject::new())
+        .await
+        .unwrap();
+    let pid: u32 = pid.value.as_str().unwrap().parse().unwrap();
+
+    // A stopped server reads nothing. The request is larger than the pipe,
+    // so its write, and the close after it, wait for a reader.
+    signal("STOP", pid);
+    let big = text_input(&"x".repeat(256 * 1024));
+    let timed_out = call(&registry, "mcp__stalled__echo", big)
+        .await
+        .unwrap_err();
+    assert_eq!(timed_out.code.as_deref(), Some(codes::TIMEOUT));
+
+    let closed = tokio::time::timeout(Duration::from_secs(60), server.disconnect()).await;
+    if closed.is_err() {
+        signal("KILL", pid);
+    }
+    assert!(
+        closed.is_ok(),
+        "disconnect hung on a server that stopped reading"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the stopped server {pid} survived"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn disconnect_kills_what_the_server_started() {
     let marker = std::env::temp_dir().join(format!("linch-mcp-orphan-{}", std::process::id()));
