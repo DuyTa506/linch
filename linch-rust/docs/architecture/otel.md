@@ -51,25 +51,28 @@ keeps a convention update local.
 An attribute whose value the observer does not know is left out rather than
 filled with a placeholder.
 
-The token attributes are `gen_ai.usage.input_tokens` (uncached input),
+The token attributes are `gen_ai.usage.input_tokens`,
 `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` and
-`gen_ai.usage.cache_creation.input_tokens` (`span.rs:99-109`), matching the
-four `Usage` buckets.
+`gen_ai.usage.cache_creation.input_tokens` (`span.rs:99-110`), from the four
+`Usage` buckets. As the GenAI convention says, `input_tokens` includes the
+cached tokens: it is `Usage::total_input_tokens()`, the uncached input plus
+both cache buckets.
 
 What differs from Python:
 
 | Name | Rust |
 |---|---|
-| `linch.cost_usd` | Rust only: the call's or the run's cost when the agent prices its model (`keys.rs:57-59`) |
+| `linch.cost_usd` | Rust only: the call's or the run's cost when the agent prices its model (`keys.rs:59-61`) |
 | `gen_ai.response.model` | Defined but never set: the stream does not carry the model that served a call (`keys.rs:15-17`) |
 | `gen_ai.input.messages` on `chat` | Not set: the stream does not carry the request's messages |
 | `linch.store.duration` | Not built: the stream carries no store calls |
 | `gen_ai.provider.name` | Set only when the host gives the provider id with `RunObserver::provider` |
+| `gen_ai.usage.input_tokens`, the `input` token bucket | Cached tokens included, where Python counts uncached input only |
 
 Subagent events reach the parent's stream wrapped, after the fact and without
-their own times, so they are not traced (`lib.rs:97-106`).
+their own times, so they are not traced (`lib.rs:104-113`).
 
-`provider_name(id)` (`lib.rs:213`) maps a Linch provider id as Python does:
+`provider_name(id)` (`lib.rs:220`) maps a Linch provider id as Python does:
 `openai-chat` and `openai-responses` are `openai`, `gemini` is `gcp.gemini`,
 any other id is itself.
 
@@ -89,7 +92,7 @@ private content; the span status is an error with an empty description
 
 ## Metrics
 
-Per model call (`crates/linch-otel/src/observer/calls.rs:142-172`):
+Per model call (`crates/linch-otel/src/observer/calls.rs:142-176`):
 
 | Metric | Unit | Attributes |
 |---|---|---|
@@ -97,14 +100,15 @@ Per model call (`crates/linch-otel/src/observer/calls.rs:142-172`):
 | `gen_ai.client.token.usage` | `{token}` | The same, plus `gen_ai.token.type` (`input` or `output`) |
 
 Both are histograms with the SDK's default buckets, created once on the meter
-the host passes (`lib.rs:145-165`). Token usage records the input and output
-buckets only. A call with unknown usage records its duration and no tokens.
+the host passes (`lib.rs:152-172`). Token usage records two buckets: `input`,
+with the cached tokens, and `output`. A call with unknown usage records its
+duration and no tokens.
 
 ## Content capture
 
 Content (the prompt, answers, tool input and results) is left out unless
 capture is on. `Telemetry::observer()` starts at
-`capture_content_from_env()` (`lib.rs:202`), which is true when
+`capture_content_from_env()` (`lib.rs:209`), which is true when
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is `true` in any case,
 Python's switch. `RunObserver::capture_content(bool)` overrides it per run.
 
@@ -123,9 +127,9 @@ so a sampled-out span costs nothing extra (`span.rs:52-55`).
 
 1. Build the SDK providers and exporters, and make a tracer and a meter for
    the scope `linch_otel::SCOPE` (`"linch"`, as Python names it,
-   `lib.rs:123`).
-2. Make one `Telemetry::new(tracer, &meter)` (`lib.rs:145`) and share it; it is
-   cheap to clone. `Telemetry::global()` (`lib.rs:169`) uses the process-global
+   `lib.rs:130`).
+2. Make one `Telemetry::new(tracer, &meter)` (`lib.rs:152`) and share it; it is
+   cheap to clone. `Telemetry::global()` (`lib.rs:176`) uses the process-global
    providers instead; nothing else in the crate reads or installs global state.
 3. For every run, resume or approve, make an observer with
    `telemetry.observer()` and set what the stream does not carry:
@@ -144,7 +148,7 @@ so a sampled-out span costs nothing extra (`span.rs:52-55`).
 The observer never panics on an order no run produces: it traces as far as
 the events make sense, and ignores envelopes of another run or anything after
 the run's end (`observer.rs:30-36`). `Telemetry` and `RunObserver` are `Send`,
-so an observer can move between tasks with its stream (`lib.rs:253-258`).
+so an observer can move between tasks with its stream (`lib.rs:260-265`).
 
 ## Example
 

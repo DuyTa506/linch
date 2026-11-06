@@ -42,10 +42,17 @@ fn text(text: &str) -> ContentBlock {
     ContentBlock::Text(TextBlock { text: text.into() })
 }
 
-fn native(tools: Vec<ToolDefinition>, messages: Vec<Message>) -> ProviderRequest {
+/// A request on `tools`, of which the core marked `appended` as added
+/// after the prefix.
+fn native(
+    tools: Vec<ToolDefinition>,
+    appended: &[&str],
+    messages: Vec<Message>,
+) -> ProviderRequest {
     let mut request = request();
     request.model = "claude-opus-5-5".into();
     request.tools = tools;
+    request.appended_tools = appended.iter().map(|name| name.to_string()).collect();
     request.messages = messages;
     request
 }
@@ -66,8 +73,8 @@ fn the_wire_prefix_keeps_its_bytes_across_an_addition() {
     let mut after = before.clone();
     after.push(Message::assistant_text("ok"));
     after.push(user(vec![notice(&["Late"], &[], vec![row("Late")])]));
-    let mut first = native(vec![row("Read")], before);
-    let mut later = native(vec![row("Read"), row("Late")], after);
+    let mut first = native(vec![row("Read")], &[], before);
+    let mut later = native(vec![row("Read"), row("Late")], &["Late"], after);
     for request in [&mut first, &mut later] {
         request.system = vec![linch_core::SystemBlock {
             text: "You help.".into(),
@@ -101,7 +108,7 @@ fn a_tool_added_by_value_moves_from_tools_to_a_system_message_at_its_notice() {
         Message::assistant_text("ok again"),
         Message::user_text("again"),
     ];
-    let request = native(tools, messages);
+    let request = native(tools, &["Late"], messages);
     let body = payload::build(&request, true).unwrap();
     assert_eq!(names(&body), ["Read", "Write"]);
     let messages = body["messages"].as_array().unwrap();
@@ -138,7 +145,7 @@ fn a_prefix_tool_added_back_is_a_reference_and_a_late_one_removed_stays() {
         Message::assistant_text("b"),
         user(vec![notice(&["Read"], &["Late"], vec![row("Read")])]),
     ];
-    let body = payload::build(&native(tools, messages), true).unwrap();
+    let body = payload::build(&native(tools, &["Late"], messages), true).unwrap();
     assert_eq!(names(&body), ["Read"]);
     let messages = body["messages"].as_array().unwrap();
     // The last notice's blocks close the conversation; removing Late is
@@ -151,6 +158,32 @@ fn a_prefix_tool_added_back_is_a_reference_and_a_late_one_removed_stays() {
 }
 
 #[test]
+fn a_late_tool_goes_at_its_notice_with_its_rows_definition() {
+    // Late's schema changed after it was added: its row has the new one.
+    let mut reshaped = row("Late");
+    let schema = json!({"type": "object", "properties": {"r": {"type": "string"}}});
+    reshaped.input_schema = schema.as_object().unwrap().clone();
+    let messages = vec![
+        Message::user_text("hi"),
+        Message::assistant_text("a"),
+        user(vec![notice(&["Late"], &[], vec![row("Late")])]),
+        Message::assistant_text("b"),
+        user(vec![notice(&[], &[], vec![reshaped.clone()])]),
+    ];
+    let request = native(vec![row("Read"), reshaped.clone()], &["Late"], messages);
+    let body = payload::build(&request, true).unwrap();
+    assert_eq!(names(&body), ["Read"]);
+    let wire = json!({
+        "name": "Late",
+        "description": reshaped.description,
+        "input_schema": reshaped.input_schema,
+    });
+    let definition = json!({"type": "tool_definition", "definition": wire});
+    let blocks = json!([{"type": "tool_addition", "tool": definition}]);
+    assert_eq!(body["messages"][3]["content"], blocks);
+}
+
+#[test]
 fn native_definitions_past_four_mebibytes_fail_locally() {
     let mut huge = row("Huge");
     huge.description = "x".repeat(4_194_304);
@@ -159,7 +192,7 @@ fn native_definitions_past_four_mebibytes_fail_locally() {
         Message::assistant_text("a"),
         user(vec![notice(&["Huge"], &[], vec![huge.clone()])]),
     ];
-    let request = native(vec![row("Read"), huge], messages);
+    let request = native(vec![row("Read"), huge], &["Huge"], messages);
     let Err(ProviderError::InvalidRequest { message }) = payload::build(&request, true) else {
         panic!("the limit holds")
     };

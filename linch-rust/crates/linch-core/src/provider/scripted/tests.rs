@@ -9,6 +9,7 @@ fn request(model: &str, text: &str) -> ProviderRequest {
         model: model.into(),
         system: Vec::new(),
         tools: Vec::new(),
+        appended_tools: Vec::new(),
         messages: vec![crate::message::Message::user_text(text)],
         max_output_tokens: None,
         temperature: None,

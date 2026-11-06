@@ -2,23 +2,24 @@
 //! [`BETA`]: Python Linch's `native_catalog_changes`.
 //!
 //! The core appends a tool added mid-session to the request's `tools`,
-//! which costs the prompt cache once. With this on, the adapter takes such
-//! a tool back out of `tools` and adds it where its catalog notice is: a
-//! `system`-role message of tool blocks after the message holding the
-//! notice, with a `tool_addition` of a `tool_definition`. A tool of the
-//! session's prefix that is removed is a `tool_removal` of a
-//! `tool_reference`, and adding it back a `tool_addition` of one. A tool
-//! added by value and removed again stays: only text tells the model, and
-//! the runner refuses its calls. The notice text still goes in the user
-//! message, so the model reads every change either way.
+//! which costs the prompt cache once, and names it in `appended_tools`.
+//! With this on, the adapter takes such a tool back out of `tools` and
+//! adds it where its catalog notice is: a `system`-role message of tool
+//! blocks after the message holding the notice, with a `tool_addition` of
+//! a `tool_definition` of its row. A tool of the session's prefix that is
+//! removed is a `tool_removal` of a `tool_reference`, and adding it back a
+//! `tool_addition` of one. A tool added by value and removed again stays:
+//! only text tells the model, and the runner refuses its calls. The notice
+//! text still goes in the user message, so the model reads every change
+//! either way.
 //!
 //! Off by default ([`AnthropicOptions::native_catalog_changes`]), and only
 //! on Anthropic's own host with the models in [`MODELS`]. Not verified
 //! against the live API.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use linch_core::{CatalogChangeBlock, JsonValue, Message, ProviderError, ToolDefinition};
+use linch_core::{CatalogChangeBlock, JsonValue, ProviderError, ProviderRequest, ToolDefinition};
 use serde_json::json;
 
 use super::AnthropicOptions;
@@ -52,11 +53,11 @@ pub(crate) fn enabled(options: &AnthropicOptions, model: &str) -> bool {
     options.native_catalog_changes && on_anthropic && MODELS.contains(&model)
 }
 
-/// The catalog of one native request, read from its tools and notices.
+/// The catalog of one native request, read from its tools.
 pub(crate) struct Native {
-    /// The request's tools a notice added by value, which the adapter
-    /// sends at the notice instead of in `tools`.
-    appended: BTreeSet<String>,
+    /// The request's tools added after the prefix, which the adapter
+    /// sends at their notice instead of in `tools`.
+    appended: BTreeMap<String, ToolDefinition>,
     /// The request's other tools: the session's prefix as the model has
     /// it, which a reference may name.
     prefix: BTreeSet<String>,
@@ -67,12 +68,11 @@ pub(crate) struct Native {
 }
 
 impl Native {
-    /// The catalog of `tools` and the notices of `messages` (see
-    /// [`native::appended`]).
-    pub(crate) fn new(tools: &[ToolDefinition], messages: &[Message]) -> Self {
-        let appended = native::appended(tools, messages);
-        let prefix: BTreeSet<String> = (tools.iter())
-            .filter(|tool| !appended.contains(&tool.name))
+    /// The catalog of `request` (see [`native::appended`]).
+    pub(crate) fn new(request: &ProviderRequest) -> Self {
+        let appended = native::appended(request);
+        let prefix: BTreeSet<String> = (request.tools.iter())
+            .filter(|tool| !appended.contains_key(&tool.name))
             .map(|tool| tool.name.clone())
             .collect();
         Self {
@@ -85,7 +85,7 @@ impl Native {
 
     /// Whether `tool` goes in the request's `tools`.
     pub(crate) fn keeps(&self, tool: &ToolDefinition) -> bool {
-        !self.appended.contains(&tool.name)
+        !self.appended.contains_key(&tool.name)
     }
 
     /// The tool blocks of `change`, in Python Linch's order: additions,
@@ -100,10 +100,9 @@ impl Native {
             if self.active.contains(name) {
                 continue;
             }
-            let definition = (change.tool_definitions.iter()).find(|d| d.name == *name);
-            let tool = match definition {
+            let tool = match self.appended.get(name) {
                 _ if self.prefix.contains(name) => reference(name),
-                Some(definition) if self.appended.contains(name) => {
+                Some(definition) => {
                     let definition = wire(definition);
                     self.bytes += serde_json::to_vec(&definition).map_or(0, |bytes| bytes.len());
                     if self.bytes > MAX_DEFINITION_BYTES {
@@ -115,7 +114,7 @@ impl Native {
                     }
                     json!({"type": "tool_definition", "definition": definition})
                 }
-                _ => continue,
+                None => continue,
             };
             out.push(json!({"type": "tool_addition", "tool": tool}));
             self.active.insert(name.clone());

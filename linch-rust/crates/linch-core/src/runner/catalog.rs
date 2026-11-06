@@ -75,8 +75,9 @@ impl Runner {
     }
 
     /// The request for `messages`: the session's frozen system blocks and
-    /// tools, narrowed to this turn's tools when a skill set them. Before
-    /// the prefix is logged (never, once the prompt is in), the live ones.
+    /// tools, narrowed to this turn's tools when a skill set them, with
+    /// the tools added since the prefix named. Before the prefix is logged
+    /// (never, once the prompt is in), the live ones.
     pub(super) fn request(&self, messages: Vec<Message>) -> ProviderRequest {
         let agent = &self.agent;
         let Some(catalog) = &self.catalog else {
@@ -87,6 +88,8 @@ impl Runner {
         let keep = |name: &str| snapshot.resolve(name).is_some();
         let keep: Option<&dyn Fn(&str) -> bool> = self.narrowed.then_some(&keep);
         let tools = catalog.tools(keep);
-        agent.request(catalog.system().to_vec(), tools, messages)
+        let mut request = agent.request(catalog.system().to_vec(), tools, messages);
+        request.appended_tools = catalog.appended(keep);
+        request
     }
 }

@@ -94,9 +94,10 @@ required fields and optional controls an adapter may ignore or refuse:
 | `max_output_tokens`, `temperature`, `stop_sequences` | Optional. |
 | `effort` (`ReasoningEffort`), `thinking` (`Thinking`) | `None` keeps the provider default. Each adapter maps them itself. |
 | `cache_control`, `output_schema`, `tool_choice` | Optional. |
+| `appended_tools` | The names of the `tools` a session added after its frozen prefix; empty outside a session's catalog. Only the native catalog changes of the Anthropic and Responses adapters read it. |
 
-There is no cancel signal, retry budget or catalog flag in the request; the
-cancel token is the second argument of `stream`.
+There is no cancel signal, retry budget or native-catalog switch in the
+request; the cancel token is the second argument of `stream`.
 
 ## Errors and retries
 

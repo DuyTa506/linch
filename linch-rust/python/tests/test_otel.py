@@ -508,6 +508,39 @@ def test_each_span_starts_and_ends_on_its_own_events() -> None:
     assert all(error_type(s) is None for s in spans)
 
 
+def test_input_tokens_include_the_cached_ones_as_the_convention_says() -> None:
+    sdk = Sdk()
+    usage = {
+        "input_tokens": 100,
+        "output_tokens": 5,
+        "cache_read_tokens": 90_000,
+        "cache_creation_tokens": 400,
+    }
+    ended = result("success")
+    ended["total_usage"] = usage
+    feed(
+        sdk.observer(),
+        [
+            (100, init()),
+            (101, prompt()),
+            (110, context_build()),
+            (150, assistant("end_turn")),
+            (151, {"type": "usage", "usage": usage, "cumulative": usage}),
+            (160, ended),
+        ],
+    )
+
+    spans = sdk.spans()
+    for span in (one(spans, "invoke_agent"), one(spans, "chat m")):
+        assert attr(span, "gen_ai.usage.input_tokens") == 90_500
+        assert attr(span, "gen_ai.usage.output_tokens") == 5
+        assert attr(span, "gen_ai.usage.cache_read.input_tokens") == 90_000
+        assert attr(span, "gen_ai.usage.cache_creation.input_tokens") == 400
+    tokens = sdk.points("gen_ai.client.token.usage")
+    [input] = [p for p in tokens if (p.attributes or {}).get("gen_ai.token.type") == "input"]
+    assert (input.count, input.sum) == (1, 90_500)
+
+
 def test_an_abort_during_a_call_marks_every_open_span_with_the_result_subtype() -> None:
     sdk = Sdk()
     feed(

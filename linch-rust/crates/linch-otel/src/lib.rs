@@ -20,6 +20,13 @@
 //! SDK's default buckets, as Python does. Span names, attribute keys and
 //! metric names are Python's; see [`keys`].
 //!
+//! Input token counts follow the GenAI convention, not Python:
+//! `gen_ai.usage.input_tokens` and the `input` bucket of
+//! `gen_ai.client.token.usage` include the cached tokens, so they are the
+//! uncached input plus `gen_ai.usage.cache_read.input_tokens` plus
+//! `gen_ai.usage.cache_creation.input_tokens`. The uncached count is
+//! `input_tokens` less the two cache counts.
+//!
 //! Only the API crate is used: the host owns the SDK and its exporters, and
 //! passes its tracer and meter in ([`Telemetry::new`]), or asks for the
 //! global ones explicitly ([`Telemetry::global`]). Nothing here installs or

@@ -45,6 +45,7 @@ fn request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> ProviderReques
         model: MODEL.into(),
         system: vec![],
         tools,
+        appended_tools: vec![],
         messages,
         max_output_tokens: Some(2048),
         temperature: None,

@@ -18,15 +18,17 @@ pub const RESPONSE_MODEL: &str = "gen_ai.response.model";
 /// `gen_ai.response.finish_reasons`: a one-element array with the
 /// response's stop reason.
 pub const FINISH_REASONS: &str = "gen_ai.response.finish_reasons";
-/// `gen_ai.usage.input_tokens`: uncached input tokens.
+/// `gen_ai.usage.input_tokens`: every input token, cached ones included,
+/// as the convention says: uncached plus [`CACHE_READ_TOKENS`] plus
+/// [`CACHE_CREATION_TOKENS`].
 pub const INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// `gen_ai.usage.output_tokens`: generated tokens.
 pub const OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
 /// `gen_ai.usage.cache_read.input_tokens`: input tokens read from the
-/// prompt cache.
+/// prompt cache, part of [`INPUT_TOKENS`].
 pub const CACHE_READ_TOKENS: &str = "gen_ai.usage.cache_read.input_tokens";
 /// `gen_ai.usage.cache_creation.input_tokens`: input tokens written to the
-/// prompt cache.
+/// prompt cache, part of [`INPUT_TOKENS`].
 pub const CACHE_CREATION_TOKENS: &str = "gen_ai.usage.cache_creation.input_tokens";
 /// `gen_ai.conversation.id`: the session id.
 pub const CONVERSATION_ID: &str = "gen_ai.conversation.id";

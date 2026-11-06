@@ -2,19 +2,21 @@
 //! Linch's `native_catalog_changes`.
 //!
 //! The core appends a tool added mid-session to the request's `tools`,
-//! which costs the prompt cache once. With this on, the adapter takes such
-//! a tool back out of `tools` and sends it where its catalog notice is, as
-//! an `additional_tools` input item after the user text holding the
-//! notice. Once any tool was added or removed, the request's `tool_choice`
-//! (when the host set none, or `auto`) becomes an `allowed_tools` list of
-//! what is still offered, so a removed tool keeps its cached schema but
-//! cannot be called. The notice text is still sent, so the model reads
-//! every change either way.
+//! which costs the prompt cache once, and names it in `appended_tools`.
+//! With this on, the adapter takes such a tool back out of `tools` and
+//! sends its row where its catalog notice is, as an `additional_tools`
+//! input item after the user text holding the notice. Once any tool was
+//! added or removed, the request's `tool_choice` (when the host set none,
+//! or `auto`) becomes an `allowed_tools` list of what is still offered, so
+//! a removed tool keeps its cached schema but cannot be called. The notice
+//! text is still sent, so the model reads every change either way.
 //!
 //! Off by default ([`ResponsesOptions::native_catalog_changes`]). Not
 //! verified against the live API.
 
-use linch_core::{CatalogChangeBlock, JsonValue, Message, ToolDefinition};
+use std::collections::BTreeMap;
+
+use linch_core::{CatalogChangeBlock, JsonValue, ProviderRequest, ToolDefinition};
 use serde_json::json;
 
 use super::ResponsesOptions;
@@ -41,10 +43,10 @@ fn supports(model: &str) -> bool {
     matches!((number(major), number(minor)), (Some(major), Some(minor)) if (major, minor) >= (5, 4))
 }
 
-/// The catalog of one native request, read from its tools and notices.
+/// The catalog of one native request, read from its tools.
 pub(crate) struct Native {
-    /// The request's tools a notice added by value.
-    appended: std::collections::BTreeSet<String>,
+    /// The request's tools added after the prefix.
+    appended: BTreeMap<String, ToolDefinition>,
     /// Every tool the conversation offered, in order, and whether it
     /// still is.
     offered: Vec<(String, bool)>,
@@ -53,12 +55,11 @@ pub(crate) struct Native {
 }
 
 impl Native {
-    /// The catalog of `tools` and the notices of `messages` (see
-    /// [`native::appended`]).
-    pub(crate) fn new(tools: &[ToolDefinition], messages: &[Message]) -> Self {
-        let appended = native::appended(tools, messages);
-        let offered = (tools.iter())
-            .filter(|tool| !appended.contains(&tool.name))
+    /// The catalog of `request` (see [`native::appended`]).
+    pub(crate) fn new(request: &ProviderRequest) -> Self {
+        let appended = native::appended(request);
+        let offered = (request.tools.iter())
+            .filter(|tool| !appended.contains_key(&tool.name))
             .map(|tool| (tool.name.clone(), true))
             .collect();
         Self {
@@ -70,23 +71,24 @@ impl Native {
 
     /// Whether `tool` goes in the request's `tools`.
     pub(crate) fn keeps(&self, tool: &ToolDefinition) -> bool {
-        !self.appended.contains(&tool.name)
+        !self.appended.contains_key(&tool.name)
     }
 
-    /// The definitions `change` adds by value, in its order; and what it
-    /// adds and removes, noted for [`Self::tool_choice`].
-    pub(crate) fn additions<'a>(
-        &mut self,
-        change: &'a CatalogChangeBlock,
-    ) -> Vec<&'a ToolDefinition> {
+    /// The rows of the appended tools `change` adds for the first time,
+    /// in its order; and what it adds and removes, noted for
+    /// [`Self::tool_choice`].
+    pub(crate) fn additions(&mut self, change: &CatalogChangeBlock) -> Vec<&ToolDefinition> {
         let known = |offered: &[(String, bool)], name: &str| offered.iter().any(|(n, _)| n == name);
-        let definitions: Vec<&ToolDefinition> = (change.tool_definitions.iter())
-            .filter(|tool| self.appended.contains(&tool.name) && !known(&self.offered, &tool.name))
+        let definitions: Vec<&ToolDefinition> = (change.added_tools.iter())
+            .filter(|name| !known(&self.offered, name))
+            .filter_map(|name| self.appended.get(name))
             .collect();
         for name in &change.added_tools {
             match self.offered.iter_mut().find(|(n, _)| n == name) {
                 Some((_, on)) => *on = true,
-                None if self.appended.contains(name) => self.offered.push((name.clone(), true)),
+                None if self.appended.contains_key(name) => {
+                    self.offered.push((name.clone(), true));
+                }
                 None => {}
             }
         }

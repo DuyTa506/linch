@@ -21,6 +21,7 @@ fn request() -> ProviderRequest {
         model: "deepseek-v4-flash".into(),
         system: vec![],
         tools: vec![],
+        appended_tools: vec![],
         messages: vec![Message::user_text("hi")],
         max_output_tokens: None,
         temperature: None,

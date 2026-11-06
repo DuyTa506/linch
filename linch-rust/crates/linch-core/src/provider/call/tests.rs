@@ -16,6 +16,7 @@ fn request() -> ProviderRequest {
         model: "m".into(),
         system: Vec::new(),
         tools: Vec::new(),
+        appended_tools: Vec::new(),
         messages: vec![Message::user_text("hi")],
         max_output_tokens: None,
         temperature: None,

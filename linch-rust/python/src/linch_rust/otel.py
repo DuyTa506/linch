@@ -22,6 +22,10 @@ ended at its closing event's, as the Rust `linch-otel` crate does::
 Each model call records `gen_ai.client.token.usage` (unit `{token}`) and
 `gen_ai.client.operation.duration` (unit `s`), with the SDK's default
 buckets. Span names, attribute keys and metric names are Python Linch's.
+Input counts follow the GenAI convention, not Python Linch:
+`gen_ai.usage.input_tokens` and the `input` token bucket include the cached
+tokens (uncached plus `gen_ai.usage.cache_read.input_tokens` plus
+`gen_ai.usage.cache_creation.input_tokens`), as `linch-otel` reports them.
 Content (the prompt, answers, tool input and results) is left out unless
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`.
 
@@ -113,11 +117,12 @@ EXECUTE_TOOL = "execute_tool"
 
 _MAX_INT = 2**63 - 1
 _USAGE_KEYS = (
-    (INPUT_TOKENS, "input_tokens"),
     (OUTPUT_TOKENS, "output_tokens"),
     (CACHE_READ_TOKENS, "cache_read_tokens"),
     (CACHE_CREATION_TOKENS, "cache_creation_tokens"),
 )
+# The GenAI convention's input count includes the cached tokens.
+_INPUT_FIELDS = ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
 
 
 def capture_content_from_env() -> bool:
@@ -261,6 +266,7 @@ class _Open:
         self.span.set_status(Status(StatusCode.ERROR))
 
     def set_usage(self, usage: JsonObject) -> None:
+        self.span.set_attribute(INPUT_TOKENS, _input_tokens(usage))
         for key, field in _USAGE_KEYS:
             self.span.set_attribute(key, _tokens(usage, field))
 
@@ -599,9 +605,10 @@ class RunObserver:
             return
         histograms.duration.record(seconds, attributes)
         if chat.usage is not None:
-            for kind, field in (("input", "input_tokens"), ("output", "output_tokens")):
+            output = _tokens(chat.usage, "output_tokens")
+            for kind, tokens in (("input", _input_tokens(chat.usage)), ("output", output)):
                 tagged = {**attributes, TOKEN_TYPE: kind}
-                histograms.tokens.record(_tokens(chat.usage, field), tagged)
+                histograms.tokens.record(tokens, tagged)
 
     def _tool_start(self, event: ToolCallStartEvent, at: int) -> None:
         step, _ = self._open_step(at)
@@ -667,6 +674,10 @@ def _count(value: int) -> int:
 def _tokens(usage: JsonObject, field: str) -> int:
     value = usage.get(field, 0)
     return _count(value) if isinstance(value, int) else 0
+
+
+def _input_tokens(usage: JsonObject) -> int:
+    return _count(sum(_tokens(usage, field) for field in _INPUT_FIELDS))
 
 
 def _json(value: Any) -> str:

@@ -394,6 +394,12 @@ async fn a_compaction_keeps_the_prefix_and_tells_the_folded_changes_once() {
     let all = |r: &ProviderRequest| prefix_bytes(r, r.tools.len());
     assert_eq!(all(after), all(before), "compaction moved the prefix");
     assert_eq!(names(after), ["Echo", "Mutate", "Late"]);
+    // Every request after the change names the added row, the summary
+    // call's too, though the compaction folds the notice that added it.
+    assert!(requests[0].appended_tools.is_empty());
+    for request in &requests[1..] {
+        assert_eq!(request.appended_tools, ["Late"]);
+    }
     // The notice the summary folded away comes back once, in the summary.
     let [restated] = all_notices(after)[..] else {
         panic!("one notice: {:?}", after.messages)
