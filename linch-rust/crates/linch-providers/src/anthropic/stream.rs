@@ -13,12 +13,11 @@ use linch_core::{ProviderError, ProviderEvent, RedactedThinkingBlock, StopReason
 
 use super::http;
 use crate::ApiKey;
+use crate::sse::Decoder;
+pub(crate) use crate::sse::events;
 use wire::{BareError, Wire, WireBlock, WireDelta, WireMessage, WireUsage};
 
-mod driver;
 mod wire;
-
-pub(crate) use driver::events;
 
 /// An open content block, by its stream index.
 enum Block {
@@ -271,6 +270,20 @@ impl Translator {
             provider_metadata: None,
         }));
         Ok(())
+    }
+}
+
+impl Decoder for Translator {
+    fn data(
+        &mut self,
+        data: &str,
+        out: &mut VecDeque<ProviderEvent>,
+    ) -> Result<bool, ProviderError> {
+        self.push(data, out)
+    }
+
+    fn close(&mut self, _out: &mut VecDeque<ProviderEvent>) -> Result<(), ProviderError> {
+        Err(transport("stream closed before message_stop"))
     }
 }
 

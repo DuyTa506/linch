@@ -14,6 +14,7 @@ pub mod openai;
 mod openai_compat;
 pub mod responses;
 pub mod servers;
+mod sse;
 
 pub use anthropic::{Anthropic, AnthropicOptions};
 pub use api_key::ApiKey;

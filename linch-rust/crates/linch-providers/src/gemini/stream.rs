@@ -16,10 +16,8 @@ use serde::Deserialize;
 
 use super::{PARTS_KEY, http};
 use crate::ApiKey;
-
-mod driver;
-
-pub(crate) use driver::events;
+use crate::sse::Decoder;
+pub(crate) use crate::sse::events;
 
 // Vendor chunks are read leniently: unknown fields are ignored. Parts stay
 // raw JSON because they are kept verbatim for replay.
@@ -260,6 +258,22 @@ impl Translator {
             provider_metadata,
         }));
         Ok(())
+    }
+}
+
+impl Decoder for Translator {
+    fn data(
+        &mut self,
+        data: &str,
+        out: &mut VecDeque<ProviderEvent>,
+    ) -> Result<bool, ProviderError> {
+        self.push(data, out)?;
+        Ok(false)
+    }
+
+    /// The close is the end of the response.
+    fn close(&mut self, out: &mut VecDeque<ProviderEvent>) -> Result<(), ProviderError> {
+        self.finish(out)
     }
 }
 

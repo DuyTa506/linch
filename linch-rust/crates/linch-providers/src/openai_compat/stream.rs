@@ -4,19 +4,15 @@
 //! events. [`events`] drives it over a byte stream with cancellation.
 
 use std::collections::{HashMap, VecDeque};
-use std::fmt::Display;
 
-use eventsource_stream::Eventsource;
-use futures::{Stream, StreamExt};
 use linch_core::provider::{
     MessageEndEvent, MessageStartEvent, TextDeltaEvent, ThinkingDeltaEvent, ToolUseEndEvent,
     ToolUseInputDeltaEvent, ToolUseStartEvent,
 };
-use linch_core::{JsonValue, ProviderError, ProviderEvent, ProviderStream, StopReason, Usage};
-use tokio_util::sync::CancellationToken;
+use linch_core::{JsonValue, ProviderError, ProviderEvent, StopReason, Usage};
 
-use crate::ApiKey;
-use crate::api_key::scrub;
+use crate::sse::Decoder;
+pub(crate) use crate::sse::events;
 
 mod wire;
 
@@ -246,106 +242,24 @@ fn transport(message: &str) -> ProviderError {
     }
 }
 
-struct State<S> {
-    sse: S,
-    translator: Translator,
-    pending: VecDeque<ProviderEvent>,
-    cancel: CancellationToken,
-    key: Option<ApiKey>,
-    done: bool,
-}
-
-/// Drive `translator` over an SSE byte stream until `[DONE]`, an error or
-/// `cancel`. Error text is scrubbed of `key` and bearer tokens.
-pub(crate) fn events<S, B, E>(
-    bytes: S,
-    translator: Translator,
-    cancel: CancellationToken,
-    key: Option<ApiKey>,
-) -> ProviderStream
-where
-    S: Stream<Item = Result<B, E>> + Send + 'static,
-    B: AsRef<[u8]> + Send + 'static,
-    E: Display + Send + 'static,
-{
-    let state = State {
-        sse: Box::pin(bytes.eventsource()),
-        translator,
-        pending: VecDeque::new(),
-        cancel,
-        key,
-        done: false,
-    };
-    futures::stream::unfold(state, |mut state| async move {
-        let item = next(&mut state).await?;
-        Some((item, state))
-    })
-    .boxed()
-}
-
-async fn next<S, E>(state: &mut State<S>) -> Option<Result<ProviderEvent, ProviderError>>
-where
-    S: Stream<Item = Result<eventsource_stream::Event, eventsource_stream::EventStreamError<E>>>
-        + Unpin,
-    E: Display,
-{
-    loop {
-        if state.done && state.pending.is_empty() {
-            return None;
+impl Decoder for Translator {
+    fn data(
+        &mut self,
+        data: &str,
+        out: &mut VecDeque<ProviderEvent>,
+    ) -> Result<bool, ProviderError> {
+        let data = data.trim();
+        if data == "[DONE]" {
+            self.finish(out)?;
+            return Ok(true);
         }
-        if state.cancel.is_cancelled() {
-            return Some(Err(stop(state, ProviderError::Cancelled)));
-        }
-        if let Some(event) = state.pending.pop_front() {
-            return Some(Ok(event));
-        }
-        let failure = match state.cancel.run_until_cancelled(state.sse.next()).await {
-            None => ProviderError::Cancelled,
-            Some(None) => transport("stream closed before [DONE]"),
-            Some(Some(Err(err))) => transport(&err.to_string()),
-            Some(Some(Ok(event))) => match on_data(state, &event.data) {
-                Ok(()) => continue,
-                Err(err) => err,
-            },
-        };
-        let failure = scrubbed(state.key.as_ref(), failure);
-        return Some(Err(stop(state, failure)));
+        self.push(data, out)?;
+        Ok(false)
     }
-}
 
-fn on_data<S>(state: &mut State<S>, data: &str) -> Result<(), ProviderError> {
-    match data.trim() {
-        "" => Ok(()),
-        "[DONE]" => {
-            state.done = true;
-            state.translator.finish(&mut state.pending)
-        }
-        data => state.translator.push(data, &mut state.pending),
+    fn close(&mut self, _out: &mut VecDeque<ProviderEvent>) -> Result<(), ProviderError> {
+        Err(transport("stream closed before [DONE]"))
     }
-}
-
-/// Server and transport text can echo request headers; scrub it.
-fn scrubbed(key: Option<&ApiKey>, err: ProviderError) -> ProviderError {
-    match err {
-        ProviderError::Transport { message } => transport(&scrub(key, &message)),
-        ProviderError::Status {
-            status,
-            retry_after,
-            message,
-        } => ProviderError::Status {
-            status,
-            retry_after,
-            message: scrub(key, &message),
-        },
-        other => other,
-    }
-}
-
-/// End the stream after `err`: nothing is yielded after an error.
-fn stop<S>(state: &mut State<S>, err: ProviderError) -> ProviderError {
-    state.done = true;
-    state.pending.clear();
-    err
 }
 
 #[cfg(test)]
