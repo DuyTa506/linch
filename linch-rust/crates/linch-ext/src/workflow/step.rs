@@ -19,8 +19,9 @@ use super::policy::{Retry, attempt_timeout, run_attempts};
 pub struct StepOptions {
     /// Identity of the step's inputs, so one step name over different
     /// inputs is journaled separately. Without it, calls of one name are
-    /// told apart by call order only. Objects are compared in canonical
-    /// form; array order counts.
+    /// told apart by call order only, counted apart in each `parallel` or
+    /// `settled` branch. Objects are compared in canonical form; array
+    /// order counts.
     pub key: Option<JsonValue>,
     /// Limit on each attempt; `None` uses the workflow's `step_timeout`,
     /// and zero opts out of it. An attempt past it fails with
@@ -81,9 +82,9 @@ impl WorkflowContext {
         Fut: Future<Output = Result<T, E>>,
     {
         let label = format!("step {name}");
-        let call_key = step_key(name, options.key.as_ref())
+        let content_key = step_key(name, options.key.as_ref())
             .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
-        let (occurrence, cached) = self.next_occurrence(&call_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
         let emit = |kind, result_text: Option<&JsonValue>| {
             let mut event = event(kind, name.to_owned(), call_key.clone(), occurrence);
             event.result_text = result_text.map(JsonValue::to_string);

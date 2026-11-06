@@ -19,12 +19,19 @@ impl WorkflowContext {
     ///
     /// Each call is its own run of `agent`, on a new session, with a run id
     /// derived from the workflow, the call's key ([`agent_key`] of `name`
-    /// and `prompt`) and its occurrence. So when a process crashes during
-    /// the call, the next [`run_workflow`](super::run_workflow) continues
-    /// that run instead of starting over, and never pays a model call twice
-    /// (the run's own journal sees to that). The final text is journaled
+    /// and `prompt`, plus its branch path inside a fan-out) and its
+    /// occurrence. So when a process crashes during the call, the next
+    /// [`run_workflow`](super::run_workflow) continues that run instead of
+    /// starting over, and never pays a model call twice (the run's own
+    /// journal sees to that). The final text is journaled
     /// once the run succeeds; a resume after that replays it without
     /// touching the agent.
+    ///
+    /// Once the run has ended, the call closes its session
+    /// ([`Agent::close_session`]), which frees what the agent holds for it
+    /// in this process: after a success once the text is journaled, and
+    /// after a failed or aborted run. A run waiting for an approval keeps
+    /// its session, since the approve continues on it.
     ///
     /// A run that failed or was aborted is never continued: the call fails,
     /// and the next resume runs the call again as a fresh run. A run that
@@ -58,8 +65,7 @@ impl WorkflowContext {
         prompt: &str,
     ) -> Result<String, WorkflowError> {
         let label = format!("agent {name}");
-        let call_key = agent_key(name, prompt);
-        let (occurrence, cached) = self.next_occurrence(&call_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&agent_key(name, prompt));
         let emit = |kind, result_text: Option<&str>| {
             let mut event = event(kind, name.to_owned(), call_key.clone(), occurrence);
             event.subagent_type = name.to_owned();
@@ -108,9 +114,20 @@ impl WorkflowContext {
             };
             break (run_id, drive(stream).await);
         };
-        let text = finish(name, &label, &run_id, outcome)?;
+        // A run that ended never continues on its session, while a run
+        // waiting for an approval does.
+        let session = SessionId::new(run_id.as_str());
+        let ended = outcome
+            .as_ref()
+            .is_ok_and(|outcome| outcome.ended.is_some());
+        let text = finish(name, &label, &run_id, outcome).inspect_err(|_| {
+            if ended {
+                agent.close_session(&session);
+            }
+        })?;
         self.record(&call_key, occurrence, &JsonValue::String(text.clone()))
             .await?;
+        agent.close_session(&session);
         emit(WorkflowKind::AgentEnd, Some(&text));
         Ok(text)
     }

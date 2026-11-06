@@ -3,6 +3,7 @@
 //! `step`, `interrupt` and `fanout`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -47,7 +48,8 @@ pub(super) struct Inner {
 }
 
 /// Journaled results by `(call_key, occurrence)`, and how many calls of
-/// each key this run has made.
+/// each key this run has made. Inside a fan-out branch the key carries the
+/// branch path (see [`WorkflowContext::next_occurrence`]).
 #[derive(Default)]
 struct Journal {
     records: HashMap<(String, u64), JsonValue>,
@@ -94,15 +96,30 @@ impl WorkflowContext {
         lock(&self.inner.suspended).clone()
     }
 
-    /// This call's occurrence of `call_key`, and its journaled value when
-    /// a previous run recorded one.
-    pub(super) fn next_occurrence(&self, call_key: &str) -> (u64, Option<JsonValue>) {
+    /// The journal key of a call with content key `call_key`, this call's
+    /// occurrence of it, and its journaled value when a previous run
+    /// recorded one.
+    ///
+    /// Outside every fan-out the journal key is `call_key`. Inside a
+    /// `parallel` or `settled` branch it is `call_key@<path>`, the path
+    /// being the branch index at each level, outermost first (`1`, `0.2`),
+    /// so each branch counts its own calls. Branches reach their calls in a
+    /// different order on replay, where journaled calls return at once; a
+    /// count shared across branches would hand one branch another's
+    /// record.
+    pub(super) fn next_occurrence(&self, call_key: &str) -> (String, u64, Option<JsonValue>) {
+        let path = branch_path();
+        let key = if path.is_empty() {
+            call_key.to_owned()
+        } else {
+            format!("{call_key}@{path}")
+        };
         let mut journal = lock(&self.inner.journal);
-        let counter = journal.counters.entry(call_key.to_owned()).or_default();
+        let counter = journal.counters.entry(key.clone()).or_default();
         let occurrence = *counter;
         *counter += 1;
-        let cached = journal.records.get(&(call_key.to_owned(), occurrence));
-        (occurrence, cached.cloned())
+        let cached = journal.records.get(&(key.clone(), occurrence)).cloned();
+        (key, occurrence, cached)
     }
 
     /// Make one result durable, then cache it.
@@ -139,6 +156,30 @@ impl WorkflowContext {
             sink(&event);
         }
     }
+}
+
+tokio::task_local! {
+    /// The fan-out branch path of the code being polled: the branch index
+    /// at each level, outermost first, joined by `.`. Unset outside every
+    /// fan-out, and in a task a branch spawns.
+    static BRANCH: String;
+}
+
+/// The branch path of the code being polled; empty outside every fan-out.
+fn branch_path() -> String {
+    BRANCH.try_with(Clone::clone).unwrap_or_default()
+}
+
+/// Poll `future` as branch `index` of the fan-out being started in the
+/// current branch.
+pub(super) fn in_branch<F: Future>(index: usize, future: F) -> impl Future<Output = F::Output> {
+    let parent = branch_path();
+    let path = if parent.is_empty() {
+        index.to_string()
+    } else {
+        format!("{parent}.{index}")
+    };
+    BRANCH.scope(path, future)
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

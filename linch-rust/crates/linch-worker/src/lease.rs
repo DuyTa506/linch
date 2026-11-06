@@ -1,8 +1,11 @@
 //! Taking a job off the queue and holding it: dequeue, heartbeat, ack,
 //! release and fail. Every write after the dequeue is fenced by the
 //! `attempts` value the dequeue set, so a worker that lost its job (another
-//! worker dequeued it after the visibility timeout) changes nothing.
+//! worker dequeued it after the visibility timeout) changes nothing. Each of
+//! those writes is one autocommit statement, run again when it fails with a
+//! serialization error (`retried`).
 
+use std::future::Future;
 use std::time::Duration;
 
 use linch_core::{RunId, SessionId};
@@ -50,6 +53,38 @@ type JobRow = (
     i32,
     i32,
 );
+
+/// Most times a fenced write runs while it fails with a serialization
+/// error, as linch-postgres runs its single-statement writes.
+const WRITE_TRIES: u32 = 3;
+
+/// Run `write` again while it fails with a serialization error (40001), up
+/// to [`WRITE_TRIES`] times in all.
+///
+/// A fenced write runs at the pool's default isolation. Above READ
+/// COMMITTED, one that waited on another update of its job row (this
+/// attempt's own heartbeat still in flight, or another worker's dequeue)
+/// fails this way once that update commits. It wrote nothing, and runs
+/// again on a fresh snapshot, which tells whether this attempt still holds
+/// the job. Under READ COMMITTED it never happens.
+async fn retried<T, F, Fut>(mut write: F) -> Result<T, sqlx::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, sqlx::Error>>,
+{
+    let mut tries = 1;
+    loop {
+        match write().await {
+            Err(error) if serialization_failure(&error) && tries < WRITE_TRIES => tries += 1,
+            outcome => return outcome,
+        }
+    }
+}
+
+fn serialization_failure(error: &sqlx::Error) -> bool {
+    let code = error.as_database_error().and_then(|error| error.code());
+    code.as_deref() == Some("40001")
+}
 
 fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
@@ -181,14 +216,16 @@ impl JobLease {
         pool: &PgPool,
         timeout: Duration,
     ) -> Result<bool, WorkerError> {
-        let done = sqlx::query(
-            "UPDATE linch_worker_jobs SET visible_at = now() + $3 * interval '1 millisecond' \
-             WHERE id = $1 AND attempts = $2 AND failed_at IS NULL",
-        )
-        .bind(self.job.id.0)
-        .bind(self.attempts)
-        .bind(millis(timeout))
-        .execute(pool)
+        let done = retried(|| {
+            sqlx::query(
+                "UPDATE linch_worker_jobs SET visible_at = now() + $3 * interval '1 millisecond' \
+                 WHERE id = $1 AND attempts = $2 AND failed_at IS NULL",
+            )
+            .bind(self.job.id.0)
+            .bind(self.attempts)
+            .bind(millis(timeout))
+            .execute(pool)
+        })
         .await?;
         Ok(done.rows_affected() == 1)
     }
@@ -199,23 +236,26 @@ impl JobLease {
         pool: &PgPool,
         run_id: &RunId,
     ) -> Result<bool, WorkerError> {
-        let done =
+        let done = retried(|| {
             sqlx::query("UPDATE linch_worker_jobs SET run_id = $3 WHERE id = $1 AND attempts = $2")
                 .bind(self.job.id.0)
                 .bind(self.attempts)
                 .bind(run_id.as_str())
                 .execute(pool)
-                .await?;
+        })
+        .await?;
         Ok(done.rows_affected() == 1)
     }
 
     /// The job is done: delete it.
     pub(crate) async fn ack(&self, pool: &PgPool) -> Result<bool, WorkerError> {
-        let done = sqlx::query("DELETE FROM linch_worker_jobs WHERE id = $1 AND attempts = $2")
-            .bind(self.job.id.0)
-            .bind(self.attempts)
-            .execute(pool)
-            .await?;
+        let done = retried(|| {
+            sqlx::query("DELETE FROM linch_worker_jobs WHERE id = $1 AND attempts = $2")
+                .bind(self.job.id.0)
+                .bind(self.attempts)
+                .execute(pool)
+        })
+        .await?;
         Ok(done.rows_affected() == 1)
     }
 
@@ -228,32 +268,39 @@ impl JobLease {
         error: &str,
         failed: bool,
     ) -> Result<bool, WorkerError> {
-        let done = sqlx::query(
-            "UPDATE linch_worker_jobs SET visible_at = now() + $3 * interval '1 millisecond', \
-             owner = NULL, error = $4, failures = failures + $5 \
-             WHERE id = $1 AND attempts = $2",
-        )
-        .bind(self.job.id.0)
-        .bind(self.attempts)
-        .bind(millis(delay))
-        .bind(error)
-        .bind(i32::from(failed))
-        .execute(pool)
+        let done = retried(|| {
+            sqlx::query(
+                "UPDATE linch_worker_jobs SET visible_at = now() + $3 * interval '1 millisecond', \
+                 owner = NULL, error = $4, failures = failures + $5 \
+                 WHERE id = $1 AND attempts = $2",
+            )
+            .bind(self.job.id.0)
+            .bind(self.attempts)
+            .bind(millis(delay))
+            .bind(error)
+            .bind(i32::from(failed))
+            .execute(pool)
+        })
         .await?;
         Ok(done.rows_affected() == 1)
     }
 
     /// The job cannot succeed: keep it with `error`, never dequeued again.
     pub(crate) async fn fail(&self, pool: &PgPool, error: &str) -> Result<bool, WorkerError> {
-        let done = sqlx::query(
-            "UPDATE linch_worker_jobs SET failed_at = now(), owner = NULL, error = $3 \
-             WHERE id = $1 AND attempts = $2",
-        )
-        .bind(self.job.id.0)
-        .bind(self.attempts)
-        .bind(error)
-        .execute(pool)
+        let done = retried(|| {
+            sqlx::query(
+                "UPDATE linch_worker_jobs SET failed_at = now(), owner = NULL, error = $3 \
+                 WHERE id = $1 AND attempts = $2",
+            )
+            .bind(self.job.id.0)
+            .bind(self.attempts)
+            .bind(error)
+            .execute(pool)
+        })
         .await?;
         Ok(done.rows_affected() == 1)
     }
 }
+
+#[cfg(test)]
+mod tests;

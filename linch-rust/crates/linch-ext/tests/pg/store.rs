@@ -1,10 +1,13 @@
-//! `PgJournalStore` on the conformance suite, a claim racing an append,
-//! exact round trips and the migrations.
+//! `PgJournalStore` on the conformance suite, a claim racing an append (at
+//! the server's default isolation and under REPEATABLE READ), exact round
+//! trips and the migrations.
 
 use std::time::Duration;
 
 use linch_ext::workflow::conformance::journal_store_suite;
-use linch_ext::workflow::{JournalRecord, JournalStore, JournalStoreError, PgJournalStore};
+use linch_ext::workflow::{
+    JournalRecord, JournalStore, JournalStoreError, PgJournalStore, WorkflowStatus,
+};
 use serde_json::json;
 
 use crate::common::TestDb;
@@ -42,6 +45,72 @@ async fn an_append_racing_a_claim_never_lands_under_the_old_epoch() {
     );
     let run = store.load("ns", "w1").await.unwrap().unwrap();
     assert!(run.records.is_empty());
+    db.finish().await;
+}
+
+/// Another process's claim, not committed yet.
+const OPEN_CLAIM: &str =
+    "UPDATE linch_ext_workflows SET epoch = epoch + 1 WHERE workflow_id = 'w1'";
+
+fn record(call_key: &str) -> JournalRecord {
+    JournalRecord {
+        call_key: call_key.into(),
+        occurrence: 0,
+        value: json!(1),
+    }
+}
+
+/// Under a REPEATABLE READ default, a write that waited on a claim gets a
+/// serialization error once the claim commits; it is run again and then
+/// sees the new epoch.
+#[tokio::test]
+async fn under_repeatable_read_an_append_behind_a_claim_is_fenced() {
+    let Some(mut db) = TestDb::migrated("rr_append").await else {
+        return;
+    };
+    let store = PgJournalStore::new(db.repeatable_read().await);
+    let lease = store.claim("ns", "w1").await.unwrap();
+    let appended = db.behind_an_update(OPEN_CLAIM, store.append(&lease, record("k")));
+    let appended = appended.await;
+    assert!(
+        matches!(appended, Err(JournalStoreError::LeaseLost { epoch: 1, .. })),
+        "{appended:?}"
+    );
+    let run = store.load("ns", "w1").await.unwrap().unwrap();
+    assert!(run.records.is_empty());
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn under_repeatable_read_a_status_write_behind_a_claim_is_fenced() {
+    let Some(mut db) = TestDb::migrated("rr_status").await else {
+        return;
+    };
+    let store = PgJournalStore::new(db.repeatable_read().await);
+    let lease = store.claim("ns", "w1").await.unwrap();
+    let status = store.set_status(&lease, WorkflowStatus::Completed);
+    let status = db.behind_an_update(OPEN_CLAIM, status).await;
+    assert!(
+        matches!(status, Err(JournalStoreError::LeaseLost { epoch: 1, .. })),
+        "{status:?}"
+    );
+    let run = store.load("ns", "w1").await.unwrap().unwrap();
+    assert_eq!((run.status, run.epoch), (WorkflowStatus::Running, 2));
+    db.finish().await;
+}
+
+/// A claim always wins, also behind another claim under REPEATABLE READ.
+#[tokio::test]
+async fn under_repeatable_read_a_claim_behind_a_claim_wins() {
+    let Some(mut db) = TestDb::migrated("rr_claim").await else {
+        return;
+    };
+    let store = PgJournalStore::new(db.repeatable_read().await);
+    store.claim("ns", "w1").await.unwrap();
+    let lease = db
+        .behind_an_update(OPEN_CLAIM, store.claim("ns", "w1"))
+        .await;
+    assert_eq!(lease.expect("the claim").epoch, 3);
     db.finish().await;
 }
 

@@ -4,14 +4,16 @@
 //! A branch is any future. Futures do nothing until polled, so there is no
 //! thunk to wrap; every branch runs in the caller's task, nothing is
 //! spawned. Each call gets its own limit of `max_concurrency` branches, so
-//! a nested fan-out never waits on the slots its caller holds.
+//! a nested fan-out never waits on the slots its caller holds. Each branch
+//! is polled under its branch path, so the journaled calls it makes count
+//! apart from its siblings' (see `WorkflowContext::next_occurrence`).
 
 use std::future::Future;
 
 use futures::future::{join_all, try_join_all};
 use tokio::sync::Semaphore;
 
-use super::context::WorkflowContext;
+use super::context::{WorkflowContext, in_branch};
 use super::error::WorkflowError;
 
 impl WorkflowContext {
@@ -37,7 +39,8 @@ impl WorkflowContext {
         Fut: Future<Output = Result<T, WorkflowError>>,
     {
         let slots = Semaphore::new(self.inner.max_concurrency);
-        try_join_all(branches.into_iter().map(|branch| gated(&slots, branch))).await
+        let branches = branches.into_iter().enumerate();
+        try_join_all(branches.map(|(index, branch)| in_branch(index, gated(&slots, branch)))).await
     }
 
     /// Like [`parallel`](Self::parallel), but a failing branch leaves the
@@ -61,7 +64,9 @@ impl WorkflowContext {
         Fut: Future<Output = Result<T, WorkflowError>>,
     {
         let slots = Semaphore::new(self.inner.max_concurrency);
-        let mut outcomes = join_all(branches.into_iter().map(|branch| gated(&slots, branch))).await;
+        let branches = branches.into_iter().enumerate();
+        let branches = branches.map(|(index, branch)| in_branch(index, gated(&slots, branch)));
+        let mut outcomes = join_all(branches).await;
         let suspended = (outcomes.iter())
             .position(|outcome| matches!(outcome, Err(WorkflowError::Suspended(_))));
         match suspended.map(|index| outcomes.swap_remove(index)) {

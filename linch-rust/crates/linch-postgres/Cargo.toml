@@ -21,4 +21,8 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["time"] }
 
 [dev-dependencies]
-tokio = { version = "1.54.1", features = ["rt", "macros", "time"] }
+# The idle-connection test drives an agent run: its stream, and a provider
+# held at a gate.
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync"] }
+tokio-util = "0.7.20"

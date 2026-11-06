@@ -183,6 +183,80 @@ async fn an_interrupt_inside_parallel_drops_its_siblings() {
     assert!(stored(&store, "w1").await.records.is_empty());
 }
 
+/// Branch 0 runs a slow `a`, then `fetch`; branch 1 runs `fetch` at once,
+/// so live, branch 1 reaches `fetch` first, while on replay branch 0 does
+/// (its `a` replays at once). `hang` holds branch 0's `fetch` forever, as
+/// a crash before its record lands. `fetches` counts branch 1's calls.
+async fn two_fetches(
+    wf: WorkflowContext,
+    hang: bool,
+    fetches: Counter,
+) -> Result<Vec<String>, WorkflowError> {
+    let wf = &wf;
+    let first = async move {
+        let a = wf.step("a", || async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok::<_, BoxError>("a0".to_owned())
+        });
+        let a = a.await?;
+        let fetch = wf.step("fetch", || async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
+            Ok::<_, BoxError>("fetch-by-b0".to_owned())
+        });
+        Ok(format!("b0: a={a} fetch={}", fetch.await?))
+    };
+    let second = async move {
+        let fetch = wf.step("fetch", || {
+            fetches.bump();
+            std::future::ready(Ok::<_, BoxError>("fetch-by-b1".to_owned()))
+        });
+        Ok(format!("b1: fetch={}", fetch.await?))
+    };
+    wf.parallel([Box::pin(first) as BoxedText<'_>, Box::pin(second)])
+        .await
+}
+
+/// Parallel branches that share an unkeyed step name keep their own
+/// records: on replay each branch gets its own, whichever reaches the name
+/// first, so a journaled step never runs again after a crash.
+#[tokio::test]
+async fn branches_sharing_a_step_name_replay_their_own_records() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let fetches = Counter::default();
+    let options_for = |id| options(&store, id, &Recorder::default());
+    let crashed = run_workflow(options_for("w1"), |wf| {
+        two_fetches(wf, true, fetches.clone())
+    });
+    let recorded = async {
+        let records = || async {
+            let run = store.load(NS, "w1").await.unwrap();
+            run.map_or(0, |run| run.records.len())
+        };
+        while records().await < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::select! {
+        outcome = crashed => panic!("branch 0's fetch never returns: {outcome:?}"),
+        () = recorded => {}
+    }
+    let resumed = run_workflow(options_for("w1"), |wf| {
+        two_fetches(wf, false, fetches.clone())
+    });
+    let texts = resumed.await.unwrap();
+    assert_eq!(
+        texts,
+        ["b0: a=a0 fetch=fetch-by-b0", "b1: fetch=fetch-by-b1"]
+    );
+    assert_eq!(fetches.get(), 1, "branch 1's fetch ran once");
+}
+
+/// Branches of different future types, boxed into one list.
+type BoxedText<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, WorkflowError>> + 'a>>;
+
 /// Branches of different future types, boxed into one list.
 type BoxedStep<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, WorkflowError>> + Send + 'a>>;

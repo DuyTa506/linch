@@ -1741,12 +1741,14 @@ name = "linch-postgres"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "linch-core",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

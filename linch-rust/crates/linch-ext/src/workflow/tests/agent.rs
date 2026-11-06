@@ -29,6 +29,11 @@ fn run_id(workflow_id: &str, generation: u64) -> linch_core::RunId {
     agent_run_id(NS, workflow_id, &call_key, 0, generation)
 }
 
+/// How many sessions the fixture's agent was told to close.
+fn closed(fixture: &crate::test_support::Fixture) -> usize {
+    fixture.closed.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// `run`'s final text from its stored events.
 async fn final_text(agent: &linch_core::Agent, run: &linch_core::RunId) -> Option<String> {
     let events = agent.events(run, 0).await.unwrap();
@@ -92,10 +97,13 @@ async fn an_agent_call_is_journaled_and_replays_without_a_provider_call() {
         Some("LGTM")
     );
 
+    assert_eq!(closed(&fixture), 1, "the finished run's session is closed");
+
     let recorder = Recorder::default();
     let resumed = run_workflow(options(&store, "w1", &recorder), flow).await;
     assert_eq!(resumed.unwrap(), "LGTM");
     assert_eq!(fixture.provider.requests().len(), 1);
+    assert_eq!(closed(&fixture), 1, "a replay opens no session");
     let replayed = &recorder.events()[0];
     assert_eq!(replayed.kind, WorkflowKind::AgentReplayed);
     assert_eq!(
@@ -155,9 +163,11 @@ async fn a_failed_agent_call_runs_a_fresh_run_on_resume() {
     assert_eq!(name, "review");
     assert!(source.to_string().contains("bad request"), "{source}");
     assert!(stored(&store, "w3").await.records.is_empty());
+    assert_eq!(closed(&fixture), 1, "the failed run's session is closed");
 
     let resumed = run_workflow(options(&store, "w3", &Recorder::default()), flow).await;
     assert_eq!(resumed.unwrap(), "LGTM");
+    assert_eq!(closed(&fixture), 2);
     let fresh = run_id("w3", 1);
     assert_eq!(
         final_text(&fixture.agent, &fresh).await.as_deref(),
@@ -178,6 +188,7 @@ async fn an_agent_call_waiting_for_approval_finishes_after_the_host_approves() {
     };
     let message = source.to_string();
     assert!(message.contains(run.as_str()) && message.contains("approval"));
+    assert_eq!(closed(&fixture), 0, "the approval resumes on this session");
 
     let answers = HashMap::from([("c1".to_owned(), ApprovalResponse::Allow)]);
     let approve = fixture
@@ -187,6 +198,7 @@ async fn an_agent_call_waiting_for_approval_finishes_after_the_host_approves() {
     let resumed = run_workflow(options(&store, "w4", &Recorder::default()), flow).await;
     assert_eq!(resumed.unwrap(), "edited");
     assert_eq!(fixture.provider.requests().len(), 2);
+    assert_eq!(closed(&fixture), 1);
 }
 
 #[tokio::test]
