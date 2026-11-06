@@ -126,11 +126,17 @@ weakest a DSN may ask for, in the order `disable`, `allow`, `prefer`,
 refuses a DSN with `sslmode=require` or none. An entry or DSN without
 `sslmode` has the server's default, `PGSSLMODE` or else `prefer`, so a DSN
 with `sslmode=disable` needs an entry that says so. An `mcp_commands` entry
-may not list `PATH`, `BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`, `PYTHONPATH`,
-`PYTHONHOME`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `NODE_PATH`, `PERL5LIB`,
-`PERL5OPT`, `RUBYLIB`, `RUBYOPT`, `CLASSPATH` or `JAVA_TOOL_OPTIONS`: they
-decide what code a program runs. A bare command name is looked up on the
-server's `PATH`; prefer absolute paths.
+may not list `PATH`, `HOME`, `XDG_CONFIG_HOME`, `BASH_ENV`, `ENV`, `LD_*`,
+`DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`,
+`NODE_OPTIONS`, `NODE_PATH`, `npm_config_*` (in any case), `PIP_*`, `UV_*`,
+`PERL5LIB`, `PERLLIB`, `PERL5OPT`, `RUBYLIB`, `RUBYOPT`, `GEM_HOME`,
+`GEM_PATH`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+`JDK_JAVA_OPTIONS` or `GCONV_PATH`: they decide what code a program runs, or
+which rc and config files it reads (an `.npmrc` under `HOME` can set
+`node-options` for `npx`). That list is best effort, not a guarantee: a
+program may read other variables, so list only names whose effect on that
+program you know. A bare command name is looked up on the server's `PATH`;
+prefer absolute paths.
 
 ---
 

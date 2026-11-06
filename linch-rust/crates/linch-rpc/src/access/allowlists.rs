@@ -59,34 +59,54 @@ pub struct McpCommand {
     #[serde(default)]
     pub args: Vec<String>,
     /// Names of the variables the transport's `env` may set; none when
-    /// absent. `PATH` and variables that decide what code a program loads
-    /// (`LD_*`, `DYLD_*`, `PYTHONPATH`, `NODE_OPTIONS`, ...) cannot be
-    /// listed.
+    /// absent. `PATH`, `HOME` and variables known to decide what code a
+    /// program loads or which config files it reads (`LD_*`, `DYLD_*`,
+    /// `PYTHONPATH`, `NODE_OPTIONS`, `npm_config_*`, `PIP_*`, ...) cannot
+    /// be listed. That list is best effort: a program may read others, so
+    /// list only names whose effect on the program you know.
     #[serde(default)]
     pub env: Vec<String>,
 }
 
-/// Variables that choose which code a program loads or runs first; an
-/// [`McpCommand`] may not let a client set them.
-const CODE_LOADING_ENV: [&str; 14] = [
+/// Variables that choose which code a program loads or runs first, or
+/// where it finds the rc and config files that can (`HOME`, as for an
+/// `.npmrc` whose `node-options` `npx` obeys); an [`McpCommand`] may not
+/// let a client set them. Best effort: these are the well-known ones.
+const CODE_LOADING_ENV: [&str; 23] = [
     "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
     "BASH_ENV",
     "ENV",
     "PYTHONPATH",
     "PYTHONHOME",
     "PYTHONSTARTUP",
+    "PYTHONUSERBASE",
     "NODE_OPTIONS",
     "NODE_PATH",
     "PERL5LIB",
+    "PERLLIB",
     "PERL5OPT",
     "RUBYLIB",
     "RUBYOPT",
+    "GEM_HOME",
+    "GEM_PATH",
     "CLASSPATH",
     "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "GCONV_PATH",
 ];
 
+/// Prefixes of the same: the dynamic loaders' variables, and the settings
+/// pip and uv read (an index URL, a config file).
+const CODE_LOADING_PREFIXES: [&str; 4] = ["LD_", "DYLD_", "PIP_", "UV_"];
+
 fn loads_code(name: &str) -> bool {
-    CODE_LOADING_ENV.contains(&name) || name.starts_with("LD_") || name.starts_with("DYLD_")
+    // npm reads `npm_config_*` in any case.
+    let npm = (name.get(..11)).is_some_and(|head| head.eq_ignore_ascii_case("npm_config_"));
+    npm || CODE_LOADING_ENV.contains(&name)
+        || (CODE_LOADING_PREFIXES.iter()).any(|prefix| name.starts_with(prefix))
 }
 
 /// Where a Postgres DSN connects, as whom, and how strictly it asks for
@@ -310,8 +330,8 @@ impl Allowlists {
     /// lists. A bare program name is looked up on the server's `PATH`.
     ///
     /// Raises:
-    ///     AccessError: If an entry lists `PATH` or a variable that decides
-    ///         what code a program loads.
+    ///     AccessError: If an entry lists `PATH`, `HOME` or another
+    ///         variable known to decide what code a program loads.
     pub fn mcp_commands(mut self, commands: &[McpCommand]) -> Result<Self, AccessError> {
         for (index, entry) in commands.iter().enumerate() {
             if let Some(name) = entry.env.iter().find(|name| loads_code(name)) {

@@ -110,6 +110,23 @@ fn an_mcp_entry_never_lets_a_client_choose_what_code_loads() {
         "DYLD_INSERT_LIBRARIES",
         "PYTHONPATH",
         "NODE_OPTIONS",
+        // Where programs find their rc and config files.
+        "HOME",
+        "XDG_CONFIG_HOME",
+        // Package managers' settings, such as an index or a registry.
+        "npm_config_registry",
+        "NPM_CONFIG_USERCONFIG",
+        "Npm_Config_Node_Options",
+        "PIP_INDEX_URL",
+        "UV_INDEX_URL",
+        // Load paths and options of other runtimes.
+        "PYTHONUSERBASE",
+        "PERLLIB",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "GCONV_PATH",
+        "GEM_HOME",
+        "GEM_PATH",
     ] {
         let error = Allowlists::new()
             .mcp_commands(&[entry("LDAP_URL"), entry(name)])
@@ -119,6 +136,16 @@ fn an_mcp_entry_never_lets_a_client_choose_what_code_loads() {
             "{name}: {error}"
         );
         assert!(error.to_string().contains(name), "{error}");
+    }
+    // Names that only start like a refused one stay allowed.
+    for name in [
+        "HOMEBREW_PREFIX",
+        "PIPELINE_ID",
+        "UVICORN_PORT",
+        "GEM_TOKEN",
+    ] {
+        let listed = Allowlists::new().mcp_commands(&[entry(name)]);
+        assert!(listed.is_ok(), "{name}");
     }
     let allow = Allowlists::new()
         .mcp_commands(&[entry("LDAP_URL")])
