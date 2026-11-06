@@ -4,7 +4,8 @@
 //! returns `isError`, `image` returns text and an image, `pid` returns the
 //! server's process id, and `slow` waits until the client cancels it.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rmcp::model::{
@@ -27,8 +28,14 @@ pub struct Fixture {
     pub cancelled: Arc<Notify>,
     /// `subscriptions/listen` streams opened so far.
     pub subscriptions: Arc<AtomicUsize>,
+    /// While set, `tools/list` never answers.
+    pub hang_lists: Arc<AtomicBool>,
+    /// Notified when a `tools/list` request starts hanging.
+    pub hung: Arc<Notify>,
     /// Whether to answer `server/discover` like a pre-2026-07-28 server.
     legacy: bool,
+    /// Whether every `tools/list` page holds one new tool and a next cursor.
+    endless: bool,
 }
 
 impl Fixture {
@@ -38,13 +45,22 @@ impl Fixture {
             version: Arc::new(watch::Sender::new(0)),
             cancelled: Arc::new(Notify::new()),
             subscriptions: Arc::new(AtomicUsize::new(0)),
+            hang_lists: Arc::new(AtomicBool::new(false)),
+            hung: Arc::new(Notify::new()),
             legacy: false,
+            endless: false,
         }
     }
 
     /// A server that only speaks the `initialize` lifecycle.
     pub fn legacy(mut self) -> Self {
         self.legacy = true;
+        self
+    }
+
+    /// A server whose tool list never ends: page `n` holds tool `p<n>`.
+    pub fn endless(mut self) -> Self {
+        self.endless = true;
         self
     }
 
@@ -63,7 +79,7 @@ impl Fixture {
 }
 
 /// A tool taking an optional string `text`.
-pub fn tool(name: &'static str, description: &'static str) -> Tool {
+pub fn tool(name: impl Into<Cow<'static, str>>, description: &'static str) -> Tool {
     let Value::Object(schema) = json!({
         "type": "object",
         "properties": {"text": {"type": "string"}},
@@ -112,9 +128,23 @@ impl ServerHandler for TestServer {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        if self.0.hang_lists.load(Ordering::SeqCst) {
+            self.0.hung.notify_one();
+            context.ct.cancelled().await;
+            return Err(ErrorData::internal_error("cancelled", None));
+        }
+        if self.0.endless {
+            let page: u64 = request
+                .and_then(|request| request.cursor)
+                .map_or(0, |cursor| cursor.parse().unwrap());
+            let mut result =
+                ListToolsResult::with_all_items(vec![tool(format!("p{page}"), "Page.")]);
+            result.next_cursor = Some((page + 1).to_string());
+            return Ok(result);
+        }
         Ok(ListToolsResult::with_all_items(self.0.tools()))
     }
 

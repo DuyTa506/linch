@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use linch_core::ToolRegistry;
+use rmcp::model::PaginatedRequestParams;
 use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
@@ -14,6 +15,12 @@ use crate::config::{ConfigError, McpServerConfig, ReconnectPolicy};
 use crate::connector::{ConnectError, Connector, Handler, connector};
 use crate::listener::Listener;
 use crate::tool::{Conn, Link, ToolSpec};
+
+/// Most `tools/list` pages read in one listing.
+const MAX_LIST_PAGES: usize = 100;
+
+/// Most tools kept from one listing; the rest are left out.
+const MAX_TOOLS: usize = 1_000;
 
 /// Where a server's connection stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,15 +223,17 @@ impl Supervisor {
                     () = close.cancelled() => break false,
                     () = lost.cancelled() => break false,
                     _ = &mut ended => break true,
-                    listed = peer.list_all_tools() => match listed {
-                        Ok(tools) => self.sync(tools),
-                        Err(ServiceError::TransportSend(_) | ServiceError::TransportClosed) => {
-                            lost.cancel();
+                    listed = tokio::time::timeout(self.policy.attempt_timeout, list_tools(&peer)) => {
+                        match listed {
+                            Ok(Ok(tools)) => self.sync(tools),
+                            Ok(Err(
+                                ServiceError::TransportSend(_) | ServiceError::TransportClosed,
+                            )) => lost.cancel(),
+                            // A failed or timed-out relist keeps the current
+                            // tools; the next change or reconnect lists again.
+                            _ => {}
                         }
-                        // Keep the current tools; the next change or
-                        // reconnect lists again.
-                        Err(_) => {}
-                    },
+                    }
                 },
             }
         };
@@ -320,7 +329,7 @@ async fn prepare(
     let listener = Listener::start(peer, list_changed, lost)
         .await
         .map_err(ConnectError::Listen)?;
-    match peer.list_all_tools().await {
+    match list_tools(peer).await {
         Ok(tools) => Ok((listener, tools)),
         Err(error) => {
             if let Some(listener) = listener {
@@ -329,6 +338,26 @@ async fn prepare(
             Err(ConnectError::ListTools(error))
         }
     }
+}
+
+/// Follow `tools/list` pages to the end, or until [`MAX_LIST_PAGES`] pages
+/// or [`MAX_TOOLS`] tools, so a server cannot keep the client listing or
+/// holding tools without end.
+async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, ServiceError> {
+    let mut tools = Vec::new();
+    let mut cursor = None;
+    for _ in 0..MAX_LIST_PAGES {
+        let page = peer
+            .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+            .await?;
+        tools.extend(page.tools);
+        cursor = page.next_cursor;
+        if cursor.is_none() || tools.len() >= MAX_TOOLS {
+            break;
+        }
+    }
+    tools.truncate(MAX_TOOLS);
+    Ok(tools)
 }
 
 fn lock(catalog: &Mutex<Catalog>) -> MutexGuard<'_, Catalog> {
