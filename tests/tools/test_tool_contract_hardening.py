@@ -18,8 +18,12 @@ def test_tool_context_keeps_file_tracker_positional_and_timeout_keyword_only() -
     assert context.tool_timeout_s is None
 
 
-@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, math.nan, math.inf, "10"])
+@pytest.mark.parametrize("value", [True, -1], ids=["wrong-type", "non-positive"])
 def test_bash_timeout_ms_rejects_invalid_values(value: object) -> None:
+    # `type(x) is not int` is a single compound check: any non-int type (bool,
+    # float, nan/inf, str) trips the same branch as `True`; any int <= 0 trips
+    # the same branch as `-1`. False/0/1.5/nan/inf/"10" are branch-duplicates
+    # of these two and were dropped (verified against the source check).
     from linch.tools.builtin import BashTool
 
     with pytest.raises(ValueError, match="timeout_ms"):
@@ -27,15 +31,19 @@ def test_bash_timeout_ms_rejects_invalid_values(value: object) -> None:
 
 
 @pytest.mark.parametrize("field", ["max_processes", "max_runtime_ms"])
-@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, math.nan, math.inf])
+@pytest.mark.parametrize("value", [1.5, -1], ids=["wrong-type", "non-positive"])
 def test_bash_process_limits_reject_invalid_values(field: str, value: object) -> None:
+    # Same compound-check reasoning as test_bash_timeout_ms_rejects_invalid_values:
+    # True/False/0/nan/inf are branch-duplicates of 1.5 (wrong type) or -1 (non-positive).
     from linch.tools.builtin import BashTool
 
     with pytest.raises(ValueError, match="process limits"):
         BashTool(**{field: value})
 
 
-@pytest.mark.parametrize("value", [True, 0, -1, math.nan, math.inf])
+@pytest.mark.parametrize(
+    "value", [True, -1, math.inf], ids=["bool-type", "non-positive", "non-finite"]
+)
 @pytest.mark.asyncio
 async def test_bash_rejects_invalid_context_timeout(tmp_path, value: object) -> None:
     from linch.tools.base import ToolContext

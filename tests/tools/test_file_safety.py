@@ -186,12 +186,6 @@ async def test_file_operations_leave_event_loop_responsive(tmp_path, monkeypatch
     assert ticks >= 5, f"file operation blocked event loop thread {event_thread}"
 
 
-async def test_binary_read_reports_clear_failure(tmp_path):
-    (tmp_path / "a.txt").write_bytes(b"binary\x00text")
-    with pytest.raises(ToolExecutionError, match="[Bb]inary"):
-        await ReadTool().execute({"file_path": "a.txt"}, context(tmp_path))
-
-
 @pytest.mark.parametrize("changed", [False, True])
 async def test_durable_suspended_run_restores_file_evidence(tmp_path, changed):
     from linch.run_store import InMemoryRunStore

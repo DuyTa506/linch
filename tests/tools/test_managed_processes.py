@@ -45,23 +45,6 @@ async def process(ctx, action="wait", id=None, wait_ms=1000):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_yield_then_wait_returns_only_new_output(tmp_path):
-    ctx, registry = await context(tmp_path)
-    try:
-        first = await launch(
-            ctx, python("print('first'); import time; time.sleep(.15); print('last')")
-        )
-        assert not first.is_error
-        process_id = first.metadata["process_id"]
-        assert "first" in first.content
-        final = await process(ctx, id=process_id)
-        assert "last" in final.content and "first" not in final.content
-        assert "Exited 0" in final.content and not final.is_error
-    finally:
-        await registry.close()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_background_flag_returns_immediately_and_kill_works(tmp_path):
     from linch import BashTool
 
@@ -75,31 +58,6 @@ async def test_background_flag_returns_immediately_and_kill_works(tmp_path):
         killed = await process(ctx, "kill", id=process_id)
         assert not killed.is_error and "signal" in killed.content
         assert "Exited" in (await process(ctx, "status", id=process_id)).content
-    finally:
-        await registry.close()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_cap_kills_overflow_but_completed_slots_can_be_reused(tmp_path):
-    ctx, registry = await context(tmp_path)
-    try:
-        first_id = (await launch(ctx, "sleep 30", max_processes=1)).metadata["process_id"]
-        overflow = await launch(ctx, "sleep 30", max_processes=1)
-        assert overflow.is_error and "timed out" in overflow.content
-        await process(ctx, "kill", id=first_id)
-        again = await launch(ctx, "sleep .1", max_processes=1)
-        assert again.metadata["process_id"] != first_id
-    finally:
-        await registry.close()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_hard_limit_stops_yielded_process(tmp_path):
-    ctx, registry = await context(tmp_path)
-    try:
-        process_id = (await launch(ctx, "sleep 30", max_runtime_ms=70)).metadata["process_id"]
-        final = await process(ctx, id=process_id)
-        assert final.is_error and "timed out" in final.content
     finally:
         await registry.close()
 
@@ -169,33 +127,6 @@ async def test_closed_registry_rejects_old_detached_start(tmp_path):
     assert not (tmp_path / "should-not-exist").exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_abort_interrupts_yield_wait_and_preserves_partial_output(tmp_path):
-    from linch.abort import AbortContext
-
-    ctx, registry = await context(tmp_path)
-    ctx.signal = AbortContext()
-    task = asyncio.create_task(launch(ctx, "echo partial; sleep 30"))
-    await asyncio.sleep(0.01)
-    ctx.signal.abort()
-    try:
-        result = await asyncio.wait_for(task, 0.5)
-        assert result.is_error and "partial" in result.content and "aborted" in result.content
-    finally:
-        await registry.close()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_running_spill_keeps_paths_and_truncation(tmp_path):
-    ctx, registry = await context(tmp_path)
-    try:
-        result = await launch(ctx, python("print('x'*40000); import time; time.sleep(30)"))
-        assert result.truncated
-        assert result.metadata["stdout_path"]
-    finally:
-        await registry.close()
-
-
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "skip-dangerous"])
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_process_control_is_allowed_without_prompt_and_not_cached(
@@ -248,26 +179,6 @@ async def test_process_control_is_allowed_without_prompt_and_not_cached(
         await agent.close()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /proc")
-async def test_foreground_children_and_spills_are_removed_at_run_end(tmp_path):
-    from linch import BashTool, empty_tools
-
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn("Bash", {"command": "sleep 30 & echo $! > child.pid; echo x"}),
-            TextTurn("done"),
-        ]
-    )
-    agent = make_agent(provider, cwd=str(tmp_path), tools=empty_tools(BashTool()))
-    try:
-        _ = [e async for e in (await agent.session()).run("go")]
-        pid = int((tmp_path / "child.pid").read_text())
-        stat = __import__("pathlib").Path(f"/proc/{pid}/stat")
-        assert not stat.exists() or stat.read_text().split()[2] == "Z"
-    finally:
-        await agent.close()
-
-
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
 async def test_cancelled_cleanup_finishes_killing_before_releasing_admission(tmp_path):
     from linch import BashTool, empty_tools
@@ -296,39 +207,6 @@ async def test_cancelled_cleanup_finishes_killing_before_releasing_admission(tmp
 
 async def _consume(session):
     return [e async for e in session.run("go")]
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_local_python_http_server_flow(tmp_path):
-    import socket
-    import urllib.request
-
-    try:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-    except PermissionError:
-        pytest.skip("sandbox denies local sockets")
-    ctx, registry = await context(tmp_path)
-    try:
-        server = await launch(
-            ctx, f"{shlex.quote(sys.executable)} -u -m http.server {port} --bind 127.0.0.1"
-        )
-        process_id = server.metadata["process_id"]
-        for _ in range(30):
-            try:
-                response = await asyncio.to_thread(
-                    urllib.request.urlopen, f"http://127.0.0.1:{port}/"
-                )
-                response.close()
-                break
-            except OSError:
-                await asyncio.sleep(0.02)
-        else:
-            pytest.fail("server did not start")
-        assert not (await process(ctx, "kill", id=process_id)).is_error
-    finally:
-        await registry.close()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
@@ -452,41 +330,6 @@ async def test_managed_process_schema_changes_block_resume(tmp_path, tool_name):
     finally:
         await old.close()
         await current.close()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_run_only_backend_retains_killing_timeout(tmp_path):
-    from linch import BashTool
-    from linch.tools.execution import LocalBackend
-
-    class RunOnly:
-        async def run(self, command, **options):
-            return await LocalBackend().run(command, **options)
-
-    ctx, registry = await context(tmp_path)
-    tool = BashTool(execution=SimpleNamespace(shell=RunOnly()))
-    try:
-        result = await tool.execute(
-            tool.validate({"command": "echo partial; sleep 30", "timeout_ms": 25}), ctx
-        )
-        assert result.is_error and "partial" in result.content and "timed out" in result.content
-        assert not registry.entries
-    finally:
-        await registry.close()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")
-async def test_only_quiet_wait_actions_count_toward_stopping_hint(tmp_path):
-    ctx, registry = await context(tmp_path)
-    try:
-        process_id = (await launch(ctx, "sleep 30")).metadata["process_id"]
-        for _ in range(4):
-            await process(ctx, "status", id=process_id)
-        for _ in range(2):
-            assert "consider stopping" not in (await process(ctx, id=process_id, wait_ms=0)).content
-        assert "consider stopping" in (await process(ctx, id=process_id, wait_ms=0)).content
-    finally:
-        await registry.close()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell or process groups")

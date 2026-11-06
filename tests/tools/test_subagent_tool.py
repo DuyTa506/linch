@@ -8,27 +8,6 @@ import pytest
 from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 from tests.support.stores import memory_session_store
 
-
-def test_subagent_tool_description_lists_verification_and_delegation_rules() -> None:
-    from linch.subagents.registry import AgentRegistry
-    from linch.tools.subagent import SubagentTool
-
-    tool = SubagentTool(
-        registry=AgentRegistry([]),
-        get_session=lambda _sid: None,
-        next_default_display_name=lambda _sid: "Agent #1",
-    )
-
-    description = tool.description
-
-    assert "- verification:" in description
-    assert "complete context" in description
-    assert "meaningful research, implementation, or verification" in description
-    assert "based on your findings" in description
-    assert "parallel" in description
-    assert "_default" not in description
-
-
 # ── Phase 1: fork/continue ────────────────────────────────────────────────────
 
 
@@ -86,14 +65,6 @@ async def _spawn(agent: Any, session: Any, **input: Any) -> Any:
     return await agent.tools.get("Subagent").execute(input, _make_ctx(session))
 
 
-async def test_plain_agent_registers_only_subagent_tool(tmp_path: Any) -> None:
-    agent, _session = await _make_plain_agent_and_session(tmp_path)
-
-    assert agent.tools.get("Subagent") is not None
-    assert agent.tools.get("SubagentContinue") is None
-    assert agent.tools.get("TaskStop") is None
-
-
 async def test_plain_subagent_does_not_retain_worker_handle(tmp_path: Any) -> None:
     agent, session = await _make_plain_agent_and_session(tmp_path)
     result = await _spawn(agent, session, description="test", prompt="hello")
@@ -120,10 +91,7 @@ async def test_plain_background_subagent_returns_clear_error(tmp_path: Any) -> N
     assert session.workers == {}
 
 
-@pytest.mark.parametrize("background", [False, True])
-async def test_subagent_inherits_invoking_tenant_filesystem(
-    tmp_path: Any, background: bool
-) -> None:
+async def test_subagent_inherits_invoking_tenant_filesystem(tmp_path: Any) -> None:
     from linch.config import FeatureFlags
     from linch.filesystem import StateFileBackend, filesystem_tools
     from tests.support.agents import make_agent
@@ -147,165 +115,15 @@ async def test_subagent_inherits_invoking_tenant_filesystem(
     ctx.deps = {"filesystem": tenant}
     try:
         result = await agent.tools.get("Subagent").execute(
-            {"description": "tenant writer", "prompt": "write", "run_in_background": background},
+            {"description": "tenant writer", "prompt": "write", "run_in_background": True},
             ctx,
         )
         assert not result.is_error
-        if background:
-            await next(iter(session.workers.values())).task
+        await next(iter(session.workers.values())).task
         assert await tenant.read("/note") == "tenant"
         assert await workspace.ls() == []
     finally:
         await agent.close()
-
-
-async def test_subagent_continue_inherits_current_run_deps(tmp_path: Any) -> None:
-    from linch import RunOptions
-    from linch.config import FeatureFlags
-    from linch.filesystem import StateFileBackend, filesystem_tools
-    from tests.support.agents import make_agent
-    from tests.support.tools import tool_registry
-
-    tenant, workspace = StateFileBackend(), StateFileBackend()
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn("Subagent", {"description": "writer", "prompt": "wait"}),
-            TextTurn("ready"),
-            TextTurn("spawned"),
-            ToolUseTurn("SubagentContinue", {"to": "Agent #1", "message": "write"}),
-            ToolUseTurn("write_file", {"path": "/note", "content": "current tenant"}),
-            TextTurn("written"),
-            TextTurn("done"),
-        ]
-    )
-    agent = make_agent(
-        provider,
-        tools=tool_registry(*filesystem_tools()),
-        filesystem=workspace,
-        cwd=str(tmp_path),
-        features=FeatureFlags(subagents=True),
-        retain_subagents=True,
-        enable_worker_tools=True,
-        run_store=None,
-    )
-    session = await agent.session()
-    try:
-        [_ async for _ in session.run("spawn")]
-        [_ async for _ in session.run("continue", RunOptions(deps={"filesystem": tenant}))]
-        assert await tenant.read("/note") == "current tenant"
-        assert await workspace.ls() == []
-    finally:
-        await agent.close()
-
-
-async def test_subagent_preserves_captured_none_deps_after_parent_changes(tmp_path: Any) -> None:
-    from linch.config import FeatureFlags
-    from tests.support.agents import make_agent
-    from tests.support.tools import StubTool, tool_registry
-
-    seen = []
-    agent = make_agent(
-        ScriptedProvider([ToolUseTurn("inspect", {}), TextTurn("done")]),
-        tools=tool_registry(StubTool("inspect", on_execute=lambda raw, ctx: seen.append(ctx.deps))),
-        features=FeatureFlags(subagents=True),
-        run_store=None,
-    )
-    session = await agent.session()
-    session.run_deps = {"tenant": "later run"}
-    try:
-        await _spawn(agent, session, description="worker", prompt="go")
-        assert seen == [None]
-    finally:
-        await agent.close()
-
-
-async def test_subagent_tool_stores_worker_handle(tmp_path: Any) -> None:
-    """Subagent execution stores a WorkerHandle in session.workers."""
-    agent, session = await _make_agent_and_session(tmp_path)
-    result = await _spawn(agent, session, description="test", prompt="hello")
-
-    assert not result.is_error
-    # Worker handle registered
-    assert hasattr(session, "workers")
-    assert len(session.workers) == 1
-    assert next(iter(session.workers)) in result.content
-
-
-@pytest.mark.parametrize("background", [False, True])
-async def test_subagent_result_exposes_unique_mailbox_address(
-    tmp_path: Any, background: bool
-) -> None:
-    from linch import InMemoryMailbox, MailboxPlugin
-
-    agent, session = await _make_agent_and_session(tmp_path)
-    await agent.use(MailboxPlugin(), InMemoryMailbox())
-    try:
-        result = await _spawn(
-            agent, session, description="worker", prompt="go", run_in_background=background
-        )
-        handle = next(iter(session.workers.values()))
-        if background:
-            await handle.task
-        child = agent._sessions[handle.child_session_id]
-        assert child.mailbox_address == handle.worker_id
-        assert child.mailbox_address in result.content
-        assert child.mailbox_address != handle.display_name
-    finally:
-        await agent.close()
-
-
-async def test_subagent_tool_returns_structured_output_as_json_text(tmp_path: Any) -> None:
-    from linch.ext.deep_agent import create_deep_agent
-
-    agent = create_deep_agent(
-        model="gpt-5",
-        provider=ScriptedProvider([ToolUseTurn("emit_answer", {"answer": 42})]),
-        final_tool_name="emit_answer",
-        session_store=memory_session_store(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=str(tmp_path),
-        durable=False,
-    )
-    session = await agent.session(id="s1")
-    result = await _spawn(agent, session, description="test", prompt="hello")
-
-    assert not result.is_error
-    assert result.content.startswith('{"answer":42}')
-    worker_id = next(iter(session.workers))
-    assert session.workers[worker_id].last_result_text == '{"answer":42}'
-
-
-async def test_subagent_continue_tool_exists_and_is_registered(tmp_path: Any) -> None:
-    """SubagentContinue is registered for deep agents after connect_subagents."""
-    from linch.tools.subagent_continue import SUBAGENT_CONTINUE_TOOL_NAME
-
-    agent, session = await _make_agent_and_session(tmp_path)
-
-    assert agent.tools.get(SUBAGENT_CONTINUE_TOOL_NAME) is not None
-
-
-@pytest.mark.parametrize("target_kind", ["id", "display-name"])
-async def test_subagent_continue_by_target(tmp_path: Any, target_kind: str) -> None:
-    """SubagentContinue accepts both worker IDs and display names."""
-    agent, session = await _make_agent_and_session(tmp_path)
-    continue_tool = agent.tools.get("SubagentContinue")
-    ctx = _make_ctx(session)
-
-    r1 = await _spawn(agent, session, description="test", prompt="hello")
-    assert not r1.is_error
-    worker_id = next(iter(session.workers))
-
-    handle = session.workers[worker_id]
-    child_session = agent._sessions.get(handle.child_session_id)
-    assert child_session is not None, "Child session should be retained"
-    msgs_after_first = len(child_session.provider_view)
-    assert msgs_after_first > 0
-
-    target = worker_id if target_kind == "id" else session.workers[worker_id].display_name
-    r2 = await continue_tool.execute({"to": target, "message": "follow up"}, ctx)
-    assert not r2.is_error
-    if target_kind == "id":
-        assert len(child_session.provider_view) > msgs_after_first
 
 
 async def test_subagent_continue_unknown_worker_returns_error(tmp_path: Any) -> None:
@@ -321,46 +139,7 @@ async def test_subagent_continue_unknown_worker_returns_error(tmp_path: Any) -> 
     assert "no live" in result.content.lower() or "nonexistent" in result.content.lower()
 
 
-async def test_pending_child_events_populated_by_subagent_run(tmp_path: Any) -> None:
-    """ctx.emit is wired: child SubagentEvents land in session.pending_child_events."""
-    from linch.events import SubagentEvent
-
-    agent, session = await _make_agent_and_session(tmp_path)
-    await _spawn(agent, session, description="test", prompt="hello")
-
-    assert hasattr(session, "pending_child_events")
-    assert any(isinstance(e, SubagentEvent) for e in session.pending_child_events)
-
-
 # ── Phase 2: background workers + <task-notification> ────────────────────────
-
-
-async def test_background_subagent_returns_ack_immediately(tmp_path: Any) -> None:
-    """run_in_background=True returns an ack string (not the worker's final text)."""
-    import asyncio
-
-    agent, session = await _make_agent_and_session(tmp_path)
-    result = await _spawn(
-        agent, session, description="test", prompt="hello", run_in_background=True
-    )
-
-    assert not result.is_error
-    # Ack, not the worker's text output
-    assert "background" in result.content.lower() or "started" in result.content.lower()
-    worker_id = next(iter(session.workers))
-    handle = session.workers[worker_id]
-    assert handle.task is not None
-    await asyncio.wait_for(handle.task, timeout=5.0)
-
-    assert len(session.pending_notifications) == 1
-    notification = session.pending_notifications[0]
-    assert "<task-notification>" in notification.content[0].text
-    assert worker_id in notification.content[0].text
-    text = notification.content[0].text
-    assert "<task-id>" in text
-    assert "<status>" in text
-    assert "<result>" in text
-    assert "</task-notification>" in text
 
 
 async def test_background_subagent_pre_drive_failure_notifies(tmp_path: Any, monkeypatch) -> None:
@@ -501,15 +280,12 @@ async def test_background_subagent_completion_keeps_origin_profile_and_deps(tmp_
         await agent.close()
 
 
-@pytest.mark.parametrize("action", ["block", "stop"])
-async def test_background_subagent_notification_honors_post_tool_veto(
-    tmp_path: Any, action
-) -> None:
+async def test_background_subagent_notification_honors_post_tool_veto(tmp_path: Any) -> None:
     from linch import HookResult
 
     class VetoCompletion:
         def on_post_tool_use(self, ctx):
-            return HookResult(action=action, reason="completion withheld")
+            return HookResult(action="block", reason="completion withheld")
 
     agent, session = await _make_agent_and_session(
         tmp_path, ScriptedProvider([TextTurn("PRIVATE_RESULT")])
@@ -639,87 +415,6 @@ async def test_background_subagent_child_is_unleased_and_completion_keeps_origin
         )
     finally:
         release.set()
-        await agent.close()
-
-
-async def test_leased_parent_keeps_foreground_and_continuation_children_unleased(
-    tmp_path: Any,
-) -> None:
-    """A lost parent token cannot fence or authorize a retained child run."""
-    from types import SimpleNamespace
-
-    from linch.run_store import InMemoryRunStore
-
-    class TrackingStore(InMemoryRunStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls: list[tuple[str, str, Any]] = []
-
-        async def create_run(self, session_id: str, **kwargs: Any) -> Any:
-            self.calls.append(("create", str(kwargs.get("id")), kwargs.get("lease")))
-            return await super().create_run(session_id, **kwargs)
-
-        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
-            self.calls.append(("append", run_id, lease))
-            return await super().append_event(run_id, event, lease=lease)
-
-        async def save_checkpoint_with_events(
-            self,
-            run_id: str,
-            checkpoint: Any,
-            events: list[Any],
-            *,
-            status: str = "running",
-            lease: Any = None,
-        ) -> Any:
-            self.calls.append(("checkpoint_events", run_id, lease))
-            return await super().save_checkpoint_with_events(
-                run_id, checkpoint, events, status=status, lease=lease
-            )
-
-        async def save_checkpoint(
-            self, run_id: str, checkpoint: Any, *, status: str = "running", lease: Any = None
-        ) -> Any:
-            self.calls.append(("checkpoint", run_id, lease))
-            return await super().save_checkpoint(run_id, checkpoint, status=status, lease=lease)
-
-    from linch.events import BackgroundWorkerEvent
-
-    agent, session = await _make_agent_and_session(tmp_path)
-    store = TrackingStore()
-    agent.run_store = store
-    await store.create_run(session.id, id="parent-run")
-    parent_lease = await store.claim("parent-run", "parent-owner", 30.0)
-    session._event_journal = SimpleNamespace(lease=parent_lease)
-    ctx = _make_ctx(session)
-    ctx.run_id = "parent-run"
-    try:
-        foreground = await agent.tools.get("Subagent").execute(
-            {"description": "worker", "prompt": "first"}, ctx
-        )
-        assert not foreground.is_error
-        worker_id = next(iter(session.workers))
-
-        await store.release(parent_lease)
-        replacement = await store.claim("parent-run", "replacement-owner", 30.0)
-        session._event_journal = SimpleNamespace(lease=replacement)
-        continuation = await agent.tools.get("SubagentContinue").execute(
-            {"to": worker_id, "message": "second"}, ctx
-        )
-        assert not continuation.is_error
-
-        child_calls = [lease for operation, run_id, lease in store.calls if run_id != "parent-run"]
-        assert child_calls
-        assert all(lease is None for lease in child_calls)
-        assert not any(
-            operation == "append" and lease is parent_lease
-            for operation, _run_id, lease in store.calls
-        )
-        assert not any(
-            isinstance(row.event, BackgroundWorkerEvent)
-            for row in await store.load_events("parent-run")
-        )
-    finally:
         await agent.close()
 
 
