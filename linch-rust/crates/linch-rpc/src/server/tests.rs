@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use linch::hooks::{ContextBuild, ContextBuildRequest, ContextBuildResponse};
 use linch::provider::scripted::TurnBuilder;
-use linch::{AgentConfig, Hooks, Tool, ToolContext, ToolRegistry, ToolResult, ToolScope};
+use linch::{AgentConfig, CallbackError, Hook, Hooks, ToolRegistry};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -55,46 +56,41 @@ async fn past_the_cap_the_read_loop_waits_for_a_call_to_finish() {
     );
 }
 
+/// A `context_build` hook that panics. A panicking tool no longer panics
+/// the run (it becomes a tool error); a hook still does.
 struct Panics;
 
 #[async_trait]
-impl Tool for Panics {
-    fn name(&self) -> &str {
-        "Panics"
+impl Hook<ContextBuild> for Panics {
+    fn policy_id(&self) -> &str {
+        "panics"
     }
 
-    fn description(&self) -> &str {
-        "Always panics."
+    fn policy_version(&self) -> u32 {
+        1
     }
 
-    fn input_schema(&self) -> &JsonObject {
-        static SCHEMA: std::sync::OnceLock<JsonObject> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| json!({"type": "object"}).as_object().unwrap().clone())
-    }
-
-    fn scope(&self) -> ToolScope {
-        ToolScope::Read
-    }
-
-    async fn execute(&self, _: JsonObject, _: ToolContext) -> ToolResult {
-        panic!("a tool bug");
+    async fn call(&self, _: &ContextBuildRequest) -> Result<ContextBuildResponse, CallbackError> {
+        panic!("a hook bug");
     }
 }
 
 #[tokio::test]
 async fn a_run_that_panics_ends_with_an_error_and_frees_its_id() {
     let (server, mut lines) = server();
-    let turn = TurnBuilder::new("m")
-        .tool_call("call_1", "Panics", &json!({}))
-        .build();
+    let turn = TurnBuilder::new("m").text("done").build();
     let config: AgentConfig = serde_json::from_value(json!({
         "namespace": "t", "spec": {"model": "m"},
         "provider": {"id": "scripted", "turns": [turn]}}))
     .unwrap();
-    let tools = Arc::new(ToolRegistry::new());
-    let _ = tools.register(Arc::new(Panics)).unwrap();
+    let hooks = Hooks::default();
+    let _ = hooks.context_build.register(Arc::new(Panics)).unwrap();
     let opened = config
-        .open_with(tools, Arc::new(Hooks::default()), &linch::PgPools::new())
+        .open_with(
+            Arc::new(ToolRegistry::new()),
+            Arc::new(hooks),
+            &linch::PgPools::new(),
+        )
         .await
         .unwrap();
     lock(&server.0.tables)
