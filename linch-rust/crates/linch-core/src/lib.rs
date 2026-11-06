@@ -51,6 +51,9 @@ pub use provider::{
     ProviderRequest, ReasoningEffort, StreamError, ToolChoice, ToolDefinition, assemble,
 };
 pub use registration::Registration;
+pub use registry::{
+    OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
+};
 pub use run::{RunStatus, StopReason};
 pub use session_log::{LogEntry, MessageEntry, ProjectionEntry, SessionLog};
 pub use tool::{
