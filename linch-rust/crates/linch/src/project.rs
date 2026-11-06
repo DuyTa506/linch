@@ -108,6 +108,20 @@ pub(crate) async fn load(
     }
 }
 
+/// The detail of a symlink a loader skipped.
+const NOT_FOLLOWED: &str = "symlinks are not followed";
+
+/// `path` skipped as a symlink when it is one. The check reads the link
+/// itself, so a file swapped for a link after it remains a window.
+fn symlink(path: &Path) -> Option<Skipped> {
+    let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    linked.then(|| Skipped {
+        path: path.to_owned(),
+        reason: SkipReason::IoError,
+        detail: NOT_FOLLOWED.into(),
+    })
+}
+
 /// The entries of `root` sorted by name, or `None` when `root` is not a
 /// directory.
 fn entries(root: &Path) -> Option<io::Result<Vec<DirEntry>>> {

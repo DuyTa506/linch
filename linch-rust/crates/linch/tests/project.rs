@@ -300,3 +300,44 @@ fn yaml_is_read_as_yaml_1_2_with_no_repeated_key() {
         ("yes".into(), SkipReason::InvalidFrontmatter, boolean.into())
     );
 }
+
+#[test]
+fn a_symlinked_skills_agents_or_skill_md_is_never_followed() {
+    let outside = tempfile::tempdir().unwrap();
+    skill(outside.path(), "far", "description: Far.");
+    let far_agent = outside.path().join("agents").join("far.md");
+    write(&far_agent, "---\ndescription: Far.\n---\nFar.\n");
+    let not_followed = "symlinks are not followed".to_owned();
+
+    let linked = tempfile::tempdir().unwrap();
+    let config = linked.path();
+    for root in ["skills", "agents"] {
+        std::os::unix::fs::symlink(outside.path().join(root), config.join(root)).unwrap();
+    }
+    let (skills, skipped) = load_skills(config, &HashSet::new());
+    assert!(skills.is_empty(), "{skills:?}");
+    let want = (
+        "skills".to_owned(),
+        SkipReason::IoError,
+        not_followed.clone(),
+    );
+    assert_eq!(reasons(&skipped), [want]);
+    let (agents, skipped) = load_subagents(config);
+    assert!(agents.is_empty(), "{agents:?}");
+    let want = (
+        "agents".to_owned(),
+        SkipReason::IoError,
+        not_followed.clone(),
+    );
+    assert_eq!(reasons(&skipped), [want]);
+
+    let plain = tempfile::tempdir().unwrap();
+    let near = plain.path().join("skills").join("near");
+    fs::create_dir_all(&near).unwrap();
+    let target = outside.path().join("skills/far/SKILL.md");
+    std::os::unix::fs::symlink(target, near.join("SKILL.md")).unwrap();
+    let (skills, skipped) = load_skills(plain.path(), &HashSet::new());
+    assert!(skills.is_empty(), "{skills:?}");
+    let want = ("near".to_owned(), SkipReason::IoError, not_followed);
+    assert_eq!(reasons(&skipped), [want]);
+}
