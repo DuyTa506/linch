@@ -80,7 +80,7 @@ pub(super) struct Batch {
 }
 
 /// The in-memory log of the stored session `entries`.
-pub(super) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
+pub(crate) fn session_log(entries: Vec<LogEntry>) -> SessionLog {
     let mut log = SessionLog::new();
     for entry in entries {
         match entry {

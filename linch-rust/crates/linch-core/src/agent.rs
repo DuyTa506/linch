@@ -32,10 +32,12 @@ use crate::usage::Usage;
 mod builder;
 mod child;
 mod error;
+mod fork;
 mod spec;
 
 pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
+pub use fork::ForkError;
 pub use spec::AgentSpec;
 
 pub(crate) use child::ChildTools;
