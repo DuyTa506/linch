@@ -42,7 +42,9 @@
 //! [`ProviderConfig`](linch::ProviderConfig)) and are never params. The
 //! result is [`AgentOpened`](protocol::AgentOpened):
 //! `{"agent": "agent-1", "contract": "<hex digest>"}`. Handles live as long
-//! as the server.
+//! as the server. The config's `mcp_servers` are connected before the
+//! result is sent (a server's tools at that moment enter the contract) and
+//! disconnected when the server stops.
 //!
 //! **`run.start`** `{agent, session_id, prompt, principal?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
@@ -110,6 +112,7 @@
 //! | -32012 | contract not digestible | `BuildError::Contract` |
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
 //! | -32014 | store unavailable | Postgres connect or migrate |
+//! | -32015 | MCP server unavailable | first connect failed; `data.server` names it |
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |
 //! | -32022 | lease lost | `StoreError::LeaseLost` |
@@ -121,14 +124,15 @@
 //! | -32028 | reconcile | `RunError::Reconcile` |
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //!
-//! Codes from -32010 to -32014 answer `agent.open`. Codes from -32020 on
+//! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
 //!
 //! # End of input
 //!
 //! When the input ends, [`serve`] drops every active run where it stands,
-//! like a crash, so a durable (Postgres) run stays resumable; it writes the
-//! queued output and returns.
+//! like a crash, so a durable (Postgres) run stays resumable; it then
+//! disconnects every agent's MCP servers, writes the queued output and
+//! returns.
 
 #![forbid(unsafe_code)]
 

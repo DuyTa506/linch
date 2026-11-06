@@ -6,6 +6,10 @@ use std::path::PathBuf;
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn};
 use serde::{Deserialize, Serialize};
 
+mod mcp;
+
+pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
+
 /// Everything needed to open an [`Agent`](linch_core::Agent), as data.
 ///
 /// Decoding rejects unknown fields at every level, so a misspelt or
@@ -33,6 +37,11 @@ pub struct AgentConfig {
     /// exec tools ask) with the workspace root, or `/`, as project root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionPolicy>,
+    /// MCP servers, connected in order when the agent opens. Their tools
+    /// at that moment enter the run contract; a tool a server adds later
+    /// does not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpConfig>,
 }
 
 /// The model provider, chosen by `id`.

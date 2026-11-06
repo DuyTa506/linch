@@ -2,6 +2,7 @@
 
 use std::error::Error;
 
+use linch::mcp::McpError;
 use linch::{BuildError, JsonValue, OpenError, RunError, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -48,6 +49,9 @@ pub mod code {
     pub const PROVIDER_UNAVAILABLE: i64 = -32013;
     /// Postgres could not be reached or migrated.
     pub const STORE_UNAVAILABLE: i64 = -32014;
+    /// An MCP server of the config could not be connected; `data.server`
+    /// names it.
+    pub const MCP_UNAVAILABLE: i64 = -32015;
     /// `RunError::Store`, any store failure not listed below.
     pub const STORE: i64 = -32020;
     /// `StoreError::NotFound`: no such run or session.
@@ -154,6 +158,10 @@ impl From<&OpenError> for ErrorObject {
                 Self::new(code::BUILD_INVALID, message)
             }
             OpenError::Store(_) => Self::new(code::STORE_UNAVAILABLE, message),
+            OpenError::Mcp(McpError::Config(_)) => Self::new(code::BUILD_INVALID, message),
+            OpenError::Mcp(McpError::Connect { server, .. }) => {
+                Self::new(code::MCP_UNAVAILABLE, message).with_data(json!({ "server": server }))
+            }
             OpenError::Build(build) => Self::new(build_code(build), message),
         }
     }

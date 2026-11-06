@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::StreamExt;
-use linch::{Agent, AgentConfig, JsonObject, JsonValue, RunId, RunStream};
+use linch::{Agent, AgentConfig, JsonObject, JsonValue, OpenedAgent, RunId, RunStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -81,6 +81,12 @@ where
     server.0.shutdown.cancel();
     server.0.tasks.close();
     server.0.tasks.wait().await;
+    // Disconnect every agent's MCP servers, so no server process outlives
+    // this call.
+    let agents: Vec<OpenedAgent> = lock(&server.0.agents).drain().map(|(_, a)| a).collect();
+    for agent in agents {
+        agent.close().await;
+    }
     // The last sender goes with the server; the writer drains and stops.
     drop(server);
     let written = writing.await.map_err(io::Error::other)?;
@@ -126,7 +132,7 @@ impl Outbox {
 struct Server(Arc<State>);
 
 struct State {
-    agents: Mutex<HashMap<String, Agent>>,
+    agents: Mutex<HashMap<String, OpenedAgent>>,
     /// Runs this server drives now, with their cancel tokens.
     runs: Mutex<HashMap<RunId, CancellationToken>>,
     next_agent: AtomicU64,
@@ -216,7 +222,7 @@ impl Server {
             .map_err(|error| ErrorObject::from(&error))?;
         let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
         let handle = format!("agent-{number}");
-        let contract = agent.contract().to_string();
+        let contract = agent.agent().contract().to_string();
         lock(&self.0.agents).insert(handle.clone(), agent);
         to_value(&AgentOpened {
             agent: handle,
@@ -234,9 +240,13 @@ impl Server {
     }
 
     fn agent(&self, handle: &str) -> Result<Agent, ErrorObject> {
-        lock(&self.0.agents).get(handle).cloned().ok_or_else(|| {
-            ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
-        })
+        let agents = lock(&self.0.agents);
+        agents
+            .get(handle)
+            .map(|opened| opened.agent().clone())
+            .ok_or_else(|| {
+                ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
+            })
     }
 }
 

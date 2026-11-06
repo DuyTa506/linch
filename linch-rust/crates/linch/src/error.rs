@@ -1,6 +1,7 @@
 //! [`OpenError`]: why an [`AgentConfig`](crate::AgentConfig) did not open.
 
 use linch_core::{BuildError, PolicyError, ProviderError, RegistryError};
+use linch_mcp::McpError;
 use linch_tools::FsError;
 use thiserror::Error;
 
@@ -31,6 +32,10 @@ pub enum OpenError {
     /// Connecting to Postgres or applying the migrations failed.
     #[error("Postgres stores could not be opened: {0}")]
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// An MCP server's config is invalid or its first connect failed. The
+    /// servers connected before it are disconnected again.
+    #[error("MCP server unusable: {0}")]
+    Mcp(#[source] McpError),
     /// The agent itself could not be built.
     #[error(transparent)]
     Build(#[from] BuildError),

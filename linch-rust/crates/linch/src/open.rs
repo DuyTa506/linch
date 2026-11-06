@@ -1,13 +1,16 @@
-//! [`AgentConfig::open`]: config to provider, tools, policy, stores and
-//! agent.
+//! [`AgentConfig::open`]: config to provider, tools, policy, stores, MCP
+//! servers and agent, and the [`OpenedAgent`] that closes them.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use linch_core::{
-    Agent, AgentBuilder, MemoryRunStore, MemorySessionStore, PermissionEngine, PermissionMode,
-    PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore, ToolRegistry,
+    Agent, AgentBuilder, Hooks, MemoryRunStore, MemorySessionStore, PermissionEngine,
+    PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider, SessionStore,
+    ToolRegistry,
 };
+use linch_mcp::McpServer;
 use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
 use linch_providers::{
     Anthropic, AnthropicOptions, ApiKey, DeepSeek, DeepSeekOptions, Gemini, GeminiOptions,
@@ -16,28 +19,52 @@ use linch_providers::{
 };
 use linch_tools::{LocalFs, ReadTracker, workspace_tools};
 
-use crate::config::{AgentConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
+use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::error::OpenError;
 
 impl AgentConfig {
-    /// Open the agent this config describes.
+    /// Open the agent this config describes, with no tools or hooks beyond
+    /// what the config declares. Same as [`Self::open_with`] on an empty
+    /// registry and empty hooks.
     ///
-    /// Reads the provider key from the environment, checks the workspace
-    /// root, validates the permission policy, then opens the stores (for
-    /// Postgres: connects a pool and runs the migrations) and builds the
-    /// agent. Nothing is written to the stores.
+    /// Raises:
+    ///     OpenError: As for [`Self::open_with`].
+    pub async fn open(self) -> Result<OpenedAgent, OpenError> {
+        let tools = Arc::new(ToolRegistry::new());
+        self.open_with(tools, Arc::new(Hooks::default())).await
+    }
+
+    /// Open the agent this config describes on top of tools and hooks bound
+    /// in code.
+    ///
+    /// Reads the provider key from the environment, registers the workspace
+    /// tools into `tools`, validates the permission policy, opens the stores
+    /// (for Postgres: connects a pool and runs the migrations), connects the
+    /// MCP servers in order, then builds the agent. Nothing is written to
+    /// the stores.
+    ///
+    /// Args:
+    ///     tools: Registry the agent runs with. Tools already in it come
+    ///         first; the workspace and MCP tools are added after them.
+    ///     hooks: Hook chains the agent runs with.
     ///
     /// Returns:
-    ///     The built agent, its contract digest computed over the spec, the
-    ///     workspace tools and the (empty) hook policies.
+    ///     The built agent with the MCP servers it connected. Its contract
+    ///     digest covers the spec, every tool registered at that point and
+    ///     the hook policies.
     ///
     /// Raises:
     ///     OpenError: If the key is unset, the workspace is not a directory,
-    ///         the policy is malformed, Postgres is unreachable, or the agent
-    ///         cannot be built (a blank model or namespace).
-    pub async fn open(self) -> Result<Agent, OpenError> {
+    ///         a tool name is taken twice, the policy is malformed, Postgres
+    ///         is unreachable, an MCP server cannot be connected, or the
+    ///         agent cannot be built (a blank model or namespace). MCP
+    ///         servers already connected are disconnected first.
+    pub async fn open_with(
+        self,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<Hooks>,
+    ) -> Result<OpenedAgent, OpenError> {
         let provider = provider(self.provider)?;
-        let tools = Arc::new(ToolRegistry::new());
         let root = match self.workspace {
             Some(root) => Some(register_workspace(&tools, root).await?),
             None => None,
@@ -48,15 +75,87 @@ impl AgentConfig {
         });
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions) = stores(self.stores).await?;
-        let agent = AgentBuilder::new(self.spec)
+        let mcp = connect_mcp(self.mcp_servers, &tools).await?;
+        let built = AgentBuilder::new(self.spec)
             .provider(provider)
             .tools(tools)
+            .hooks(hooks)
             .permissions(permissions)
             .run_store(runs)
             .session_store(sessions)
             .namespace(self.namespace)
-            .build()?;
-        Ok(agent)
+            .build();
+        match built {
+            Ok(agent) => Ok(OpenedAgent { agent, mcp }),
+            Err(error) => {
+                disconnect(mcp).await;
+                Err(error.into())
+            }
+        }
+    }
+}
+
+/// An agent opened from an [`AgentConfig`], with the MCP servers it
+/// connected.
+///
+/// Call [`Self::close`] when done. Dropping it instead closes the MCP
+/// servers in the background, without waiting for their processes to exit.
+pub struct OpenedAgent {
+    agent: Agent,
+    mcp: Vec<McpServer>,
+}
+
+impl OpenedAgent {
+    /// The agent. Clone it to run from several tasks.
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    /// The connected MCP servers, in config order.
+    pub fn mcp_servers(&self) -> &[McpServer] {
+        &self.mcp
+    }
+
+    /// Disconnect every MCP server and wait for each to close (a stdio
+    /// server's process to exit). Clones of the agent keep working, but
+    /// the MCP tools are no longer registered.
+    pub async fn close(self) {
+        disconnect(self.mcp).await;
+    }
+}
+
+impl fmt::Debug for OpenedAgent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.mcp.iter().map(McpServer::name).collect();
+        f.debug_struct("OpenedAgent")
+            .field("contract", &self.agent.contract())
+            .field("mcp_servers", &names)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Connect each server in order, so the registry order (and the contract)
+/// does not depend on timing. On a failure, disconnect the ones already up.
+async fn connect_mcp(
+    configs: Vec<McpConfig>,
+    tools: &Arc<ToolRegistry>,
+) -> Result<Vec<McpServer>, OpenError> {
+    let mut servers = Vec::with_capacity(configs.len());
+    for config in configs {
+        match McpServer::connect(config.into(), Arc::clone(tools)).await {
+            Ok(server) => servers.push(server),
+            Err(error) => {
+                disconnect(servers).await;
+                return Err(OpenError::Mcp(error));
+            }
+        }
+    }
+    Ok(servers)
+}
+
+async fn disconnect(servers: Vec<McpServer>) {
+    for server in servers {
+        server.disconnect().await;
     }
 }
 

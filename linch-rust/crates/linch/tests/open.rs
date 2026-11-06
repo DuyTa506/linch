@@ -74,8 +74,8 @@ async fn a_scripted_agent_reads_a_workspace_file() {
             .text("It says alpha.")
             .build(),
     ]);
-    let agent = scripted(turns, dir.path().to_str()).open().await.unwrap();
-    let mut stream = agent.run("Read notes.txt", RunOptions::new("s1"));
+    let opened = scripted(turns, dir.path().to_str()).open().await.unwrap();
+    let mut stream = opened.agent().run("Read notes.txt", RunOptions::new("s1"));
     let mut events = Vec::new();
     while let Some(item) = stream.next().await {
         events.push(item.unwrap().event);
@@ -119,7 +119,7 @@ async fn a_postgres_failure_never_shows_the_password() {
         let mut config = scripted(json!([]), None);
         config.stores = StoreConfig::Postgres { dsn: dsn.into() };
         assert!(!format!("{config:?}").contains("hunter2"));
-        let error = config.open().await.err().expect("no database there");
+        let error = config.open().await.expect_err("no database there");
         assert!(matches!(error, OpenError::Store(_)), "{error:?}");
         let text = format!("{} {error:?}", chain(&error));
         assert!(!text.contains("hunter2"), "{text}");
