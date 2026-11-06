@@ -29,6 +29,7 @@ pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
     "child_run_status",
     "workflow",
     "verification",
+    "hook",
     "error",
     "result",
     "model_call_delivery",

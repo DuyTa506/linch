@@ -9,12 +9,14 @@
 //! `super::kinds::X` resolves regardless of which file defines `X`.
 
 mod control;
+mod hook;
 mod lifecycle;
 mod skills;
 mod suspend;
 mod tooling;
 
 pub use control::*;
+pub use hook::*;
 pub use lifecycle::*;
 pub use skills::*;
 pub use suspend::*;

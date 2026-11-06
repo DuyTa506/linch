@@ -14,9 +14,11 @@
 mod builders;
 
 use super::event::{Event, IgnorableEvent, SubagentEvent};
+use super::kinds::{HookEvent, HookOutcome};
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::message::{ContentBlock, Message, Role};
+use crate::policy::{FailMode, HookPoint};
 use crate::run::{RunStatus, StopReason};
 use crate::usage::Usage;
 use proptest::collection::vec;
@@ -142,6 +144,40 @@ fn ignorable_event() -> impl Strategy<Value = Event> {
     })
 }
 
+/// An arbitrary `hook` record. Kept here rather than in [`builders`],
+/// which is already past the per-file line target.
+fn hook_event() -> impl Strategy<Value = HookEvent> {
+    let point = prop_oneof![
+        Just(HookPoint::UserPromptSubmit),
+        Just(HookPoint::ContextBuild),
+        Just(HookPoint::PreToolUse),
+        Just(HookPoint::PermissionRequest),
+        Just(HookPoint::PostToolUse),
+        Just(HookPoint::Stop),
+        Just(HookPoint::PostTurn),
+    ];
+    let fail_mode = prop_oneof![Just(FailMode::Open), Just(FailMode::Closed)];
+    let outcome = prop_oneof![
+        short_string().prop_map(|verdict| HookOutcome::Answered { verdict }),
+        (short_string(), fail_mode.clone())
+            .prop_map(|(error, fail_mode)| HookOutcome::Failed { error, fail_mode }),
+        (any::<u64>(), fail_mode).prop_map(|(timeout_ms, fail_mode)| HookOutcome::TimedOut {
+            timeout_ms,
+            fail_mode
+        }),
+    ];
+    let tool_use_id = proptest::option::of(short_string());
+    (point, short_string(), any::<u32>(), tool_use_id, outcome).prop_map(
+        |(point, policy_id, policy_version, tool_use_id, outcome)| HookEvent {
+            point,
+            policy_id,
+            policy_version,
+            tool_use_id,
+            outcome,
+        },
+    )
+}
+
 /// An arbitrary event, including nested `subagent` wrapping up to
 /// `depth_budget` levels deep (0 means "never nest").
 pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
@@ -202,6 +238,7 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
         builders::verification_event()
             .prop_map(Event::Verification)
             .boxed(),
+        hook_event().prop_map(Event::Hook).boxed(),
         builders::error_event().prop_map(Event::Error).boxed(),
         builders::result_event().prop_map(Event::Result).boxed(),
         builders::model_call_delivery_event()

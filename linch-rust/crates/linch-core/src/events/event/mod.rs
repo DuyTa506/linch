@@ -91,6 +91,8 @@ pub enum Event {
     Workflow(WorkflowEvent),
     /// A closed-loop gate acted on a would-be-final answer.
     Verification(VerificationEvent),
+    /// One intercept-hook call. Stream-only.
+    Hook(HookEvent),
     /// A terminal or recoverable error payload.
     Error(ErrorEvent),
     /// The terminal outcome of a run.
@@ -213,6 +215,7 @@ impl Event {
             "child_run_status" => Ok(Event::ChildRunStatus(payload("child_run_status", obj)?)),
             "workflow" => Ok(Event::Workflow(payload("workflow", obj)?)),
             "verification" => Ok(Event::Verification(payload("verification", obj)?)),
+            "hook" => Ok(Event::Hook(payload("hook", obj)?)),
             "error" => Ok(Event::Error(payload("error", obj)?)),
             "result" => Ok(Event::Result(payload("result", obj)?)),
             "model_call_delivery" => Ok(Event::ModelCallDelivery(payload(
@@ -285,6 +288,7 @@ impl Event {
             Event::ChildRunStatus(e) => tagged("child_run_status", e),
             Event::Workflow(e) => tagged("workflow", e),
             Event::Verification(e) => tagged("verification", e),
+            Event::Hook(e) => tagged("hook", e),
             Event::Error(e) => tagged("error", e),
             Event::Result(e) => tagged("result", e),
             Event::ModelCallDelivery(e) => tagged("model_call_delivery", e),
@@ -307,6 +311,7 @@ impl Event {
         match self {
             Event::ToolProgress(_) => StreamOnly,
             Event::PartialAssistant(_) => StreamOnly,
+            Event::Hook(_) => StreamOnly,
             Event::ModelCallDelivery(_) => JournalOnly,
             Event::ModelCallReceipt(_) => JournalOnly,
             Event::ModelCallUsageSettlement(_) => JournalOnly,

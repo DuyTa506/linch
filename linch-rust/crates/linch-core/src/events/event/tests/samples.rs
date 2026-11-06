@@ -139,6 +139,15 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             feedback: String::new(),
             attempt: 1,
         }),
+        Event::Hook(HookEvent {
+            point: crate::policy::HookPoint::PreToolUse,
+            policy_id: "cache".into(),
+            policy_version: 1,
+            tool_use_id: Some("t1".into()),
+            outcome: HookOutcome::Answered {
+                verdict: "continue".into(),
+            },
+        }),
         Event::Error(ErrorEvent {
             error: JsonObject::new(),
         }),

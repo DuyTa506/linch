@@ -185,7 +185,9 @@ fn subagent_round_trips_and_boxes_its_child() {
 fn persistence_classification_covers_every_kind() {
     use std::collections::HashSet;
 
-    let stream_only: HashSet<&str> = ["tool_progress", "partial_assistant"].into_iter().collect();
+    let stream_only: HashSet<&str> = ["tool_progress", "partial_assistant", "hook"]
+        .into_iter()
+        .collect();
     let journal_only: HashSet<&str> = [
         "model_call_delivery",
         "model_call_receipt",
