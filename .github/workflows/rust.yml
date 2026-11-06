@@ -1,5 +1,6 @@
 # Format, lint, test and document the linch-rust workspace crates that do not
-# need Python. linch-python is built and tested by native-wheels.yml.
+# need Python, then the Python client against the built linch-server.
+# linch-python is built and tested by native-wheels.yml.
 name: Rust
 
 on:
@@ -35,3 +36,13 @@ jobs:
       - run: cargo doc -p linch-core -p linch-providers -p linch-postgres -p linch-tools -p linch-mcp -p linch -p linch-rpc -p linch-server -p linch-worker --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      # The Python client tests drive the linch-server binary that cargo test built.
+      - uses: astral-sh/setup-uv@v6
+      - name: Python client
+        working-directory: linch-rust/python
+        run: |
+          uv lock --check
+          uv run ruff check
+          uv run ruff format --check
+          uv run pyright
+          uv run pytest -q
