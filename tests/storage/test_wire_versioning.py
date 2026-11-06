@@ -100,12 +100,18 @@ def _set_version(raw: dict[str, object], version: object) -> None:
 @pytest.mark.parametrize(
     "kind",
     [
+        "checkpoint",
         "run_contract",
+        "model_intent",
+        "model_receipt",
+        "model_event",
         "permission",
+        "provider_snapshot",
+        "model_input_snapshot",
         "stored_event",
     ],
 )
-@pytest.mark.parametrize("version", [1])
+@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
 def test_wire_decoders_reject_noncurrent_version(kind: str, version: object) -> None:
     """Reject every pre-3.0 or malformed wire-version marker at its decoder."""
     decoder: Any

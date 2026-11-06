@@ -144,6 +144,40 @@ async def test_infrastructure_claim_failure_is_retried(pool):
         )
 
 
+async def test_lease_heartbeat_renews_then_cancels_on_loss(pool):
+    from linch import PostgresRunStore
+    from linch.worker import Worker, enqueue_run
+
+    async def factory(job):
+        return make_agent(job)
+
+    worker = Worker(pool, factory, lease_ttl_s=0.3)
+    rid = await enqueue_run(pool, "s", "hello")
+    store = PostgresRunStore("", pool=pool)
+    lease = await store.claim(rid, "owner", 0.3)
+
+    async def blocked():
+        await asyncio.Event().wait()
+
+    run_task = asyncio.create_task(blocked())
+    task = asyncio.create_task(worker._heartbeat(store, lease, run_task))
+    try:
+        await asyncio.sleep(0.45)
+        assert not run_task.done()
+        assert await pool.fetchval(
+            "SELECT lease_expires_at>$2 FROM runs WHERE id=$1", rid, lease.expires_at
+        )
+        await pool.execute("UPDATE runs SET lease_epoch=lease_epoch+1 WHERE id=$1", rid)
+        await asyncio.wait_for(task, 1)
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "pending"
+    finally:
+        task.cancel()
+        run_task.cancel()
+        await asyncio.gather(task, run_task, return_exceptions=True)
+
+
 async def test_worker_preserves_a_contract_persisted_before_first_checkpoint(pool):
     from linch.run_store import build_run_contract, run_meta_with_contract
     from linch.worker import Worker, enqueue_run

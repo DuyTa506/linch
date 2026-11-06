@@ -93,6 +93,49 @@ async def test_leased_event_encoding_failure_is_atomic(store_case) -> None:
     await store.release(lease)
 
 
+@pytest.mark.parametrize("staleness", ["epoch", "owner"])
+async def test_stale_release_preserves_current_local_lease(store_case, staleness) -> None:
+    from dataclasses import replace
+
+    from linch.run_store import LeaseLostError
+
+    store = store_case.store
+    run_id = f"stale-release-{uuid4()}"
+    await store.create_run("session", id=run_id)
+    old = await store.claim(run_id, "owner", 30.0)
+    if staleness == "epoch":
+        await store.release(old)
+        current = await store.claim(run_id, "owner", 30.0)
+    else:
+        current = old
+        old = replace(old, owner="other-owner")
+    with pytest.raises(LeaseLostError):
+        await store.release(old)
+    assert await store.renew(current) is not None
+    assert await store.append_event(run_id, _event("current owner")) == 1
+    await store.release(current)
+
+
+async def test_run_store_concurrent_claim_has_one_winner(store_case: _StoreCase) -> None:
+    import asyncio
+
+    from linch.run_store import RunLeaseConflictError
+
+    run_id = f"conformance-claim-{uuid4()}"
+    store = store_case.store
+    peer = store_case.peer
+    await store.create_run("session-1", id=run_id)
+    results = await asyncio.gather(
+        store.claim(run_id, "owner-a", 30.0),  # type: ignore[attr-defined]
+        peer.claim(run_id, "owner-b", 30.0),  # type: ignore[attr-defined]
+        return_exceptions=True,
+    )
+    winners = [result for result in results if not isinstance(result, Exception)]
+    conflicts = [result for result in results if isinstance(result, RunLeaseConflictError)]
+    assert len(winners) == 1
+    assert len(conflicts) == 1
+
+
 async def test_unleased_public_delegates_support_legacy_override_signatures(
     store_case: _StoreCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:

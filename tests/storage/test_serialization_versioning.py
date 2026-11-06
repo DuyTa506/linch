@@ -16,6 +16,7 @@ import json
 
 import pytest
 
+from linch.events import IgnorableEvent, ToolCallStartEvent, event_to_dict
 from linch.run_store import (
     SCHEMA_VERSION,
     RunCheckpoint,
@@ -110,6 +111,41 @@ def test_checkpoint_normalizes_malformed_pending_alignment() -> None:
     ]
     restored = checkpoint_from_dict(data)
     assert restored.pending_alignment == [{"prompt": "ok", "images": None}]
+
+
+async def test_load_events_preserves_explicitly_ignorable_future_events(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
+    try:
+        await store.create_run("session-1", id="run-1")
+        await store.append_event(
+            "run-1",
+            ToolCallStartEvent(tool_use_id="t1", tool_name="Search", input={}, summary="s"),
+        )
+        future_raw = {
+            "type": "telepathy_event",
+            "ignorable": True,
+            "schema_version": 97,
+            "payload": 42,
+        }
+        stored_future = {"schema_version": SCHEMA_VERSION, "event": future_raw}
+        pool = await store._ensure()
+        await pool.execute(
+            "INSERT INTO run_events (run_id, seq, appended_at, event) VALUES ($1, $2, $3, $4)",
+            *("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(stored_future)),
+        )
+
+        events = await store.load_events("run-1")
+
+        assert len(events) == 2
+        assert isinstance(events[0].event, ToolCallStartEvent)
+        assert events[0].seq == 1
+        assert isinstance(events[1].event, IgnorableEvent)
+        assert events[1].seq == 2
+        assert event_to_dict(events[1].event) == future_raw
+    finally:
+        await store.close()
 
 
 @pytest.mark.parametrize(

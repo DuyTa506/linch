@@ -53,10 +53,17 @@ def _contract(**overrides):
     return build_run_contract(**values)
 
 
-@pytest.mark.parametrize("fingerprint", [7])
+@pytest.mark.parametrize("fingerprint", [None, "", 7, "sha256:not-the-content"])
 def test_contract_invalid_fingerprint_fails_closed(fingerprint) -> None:
     wire = run_contract_to_dict(_contract())
     wire["fingerprint"] = fingerprint
+    with pytest.raises(ValueError, match="fingerprint"):
+        run_contract_from_dict(wire)
+
+
+def test_contract_missing_fingerprint_fails_closed() -> None:
+    wire = run_contract_to_dict(_contract())
+    del wire["fingerprint"]
     with pytest.raises(ValueError, match="fingerprint"):
         run_contract_from_dict(wire)
 

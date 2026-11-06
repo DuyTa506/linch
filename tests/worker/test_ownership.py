@@ -8,6 +8,46 @@ import pytest
 from test_dispatch import make_agent, running, wait_for
 
 
+async def test_lease_lost_cancels_run_without_terminal_status_and_preserves_job(pool, monkeypatch):
+    from linch import LeaseLostError, PostgresRunStore
+    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch.worker import Worker, enqueue_run
+
+    entered = asyncio.Event()
+    stopped = asyncio.Event()
+    aborted = []
+
+    class WaitingProvider(ScriptedProvider):
+        async def stream(self, request):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+                async for event in super().stream(request):
+                    yield event
+            finally:
+                aborted.append(bool(request.signal and request.signal.aborted))
+                stopped.set()
+
+    async def factory(job):
+        return make_agent(job, WaitingProvider([TextTurn("unused")]))
+
+    worker = Worker(pool, factory, lease_ttl_s=0.6, poll_interval_s=0.02, retry_delay_s=0.2)
+
+    async def renew(store, lease):
+        await entered.wait()
+        worker.stop()  # Keep the first retry queued for inspection.
+        raise LeaseLostError("ownership lost")
+
+    monkeypatch.setattr(PostgresRunStore, "renew", renew)
+    rid = await enqueue_run(pool, "lost", "hello")
+    await asyncio.wait_for(worker.run(), 5)
+    assert stopped.is_set()
+    assert aborted == [False]
+    assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "running"
+    row = await pool.fetchrow("SELECT status::text,attempts FROM pgqueuer")
+    assert row["status"] == "queued" and row["attempts"] == 1
+
+
 async def test_expired_lease_without_takeover_retries_and_resumes_checkpoint(pool, monkeypatch):
     from linch import PostgresRunStore
     from linch.ext.evals import ScriptedProvider, TextTurn
