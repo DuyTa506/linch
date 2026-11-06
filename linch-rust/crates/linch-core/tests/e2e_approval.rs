@@ -268,12 +268,13 @@ async fn a_tool_of_another_scope_is_another_contract() {
     assert!(fixture.runs.lock().unwrap().is_empty(), "nothing ran");
 }
 
-/// R1-core 6: an approve that failed after its answers were committed, and
-/// before the call started, can be retried. The retry continues like a
-/// resume and the call runs once; an approve that answers a call without a
-/// committed decision is still refused, before the claim.
+/// R2-core 1: an approve that failed after its answers were committed
+/// leaves a `ToolBatch` run, which may still have a live owner. Another
+/// approve of it (the same one retried, or one with no answers) gets
+/// `NotSuspended` before any claim, so it never fences that owner. The host
+/// resumes the run instead, and the call runs once.
 #[tokio::test]
-async fn an_approve_retried_after_its_answers_were_committed_continues() {
+async fn an_approve_after_its_answers_were_committed_is_refused_and_resume_continues() {
     let fixture = Fixture::new(1);
     let (run_id, _) = fixture.suspend().await;
     let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
@@ -297,19 +298,20 @@ async fn an_approve_retried_after_its_answers_were_committed_continues() {
     assert!(fixture.runs.lock().unwrap().is_empty());
 
     let agent = fixture.agent(policy(PermissionMode::Default));
-    let unknown = answers(&[
-        ("call_0_0", ApprovalResponse::Allow),
-        ("other", ApprovalResponse::Allow),
-    ]);
-    let (_, error) = drain(agent.approve(run_id.clone(), unknown, RunOptions::new("s1"))).await;
-    assert!(
-        matches!(error, Some(RunError::NotSuspended { .. })),
-        "{error:?}"
-    );
-    let epoch = fixture.stores.runs.load(NS, &run_id).await.unwrap().epoch;
-    assert_eq!(epoch, record.epoch, "refused before the claim");
+    for retry in [allow, HashMap::new()] {
+        let (envelopes, error) =
+            drain(agent.approve(run_id.clone(), retry, RunOptions::new("s1"))).await;
+        assert!(envelopes.is_empty());
+        assert!(
+            matches!(error, Some(RunError::NotSuspended { .. })),
+            "{error:?}"
+        );
+        let after = fixture.stores.runs.load(NS, &run_id).await.unwrap();
+        assert_eq!(after.epoch, record.epoch, "refused before the claim");
+        assert_eq!(after.last_seq, record.last_seq, "nothing written");
+    }
 
-    let envelopes = finish(agent.approve(run_id.clone(), allow, RunOptions::new("s1"))).await;
+    let envelopes = finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
     assert_eq!(subtype(&envelopes), ResultSubtype::Success);
     assert_eq!(fixture.results().await, ["v0.0"]);
     assert_eq!(fixture.runs.lock().unwrap()["call_0_0"], 1);

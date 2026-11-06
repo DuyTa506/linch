@@ -180,9 +180,16 @@ impl Agent {
 
     /// Answer the pending tool calls of a suspended run and continue it.
     ///
-    /// Retrying an approve that failed after its answers were committed is
-    /// safe: when the run's batch already decided every call answered, the
-    /// run continues like a resume and the committed decisions stand.
+    /// Only a run awaiting approval takes an approve; any other run gets
+    /// `RunError::NotSuspended` before anything is claimed or written, so an
+    /// approve never fences out the run's live owner. Once an approve has
+    /// committed its answers the run is no longer suspended: retrying that
+    /// approve (after a timeout, a crash, or a second click) gets
+    /// `NotSuspended`, and the host continues the run with [`Agent::resume`],
+    /// under the committed decisions. Two approves that race on one
+    /// suspended run can still both pass this check: the later claim fences
+    /// the earlier approve, then gets `NotSuspended`, which leaves the run
+    /// `running` for a resume.
     ///
     /// Args:
     ///     run_id: A run whose checkpoint is awaiting approval.

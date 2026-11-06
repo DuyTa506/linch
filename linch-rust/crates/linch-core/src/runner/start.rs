@@ -12,7 +12,6 @@ use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, reconcile};
-use crate::policy::PermissionDecision;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
@@ -113,9 +112,8 @@ pub(super) async fn new_run(
 }
 
 /// Claim an existing run, check it may continue, reconcile its durable
-/// state, and go on from there. `answers` is set for an approve; on a run
-/// whose answers are already committed (an approve that failed after its
-/// first commit) they are ignored and the run continues like a resume.
+/// state, and go on from there. `answers` is set for an approve, which is
+/// accepted only on a run awaiting approval.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
@@ -250,8 +248,10 @@ fn last_stop(events: &[Envelope]) -> StopReason {
 }
 
 /// Refuse a terminal run, a run of another contract, and an approve on a
-/// run that is neither suspended nor in a batch that already decided every
-/// call the approve answers.
+/// run that is not awaiting approval. A run whose approve committed its
+/// answers is in its tool batch and may still have a live owner, so an
+/// approve of it (a retry, or a second click) is refused too: the host
+/// resumes it.
 fn check(
     record: &RunRecord,
     agent: &AgentInner,
@@ -270,18 +270,8 @@ fn check(
             found: record.contract,
         });
     }
-    let approvable = |answers: &HashMap<String, ApprovalResponse>| match &record.checkpoint.phase {
-        Phase::AwaitingApproval { .. } => true,
-        // An approve that failed after committing its answers.
-        Phase::ToolBatch { decisions, .. } => answers.keys().all(|id| {
-            decisions.iter().any(|recorded| {
-                &recorded.tool_use_id == id
-                    && !matches!(recorded.decision, PermissionDecision::Ask { .. })
-            })
-        }),
-        _ => false,
-    };
-    if answers.is_some_and(|answers| !approvable(answers)) {
+    let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
+    if answers.is_some() && !suspended {
         return Err(RunError::NotSuspended {
             run_id: record.run_id.clone(),
         });
