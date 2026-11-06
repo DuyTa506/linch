@@ -3,9 +3,10 @@
 use std::num::NonZeroU32;
 
 /// A run commit or session append is one round trip; sqlx's default ping
-/// before every acquire would make it two.
+/// before every acquire would make it two. `connect` pings only a
+/// connection that sat idle (`idle.rs`).
 #[tokio::test]
-async fn connect_skips_the_ping_before_each_acquire() {
+async fn connect_turns_off_the_ping_before_every_acquire() {
     let Ok(dsn) = std::env::var("LINCH_TEST_PG_DSN") else {
         eprintln!("skipping: LINCH_TEST_PG_DSN is not set");
         return;

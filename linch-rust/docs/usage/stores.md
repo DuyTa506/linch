@@ -147,9 +147,11 @@ Schema details, write paths and the refusal rules are in the
   connections per run in flight at once, per server process. The open that
   connects a DSN's pool sets its size; agents that share the pool share that
   size. Several server processes on one database each have their own pools.
-- A connection the database dropped while idle fails the next write instead
-  of being replaced first; the run stops at its last durable state and can be
-  resumed.
+- A connection that sat idle for a second or more is checked before its next
+  write and replaced if the database closed it (a restart, a failover, an
+  idle timeout), so a run that waited on a long model call still writes its
+  answer. A connection that fails in the middle of a write stops the run at
+  its last durable state; resume it.
 
 ## The virtual filesystem
 

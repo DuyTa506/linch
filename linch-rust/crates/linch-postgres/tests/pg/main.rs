@@ -6,6 +6,7 @@ mod common;
 mod conformance;
 mod crash;
 mod files;
+mod idle;
 mod isolation;
 mod migrations;
 mod pool;

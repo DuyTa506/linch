@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Postgres, SqlSafeStr, Transaction};
+use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 
 mod codec;
 mod files;
@@ -63,6 +63,10 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// default).
 pub const MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::new(10).unwrap();
 
+/// How long a connection sits idle in a [`connect`] pool before the pool
+/// pings it on its way out.
+pub const IDLE_PING_AFTER: Duration = Duration::from_secs(1);
+
 /// Connect a pool, failing after `timeout` when no first connection can
 /// be opened.
 ///
@@ -71,12 +75,16 @@ pub const MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::new(10).unwrap();
 /// that long. Only this first connect is bounded; later waits for a pooled
 /// connection keep sqlx's defaults.
 ///
-/// The pool does not ping a connection before handing it out (sqlx's
-/// `test_before_acquire`): a run commit or session append is one round
-/// trip, and the ping would make it two. A connection the server dropped
-/// while idle fails the next query on it with a backend error instead of
-/// being replaced first; sqlx's idle timeout and lifetime still recycle
-/// connections.
+/// The pool pings a connection before handing it out only when it sat
+/// idle for [`IDLE_PING_AFTER`] or longer, and replaces it when the ping
+/// fails. A connection the server closed during such a wait (a restart, a
+/// failover, `idle_session_timeout`, a proxy's idle kill) is replaced
+/// instead of failing the next write, so the receipt write after a long
+/// model call lands, and a resume does not pay for the call again. Writes
+/// that follow each other closely (a run's barrier writes) skip the ping:
+/// a run commit or session append stays one round trip. sqlx's own ping
+/// before every acquire (`test_before_acquire`) would make each of them
+/// two.
 ///
 /// Args:
 ///     dsn: Connection string, for example `postgres://user:pass@host/db`.
@@ -107,6 +115,16 @@ pub async fn connect(
     };
     let pool = PgPoolOptions::new()
         .test_before_acquire(false)
+        .before_acquire(|connection, meta| {
+            Box::pin(async move {
+                // A failed ping closes this connection; the pool hands out
+                // another one, or opens a new one.
+                if meta.idle_for >= IDLE_PING_AFTER {
+                    connection.ping().await?;
+                }
+                Ok(true)
+            })
+        })
         .max_connections(max_connections.get());
     match tokio::time::timeout(timeout, pool.connect_with(options)).await {
         Ok(connected) => connected,

@@ -116,10 +116,10 @@ tests.
 
 ### Schema and migrations
 
-`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:169`) creates or upgrades
+`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:219`) creates or upgrades
 the tables. It is safe on every start: applied migrations are skipped and
 concurrent callers serialize on an advisory lock. Applied versions are
-recorded in `linch_migrations` (`lib.rs:52`), not sqlx's default table, so a
+recorded in `linch_migrations` (`lib.rs:57`), not sqlx's default table, so a
 host's own sqlx migrations in the same schema do not collide. Tables are
 unqualified and prefixed `linch_`, so the connection's `search_path` picks the
 schema. Queries are built at run time: building the crate needs no database.
@@ -137,7 +137,7 @@ hand back exactly what was written, because message bytes feed prompt caches
 and digests (`migrations/0001_stores.sql:1-3`). Rows decode strictly; a row
 that does not decode is an error (`crates/linch-postgres/src/codec.rs:1-4`).
 Migrations are append-only: add a new file and a `Migration::new` entry
-(`lib.rs:118-153`), never edit an applied one, since `migrate` fails when an
+(`lib.rs:167-203`), never edit an applied one, since `migrate` fails when an
 applied migration differs from the embedded one.
 
 ### Write paths
@@ -153,9 +153,9 @@ applied migration differs from the embedded one.
 
 Multi-statement writes begin at `READ COMMITTED` whatever the server or role
 default, because they must read a row again after waiting on another writer
-(`lib.rs:97`). The single-statement writes run in autocommit at the pool's
+(`lib.rs:146`). The single-statement writes run in autocommit at the pool's
 default isolation; above `READ COMMITTED` a serialization failure (`40001`)
-wrote nothing and is retried, up to three tries in all (`lib.rs:104-115`).
+wrote nothing and is retried, up to three tries in all (`lib.rs:151-165`).
 
 Admission is enforced by the partial unique index, not by a read. A violation
 of `linch_runs_one_live_per_session` reads the live run's id and returns
@@ -184,15 +184,26 @@ the same way: `NotFound`, or `Conflict` naming both lengths
 
 ### Connecting and sizing a pool
 
-`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:95`) bounds
+`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:103`) bounds
 the first connection (default `CONNECT_TIMEOUT`, 5 s); sqlx alone would retry a
 refused connection for its 30 s acquire timeout. Past it, the error names the
-host and port (or socket) it tried. It also turns off sqlx's ping before
-each acquire (`test_before_acquire(false)`, `lib.rs:109`): a run commit or a
-session append is one round trip, and the ping would make it two. A
-connection the server dropped while idle then fails its next query with a
-`Backend` error instead of being replaced first; sqlx's idle timeout and
-lifetime still recycle connections. No error message holds the DSN.
+host and port (or socket) it tried. No error message holds the DSN.
+
+The pool pings a connection before handing it out only when it sat idle for
+`IDLE_PING_AFTER` (1 s) or longer, and replaces it when the ping fails
+(`before_acquire`, `lib.rs:118-127`). sqlx does not watch an idle socket, so
+without the ping a connection the server closed while idle (a restart, a
+failover, `idle_session_timeout`, a proxy's idle kill) would fail the next
+write on it. After a model call, that write is the receipt: the journal would
+be poisoned, and the resume would find no accepted receipt and pay for the
+call again. Writes that follow each other closely, such as a run's barrier
+writes, skip the ping, so a run commit or a session append stays one round
+trip; sqlx's own ping before every acquire (`test_before_acquire`, off here)
+would make each of them two. A write after a pause of 1 s or more, such as the
+receipt after a model call, pays one extra round trip. A connection the server
+closes within a second of its last use still fails its next write, and the
+run stops at its last durable state. sqlx's idle timeout and lifetime still
+recycle connections.
 
 `connect` keeps sqlx's other defaults; `MAX_CONNECTIONS` is sqlx's 10, and a
 facade config sets its own with `stores.max_connections`. sqlx
@@ -201,8 +212,7 @@ also pings a connection in the background when it is released (sqlx-core
 back alternates between two connections. Size a pool at about two
 connections per concurrently committing run. A `Worker` needs one more for its
 `LISTEN` connection (`crates/linch-worker/src/worker.rs:87-90`). The example
-below sizes its pool that way with sqlx's `PgPoolOptions`, keeping the acquire
-ping off.
+below sizes its pool that way with `connect`.
 
 ## Group-commit write counts
 
@@ -239,7 +249,7 @@ and the two functions need a database:
 
 ```rust
 use std::error::Error;
-use std::time::Duration;
+use std::num::NonZeroU32;
 
 use linch_core::store::conformance::{
     run_admission_suite, run_store_suite, session_store_suite, task_store_suite,
@@ -247,16 +257,11 @@ use linch_core::store::conformance::{
 use linch_core::vfs::conformance::backend_suite;
 use linch_core::{MemoryRunStore, MemorySessionStore};
 use linch_postgres::{PgFileBackend, PgPool, PgRunStore, PgSessionStore};
-use sqlx::postgres::PgPoolOptions;
 
-/// A pool for `runs` runs committing at once: about two connections each,
-/// with the acquire ping off as in `linch_postgres::connect`.
-async fn pool(dsn: &str, runs: u32) -> Result<PgPool, sqlx::Error> {
-    let options = PgPoolOptions::new()
-        .max_connections(2 * runs)
-        .test_before_acquire(false)
-        .acquire_timeout(Duration::from_secs(5));
-    let pool = options.connect(dsn).await?;
+/// A pool for `runs` runs committing at once: about two connections each.
+async fn pool(dsn: &str, runs: NonZeroU32) -> Result<PgPool, sqlx::Error> {
+    let max = runs.saturating_mul(NonZeroU32::new(2).unwrap());
+    let pool = linch_postgres::connect(dsn, linch_postgres::CONNECT_TIMEOUT, max).await?;
     linch_postgres::migrate(&pool).await?;
     Ok(pool)
 }
