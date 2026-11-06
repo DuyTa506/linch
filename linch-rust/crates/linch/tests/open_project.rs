@@ -134,3 +134,33 @@ async fn skills_and_subagents_stay_off_unless_turned_on() {
     let (text, _) = skill_result(&opened).await;
     assert!(text.contains("Skill"), "an unknown tool: {text}");
 }
+
+#[tokio::test]
+async fn workers_and_a_mailbox_add_their_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = Arc::new(ToolRegistry::new());
+    let extra = json!({
+        "config_dir": dir.path(),
+        "subagents": true,
+        "workers": {"background": true},
+        "mailbox": true,
+    });
+    let opened = open(config("notes", extra), &tools).await;
+    let snapshot = tools.snapshot();
+    for name in ["Subagent", "SubagentContinue", "TaskStop", "send_message"] {
+        assert!(snapshot.resolve(name).is_some(), "{name}");
+    }
+    opened.close().await;
+
+    let no_subagents = config("notes", json!({"workers": {"retain": true}}));
+    let hooks = Arc::new(Hooks::default());
+    let error = no_subagents
+        .open_with(Arc::new(ToolRegistry::new()), hooks, &PgPools::new())
+        .await
+        .err()
+        .expect("workers need subagents");
+    assert!(
+        error.to_string().contains("workers need subagents"),
+        "{error}"
+    );
+}
