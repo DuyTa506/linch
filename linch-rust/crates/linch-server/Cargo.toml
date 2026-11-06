@@ -1,0 +1,20 @@
+[package]
+name = "linch-server"
+description = "The Linch sidecar: serves the linch-rpc protocol over stdio."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+linch-rpc = { path = "../linch-rpc" }
+tokio = { version = "1.54.1", features = ["io-std", "macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+linch = { path = "../linch" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "time"] }
