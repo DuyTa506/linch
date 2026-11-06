@@ -4,8 +4,10 @@
 
 use std::path::PathBuf;
 
+use linch::permissions::RuleDecision;
 use linch::{
-    AgentConfig, McpTransportConfig, PermissionMode, Principal, ProviderConfig, StoreConfig,
+    AgentConfig, McpTransportConfig, PermissionMode, PermissionPolicy, Principal, ProviderConfig,
+    StoreConfig,
 };
 use serde_json::json;
 
@@ -15,9 +17,10 @@ use crate::error::{ErrorObject, code};
 
 impl Tenant {
     /// Refuse `config` unless its namespace is this tenant's and its
-    /// provider, endpoints, permission mode, workspace, store and MCP
-    /// servers are all allowed. The workspace is replaced by the
-    /// canonical path that was checked.
+    /// provider, endpoints, permissions, workspace, store and MCP servers
+    /// are all allowed. The workspace and the project root are replaced by
+    /// the canonical paths that were checked, and `bash` is turned off
+    /// unless the tenant may run exec tools.
     pub(crate) async fn admit(&self, config: &mut AgentConfig) -> Result<(), ErrorObject> {
         let namespace = &config.namespace;
         let own = namespace == &self.name
@@ -38,9 +41,20 @@ impl Tenant {
                 format!("permission mode {mode:?} is not in the tenant's permission_modes");
             return Err(refused("permission_mode", message));
         }
-        if let Some(root) = config.workspace.take() {
-            config.workspace = Some(allow.admit_workspace(root).await?);
+        if let Some(policy) = &mut config.permissions {
+            allow.admit_grants(policy)?;
+            let root = PathBuf::from(&policy.project_root);
+            let canonical = allow.admit_dir(root, "project_root").await?;
+            let Ok(canonical) = canonical.into_os_string().into_string() else {
+                let message = "project_root resolves to a path that is not UTF-8";
+                return Err(refused("project_root", message.into()));
+            };
+            policy.project_root = canonical;
         }
+        if let Some(root) = config.workspace.take() {
+            config.workspace = Some(allow.admit_dir(root, "workspace").await?);
+        }
+        config.bash &= allow.exec_tools;
         if let StoreConfig::Postgres { dsn } = &config.stores
             && !PgTarget::parse(dsn).is_some_and(|target| allow.postgres.contains(&target))
         {
@@ -109,17 +123,44 @@ impl Allowlists {
         }
     }
 
-    /// The canonical `root`, if it lies in an allowed root. A path that
-    /// does not exist is refused the same way, so a client cannot probe the
-    /// server's file system.
-    async fn admit_workspace(&self, root: PathBuf) -> Result<PathBuf, ErrorObject> {
-        if let Ok(canonical) = tokio::fs::canonicalize(&root).await
+    /// The canonical `path` (the config's `kind`), if it lies in an
+    /// allowed root. A path that does not exist is refused the same way, so
+    /// a client cannot probe the server's file system.
+    async fn admit_dir(&self, path: PathBuf, kind: &str) -> Result<PathBuf, ErrorObject> {
+        if let Ok(canonical) = tokio::fs::canonicalize(&path).await
             && (self.workspace_roots.iter()).any(|allowed| canonical.starts_with(allowed))
         {
             return Ok(canonical);
         }
-        let message = "workspace is not an existing directory under the tenant's workspace_roots";
-        Err(refused("workspace", message.into()))
+        let message =
+            format!("{kind} is not an existing directory under the tenant's workspace_roots");
+        Err(refused(kind, message))
+    }
+
+    /// Refuse what lets calls run without asking, `auto_allow` entries and
+    /// rules that allow, unless the tenant may choose `skip_dangerous`,
+    /// which allows every call. Rules that ask or deny only take away.
+    fn admit_grants(&self, policy: &PermissionPolicy) -> Result<(), ErrorObject> {
+        if self
+            .permission_modes
+            .contains(&PermissionMode::SkipDangerous)
+        {
+            return Ok(());
+        }
+        if !policy.auto_allow.is_empty() {
+            let message = "auto_allow needs skip_dangerous in the tenant's permission_modes";
+            return Err(refused("auto_allow", message.into()));
+        }
+        let rules = policy.layers.iter().flat_map(|layer| &layer.rules);
+        if rules
+            .into_iter()
+            .any(|rule| rule.decision() == RuleDecision::Allow)
+        {
+            let message =
+                "a rule that allows needs skip_dangerous in the tenant's permission_modes";
+            return Err(refused("permission_rule", message.into()));
+        }
+        Ok(())
     }
 }
 

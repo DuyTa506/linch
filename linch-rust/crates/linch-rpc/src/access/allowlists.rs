@@ -13,10 +13,11 @@ use super::AccessError;
 /// What a tenant's `agent.open` may ask for, built with the methods
 /// below. A new value allows the memory stores, the permission modes
 /// `default` and `accept_edits`, the live providers at their public
-/// endpoints, and nothing else.
+/// endpoints, and nothing else: no `Bash`, no workspace.
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
+    pub(super) exec_tools: bool,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
     pub(super) workspace_roots: Vec<PathBuf>,
@@ -108,6 +109,7 @@ impl Allowlists {
     pub fn new() -> Self {
         Self {
             scripted_provider: false,
+            exec_tools: false,
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
             workspace_roots: Vec::new(),
@@ -134,15 +136,27 @@ impl Allowlists {
         Ok(self)
     }
 
+    /// Whether a workspace agent gets `Bash`, which runs commands
+    /// unconfined, as the server's user. Off by default: the agent then
+    /// has no `Bash`, whatever its config's `bash` says.
+    pub fn exec_tools(mut self, allowed: bool) -> Self {
+        self.exec_tools = allowed;
+        self
+    }
+
     /// The permission modes a config may choose, replacing the default
-    /// `default` and `accept_edits`.
+    /// `default` and `accept_edits`. Only with `skip_dangerous` among them
+    /// may a config carry `auto_allow` entries or rules that allow, since
+    /// either lets calls run without asking, as `skip_dangerous` does.
     pub fn permission_modes(mut self, modes: &[PermissionMode]) -> Self {
         self.permission_modes = modes.to_vec();
         self
     }
 
-    /// Directories a `workspace` may be, or lie under, compared on the
-    /// canonical path. Blocks on the file system, so call it at startup.
+    /// Directories a `workspace` and a `permissions.project_root` may be,
+    /// or lie under, compared on the canonical path. Without one a config
+    /// can name neither, so it keeps the default policy. Blocks on the file
+    /// system, so call it at startup.
     ///
     /// Raises:
     ///     AccessError: If a root does not exist or cannot be resolved.

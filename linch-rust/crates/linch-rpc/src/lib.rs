@@ -41,21 +41,28 @@
 //!   another tenant's runs and sessions look missing (`-32021`).
 //! - `run.start`, `run.resume`, `run.approve`: a `principal`, if given, has
 //!   the tenant's name as its `tenant`. The server does not fill one in.
-//! - `agent.open`: the config passes the tenant's [`Allowlists`]: the
-//!   scripted provider only if allowed; a client-chosen provider
-//!   `base_url` (always present for vllm, sglang and llama.cpp) only at an
-//!   allowed origin, since the server's key goes there; a permission mode
-//!   in the allowed list (by default `default` and `accept_edits`, not
-//!   `skip_dangerous`); a `workspace` that is an existing directory under
-//!   an allowed root, replaced by its canonical path; a Postgres DSN only
-//!   with an allowed host, port, socket, database, user and options; an
-//!   MCP stdio server only with the `command` and `args` of an entry,
-//!   setting only the `env` names that entry lists ([`McpCommand`]); MCP
-//!   HTTP URLs only at allowed origins.
+//! - `agent.open`: the config passes the tenant's [`Allowlists`]:
+//!   - the scripted provider only if allowed, and a client-chosen provider
+//!     `base_url` (always present for vllm, sglang and llama.cpp) only at
+//!     an allowed origin, since the server's key goes there;
+//!   - a permission mode in the allowed list (by default `default` and
+//!     `accept_edits`); `auto_allow` entries and rules that allow only
+//!     with `skip_dangerous` in it, since they let calls run unasked;
+//!   - a `workspace` and a `permissions.project_root` only as existing
+//!     directories under an allowed root, each replaced by its canonical
+//!     path (without a root, a config keeps the default policy);
+//!   - `Bash` only when the tenant allows exec tools; otherwise the config's
+//!     `bash` is turned off and the agent opens without it;
+//!   - a Postgres DSN only with an allowed host, port, socket, database,
+//!     user and options;
+//!   - an MCP stdio server only with the `command` and `args` of an entry,
+//!     setting only the `env` names that entry lists ([`McpCommand`]); an
+//!     MCP HTTP URL only at an allowed origin.
 //!
 //! A refusal is `-32004` with `data.kind` naming the check: `namespace`,
 //! `principal`, `provider`, `provider_base_url`, `permission_mode`,
-//! `workspace`, `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
+//! `auto_allow`, `permission_rule`, `workspace`, `project_root`,
+//! `postgres`, `mcp_command`, `mcp_env` or `mcp_url`.
 //!
 //! # Framing
 //!

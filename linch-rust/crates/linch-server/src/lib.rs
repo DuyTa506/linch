@@ -28,6 +28,7 @@
 //!      "tokens": [{"env": "LINCH_TOKEN_ACME"}, {"value": "a-long-random-token"}],
 //!      "allow": {
 //!        "scripted_provider": false,
+//!        "exec_tools": false,
 //!        "provider_base_urls": ["http://vllm.internal:8000/v1"],
 //!        "permission_modes": ["default", "accept_edits"],
 //!        "workspace_roots": ["/srv/linch/acme"],
@@ -41,8 +42,9 @@
 //! token. Each token names its tenant: a token is given inline or as the
 //! name of an environment variable read at startup. Every `allow` list
 //! is empty when absent (it allows nothing), except `permission_modes`,
-//! which defaults to `default` and `accept_edits`. See
-//! [`linch_rpc::Allowlists`] for how each list matches.
+//! which defaults to `default` and `accept_edits`; `scripted_provider`
+//! and `exec_tools` (`Bash` for workspace agents) are off when absent.
+//! See [`linch_rpc::Allowlists`] for how each entry matches.
 //!
 //! # Transports
 //!

@@ -53,20 +53,6 @@ fn config(extra: Value) -> Value {
     config
 }
 
-async fn refused(rpc: &Rpc, config: Value) -> Option<String> {
-    match rpc.call(method::AGENT_OPEN, config).await {
-        Ok(_) => None,
-        Err(error) => {
-            let (code, kind) = refusal(error);
-            if code == code::NOT_ALLOWED {
-                kind
-            } else {
-                None
-            }
-        }
-    }
-}
-
 #[tokio::test]
 async fn a_provider_endpoint_must_share_an_allowed_origin() {
     let urls = strings(&["http://127.0.0.1:9/v1"]);
@@ -197,14 +183,18 @@ async fn the_scripted_provider_needs_the_servers_consent() {
 
 #[tokio::test]
 async fn skip_dangerous_needs_the_servers_consent() {
-    let mode = |mode: &str| config(json!({"permissions": {"mode": mode, "project_root": "/"}}));
-    let rpc = Rpc::remote(acme(|allow| allow));
+    let dir = tempfile::tempdir().unwrap();
+    let roots = [dir.path().to_path_buf()];
+    let mode =
+        |mode: &str| config(json!({"permissions": {"mode": mode, "project_root": dir.path()}}));
+    let rpc = Rpc::remote(acme(|allow| allow.workspace_roots(&roots).unwrap()));
     for allowed in ["default", "accept_edits"] {
         assert_eq!(refused(&rpc, mode(allowed)).await, None, "{allowed}");
     }
     let kind = refused(&rpc, mode("skip_dangerous")).await;
     assert_eq!(kind.as_deref(), Some("permission_mode"));
     let only = Rpc::remote(acme(|allow| {
+        let allow = allow.workspace_roots(&roots).unwrap();
         allow.permission_modes(&[linch::PermissionMode::SkipDangerous])
     }));
     assert_eq!(refused(&only, mode("skip_dangerous")).await, None);

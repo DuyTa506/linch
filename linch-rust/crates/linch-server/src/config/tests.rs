@@ -14,7 +14,8 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
         "tenants": {
             "acme": {
                 "tokens": [{"env": "ACME_TOKEN"}, {"value": "tok-acme-inline-0001"}],
-                "allow": {"provider_base_urls": ["http://10.0.0.5:8000/v1"],
+                "allow": {"exec_tools": true,
+                          "provider_base_urls": ["http://10.0.0.5:8000/v1"],
                           "permission_modes": ["skip_dangerous"],
                           "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
                                             "args": ["--read-only"],
@@ -26,6 +27,8 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
     .to_string();
     let config = ServerConfig::from_json(&text).unwrap();
     assert_eq!(config.http, Some("127.0.0.1:8731".parse().unwrap()));
+    assert!(config.tenants["acme"].allow.exec_tools);
+    assert!(!config.tenants["beta"].allow.exec_tools);
     let debug = format!("{config:?}");
     assert!(!debug.contains("tok-acme-inline-0001"), "{debug}");
     let env = |name: &str| (name == "ACME_TOKEN").then(|| "tok-acme-env-0001".to_owned());

@@ -67,12 +67,16 @@ impl fmt::Debug for TokenSource {
 pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub scripted_provider: bool,
+    /// Whether a workspace agent gets `Bash`, which runs commands
+    /// unconfined, as the server's user; off when absent.
+    pub exec_tools: bool,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
-    /// when absent.
+    /// when absent. `auto_allow` and rules that allow need
+    /// `skip_dangerous` here.
     pub permission_modes: Option<Vec<PermissionMode>>,
-    /// Directories a workspace may be or lie under.
+    /// Directories a workspace and a project root may be or lie under.
     pub workspace_roots: Vec<PathBuf>,
     /// Postgres servers, databases, users and options a store DSN may use.
     pub postgres_dsns: Vec<String>,
@@ -182,6 +186,7 @@ impl AllowConfig {
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
+            .exec_tools(self.exec_tools)
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?
