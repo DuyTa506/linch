@@ -146,3 +146,30 @@ async fn the_binary_serves_runs_over_stdio_and_never_echoes_keys() {
         );
     }
 }
+
+/// Stdio that is not a pipe (files here) falls back to tokio's stdin and
+/// stdout and still serves until the input ends.
+#[tokio::test]
+async fn the_binary_also_serves_files_as_stdin_and_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let (input, output) = (dir.path().join("in"), dir.path().join("out"));
+    let calls = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"run.cancel","params":{"run_id":"r"}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"run.cancel","params":{"run_id":"s"}}"#,
+    ];
+    std::fs::write(&input, calls.join("\n") + "\n").unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_linch-server"))
+        .stdin(std::fs::File::open(&input).unwrap())
+        .stdout(std::fs::File::create(&output).unwrap())
+        .status();
+    let status = timeout(Duration::from_secs(20), status).await.unwrap();
+    assert!(status.unwrap().success());
+    let text = std::fs::read_to_string(&output).unwrap();
+    let mut ids: Vec<Value> = (text.lines())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .inspect(|answer| assert_eq!(answer["result"], json!({"cancelled": false})))
+        .map(|answer| answer["id"].clone())
+        .collect();
+    ids.sort_by_key(Value::as_u64);
+    assert_eq!(ids, [json!(1), json!(2)], "{text}");
+}

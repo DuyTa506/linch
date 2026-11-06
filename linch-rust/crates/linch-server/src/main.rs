@@ -18,10 +18,13 @@
 
 #![forbid(unsafe_code)]
 
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use linch_server::{Listeners, PATH, ServerConfig};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::unix::pipe;
 use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "usage: linch-server [--config FILE]";
@@ -45,7 +48,10 @@ async fn main() -> ExitCode {
         }
     };
     let served = match config {
-        None => linch_rpc::serve(tokio::io::stdin(), tokio::io::stdout()).await,
+        None => {
+            let (reader, writer) = stdio();
+            linch_rpc::serve(reader, writer).await
+        }
         Some(path) => match listen(&path).await {
             Ok(listeners) => listeners.serve(on_signal()).await,
             Err(code) => return code,
@@ -58,6 +64,32 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Stdin and stdout for the stdio transport.
+///
+/// A pipe, which is what a client that spawns the server gives it, is
+/// switched to non-blocking mode and driven by the runtime, so each read
+/// and write is one system call on the task's own thread; tokio's
+/// `stdin()` and `stdout()` hand each one to a blocking thread and back
+/// instead. Anything else (a file, a terminal) uses those.
+fn stdio() -> (
+    Box<dyn AsyncRead + Unpin + Send>,
+    Box<dyn AsyncWrite + Unpin + Send>,
+) {
+    let stdin = std::io::stdin().as_fd().try_clone_to_owned();
+    let reader: Box<dyn AsyncRead + Unpin + Send> =
+        match stdin.and_then(pipe::Receiver::from_owned_fd) {
+            Ok(pipe) => Box::new(pipe),
+            Err(_) => Box::new(tokio::io::stdin()),
+        };
+    let stdout = std::io::stdout().as_fd().try_clone_to_owned();
+    let writer: Box<dyn AsyncWrite + Unpin + Send> =
+        match stdout.and_then(pipe::Sender::from_owned_fd) {
+            Ok(pipe) => Box::new(pipe),
+            Err(_) => Box::new(tokio::io::stdout()),
+        };
+    (reader, writer)
 }
 
 /// Read the config and bind its listeners, reporting where they listen.
