@@ -29,7 +29,8 @@ The run span is a child of the context current when `Agent.run`,
 `resume` or `approve` is called. A resumed or approved call has no `init`
 event, so its spans carry no session id or turn. A run whose stream is
 left before its end keeps its spans open, and they are never exported:
-read every run to its end, or `Run.result()`.
+read every run to its end, or `Run.result()`. `Run.trace_id` is the trace
+id of its spans, for log lines.
 """
 
 from __future__ import annotations
@@ -320,6 +321,7 @@ class RunObserver:
         self._turn = turn
         self._run_id: str | None = None
         self._run: _Open | None = None
+        self._trace_id: str | None = None
         self._step: _Open | None = None
         # When the next turn begins: the prompt, or the end of the last turn.
         self._turn_opened: int | None = None
@@ -330,6 +332,14 @@ class RunObserver:
         self._errored = False
         self._prompt_captured = False
         self._ended = False
+
+    @property
+    def trace_id(self) -> str | None:
+        """The run span's trace id, as 32 hex digits, once the first envelope
+        started it; before that, the parent's, if it has one."""
+        if self._trace_id is not None:
+            return self._trace_id
+        return _trace_id(self._parent)
 
     def observe(self, envelope: Envelope) -> None:
         """Trace one envelope of the run."""
@@ -414,6 +424,7 @@ class RunObserver:
         attributes = self._attributes(INVOKE_AGENT, False)
         attributes[RESUMED] = resumed
         self._run = self._start(self._parent, INVOKE_AGENT, SpanKind.INTERNAL, at, attributes)
+        self._trace_id = _trace_id(self._run.context)
 
     def _open_step(self, at: int) -> tuple[Context, int]:
         """The open step's context and start, opening it if the turn has none."""
@@ -633,6 +644,12 @@ class RunObserver:
         if self._capture and open.recording():
             open.set(TOOL_RESULT, _result_text(event.result))
         open.end(at)
+
+
+def _trace_id(context: Context) -> str | None:
+    """The trace id of the span in `context`, or `None` without a valid one."""
+    span_context = trace.get_current_span(context).get_span_context()
+    return format(span_context.trace_id, "032x") if span_context.is_valid else None
 
 
 def _ns(ms: int) -> int:

@@ -279,6 +279,41 @@ async def test_a_text_run_is_an_agent_span_over_one_step_over_one_chat() -> None
     assert chat.status.status_code == StatusCode.UNSET and error_type(chat) is None
 
 
+async def test_a_run_tells_the_trace_id_of_its_spans() -> None:
+    sdk = Sdk()
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("hi")]), telemetry=sdk.telemetry)
+        run = await agent.run("s1", "Hi")
+        before = run.trace_id
+        await run.result()
+
+    run_span = one(sdk.spans(), "invoke_agent")
+    assert before is None, "no parent span, and the run span starts on its first envelope"
+    assert run_span.context is not None
+    assert run.trace_id == format(run_span.context.trace_id, "032x")
+
+
+def test_before_its_first_envelope_an_observer_tells_its_parents_trace_id() -> None:
+    sdk = Sdk()
+    with sdk.tracer_provider.get_tracer("host").start_as_current_span("request") as request:
+        observer = sdk.observer()
+    request_trace = format(request.get_span_context().trace_id, "032x")
+
+    assert observer.trace_id == request_trace
+    observer.observe(envelope(1, 0, init()))
+    assert observer.trace_id == request_trace
+    assert sdk.observer().trace_id is None
+
+
+async def test_an_untraced_run_has_no_trace_id() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("hi")]))
+        run = await agent.run("s1", "Hi")
+        await run.result()
+
+    assert run.trace_id is None
+
+
 async def test_each_model_call_records_its_tokens_and_duration() -> None:
     sdk = Sdk()
     envelopes = await traced(sdk, [text_turn("hello")])
