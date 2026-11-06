@@ -5,6 +5,7 @@ use linch_core::events::kinds::{
     LoopGuardReason, PromptCacheAdvisoryEvent, PromptCacheAdvisoryReason, ResultEvent,
     ResultSubtype, UsageEvent, VerificationAction, VerificationEvent,
 };
+use linch_core::hooks::ApprovalResponse;
 use linch_core::{
     Event, JsonObject, JsonValue, RunId, RunOptions, RunStatus, RunStore, SessionId, StopReason,
     Usage,
@@ -159,6 +160,29 @@ async fn a_suspended_run_reports_its_pending_permission() {
     assert_eq!(record.status, RunStatus::AwaitingApproval);
     assert_eq!(stored.status, "awaiting_approval");
     assert_eq!(stored.phase.as_deref(), Some("awaiting_approval"));
+}
+
+/// A suspend is not final: the `result` after an approval still sets the
+/// status of a report built without a record.
+#[tokio::test]
+async fn an_approved_run_that_completes_reports_completed_without_a_record() {
+    let fixture = scripted(vec![tool_turn("c1", "Edit", json!({})), text_turn("done")]);
+    let stream = fixture.agent.run("edit", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let first_leg = drain(stream).await;
+    let decisions = HashMap::from([("c1".to_owned(), ApprovalResponse::Allow)]);
+    let approved = fixture
+        .agent
+        .approve(run_id.clone(), decisions, RunOptions::new("s1"));
+    let second_leg = drain(approved).await;
+
+    let stored = fixture.agent.events(&run_id, 0).await.unwrap();
+    let joined: Vec<Envelope> = first_leg.into_iter().chain(second_leg).collect();
+    for events in [stored, joined] {
+        let report = build_run_report(&events, None);
+        assert_eq!(report.status, "completed");
+        assert!(report.long_run.quality.completed);
+    }
 }
 
 #[test]

@@ -40,8 +40,9 @@ pub struct RunReport {
     /// empty.
     pub session_id: String,
     /// The record's status; without a record, `unknown`, then `running`
-    /// after `init`, then the status a `result` (`completed`, `error`,
-    /// `aborted`, `interrupted`) or `suspended` event ends the run with.
+    /// after `init`, then the status of the last `suspended` event
+    /// (`awaiting_approval`, `awaiting_input`) until a `result` sets the
+    /// final one (`completed`, `error`, `aborted`, `interrupted`).
     pub status: String,
     /// The record's checkpoint phase, as its wire tag.
     pub phase: Option<String>,
@@ -143,7 +144,13 @@ impl RunReport {
     /// Fold one event in; `starts` holds the input and summary of each
     /// tool call not yet ended.
     fn fold(&mut self, event: &Event, has_record: bool, starts: &mut Starts) {
-        let open = !has_record && matches!(self.status.as_str(), "unknown" | "running");
+        // A suspend is not final: an approved run's later `result` still
+        // sets the status. Only a `result` closes it.
+        let open = !has_record
+            && matches!(
+                self.status.as_str(),
+                "unknown" | "running" | "awaiting_approval" | "awaiting_input"
+            );
         match event {
             Event::Init(init) => {
                 if self.run_id.is_empty() {
