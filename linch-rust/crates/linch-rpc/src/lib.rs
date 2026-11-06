@@ -11,9 +11,10 @@
 //!
 //! # Transports and access
 //!
-//! Each connection has its own agents, runs and server requests; a handle
-//! from one connection is unknown on another (`-32001`), and `run.cancel`
-//! reaches only the runs its own connection drives.
+//! Each connection has its own agents, runs and server requests. Handles
+//! are numbered per connection, so `agent-1` names the connection's own
+//! first agent and never another connection's; `run.cancel` reaches only
+//! the runs its own connection drives.
 //!
 //! - **stdio** ([`serve`]): `linch-server` with no arguments. The client
 //!   started the server and is trusted ([`Access::Local`]): no login, no
@@ -260,7 +261,7 @@
 //! | -32601 | method not found | |
 //! | -32602 | invalid params | unknown, missing or mistyped field; invalid host tool or callback |
 //! | -32603 | internal error | a result or envelope did not encode; a request or a run (in `run.end`) panicked |
-//! | -32001 | agent not found | unknown `agent` handle, or one of another connection |
+//! | -32001 | agent not found | unknown `agent` handle (handles are per connection) |
 //! | -32002 | run busy | the connection already drives that run; `agent.close` of an agent with a driven run |
 //! | -32003 | unauthenticated | the socket's first message is not `connection.auth` with a known token |
 //! | -32004 | not allowed | a tenant check refused the request; `data: {kind}` |
