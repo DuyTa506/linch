@@ -46,7 +46,7 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use profile::build_payload as profile_payload;
-pub(crate) use profile::{ChatProfile, ToolChoiceSupport};
+pub(crate) use profile::{ChatProfile, ToolChoiceSupport, effort_value};
 
 /// OpenAI's API root, including the `/v1` prefix.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
