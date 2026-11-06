@@ -2,6 +2,34 @@
 
 use super::*;
 
+/// Rebuilds `(full_history, provider_view)` from scratch by replaying the
+/// fold rule the module docs describe over `log.entries()` alone: a message
+/// entry appends to each projection it's flagged for, a projection entry
+/// replaces the derived view outright. This must always agree with the
+/// live, cached projections — a log whose `entries()` journal doesn't
+/// actually justify its cached views would still pass every other check in
+/// this test, since none of them read `entries()`.
+fn replay_entries(log: &SessionLog) -> (Vec<Message>, Vec<Message>) {
+    let mut full = Vec::new();
+    let mut derived = Vec::new();
+    for entry in log.entries() {
+        match entry {
+            LogEntry::Message(entry) => {
+                if entry.historical {
+                    full.push((*entry.message).clone());
+                }
+                if entry.visible {
+                    derived.push((*entry.message).clone());
+                }
+            }
+            LogEntry::Projection(entry) => {
+                derived = entry.replacement.iter().map(|m| (**m).clone()).collect();
+            }
+        }
+    }
+    (full, derived)
+}
+
 #[derive(Debug, Clone)]
 enum Op {
     Append {
@@ -69,6 +97,12 @@ proptest! {
             prop_assert_eq!(view_as_messages(&log), ref_derived.clone());
             prop_assert_eq!(log.history_count(), ref_full.len());
             prop_assert_eq!(log.visible_count(), ref_derived.len());
+
+            // `entries()` must itself justify the cached projections above,
+            // not just happen to agree by construction.
+            let (replayed_full, replayed_derived) = replay_entries(&log);
+            prop_assert_eq!(replayed_full, history_as_messages(&log));
+            prop_assert_eq!(replayed_derived, view_as_messages(&log));
         }
 
         // "Equal histories" means equal full_history content however
