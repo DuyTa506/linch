@@ -9,6 +9,11 @@
 //! 3. the projection goes into the session log, after which the turn's
 //!    primary call follows as usual.
 //!
+//! With skills on, the summary message also carries a `<system-reminder>`
+//! with the body of each skill the model loaded in the session, since the
+//! summary folds their tool results away. The projection logs it, so it is
+//! in the provider view and never in the full history.
+//!
 //! A summary call that fails, or answers with no text, is not fatal: the
 //! turn goes on uncompacted. Its receipt and `Usage` are written at once,
 //! with a `CompactionPending` checkpoint that counts them (one more run
@@ -20,10 +25,11 @@ use crate::compaction::{self, estimate_tokens};
 use crate::events::Event;
 use crate::events::kinds::CompactionEvent;
 use crate::events::model_call::ModelCallReceiptEvent;
-use crate::message::Message;
+use crate::message::{ContentBlock, Message};
 use crate::provider::ProviderError;
 use crate::provider::call::ModelCall;
 use crate::run::Phase;
+use crate::skills;
 
 use super::turn::{Runner, Step};
 
@@ -100,7 +106,12 @@ impl Runner {
             self.outbox.deliver(ready).await;
             return Ok(Some(DISPATCH));
         }
-        let summary = compaction::summary_message(text);
+        let mut summary = compaction::summary_message(text);
+        if agent.skills {
+            // The bodies the model loaded, which the summary folds away.
+            let reminders = skills::reminders(&self.log.full_history());
+            (summary.content).extend(reminders.into_iter().map(ContentBlock::text));
+        }
         let compacted = compaction::replacement(&view, summary.clone(), keep_from);
         self.journal.stage(Event::Compaction(CompactionEvent {
             messages_before: view.len() as u64,

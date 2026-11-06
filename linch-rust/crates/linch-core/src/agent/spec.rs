@@ -8,6 +8,7 @@ use serde_json::json;
 
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
+use crate::json::JsonObject;
 use crate::message::SystemBlock;
 use crate::provider::{ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
 use crate::tool::ToolScope;
@@ -77,23 +78,16 @@ impl AgentSpec {
         self.call_timeout_ms.map(Duration::from_millis)
     }
 
-    /// A request for this spec with `tools` and `messages`.
+    /// A request for this spec with `tools` and `messages`, and no system
+    /// blocks: the agent adds its own.
     pub(crate) fn request(
         &self,
         tools: Vec<ToolDefinition>,
         messages: Vec<crate::message::Message>,
     ) -> ProviderRequest {
-        let system = if self.system_prompt.is_empty() {
-            Vec::new()
-        } else {
-            vec![SystemBlock {
-                text: self.system_prompt.clone(),
-                cacheable: false,
-            }]
-        };
         ProviderRequest {
             model: self.model.clone(),
-            system,
+            system: Vec::new(),
             tools,
             messages,
             max_output_tokens: self.max_output_tokens,
@@ -108,22 +102,40 @@ impl AgentSpec {
     }
 }
 
+/// The system prompt as a system block; none when it is empty.
+pub(crate) fn prompt_block(spec: &AgentSpec) -> Vec<SystemBlock> {
+    if spec.system_prompt.is_empty() {
+        return Vec::new();
+    }
+    vec![SystemBlock {
+        text: spec.system_prompt.clone(),
+        cacheable: false,
+    }]
+}
+
 /// Digest of the run contract: the spec, each tool's definition and scope,
-/// and the hook policy digest (BLUEPRINT 13.1.2). A run stores it at
-/// creation; resume and approve refuse an agent whose contract differs.
+/// the hook policy digest (BLUEPRINT 13.1.2), and the `features` that shape
+/// requests beyond the spec (the skills, a subagent's definition). A run
+/// stores it at creation; resume and approve refuse an agent whose
+/// contract differs. With no features the digest is the one an agent
+/// without them always had.
 pub(crate) fn contract_digest(
     spec: &AgentSpec,
     tools: &[(ToolDefinition, ToolScope)],
     hooks: Digest,
+    features: &JsonObject,
 ) -> Result<Digest, CanonicalError> {
     let tools: Vec<_> = (tools.iter())
         .map(|(definition, scope)| json!({"definition": definition, "scope": scope}))
         .collect();
-    let value = json!({
+    let mut value = json!({
         "spec": spec,
         "tools": tools,
         "hooks": hooks.to_string(),
     });
+    if let Some(object) = value.as_object_mut() {
+        object.extend(features.clone());
+    }
     digest_with_domain(CONTRACT_DOMAIN, &value)
 }
 
@@ -143,26 +155,37 @@ mod tests {
     #[test]
     fn the_contract_covers_spec_tools_and_hooks() {
         let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
         let spec = AgentSpec::new("m");
-        let base = contract_digest(&spec, &[], hooks).unwrap();
-        assert_eq!(base, contract_digest(&spec.clone(), &[], hooks).unwrap());
+        let base = contract_digest(&spec, &[], hooks, &none).unwrap();
+        assert_eq!(
+            base,
+            contract_digest(&spec.clone(), &[], hooks, &none).unwrap()
+        );
         let mut other = spec.clone();
         other.system_prompt = "be brief".into();
-        assert_ne!(base, contract_digest(&other, &[], hooks).unwrap());
+        assert_ne!(base, contract_digest(&other, &[], hooks, &none).unwrap());
         let tool = ToolDefinition {
             name: "Read".into(),
             description: String::new(),
             input_schema: Default::default(),
         };
-        let read = contract_digest(&spec, &[(tool.clone(), ToolScope::Read)], hooks).unwrap();
+        let read =
+            contract_digest(&spec, &[(tool.clone(), ToolScope::Read)], hooks, &none).unwrap();
         assert_ne!(base, read);
-        let exec = contract_digest(&spec, &[(tool, ToolScope::Exec)], hooks).unwrap();
+        let exec = contract_digest(&spec, &[(tool, ToolScope::Exec)], hooks, &none).unwrap();
         assert_ne!(read, exec, "the scope counts");
         let digest = crate::canonical::digest(&json!(1)).unwrap();
-        assert_ne!(base, contract_digest(&spec, &[], digest).unwrap());
+        assert_ne!(base, contract_digest(&spec, &[], digest, &none).unwrap());
         let mut compacting = spec.clone();
         compacting.compaction = Some(CompactionSpec::new(1000));
-        assert_ne!(base, contract_digest(&compacting, &[], hooks).unwrap());
+        assert_ne!(
+            base,
+            contract_digest(&compacting, &[], hooks, &none).unwrap()
+        );
+        let mut features = JsonObject::new();
+        features.insert("skills".into(), json!([]));
+        assert_ne!(base, contract_digest(&spec, &[], hooks, &features).unwrap());
     }
 
     #[test]

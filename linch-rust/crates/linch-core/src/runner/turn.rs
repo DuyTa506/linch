@@ -267,7 +267,7 @@ impl Runner {
             return Ok(None);
         };
         add_context(&mut messages, context);
-        let request = (self.agent.spec).request(self.snapshot.definitions(), messages);
+        let request = self.agent.request(self.snapshot.definitions(), messages);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));

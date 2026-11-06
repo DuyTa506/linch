@@ -16,16 +16,20 @@ use crate::canonical::Digest;
 use crate::events::{Envelope, Persistence};
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
+use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderRequest, ToolDefinition};
+use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::runner::{self, RunStream};
 use crate::store::{RunStore, SessionStore};
 
+mod builder;
 mod error;
 mod spec;
 
+pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
 pub use spec::AgentSpec;
 
@@ -67,134 +71,6 @@ impl RunOptions {
 /// A callback that [`Agent::close_session`] runs.
 type SessionClose = Arc<dyn Fn(&SessionId) + Send + Sync>;
 
-/// Binds an [`AgentSpec`] to the values an agent runs with.
-///
-/// The provider, the permission engine, both stores and a namespace are
-/// required; tools, hooks and session-close callbacks default to none.
-/// Nothing here does I/O.
-pub struct AgentBuilder {
-    spec: AgentSpec,
-    provider: Option<Arc<dyn Provider>>,
-    tools: Arc<ToolRegistry>,
-    permissions: Option<PermissionEngine>,
-    hooks: Arc<Hooks>,
-    runs: Option<Arc<dyn RunStore>>,
-    sessions: Option<Arc<dyn SessionStore>>,
-    namespace: Option<String>,
-    session_close: Vec<SessionClose>,
-}
-
-impl AgentBuilder {
-    /// Start binding `spec`.
-    pub fn new(spec: AgentSpec) -> Self {
-        Self {
-            spec,
-            provider: None,
-            tools: Arc::new(ToolRegistry::new()),
-            permissions: None,
-            hooks: Arc::new(Hooks::default()),
-            runs: None,
-            sessions: None,
-            namespace: None,
-            session_close: Vec::new(),
-        }
-    }
-
-    /// The model provider.
-    pub fn provider(mut self, provider: Arc<dyn Provider>) -> Self {
-        self.provider = Some(provider);
-        self
-    }
-
-    /// The tool registry; each turn takes one snapshot of it.
-    pub fn tools(mut self, tools: Arc<ToolRegistry>) -> Self {
-        self.tools = tools;
-        self
-    }
-
-    /// The permission engine that decides every tool call.
-    pub fn permissions(mut self, permissions: PermissionEngine) -> Self {
-        self.permissions = Some(permissions);
-        self
-    }
-
-    /// The hook chains.
-    pub fn hooks(mut self, hooks: Arc<Hooks>) -> Self {
-        self.hooks = hooks;
-        self
-    }
-
-    /// The durable run store.
-    pub fn run_store(mut self, runs: Arc<dyn RunStore>) -> Self {
-        self.runs = Some(runs);
-        self
-    }
-
-    /// The durable session store.
-    pub fn session_store(mut self, sessions: Arc<dyn SessionStore>) -> Self {
-        self.sessions = Some(sessions);
-        self
-    }
-
-    /// The store key space for this agent's runs and sessions.
-    pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.namespace = Some(namespace.into());
-        self
-    }
-
-    /// Run `callback` on [`Agent::close_session`], after the callbacks
-    /// added before it. A host frees per-session state there, such as the
-    /// read evidence of `linch_tools::ReadTracker::forget`.
-    pub fn on_session_close(
-        mut self,
-        callback: impl Fn(&SessionId) + Send + Sync + 'static,
-    ) -> Self {
-        self.session_close.push(Arc::new(callback));
-        self
-    }
-
-    /// Build the agent and compute its contract digest from the spec, the
-    /// tools registered now and the hook policies (BLUEPRINT 13.1.2).
-    ///
-    /// Raises:
-    ///     BuildError: If a required binding is missing, the model or the
-    ///         namespace is blank, the compaction settings cannot run, or
-    ///         the tool schemas cannot be digested.
-    pub fn build(self) -> Result<Agent, BuildError> {
-        if self.spec.model.trim().is_empty() {
-            return Err(BuildError::Invalid("the model must not be blank".into()));
-        }
-        if let Some(problem) = self.spec.compaction.as_ref().and_then(|c| c.problem()) {
-            return Err(BuildError::Invalid(problem.into()));
-        }
-        let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;
-        if namespace.trim().is_empty() {
-            return Err(BuildError::Invalid(
-                "the namespace must not be blank".into(),
-            ));
-        }
-        let tools = self.tools.snapshot().contract_tools();
-        let contract = spec::contract_digest(&self.spec, &tools, self.hooks.policy_digest())?;
-        let inner = AgentInner {
-            provider: self.provider.ok_or(BuildError::Missing("provider"))?,
-            permissions: self
-                .permissions
-                .ok_or(BuildError::Missing("permission engine"))?,
-            runs: self.runs.ok_or(BuildError::Missing("run store"))?,
-            sessions: self.sessions.ok_or(BuildError::Missing("session store"))?,
-            spec: self.spec,
-            tools: self.tools,
-            hooks: self.hooks,
-            namespace,
-            contract,
-            session_close: self.session_close,
-        };
-        Ok(Agent {
-            inner: Arc::new(inner),
-        })
-    }
-}
-
 /// A built agent. Cheap to clone; clones share every binding.
 #[derive(Clone)]
 pub struct Agent {
@@ -212,7 +88,35 @@ pub(crate) struct AgentInner {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) namespace: String,
     pub(crate) contract: Digest,
+    /// The system blocks of every request: the system prompt, then the
+    /// skill listing.
+    pub(crate) system: Vec<SystemBlock>,
+    /// Whether skills are on: the agent registered the `Skill` tool.
+    pub(crate) skills: bool,
     session_close: Vec<SessionClose>,
+    /// The built-in tools this agent registered, removed when it goes.
+    registrations: Vec<Registration>,
+}
+
+impl AgentInner {
+    /// A request for `messages` with this agent's system blocks and `tools`.
+    pub(crate) fn request(
+        &self,
+        tools: Vec<ToolDefinition>,
+        messages: Vec<Message>,
+    ) -> ProviderRequest {
+        let mut request = self.spec.request(tools, messages);
+        request.system = self.system.clone();
+        request
+    }
+}
+
+impl Drop for AgentInner {
+    fn drop(&mut self) {
+        for registration in &self.registrations {
+            registration.dispose();
+        }
+    }
 }
 
 impl Agent {
