@@ -173,8 +173,8 @@ impl AgentBuilder {
                 "the namespace must not be blank".into(),
             ));
         }
-        let definitions = self.tools.snapshot().definitions();
-        let contract = spec::contract_digest(&self.spec, &definitions, self.hooks.policy_digest())?;
+        let tools = self.tools.snapshot().contract_tools();
+        let contract = spec::contract_digest(&self.spec, &tools, self.hooks.policy_digest())?;
         let inner = AgentInner {
             provider: self.provider.ok_or(BuildError::Missing("provider"))?,
             permissions: self

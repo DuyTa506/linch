@@ -10,6 +10,7 @@ use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
 use crate::message::SystemBlock;
 use crate::provider::{ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
+use crate::tool::ToolScope;
 
 /// Domain separator for the run contract digest.
 const CONTRACT_DOMAIN: &str = "linch.agent.contract";
@@ -107,14 +108,17 @@ impl AgentSpec {
     }
 }
 
-/// Digest of the run contract: the spec, the tool definitions and the hook
-/// policy digest (BLUEPRINT 13.1.2). A run stores it at creation; resume and
-/// approve refuse an agent whose contract differs.
+/// Digest of the run contract: the spec, each tool's definition and scope,
+/// and the hook policy digest (BLUEPRINT 13.1.2). A run stores it at
+/// creation; resume and approve refuse an agent whose contract differs.
 pub(crate) fn contract_digest(
     spec: &AgentSpec,
-    tools: &[ToolDefinition],
+    tools: &[(ToolDefinition, ToolScope)],
     hooks: Digest,
 ) -> Result<Digest, CanonicalError> {
+    let tools: Vec<_> = (tools.iter())
+        .map(|(definition, scope)| json!({"definition": definition, "scope": scope}))
+        .collect();
     let value = json!({
         "spec": spec,
         "tools": tools,
@@ -150,7 +154,10 @@ mod tests {
             description: String::new(),
             input_schema: Default::default(),
         };
-        assert_ne!(base, contract_digest(&spec, &[tool], hooks).unwrap());
+        let read = contract_digest(&spec, &[(tool.clone(), ToolScope::Read)], hooks).unwrap();
+        assert_ne!(base, read);
+        let exec = contract_digest(&spec, &[(tool, ToolScope::Exec)], hooks).unwrap();
+        assert_ne!(read, exec, "the scope counts");
         let digest = crate::canonical::digest(&json!(1)).unwrap();
         assert_ne!(base, contract_digest(&spec, &[], digest).unwrap());
         let mut compacting = spec.clone();

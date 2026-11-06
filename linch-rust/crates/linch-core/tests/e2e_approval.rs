@@ -244,3 +244,25 @@ async fn an_agent_with_another_contract_cannot_continue_the_run() {
     assert_eq!(record.epoch, epoch);
     assert!(fixture.runs.lock().unwrap().is_empty());
 }
+
+/// R1-rpc 5: a tool's scope decides approval and parallelism, so the same
+/// tool declared `read` instead of `write` is another contract.
+#[tokio::test]
+async fn a_tool_of_another_scope_is_another_contract() {
+    let fixture = Fixture::new(1);
+    let (run_id, _) = fixture.suspend().await;
+    let tools = registry(vec![Echo::new("Write", ToolScope::Read, &fixture.runs)]);
+    let permissions = policy(PermissionMode::Default);
+    let agent = agent(
+        fixture.provider.clone(),
+        tools,
+        permissions,
+        fixture.stores.clone(),
+    );
+    let (_, error) = drain(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
+    assert!(
+        matches!(error, Some(RunError::ContractMismatch { .. })),
+        "{error:?}"
+    );
+    assert!(fixture.runs.lock().unwrap().is_empty(), "nothing ran");
+}

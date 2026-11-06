@@ -23,7 +23,7 @@ use thiserror::Error;
 
 use crate::provider::ToolDefinition;
 use crate::registration::Registration;
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolScope};
 
 /// Longest tool name accepted by every supported provider.
 const MAX_NAME_LEN: usize = 64;
@@ -193,6 +193,15 @@ impl ToolSnapshot {
         self.tools
             .iter()
             .map(|tool| tool.definition().clone())
+            .collect()
+    }
+
+    /// Each tool's definition with its scope, in registration order: the
+    /// tool part of the run contract. The scope decides approval and
+    /// parallelism, so it counts as much as the schema.
+    pub(crate) fn contract_tools(&self) -> Vec<(ToolDefinition, ToolScope)> {
+        (self.tools.iter())
+            .map(|tool| (tool.definition().clone(), tool.tool().scope()))
             .collect()
     }
 }
