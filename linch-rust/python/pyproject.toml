@@ -1,0 +1,39 @@
+[project]
+name = "linch-rust"
+version = "0.1.0"
+description = "Minimal asyncio client for the Linch Rust core, over the linch-server sidecar."
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    # Test-only: creates and drops the Postgres schema of the resume test.
+    "psycopg[binary]>=3.2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src", "tests"]
+strict = ["src"]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"

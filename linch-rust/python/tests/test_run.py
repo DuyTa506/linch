@@ -1,0 +1,78 @@
+"""A run end to end, event replay, errors, and the server's lifetime."""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+from scripted import config, text_turn
+
+from linch_rust import (
+    AssistantEvent,
+    InitEvent,
+    ProtocolError,
+    ResultEvent,
+    RunNotFound,
+    Server,
+)
+
+STREAM_ONLY = {"partial_assistant", "tool_progress", "hook"}
+
+
+async def test_a_run_streams_its_envelopes_then_its_result() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("Hello there.")]))
+        run = await agent.run("s1", "Say hello")
+        envelopes = [envelope async for envelope in run]
+        result = await run.result()
+
+    kinds = [envelope.event.type for envelope in envelopes]
+    assert kinds[:2] == ["init", "user"]
+    assert kinds[-1] == "result"
+    assert all(envelope.run_id == run.id for envelope in envelopes)
+    init = envelopes[0].event
+    assert isinstance(init, InitEvent) and init.session_id == "s1"
+    assistant = next(e.event for e in envelopes if isinstance(e.event, AssistantEvent))
+    assert assistant.stop_reason == "end_turn"
+    assert isinstance(result, ResultEvent)
+    assert result.subtype == "success"
+    assert result.final_text == "Hello there."
+
+
+async def test_events_replays_the_durable_envelopes_after_a_seq() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("Replayed.")]))
+        run = await agent.run("s1", "Go")
+        streamed = [e async for e in run if e.event.type not in STREAM_ONLY]
+        replayed = await agent.events(run.id)
+        middle = streamed[1].seq
+        tail = await agent.events(run.id, after_seq=middle)
+
+    assert replayed == streamed
+    assert [e.seq for e in replayed] == sorted({e.seq for e in replayed})
+    assert tail == [e for e in streamed if e.seq > middle]
+
+
+async def test_an_invalid_config_is_refused_at_open() -> None:
+    async with Server() as server:
+        bad = config([text_turn("x")])
+        bad["api_key"] = "sk-never"
+        with pytest.raises(ProtocolError) as raised:
+            await server.open_agent(bad)
+    assert raised.value.code == -32602
+
+
+async def test_resuming_an_unknown_run_ends_with_not_found() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([]))
+        run = await agent.resume("no-such-run")
+        with pytest.raises(RunNotFound):
+            await run.result()
+
+
+async def test_closing_the_server_stops_its_process() -> None:
+    async with Server() as server:
+        pid = server.pid
+        await server.open_agent(config([]))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
