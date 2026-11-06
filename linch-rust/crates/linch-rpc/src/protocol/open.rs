@@ -96,3 +96,44 @@ fn take<T: DeserializeOwned, E: serde::de::Error>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn open_params_round_trip_and_stay_strict() {
+        let wire = json!({
+            "namespace": "t",
+            "spec": {"model": "m"},
+            "provider": {"id": "deepseek"},
+            "tools": [{"name": "lookup", "description": "Find.",
+                       "input_schema": {"type": "object"}, "scope": "read",
+                       "timeout_ms": 5}],
+            "callbacks": [{"point": "stop", "policy_id": "p", "policy_version": 2}],
+        });
+        let params: OpenParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(params.tools[0].scope, ToolScope::Read);
+        assert_eq!(params.callbacks[0].policy_version, 2);
+        let encoded = serde_json::to_value(&params).unwrap();
+        assert_eq!(encoded["tools"], wire["tools"]);
+        assert_eq!(encoded["callbacks"], wire["callbacks"]);
+        assert_eq!(
+            serde_json::from_value::<OpenParams>(encoded).unwrap(),
+            params
+        );
+
+        let bare = json!({"namespace": "t", "spec": {"model": "m"},
+                          "provider": {"id": "deepseek"}});
+        let params: OpenParams = serde_json::from_value(bare.clone()).unwrap();
+        assert!(params.tools.is_empty() && params.callbacks.is_empty());
+        let encoded = serde_json::to_value(&params).unwrap();
+        assert!(encoded.get("tools").is_none() && encoded.get("callbacks").is_none());
+
+        let mut unknown = bare;
+        unknown["hooks"] = json!([]);
+        assert!(serde_json::from_value::<OpenParams>(unknown).is_err());
+    }
+}

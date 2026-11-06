@@ -258,3 +258,6 @@ impl Wire for PostTurn {
         answer::<PostTurnAnswer>(value).map(|_| ())
     }
 }
+
+#[cfg(test)]
+mod tests;
