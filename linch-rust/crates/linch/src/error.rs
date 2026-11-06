@@ -1,6 +1,7 @@
 //! [`OpenError`]: why an [`AgentConfig`](crate::AgentConfig) did not open.
 
 use linch_core::{BuildError, PolicyError, ProviderError, RegistryError};
+use linch_ext::deep_agent::DeepAgentError;
 use linch_mcp::McpError;
 use linch_tools::FsError;
 use thiserror::Error;
@@ -36,6 +37,10 @@ pub enum OpenError {
     /// servers connected before it are disconnected again.
     #[error("MCP server unusable: {0}")]
     Mcp(#[source] McpError),
+    /// The deep agent preset names an unknown profile, or is durable on
+    /// memory stores.
+    #[error("deep agent unusable: {0}")]
+    DeepAgent(#[from] DeepAgentError),
     /// The agent itself could not be built.
     #[error(transparent)]
     Build(#[from] BuildError),

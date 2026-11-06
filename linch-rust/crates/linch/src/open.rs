@@ -20,6 +20,7 @@ use linch_providers::{
 use linch_tools::{LocalFs, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools};
 
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
+use crate::deep;
 use crate::error::OpenError;
 use crate::files::Files;
 use crate::pools::{PgPools, Shared};
@@ -42,7 +43,11 @@ impl AgentConfig {
     /// Open the agent this config describes on top of tools and hooks bound
     /// in code.
     ///
-    /// Reads the provider key from the environment, registers the workspace
+    /// First turns on what a `deep_agent` preset needs (see
+    /// [`DeepAgentConfig`](crate::DeepAgentConfig); its file memory hook
+    /// goes with the filesystem's registrations, and its roster joins the
+    /// config directory's subagents). Then reads the provider key from the
+    /// environment, registers the workspace
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), registers
@@ -73,17 +78,20 @@ impl AgentConfig {
     ///     table fills the cost fields of usage and result events.
     ///
     /// Raises:
-    ///     OpenError: If the key is unset, the workspace is not a directory,
+    ///     OpenError: If the deep agent preset names an unknown profile or
+    ///         is durable on memory stores, the key is unset, the workspace
+    ///         is not a directory,
     ///         a tool name is taken twice, the policy is malformed, Postgres
     ///         is unreachable, an MCP server cannot be connected, or the
     ///         agent cannot be built (a blank model or namespace). MCP
     ///         servers already connected are disconnected first.
     pub async fn open_with(
-        self,
+        mut self,
         tools: Arc<ToolRegistry>,
         hooks: Arc<Hooks>,
         pools: &PgPools,
     ) -> Result<OpenedAgent, OpenError> {
+        let deep = deep::expand(&mut self)?;
         let provider = provider(self.provider)?;
         let reads = Arc::new(ReadTracker::new());
         let root = match self.workspace {
@@ -109,21 +117,25 @@ impl AgentConfig {
             }
         }
         let pg = pool.as_deref().and_then(Shared::pool);
-        let files = Files::wire(
+        let mut files = Files::wire(
             self.filesystem.as_ref(),
             &tools,
             &hooks,
             pg,
             &self.namespace,
         )?;
+        if deep.is_some() {
+            files.remember(&hooks);
+        }
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
-        let project = match self.skills || self.subagents {
+        let mut project = match self.skills || self.subagents {
             true => {
                 let root = root.as_deref();
                 project::load(self.config_dir, root, self.skills, self.subagents, &tools).await
             }
             false => Loaded::default(),
         };
+        deep::add_roster(deep.as_ref(), &mut project);
         let forget = files.forget();
         let mut builder = AgentBuilder::new(files.teach(self.spec))
             .provider(provider)

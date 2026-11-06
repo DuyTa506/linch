@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use linch_core::{AgentSpec, Hooks, Registration, SessionId, ToolRegistry};
+use linch_ext::deep_agent::FileMemoryContext;
 use linch_postgres::{PgFileBackend, PgPool};
 use linch_tools::vfs::{
     MemorySessions, OffloadConfig, PROMPT, ResultOffload, SessionFiles, SharedFiles, vfs_tools,
@@ -24,6 +25,8 @@ pub(crate) struct Files {
     registrations: Vec<Registration>,
     /// The per-session memory files, which a session close drops.
     memory: Option<Arc<MemorySessions>>,
+    /// Each session's files; `None` when the filesystem is off.
+    files: Option<Arc<dyn SessionFiles>>,
 }
 
 impl Files {
@@ -48,6 +51,7 @@ impl Files {
             on: true,
             registrations: Vec::new(),
             memory: None,
+            files: None,
         };
         let files: Arc<dyn SessionFiles> = match pool {
             Some(pool) => {
@@ -60,6 +64,7 @@ impl Files {
                 memory
             }
         };
+        wired.files = Some(Arc::clone(&files));
         for tool in vfs_tools(Arc::clone(&files)) {
             wired.registrations.push(tools.register(tool)?);
         }
@@ -71,6 +76,19 @@ impl Files {
             wired.registrations.push(registration);
         }
         Ok(wired)
+    }
+
+    /// Register the deep agent's file memory hook over these files on
+    /// `hooks.context_build`, undone like the other registrations. Nothing
+    /// when the filesystem is off.
+    pub(crate) fn remember(&mut self, hooks: &Hooks) {
+        let Some(files) = self.files.clone() else {
+            return;
+        };
+        let hook = FileMemoryContext::new(move |session| files.backend(session));
+        let registration = (hooks.context_build.register(Arc::new(hook)))
+            .expect("the file memory hook has a policy id, no matcher and fails open");
+        self.registrations.push(registration);
     }
 
     /// `spec` with [`PROMPT`] after its system prompt when the tools are on.

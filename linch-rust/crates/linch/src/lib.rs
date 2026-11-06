@@ -33,7 +33,8 @@
 //! provider by id plus its options, the stores (memory or a Postgres DSN),
 //! the built-in workspace tools from [`tools`], the permission policy, MCP
 //! servers ([`McpConfig`]), the virtual filesystem ([`FilesystemConfig`]),
-//! and whether the agent loads the skills and
+//! the deep agent preset ([`DeepAgentConfig`]), and whether the agent
+//! loads the skills and
 //! subagents of its config directory ([`project`]). Provider keys are
 //! never part of it;
 //! [`AgentConfig::open`] reads each one from the process environment.
@@ -46,6 +47,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod deep;
 mod error;
 mod files;
 mod open;
@@ -53,16 +55,16 @@ mod pools;
 pub mod project;
 
 pub use config::{
-    AgentConfig, FilesystemConfig, McpConfig, McpTransportConfig, ProviderConfig,
-    ReasoningSummaryConfig, ReconnectConfig, StoreConfig,
+    AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, FilesystemConfig, McpConfig,
+    McpTransportConfig, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig, StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;
 pub use open::OpenedAgent;
 pub use pools::PgPools;
 
-/// The extensions (`linch-ext`): evals, run reports and workflows, with
-/// the Postgres workflow journal.
+/// The extensions (`linch-ext`): evals, run reports, workflows, with the
+/// Postgres workflow journal, and the deep agent preset.
 pub use linch_ext as ext;
 
 /// The MCP client (`linch-mcp`).
