@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 
 use futures::StreamExt;
 use linch_core::events::kinds::ResultSubtype;
-use linch_core::{Event, RunOptions};
+use linch_core::{ContentBlock, Event, RunOptions};
 
 async fn conversation(test: &str, thinking: bool) {
     let Some(live) = support::live(thinking) else {
@@ -25,14 +25,21 @@ async fn conversation(test: &str, thinking: bool) {
     );
     let mut kinds = Vec::new();
     let mut result = None;
+    // Whether each response carried reasoning, in order.
+    let mut thought = Vec::new();
     while let Some(item) = stream.next().await {
         let envelope = item.expect("the run continues durably");
         let kind = envelope.event.to_value().unwrap()["type"].clone();
         if kind != "partial_assistant" {
             kinds.push(kind.as_str().unwrap_or_default().to_owned());
         }
-        if let Event::Result(done) = envelope.event {
-            result = Some(done);
+        match envelope.event {
+            Event::Assistant(response) => thought.push(
+                (response.message.content.iter())
+                    .any(|block| matches!(block, ContentBlock::Thinking(_))),
+            ),
+            Event::Result(done) => result = Some(done),
+            _ => {}
         }
     }
     let calls = live.calls.lock().unwrap().clone();
@@ -46,7 +53,7 @@ async fn conversation(test: &str, thinking: bool) {
             call.usage,
         );
     }
-    eprintln!("{test}: events {kinds:?}");
+    eprintln!("{test}: events {kinds:?}; responses with thinking {thought:?}");
     let result = result.expect("the run ends with a result");
     eprintln!("{test}: final text {:?}", result.final_text);
     assert_eq!(result.subtype, ResultSubtype::Success, "{result:?}");
@@ -61,6 +68,9 @@ async fn conversation(test: &str, thinking: bool) {
         "the tool ran"
     );
     assert!(calls.len() >= 2, "a tool turn, then the answer");
+    // With thinking on, the tool-call response carries reasoning, so the
+    // second request echoes it back (`reasoning_content`).
+    assert_eq!(thought[0], thinking, "{thought:?}");
 }
 
 #[tokio::test]
