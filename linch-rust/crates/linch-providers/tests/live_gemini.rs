@@ -81,7 +81,7 @@ async fn text_turn() {
     let turn = call("text_turn", &provider, request(vec![prompt], vec![])).await;
     assert_eq!(turn.stop_reason, StopReason::EndTurn);
     assert!(turn.message.text().to_lowercase().contains("pong"));
-    assert!(turn.usage.output_tokens > 0);
+    assert!(turn.usage.expect("Gemini reports usage").output_tokens > 0);
 }
 
 /// The second call replays the first turn's kept parts, so it proves the

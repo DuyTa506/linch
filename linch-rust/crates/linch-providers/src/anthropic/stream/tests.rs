@@ -83,7 +83,7 @@ async fn recorded_text_turn_keeps_a_signature_only_thinking_block() {
     assert_eq!(turn.message.text(), "pong");
     assert_eq!(turn.message.content.len(), 2);
     assert_eq!(
-        turn.usage,
+        turn.usage.unwrap(),
         Usage {
             input_tokens: 43,
             output_tokens: 3,
@@ -106,8 +106,8 @@ async fn recorded_parallel_tool_calls_end_with_tool_use() {
     assert_eq!(calls[0].id, "call_00_cyykLObIwPinH20EybNw8457");
     assert_eq!(calls[0].input["city"], "Paris");
     assert_eq!(calls[1].input["city"], "Tokyo");
-    assert_eq!(turn.usage.input_tokens, 306);
-    assert_eq!(turn.usage.output_tokens, 92);
+    assert_eq!(turn.usage.unwrap().input_tokens, 306);
+    assert_eq!(turn.usage.unwrap().output_tokens, 92);
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn edge_fixture_covers_redacted_prefilled_and_skipped_blocks() {
     assert_eq!(content.len(), 4);
     assert_eq!(turn.stop_reason, StopReason::ToolUse);
     assert_eq!(
-        turn.usage,
+        turn.usage.unwrap(),
         Usage {
             input_tokens: 12,
             output_tokens: 57,
@@ -240,7 +240,7 @@ async fn blank_model_falls_back_to_the_requested_one() {
     let end = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#;
     let turn = assemble(run_ok(&frames(&[start, end, STOP])).await).unwrap();
     assert_eq!(turn.model, "claude-requested");
-    assert_eq!(turn.usage, Usage::default());
+    assert_eq!(turn.usage, None);
 }
 
 #[tokio::test]

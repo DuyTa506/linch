@@ -86,7 +86,7 @@ async fn reasoning_summary_and_two_calls_assemble() {
     );
     assert_eq!(calls[1].input, *json!({"zone": "ICT"}).as_object().unwrap());
     assert_eq!(
-        turn.usage,
+        turn.usage.unwrap(),
         Usage {
             input_tokens: 200,
             output_tokens: 120,
@@ -114,7 +114,7 @@ async fn text_turn_with_comment_line_assembles() {
     let turn = assemble(run_ok(TEXT).await).unwrap();
     assert_eq!(turn.stop_reason, StopReason::EndTurn);
     assert_eq!(turn.message.text(), "It is 31C in Hue.");
-    assert_eq!(turn.usage.input_tokens, 40);
+    assert_eq!(turn.usage.unwrap().input_tokens, 40);
 }
 
 #[tokio::test]
@@ -171,7 +171,7 @@ async fn refusal_text_ends_with_refusal() {
     let turn = assemble(run_ok(&sse).await).unwrap();
     assert_eq!(turn.stop_reason, StopReason::Refusal);
     assert_eq!(turn.message.text(), "I can't help with that.");
-    assert_eq!(turn.usage, Usage::default());
+    assert_eq!(turn.usage, None);
 }
 
 #[tokio::test]

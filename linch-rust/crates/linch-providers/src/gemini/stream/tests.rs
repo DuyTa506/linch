@@ -85,7 +85,7 @@ async fn text_turn_keeps_thoughts_text_usage_and_the_signed_parts() {
         ]
     );
     assert_eq!(
-        turn.usage,
+        turn.usage.unwrap(),
         Usage {
             input_tokens: 5,
             output_tokens: 22,
@@ -113,7 +113,7 @@ async fn parallel_calls_get_position_ids_and_keep_the_signature_on_the_first() {
     assert_eq!(calls[1].id, "gemini_3_1");
     assert_eq!(calls[0].input["city"], "Paris");
     assert_eq!(calls[1].input["city"], "Tokyo");
-    assert_eq!(turn.usage.output_tokens, 42);
+    assert_eq!(turn.usage.unwrap().output_tokens, 42);
     let parts = &turn.message.provider_metadata.unwrap()[PARTS_KEY];
     assert_eq!(parts[1]["thoughtSignature"], "c2lnLWNhbGw=");
     assert!(parts[2].get("thoughtSignature").is_none());
@@ -149,7 +149,7 @@ async fn unsigned_turns_keep_no_metadata_and_fall_back_to_the_requested_model() 
     let turn = assemble(run_ok(&frames(&[chunk])).await).unwrap();
     assert_eq!(turn.model, "gemini-requested");
     assert!(turn.message.provider_metadata.is_none());
-    assert_eq!(turn.usage, Usage::default());
+    assert_eq!(turn.usage, None);
 }
 
 #[tokio::test]
@@ -174,7 +174,7 @@ async fn a_blocked_prompt_is_a_refusal_with_no_content() {
     let turn = assemble(run_ok(&frames(&[chunk])).await).unwrap();
     assert_eq!(turn.stop_reason, StopReason::Refusal);
     assert!(turn.message.content.is_empty());
-    assert_eq!(turn.usage.input_tokens, 7);
+    assert_eq!(turn.usage.unwrap().input_tokens, 7);
 }
 
 #[tokio::test]

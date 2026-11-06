@@ -41,7 +41,7 @@ pub(crate) struct Translator {
     started: bool,
     blocks: HashMap<u64, Block>,
     tool_calls: usize,
-    usage: Usage,
+    usage: Option<Usage>,
     stop: Option<StopReason>,
 }
 
@@ -54,7 +54,7 @@ impl Translator {
             started: false,
             blocks: HashMap::new(),
             tool_calls: 0,
-            usage: Usage::default(),
+            usage: None,
             stop: None,
         }
     }
@@ -124,7 +124,7 @@ impl Translator {
     }
 
     fn add_usage(&mut self, wire: &WireUsage) {
-        let usage = &mut self.usage;
+        let usage = self.usage.get_or_insert_with(Usage::default);
         for (field, value) in [
             (&mut usage.input_tokens, wire.input_tokens),
             (&mut usage.output_tokens, wire.output_tokens),

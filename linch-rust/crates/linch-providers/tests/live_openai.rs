@@ -100,7 +100,7 @@ async fn text_turn(test: &str, provider: &dyn Provider) {
     let turn = call(test, provider, request(vec![ask], vec![])).await;
     assert_eq!(turn.stop_reason, StopReason::EndTurn);
     assert!(turn.message.text().to_lowercase().contains("pong"));
-    assert!(turn.usage.output_tokens > 0);
+    assert!(turn.usage.expect("OpenAI reports usage").output_tokens > 0);
 }
 
 async fn tool_round_trip(test: &str, provider: &dyn Provider) {

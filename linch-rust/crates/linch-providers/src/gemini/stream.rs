@@ -256,9 +256,7 @@ impl Translator {
         });
         out.push_back(ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason,
-            // `MessageEndEvent` has no "unknown" usage; Gemini sends usage
-            // on every chunk, so a missing one reads as zero.
-            usage: self.usage.unwrap_or_default(),
+            usage: self.usage,
             provider_metadata,
         }));
         Ok(())

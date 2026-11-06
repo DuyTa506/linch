@@ -167,7 +167,7 @@ async fn fixture_parallel_calls_and_cache_usage_assemble() {
         );
         // 1200 prompt tokens = 1024 cache reads + 100 cache writes + 76.
         assert_eq!(
-            turn.usage,
+            turn.usage.unwrap(),
             Usage {
                 input_tokens: 76,
                 output_tokens: 64,

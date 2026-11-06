@@ -217,9 +217,7 @@ impl Translator {
         let provider_metadata = metadata(response.id, response.output);
         out.push_back(ProviderEvent::MessageEnd(MessageEndEvent {
             stop_reason,
-            // `MessageEndEvent` has no "unknown" state; a response without
-            // usage reads as zero.
-            usage: response.usage.map(usage).unwrap_or_default(),
+            usage: response.usage.map(usage),
             provider_metadata,
         }));
         Ok(())

@@ -39,7 +39,7 @@ async fn vllm_reasoning_field_whole_call_and_cache_writes() {
         *json!({"city": "Vinh"}).as_object().unwrap()
     );
     assert_eq!(
-        turn.usage,
+        turn.usage.unwrap(),
         Usage {
             input_tokens: 12,
             output_tokens: 60,
@@ -80,7 +80,7 @@ async fn sglang_nulls_sglext_chunk_and_cache_report() {
     assert_eq!(call.id, "call_0f1e2d3c4b5a69788796a5b4");
     assert_eq!(call.input, *json!({"city": "Hanoi"}).as_object().unwrap());
     assert_eq!(
-        turn.usage,
+        turn.usage.unwrap(),
         Usage {
             input_tokens: 114,
             output_tokens: 52,
@@ -106,8 +106,8 @@ async fn llamacpp_ping_growing_name_and_timings() {
         calls[0].input,
         *json!({"city": "Da Nang"}).as_object().unwrap()
     );
-    assert_eq!(turn.usage.input_tokens, 64);
-    assert_eq!(turn.usage.cache_read_tokens, 448);
+    assert_eq!(turn.usage.unwrap().input_tokens, 64);
+    assert_eq!(turn.usage.unwrap().cache_read_tokens, 448);
 }
 
 #[tokio::test]

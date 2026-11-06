@@ -102,7 +102,12 @@ async fn text_turn(test: &str, thinking: bool) {
     assert_eq!(turn.stop_reason, StopReason::EndTurn);
     assert!(turn.message.text().to_lowercase().contains("pong"));
     assert_eq!(has_signed_thinking(&turn), thinking);
-    assert!(turn.usage.output_tokens > 0);
+    assert!(
+        turn.usage
+            .expect("the endpoint reports usage")
+            .output_tokens
+            > 0
+    );
 }
 
 async fn tool_round_trip(test: &str, thinking: bool) {
