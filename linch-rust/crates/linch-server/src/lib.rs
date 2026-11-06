@@ -59,7 +59,8 @@
 //!   connection. A socket file left by a stopped server is replaced and
 //!   the file is removed at shutdown. Its permissions follow the umask.
 //! - **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades
-//!   to a WebSocket carrying one JSON-RPC message per text frame. A
+//!   to a WebSocket carrying one JSON-RPC message per text frame; the
+//!   `101` names the token's tenant in `Linch-Tenant: <name>`. A
 //!   missing or unknown token gets `401` with `WWW-Authenticate: Bearer`;
 //!   a tenant already holding its `max_connections` gets `429`, both
 //!   before the upgrade. Until it is upgraded a connection has

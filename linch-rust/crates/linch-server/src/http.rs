@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures::{SinkExt, StreamExt};
@@ -42,6 +42,10 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// bounds them to about 13 MiB; an upgraded WebSocket gives its place
 /// back and counts against its tenant's `max_connections` instead.
 pub const MAX_PENDING_UPGRADES: usize = 32;
+
+/// The `101` header naming the tenant the token acts for, as the socket's
+/// `connection.auth` answer does.
+const TENANT: HeaderName = HeaderName::from_static("linch-tenant");
 
 /// Largest WebSocket message read. Messages over [`MAX_LINE_BYTES`] are
 /// refused by the core like an oversized line; past this one the socket
@@ -129,9 +133,10 @@ async fn handshake(stream: TcpStream, app: Router) {
 }
 
 /// Check the bearer token and take a place among its tenant's
-/// connections, then upgrade. The token is checked first, so a request
-/// without one learns nothing else; a tenant at its `max_connections`
-/// gets 429 instead of a socket that closes at once.
+/// connections, then upgrade, naming the tenant in `Linch-Tenant`. The
+/// token is checked first, so a request without one learns nothing else;
+/// a tenant at its `max_connections` gets 429 instead of a socket that
+/// closes at once.
 async fn upgrade(
     State(http): State<Http>,
     headers: HeaderMap,
@@ -141,6 +146,8 @@ async fn upgrade(
     let Some(tenant) = bearer(&headers).and_then(|token| shared.tokens.tenant(token)) else {
         return (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response();
     };
+    // `Tenant::new` allows only ASCII letters, digits, `.`, `_` and `-`.
+    let name = HeaderValue::from_str(tenant.name()).expect("a tenant name is a header value");
     let place = match tenant.connect() {
         Ok(place) => place,
         Err(error) => return (StatusCode::TOO_MANY_REQUESTS, error.message).into_response(),
@@ -152,12 +159,15 @@ async fn upgrade(
     // Counted from now, so a stop cannot finish before this connection.
     let counted = shared.connections.token();
     let (pools, stop) = (shared.pools, http.stop);
-    socket
-        .max_message_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
-            let _counted = counted;
-            serve_socket(socket, Access::Tenant(place), pools, stop).await;
-        })
+    let mut switching =
+        socket
+            .max_message_size(MAX_MESSAGE_BYTES)
+            .on_upgrade(move |socket| async move {
+                let _counted = counted;
+                serve_socket(socket, Access::Tenant(place), pools, stop).await;
+            });
+    switching.headers_mut().insert(TENANT, name);
+    switching
 }
 
 /// The token of an `Authorization: Bearer <token>` header.

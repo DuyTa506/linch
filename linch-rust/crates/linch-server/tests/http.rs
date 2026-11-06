@@ -18,13 +18,18 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-async fn connect(address: SocketAddr, authorization: Option<&str>) -> Result<Socket, Error> {
+/// Upgrade to a WebSocket, keeping the server's `101` response.
+async fn upgrade(
+    address: SocketAddr,
+    authorization: Option<&str>,
+) -> Result<(Socket, Response), Error> {
     let mut request = format!("ws://{address}{}", linch_server::PATH)
         .into_client_request()
         .unwrap();
@@ -33,7 +38,11 @@ async fn connect(address: SocketAddr, authorization: Option<&str>) -> Result<Soc
             .headers_mut()
             .insert("authorization", value.parse().unwrap());
     }
-    tokio_tungstenite::connect_async(request)
+    tokio_tungstenite::connect_async(request).await
+}
+
+async fn connect(address: SocketAddr, authorization: Option<&str>) -> Result<Socket, Error> {
+    upgrade(address, authorization)
         .await
         .map(|(socket, _)| socket)
 }
@@ -163,6 +172,25 @@ async fn a_missing_or_wrong_token_gets_401_before_the_upgrade() {
     // The scheme is case-insensitive.
     let lower = format!("bearer {TOKEN}");
     assert!(connect(address, Some(&lower)).await.is_ok());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn an_upgrade_names_its_tokens_tenant_and_nothing_secret() {
+    let (server, listening) = running(&config(json!({"http": "127.0.0.1:0"}))).await;
+    let address = listening.http.unwrap();
+    let bearer = format!("Bearer {TOKEN}");
+    let (_socket, response) = upgrade(address, Some(&bearer)).await.unwrap();
+    assert_eq!(response.headers()["linch-tenant"], "acme");
+    for (name, value) in response.headers() {
+        let value = value.to_str().unwrap_or_default();
+        assert!(!value.contains(TOKEN), "{name} holds the token");
+    }
+    // A refused upgrade names no tenant.
+    match upgrade(address, None).await {
+        Err(Error::Http(refused)) => assert!(!refused.headers().contains_key("linch-tenant")),
+        other => panic!("not refused: {:?}", other.map(|_| ())),
+    }
     server.stop().await;
 }
 

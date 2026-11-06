@@ -245,7 +245,8 @@ final: Hello over WebSocket.
   `-32003` and the connection closes; so does 10 seconds of silence.
 - **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades to a
   WebSocket that carries one JSON-RPC message per text frame, with the same
-  methods and no `connection.auth`.
+  methods and no `connection.auth`. Its `101` response names the token's
+  tenant in a `Linch-Tenant` header, as the socket's login answer does.
 - On both, run events arrive as `run.event` notifications and end with
   `run.end`, and the server sends `tool.call` and `hook.call` requests on the
   same connection for the client to answer.
@@ -257,7 +258,7 @@ The HTTP server answers before the upgrade:
 | No token, or an unknown one | `401` with `WWW-Authenticate: Bearer` |
 | The tenant already holds `max_connections` | `429`, the body naming the cap |
 | A valid token without WebSocket headers | `400` |
-| A valid WebSocket upgrade | `101 Switching Protocols` |
+| A valid WebSocket upgrade | `101 Switching Protocols`, with `Linch-Tenant: <name>` naming the token's tenant |
 | A request head not complete within 10 seconds | No answer: the connection closes |
 
 ```bash
