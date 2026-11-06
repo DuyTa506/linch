@@ -192,20 +192,26 @@ def tree_usage(root: int) -> dict:
     """
     ticks = pages = fds = processes = 0
     bound = False
-    todo = [root]
+    todo = [(root, "")]
     while todo:
-        pid = todo.pop()
+        pid, parent = todo.pop()
         try:
             with open(f"/proc/{pid}/stat") as handle:
-                fields = handle.read().rsplit(")", 1)[1].split()
+                comm, fields = handle.read().split("(", 1)[1].rsplit(")", 1)
+            fields = fields.split()
             tasks = os.listdir(f"/proc/{pid}/task")
-            try:
-                open_fds = len(os.listdir(f"/proc/{pid}/fd"))
-            except PermissionError:  # not dumpable, or a zombie (FDSize 0)
+            open_fds = 0
+            if comm == parent:  # forked, not yet exec'd: its pages and fds are the parent's
+                fields[21] = "0"
+            elif comm == "linch-server" and not os.access(f"/proc/{pid}/fd", os.R_OK):
                 with open(f"/proc/{pid}/status") as handle:
                     slots = [line for line in handle if line.startswith("FDSize:")]
-                open_fds = int(slots[0].split()[1])
-                bound = bound or open_fds > 0
+                open_fds, bound = int(slots[0].split()[1]), True
+            else:
+                try:
+                    open_fds = len(os.listdir(f"/proc/{pid}/fd"))
+                except PermissionError:  # a zombie, or a child inside its exec
+                    pass
         except (OSError, IndexError):  # it exited while being read
             continue
         ticks += sum(int(value) for value in fields[11:15])  # utime stime cutime cstime
@@ -215,7 +221,11 @@ def tree_usage(root: int) -> dict:
         for task in tasks:
             try:
                 with open(f"/proc/{pid}/task/{task}/children") as handle:
-                    todo.extend(int(child) for child in handle.read().split())
+                    children = handle.read().split()
+                if children:  # a child keeps its forking thread's name until it execs
+                    with open(f"/proc/{pid}/task/{task}/comm") as handle:
+                        forker = handle.read().strip()
+                    todo.extend((int(child), forker) for child in children)
             except OSError:
                 pass
     return {

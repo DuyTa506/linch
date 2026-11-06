@@ -131,9 +131,10 @@ the CPU again. In between it samples the tree every 100 ms from `/proc`
   open, the warm-up run (an idle backend reports up to 10 s late) and the
   close.
 - Peak children and fds are 100 ms samples, so a Bash child that lives a
-  millisecond is seen only when many run at once. `linch-server` is not
-  dumpable, so its `fd/` cannot be listed: its fd table size (`FDSize`, at
-  least its open fds) stands in, shown as `<= N`.
+  millisecond is seen only when many run at once; between its fork and
+  exec it counts as a child but not its pages or fds (its parent's).
+  `linch-server` is not dumpable, so its `fd/` cannot be listed: its fd
+  table size (`FDSize`, at least its open fds) stands in, shown as `<= N`.
 - Failed: runs that did not end `success`, with the first error texts.
 
 ## What is not the same on every side
