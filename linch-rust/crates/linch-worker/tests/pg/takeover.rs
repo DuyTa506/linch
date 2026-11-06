@@ -116,10 +116,10 @@ async fn a_killed_workers_job_is_taken_over() {
     let record = db.record(&run_id).await;
     assert_eq!(record.epoch, 2, "one claim per worker");
     // The call started on the killed worker is not run again: the model
-    // gets the interrupted placeholder, and no end was ever recorded.
+    // gets the interrupted placeholder, and its end is the only one.
     assert_eq!(probe.started(), 1);
     assert_eq!(db.tool_results("s1").await, vec![INTERRUPTED_TOOL_TEXT]);
-    assert_eq!(tool_ends(&db.events(&run_id).await), 0);
+    assert_eq!(tool_ends(&db.events(&run_id).await), 1);
     wait_until("the job is acked", || async { db.jobs().await == 0 }).await;
     second.stop().await;
     db.finish().await;
@@ -152,7 +152,8 @@ async fn a_stalled_worker_is_taken_over_and_writes_nothing() {
     .await;
     wait_until("the job is acked", || async { db.jobs().await == 0 }).await;
     let before = db.events(&run_id).await;
-    assert_eq!(tool_ends(&before), 0);
+    // Only the interrupted placeholder's end.
+    assert_eq!(tool_ends(&before), 1);
     assert_eq!(db.tool_results("s1").await, vec![INTERRUPTED_TOOL_TEXT]);
 
     // Thaw the first worker. Its last confirmed heartbeat is older than the
