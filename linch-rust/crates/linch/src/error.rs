@@ -6,6 +6,8 @@ use linch_mcp::McpError;
 use linch_tools::FsError;
 use thiserror::Error;
 
+use crate::profile::ProfileError;
+
 /// [`AgentConfig::open`](crate::AgentConfig::open) failed. No message ever
 /// holds a provider key or a DSN.
 #[derive(Debug, Error)]
@@ -41,6 +43,9 @@ pub enum OpenError {
     /// memory stores.
     #[error("deep agent unusable: {0}")]
     DeepAgent(#[from] DeepAgentError),
+    /// The domain profile is invalid.
+    #[error("profile unusable: {0}")]
+    Profile(#[from] ProfileError),
     /// The agent itself could not be built.
     #[error(transparent)]
     Build(#[from] BuildError),

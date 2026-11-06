@@ -46,8 +46,9 @@ impl AgentConfig {
     /// First turns on what a `deep_agent` preset needs (see
     /// [`DeepAgentConfig`](crate::DeepAgentConfig); its file memory hook
     /// goes with the filesystem's registrations, and its roster joins the
-    /// config directory's subagents). Then reads the provider key from the
-    /// environment, registers the workspace
+    /// config directory's subagents), and applies the `profile` (its spec
+    /// changes, and its permission layer on the policy). Then reads the
+    /// provider key from the environment, registers the workspace
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), registers
@@ -79,7 +80,8 @@ impl AgentConfig {
     ///
     /// Raises:
     ///     OpenError: If the deep agent preset names an unknown profile or
-    ///         is durable on memory stores, the key is unset, the workspace
+    ///         is durable on memory stores, the domain profile is invalid,
+    ///         the key is unset, the workspace
     ///         is not a directory,
     ///         a tool name is taken twice, the policy is malformed, Postgres
     ///         is unreachable, an MCP server cannot be connected, or the
@@ -92,6 +94,10 @@ impl AgentConfig {
         pools: &PgPools,
     ) -> Result<OpenedAgent, OpenError> {
         let deep = deep::expand(&mut self)?;
+        if let Some(profile) = &self.profile {
+            profile.validate()?;
+            self.spec = profile.spec(self.spec);
+        }
         let provider = provider(self.provider)?;
         let reads = Arc::new(ReadTracker::new());
         let root = match self.workspace {
@@ -108,6 +114,9 @@ impl AgentConfig {
         if self.tasks {
             policy.auto_allow.extend(TASK_TOOL_NAMES.map(String::from));
         }
+        policy
+            .layers
+            .extend(self.profile.and_then(|p| p.deny_layer()));
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, tasks, pool) = stores(self.stores, pools).await?;
         if self.tasks {
