@@ -54,8 +54,9 @@ pub struct RunIdentity {
 /// A host's answer to a call that was awaiting approval, kept so a resumed
 /// run can apply it when it plans the same batch again.
 ///
-/// [`plan`] looks it up by `tool_use_id`. It applies only while the call's
-/// final input equals `input`: hooks run again on resume, and an approval
+/// [`plan`] looks it up by `tool_use_id`. A deny applies whatever the
+/// call's final input is (fail closed). An allow applies only while the
+/// final input equals `input`: hooks run again on resume, and an allow
 /// covers the input the host saw, not whatever a hook produces next time. A
 /// mismatch leaves the call asking again.
 #[derive(Debug, Clone, PartialEq)]

@@ -103,8 +103,9 @@ pub enum PlannedAction {
 /// or invalid model input skips the hooks.
 ///
 /// `approvals` holds host answers from an earlier suspend, by `tool_use_id`.
-/// A recorded allow only lifts an `Ask`, a recorded deny always denies, and
-/// nothing overrides a fresh deny.
+/// A recorded allow only lifts an `Ask` on the input the host saw, a
+/// recorded deny always denies (whatever the input), and nothing overrides
+/// a fresh deny.
 ///
 /// Returns one entry per block, in order. When any entry awaits approval
 /// ([`BatchPlan::is_awaiting_approval`]) the run must suspend instead of
@@ -256,10 +257,12 @@ impl Planner<'_> {
             call.hook_records.extend(chain.records);
             decision = chain.outcome;
         }
-        let recorded = self
-            .approvals
-            .get(&call.tool_use_id)
-            .filter(|recorded| recorded.input == call.input);
+        // A recorded deny stands whatever the input; an allow covers only
+        // the input the host saw.
+        let recorded = self.approvals.get(&call.tool_use_id).filter(|recorded| {
+            matches!(recorded.response, ApprovalResponse::Deny { .. })
+                || recorded.input == call.input
+        });
         apply_recorded(decision, recorded.map(|recorded| &recorded.response))
     }
 }

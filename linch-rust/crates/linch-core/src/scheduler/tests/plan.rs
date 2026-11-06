@@ -272,6 +272,31 @@ async fn a_recorded_allow_never_overrides_a_deny() {
     assert_eq!(plan.calls()[1].action, PlannedAction::Denied { reason });
 }
 
+/// R1-core 3: a hook may give the call another input on resume; the host's
+/// deny still stands (fail closed), while its allow covers only the input
+/// it saw.
+#[tokio::test]
+async fn a_recorded_deny_applies_whatever_the_input() {
+    let log = new_log();
+    let fx = Fixture::new(PermissionMode::Default);
+    fx.tool(TestTool::new("Write", ToolScope::Write, &log));
+    let _rewrite = (fx.hooks.pre_tool_use)
+        .register(hook::<PreToolUse>("rewrite", &log, rewrite_x_to(2)))
+        .unwrap();
+    let blocks = [use_block("w", "Write", json!({"x": 1}))];
+    let reason = "user said no".to_owned();
+    let deny = ApprovalResponse::Deny {
+        reason: reason.clone(),
+    };
+    let seen = json!({"x": 1});
+    let denied = fx
+        .plan_with(&blocks, &recorded("w", seen.clone(), deny))
+        .await;
+    assert_eq!(denied.calls()[0].action, PlannedAction::Denied { reason });
+    let allowed = (fx.plan_with(&blocks, &recorded("w", seen, ApprovalResponse::Allow))).await;
+    assert!(allowed.is_awaiting_approval());
+}
+
 #[tokio::test]
 async fn a_cached_result_is_served_only_when_permission_allows() {
     let log = new_log();
