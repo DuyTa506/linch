@@ -1,7 +1,7 @@
 //! Native `copy.deepcopy`.
 //!
 //! A port of CPython's `copy.deepcopy` / `copy._reconstruct` (3.11-3.14; 3.14
-//! only moved the atomic types into a set) that shares the caller's memo dict, including the keep-alive
+//! moved the atomic types into a set and checks them before the memo) that shares the caller's memo dict, including the keep-alive
 //! list stored under `id(memo)`. Exact `list`/`dict`/`tuple`, the atomic types
 //! and the `__reduce_ex__(4)` reconstruction run natively. Every other case
 //! (`__deepcopy__` hooks, `copyreg.dispatch_table`, the remaining dispatch
@@ -30,6 +30,9 @@ struct Refs {
     object: Py<PyType>,
     dispatch_table: Py<PyDict>,
     atomic: Vec<Py<PyType>>,
+    /// 3.14 returns an atomic before reading the memo; 3.11-3.13 read the
+    /// memo first, so a memo entry for an atomic wins there.
+    atomic_before_memo: bool,
     other_dispatch: Vec<Py<PyType>>,
 }
 
@@ -46,7 +49,8 @@ fn refs(py: Python<'_>) -> PyResult<&'static Refs> {
         let (mut atomic, mut other_dispatch) = (Vec::new(), Vec::new());
         // 3.14 keeps the atomic types in a set; older versions map them to
         // `_deepcopy_atomic` in the dispatch table.
-        let atomic_copier = if copy.hasattr("_atomic_types")? {
+        let atomic_before_memo = copy.hasattr("_atomic_types")?;
+        let atomic_copier = if atomic_before_memo {
             for cls in copy.getattr("_atomic_types")?.try_iter()? {
                 atomic.push(cls?.cast_into::<PyType>()?.unbind());
             }
@@ -75,6 +79,7 @@ fn refs(py: Python<'_>) -> PyResult<&'static Refs> {
                 .cast_into::<PyDict>()?
                 .unbind(),
             atomic,
+            atomic_before_memo,
             other_dispatch,
         })
     })
@@ -115,6 +120,10 @@ impl<'py> Copier<'py> {
 
     fn delegate(&self, x: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         self.refs.deepcopy.bind(self.py).call1((x, &self.memo))
+    }
+
+    fn is_atomic(&self, cls: &Bound<'py, PyType>) -> bool {
+        self.refs.atomic.iter().any(|ty| ty.bind(self.py).is(cls))
     }
 
     fn has_reductor(&self, cls: &Bound<'py, PyType>) -> PyResult<bool> {
@@ -217,7 +226,7 @@ impl<'py> Copier<'py> {
         }
         let refs = self.refs;
         let is_any = |types: &[Py<PyType>]| types.iter().any(|ty| ty.bind(self.py).is(cls));
-        let plan = if is_any(&refs.atomic) {
+        let plan = if self.is_atomic(cls) {
             Plan::Atomic
         } else if cls.is(self.py.get_type::<PyList>()) {
             Plan::List
@@ -259,6 +268,9 @@ impl<'py> Copier<'py> {
     fn deep_inner(&mut self, x: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let d = self.id(x);
         if let Some(y) = self.memo.get_item(d)? {
+            if self.refs.atomic_before_memo && self.is_atomic(&x.get_type()) {
+                return Ok(x.clone());
+            }
             return Ok(y);
         }
         let cls = x.get_type();

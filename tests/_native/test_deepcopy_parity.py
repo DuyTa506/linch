@@ -246,6 +246,19 @@ def test_preseeded_memo_is_honoured_and_extended() -> None:
     assert id(memo) in memo  # keep-alive list, as in the stdlib
 
 
+@pytest.mark.parametrize(
+    "value",
+    [2**40, "memo-key", 1.5, None, len, type],
+    ids=["int", "str", "float", "none", "builtin", "type"],
+)
+def test_preseeded_memo_entry_for_an_atomic_matches_stdlib(value: Any) -> None:
+    # 3.14 returns an atomic before reading the memo; 3.11-3.13 read the memo first.
+    replacement = object()
+    for wrap, unwrap in ((lambda v: v, lambda y: y), (lambda v: [v], lambda y: y[0])):
+        expected = unwrap(copy.deepcopy(wrap(value), {id(value): replacement}))
+        assert unwrap(native_deepcopy(wrap(value), {id(value): replacement})) is expected
+
+
 def test_deep_nesting_delegates_without_overflow() -> None:
     value: Any = "leaf"
     for _ in range(400):
