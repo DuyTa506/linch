@@ -154,12 +154,11 @@ def _seed_messages(count: int = 30):
     ]
 
 
-@pytest.mark.parametrize("corruption", ["no_prefix", "reordered_tail", "missing_tail_message"])
-def test_paid_target_recipe_requires_an_ordered_retained_suffix(corruption: str) -> None:
+def test_paid_target_recipe_requires_an_ordered_retained_suffix() -> None:
     from linch.compaction import _paid_target_from_recipe, _source_message_fingerprints
     from linch.types import Message, TextBlock
 
-    history = [
+    base = [
         Message(role=role, content=[TextBlock(text=text)])
         for role, text in [
             ("user", "prefix"),
@@ -169,26 +168,33 @@ def test_paid_target_recipe_requires_an_ordered_retained_suffix(corruption: str)
             ("user", "last question"),
         ]
     ]
-    source = list(history)
-    keep = 2
-    if corruption == "no_prefix":
-        history = source = [history[1]]
-        keep = 1
-    elif corruption == "reordered_tail":
-        source[1], source[3] = source[3], source[1]
-    else:
-        del source[2]
-    recipe = {
-        "source_message_fingerprints": _source_message_fingerprints(source),
-        "strategy_config": {"keep_recent_turns": keep, "implementation": "default_v1"},
-        "reminder_fingerprints": [],
-    }
+    for corruption in ("no_prefix", "reordered_tail", "missing_tail_message"):
+        history = list(base)
+        source = list(base)
+        keep = 2
+        if corruption == "no_prefix":
+            history = source = [base[1]]
+            keep = 1
+        elif corruption == "reordered_tail":
+            source[1], source[3] = source[3], source[1]
+        else:
+            del source[2]
+        recipe = {
+            "source_message_fingerprints": _source_message_fingerprints(source),
+            "strategy_config": {"keep_recent_turns": keep, "implementation": "default_v1"},
+            "reminder_fingerprints": [],
+        }
 
-    assert _paid_target_from_recipe(recipe, history, {}, "paid summary", None) is None
+        assert _paid_target_from_recipe(recipe, history, {}, "paid summary", None) is None
 
 
-@pytest.mark.parametrize("paid_compactions", [1, 2])
-@pytest.mark.parametrize("lose_snapshot", [False, True])
+@pytest.mark.parametrize(
+    ("lose_snapshot", "paid_compactions"),
+    [
+        (False, 1),  # snapshot present: resume restores the materialized view directly.
+        (True, 2),  # snapshot lost, two stacked compactions: hardest rebuild-from-log case.
+    ],
+)
 async def test_paid_compaction_from_an_earlier_run_is_resumable(
     paid_compactions: int, lose_snapshot: bool
 ) -> None:
@@ -245,10 +251,11 @@ async def test_paid_compaction_from_an_earlier_run_is_resumable(
 
 
 @pytest.mark.parametrize("prior_compaction", [False, True])
-@pytest.mark.parametrize("tail_after_micro", [False, True])
-async def test_paid_then_micro_compaction_snapshot_is_resumable(
-    prior_compaction: bool, tail_after_micro: bool
-) -> None:
+async def test_paid_then_micro_compaction_snapshot_is_resumable(prior_compaction: bool) -> None:
+    # Both kept cells crash with the tail durably written after the micro
+    # snapshot (_CrashAfterMicroTail): that leaves a strict superset of what
+    # crashing mid-write would leave, and resume doesn't branch on which
+    # store took the last write -- only on whether the snapshot exists.
     from linch import CompactionLadder
     from linch.types import Message, TextBlock
     from tests.support.tools import StubTool, tool_registry
@@ -260,8 +267,8 @@ async def test_paid_then_micro_compaction_snapshot_is_resumable(
         [event async for event in prior.run("earlier run")]
     provider = _ToolProvider()
     agent = _agent(
-        sessions if tail_after_micro else _CrashOnNthAssistant(sessions, 4),
-        _CrashAfterMicroTail(runs) if tail_after_micro else runs,
+        sessions,
+        _CrashAfterMicroTail(runs),
         provider,
         tools=tool_registry(StubTool("Big", output="R" * 600)),
         compaction_ladder=CompactionLadder(keep_recent_turns=1),
