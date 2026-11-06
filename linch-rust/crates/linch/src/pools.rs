@@ -131,7 +131,7 @@ mod tests {
             eprintln!("skipping: LINCH_TEST_PG_DSN is not set");
             return;
         };
-        let schema = format!("p11i_pool_size_{}", std::process::id());
+        let schema = format!("pool_size_{}", std::process::id());
         let admin = PgPoolOptions::new().max_connections(1).connect(&dsn).await;
         let admin = admin.expect("connect to the test database");
         let reset = format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}");
