@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import dataclasses
+import re
+from pathlib import Path
+from typing import get_args
+
 from linch_rust import (
     ChildRunStatusEvent,
     CompactionEvent,
+    Event,
     InitEvent,
     SkillCompletedEvent,
     SkillInvokedEvent,
@@ -14,6 +20,10 @@ from linch_rust import (
     UsageEvent,
 )
 from linch_rust.events import decode_event
+
+EVENTS_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/events"
+# Written only to the accounting journal, never streamed to a client.
+JOURNAL_ONLY = {"model_call_delivery", "model_call_receipt", "model_call_usage_settlement"}
 
 END = {
     "type": "tool_call_end",
@@ -99,3 +109,31 @@ def test_a_resumed_init_names_the_turn_it_continues_in() -> None:
 
     assert isinstance(first, InitEvent) and (first.resumed, first.turn) == (False, 0)
     assert isinstance(again, InitEvent) and (again.resumed, again.turn) == (True, 2)
+
+
+def rust_kinds() -> dict[str, set[str]]:
+    """Each streamed Rust event kind's wire name and the names of its fields."""
+    event_rs = (EVENTS_RS / "event/mod.rs").read_text(encoding="utf-8")
+    kinds_rs = [path.read_text(encoding="utf-8") for path in sorted(EVENTS_RS.glob("kinds/*.rs"))]
+    structs = "\n".join([event_rs, *kinds_rs])
+    enum = event_rs.split("pub enum Event {", 1)[1].split("\n}", 1)[0]
+    payloads = dict(re.findall(r"^\s+(\w+)\((\w+)\),$", enum, re.MULTILINE))
+    tags = dict(re.findall(r'Event::(\w+)\(e\) => tagged\("(\w+)", e\)', event_rs))
+    tags["Subagent"] = "subagent"
+    kinds: dict[str, set[str]] = {}
+    for variant, tag in tags.items():
+        if tag in JOURNAL_ONLY:
+            continue
+        found = re.search(rf"pub struct {payloads[variant]} \{{(.*?)\n\}}", structs, re.DOTALL)
+        assert found is not None, payloads[variant]
+        kinds[tag] = set(re.findall(r"^\s*pub (\w+):", found.group(1), re.MULTILINE))
+    return kinds
+
+
+def test_every_rust_event_kind_has_a_class_with_its_fields() -> None:
+    classes = [cls for cls in get_args(Event) if cls is not UnknownEvent]
+    python = {cls.type: {field.name for field in dataclasses.fields(cls)} for cls in classes}
+    rust = rust_kinds()
+
+    assert len(rust) > 20, "the Rust sources were read"
+    assert python == rust

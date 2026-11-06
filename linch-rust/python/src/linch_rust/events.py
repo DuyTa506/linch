@@ -138,6 +138,16 @@ class PermissionRequestEvent:
 
 
 @dataclass(frozen=True)
+class InputRequestEvent:
+    """The run asks for input (`ask_user` or `workflow_interrupt`); `request_id` names it."""
+
+    type: ClassVar[str] = "input_request"
+    request_id: str
+    kind: str
+    prompt: str
+
+
+@dataclass(frozen=True)
 class SuspendedEvent:
     """The run stopped to wait; answer `pending_request_ids` with `Agent.approve`."""
 
@@ -183,6 +193,46 @@ class LoopGuardEvent:
 
 
 @dataclass(frozen=True)
+class BudgetEvent:
+    """A run budget crossed its warning ratio (`warning`) or ran out (`exceeded`)."""
+
+    type: ClassVar[str] = "budget"
+    kind: str
+    spent_tokens: int
+    spent_usd: float
+    max_tokens: int | None = None
+    max_cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
+class PromptCacheAdvisoryEvent:
+    """A change broke the provider's prompt cache (`tool_set_changed`, `model_changed`)."""
+
+    type: ClassVar[str] = "prompt_cache_advisory"
+    reason: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class VerificationEvent:
+    """A closed-loop gate acted on a would-be-final answer (`retry`, `stop`, `exhausted`)."""
+
+    type: ClassVar[str] = "verification"
+    verifier: str
+    action: str
+    feedback: str = ""
+    attempt: int = 0
+
+
+@dataclass(frozen=True)
+class SkillsLoadedEvent:
+    """The skills the model can load: one descriptor dict per skill."""
+
+    type: ClassVar[str] = "skills_loaded"
+    skills: list[JsonObject]
+
+
+@dataclass(frozen=True)
 class SkillInvokedEvent:
     """The `Skill` tool loaded a skill, with the arguments it was given."""
 
@@ -200,6 +250,21 @@ class SkillCompletedEvent:
     type: ClassVar[str] = "skill_completed"
     name: str
     is_error: bool = False
+
+
+@dataclass(frozen=True)
+class WorkflowEvent:
+    """A workflow engine record: a phase, a step's start, end or replay, or an interrupt."""
+
+    type: ClassVar[str] = "workflow"
+    kind: str
+    title: str = ""
+    call_key: str = ""
+    occurrence: int = 0
+    subagent_type: str = ""
+    result_text: str | None = None
+    structured_output: JsonObject | None = None
+    structured_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -287,12 +352,18 @@ Event = (
     | ToolCallEndEvent
     | ToolProgressEvent
     | PermissionRequestEvent
+    | InputRequestEvent
     | SuspendedEvent
     | ContextBuildEvent
     | CompactionEvent
     | LoopGuardEvent
+    | BudgetEvent
+    | PromptCacheAdvisoryEvent
+    | VerificationEvent
+    | SkillsLoadedEvent
     | SkillInvokedEvent
     | SkillCompletedEvent
+    | WorkflowEvent
     | SubagentEvent
     | ChildRunStatusEvent
     | HookEvent
@@ -313,12 +384,18 @@ _KINDS: dict[str, type[Any]] = {
         ToolCallEndEvent,
         ToolProgressEvent,
         PermissionRequestEvent,
+        InputRequestEvent,
         SuspendedEvent,
         ContextBuildEvent,
         CompactionEvent,
         LoopGuardEvent,
+        BudgetEvent,
+        PromptCacheAdvisoryEvent,
+        VerificationEvent,
+        SkillsLoadedEvent,
         SkillInvokedEvent,
         SkillCompletedEvent,
+        WorkflowEvent,
         SubagentEvent,
         ChildRunStatusEvent,
         HookEvent,

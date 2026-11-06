@@ -365,10 +365,24 @@ parent's stream this way; a background worker's durable ones do. See
 A background worker's child run changed status: `child_run_id` and `status`
 (`running`, then `completed`, `failed` or `aborted`).
 
+### Kinds the server does not emit yet
+
+The core declares these kinds and the client decodes each into its class,
+but no run emits them today:
+
+| Class (`type`) | Fields |
+|---|---|
+| `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` or `workflow_interrupt`), `prompt` |
+| `BudgetEvent` (`budget`) | `kind` (`warning` or `exceeded`), `spent_tokens`, `spent_usd`, `max_tokens`, `max_cost_usd` |
+| `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
+| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt` |
+| `SkillsLoadedEvent` (`skills_loaded`) | `skills`, one descriptor dict per skill |
+| `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
+
 ### `UnknownEvent`
 
-A type this client has no class for, such as `budget` or `workflow`. `type`
-is the wire type and `raw` the payload without it.
+A type this client has no class for, from a newer server. `type` is the
+wire type and `raw` the payload without it.
 
 ## Usage and cost
 
