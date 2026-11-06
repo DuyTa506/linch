@@ -50,8 +50,8 @@ class Link(Protocol):
 
     @property
     def tenant(self) -> str | None:
-        """The tenant the login named; `None` over a WebSocket, whose
-        upgrade does not name it."""
+        """The tenant the socket's login or the WebSocket upgrade's
+        `Linch-Tenant` header named."""
         ...
 
     async def close(self) -> None:
@@ -170,7 +170,9 @@ class _WebSocketTransport:
 class _WebSocketLink:
     def __init__(self, socket: ClientConnection) -> None:
         self.connection = Connection(_WebSocketTransport(socket))
-        self.tenant: str | None = None
+        # The upgrade names the token's tenant, as the socket's login does.
+        response = socket.response
+        self.tenant: str | None = response.headers.get("Linch-Tenant") if response else None
         self._socket = socket
 
     async def close(self) -> None:

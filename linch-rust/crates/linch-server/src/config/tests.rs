@@ -15,6 +15,7 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
             "acme": {
                 "tokens": [{"env": "ACME_TOKEN"}, {"value": "tok-acme-inline-0001"}],
                 "allow": {"exec_tools": true, "max_runs": 3, "max_connections": 2,
+                          "max_agents": 5,
                           "provider_base_urls": ["http://10.0.0.5:8000/v1"],
                           "permission_modes": ["skip_dangerous"],
                           "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
@@ -31,6 +32,7 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
     assert!(acme.exec_tools && !beta.exec_tools);
     assert_eq!((acme.max_runs, acme.max_connections), (Some(3), Some(2)));
     assert_eq!((beta.max_runs, beta.max_connections), (None, None));
+    assert_eq!((acme.max_agents, beta.max_agents), (Some(5), None));
     let debug = format!("{config:?}");
     assert!(!debug.contains("tok-acme-inline-0001"), "{debug}");
     let env = |name: &str| (name == "ACME_TOKEN").then(|| "tok-acme-env-0001".to_owned());
@@ -97,7 +99,7 @@ fn bad_configs_are_refused_without_echoing_tokens() {
 
 #[test]
 fn a_cap_of_zero_is_refused_when_the_config_loads() {
-    for field in ["max_runs", "max_connections"] {
+    for field in ["max_runs", "max_connections", "max_agents"] {
         let text = json!({"http": "127.0.0.1:1",
                           "tenants": {"acme": {"tokens": [{"value": "t"}],
                                                "allow": {field: 0}}}});
@@ -107,6 +109,7 @@ fn a_cap_of_zero_is_refused_when_the_config_loads() {
     }
     let one = json!({"http": "127.0.0.1:1",
                      "tenants": {"acme": {"tokens": [{"value": "t"}],
-                                          "allow": {"max_runs": 1, "max_connections": 1}}}});
+                                          "allow": {"max_runs": 1, "max_connections": 1,
+                                                    "max_agents": 1}}}});
     assert!(ServerConfig::from_json(&one.to_string()).is_ok());
 }

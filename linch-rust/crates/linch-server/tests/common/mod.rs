@@ -49,7 +49,7 @@ pub struct Listening {
 
 pub struct Running {
     stop: CancellationToken,
-    task: JoinHandle<std::io::Result<()>>,
+    task: JoinHandle<()>,
 }
 
 impl Running {
@@ -57,7 +57,7 @@ impl Running {
     pub async fn stop(self) {
         self.stop.cancel();
         let stopped = tokio::time::timeout(Duration::from_secs(10), self.task).await;
-        stopped.expect("the listeners stop").unwrap().unwrap();
+        stopped.expect("the listeners stop").unwrap();
     }
 }
 

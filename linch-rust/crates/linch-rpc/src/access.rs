@@ -17,7 +17,9 @@ use crate::error::{ErrorObject, limit_reached};
 mod admit;
 mod allowlists;
 
-pub use allowlists::{Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, McpCommand};
+pub use allowlists::{
+    Allowlists, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, McpCommand,
+};
 
 /// How a connection's client is trusted.
 #[derive(Debug)]
@@ -36,13 +38,15 @@ pub enum Access {
 }
 
 /// A tenant: the name its agents and runs belong to, what its agents may
-/// use, and its places for live runs and connections, shared by every
-/// connection that acts for it (share one `Arc<Tenant>` among them).
+/// use, and its places for live runs, open agents and connections, shared
+/// by every connection that acts for it (share one `Arc<Tenant>` among
+/// them).
 #[derive(Debug)]
 pub struct Tenant {
     name: String,
     allow: Allowlists,
     runs: Arc<Semaphore>,
+    agents: Arc<Semaphore>,
     connections: Arc<Semaphore>,
 }
 
@@ -64,6 +68,7 @@ impl Tenant {
         Ok(Self {
             name,
             runs: places(allow.max_runs),
+            agents: places(allow.max_agents),
             connections: places(allow.max_connections),
             allow,
         })
@@ -72,6 +77,11 @@ impl Tenant {
     /// A place among the tenant's live runs, or `-32005`.
     pub(crate) fn run_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
         take(&self.runs, "runs", self.allow.max_runs)
+    }
+
+    /// A place among the tenant's open agents, or `-32005`.
+    pub(crate) fn agent_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
+        take(&self.agents, "agents", self.allow.max_agents)
     }
 
     /// Take a place among the tenant's connections for a client that

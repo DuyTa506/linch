@@ -95,6 +95,10 @@ async fn a_run_that_panics_ends_with_an_error_and_frees_its_id() {
         )
         .await
         .unwrap();
+    let opened = Opened {
+        agent: opened,
+        place: None,
+    };
     lock(&server.0.tables)
         .agents
         .insert("agent-1".into(), opened);

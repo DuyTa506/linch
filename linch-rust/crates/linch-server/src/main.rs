@@ -19,7 +19,6 @@
 
 #![forbid(unsafe_code)]
 
-use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -70,7 +69,10 @@ async fn serve(config: Option<PathBuf>) -> ExitCode {
             linch_rpc::serve(reader, writer).await
         }
         Some(path) => match listen(&path).await {
-            Ok(listeners) => listeners.serve(on_signal()).await,
+            Ok(listeners) => {
+                listeners.serve(on_signal()).await;
+                Ok(())
+            }
             Err(code) => return code,
         },
     };
@@ -86,25 +88,36 @@ async fn serve(config: Option<PathBuf>) -> ExitCode {
 /// Stdin and stdout for the stdio transport.
 ///
 /// A pipe, which is what a client that spawns the server gives it, is
-/// switched to non-blocking mode and driven by the runtime, so each read
-/// and write is one system call on the task's own thread; tokio's
-/// `stdin()` and `stdout()` hand each one to a blocking thread and back
-/// instead. Anything else (a file, a terminal) uses those.
+/// driven by the runtime in non-blocking mode, so each read and write is
+/// one system call on the task's own thread; tokio's `stdin()` and
+/// `stdout()` hand each one to a blocking thread and back instead.
+///
+/// Non-blocking mode is a flag of the open file description, which fds 0
+/// and 1 share with every process holding the same pipe (a shell's
+/// `producer | { linch-server; next-step; }`, or a supervisor passing on
+/// its own stdio), and a dup shares it too. So the server never sets it
+/// on fds 0 and 1: on Linux it opens `/proc/self/fd/0` and `/proc/self/fd/1`,
+/// which gives it new descriptions of the same pipes that only it holds,
+/// and drives those. Nothing needs undoing at exit, so a crash or a kill
+/// leaves the pipes as they were too. Anything else (a file, a terminal,
+/// a socket, a pipe it may not reopen, another OS, where `/dev/fd` dups)
+/// uses tokio's `stdin()` and `stdout()`, which leave the flags alone.
 fn stdio() -> (
     Box<dyn AsyncRead + Unpin + Send>,
     Box<dyn AsyncWrite + Unpin + Send>,
 ) {
-    let stdin = std::io::stdin().as_fd().try_clone_to_owned();
+    let own = |fd: u8| cfg!(target_os = "linux").then(|| format!("/proc/self/fd/{fd}"));
+    // Opened non-blocking, and refused unless it is a pipe.
+    let options = pipe::OpenOptions::new();
     let reader: Box<dyn AsyncRead + Unpin + Send> =
-        match stdin.and_then(pipe::Receiver::from_owned_fd) {
-            Ok(pipe) => Box::new(pipe),
-            Err(_) => Box::new(tokio::io::stdin()),
+        match own(0).map(|path| options.open_receiver(path)) {
+            Some(Ok(pipe)) => Box::new(pipe),
+            _ => Box::new(tokio::io::stdin()),
         };
-    let stdout = std::io::stdout().as_fd().try_clone_to_owned();
     let writer: Box<dyn AsyncWrite + Unpin + Send> =
-        match stdout.and_then(pipe::Sender::from_owned_fd) {
-            Ok(pipe) => Box::new(pipe),
-            Err(_) => Box::new(tokio::io::stdout()),
+        match own(1).map(|path| options.open_sender(path)) {
+            Some(Ok(pipe)) => Box::new(pipe),
+            _ => Box::new(tokio::io::stdout()),
         };
     (reader, writer)
 }

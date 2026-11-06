@@ -47,10 +47,11 @@ pub mod code {
     /// `data.kind` names the check that refused (the crate docs list
     /// them).
     pub const NOT_ALLOWED: i64 = -32004;
-    /// A cap is reached and nothing was started; try again once a run or
-    /// connection ends. `data` is `{kind, max}`: `kind` is `runs` or
-    /// `connections` (the tenant's, across its connections) or `logins`
-    /// (socket connections waiting to log in), `max` the cap.
+    /// A cap is reached and nothing was started; try again once a run,
+    /// agent or connection ends. `data` is `{kind, max}`: `kind` is
+    /// `runs`, `agents` or `connections` (the tenant's, across its
+    /// connections) or `logins` (socket connections waiting to log in),
+    /// `max` the cap.
     pub const LIMIT_REACHED: i64 = -32005;
     /// `BuildError::Missing`: a required binding was not set.
     pub const BUILD_MISSING: i64 = -32010;
@@ -122,7 +123,8 @@ pub(crate) fn invalid_params(message: &str) -> ErrorObject {
     ErrorObject::new(code::INVALID_PARAMS, message)
 }
 
-/// The cap on `kind` (`runs`, `connections` or `logins`), `max`, is reached.
+/// The cap on `kind` (`runs`, `agents`, `connections` or `logins`), `max`,
+/// is reached.
 pub(crate) fn limit_reached(kind: &str, max: usize) -> ErrorObject {
     let message = format!("at most {max} {kind} at once; try again once one ends");
     ErrorObject::new(code::LIMIT_REACHED, message).with_data(json!({ "kind": kind, "max": max }))

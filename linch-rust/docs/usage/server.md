@@ -109,22 +109,34 @@ token names exactly one tenant: the same token twice is refused.
 | `scripted_provider` | `false` | The `scripted` provider, for tests and evals |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands as the server's user |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
+| `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |
 | `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host and port |
 | `permission_modes` | `default`, `accept_edits` | The modes a config may choose |
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
-| `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry |
+| `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
 | `mcp_commands` | none | MCP stdio servers, `{"command", "args", "env"}`: the command and argument list must match exactly, and the transport may set only the `env` names listed |
 | `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
 
 The live providers at their public endpoints and the memory stores need no
 entry. A `postgres_dsns` entry without a user stands for the server's own
-user; one without options or TLS files allows none. An `mcp_commands` entry
-may not list `PATH`, `BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`, `PYTHONPATH`,
-`PYTHONHOME`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `NODE_PATH`, `PERL5LIB`,
-`PERL5OPT`, `RUBYLIB`, `RUBYOPT`, `CLASSPATH` or `JAVA_TOOL_OPTIONS`: they
-decide what code a program runs. A bare command name is looked up on the
-server's `PATH`; prefer absolute paths.
+user; one without options or TLS files allows none. Its `sslmode` is the
+weakest a DSN may ask for, in the order `disable`, `allow`, `prefer`,
+`require`, `verify-ca`, `verify-full`: an entry with `sslmode=verify-full`
+refuses a DSN with `sslmode=require` or none. An entry or DSN without
+`sslmode` has the server's default, `PGSSLMODE` or else `prefer`, so a DSN
+with `sslmode=disable` needs an entry that says so. An `mcp_commands` entry
+may not list `PATH`, `HOME`, `XDG_CONFIG_HOME`, `BASH_ENV`, `ENV`, `LD_*`,
+`DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`,
+`NODE_OPTIONS`, `NODE_PATH`, `npm_config_*` (in any case), `PIP_*`, `UV_*`,
+`PERL5LIB`, `PERLLIB`, `PERL5OPT`, `RUBYLIB`, `RUBYOPT`, `GEM_HOME`,
+`GEM_PATH`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+`JDK_JAVA_OPTIONS` or `GCONV_PATH`: they decide what code a program runs, or
+which rc and config files it reads (an `.npmrc` under `HOME` can set
+`node-options` for `npx`). That list is best effort, not a guarantee: a
+program may read other variables, so list only names whose effect on that
+program you know. A bare command name is looked up on the server's `PATH`;
+prefer absolute paths.
 
 ---
 
@@ -207,13 +219,14 @@ final: Hello over WebSocket.
 | `Unauthenticated` (-32003) on entering | The token is not in the config (an HTTP `401` on the WebSocket) |
 | `LimitReached` (-32005) on entering | The tenant holds `max_connections` connections (`kind == "connections"`; an HTTP `429` on the WebSocket), or 32 logins wait at once (`kind == "logins"`) |
 | `NotAllowed` (-32004) | `open_agent` or a run call failed a [check](#what-admission-refuses-and-why); `.kind` names it |
+| `LimitReached` (-32005) by `open_agent` | The tenant keeps `max_agents` agents open; nothing started (`kind == "agents"`) |
 | `LimitReached` (-32005) by `run`, `resume` or `approve` | The tenant drives `max_runs` runs; nothing started (`kind == "runs"`, `.max` the cap) |
 
 - A remote server owns the provider keys: they come from its environment, and
   `Server.connect` takes no `env`. `server.pid` raises `LinchError`.
-- `server.tenant` is the tenant a socket connection acts for, as the login
-  answer names it (`"acme"`). It is `None` over the WebSocket, whose upgrade
-  does not name it, and for a server spawned with `Server()`.
+- `server.tenant` is the tenant a remote connection acts for (`"acme"`), as
+  the socket's login answer or the WebSocket upgrade's `Linch-Tenant` header
+  names it. It is `None` for a server spawned with `Server()`.
 - Each connection has its own agent handles (`agent-1` is always the
   connection's own) and can cancel only the runs it drives. A Postgres run
   can be resumed or approved from another connection that opens the same
@@ -232,7 +245,8 @@ final: Hello over WebSocket.
   `-32003` and the connection closes; so does 10 seconds of silence.
 - **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades to a
   WebSocket that carries one JSON-RPC message per text frame, with the same
-  methods and no `connection.auth`.
+  methods and no `connection.auth`. Its `101` response names the token's
+  tenant in a `Linch-Tenant` header, as the socket's login answer does.
 - On both, run events arrive as `run.event` notifications and end with
   `run.end`, and the server sends `tool.call` and `hook.call` requests on the
   same connection for the client to answer.
@@ -244,7 +258,8 @@ The HTTP server answers before the upgrade:
 | No token, or an unknown one | `401` with `WWW-Authenticate: Bearer` |
 | The tenant already holds `max_connections` | `429`, the body naming the cap |
 | A valid token without WebSocket headers | `400` |
-| A valid WebSocket upgrade | `101 Switching Protocols` |
+| A valid WebSocket upgrade | `101 Switching Protocols`, with `Linch-Tenant: <name>` naming the token's tenant |
+| A request head not complete within 10 seconds | No answer: the connection closes |
 
 ```bash
 curl -i http://127.0.0.1:8731/rpc                     # HTTP/1.1 401 Unauthorized
@@ -274,15 +289,23 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Limit | Value | Past it |
 |---|---|---|
 | `max_runs` | 16 per tenant unless set | `run.start`, `run.resume` or `run.approve` gets `-32005`, `data: {"kind": "runs", "max": ...}`; nothing starts. A run holds its place until its `run.end` |
+| `max_agents` | 16 per tenant unless set | `agent.open` gets `-32005` (`kind: agents`) after its checks pass, before any MCP server starts. An agent holds its place until `agent.close`, or the end of its connection, has stopped its MCP servers |
 | `max_connections` | 8 per tenant unless set | The socket login gets `-32005` (`kind: connections`) and closes; HTTP gets `429` |
 | Logins waiting at once | 32, across the server | `-32005` (`kind: logins`) and the connection closes |
 | Login wait | 10 seconds | `-32003` and the connection closes |
+| HTTP connections waiting for their upgrade | 32, across the server; an upgraded one gives its place back | The connection is closed unread |
+| HTTP request head | 10 seconds for each head before the upgrade | The connection closes without an answer |
 | One message | 16 MiB | The request gets `-32600` |
 | A Postgres pool | One per DSN across the server, `stores.max_connections` connections (10 unless set) | Queries wait for a connection; the open that connects a DSN sets its size and later opens share it ([Stores](./stores.md#connections-and-pools)) |
 | Requests in flight per connection | 64 | Reading waits until one is answered |
 
 The defaults bound what one tenant spends: each run streams from a provider
-on the server's key, and each connection may buffer a large message.
+on the server's key, each open agent holds its config in memory and runs its
+MCP stdio servers as child processes, and each connection may buffer a large
+message. A run's background subagents stream too, up to its
+`workers.max_background` (4 unless set) at once, so one tenant has at most
+`max_runs × (1 + max_background)` provider streams open: 80 with the
+defaults.
 
 ---
 
@@ -305,7 +328,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `workspace` | Not an existing directory under `workspace_roots` | The workspace tools read and write there |
 | `project_root` | The same, for `permissions.project_root` | Path rules resolve against it; with no roots, a config cannot send `permissions` at all and keeps the default policy |
 | `config_dir` | With skills or subagents on: not an existing directory under the roots, through an absolute path, `..` or a symlink | `SKILL.md` and agent files would load from another tenant's tree |
-| `postgres` | A DSN that matches no `postgres_dsns` entry exactly | A client could pick another database, role, `search_path` or certificate file |
+| `postgres` | A DSN that matches no `postgres_dsns` entry exactly, or asks for a weaker `sslmode` | A client could pick another database, role, `search_path` or certificate file, or send the server's credentials without TLS |
 | `mcp_command` | A stdio command and argument list that match no entry | The server would start that program |
 | `mcp_env` | An `env` name the matching entry does not list | It could change what the program loads |
 | `mcp_url` | An MCP HTTP URL outside `mcp_urls` | The server would connect there |

@@ -64,7 +64,8 @@
 //!   - `Bash` only when the tenant allows exec tools; otherwise the config's
 //!     `bash` is turned off and the agent opens without it;
 //!   - a Postgres DSN only with an allowed host, port, socket, database,
-//!     user, options and TLS files (`sslrootcert`, `sslcert`, `sslkey`);
+//!     user, options and TLS files (`sslrootcert`, `sslcert`, `sslkey`),
+//!     and an `sslmode` at least as strict as the entry's;
 //!   - an MCP stdio server only with the `command` and `args` of an entry,
 //!     setting only the `env` names that entry lists ([`McpCommand`]); an
 //!     MCP HTTP URL only at an allowed origin.
@@ -76,9 +77,11 @@
 //!
 //! A tenant also has caps, counted across all its connections: at most
 //! `max_runs` runs driven at once (default [`DEFAULT_MAX_RUNS`]; a run
-//! holds its place until its `run.end`) and `max_connections` connections
-//! (default [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is
-//! refused with `-32005` and `data: {kind: "runs" | "connections", max}`;
+//! holds its place until its `run.end`), `max_agents` agents open (default
+//! [`DEFAULT_MAX_AGENTS`]; until `agent.close` or the connection's end has
+//! closed its MCP servers) and `max_connections` connections (default
+//! [`DEFAULT_MAX_CONNECTIONS`]). Past a cap the request is refused with
+//! `-32005` and `data: {kind: "runs" | "agents" | "connections", max}`;
 //! a refused socket login gets that error under its `connection.auth` id
 //! and closes (on HTTP, the `429` above). A local connection has none.
 //!
@@ -332,7 +335,7 @@
 //! | -32002 | run busy | the connection already drives that run; `agent.close` of an agent with a driven run |
 //! | -32003 | unauthenticated | the socket's first message is not `connection.auth` with a known token |
 //! | -32004 | not allowed | a tenant check refused the request; `data: {kind}` |
-//! | -32005 | limit reached | a cap on runs, connections or pending logins; nothing started; `data: {kind, max}` |
+//! | -32005 | limit reached | a cap on runs, agents, connections or pending logins; nothing started; `data: {kind, max}` |
 //! | -32010 | missing binding | `BuildError::Missing` |
 //! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash |
 //! | -32012 | contract not digestible | `BuildError::Contract` |
@@ -375,8 +378,8 @@ pub mod protocol;
 mod server;
 
 pub use access::{
-    Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
-    MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens,
+    Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_MAX_RUNS, MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens,
 };
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};

@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use linch::PermissionMode;
 use serde::Deserialize;
-use sqlx::postgres::PgConnectOptions;
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::{Origin, Url};
 
 use super::AccessError;
@@ -20,17 +20,23 @@ pub const DEFAULT_MAX_RUNS: usize = 16;
 /// so this bounds one tenant to about 1 GiB of buffers.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
 
+/// Agents a tenant keeps open at once unless its allowlists say
+/// otherwise: each holds its config and tools in the server's memory and
+/// runs its MCP stdio servers as child processes until it is closed.
+pub const DEFAULT_MAX_AGENTS: usize = 16;
+
 /// What a tenant may ask for, built with the methods below. A new value
 /// allows the memory stores, the permission modes `default` and
 /// `accept_edits`, the live providers at their public endpoints, and
 /// nothing else: no `Bash`, no workspace; and at most
-/// [`DEFAULT_MAX_RUNS`] live runs and [`DEFAULT_MAX_CONNECTIONS`]
-/// connections at once.
+/// [`DEFAULT_MAX_RUNS`] live runs, [`DEFAULT_MAX_AGENTS`] open agents and
+/// [`DEFAULT_MAX_CONNECTIONS`] connections at once.
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
     pub(super) exec_tools: bool,
     pub(super) max_runs: usize,
+    pub(super) max_agents: usize,
     pub(super) max_connections: usize,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
@@ -53,39 +59,59 @@ pub struct McpCommand {
     #[serde(default)]
     pub args: Vec<String>,
     /// Names of the variables the transport's `env` may set; none when
-    /// absent. `PATH` and variables that decide what code a program loads
-    /// (`LD_*`, `DYLD_*`, `PYTHONPATH`, `NODE_OPTIONS`, ...) cannot be
-    /// listed.
+    /// absent. `PATH`, `HOME` and variables known to decide what code a
+    /// program loads or which config files it reads (`LD_*`, `DYLD_*`,
+    /// `PYTHONPATH`, `NODE_OPTIONS`, `npm_config_*`, `PIP_*`, ...) cannot
+    /// be listed. That list is best effort: a program may read others, so
+    /// list only names whose effect on the program you know.
     #[serde(default)]
     pub env: Vec<String>,
 }
 
-/// Variables that choose which code a program loads or runs first; an
-/// [`McpCommand`] may not let a client set them.
-const CODE_LOADING_ENV: [&str; 14] = [
+/// Variables that choose which code a program loads or runs first, or
+/// where it finds the rc and config files that can (`HOME`, as for an
+/// `.npmrc` whose `node-options` `npx` obeys); an [`McpCommand`] may not
+/// let a client set them. Best effort: these are the well-known ones.
+const CODE_LOADING_ENV: [&str; 23] = [
     "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
     "BASH_ENV",
     "ENV",
     "PYTHONPATH",
     "PYTHONHOME",
     "PYTHONSTARTUP",
+    "PYTHONUSERBASE",
     "NODE_OPTIONS",
     "NODE_PATH",
     "PERL5LIB",
+    "PERLLIB",
     "PERL5OPT",
     "RUBYLIB",
     "RUBYOPT",
+    "GEM_HOME",
+    "GEM_PATH",
     "CLASSPATH",
     "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "GCONV_PATH",
 ];
 
+/// Prefixes of the same: the dynamic loaders' variables, and the settings
+/// pip and uv read (an index URL, a config file).
+const CODE_LOADING_PREFIXES: [&str; 4] = ["LD_", "DYLD_", "PIP_", "UV_"];
+
 fn loads_code(name: &str) -> bool {
-    CODE_LOADING_ENV.contains(&name) || name.starts_with("LD_") || name.starts_with("DYLD_")
+    // npm reads `npm_config_*` in any case.
+    let npm = (name.get(..11)).is_some_and(|head| head.eq_ignore_ascii_case("npm_config_"));
+    npm || CODE_LOADING_ENV.contains(&name)
+        || (CODE_LOADING_PREFIXES.iter()).any(|prefix| name.starts_with(prefix))
 }
 
-/// Where a Postgres DSN connects, and as whom: what an allowed DSN must
-/// match.
-#[derive(Debug, PartialEq, Eq)]
+/// Where a Postgres DSN connects, as whom, and how strictly it asks for
+/// TLS: what an allowed DSN must match.
+#[derive(Debug)]
 pub(super) struct PgTarget {
     host: String,
     port: u16,
@@ -98,12 +124,15 @@ pub(super) struct PgTarget {
     root_cert: Option<String>,
     client_cert: Option<String>,
     client_key: Option<String>,
+    /// The `sslmode` as a rank, from `disable` (0) to `verify-full` (5).
+    tls: u8,
 }
 
 impl PgTarget {
     /// Read `dsn` the way the store connects with it, so a `?host=` or
-    /// `?user=` override counts, and a DSN without a user gets the
-    /// server's own (`PGUSER`, else the process's user).
+    /// `?user=` override counts, a DSN without a user gets the server's
+    /// own (`PGUSER`, else the process's user), and one without an
+    /// `sslmode` the server's default (`PGSSLMODE`, else `prefer`).
     pub(super) fn parse(dsn: &str) -> Option<Self> {
         let options = PgConnectOptions::from_str(dsn).ok()?;
         let mut target = Self {
@@ -116,6 +145,14 @@ impl PgTarget {
             root_cert: None,
             client_cert: None,
             client_key: None,
+            tls: match options.get_ssl_mode() {
+                PgSslMode::Disable => 0,
+                PgSslMode::Allow => 1,
+                PgSslMode::Prefer => 2,
+                PgSslMode::Require => 3,
+                PgSslMode::VerifyCa => 4,
+                PgSslMode::VerifyFull => 5,
+            },
         };
         // sqlx has no getters for these, so read the query as it does:
         // under each of its names, the last one winning.
@@ -129,6 +166,29 @@ impl PgTarget {
             *file = Some(value.into_owned());
         }
         Some(target)
+    }
+
+    /// Whether this entry allows `dsn`: the same server, database, user,
+    /// options and TLS files, and an `sslmode` this strict or stricter.
+    pub(super) fn allows(&self, dsn: &Self) -> bool {
+        // Taken apart, so a field added later cannot miss the check.
+        let Self {
+            host,
+            port,
+            socket,
+            database,
+            user,
+            options,
+            root_cert,
+            client_cert,
+            client_key,
+            tls,
+        } = self;
+        (host, port, socket, database) == (&dsn.host, &dsn.port, &dsn.socket, &dsn.database)
+            && (user, options) == (&dsn.user, &dsn.options)
+            && (root_cert, client_cert, client_key)
+                == (&dsn.root_cert, &dsn.client_cert, &dsn.client_key)
+            && dsn.tls >= *tls
     }
 }
 
@@ -145,6 +205,7 @@ impl Allowlists {
             scripted_provider: false,
             exec_tools: false,
             max_runs: DEFAULT_MAX_RUNS,
+            max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
@@ -177,6 +238,15 @@ impl Allowlists {
     /// refused with `-32005`. A run holds its place until its `run.end`.
     pub fn max_runs(mut self, max: usize) -> Self {
         self.max_runs = max;
+        self
+    }
+
+    /// How many agents the tenant's connections may keep open at once, all
+    /// together: an `agent.open` past it is refused with `-32005` before
+    /// anything starts. An agent holds its place until `agent.close`, or
+    /// its connection's end, has closed its MCP servers.
+    pub fn max_agents(mut self, max: usize) -> Self {
+        self.max_agents = max;
         self
     }
 
@@ -229,12 +299,17 @@ impl Allowlists {
     /// Postgres servers a store DSN may connect to, and as whom: a DSN is
     /// allowed when its host, port (or socket), database, user, startup
     /// `options` and TLS files (`sslrootcert`, `sslcert`, `sslkey`) all
-    /// equal an entry's. An entry without a user stands for the server's
+    /// equal an entry's, and its `sslmode` is the entry's or stricter
+    /// (`disable` < `allow` < `prefer` < `require` < `verify-ca` <
+    /// `verify-full`). An entry without a user stands for the server's
     /// own (`PGUSER`, else the process's user), whose password the server
     /// may hold (`PGPASSWORD`, `.pgpass`); an entry without options or
     /// files allows none, so a client cannot pick a role, a `search_path`,
     /// or a certificate or key file on the server the entry does not name.
-    /// The password is the client's.
+    /// An entry, or a DSN, without `sslmode` has the server's default
+    /// (`PGSSLMODE`, else `prefer`), so an entry that asks for TLS keeps a
+    /// client from turning it off or skipping the certificate check. The
+    /// password is the client's.
     ///
     /// Raises:
     ///     AccessError: If an entry is not a valid DSN.
@@ -255,8 +330,8 @@ impl Allowlists {
     /// lists. A bare program name is looked up on the server's `PATH`.
     ///
     /// Raises:
-    ///     AccessError: If an entry lists `PATH` or a variable that decides
-    ///         what code a program loads.
+    ///     AccessError: If an entry lists `PATH`, `HOME` or another
+    ///         variable known to decide what code a program loads.
     pub fn mcp_commands(mut self, commands: &[McpCommand]) -> Result<Self, AccessError> {
         for (index, entry) in commands.iter().enumerate() {
             if let Some(name) = entry.env.iter().find(|name| loads_code(name)) {

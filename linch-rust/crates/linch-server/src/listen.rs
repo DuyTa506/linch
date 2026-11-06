@@ -72,11 +72,9 @@ impl Listeners {
     /// end every connection as at the end of its input (runs dropped,
     /// calls in flight answered, MCP servers closed), wait for them, and
     /// remove the socket file. Agents of every connection on one Postgres
-    /// DSN share one pool.
-    ///
-    /// Raises:
-    ///     io::Error: If the HTTP server fails.
-    pub async fn serve(self, stop: CancellationToken) -> io::Result<()> {
+    /// DSN share one pool. A failed accept is reported on stderr and
+    /// retried, and a connection's I/O error ends only that connection.
+    pub async fn serve(self, stop: CancellationToken) {
         let connections = TaskTracker::new();
         let pools = Arc::new(PgPools::new());
         let socket = async {
@@ -85,25 +83,21 @@ impl Listeners {
             }
         };
         let web = async {
-            match self.http {
-                Some(listener) => {
-                    let shared = http::Shared {
-                        tokens: Arc::clone(&self.tokens),
-                        pools: Arc::clone(&pools),
-                        connections: connections.clone(),
-                    };
-                    http::serve(listener, shared, stop.clone()).await
-                }
-                None => Ok(()),
+            if let Some(listener) = self.http {
+                let shared = http::Shared {
+                    tokens: Arc::clone(&self.tokens),
+                    pools: Arc::clone(&pools),
+                    connections: connections.clone(),
+                };
+                http::serve(listener, shared, stop.clone()).await;
             }
         };
-        let ((), served) = tokio::join!(socket, web);
+        tokio::join!(socket, web);
         connections.close();
         connections.wait().await;
         if let Some((_, path)) = &self.socket {
             let _ = std::fs::remove_file(path);
         }
-        served
     }
 }
 

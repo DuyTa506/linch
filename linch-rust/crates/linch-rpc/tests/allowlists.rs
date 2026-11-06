@@ -273,7 +273,7 @@ async fn skip_dangerous_needs_the_servers_consent() {
 async fn a_store_dsn_must_name_an_allowed_server() {
     let address = hangs_up().await;
     let dsns = [
-        format!("postgres://acme@{address}/linch"),
+        format!("postgres://acme@{address}/linch?sslmode=disable"),
         format!("postgres://pinned@{address}/linch?options=-c%20search_path%3Dacme"),
     ];
     let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
@@ -317,7 +317,7 @@ async fn a_store_dsn_must_name_an_entrys_tls_files_exactly() {
     let files = format!("{two}&sslkey=/etc/linch/acme.key");
     let dsns = [
         format!("postgres://acme@{address}/linch"),
-        format!("postgres://pinned@{address}/linch?{files}"),
+        format!("postgres://pinned@{address}/linch?sslmode=disable&{files}"),
     ];
     let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
     let store = |dsn: String| config(json!({"stores": {"type": "postgres", "dsn": dsn}}));
@@ -343,6 +343,50 @@ async fn a_store_dsn_must_name_an_entrys_tls_files_exactly() {
         format!("postgres://pinned@{address}/linch?{files}&sslkey=/srv/beta/client.key"),
     ];
     for dsn in outside {
+        let kind = refused(&rpc, store(dsn.clone())).await;
+        assert_eq!(kind.as_deref(), Some("postgres"), "{dsn}");
+    }
+}
+
+#[tokio::test]
+async fn a_store_dsn_must_ask_for_tls_at_least_as_strictly_as_its_entry() {
+    let address = hangs_up().await;
+    let dsns = [
+        // No `sslmode`: the store's default, `prefer`.
+        format!("postgres://acme@{address}/linch"),
+        format!("postgres://pinned@{address}/linch?sslmode=require"),
+        format!("postgres://strict@{address}/linch?ssl-mode=verify-ca"),
+    ];
+    let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
+    let store = |dsn: String| config(json!({"stores": {"type": "postgres", "dsn": dsn}}));
+    let modes = |user: &str, modes: &[&str]| -> Vec<String> {
+        (modes.iter())
+            .map(|mode| match *mode {
+                "" => format!("postgres://{user}@{address}/linch"),
+                mode => format!("postgres://{user}@{address}/linch?sslmode={mode}"),
+            })
+            .collect()
+    };
+    // The entry's mode or a stricter one: the open goes on and fails on
+    // the fake server.
+    let allowed = [
+        modes(
+            "acme",
+            &["", "prefer", "require", "verify-ca", "verify-full"],
+        ),
+        modes("pinned", &["require", "Verify-CA", "verify-full"]),
+        modes("strict", &["verify-ca", "verify-full"]),
+    ];
+    for dsn in allowed.concat() {
+        let kind = refused(&rpc, store(dsn.clone())).await;
+        assert_eq!(kind, None, "{dsn}");
+    }
+    let weaker = [
+        modes("acme", &["disable", "allow"]),
+        modes("pinned", &["", "disable", "allow", "prefer"]),
+        modes("strict", &["prefer", "require"]),
+    ];
+    for dsn in weaker.concat() {
         let kind = refused(&rpc, store(dsn.clone())).await;
         assert_eq!(kind.as_deref(), Some("postgres"), "{dsn}");
     }

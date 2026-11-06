@@ -1,7 +1,8 @@
 //! Spawns the `linch-server` binary and speaks the protocol over its stdio:
 //! a scripted run end to end, then a DeepSeek run against a closed local
 //! port whose key, set in the server's environment, must never come back.
-//! Closing stdin stops the server; the test waits for it to exit.
+//! Closing stdin stops the server; the test waits for it to exit. Pipes
+//! the server shares with other processes stay blocking.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -172,4 +173,45 @@ async fn the_binary_also_serves_files_as_stdin_and_stdout() {
         .collect();
     ids.sort_by_key(Value::as_u64);
     assert_eq!(ids, [json!(1), json!(2)], "{text}");
+}
+
+/// Whether the open file description behind `fd` is non-blocking, from
+/// `/proc/self/fdinfo` (`O_NONBLOCK` is `0o4000` on x86-64 and arm64).
+#[cfg(target_os = "linux")]
+fn nonblocking(fd: &impl std::os::fd::AsRawFd) -> bool {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd())).unwrap();
+    let flags = (info.lines())
+        .find_map(|line| line.strip_prefix("flags:"))
+        .expect("a flags line");
+    u32::from_str_radix(flags.trim(), 8).unwrap() & 0o4000 != 0
+}
+
+/// A shell's `producer | { linch-server; next-step; } | consumer` hands
+/// the server pipes the next step reads and writes too: the server serves
+/// them as pipes and leaves them blocking, so that step gets no `EAGAIN`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_binary_leaves_the_pipes_it_shares_blocking() {
+    use std::io::{Read, Write};
+
+    let (stdin, mut feed) = std::io::pipe().unwrap();
+    let (mut answers, stdout) = std::io::pipe().unwrap();
+    assert!(!nonblocking(&stdin) && !nonblocking(&stdout));
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"run.cancel","params":{"run_id":"r"}}"#;
+    feed.write_all(format!("{call}\n").as_bytes()).unwrap();
+    drop(feed);
+    // The test keeps its own handle on each pipe, as the shell does.
+    let status = Command::new(env!("CARGO_BIN_EXE_linch-server"))
+        .stdin(stdin.try_clone().unwrap())
+        .stdout(stdout.try_clone().unwrap())
+        .status();
+    let status = timeout(Duration::from_secs(20), status).await.unwrap();
+    assert!(status.unwrap().success());
+    assert!(!nonblocking(&stdin), "stdin's pipe was left non-blocking");
+    assert!(!nonblocking(&stdout), "stdout's pipe was left non-blocking");
+    drop(stdout);
+    let mut text = String::new();
+    answers.read_to_string(&mut text).unwrap();
+    let answer: Value = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(answer["result"], json!({"cancelled": false}), "{text}");
 }

@@ -75,7 +75,8 @@ impl Tenant {
         }
         config.bash &= allow.exec_tools;
         if let StoreConfig::Postgres { dsn, .. } = &config.stores
-            && !PgTarget::parse(dsn).is_some_and(|target| allow.postgres.contains(&target))
+            && !PgTarget::parse(dsn)
+                .is_some_and(|target| allow.postgres.iter().any(|entry| entry.allows(&target)))
         {
             let message = "the store DSN does not name a server in the tenant's postgres_dsns";
             return Err(refused("postgres", message.into()));

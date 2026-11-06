@@ -1,6 +1,6 @@
-//! A tenant's caps, counted across all its connections: live runs and
-//! open connections. Past a cap the request is refused with `-32005` and
-//! nothing starts. A local connection has no caps.
+//! A tenant's caps, counted across all its connections: live runs, open
+//! agents and open connections. Past a cap the request is refused with
+//! `-32005` and nothing starts. A local connection has no caps.
 
 mod common;
 
@@ -186,4 +186,40 @@ async fn a_login_past_the_connection_cap_is_refused_under_its_id() {
     assert!(second.next().await.is_none(), "the connection closes");
     second.close().await;
     first.close().await;
+}
+
+/// A scripted agent of tenant `acme` with nothing to run.
+fn idle() -> Value {
+    let mut config = scripted(vec![], None, "default");
+    config["namespace"] = json!("acme");
+    config
+}
+
+#[tokio::test]
+async fn a_tenant_keeps_at_most_max_agents_open_across_its_connections() {
+    let acme = acme(Allowlists::new().max_agents(2));
+    let first = Rpc::remote(connected(&acme));
+    let mut second = Raw::connect(connected(&acme));
+    let agent = first.open(idle()).await;
+    let opened = second.call(1, method::AGENT_OPEN, idle()).await.unwrap();
+    assert!(opened["result"]["agent"].is_string(), "{opened}");
+    let error = first.call(method::AGENT_OPEN, idle()).await;
+    let (code, data) = limit(error.unwrap_err());
+    assert_eq!(code, code::LIMIT_REACHED);
+    assert_eq!(data, json!({"kind": "agents", "max": 2}));
+    // A closed agent gives its place back.
+    let close = json!({"agent": agent});
+    first.call(method::AGENT_CLOSE, close).await.unwrap();
+    first.open(idle()).await;
+    // So do the agents of a connection that ends.
+    second.close().await;
+    first.open(idle()).await;
+}
+
+#[tokio::test]
+async fn a_local_connection_has_no_agent_cap() {
+    let rpc = Rpc::remote(Access::Local);
+    for _ in 0..=linch_rpc::DEFAULT_MAX_AGENTS {
+        rpc.open(scripted(vec![], None, "default")).await;
+    }
 }
