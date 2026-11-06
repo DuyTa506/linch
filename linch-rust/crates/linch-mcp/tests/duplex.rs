@@ -359,6 +359,27 @@ async fn the_call_timeout_returns_while_the_server_reads_nothing() {
 }
 
 #[tokio::test]
+async fn dropping_a_server_disposes_its_tools_at_once() {
+    let fixture = Fixture::new(standard_tools());
+    let registry = Arc::new(ToolRegistry::new());
+    let first = McpServer::connect(
+        config("t", Duplex::new(fixture.clone())),
+        Arc::clone(&registry),
+    )
+    .await
+    .unwrap();
+    drop(first);
+    assert!(visible(&registry).is_empty(), "still registered");
+    // So the same name can connect again straight away.
+    let second = McpServer::connect(config("t", Duplex::new(fixture)), Arc::clone(&registry))
+        .await
+        .unwrap();
+    assert!(second.skipped().is_empty(), "{:?}", second.skipped());
+    assert_eq!(second.tools().len(), 5);
+    second.disconnect().await;
+}
+
+#[tokio::test]
 async fn disconnect_disposes_only_this_servers_registrations() {
     let registry = Arc::new(ToolRegistry::new());
     let first = McpServer::connect(

@@ -59,7 +59,8 @@ pub enum McpError {
 /// A background task keeps the registry in step with the server: on
 /// `notifications/tools/list_changed`, and after every reconnect, it lists
 /// the tools again and replaces only the ones that changed. Dropping the
-/// handle without [`Self::disconnect`] closes the server in the background.
+/// handle without [`Self::disconnect`] disposes the registrations at once
+/// and closes the server in the background.
 pub struct McpServer {
     link: Arc<Link>,
     catalog: Arc<Mutex<Catalog>>,
@@ -91,6 +92,7 @@ impl McpServer {
             status: watch::Sender::new(ServerStatus::Connected),
         });
         let catalog = Arc::new(Mutex::new(Catalog::default()));
+        let close = CancellationToken::new();
         let supervisor = Supervisor {
             connector,
             registry,
@@ -98,6 +100,7 @@ impl McpServer {
             catalog: Arc::clone(&catalog),
             trust_annotations: config.trust_annotations,
             policy: config.reconnect,
+            close: close.clone(),
         };
         let (live, tools) = supervisor
             .open()
@@ -107,8 +110,7 @@ impl McpServer {
                 source: Box::new(source),
             })?;
         supervisor.install(&live, tools);
-        let close = CancellationToken::new();
-        let task = tokio::spawn(supervisor.run(live, close.clone()));
+        let task = tokio::spawn(supervisor.run(live));
         Ok(Self {
             link,
             catalog,
@@ -144,19 +146,27 @@ impl McpServer {
 
     /// Close the connection and dispose every registration this server made.
     ///
-    /// Waits for the transport to close; a stdio server gets its stdin
-    /// closed, then `SIGTERM`, then `SIGKILL`, a few seconds apart.
+    /// The registrations go at once. Then this waits for the transport to
+    /// close; a stdio server gets its stdin closed, then `SIGTERM`, then
+    /// `SIGKILL`, a few seconds apart.
     pub async fn disconnect(mut self) {
-        self.close.cancel();
+        self.stop();
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+    }
+
+    /// Tell the supervisor to close, and dispose the registrations now
+    /// rather than after the transport has closed.
+    fn stop(&self) {
+        self.close.cancel();
+        lock(&self.catalog).clear();
     }
 }
 
 impl Drop for McpServer {
     fn drop(&mut self) {
-        self.close.cancel();
+        self.stop();
     }
 }
 
@@ -177,10 +187,13 @@ struct Supervisor {
     catalog: Arc<Mutex<Catalog>>,
     trust_annotations: bool,
     policy: ReconnectPolicy,
+    /// Cancelled by the handle on disconnect or drop.
+    close: CancellationToken,
 }
 
 impl Supervisor {
-    async fn run(self, mut live: Live, close: CancellationToken) {
+    async fn run(self, mut live: Live) {
+        let close = self.close.clone();
         loop {
             self.watch(live, &close).await;
             if close.is_cancelled() {
@@ -313,7 +326,13 @@ impl Supervisor {
             .iter()
             .map(|tool| ToolSpec::new(&self.link.server, tool, self.trust_annotations))
             .collect();
-        lock(&self.catalog).sync(&self.registry, &self.link, specs);
+        let mut catalog = lock(&self.catalog);
+        // Checked under the lock the handle clears with, so nothing is
+        // registered again once the handle is closing.
+        if self.close.is_cancelled() {
+            return;
+        }
+        catalog.sync(&self.registry, &self.link, specs);
     }
 }
 
