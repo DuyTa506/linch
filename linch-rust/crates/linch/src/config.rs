@@ -47,6 +47,26 @@ pub struct AgentConfig {
     /// does not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpConfig>,
+    /// Whether the agent has skills: the built-in `verify` and those in
+    /// `config_dir/skills` (see [`crate::project::load_skills`]). Off when
+    /// absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skills: bool,
+    /// Whether the agent has foreground subagents: the built-in
+    /// `verification` and those in `config_dir/agents` (see
+    /// [`crate::project::load_subagents`]). Off when absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub subagents: bool,
+    /// Directory holding `skills/` and `agents/`. Absent: `.linch`. A
+    /// relative path resolves against the workspace root, or the process's
+    /// working directory without a workspace. Unused unless `skills` or
+    /// `subagents` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<PathBuf>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// The model provider, chosen by `id`.

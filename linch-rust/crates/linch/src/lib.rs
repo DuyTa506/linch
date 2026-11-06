@@ -30,8 +30,10 @@
 //!
 //! [`AgentConfig`] covers the declarative tier: the [`AgentSpec`], the
 //! provider by id plus its options, the stores (memory or a Postgres DSN),
-//! the built-in workspace tools from [`tools`], the permission policy and
-//! MCP servers ([`McpConfig`]). Provider keys are never part of it;
+//! the built-in workspace tools from [`tools`], the permission policy, MCP
+//! servers ([`McpConfig`]), and whether the agent loads the skills and
+//! subagents of its config directory ([`project`]). Provider keys are
+//! never part of it;
 //! [`AgentConfig::open`] reads each one from the process environment.
 //! Custom tools and hooks are bound in code and passed to
 //! [`AgentConfig::open_with`], along with the [`PgPools`] that lets agents
@@ -45,6 +47,7 @@ mod config;
 mod error;
 mod open;
 mod pools;
+pub mod project;
 
 pub use config::{
     AgentConfig, McpConfig, McpTransportConfig, ProviderConfig, ReasoningSummaryConfig,

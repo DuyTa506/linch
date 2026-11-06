@@ -23,6 +23,10 @@ tokio = { version = "1.54.1", features = ["rt", "sync"] }
 # Replaces only the password of a DSN when a config is serialized (already
 # in the lockfile for linch-rpc).
 url = "2.5.8"
+# Parses the YAML frontmatter of skills and subagents: pure Rust and
+# maintained (serde_yaml is deprecated), and its untyped tree lets the
+# loaders name the exact field that is wrong, as the Python loaders do.
+yaml-rust2 = { version = "0.13.0", default-features = false }
 
 [dev-dependencies]
 futures = "0.3.34"

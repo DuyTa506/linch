@@ -44,6 +44,11 @@ fn a_config_reads_strictly_with_defaults() {
     }));
     assert_eq!(minimal.stores, StoreConfig::Memory {});
     assert!(minimal.workspace.is_none() && minimal.permissions.is_none());
+    assert!(!minimal.skills && !minimal.subagents && minimal.config_dir.is_none());
+    let echoed = serde_json::to_value(&minimal).unwrap();
+    for key in ["skills", "subagents", "config_dir"] {
+        assert!(echoed.get(key).is_none(), "{echoed}");
+    }
     let rejected = [
         json!({"namespace": "t", "spec": {"model": "m"}, "provider": {"id": "deepseek"}, "x": 1}),
         json!({"namespace": "t", "spec": {"model": "m"},

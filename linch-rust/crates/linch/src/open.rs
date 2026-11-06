@@ -22,6 +22,7 @@ use linch_tools::{LocalFs, ReadTracker, workspace_tools};
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::error::OpenError;
 use crate::pools::{PgPools, Shared};
+use crate::project::{self, Loaded, Skipped};
 
 impl AgentConfig {
     /// Open the agent this config describes, with no tools or hooks beyond
@@ -44,8 +45,10 @@ impl AgentConfig {
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), connects
-    /// the MCP servers in order, then builds the agent. Nothing is written
-    /// to the stores. [`Agent::close_session`] drops what the workspace
+    /// the MCP servers in order, loads the skills and subagents of the
+    /// config directory when they are on (no skill may take the name of a
+    /// tool registered by then; see [`OpenedAgent::skipped`] for those
+    /// left out), then builds the agent. Nothing is written to the stores. [`Agent::close_session`] drops what the workspace
     /// tools recorded as read in that session, so its next write must read
     /// again.
     ///
@@ -86,7 +89,14 @@ impl AgentConfig {
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, pool) = stores(self.stores, pools).await?;
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
-        let built = AgentBuilder::new(self.spec)
+        let project = match self.skills || self.subagents {
+            true => {
+                let root = root.as_deref();
+                project::load(self.config_dir, root, self.skills, self.subagents, &tools).await
+            }
+            false => Loaded::default(),
+        };
+        let mut builder = AgentBuilder::new(self.spec)
             .provider(provider)
             .tools(tools)
             .hooks(hooks)
@@ -94,10 +104,21 @@ impl AgentConfig {
             .run_store(runs)
             .session_store(sessions)
             .namespace(self.namespace)
-            .on_session_close(move |session| reads.forget(session))
-            .build();
-        match built {
-            Ok(agent) => Ok(OpenedAgent { agent, mcp, pool }),
+            .on_session_close(move |session| reads.forget(session));
+        if let Some(skills) = project.skills {
+            builder = builder.skills(skills);
+        }
+        if let Some(definitions) = project.subagents {
+            builder = builder.subagents(definitions);
+        }
+        let skipped = project.skipped;
+        match builder.build() {
+            Ok(agent) => Ok(OpenedAgent {
+                agent,
+                mcp,
+                pool,
+                skipped,
+            }),
             Err(error) => {
                 disconnect(mcp).await;
                 Err(error.into())
@@ -116,12 +137,19 @@ pub struct OpenedAgent {
     mcp: Vec<McpServer>,
     /// Keeps the Postgres pool in its [`PgPools`] while this agent is open.
     pool: Option<Arc<Shared>>,
+    skipped: Vec<Skipped>,
 }
 
 impl OpenedAgent {
     /// The agent. Clone it to run from several tasks.
     pub fn agent(&self) -> &Agent {
         &self.agent
+    }
+
+    /// The skill directories and subagent files of the config directory
+    /// that were left out, and why.
+    pub fn skipped(&self) -> &[Skipped] {
+        &self.skipped
     }
 
     /// The connected MCP servers, in config order.
