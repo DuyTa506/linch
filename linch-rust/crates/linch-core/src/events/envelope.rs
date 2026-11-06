@@ -66,7 +66,7 @@ impl DecodeCtx {
     }
 }
 
-/// Every way decoding an [`Envelope`] or [`Event`] can fail.
+/// Every way encoding or decoding an [`Envelope`] or [`Event`] can fail.
 #[derive(Debug, thiserror::Error)]
 pub enum EventError {
     /// The value at this position was not a JSON object.
@@ -121,6 +121,16 @@ pub enum EventError {
         /// The event type whose payload was invalid.
         type_name: String,
         /// The underlying deserialization error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A known event's payload failed to serialize (for example, a
+    /// non-finite monetary `f64`; see `wire::serialize_finite_f64`).
+    #[error("failed to encode payload for event type {type_name:?}: {source}")]
+    EncodePayload {
+        /// The event type whose payload failed to encode.
+        type_name: String,
+        /// The underlying serialization error.
         #[source]
         source: serde_json::Error,
     },

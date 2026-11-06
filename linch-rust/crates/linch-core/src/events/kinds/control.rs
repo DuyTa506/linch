@@ -2,6 +2,7 @@
 //! loop guard, budget, prompt-cache advisory, and verification.
 
 use super::is_zero;
+use crate::events::wire::{serialize_finite_f64, serialize_finite_f64_option};
 use crate::json::JsonObject;
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
@@ -101,13 +102,22 @@ pub struct BudgetEvent {
     pub kind: BudgetKind,
     /// Tokens spent when the event was emitted.
     pub spent_tokens: u64,
-    /// Cost spent when the event was emitted.
+    /// Cost spent when the event was emitted. Encoding a NaN or infinite
+    /// value is an error (see `serialize_finite_f64`), never a silent
+    /// `null`.
+    #[serde(serialize_with = "serialize_finite_f64")]
     pub spent_usd: f64,
     /// Configured token limit, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// Configured cost limit, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Configured cost limit, if any. Encoding a NaN or infinite value is
+    /// an error (see `serialize_finite_f64_option`), never a silent
+    /// `null` indistinguishable from "no limit".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
     pub max_cost_usd: Option<f64>,
 }
 
@@ -162,4 +172,39 @@ pub struct VerificationEvent {
     /// Retry attempts used so far in this run.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempt: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn budget(spent_usd: f64, max_cost_usd: Option<f64>) -> BudgetEvent {
+        BudgetEvent {
+            kind: BudgetKind::Warning,
+            spent_tokens: 0,
+            spent_usd,
+            max_tokens: None,
+            max_cost_usd,
+        }
+    }
+
+    #[test]
+    fn non_finite_spent_usd_fails_to_encode() {
+        assert!(serde_json::to_value(budget(f64::NAN, None)).is_err());
+        assert!(serde_json::to_value(budget(f64::INFINITY, None)).is_err());
+        assert!(serde_json::to_value(budget(f64::NEG_INFINITY, None)).is_err());
+    }
+
+    #[test]
+    fn non_finite_max_cost_usd_fails_to_encode() {
+        assert!(serde_json::to_value(budget(0.0, Some(f64::NAN))).is_err());
+        assert!(serde_json::to_value(budget(0.0, Some(f64::INFINITY))).is_err());
+    }
+
+    #[test]
+    fn finite_values_round_trip() {
+        let event = budget(1.5, Some(10.0));
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(serde_json::from_value::<BudgetEvent>(value).unwrap(), event);
+    }
 }

@@ -114,6 +114,26 @@ fn ignorable_flag_is_omitted_when_false() {
 }
 
 #[test]
+fn encoding_a_non_finite_monetary_field_fails_the_whole_envelope() {
+    use crate::events::kinds::{BudgetEvent, BudgetKind};
+
+    let envelope = Envelope {
+        v: WIRE_VERSION,
+        seq: 1,
+        run_id: RunId::new("r1"),
+        ignorable: false,
+        event: Event::Budget(BudgetEvent {
+            kind: BudgetKind::Exceeded,
+            spent_tokens: 0,
+            spent_usd: f64::NAN,
+            max_tokens: None,
+            max_cost_usd: None,
+        }),
+    };
+    assert!(serde_json::to_string(&envelope).is_err());
+}
+
+#[test]
 fn from_str_rejects_invalid_json() {
     use std::str::FromStr;
     assert!(matches!(

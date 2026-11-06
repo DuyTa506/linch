@@ -1,5 +1,8 @@
+mod samples;
+
 use super::ignorable::KNOWN_EVENT_TYPES;
 use super::*;
+use samples::one_of_every_kind;
 use serde_json::json;
 
 #[test]
@@ -29,13 +32,15 @@ fn known_event_types_matches_decode_exhaustively() {
     let sample_tags: Vec<String> = one_of_every_kind()
         .iter()
         .filter(|event| !matches!(event, Event::Ignorable(_)))
-        .map(|event| match event.to_value() {
-            JsonValue::Object(obj) => match obj.get("type") {
-                Some(JsonValue::String(s)) => s.clone(),
-                _ => panic!("event is missing its type tag"),
+        .map(
+            |event| match event.to_value().expect("sample events are encodable") {
+                JsonValue::Object(obj) => match obj.get("type") {
+                    Some(JsonValue::String(s)) => s.clone(),
+                    _ => panic!("event is missing its type tag"),
+                },
+                _ => panic!("event did not encode to an object"),
             },
-            _ => panic!("event did not encode to an object"),
-        })
+        )
         .collect();
 
     let sample_set: BTreeSet<&str> = sample_tags.iter().map(String::as_str).collect();
@@ -98,6 +103,36 @@ fn subagent_persistence_recurses_into_the_wrapped_event() {
 }
 
 #[test]
+fn to_value_surfaces_a_non_finite_monetary_field_as_an_error() {
+    let event = Event::Budget(BudgetEvent {
+        kind: BudgetKind::Exceeded,
+        spent_tokens: 0,
+        spent_usd: f64::NAN,
+        max_tokens: None,
+        max_cost_usd: None,
+    });
+    assert!(matches!(
+        event.to_value(),
+        Err(EventError::EncodePayload { ref type_name, .. }) if type_name == "budget"
+    ));
+}
+
+#[test]
+fn to_value_surfaces_a_non_finite_field_nested_inside_a_subagent() {
+    let event = Event::Subagent(SubagentEvent {
+        child_run_id: RunId::new("child-1"),
+        event: Box::new(Event::Budget(BudgetEvent {
+            kind: BudgetKind::Exceeded,
+            spent_tokens: 0,
+            spent_usd: f64::INFINITY,
+            max_tokens: None,
+            max_cost_usd: None,
+        })),
+    });
+    assert!(event.to_value().is_err());
+}
+
+#[test]
 fn ignorable_new_rejects_empty_type() {
     assert!(matches!(
         IgnorableEvent::new("", JsonObject::new()),
@@ -117,7 +152,7 @@ fn child_run_status_round_trips() {
         child_run_id: RunId::new("child-1"),
         status: crate::run::RunStatus::Running,
     });
-    let value = event.to_value();
+    let value = event.to_value().unwrap();
     assert_eq!(
         value,
         json!({"type": "child_run_status", "child_run_id": "child-1", "status": "running"})
@@ -134,7 +169,7 @@ fn subagent_round_trips_and_boxes_its_child() {
         child_run_id: RunId::new("child-1"),
         event: Box::new(child),
     });
-    let value = event.to_value();
+    let value = event.to_value().unwrap();
     assert_eq!(
         value,
         json!({
@@ -144,179 +179,6 @@ fn subagent_round_trips_and_boxes_its_child() {
         })
     );
     assert_eq!(Event::decode(value, DecodeCtx::strict()).unwrap(), event);
-}
-
-/// One minimal, valid instance of every `Event` kind, built by hand
-/// (not via `arbitrary`) so this list is a deliberate, readable
-/// enumeration a reviewer can check against the card's kind list.
-fn one_of_every_kind() -> Vec<Event> {
-    use super::super::model_call::{
-        CallDisposition, ModelCallDeliveryEvent, ModelCallKind, ModelCallReceiptEvent,
-        ModelCallUsageSettlementEvent,
-    };
-    use crate::message::ToolResultBlock;
-    use crate::run::{RunStatus, StopReason};
-    use crate::usage::Usage;
-
-    vec![
-        Event::Init(InitEvent {
-            session_id: crate::ids::SessionId::new("s1"),
-            run_id: RunId::new("r1"),
-            parent_run_id: None,
-            model: "claude".into(),
-            tools: vec![],
-            trace_id: None,
-        }),
-        Event::User(UserEvent {
-            message: crate::message::Message::user_text("hi"),
-            subtype: UserEventSubtype::Prompt,
-        }),
-        Event::Assistant(AssistantEvent {
-            message: crate::message::Message::assistant_text("hi"),
-            stop_reason: StopReason::EndTurn,
-        }),
-        Event::PartialAssistant(PartialAssistantEvent {
-            delta: JsonObject::new(),
-        }),
-        Event::Usage(UsageEvent {
-            usage: Usage::default(),
-            cumulative: Usage::default(),
-        }),
-        Event::ToolCallStart(ToolCallStartEvent {
-            tool_use_id: "c1".into(),
-            tool_name: "Read".into(),
-            input: JsonObject::new(),
-            summary: "reading".into(),
-        }),
-        Event::ToolCallEnd(ToolCallEndEvent {
-            tool_name: "Read".into(),
-            result: ToolResultBlock::text("c1", "done", false),
-            duration_ms: 1,
-            canonical_output: None,
-        }),
-        Event::ToolProgress(ToolProgressEvent {
-            tool_use_id: "c1".into(),
-            tool_name: "Read".into(),
-            message: "working".into(),
-            data: None,
-        }),
-        Event::PermissionRequest(PermissionRequestEvent { requests: vec![] }),
-        Event::InputRequest(InputRequestEvent {
-            request_id: "req1".into(),
-            kind: InputRequestKind::AskUser,
-            prompt: "continue?".into(),
-        }),
-        Event::Suspended(SuspendedEvent {
-            status: SuspendStatus::AwaitingApproval,
-            pending_request_ids: vec!["c1".into()],
-        }),
-        Event::ContextBuild(ContextBuildEvent {
-            system_blocks: 1,
-            messages: 1,
-            selected_tools: None,
-            budget: JsonObject::new(),
-            metadata: JsonObject::new(),
-        }),
-        Event::Compaction(CompactionEvent {
-            messages_before: 10,
-            messages_after: 2,
-            tokens_before: 100,
-            tokens_after: 10,
-            strategy: "summarize".into(),
-        }),
-        Event::LoopGuard(LoopGuardEvent {
-            reason: LoopGuardReason::MaxTurns,
-            detail: "too many turns".into(),
-            action: LoopGuardAction::Stop,
-        }),
-        Event::Budget(BudgetEvent {
-            kind: BudgetKind::Warning,
-            spent_tokens: 1,
-            spent_usd: 0.1,
-            max_tokens: None,
-            max_cost_usd: None,
-        }),
-        Event::PromptCacheAdvisory(PromptCacheAdvisoryEvent {
-            reason: PromptCacheAdvisoryReason::ModelChanged,
-            detail: "model changed".into(),
-        }),
-        Event::SkillsLoaded(SkillsLoadedEvent { skills: vec![] }),
-        Event::SkillInvoked(SkillInvokedEvent {
-            name: "deploy".into(),
-            args: None,
-            model_override: None,
-            allowed_tools: None,
-        }),
-        Event::SkillCompleted(SkillCompletedEvent {
-            name: "deploy".into(),
-            is_error: false,
-        }),
-        Event::Subagent(SubagentEvent {
-            child_run_id: RunId::new("child-1"),
-            event: Box::new(Event::Error(ErrorEvent {
-                error: JsonObject::new(),
-            })),
-        }),
-        Event::ChildRunStatus(ChildRunStatusEvent {
-            child_run_id: RunId::new("child-1"),
-            status: RunStatus::Running,
-        }),
-        Event::Workflow(WorkflowEvent {
-            kind: WorkflowKind::Phase,
-            title: String::new(),
-            call_key: String::new(),
-            occurrence: 0,
-            subagent_type: String::new(),
-            result_text: None,
-            structured_output: None,
-            structured_error: None,
-        }),
-        Event::Verification(VerificationEvent {
-            verifier: "output_schema".into(),
-            action: VerificationAction::Retry,
-            feedback: String::new(),
-            attempt: 1,
-        }),
-        Event::Error(ErrorEvent {
-            error: JsonObject::new(),
-        }),
-        Event::Result(ResultEvent {
-            subtype: ResultSubtype::Success,
-            stop_reason: StopReason::EndTurn,
-            total_usage: Some(Usage::default()),
-            final_text: None,
-            structured_output: None,
-            structured_error: None,
-            trace_id: None,
-        }),
-        Event::ModelCallDelivery(ModelCallDeliveryEvent {
-            run_id: RunId::new("r1"),
-            logical_call_id: "lc1".into(),
-            delivery_attempt_id: "da1".into(),
-            kind: ModelCallKind::Primary,
-            turn_index: None,
-            requested_model: "claude".into(),
-        }),
-        Event::ModelCallReceipt(ModelCallReceiptEvent {
-            run_id: RunId::new("r1"),
-            logical_call_id: "lc1".into(),
-            delivery_attempt_id: "da1".into(),
-            kind: ModelCallKind::Primary,
-            actual_model: None,
-            disposition: CallDisposition::Cancelled,
-            usage: None,
-            cost_usd: None,
-            duration_ms: 0,
-        }),
-        Event::ModelCallUsageSettlement(ModelCallUsageSettlementEvent {
-            run_id: RunId::new("r1"),
-            budget_owner_id: None,
-            logical_call_id: "lc1".into(),
-            usage: Usage::default(),
-            cost_usd: None,
-        }),
-        Event::Ignorable(IgnorableEvent::new("future_kind", JsonObject::new()).unwrap()),
-    ]
 }
 
 #[test]
@@ -339,7 +201,7 @@ fn persistence_classification_covers_every_kind() {
         "one_of_every_kind must cover every known type plus Ignorable"
     );
     for event in &samples {
-        let tag = match event.to_value() {
+        let tag = match event.to_value().expect("sample events are encodable") {
             JsonValue::Object(obj) => match obj.get("type") {
                 Some(JsonValue::String(s)) => s.clone(),
                 _ => panic!("event is missing its type tag"),
@@ -364,7 +226,7 @@ fn every_kind_round_trips_through_decode() {
 
     let mut runner = TestRunner::new(Config::default());
     for event in one_of_every_kind() {
-        let value = event.to_value();
+        let value = event.to_value().expect("sample events are encodable");
         let ctx = if matches!(event, Event::Ignorable(_)) {
             DecodeCtx::root(true)
         } else {
@@ -378,7 +240,7 @@ fn every_kind_round_trips_through_decode() {
     for _ in 0..256 {
         let tree = strategy.new_tree(&mut runner).unwrap();
         let event = tree.current();
-        let value = event.to_value();
+        let value = event.to_value().expect("arbitrary finite events encode");
         let ignorable = contains_ignorable(&event);
         let ctx = DecodeCtx::root(ignorable);
         let decoded = Event::decode(value, ctx).expect("arbitrary event must decode");

@@ -31,9 +31,11 @@ fn short_string() -> impl Strategy<Value = String> {
 }
 
 /// A finite, non-negative monetary amount. `f64::NAN`/`INFINITY`, which
-/// `any::<f64>()` can produce, are not valid JSON numbers and would make
-/// `serde_json::to_value` fail for reasons unrelated to the code under
-/// test.
+/// `any::<f64>()` can produce, are not valid JSON numbers; encoding one is
+/// now a hard error (`wire::serialize_finite_f64`/`_option`), which this
+/// round-trip generator does not want to exercise — it only produces
+/// values this crate can actually encode. The rejection path itself has
+/// its own dedicated unit tests next to the fields that use it.
 fn finite_f64() -> impl Strategy<Value = f64> {
     (0u32..1_000_000u32).prop_map(|cents| cents as f64 / 100.0)
 }

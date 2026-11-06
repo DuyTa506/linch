@@ -8,6 +8,7 @@
 //! budget land later). `usage: Option<Usage>` follows the same rule as the
 //! rest of this crate: unknown usage is `None`, never a zero [`Usage`].
 
+use super::wire::serialize_finite_f64_option;
 use crate::ids::RunId;
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
@@ -86,8 +87,14 @@ pub struct ModelCallReceiptEvent {
     /// dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Cost of the call, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Cost of the call, when known. Encoding a NaN or infinite value is an
+    /// error (see `serialize_finite_f64_option`), never a silent `null`
+    /// indistinguishable from "unknown".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
     pub cost_usd: Option<f64>,
     /// Elapsed delivery time in milliseconds.
     pub duration_ms: u64,
@@ -111,8 +118,14 @@ pub struct ModelCallUsageSettlementEvent {
     pub logical_call_id: String,
     /// Usage attributed to the budget owner.
     pub usage: Usage,
-    /// Cost attributed to the budget owner, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Cost attributed to the budget owner, when known. Encoding a NaN or
+    /// infinite value is an error (see `serialize_finite_f64_option`),
+    /// never a silent `null` indistinguishable from "unknown".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
     pub cost_usd: Option<f64>,
 }
 
@@ -169,5 +182,33 @@ mod tests {
             serde_json::from_value::<ModelCallReceiptEvent>(value).unwrap(),
             receipt
         );
+    }
+
+    #[test]
+    fn non_finite_receipt_cost_fails_to_encode() {
+        let receipt = ModelCallReceiptEvent {
+            run_id: RunId::new("r1"),
+            logical_call_id: "lc1".into(),
+            delivery_attempt_id: "da1".into(),
+            kind: ModelCallKind::Primary,
+            actual_model: None,
+            disposition: CallDisposition::Accepted,
+            usage: None,
+            cost_usd: Some(f64::NAN),
+            duration_ms: 0,
+        };
+        assert!(serde_json::to_value(receipt).is_err());
+    }
+
+    #[test]
+    fn non_finite_settlement_cost_fails_to_encode() {
+        let settlement = ModelCallUsageSettlementEvent {
+            run_id: RunId::new("r1"),
+            budget_owner_id: None,
+            logical_call_id: "lc1".into(),
+            usage: Usage::default(),
+            cost_usd: Some(f64::INFINITY),
+        };
+        assert!(serde_json::to_value(settlement).is_err());
     }
 }

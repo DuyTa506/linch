@@ -121,16 +121,19 @@ pub struct SubagentEvent {
 
 /// Serialize a payload, then inject the wire `type` tag.
 ///
-/// # Panics
-/// Only if `payload`'s `Serialize` implementation itself errors, which none
-/// of this crate's plain derived payload types do.
-fn tagged<T: Serialize>(tag: &'static str, payload: &T) -> JsonValue {
-    let mut value =
-        serde_json::to_value(payload).expect("event payload types only hold JSON-safe values");
+/// Fails if `payload`'s `Serialize` implementation does — the one way any
+/// of this crate's plain derived payload types do is a monetary
+/// `f64`/`Option<f64>` field rejecting a non-finite value (see
+/// `wire::serialize_finite_f64`).
+fn tagged<T: Serialize>(tag: &'static str, payload: &T) -> Result<JsonValue, EventError> {
+    let mut value = serde_json::to_value(payload).map_err(|source| EventError::EncodePayload {
+        type_name: tag.to_string(),
+        source,
+    })?;
     if let JsonValue::Object(map) = &mut value {
         map.insert("type".to_string(), JsonValue::String(tag.to_string()));
     }
-    value
+    Ok(value)
 }
 
 /// Decode a known event's payload, stripping `type` first so the payload's
@@ -241,7 +244,11 @@ impl Event {
     }
 
     /// Encode this event to its JSON wire representation.
-    pub fn to_value(&self) -> JsonValue {
+    ///
+    /// Raises:
+    ///     EventError: If a payload field that must encode to a finite JSON
+    ///         number (for example a monetary `f64`) does not.
+    pub fn to_value(&self) -> Result<JsonValue, EventError> {
         match self {
             Event::Init(e) => tagged("init", e),
             Event::User(e) => tagged("user", e),
@@ -272,8 +279,8 @@ impl Event {
                     "child_run_id".to_string(),
                     JsonValue::String(e.child_run_id.as_str().to_string()),
                 );
-                obj.insert("event".to_string(), e.event.to_value());
-                JsonValue::Object(obj)
+                obj.insert("event".to_string(), e.event.to_value()?);
+                Ok(JsonValue::Object(obj))
             }
             Event::ChildRunStatus(e) => tagged("child_run_status", e),
             Event::Workflow(e) => tagged("workflow", e),
@@ -283,7 +290,7 @@ impl Event {
             Event::ModelCallDelivery(e) => tagged("model_call_delivery", e),
             Event::ModelCallReceipt(e) => tagged("model_call_receipt", e),
             Event::ModelCallUsageSettlement(e) => tagged("model_call_usage_settlement", e),
-            Event::Ignorable(e) => JsonValue::Object(e.raw().clone()),
+            Event::Ignorable(e) => Ok(JsonValue::Object(e.raw().clone())),
         }
     }
 
@@ -336,7 +343,9 @@ impl Serialize for Event {
     where
         S: serde::Serializer,
     {
-        self.to_value().serialize(serializer)
+        self.to_value()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
     }
 }
 
