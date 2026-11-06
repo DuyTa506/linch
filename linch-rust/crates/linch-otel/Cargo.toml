@@ -1,0 +1,27 @@
+[package]
+name = "linch-otel"
+description = "OpenTelemetry traces and metrics for Linch runs, built from the run's event stream."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The envelope and event types the observer reads.
+linch-core = { path = "../linch-core" }
+# The API crate only: the host owns the SDK and its exporters, as in Python.
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }
+# Enum wire names (`end_turn`) and captured content as JSON text.
+serde = "1.0.229"
+serde_json = "1.0.154"
+
+[dev-dependencies]
+async-trait = "0.1.92"
+futures = "0.3.34"
+# The in-memory span and metric exporters the tests read back.
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "metrics", "testing"] }
+tokio = { version = "1.54.1", features = ["rt", "macros", "sync"] }
