@@ -4,6 +4,30 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::thread::{self, JoinHandle};
 
+use linch_core::ProviderError;
+
+/// A `307` whose `location` is a local port nothing listens on, so a
+/// client that follows it fails to connect instead of reaching a server.
+pub(crate) fn redirect_response() -> String {
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    format!(
+        "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{closed}/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+    )
+}
+
+/// The call failed on the redirect itself rather than following it.
+pub(crate) fn assert_redirect_refused(err: &ProviderError) {
+    assert!(
+        matches!(err, ProviderError::Status { status: 307, retry_after: None, message }
+            if message == crate::transport::REDIRECT_REFUSED),
+        "{err:?}"
+    );
+    assert!(!err.retryable());
+}
+
 /// Serve one canned HTTP response on a local port. Returns the base URL and
 /// a handle that yields the raw request (head and body) it read.
 pub(crate) fn serve_once(response: String) -> (String, JoinHandle<String>) {

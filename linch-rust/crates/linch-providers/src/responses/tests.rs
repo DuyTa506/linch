@@ -13,6 +13,7 @@ use super::*;
 use crate::openai::test_support::{
     assemble_ok, error_response, request, serve_once, sse_response, weather_tool,
 };
+use crate::test_server::{assert_redirect_refused, redirect_response};
 
 const SECRET: &str = "sk-unit-test-responses-8e7d";
 const MODEL: &str = "gpt-5.5";
@@ -324,4 +325,16 @@ async fn http_429_keeps_retry_after_and_never_the_key() {
         "{err:?}"
     );
     assert!(!format!("{err} {err:?}").contains(SECRET), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_redirect_is_refused_and_never_followed() {
+    let (url, server) = serve_once(redirect_response());
+    let err = provider(url)
+        .stream(request(MODEL), CancellationToken::new())
+        .await
+        .err()
+        .expect("a redirect fails the call");
+    server.join().unwrap();
+    assert_redirect_refused(&err);
 }

@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::test_server::serve_once;
+use crate::test_server::{assert_redirect_refused, redirect_response, serve_once};
 
 const SECRET: &str = "sk-unit-test-secret-9f8e7d";
 
@@ -307,4 +307,16 @@ async fn cancelled_before_send_is_cancelled() {
         .err()
         .unwrap();
     assert!(matches!(err, ProviderError::Cancelled), "{err}");
+}
+
+#[tokio::test]
+async fn a_redirect_is_refused_and_never_followed() {
+    let (url, server) = serve_once(redirect_response());
+    let err = provider(url)
+        .stream(request(), CancellationToken::new())
+        .await
+        .err()
+        .expect("a redirect fails the call");
+    server.join().unwrap();
+    assert_redirect_refused(&err);
 }

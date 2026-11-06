@@ -12,8 +12,8 @@ use crate::ApiKey;
 /// Longest error summary kept in a [`ProviderError`].
 const MAX_ERROR_CHARS: usize = 500;
 
-/// POST `body` to `url` with `x-api-key` auth; non-2xx maps through
-/// [`status_error`].
+/// POST `body` to `url` with `x-api-key` auth. A redirect is refused,
+/// never followed; any other non-2xx maps through [`status_error`].
 pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
@@ -36,6 +36,9 @@ pub(crate) async fn post(
     let status = response.status();
     if status.is_success() {
         return Ok(response);
+    }
+    if status.is_redirection() {
+        return Err(crate::transport::redirect_refused(status.as_u16()));
     }
     let retry_after = response
         .headers()

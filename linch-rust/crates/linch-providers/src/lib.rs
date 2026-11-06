@@ -17,6 +17,7 @@ pub mod servers;
 mod sse;
 #[cfg(test)]
 mod test_server;
+mod transport;
 
 pub use anthropic::{Anthropic, AnthropicOptions};
 pub use api_key::ApiKey;

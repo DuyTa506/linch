@@ -13,6 +13,7 @@ use super::test_support::{
     assemble_ok, bytes, error_response, request, serve_once, sse_response, weather_tool,
 };
 use super::*;
+use crate::test_server::{assert_redirect_refused, redirect_response};
 
 const SECRET: &str = "sk-unit-test-openai-4c3b2a";
 const MODEL: &str = "gpt-5.5";
@@ -286,4 +287,16 @@ async fn invalid_request_fails_before_any_http() {
         .err()
         .unwrap();
     assert!(matches!(err, ProviderError::InvalidRequest { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_redirect_is_refused_and_never_followed() {
+    let (url, server) = serve_once(redirect_response());
+    let err = provider(url)
+        .stream(request(MODEL), CancellationToken::new())
+        .await
+        .err()
+        .expect("a redirect fails the call");
+    server.join().unwrap();
+    assert_redirect_refused(&err);
 }

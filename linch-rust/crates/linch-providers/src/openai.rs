@@ -131,10 +131,7 @@ impl OpenAiChat {
         api_key: Option<ApiKey>,
         thinking_off: JsonObject,
     ) -> Result<Self, ProviderError> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .build()
+        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(api_key.as_ref(), &err))?;
         Ok(Self {
             client,
