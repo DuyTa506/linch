@@ -27,6 +27,12 @@ impl WorkflowContext {
     /// once the run succeeds; a resume after that replays it without
     /// touching the agent.
     ///
+    /// Once the run has ended, the call closes its session
+    /// ([`Agent::close_session`]), which frees what the agent holds for it
+    /// in this process: after a success once the text is journaled, and
+    /// after a failed or aborted run. A run waiting for an approval keeps
+    /// its session, since the approve continues on it.
+    ///
     /// A run that failed or was aborted is never continued: the call fails,
     /// and the next resume runs the call again as a fresh run. A run that
     /// stops for an approval also fails the call; approve it with
@@ -108,9 +114,20 @@ impl WorkflowContext {
             };
             break (run_id, drive(stream).await);
         };
-        let text = finish(name, &label, &run_id, outcome)?;
+        // A run that ended never continues on its session, while a run
+        // waiting for an approval does.
+        let session = SessionId::new(run_id.as_str());
+        let ended = outcome
+            .as_ref()
+            .is_ok_and(|outcome| outcome.ended.is_some());
+        let text = finish(name, &label, &run_id, outcome).inspect_err(|_| {
+            if ended {
+                agent.close_session(&session);
+            }
+        })?;
         self.record(&call_key, occurrence, &JsonValue::String(text.clone()))
             .await?;
+        agent.close_session(&session);
         emit(WorkflowKind::AgentEnd, Some(&text));
         Ok(text)
     }

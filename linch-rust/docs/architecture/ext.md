@@ -164,14 +164,18 @@ a cancelled workflow are not.
 
 An `agent` call runs on its own session with a run id derived from the
 workflow, the call's key, its occurrence and a generation
-(`crates/linch-ext/src/workflow/agent.rs:121`). After a crash, the next
+(`crates/linch-ext/src/workflow/agent.rs:138`). After a crash, the next
 `run_workflow` continues that run instead of starting over, so a model call is
 never paid twice. A run that failed or was aborted is never continued: the
 call fails, and the next resume starts a fresh run with the next generation.
 A run that stops for approval fails the call; approve it with `Agent::approve`,
 then resume the workflow, which reads the finished run's text. Step timeouts
 and retries do not apply to an agent call; the workflow deadline and cancel
-token do (`agent.rs:17-38`).
+token do (`agent.rs:17-45`). Once the run has ended (succeeded with its text
+journaled, failed or aborted), the call closes its session with
+`Agent::close_session`, which frees what the agent keeps for that session in
+this process, such as its memory files and retained subagent workers; a run
+waiting for approval keeps its session for the approve (`agent.rs:117-130`).
 
 An interrupt without an answer returns `WorkflowError::Suspended`;
 `run_workflow` then stores the workflow as `awaiting_input` with the question,
