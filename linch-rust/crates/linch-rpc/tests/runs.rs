@@ -140,3 +140,27 @@ async fn agent_open_reports_build_and_key_errors() {
         assert_eq!(error.data, Some(json!({"env": "GEMINI_API_KEY"})));
     }
 }
+
+#[tokio::test]
+async fn an_unreachable_postgres_fails_agent_open_fast() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let rpc = Rpc::new();
+    let mut config = scripted(vec![], None, "");
+    let dsn = format!("postgres://linch:pg-secret@127.0.0.1:{port}/linch");
+    config["stores"] = json!({"type": "postgres", "dsn": dsn});
+    let started = std::time::Instant::now();
+    let error = rpc.call(method::AGENT_OPEN, config).await.unwrap_err();
+    // sqlx alone would retry the refused connection for 30 s.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+    let linch_rpc::ClientError::Rpc(error) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(error.code, code::STORE_UNAVAILABLE);
+    assert!(!error.message.contains("pg-secret"), "{}", error.message);
+}

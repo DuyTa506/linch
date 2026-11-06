@@ -11,7 +11,7 @@ use linch_core::{
     ToolRegistry,
 };
 use linch_mcp::McpServer;
-use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
+use linch_postgres::{PgRunStore, PgSessionStore};
 use linch_providers::{
     Anthropic, AnthropicOptions, ApiKey, DeepSeek, DeepSeekOptions, Gemini, GeminiOptions,
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
@@ -185,7 +185,7 @@ async fn stores(config: StoreConfig) -> Result<Stores, OpenError> {
             Arc::new(MemorySessionStore::default()),
         )),
         StoreConfig::Postgres { dsn } => {
-            let pool = PgPool::connect(&dsn)
+            let pool = linch_postgres::connect(&dsn, linch_postgres::CONNECT_TIMEOUT)
                 .await
                 .map_err(|error| OpenError::Store(Box::new(error)))?;
             linch_postgres::migrate(&pool)

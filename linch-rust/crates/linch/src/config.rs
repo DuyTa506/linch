@@ -157,8 +157,9 @@ pub enum StoreConfig {
     /// In-process memory stores owned by the opened agent, for tests and
     /// development. They are dropped with the agent.
     Memory {},
-    /// Postgres stores. Opening connects a pool and applies the
-    /// migrations.
+    /// Postgres stores. Opening connects a pool, giving up after
+    /// [`linch_postgres::CONNECT_TIMEOUT`] when the server cannot be
+    /// reached, and applies the migrations.
     Postgres {
         /// Connection string, for example `postgres://user:pass@host/db`.
         dsn: String,
