@@ -7,6 +7,8 @@
 //!
 //! [`RunStore::commit`] is the only write to a running run, so every store
 //! write is a group-commit barrier by construction.
+//!
+//! [`TaskStore`] keeps the session tasks; the session stores implement it.
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -20,6 +22,9 @@ use crate::session_log::LogEntry;
 pub mod conformance;
 pub mod faulty;
 pub mod memory;
+mod tasks;
+
+pub use tasks::{NewTask, Task, TaskPatch, TaskStatus, TaskStore};
 
 /// Everything written when a run is created, in one write.
 #[derive(Debug, Clone)]

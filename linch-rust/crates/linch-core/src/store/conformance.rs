@@ -1,7 +1,8 @@
 //! Store conformance suite shared by every backend.
 //!
 //! Every [`RunStore`] and [`SessionStore`] must pass [`run_store_suite`],
-//! [`run_admission_suite`] and [`session_store_suite`]. A failed rule panics
+//! [`run_admission_suite`] and [`session_store_suite`], and every
+//! [`TaskStore`](crate::store::TaskStore) [`task_store_suite`]. A failed rule panics
 //! with a message naming it, so call the suites from a test. Each check uses
 //! its own namespace under `conformance/`; run the suites on a store that
 //! holds nothing there.
@@ -16,11 +17,13 @@
 
 mod admission;
 mod fixtures;
+mod tasks;
 
 pub use admission::run_admission_suite;
 use fixtures::{
     checkpoint, checkpoint_at, commit_shapes, entry, envelope, lease_for, new_run, same_record,
 };
+pub use tasks::task_store_suite;
 
 use crate::ids::{RunId, SessionId};
 use crate::run::RunStatus;
