@@ -6,6 +6,12 @@
 //! files live wherever the backend keeps them:
 //!
 //! - [`MemoryBackend`]: in memory, gone with the process.
+//! - [`DiskBackend`]: real files under a root directory, confined like
+//!   [`crate::LocalFs`].
+//! - `linch_postgres::PgFileBackend`: a Postgres table, shared across
+//!   processes.
+//! - [`CompositeBackend`] routes paths by longest prefix to other backends,
+//!   and [`ScopedBackend`] exposes one subtree of another backend.
 //!
 //! Callers find a session's backend through [`SessionFiles`]:
 //! [`MemorySessions`] gives each session a fresh [`MemoryBackend`], and
@@ -14,8 +20,11 @@
 //! Every backend applies [`normalize_path`] to the paths it is given, so
 //! `a//b/` and `/a/b` name one file, and `..` or a NUL byte is refused.
 
+mod composite;
 pub mod conformance;
+mod disk;
 mod memory;
+mod scoped;
 
 use std::sync::Arc;
 
@@ -23,7 +32,10 @@ use async_trait::async_trait;
 use linch_core::SessionId;
 use thiserror::Error;
 
+pub use composite::CompositeBackend;
+pub use disk::DiskBackend;
 pub use memory::{MemoryBackend, MemorySessions};
+pub use scoped::ScopedBackend;
 
 /// Boxed error of a storage layer under a backend.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
