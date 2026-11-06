@@ -1,10 +1,12 @@
-//! Postgres run and session stores for the Linch agent kernel.
+//! Postgres run, session and virtual file stores for the Linch agent kernel.
 //!
 //! [`PgRunStore`] and [`PgSessionStore`] implement linch-core's
 //! [`RunStore`](linch_core::RunStore) and
-//! [`SessionStore`](linch_core::SessionStore) and pass its conformance suite.
-//! Both take a [`PgPool`]; tables are created by [`migrate`], which the host
-//! runs once at startup:
+//! [`SessionStore`](linch_core::SessionStore) and pass its conformance suite;
+//! [`PgFileBackend`] implements linch-tools'
+//! [`FileBackend`](linch_tools::vfs::FileBackend) and passes its suite. All
+//! take a [`PgPool`]; tables are created by [`migrate`], which the host runs
+//! once at startup:
 //!
 //! ```no_run
 //! # async fn start(dsn: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -28,10 +30,12 @@ use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
 mod codec;
+mod files;
 mod run;
 mod session;
 
 pub use codec::CodecError;
+pub use files::PgFileBackend;
 pub use run::PgRunStore;
 pub use session::PgSessionStore;
 pub use sqlx::PgPool;
@@ -97,6 +101,13 @@ fn migrator() -> Migrator {
             Cow::Borrowed("one live run per session"),
             MigrationType::Simple,
             include_str!("../migrations/0002_one_live_run_per_session.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            3,
+            Cow::Borrowed("files"),
+            MigrationType::Simple,
+            include_str!("../migrations/0003_files.sql").into_sql_str(),
             false,
         ),
     ];

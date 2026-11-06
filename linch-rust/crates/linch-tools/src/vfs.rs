@@ -223,8 +223,13 @@ pub fn apply_edit(
     }
 }
 
-/// `path` normalized and checked to name a file, not the root.
-pub(crate) fn file_path(path: &str) -> Result<String, VfsError> {
+/// `path` normalized by [`normalize_path`] and checked to name a file, not
+/// the root. Backends apply it to every file argument.
+///
+/// Raises:
+///     VfsError: `InvalidPath` when [`normalize_path`] refuses `path` or it
+///         names the root.
+pub fn file_path(path: &str) -> Result<String, VfsError> {
     let normal = normalize_path(path)?;
     if normal == "/" {
         return Err(invalid(path, "the root is a directory, not a file"));
