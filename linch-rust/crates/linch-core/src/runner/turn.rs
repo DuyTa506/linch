@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::Outbox;
-use super::hooks::add_context;
+use super::hooks::{Stopping, add_context};
 use crate::agent::{AgentInner, RunError};
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
@@ -341,8 +341,10 @@ impl Runner {
             self.append(message).await?;
         }
         if calls.is_empty() {
-            if let Some(feedback) = self.stop(&text).await? {
-                return Ok(Some(feedback));
+            match self.stop(&text).await? {
+                Stopping::Stop => {}
+                Stopping::Continue(feedback) => return Ok(Some(feedback)),
+                Stopping::Ended => return Ok(None),
             }
             self.post_turn(stop_reason).await;
             let final_text = (!text.is_empty()).then_some(text);

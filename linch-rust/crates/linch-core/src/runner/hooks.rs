@@ -21,6 +21,16 @@ use crate::ids::{RunId, SessionId};
 use crate::message::{ContentBlock, Message, Role, TextBlock};
 use crate::run::{Phase, StopReason};
 
+/// What a text-only response leads to, after the `stop` chain.
+pub(super) enum Stopping {
+    /// Every hook let the run stop.
+    Stop,
+    /// A hook kept the run going: this feedback step is next.
+    Continue(Step),
+    /// The run already ended: a hook failed closed.
+    Ended,
+}
+
 /// Queue each record as a stream-only `hook` envelope at `seq`.
 pub(super) fn push_records(
     outbox: &Outbox,
@@ -133,12 +143,11 @@ impl Runner {
         result.outcome
     }
 
-    /// Run `stop` on a text-only response. `None` lets the run stop;
-    /// otherwise the feedback step that keeps it going.
-    pub(super) async fn stop(&mut self, text: &str) -> Result<Option<Step>, RunError> {
+    /// Run `stop` on a text-only response.
+    pub(super) async fn stop(&mut self, text: &str) -> Result<Stopping, RunError> {
         let chain = &self.agent.hooks.stop;
         if chain.is_empty() {
-            return Ok(None);
+            return Ok(Stopping::Stop);
         }
         let request = StopRequest {
             session_id: self.run.session_id.clone(),
@@ -147,8 +156,13 @@ impl Runner {
         };
         let result = chain.run(&request).await;
         self.push_records(result.records, None);
-        let StopOutcome::Continue { feedback } = result.outcome else {
-            return Ok(None);
+        let feedback = match result.outcome {
+            StopOutcome::Stop => return Ok(Stopping::Stop),
+            StopOutcome::Continue { feedback } => feedback,
+            StopOutcome::Failed { reason } => {
+                self.hook_failed(reason).await?;
+                return Ok(Stopping::Ended);
+            }
         };
         // The feedback is a user message to append before the next turn,
         // which is what `ToolResults` already records and recovers.
@@ -161,7 +175,7 @@ impl Runner {
             message: message.clone(),
         })
         .await?;
-        Ok(Some(Step::Results {
+        Ok(Stopping::Continue(Step::Results {
             message,
             appended: false,
         }))

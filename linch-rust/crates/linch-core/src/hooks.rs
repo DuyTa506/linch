@@ -10,10 +10,11 @@
 //! the next hook; a blocking answer stops the chain. A hook that errors or
 //! times out is handled by its [`FailMode`](crate::FailMode): open skips the
 //! hook and the chain goes on, closed turns the failure into the point's
-//! blocking answer. Every call is returned as a [`HookRecord`] so the loop
-//! can emit it. No answer can skip later hooks and still let a tool run
-//! (Linch 3.x #102): [`PreToolUseOutcome::Run`] only comes from a chain that
-//! ran every matching hook.
+//! blocking answer (at `stop` it fails the run, see [`StopOutcome`]). Every
+//! call is returned as a [`HookRecord`] so the loop can emit it. No answer
+//! can skip later hooks and still let a tool run (Linch 3.x #102):
+//! [`PreToolUseOutcome::Run`] only comes from a chain that ran every
+//! matching hook.
 //!
 //! Observe-only lifecycle points are the event stream, not hooks, and
 //! Python's `AfterProviderCall` is gone (provider retries live in the

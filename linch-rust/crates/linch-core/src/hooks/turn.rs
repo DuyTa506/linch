@@ -195,10 +195,16 @@ pub enum StopResponse {
 pub enum StopOutcome {
     /// Every hook allowed the stop.
     Stop,
-    /// A hook kept the run going, or failed closed.
+    /// A hook kept the run going.
     Continue {
         /// Shown to the model.
         feedback: String,
+    },
+    /// A hook failed closed: the answer cannot be checked, so the run ends
+    /// failed.
+    Failed {
+        /// Which hook failed and how.
+        reason: String,
     },
 }
 
@@ -223,21 +229,20 @@ impl Point for Stop {
 
 impl HookChain<Stop> {
     /// Run the hooks in order. The first hook that keeps the run going
-    /// stops the chain. A closed failure blocks the stop the same way, so
-    /// the answer is not accepted unchecked; the turn limit bounds the
-    /// extra turns.
+    /// stops the chain. A closed failure stops it too, and fails the run:
+    /// the answer is not accepted unchecked, and sending the failure back
+    /// as feedback would pay for one more answer per turn.
     pub async fn run(&self, request: &StopRequest) -> ChainResult<StopOutcome> {
         let mut records = Vec::new();
         for entry in self.entries().iter() {
-            match entry.invoke(request, &mut records).await {
-                Step::Skip | Step::Answer(StopResponse::Allow) => {}
-                Step::Answer(StopResponse::Continue { feedback }) | Step::Closed(feedback) => {
-                    return ChainResult {
-                        outcome: StopOutcome::Continue { feedback },
-                        records,
-                    };
+            let outcome = match entry.invoke(request, &mut records).await {
+                Step::Skip | Step::Answer(StopResponse::Allow) => continue,
+                Step::Answer(StopResponse::Continue { feedback }) => {
+                    StopOutcome::Continue { feedback }
                 }
-            }
+                Step::Closed(reason) => StopOutcome::Failed { reason },
+            };
+            return ChainResult { outcome, records };
         }
         ChainResult {
             outcome: StopOutcome::Stop,

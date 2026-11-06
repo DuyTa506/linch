@@ -40,6 +40,16 @@ impl Runner {
         self.end(RunStatus::Aborted, subtype, stop, None).await
     }
 
+    /// The terminal for a hook that failed closed where the run cannot go
+    /// on unchecked (`stop`).
+    pub(super) async fn hook_failed(&mut self, reason: String) -> Result<(), RunError> {
+        let error = json!({"name": "HookError", "message": reason, "retryable": false});
+        let error = error.as_object().cloned().unwrap_or_default();
+        self.journal.stage(Event::Error(ErrorEvent { error }));
+        let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
+        self.end(RunStatus::Failed, subtype, stop, None).await
+    }
+
     /// The `max_turns` terminal, as Python's `_max_turns_tail` emits it.
     pub(super) async fn max_turns(&mut self, max: u32) -> Result<(), RunError> {
         self.journal.stage(Event::LoopGuard(LoopGuardEvent {

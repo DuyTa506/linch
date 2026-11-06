@@ -233,7 +233,7 @@ async fn context_blocks_accumulate_in_order_and_failures_add_nothing() {
 }
 
 #[tokio::test]
-async fn stop_continues_on_the_first_feedback_or_a_closed_failure() {
+async fn stop_continues_on_the_first_feedback_and_fails_closed() {
     let request = StopRequest {
         session_id: SessionId::from("s"),
         run_id: RunId::from("r"),
@@ -267,7 +267,7 @@ async fn stop_continues_on_the_first_feedback_or_a_closed_failure() {
     );
     assert!(!calls(&log).contains(&"never".to_owned()));
 
-    // Open by default; closed blocks the stop.
+    // Open by default; closed fails the run.
     let hooks = Hooks::default();
     let _ = register(&hooks.stop, Scripted::new("v", &log, |_| Act::Fail));
     assert_eq!(hooks.stop.run(&request).await.outcome, StopOutcome::Stop);
@@ -278,8 +278,8 @@ async fn stop_continues_on_the_first_feedback_or_a_closed_failure() {
     );
     assert_eq!(
         hooks.stop.run(&request).await.outcome,
-        StopOutcome::Continue {
-            feedback: "hook `v` failed".into()
+        StopOutcome::Failed {
+            reason: "hook `v` failed".into()
         }
     );
 }

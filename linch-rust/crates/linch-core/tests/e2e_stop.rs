@@ -1,6 +1,6 @@
 //! The `stop` and `post_turn` points in a run: feedback that keeps a run
-//! going, a closed failure bounded by the turn limit, open failures that
-//! leave the run alone, and a crash at every write of a continued run.
+//! going, a closed failure that ends it failed, open failures that leave
+//! the run alone, and a crash at every write of a continued run.
 
 mod common;
 
@@ -81,24 +81,45 @@ async fn a_stop_hook_keeps_the_run_going_with_feedback() {
     assert_eq!(stores.sessions.writes().append, 4);
 }
 
+/// R1-rpc 3: a stop hook that fails closed ends the run failed, instead of
+/// sending the failure back as feedback and paying for one more answer per
+/// turn, without end when no turn limit is set.
 #[tokio::test]
-async fn a_stop_hook_that_fails_closed_runs_until_the_turn_limit() {
+async fn a_stop_hook_that_fails_closed_ends_the_run_failed() {
     let hooks = Hooks::default();
     let down = hook::<Stop>("judge", |_| Err("judge down".into())).fail_mode(FailMode::Closed);
     let _ = hooks.stop.register(down.arc()).unwrap();
-    let mut spec = spec();
-    spec.max_turns = Some(2);
+    let turns = Arc::new(Mutex::new(0));
+    let seen = Arc::clone(&turns);
+    let watch = hook::<PostTurn>("watch", move |_| {
+        *seen.lock().unwrap() += 1;
+        Ok(())
+    });
+    let _ = hooks.post_turn.register(watch.arc()).unwrap();
     let stores = Arc::new(Stores::default());
-    let agent = hooked(spec, answers(), hooks, stores.clone());
-    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
-    let log = messages(&*stores, "s1").await;
-    assert_eq!(log[2], Message::user_text("hook `judge` failed"));
-    assert_eq!(log.len(), 5, "two answers, each sent back");
+    let provider = answers();
+    let agent = hooked(spec(), provider.clone(), hooks, stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+    let want = [Message::user_text("go"), Message::assistant_text("first")];
+    assert_eq!(messages(&*stores, "s1").await, want);
+    assert_eq!(provider.calls().values().sum::<u32>(), 1, "one paid answer");
+    assert_eq!(*turns.lock().unwrap(), 0, "the turn failed: no post_turn");
+    let error = envelopes.iter().find_map(|e| match &e.event {
+        Event::Error(error) => Some(error.error.clone()),
+        _ => None,
+    });
+    let error = error.expect("an error event");
+    assert_eq!(error["name"], "HookError");
+    assert_eq!(error["message"], "hook `judge` failed");
     let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
         panic!("no result");
     };
     assert_eq!(result.subtype, ResultSubtype::Error);
-    assert!(kinds(&envelopes).contains(&"loop_guard".to_owned()));
+    assert!(!kinds(&envelopes).contains(&"loop_guard".to_owned()));
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
 }
 
 #[tokio::test]
