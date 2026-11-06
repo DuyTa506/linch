@@ -8,14 +8,17 @@ use super::turn::Runner;
 use crate::agent::RunError;
 use crate::events::Event;
 use crate::events::kinds::{
-    ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent, ResultSubtype,
+    ChildRunStatusEvent, ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent,
+    ResultSubtype,
 };
 use crate::provider::AssistantAssembly;
 use crate::run::{RunStatus, StopReason};
 
 impl Runner {
     /// End the run with `status` and its `Result`, once every child run
-    /// still running was cancelled and ended.
+    /// still running was cancelled and ended. The `child_run_status` end
+    /// of each background child not heard of yet goes into the same write,
+    /// with no notification.
     pub(super) async fn end(
         &mut self,
         status: RunStatus,
@@ -26,6 +29,13 @@ impl Runner {
         if let Some(family) = &self.family {
             family.cancel_all();
             family.idle().await;
+            for completion in family.take_done() {
+                self.journal
+                    .stage(Event::ChildRunStatus(ChildRunStatusEvent {
+                        child_run_id: completion.child,
+                        status: completion.status,
+                    }));
+            }
         }
         self.stage_children();
         let result = ResultEvent {

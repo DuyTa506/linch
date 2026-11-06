@@ -222,8 +222,10 @@ replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', '
   added to the next tool results the parent logs, or logged as a user message.
 - When the parent answers with text while a worker still runs, the run does
   not end: it waits for the worker and gives the model another turn with the
-  notification. A parent that ends anyway (cancelled, failed, out of turns)
-  cancels its workers and waits for them first.
+  notification. A worker `TaskStop` stopped has no notification, so the wait
+  goes on for the others. A parent that ends anyway (cancelled, failed, out of
+  turns) cancels its workers, waits for them, and marks each one's end with a
+  `ChildRunStatusEvent` in its last write.
 - The parent's stream drives its workers: keep reading the run to its end, or
   call `Run.result()`.
 - A parent that suspends for approval keeps its workers running while it

@@ -52,9 +52,11 @@
 //!   in the same write;
 //! - when the parent answers with text while a background child runs, the
 //!   run does not end: it waits for the next end and logs the notification
-//!   as a user message, so the model takes another turn;
+//!   as a user message, so the model takes another turn; an end `TaskStop`
+//!   caused has none, so it is recorded and the wait goes on;
 //! - a parent that ends anyway (cancelled, failed, out of turns) cancels
-//!   its children and waits for their aborts first;
+//!   its children and waits for their aborts first, and records each end
+//!   it has not reported in its terminal write;
 //! - a parent that suspends for approval keeps its children running: the
 //!   agent holds its family, a task drives them while the parent waits, and
 //!   the approve or resume in this process takes them over, so a child is

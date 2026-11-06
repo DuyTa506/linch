@@ -15,9 +15,10 @@ use common::*;
 use linch_core::events::kinds::UserEventSubtype;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    AgentBuilder, ContentBlock, Envelope, Event, JsonObject, PermissionMode, Provider,
-    ProviderError, ProviderRequest, ProviderStream, RunId, RunOptions, RunStatus, RunStore,
-    ScriptedTurn, Tool, ToolContext, ToolOutput, ToolResult, ToolScope, Workers,
+    AgentBuilder, Commit, ContentBlock, Envelope, Event, JsonObject, Lease, NewRun, PermissionMode,
+    Provider, ProviderError, ProviderRequest, ProviderStream, RunId, RunOptions, RunRecord,
+    RunStatus, RunStore, ScriptedTurn, StoreError, Tool, ToolContext, ToolOutput, ToolResult,
+    ToolScope, Workers,
 };
 use serde_json::json;
 use tokio::sync::Notify;
@@ -334,4 +335,148 @@ async fn a_parent_cancelled_while_it_waits_aborts_its_background_child() {
         log.iter()
             .all(|m| !m.text().contains("<task-notification>"))
     );
+}
+
+/// Sleeps 400 ms unless its call is cancelled first.
+struct Nap(JsonObject);
+
+#[async_trait]
+impl Tool for Nap {
+    fn name(&self) -> &str {
+        "Nap"
+    }
+    fn description(&self) -> &str {
+        "Nap."
+    }
+    fn input_schema(&self) -> &JsonObject {
+        &self.0
+    }
+    fn scope(&self) -> ToolScope {
+        ToolScope::Read
+    }
+    async fn execute(&self, _input: JsonObject, ctx: ToolContext) -> ToolResult {
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(400)) => Ok(ToolOutput::new("slept")),
+            () = ctx.cancel.cancelled() => Ok(ToolOutput::new("woken")),
+        }
+    }
+}
+
+/// [`Stores`] whose child-run commits (a child's id holds a `:`) take
+/// 100 ms, so a stopped child's abort lands after the `TaskStop` batch.
+struct SlowChildren(Arc<Stores>);
+
+#[async_trait]
+impl RunStore for SlowChildren {
+    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
+        RunStore::create(&*self.0, run).await
+    }
+    async fn claim(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
+        self.0.claim(ns, run_id, owner).await
+    }
+    async fn load(&self, ns: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
+        RunStore::load(&*self.0, ns, run_id).await
+    }
+    async fn commit(&self, lease: &Lease, commit: Commit) -> Result<(), StoreError> {
+        if lease.run_id.as_str().contains(':') {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.0.commit(lease, commit).await
+    }
+    async fn events(&self, ns: &str, id: &RunId, after: u64) -> Result<Vec<Envelope>, StoreError> {
+        self.0.events(ns, id, after).await
+    }
+}
+
+/// R3-core 1: a text answer after a `TaskStop` waits for the other
+/// background worker, which completes and reaches the model.
+#[tokio::test]
+async fn a_text_answer_after_a_task_stop_still_waits_for_the_other_worker() {
+    let stop = TurnBuilder::new(MODEL)
+        .tool_call("stop_0", "TaskStop", &json!({"task_id": "r1:sub_0"}))
+        .usage(usage(10, 5))
+        .build();
+    let parent = vec![
+        background_turn(&["a", "b"], &[]),
+        stop,
+        text_turn("a stopped, waiting for b"),
+        text_turn("done"),
+    ];
+    let child = vec![tool_turn(0, 1, "Nap"), text_turn("held")];
+    let family = Arc::new(Family::new(parent, child));
+    let stores = Arc::new(Stores::default());
+    let workers = Workers {
+        background: true,
+        ..Workers::default()
+    };
+    let nap = Nap(object(json!({"type": "object"})));
+    let agent = builder(family.clone(), &stores, vec![Arc::new(nap)])
+        .run_store(Arc::new(SlowChildren(stores.clone())))
+        .workers(workers)
+        .build()
+        .unwrap();
+    let mut options = RunOptions::new("s1");
+    options.run_id = Some(RunId::new("r1"));
+    let envelopes = finish(agent.run("go", options)).await;
+
+    let (a, b) = (RunId::new("r1:sub_0"), RunId::new("r1:sub_1"));
+    let status = |record: RunRecord| record.status;
+    assert_eq!(
+        status(stores.runs.load(NS, &a).await.unwrap()),
+        RunStatus::Aborted
+    );
+    assert_eq!(
+        status(stores.runs.load(NS, &b).await.unwrap()),
+        RunStatus::Completed
+    );
+    let requests = family.requests_of("parent");
+    assert_eq!(requests.len(), 4, "the model heard of b");
+    let heard = requests[3].messages.last().unwrap().text();
+    assert_eq!(
+        heard,
+        notification("r1:sub_1", "completed", "Agent #2", "held")
+    );
+    let ends: Vec<_> = (markers(&envelopes).into_iter())
+        .filter(|(_, status)| *status != RunStatus::Running)
+        .collect();
+    assert_eq!(ends, [(a, RunStatus::Aborted), (b, RunStatus::Completed)]);
+    let parent = stores.runs.load(NS, &RunId::new("r1")).await.unwrap();
+    assert_eq!(parent.status, RunStatus::Completed);
+}
+
+/// A worker that the parent's end cancels gets its end recorded in the
+/// parent's log.
+#[tokio::test]
+async fn a_worker_the_parents_end_cancels_has_its_end_recorded() {
+    let parent = vec![background_turn(&["check x"], &[]), text_turn("waiting")];
+    let family = Arc::new(Family::new(parent, vec![tool_turn(0, 1, "Block")]));
+    let stores = Arc::new(Stores::default());
+    let started = Arc::new(Notify::new());
+    let block = Block(started.clone(), object(json!({"type": "object"})));
+    let workers = Workers {
+        background: true,
+        ..Workers::default()
+    };
+    let agent = builder(family.clone(), &stores, vec![Arc::new(block)])
+        .workers(workers)
+        .build()
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let mut options = RunOptions::new("s1");
+    options.run_id = Some(RunId::new("r1"));
+    options.cancel = cancel.clone();
+    let stream = agent.run("go", options);
+    let canceller = tokio::spawn(async move {
+        started.notified().await;
+        cancel.cancel();
+    });
+    let envelopes = finish(stream).await;
+    canceller.await.unwrap();
+
+    let child = RunId::new("r1:sub_0");
+    let expected = [
+        (child.clone(), RunStatus::Running),
+        (child, RunStatus::Aborted),
+    ];
+    assert_eq!(markers(&envelopes), expected);
 }
