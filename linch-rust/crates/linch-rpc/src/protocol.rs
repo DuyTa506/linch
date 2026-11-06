@@ -29,6 +29,8 @@ pub mod method {
     pub const AGENT_OPEN: &str = "agent.open";
     /// Disconnect an agent's MCP servers and free its handle.
     pub const AGENT_CLOSE: &str = "agent.close";
+    /// Tell an agent the client is done with a session.
+    pub const SESSION_CLOSE: &str = "session.close";
     /// Start a run.
     pub const RUN_START: &str = "run.start";
     /// Resume a run.
@@ -94,6 +96,16 @@ pub struct AgentOpened {
 pub struct CloseParams {
     /// Agent handle from `agent.open`.
     pub agent: String,
+}
+
+/// Params of `session.close`. The result is `{}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionCloseParams {
+    /// Agent handle from `agent.open`.
+    pub agent: String,
+    /// The session the client is done with.
+    pub session_id: SessionId,
 }
 
 /// Params of `run.start`.

@@ -1,5 +1,5 @@
-//! The agent methods: `agent.open`, `agent.close` and `run.events`, and the
-//! handle lookup the run methods share.
+//! The agent methods: `agent.open`, `agent.close`, `session.close` and
+//! `run.events`, and the handle lookup the run methods share.
 
 use std::sync::atomic::Ordering;
 
@@ -7,7 +7,9 @@ use linch::{Agent, JsonObject, JsonValue, OpenedAgent};
 
 use super::{Server, Tables, callback, host, lock, to_value};
 use crate::error::{ErrorObject, code};
-use crate::protocol::{AgentOpened, CloseParams, Events, EventsParams, OpenParams};
+use crate::protocol::{
+    AgentOpened, CloseParams, Events, EventsParams, OpenParams, SessionCloseParams,
+};
 
 impl Server {
     /// Open an agent whose host tools and callbacks call back over this
@@ -56,6 +58,17 @@ impl Server {
                 .expect("looked up above")
         };
         opened.close().await;
+        Ok(JsonValue::Object(JsonObject::new()))
+    }
+
+    /// Run the agent's session-close callbacks, which drop what its
+    /// workspace tools recorded as read in the session. Nothing is written.
+    pub(super) fn close_session(
+        &self,
+        params: SessionCloseParams,
+    ) -> Result<JsonValue, ErrorObject> {
+        let agent = lock(&self.0.tables).agent(&params.agent)?;
+        agent.close_session(&params.session_id);
         Ok(JsonValue::Object(JsonObject::new()))
     }
 

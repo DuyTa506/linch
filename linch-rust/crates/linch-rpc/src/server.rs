@@ -256,6 +256,7 @@ impl Server {
         match name {
             method::AGENT_OPEN => self.open(parse(params)?).await.map(Reply::Value),
             method::AGENT_CLOSE => self.close(parse(params)?).await.map(Reply::Value),
+            method::SESSION_CLOSE => self.close_session(parse(params)?).map(Reply::Value),
             method::RUN_START => self.start(parse(params)?),
             method::RUN_RESUME => self.resume(parse(params)?),
             method::RUN_APPROVE => self.approve(parse(params)?),

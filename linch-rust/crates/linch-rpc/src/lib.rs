@@ -151,6 +151,13 @@
 //! that agent it is refused with `-32002`; cancel the run or wait for its
 //! `run.end`.
 //!
+//! **`session.close`** `{agent, session_id}`
+//! ([`SessionCloseParams`](protocol::SessionCloseParams)) tells the agent
+//! the client is done with a session and answers `{}`: the workspace tools
+//! forget what the session read, so a later write there must read the file
+//! again. Nothing is written; the session and its runs stay, and a run of
+//! it still in progress just has to read again before it writes.
+//!
 //! **`run.start`** `{agent, session_id, prompt, run_id?, principal?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
 //! created when missing. `run_id` names the new run (a fresh uuid when
