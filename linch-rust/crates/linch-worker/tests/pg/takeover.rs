@@ -53,7 +53,7 @@ impl FrozenWorker {
                     .connect_with(options)
                     .await
                     .unwrap();
-                let worker = Worker::new(pool.clone(), config).agent(NS, agent(&pool, probe));
+                let worker = Worker::new(pool.clone(), config).agent(agent(&pool, probe));
                 let result = worker.run(token).await;
                 pool.close().await;
                 result

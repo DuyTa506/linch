@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use linch_core::{Agent, Phase, RunError, RunOptions, RunRecord, RunStore, RunStream};
-use linch_core::{SessionId, StoreError};
+use linch_core::{RunId, SessionId, StoreError};
 use linch_postgres::{PgPool, PgRunStore};
 use tokio::time::Instant;
 
@@ -48,17 +48,28 @@ pub(crate) enum Outcome {
     Retry(String),
     /// The job can never succeed: keep it, failed, with this error.
     Fail(String),
+    /// The run can never continue either: mark it failed, then the job.
+    FailRun {
+        /// The run to fail.
+        run_id: RunId,
+        /// Why; the run's `Error` event and the job's error.
+        error: String,
+    },
     /// Another worker holds the job now: leave it alone.
     Lost,
 }
 
-/// Map a run error onto the job's outcome.
-pub(crate) fn classify(error: &RunError) -> Outcome {
+/// Map an error of `run_id` onto the job's outcome.
+pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
     match error {
         RunError::Terminal { .. } => Outcome::Done,
-        RunError::ContractMismatch { .. }
-        | RunError::NotSuspended { .. }
-        | RunError::Reconcile(_)
+        // Its durable state does not fit, or no agent has its contract.
+        RunError::ContractMismatch { .. } | RunError::Reconcile(_) => Outcome::FailRun {
+            run_id: run_id.clone(),
+            error: chain(error),
+        },
+        // An approve that came late: the run itself is fine.
+        RunError::NotSuspended { .. }
         // A user_prompt_submit hook refused the prompt; a retry sends the same prompt.
         | RunError::PromptBlocked { .. } => Outcome::Fail(chain(error)),
         // Includes a lost run lease and a session append conflict.
@@ -82,6 +93,20 @@ pub(crate) async fn execute(shared: Arc<Shared>, lease: JobLease) {
         Outcome::Fail(error) => {
             tracing::warn!(job = id, %error, "failing a job");
             lease.fail(pool, error).await
+        }
+        // The run first: a crash in between leaves a terminal run, which the
+        // job's next attempt acks.
+        Outcome::FailRun { run_id, error } => {
+            match fail_run(&shared, &lease.job, run_id, error).await {
+                Ok(()) => {
+                    tracing::warn!(job = id, run = %run_id, %error, "failing a job and its run");
+                    lease.fail(pool, error).await
+                }
+                Err(why) => {
+                    tracing::warn!(job = id, error = %why, "failing a run failed; retrying the job");
+                    lease.release(pool, shared.retry_delay, &why).await
+                }
+            }
         }
         Outcome::Lost => {
             tracing::info!(job = id, "lost the job; dropped its run");
@@ -110,10 +135,24 @@ async fn attempt(shared: &Shared, lease: &JobLease) -> Outcome {
     // The stream ends after `Result` or `Suspended`; both end the job.
     while let Some(item) = stream.next().await {
         if let Err(error) = item {
-            return classify(&error);
+            return classify(&error, stream.run_id());
         }
     }
     Outcome::Done
+}
+
+/// Mark `run_id` failed with `error`; a run that is already terminal (or
+/// was never created) is left as it is.
+async fn fail_run(shared: &Shared, job: &Job, run_id: &RunId, error: &str) -> Result<(), String> {
+    let Some(agent) = shared.agents.get(&job.namespace) else {
+        return Err(format!("no agent for namespace {}", job.namespace));
+    };
+    let options = shared.options(SessionId::new(""));
+    match agent.fail(run_id.clone(), error, options).await {
+        Ok(_) | Err(RunError::Terminal { .. }) => Ok(()),
+        Err(RunError::Store(StoreError::NotFound { .. })) => Ok(()),
+        Err(other) => Err(chain(&other)),
+    }
 }
 
 /// The stream to drain, `None` when there is nothing to run.
@@ -166,14 +205,8 @@ fn continue_run(
     match (&job.approvals, suspended) {
         (Some(Err(error)), _) => Err(Outcome::Fail(format!("approvals do not decode: {error}"))),
         (Some(Ok(approvals)), true) => {
-            let answers = approvals
-                .iter()
-                .map(|(id, a)| (id.clone(), a.clone().into()));
-            Ok(Some(agent.approve(
-                record.run_id,
-                answers.collect(),
-                options,
-            )))
+            let answers = approvals.clone().into_iter().collect();
+            Ok(Some(agent.approve(record.run_id, answers, options)))
         }
         // Waits for an approve job; a resume would only suspend it again.
         (None, true) => Ok(None),
@@ -211,10 +244,14 @@ async fn keep_alive(shared: &Shared, lease: &JobLease) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linch_core::{ReconcileError, RunId, RunStatus};
+    use linch_core::{ReconcileError, RunStatus};
 
     fn run() -> RunId {
         RunId::new("r1")
+    }
+
+    fn classify(error: &RunError) -> Outcome {
+        super::classify(error, &run())
     }
 
     #[test]
@@ -230,7 +267,9 @@ mod tests {
             expected: digest,
             found: digest,
         };
-        assert!(matches!(classify(&mismatch), Outcome::Fail(_)));
+        let fails_run =
+            |outcome| matches!(outcome, Outcome::FailRun { run_id, .. } if run_id == run());
+        assert!(fails_run(classify(&mismatch)));
         let not_suspended = RunError::NotSuspended { run_id: run() };
         assert!(matches!(classify(&not_suspended), Outcome::Fail(_)));
         let lost = RunError::Store(StoreError::LeaseLost {
@@ -243,6 +282,6 @@ mod tests {
         });
         assert!(matches!(classify(&conflict), Outcome::Retry(_)));
         let reconcile = RunError::Reconcile(ReconcileError::MissingToolCalls);
-        assert!(matches!(classify(&reconcile), Outcome::Fail(_)));
+        assert!(fails_run(classify(&reconcile)));
     }
 }

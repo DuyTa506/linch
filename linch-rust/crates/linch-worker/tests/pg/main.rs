@@ -4,5 +4,6 @@ mod common;
 mod exclusive;
 mod fixtures;
 mod schedule;
+mod session;
 mod suspend;
 mod takeover;

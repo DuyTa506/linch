@@ -1,11 +1,10 @@
-//! Enqueueing jobs, and the approval wire form an approve job carries.
+//! Enqueueing jobs.
 
 use std::collections::BTreeMap;
 
 use linch_core::hooks::ApprovalResponse;
 use linch_core::{RunId, SessionId};
 use linch_postgres::PgPool;
-use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 
 use crate::CHANNEL;
@@ -15,35 +14,10 @@ use crate::error::{WorkerError, non_blank};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobId(pub i64);
 
-/// The host's answer for one pending tool call, as an approve job stores it.
-///
-/// It maps one to one onto [`ApprovalResponse`], which has no serde form.
-/// `Allow {}` is a struct variant so that decoding rejects unknown fields
-/// on it too (serde ignores them on a unit variant of a tagged enum).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Approval {
-    /// Approve the call.
-    Allow {},
-    /// Deny the call.
-    Deny {
-        /// Shown to the model.
-        reason: String,
-    },
-}
-
-impl From<Approval> for ApprovalResponse {
-    fn from(approval: Approval) -> Self {
-        match approval {
-            Approval::Allow {} => ApprovalResponse::Allow,
-            Approval::Deny { reason } => ApprovalResponse::Deny { reason },
-        }
-    }
-}
-
-/// Approvals keyed by `tool_use_id`. A `BTreeMap` keeps the stored JSON in
+/// Approvals keyed by `tool_use_id`, stored as JSON in the job row in
+/// [`ApprovalResponse`]'s wire form. A `BTreeMap` keeps the stored JSON in
 /// one key order.
-pub(crate) type Approvals = BTreeMap<String, Approval>;
+pub(crate) type Approvals = BTreeMap<String, ApprovalResponse>;
 
 /// The columns of a new job row.
 #[derive(Default)]
@@ -184,7 +158,7 @@ pub async fn enqueue_approve(
     queue: &str,
     namespace: &str,
     run_id: &RunId,
-    approvals: impl IntoIterator<Item = (String, Approval)>,
+    approvals: impl IntoIterator<Item = (String, ApprovalResponse)>,
 ) -> Result<JobId, WorkerError> {
     let approvals: Approvals = approvals.into_iter().collect();
     let approvals = serde_json::to_string(&approvals)
@@ -205,15 +179,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn approvals_round_trip_strictly() {
+    fn approvals_are_stored_in_the_core_wire_form() {
+        let deny = ApprovalResponse::Deny {
+            reason: "no".into(),
+        };
         let approvals: Approvals = [
-            ("t1".to_owned(), Approval::Allow {}),
-            (
-                "t2".to_owned(),
-                Approval::Deny {
-                    reason: "no".into(),
-                },
-            ),
+            ("t1".to_owned(), ApprovalResponse::Allow),
+            ("t2".to_owned(), deny),
         ]
         .into();
         let wire = serde_json::to_value(&approvals).unwrap();
@@ -225,24 +197,7 @@ mod tests {
             serde_json::from_value::<Approvals>(wire).unwrap(),
             approvals
         );
-        for bad in [
-            json!({"t1": {"decision": "maybe"}}),
-            json!({"t1": {"decision": "allow", "x": 1}}),
-            json!({"t1": {"decision": "deny"}}),
-        ] {
-            assert!(serde_json::from_value::<Approvals>(bad).is_err());
-        }
-    }
-
-    #[test]
-    fn approvals_map_onto_responses() {
-        assert_eq!(
-            ApprovalResponse::from(Approval::Allow {}),
-            ApprovalResponse::Allow
-        );
-        assert_eq!(
-            ApprovalResponse::from(Approval::Deny { reason: "r".into() }),
-            ApprovalResponse::Deny { reason: "r".into() }
-        );
+        let bad = json!({"t1": {"decision": "allow", "x": 1}});
+        assert!(serde_json::from_value::<Approvals>(bad).is_err());
     }
 }

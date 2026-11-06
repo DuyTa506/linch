@@ -1,8 +1,9 @@
 //! A run suspended for approval ends its job and waits; only an approve
 //! job continues it.
 
+use linch_core::hooks::ApprovalResponse;
 use linch_core::{RunStatus, SessionId, ToolScope};
-use linch_worker::{Approval, enqueue_approve, enqueue_resume, enqueue_run};
+use linch_worker::{enqueue_approve, enqueue_resume, enqueue_run};
 
 use crate::common::*;
 
@@ -45,7 +46,7 @@ async fn a_suspended_run_waits_for_approve() {
     );
     assert_eq!(probe.started(), 0);
 
-    let approvals = [("call_0".to_owned(), Approval::Allow {})];
+    let approvals = [("call_0".to_owned(), ApprovalResponse::Allow)];
     enqueue_approve(&db.pool, "default", NS, &run_id, approvals)
         .await
         .unwrap();

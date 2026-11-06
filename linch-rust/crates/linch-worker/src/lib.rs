@@ -13,7 +13,11 @@
 //!   takes it over. The run's lease epoch fences the old worker out.
 //! - **Runs.** A worker starts a run with [`linch_core::Agent::run`] and
 //!   continues it with `resume` or `approve`. A run that suspends for
-//!   approval ends its job; [`enqueue_approve`] queues the continuation.
+//!   approval ends its job; [`enqueue_approve`] queues the continuation. A
+//!   job that can never succeed is kept as failed; when its run can never
+//!   continue either (its durable state does not reconcile, or it has
+//!   another contract), [`linch_core::Agent::fail`] marks the run failed
+//!   first.
 //! - **Schedules.** A due schedule enqueues one start job and moves its next
 //!   fire forward in one transaction, so a fire happens once however many
 //!   workers poll.
@@ -47,7 +51,7 @@ mod schedule;
 mod worker;
 
 pub use error::WorkerError;
-pub use job::{Approval, JobId, enqueue_approve, enqueue_resume, enqueue_run};
+pub use job::{JobId, enqueue_approve, enqueue_resume, enqueue_run};
 pub use schedule::{Schedule, cancel_schedule, create_schedule, fire_due_schedules};
 pub use worker::{QueueLimit, Worker, WorkerConfig};
 

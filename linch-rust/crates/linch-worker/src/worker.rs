@@ -118,11 +118,11 @@ impl Worker {
         }
     }
 
-    /// Serve jobs of `namespace` with `agent`, which must have been built
-    /// with that namespace. Every worker serving the namespace needs an
-    /// agent of the same contract.
-    pub fn agent(mut self, namespace: impl Into<String>, agent: Agent) -> Self {
-        self.agents.insert(namespace.into(), agent);
+    /// Serve the jobs of [`Agent::namespace`] with `agent`, replacing an
+    /// agent added before for the same namespace. Every worker serving the
+    /// namespace needs an agent of the same contract.
+    pub fn agent(mut self, agent: Agent) -> Self {
+        self.agents.insert(agent.namespace().to_owned(), agent);
         self
     }
 

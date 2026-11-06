@@ -1765,7 +1765,6 @@ dependencies = [
  "futures",
  "linch-core",
  "linch-postgres",
- "serde",
  "serde_json",
  "sqlx",
  "thiserror",

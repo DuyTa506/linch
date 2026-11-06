@@ -208,7 +208,7 @@ pub struct Running {
 impl Running {
     pub fn spawn(pool: &PgPool, config: WorkerConfig, agent: Agent) -> Self {
         let shutdown = CancellationToken::new();
-        let worker = Worker::new(pool.clone(), config).agent(NS, agent);
+        let worker = Worker::new(pool.clone(), config).agent(agent);
         let handle = tokio::spawn(worker.run(shutdown.clone()));
         Self { shutdown, handle }
     }
