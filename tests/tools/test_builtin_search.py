@@ -241,6 +241,20 @@ async def test_fallback_globs_skip_symlink_results_outside_root(
     assert "TOP SECRET" not in grep_result.content
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(builtin_mod._RG_PATH is None, reason="ripgrep not on PATH")
+async def test_grep_malformed_regex_rg_reports_error(tmp_path) -> None:
+    (tmp_path / "a.txt").write_text("hello\n")
+
+    tool = GrepTool()
+    ctx = _make_ctx(tmp_path)
+    validated = tool.validate({"pattern": "("})
+    result = await tool.execute(validated, ctx)
+
+    assert result.is_error is True
+    assert result.content != "No matches found."
+
+
 @pytest.mark.parametrize("use_rg", [False, True])
 @pytest.mark.asyncio
 async def test_grep_malformed_regex_reports_error(
