@@ -5,7 +5,9 @@
 //!
 //! Every case runs on a fresh session, one case after another, so a
 //! [`ScriptedProvider`](linch_core::ScriptedProvider) consumes its turns in
-//! case order. A case passes when its run records no error and no scorer
+//! case order; within a case, a subagent's child run takes the turns
+//! between its parent's `Subagent` call and the parent's next turn. A case
+//! passes when its run records no error and no scorer
 //! returns `Some(false)`; `None` is an unknown verdict and does not fail it.
 
 mod benchmark;

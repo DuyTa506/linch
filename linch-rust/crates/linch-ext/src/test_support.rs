@@ -10,8 +10,8 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, Envelope, Event, JsonObject, JsonValue, MemoryRunStore,
     MemorySessionStore, PermissionEngine, PermissionMode, PermissionPolicy, RunId, RunStream,
-    ScriptedProvider, ScriptedTurn, Tool, ToolContext, ToolOutput, ToolOutputError, ToolRegistry,
-    ToolResult, ToolScope, Usage, WIRE_VERSION,
+    ScriptedProvider, ScriptedTurn, SubagentDefinition, Tool, ToolContext, ToolOutput,
+    ToolOutputError, ToolRegistry, ToolResult, ToolScope, Usage, WIRE_VERSION,
 };
 use serde_json::json;
 
@@ -93,6 +93,20 @@ pub struct Fixture {
 }
 
 pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
+    build(turns, PermissionMode::Default, None)
+}
+
+/// An agent like [`scripted`]'s that allows every call and has foreground
+/// subagents: a `Subagent` call runs a child on the same provider.
+pub fn with_subagents(turns: Vec<ScriptedTurn>) -> Fixture {
+    build(turns, PermissionMode::SkipDangerous, Some(Vec::new()))
+}
+
+fn build(
+    turns: Vec<ScriptedTurn>,
+    mode: PermissionMode,
+    subagents: Option<Vec<SubagentDefinition>>,
+) -> Fixture {
     let provider = Arc::new(ScriptedProvider::new(turns));
     let tools = ToolRegistry::new();
     for tool in [
@@ -102,11 +116,11 @@ pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
         // The registry lives as long as the agent; the handle is not needed.
         let _ = tools.register(Arc::new(tool)).unwrap();
     }
-    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let policy = PermissionPolicy::new(mode, "/");
     let runs = Arc::new(MemoryRunStore::default());
     let closed = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&closed);
-    let agent = AgentBuilder::new(AgentSpec::new(MODEL))
+    let mut builder = AgentBuilder::new(AgentSpec::new(MODEL))
         .provider(provider.clone())
         .tools(Arc::new(tools))
         .permissions(PermissionEngine::new(policy).unwrap())
@@ -115,9 +129,11 @@ pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
         .namespace(NS)
         .on_session_close(move |_| {
             counter.fetch_add(1, Ordering::SeqCst);
-        })
-        .build()
-        .unwrap();
+        });
+    if let Some(definitions) = subagents {
+        builder = builder.subagents(definitions);
+    }
+    let agent = builder.build().unwrap();
     Fixture {
         agent,
         provider,

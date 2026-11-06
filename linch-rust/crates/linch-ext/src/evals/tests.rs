@@ -45,6 +45,40 @@ async fn a_case_passes_when_its_output_contains_the_expected_answer() {
 }
 
 #[tokio::test]
+async fn a_child_agent_takes_the_next_turn_and_its_session_is_closed_too() {
+    // One provider serves parent and child: the parent's call, the child's
+    // answer, then the parent's answer.
+    let fixture = with_subagents(vec![
+        tool_turn(
+            "call_1",
+            "Subagent",
+            json!({"description": "helper", "prompt": "Return the child marker."}),
+        ),
+        text_turn("child marker"),
+        text_turn("parent marker"),
+    ]);
+    let cases = [EvalCase::new("Delegate this task.", "parent marker")];
+    let scorers = [
+        expected(),
+        Scorer::ToolCalled {
+            tool: "Subagent".into(),
+        },
+    ];
+    let result = run_eval(&fixture.agent, &cases, &scorers).await;
+
+    let case = &result.cases[0];
+    assert!(case.passed, "{:?}", case.scores);
+    assert_eq!(case.output, "parent marker");
+    assert_eq!(case.tool_calls(), ["Subagent"]);
+    assert!(case.events.iter().any(|envelope| matches!(
+        &envelope.event,
+        Event::Subagent(wrapped) if matches!(*wrapped.event, Event::Result(_))
+    )));
+    // The case's session and the child's.
+    assert_eq!(fixture.closed.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn every_case_runs_on_a_fresh_session_that_is_closed_after() {
     let fixture = scripted(vec![text_turn("a"), text_turn("b"), text_turn("c")]);
     let cases = [EvalCase::new("one", ""), EvalCase::new("two", "")];

@@ -21,6 +21,7 @@ use linch_tools::{LocalFs, ReadTracker, workspace_tools};
 
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::error::OpenError;
+use crate::files::Files;
 use crate::pools::{PgPools, Shared};
 use crate::project::{self, Loaded, Skipped};
 
@@ -44,13 +45,16 @@ impl AgentConfig {
     /// Reads the provider key from the environment, registers the workspace
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
-    /// and running the migrations when no open agent uses one), connects
+    /// and running the migrations when no open agent uses one), registers
+    /// the virtual filesystem tools and the offload hook when the config
+    /// turns them on (see [`FilesystemConfig`](crate::FilesystemConfig); a
+    /// failed open takes them back), connects
     /// the MCP servers in order, loads the skills and subagents of the
     /// config directory when they are on (no skill may take the name of a
     /// tool registered by then; see [`OpenedAgent::skipped`] for those
     /// left out), then builds the agent. Nothing is written to the stores. [`Agent::close_session`] drops what the workspace
     /// tools recorded as read in that session, so its next write must read
-    /// again.
+    /// again, and the session's in-memory virtual files.
     ///
     /// Args:
     ///     tools: Registry the agent runs with. Tools already in it come
@@ -61,8 +65,8 @@ impl AgentConfig {
     ///
     /// Returns:
     ///     The built agent with the MCP servers it connected. Its contract
-    ///     digest covers the spec, every tool registered at that point and
-    ///     the hook policies.
+    ///     digest covers the spec (with the filesystem's system text), every
+    ///     tool registered at that point and the hook policies.
     ///
     /// Raises:
     ///     OpenError: If the key is unset, the workspace is not a directory,
@@ -88,6 +92,14 @@ impl AgentConfig {
         });
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, pool) = stores(self.stores, pools).await?;
+        let pg = pool.as_deref().and_then(Shared::pool);
+        let files = Files::wire(
+            self.filesystem.as_ref(),
+            &tools,
+            &hooks,
+            pg,
+            &self.namespace,
+        )?;
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
         let project = match self.skills || self.subagents {
             true => {
@@ -96,7 +108,8 @@ impl AgentConfig {
             }
             false => Loaded::default(),
         };
-        let mut builder = AgentBuilder::new(self.spec)
+        let forget = files.forget();
+        let mut builder = AgentBuilder::new(files.teach(self.spec))
             .provider(provider)
             .tools(tools)
             .hooks(hooks)
@@ -104,7 +117,10 @@ impl AgentConfig {
             .run_store(runs)
             .session_store(sessions)
             .namespace(self.namespace)
-            .on_session_close(move |session| reads.forget(session));
+            .on_session_close(move |session| {
+                reads.forget(session);
+                forget(session);
+            });
         if let Some(skills) = project.skills {
             builder = builder.skills(skills);
         }
@@ -113,12 +129,15 @@ impl AgentConfig {
         }
         let skipped = project.skipped;
         match builder.build() {
-            Ok(agent) => Ok(OpenedAgent {
-                agent,
-                mcp,
-                pool,
-                skipped,
-            }),
+            Ok(agent) => {
+                files.keep();
+                Ok(OpenedAgent {
+                    agent,
+                    mcp,
+                    pool,
+                    skipped,
+                })
+            }
             Err(error) => {
                 disconnect(mcp).await;
                 Err(error.into())
@@ -159,7 +178,8 @@ impl OpenedAgent {
 
     /// Disconnect every MCP server and wait for each to close (a stdio
     /// server's process to exit). Clones of the agent keep working, but
-    /// the MCP tools are no longer registered. The Postgres pool is not
+    /// the MCP tools are no longer registered; the workspace and virtual
+    /// filesystem tools and the offload hook stay. The Postgres pool is not
     /// closed: other agents may share it, and it goes once nothing uses it.
     pub async fn close(self) {
         drop(self.pool);

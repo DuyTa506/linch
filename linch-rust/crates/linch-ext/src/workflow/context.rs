@@ -33,7 +33,7 @@ pub struct WorkflowContext {
 
 pub(super) struct Inner {
     store: Arc<dyn JournalStore>,
-    lease: JournalLease,
+    pub(super) lease: JournalLease,
     journal: Mutex<Journal>,
     on_event: Option<EventSink>,
     pub(super) step_timeout: Option<Duration>,

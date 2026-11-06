@@ -179,8 +179,11 @@ impl EvalResult {
 /// Run `agent` over `cases` one after another and score each run.
 ///
 /// Each case runs on a new session with a fresh id, which
-/// [`Agent::close_session`] releases once the run ends. A run that
-/// suspends for approval is left suspended.
+/// [`Agent::close_session`] releases once the run ends, along with the
+/// session of every child run its `Subagent` calls ran. A child runs on the
+/// agent's provider, so a scripted provider gives it the turn after the
+/// parent's `Subagent` call, and the parent the turn after the child's
+/// last. A run that suspends for approval is left suspended.
 ///
 /// Args:
 ///     agent: The agent under test.
@@ -218,6 +221,9 @@ async fn run_case(agent: &Agent, case: &EvalCase, scorers: &[Scorer]) -> CaseRes
         }
     }
     agent.close_session(&session);
+    for child in child_sessions(&events) {
+        agent.close_session(&child);
+    }
     let output = result_event(&events)
         .and_then(|result| result.final_text.clone())
         .unwrap_or_default();
@@ -237,6 +243,21 @@ async fn run_case(agent: &Agent, case: &EvalCase, scorers: &[Scorer]) -> CaseRes
         events,
         error,
     }
+}
+
+/// The sessions of the child runs in `events`, in first-seen order: a
+/// subagent's child run has its run id as its session id.
+fn child_sessions(events: &[Envelope]) -> Vec<SessionId> {
+    let mut sessions: Vec<SessionId> = Vec::new();
+    for envelope in events {
+        if let Event::Subagent(wrapped) = &envelope.event {
+            let session = SessionId::new(wrapped.child_run_id.as_str());
+            if !sessions.contains(&session) {
+                sessions.push(session);
+            }
+        }
+    }
+    sessions
 }
 
 /// The run's `result` event, if it reached one.

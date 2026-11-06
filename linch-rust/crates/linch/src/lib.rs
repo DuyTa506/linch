@@ -5,7 +5,8 @@
 //! Everything `linch_core` exports at its root is re-exported here, so a
 //! host writes `linch::Agent`, `linch::RunOptions`, `linch::Envelope`. The
 //! adapter crates are re-exported whole as [`providers`], [`tools`],
-//! [`postgres`] and [`mcp`].
+//! [`postgres`] and [`mcp`], and the extensions (evals, run reports,
+//! workflows) as [`ext`].
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +32,8 @@
 //! [`AgentConfig`] covers the declarative tier: the [`AgentSpec`], the
 //! provider by id plus its options, the stores (memory or a Postgres DSN),
 //! the built-in workspace tools from [`tools`], the permission policy, MCP
-//! servers ([`McpConfig`]), and whether the agent loads the skills and
+//! servers ([`McpConfig`]), the virtual filesystem ([`FilesystemConfig`]),
+//! and whether the agent loads the skills and
 //! subagents of its config directory ([`project`]). Provider keys are
 //! never part of it;
 //! [`AgentConfig::open`] reads each one from the process environment.
@@ -45,18 +47,23 @@
 
 mod config;
 mod error;
+mod files;
 mod open;
 mod pools;
 pub mod project;
 
 pub use config::{
-    AgentConfig, McpConfig, McpTransportConfig, ProviderConfig, ReasoningSummaryConfig,
-    ReconnectConfig, StoreConfig,
+    AgentConfig, FilesystemConfig, McpConfig, McpTransportConfig, ProviderConfig,
+    ReasoningSummaryConfig, ReconnectConfig, StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;
 pub use open::OpenedAgent;
 pub use pools::PgPools;
+
+/// The extensions (`linch-ext`): evals, run reports and workflows, with
+/// the Postgres workflow journal.
+pub use linch_ext as ext;
 
 /// The MCP client (`linch-mcp`).
 pub use linch_mcp as mcp;

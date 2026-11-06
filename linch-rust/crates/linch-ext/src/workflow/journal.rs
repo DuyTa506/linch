@@ -172,6 +172,17 @@ pub fn step_key(name: &str, key: Option<&JsonValue>) -> Result<String, Canonical
     Ok(digest_with_domain("step", &value)?.to_string())
 }
 
+/// The content key of one `agent` call: its name and its prompt, so one
+/// name over different prompts is journaled separately.
+///
+/// Domain-separated from [`step_key`] and [`interrupt_key`].
+pub fn agent_key(name: &str, prompt: &str) -> String {
+    let value = json!({"name": name, "prompt": prompt});
+    digest_with_domain("agent", &value)
+        .expect("a flat JSON object always encodes")
+        .to_string()
+}
+
 /// The content key of one `interrupt` call. Only the key is hashed: the
 /// payload may be rebuilt differently across resumes without losing the
 /// stored answer.
