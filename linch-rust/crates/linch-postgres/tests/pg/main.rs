@@ -1,5 +1,6 @@
 //! Postgres store tests. Each skips cleanly without `LINCH_TEST_PG_DSN`.
 
+mod admission;
 mod claim;
 mod common;
 mod conformance;

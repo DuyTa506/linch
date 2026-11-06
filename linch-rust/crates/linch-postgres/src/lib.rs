@@ -74,13 +74,22 @@ pub async fn connect(dsn: &str, timeout: Duration) -> Result<PgPool, sqlx::Error
 
 /// The migrations embedded in this crate, newest last.
 fn migrator() -> Migrator {
-    let migrations = vec![Migration::new(
-        1,
-        Cow::Borrowed("stores"),
-        MigrationType::Simple,
-        include_str!("../migrations/0001_stores.sql").into_sql_str(),
-        false,
-    )];
+    let migrations = vec![
+        Migration::new(
+            1,
+            Cow::Borrowed("stores"),
+            MigrationType::Simple,
+            include_str!("../migrations/0001_stores.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            2,
+            Cow::Borrowed("one live run per session"),
+            MigrationType::Simple,
+            include_str!("../migrations/0002_one_live_run_per_session.sql").into_sql_str(),
+            false,
+        ),
+    ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),
         ..Migrator::with_migrations(migrations)

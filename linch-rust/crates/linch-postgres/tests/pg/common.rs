@@ -102,14 +102,16 @@ pub fn checkpoint(turn: u32) -> Checkpoint {
     }
 }
 
-/// A run in `namespace` with `events` first events.
+/// A run in `namespace` with `events` first events, alone in its own
+/// session (a session admits one live run).
 pub fn new_run(namespace: &str, run_id: &str, events: u64) -> NewRun {
+    let session_id = SessionId::new(format!("s-{run_id}"));
     let run_id = RunId::new(run_id);
     NewRun {
         namespace: namespace.into(),
         events: (1..=events).map(|seq| envelope(&run_id, seq)).collect(),
         run_id,
-        session_id: SessionId::new("s1"),
+        session_id,
         parent_run_id: None,
         contract: "0".repeat(64).parse().expect("a valid digest"),
         checkpoint: checkpoint(0),

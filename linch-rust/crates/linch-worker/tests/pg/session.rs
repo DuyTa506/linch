@@ -9,14 +9,13 @@ use futures::StreamExt;
 use linch_core::hooks::ApprovalResponse;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Commit, Envelope, Event, Lease, LogEntry, Message, NewRun,
-    PermissionEngine, PermissionMode, PermissionPolicy, Provider, ProviderError, ProviderEvent,
-    ProviderRequest, ProviderStream, Role, RunId, RunOptions, RunRecord, RunStatus, RunStore,
-    SessionId, SessionStore, StoreError, ToolScope,
+    Agent, AgentBuilder, AgentSpec, Event, LogEntry, Message, PermissionEngine, PermissionMode,
+    PermissionPolicy, Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderStream,
+    Role, RunOptions, RunStatus, SessionId, SessionStore, StoreError, ToolScope,
 };
 use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
 use linch_worker::{enqueue_approve, enqueue_run};
-use tokio::sync::{Barrier, Mutex};
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::*;
@@ -79,60 +78,7 @@ impl SessionStore for Gate {
     }
 }
 
-/// Postgres runs with the admission rule of `RunStore::create`, which
-/// `linch-postgres` does not enforce yet: a create on a session with a run
-/// that is not terminal is `SessionBusy`. A lock makes the check and the
-/// insert one step within this process.
-struct Admit {
-    inner: PgRunStore,
-    pool: PgPool,
-    one: Mutex<()>,
-}
-
-#[async_trait]
-impl RunStore for Admit {
-    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
-        let _one = self.one.lock().await;
-        let active: Option<String> = sqlx::query_scalar(
-            "SELECT run_id FROM linch_runs WHERE namespace = $1 AND session_id = $2 \
-             AND status NOT IN ('completed', 'failed', 'aborted') LIMIT 1",
-        )
-        .bind(&run.namespace)
-        .bind(run.session_id.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .expect("the admission query");
-        if let Some(run_id) = active {
-            let run_id = RunId::new(run_id);
-            let session_id = run.session_id;
-            return Err(StoreError::SessionBusy { session_id, run_id });
-        }
-        self.inner.create(run).await
-    }
-
-    async fn claim(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
-        self.inner.claim(ns, run_id, owner).await
-    }
-
-    async fn load(&self, ns: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
-        self.inner.load(ns, run_id).await
-    }
-
-    async fn commit(&self, lease: &Lease, commit: Commit) -> Result<(), StoreError> {
-        self.inner.commit(lease, commit).await
-    }
-
-    async fn events(
-        &self,
-        ns: &str,
-        run_id: &RunId,
-        after_seq: u64,
-    ) -> Result<Vec<Envelope>, StoreError> {
-        self.inner.events(ns, run_id, after_seq).await
-    }
-}
-
-fn reply_agent(pool: &PgPool, runs: Arc<Admit>) -> Agent {
+fn reply_agent(pool: &PgPool) -> Agent {
     let gate = Gate {
         inner: PgSessionStore::new(pool.clone()),
         loads: AtomicUsize::new(0),
@@ -142,7 +88,7 @@ fn reply_agent(pool: &PgPool, runs: Arc<Admit>) -> Agent {
     AgentBuilder::new(AgentSpec::new(MODEL))
         .provider(Arc::new(Reply))
         .permissions(PermissionEngine::new(policy).unwrap())
-        .run_store(runs)
+        .run_store(Arc::new(PgRunStore::new(pool.clone())))
         .session_store(Arc::new(gate))
         .namespace(NS)
         .build()
@@ -164,12 +110,7 @@ async fn two_start_jobs_on_one_session_take_turns() {
     let Some(db) = TestDb::new("two_runs").await else {
         return;
     };
-    let runs = Arc::new(Admit {
-        inner: PgRunStore::new(db.pool.clone()),
-        pool: db.pool.clone(),
-        one: Mutex::new(()),
-    });
-    let agent = reply_agent(&db.pool, runs);
+    let agent = reply_agent(&db.pool);
     let worker = Running::spawn(&db.pool, config("w1"), agent);
     let s1 = SessionId::new("s1");
     for prompt in ["from a", "from b"] {

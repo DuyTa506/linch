@@ -82,18 +82,45 @@ async fn insert_events(
     Ok(())
 }
 
-#[async_trait]
-impl RunStore for PgRunStore {
-    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
-        check_events(&run.run_id, 0, &run.events)?;
-        let checkpoint = encode_checkpoint(&run.checkpoint)?;
+/// The unique index of migration 2: one run that is not terminal per
+/// session and namespace.
+const LIVE_PER_SESSION: &str = "linch_runs_one_live_per_session";
+
+/// The live run of a session; the predicate is the index's, so the index
+/// serves the read.
+const LIVE_RUN: &str = "SELECT run_id FROM linch_runs WHERE namespace = $1 AND session_id = $2 \
+                        AND status NOT IN ('completed', 'failed', 'aborted')";
+
+/// Most inserts one `create` tries when the run it lost to ends before its
+/// id is read.
+const ADMIT_TRIES: u32 = 3;
+
+/// How one insert attempt of a `create` ended.
+enum Insert {
+    Done,
+    /// The session's live-run index refused the row; nothing was written.
+    Busy(sqlx::Error),
+}
+
+fn session_busy(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|database| {
+        database.is_unique_violation() && database.constraint() == Some(LIVE_PER_SESSION)
+    })
+}
+
+impl PgRunStore {
+    /// Insert the run row and its first events in one transaction.
+    async fn insert(&self, run: &NewRun, checkpoint: &str) -> Result<Insert, StoreError> {
         let events = encode_events(&run.events)?;
         let last_seq = run.events.len() as u64;
         let mut tx = self.pool.begin().await.map_err(backend)?;
+        // Only an existing id is skipped here; a live run on the session
+        // fails the statement through the partial unique index.
         let inserted = sqlx::query(
             "INSERT INTO linch_runs (namespace, run_id, session_id, parent_run_id, contract, \
              status, epoch, checkpoint, last_seq) \
-             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8) ON CONFLICT DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8) \
+             ON CONFLICT (namespace, run_id) DO NOTHING",
         )
         .bind(&run.namespace)
         .bind(run.run_id.as_str())
@@ -104,9 +131,12 @@ impl RunStore for PgRunStore {
         .bind(checkpoint)
         .bind(to_i64(last_seq, "last_seq")?)
         .execute(&mut *tx)
-        .await
-        .map_err(backend)?
-        .rows_affected();
+        .await;
+        let inserted = match inserted {
+            Ok(done) => done.rows_affected(),
+            Err(error) if session_busy(&error) => return Ok(Insert::Busy(error)),
+            Err(error) => return Err(backend(error)),
+        };
         if inserted == 0 {
             return Err(StoreError::Conflict {
                 message: format!("run {} already exists in {}", run.run_id, run.namespace),
@@ -114,6 +144,36 @@ impl RunStore for PgRunStore {
         }
         insert_events(&mut tx, &run.namespace, &run.run_id, events).await?;
         tx.commit().await.map_err(backend)?;
+        Ok(Insert::Done)
+    }
+}
+
+#[async_trait]
+impl RunStore for PgRunStore {
+    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
+        check_events(&run.run_id, 0, &run.events)?;
+        let checkpoint = encode_checkpoint(&run.checkpoint)?;
+        let mut tries = 0;
+        while let Insert::Busy(error) = self.insert(&run, &checkpoint).await? {
+            let live: Option<String> = sqlx::query_scalar(LIVE_RUN)
+                .bind(&run.namespace)
+                .bind(run.session_id.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend)?;
+            if let Some(live) = live {
+                return Err(StoreError::SessionBusy {
+                    session_id: run.session_id,
+                    run_id: RunId::new(live),
+                });
+            }
+            // The live run ended between the insert and the read.
+            tries += 1;
+            if tries == ADMIT_TRIES {
+                return Err(backend(error));
+            }
+        }
+        let last_seq = run.events.len() as u64;
         Ok(RunRecord {
             namespace: run.namespace,
             run_id: run.run_id,
@@ -255,5 +315,34 @@ impl RunStore for PgRunStore {
             .filter_map(|(text,)| text)
             .map(|text| decode_event(&text))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The SQL lists the terminal statuses by name; they must be exactly
+    /// the ones linch-core calls terminal.
+    #[test]
+    fn the_live_run_predicate_matches_core() {
+        use RunStatus::*;
+        let predicate = "status NOT IN ('completed', 'failed', 'aborted')";
+        let terminal = ["completed", "failed", "aborted"];
+        let all = [
+            Pending,
+            Running,
+            AwaitingApproval,
+            AwaitingInput,
+            Completed,
+            Failed,
+            Aborted,
+        ];
+        for status in all {
+            let listed = terminal.contains(&status_name(status));
+            assert_eq!(status.is_terminal(), listed, "{status:?}");
+        }
+        let index = include_str!("../migrations/0002_one_live_run_per_session.sql");
+        assert!(index.contains(predicate) && LIVE_RUN.contains(predicate));
     }
 }

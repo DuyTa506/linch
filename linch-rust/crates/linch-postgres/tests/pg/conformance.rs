@@ -1,6 +1,6 @@
 //! linch-core's store conformance suites, plus exact round trips.
 
-use linch_core::store::conformance::{run_store_suite, session_store_suite};
+use linch_core::store::conformance::{run_admission_suite, run_store_suite, session_store_suite};
 use linch_core::{JsonValue, RunId, RunStore};
 use linch_postgres::{PgRunStore, PgSessionStore};
 
@@ -12,6 +12,15 @@ async fn run_store_passes_the_conformance_suite() {
         return;
     };
     run_store_suite(&PgRunStore::new(db.pool.clone())).await;
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn run_store_passes_the_admission_suite() {
+    let Some(db) = TestDb::migrated("conformance_admission").await else {
+        return;
+    };
+    run_admission_suite(&PgRunStore::new(db.pool.clone())).await;
     db.finish().await;
 }
 
