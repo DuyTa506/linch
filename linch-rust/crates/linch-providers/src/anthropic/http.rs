@@ -45,11 +45,7 @@ pub(crate) async fn post(
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(String::from);
-    let text = cancel
-        .run_until_cancelled(response.text())
-        .await
-        .ok_or(ProviderError::Cancelled)?
-        .unwrap_or_default();
+    let text = crate::transport::error_body(response, cancel).await?;
     Err(status_error(
         status.as_u16(),
         retry_after.as_deref(),

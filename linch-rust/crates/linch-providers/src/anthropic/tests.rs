@@ -5,7 +5,9 @@ use linch_core::{Message, OutputSchema, ProviderError, ProviderRequest, assemble
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::test_server::{assert_redirect_refused, redirect_response, serve_once};
+use crate::test_server::{
+    assert_redirect_refused, redirect_response, serve_once, serve_stalled_error,
+};
 
 mod payload;
 
@@ -134,4 +136,21 @@ async fn a_redirect_is_refused_and_never_followed() {
         .expect("a redirect fails the call");
     server.join().unwrap();
     assert_redirect_refused(&err);
+}
+
+#[tokio::test]
+async fn a_huge_error_body_is_read_only_in_part() {
+    let url = serve_stalled_error(&format!("echo {SECRET} "));
+    let provider = provider(url);
+    let call = provider.stream(request(), CancellationToken::new());
+    let err = tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .expect("the body is not read to its end")
+        .err()
+        .expect("a 400 fails the call");
+    assert!(
+        matches!(&err, ProviderError::Status { status: 400, message, .. }
+            if message.chars().count() == 500 && !message.contains(SECRET)),
+        "{err:?}"
+    );
 }

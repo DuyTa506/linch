@@ -15,8 +15,8 @@ const MAX_ERROR_CHARS: usize = 500;
 /// POST `body` to `url` and return the response once its status is 2xx.
 ///
 /// `key`, when given, is sent as a bearer token. A redirect is refused,
-/// never followed; any other non-2xx status reads the body and maps it with
-/// [`status_error`].
+/// never followed; any other non-2xx status reads the start of the body and
+/// maps it with [`status_error`].
 pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
@@ -49,11 +49,7 @@ pub(crate) async fn post(
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(String::from);
-    let text = cancel
-        .run_until_cancelled(response.text())
-        .await
-        .ok_or(ProviderError::Cancelled)?
-        .unwrap_or_default();
+    let text = crate::transport::error_body(response, cancel).await?;
     Err(status_error(
         status.as_u16(),
         retry_after.as_deref(),

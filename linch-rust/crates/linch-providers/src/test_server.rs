@@ -18,6 +18,33 @@ pub(crate) fn redirect_response() -> String {
     )
 }
 
+/// A `400` that promises a 10 MB body starting with `prefix`, sends 64 KiB
+/// of it and then stalls until the client hangs up. A client that reads the
+/// whole body before answering never returns.
+pub(crate) fn serve_stalled_error(prefix: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let response = format!(
+        "HTTP/1.1 400 Bad Request\r\ncontent-length: 10000000\r\n\r\n{prefix}{}",
+        "x".repeat(64 * 1024)
+    );
+    thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut buffer = [0; 4096];
+        let mut seen = Vec::new();
+        while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+            match socket.read(&mut buffer) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => seen.extend_from_slice(&buffer[..read]),
+            }
+        }
+        // The client may hang up mid-write once it has read enough.
+        let _ = socket.write_all(response.as_bytes());
+        while matches!(socket.read(&mut buffer), Ok(read) if read > 0) {}
+    });
+    url
+}
+
 /// The call failed on the redirect itself rather than following it.
 pub(crate) fn assert_redirect_refused(err: &ProviderError) {
     assert!(
