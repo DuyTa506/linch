@@ -3,7 +3,9 @@
 //!
 //! [`run_workflow`] runs an async function on a [`WorkflowContext`]. Its
 //! journaled calls are [`WorkflowContext::step`] (host code with side
-//! effects) and [`WorkflowContext::interrupt`] (a question for a human);
+//! effects), [`WorkflowContext::agent`] (an agent's run on a prompt, which
+//! a resume continues) and [`WorkflowContext::interrupt`] (a question for a
+//! human);
 //! [`WorkflowContext::parallel`] and [`WorkflowContext::settled`] fan
 //! branches out, and [`WorkflowContext::phase`] marks progress. Everything
 //! else in the function runs again on every resume.
@@ -40,7 +42,8 @@
 //!
 //! ## Replay rule
 //!
-//! A call is identified by a content key ([`step_key`], [`interrupt_key`])
+//! A call is identified by a content key ([`step_key`], [`agent_key`],
+//! [`interrupt_key`])
 //! plus its occurrence: how many calls with that key came before it in
 //! this run. A resume replays every call whose key and occurrence the
 //! journal holds, so the function must take the same path again: branching
@@ -66,6 +69,7 @@
 //! feature (run `linch_ext::migrate` once at startup). Every store passes
 //! [`conformance::journal_store_suite`].
 
+mod agent;
 pub mod conformance;
 mod context;
 mod engine;
@@ -86,7 +90,7 @@ pub use engine::{WorkflowOptions, run_workflow};
 pub use error::{BoxError, WorkflowError};
 pub use journal::{
     Interrupt, JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowRun,
-    WorkflowStatus, interrupt_key, step_key,
+    WorkflowStatus, agent_key, interrupt_key, step_key,
 };
 pub use memory::MemoryJournalStore;
 pub use policy::Retry;
