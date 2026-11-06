@@ -21,7 +21,8 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Read and answer the first message: the tenant, with the connection's
 /// place among the tenant's connections. `None` when the login was
 /// refused (answered with `-32003`, or `-32005` past the tenant's
-/// connection cap), timed out, or `stop` fired.
+/// connection cap or [`MAX_PENDING_LOGINS`](crate::MAX_PENDING_LOGINS)),
+/// timed out, or `stop` fired.
 pub(super) async fn login<S>(
     input: &mut S,
     tokens: &Tokens,
@@ -31,6 +32,15 @@ pub(super) async fn login<S>(
 where
     S: Stream<Item = Inbound> + Unpin,
 {
+    // Held while the first message is awaited, so waiting connections and
+    // their buffers stay bounded.
+    let _pending = match tokens.pending_place() {
+        Ok(place) => place,
+        Err(error) => {
+            outbox.send(&Response::err(Id::Null, error)).await;
+            return None;
+        }
+    };
     let first = tokio::select! {
         biased;
         () = stop.cancelled() => return None,

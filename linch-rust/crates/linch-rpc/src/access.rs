@@ -10,7 +10,7 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 
 use crate::error::{ErrorObject, limit_reached};
 
@@ -88,18 +88,36 @@ impl Tenant {
     }
 }
 
+/// Socket connections that may wait for their login at once, across every
+/// connection checked against one [`Tokens`]: each may buffer up to a
+/// 16 MiB line for up to 10 s, so this bounds that to 512 MiB. One past it
+/// gets `-32005` and closes without being read.
+pub const MAX_PENDING_LOGINS: usize = 32;
+
 /// Bearer tokens and the tenant each one names.
 ///
 /// Tokens are kept only as SHA-256 digests, and a presented token is
-/// compared with every one in constant time. `Debug` shows tenant names
-/// only.
-#[derive(Default)]
-pub struct Tokens(Vec<([u8; 32], Arc<Tenant>)>);
+/// compared with every one in constant time. They also count the socket
+/// connections waiting for their login ([`MAX_PENDING_LOGINS`]). `Debug`
+/// shows tenant names only.
+pub struct Tokens(Vec<([u8; 32], Arc<Tenant>)>, Semaphore);
+
+impl Default for Tokens {
+    fn default() -> Self {
+        Self(Vec::new(), Semaphore::new(MAX_PENDING_LOGINS))
+    }
+}
 
 impl Tokens {
     /// No tokens: every presented token is refused.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A place among the connections waiting for their login, or
+    /// `-32005`.
+    pub(crate) fn pending_place(&self) -> Result<SemaphorePermit<'_>, ErrorObject> {
+        (self.1.try_acquire()).map_err(|_| limit_reached("logins", MAX_PENDING_LOGINS))
     }
 
     /// Accept `token` for `tenant`.

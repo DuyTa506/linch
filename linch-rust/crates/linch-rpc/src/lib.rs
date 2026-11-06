@@ -24,7 +24,9 @@
 //!   **`connection.auth`** `{token}` ([`AuthParams`](protocol::AuthParams)),
 //!   answered with [`Authenticated`](protocol::Authenticated)
 //!   `{"tenant": "acme"}`. Any other first message or an unknown token gets
-//!   `-32003` and the connection closes; so does silence for 10 s.
+//!   `-32003` and the connection closes; so does silence for 10 s. At most
+//!   [`MAX_PENDING_LOGINS`] connections wait for their login at once; one
+//!   more gets `-32005` (`kind: logins`) at once and closes.
 //! - **HTTP** ([`serve_messages`] with [`Access::Tenant`]): `GET /rpc` with
 //!   `Authorization: Bearer <token>` upgrades to a WebSocket carrying one
 //!   message per text frame (a binary frame that is not UTF-8 ends the
@@ -345,8 +347,8 @@ pub mod protocol;
 mod server;
 
 pub use access::{
-    Access, AccessError, Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, McpCommand, Tenant,
-    Tokens,
+    Access, AccessError, Allowlists, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS, MAX_PENDING_LOGINS,
+    McpCommand, Tenant, Tokens,
 };
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
