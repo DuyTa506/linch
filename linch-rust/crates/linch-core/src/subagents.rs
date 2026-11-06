@@ -54,7 +54,14 @@
 //!   run does not end: it waits for the next end and logs the notification
 //!   as a user message, so the model takes another turn;
 //! - a parent that ends anyway (cancelled, failed, out of turns) cancels
-//!   its children and waits for their aborts first.
+//!   its children and waits for their aborts first;
+//! - a parent that suspends for approval keeps its children running: the
+//!   agent holds its family, a task drives them while the parent waits, and
+//!   the approve or resume in this process takes them over, so a child is
+//!   never resumed as if it crashed. Closing the parent's session
+//!   ([`crate::Agent::close_session`]) or dropping the agent meanwhile
+//!   cancels them; each writes its abort, which the parent hears when it
+//!   goes on.
 //!
 //! A worker's display name is its definition's name, or `Agent #N` for
 //! the N-th general-purpose worker of the parent session (kept in process

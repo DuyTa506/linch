@@ -152,8 +152,10 @@ async fn pick_up(
 
 /// Pick up the background children of a resumed run: each child that a
 /// `child_run_status` event in `events` marks running, with no later mark
-/// of its end, is resumed, started (its create never landed), or read
-/// back. A child that cannot be picked up reports a failed end.
+/// of its end, and that `family` does not hold already (a run suspended
+/// in this process keeps its family), is resumed, started (its create
+/// never landed), or read back. A child that cannot be picked up reports a
+/// failed end.
 pub(crate) async fn reattach(
     parent: &AgentInner,
     family: &Arc<Family>,
@@ -191,7 +193,7 @@ pub(crate) async fn reattach(
             }
         }
     }
-    for id in running {
+    for id in running.into_iter().filter(|id| !family.knows(id)) {
         let Some(input) = call_input(events, id.as_str().strip_prefix(&prefix)) else {
             continue;
         };

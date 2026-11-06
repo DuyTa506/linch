@@ -226,6 +226,14 @@ replayed: ['assistant', 'child_run_status', 'context_build', 'init', 'result', '
   cancels its workers and waits for them first.
 - The parent's stream drives its workers: keep reading the run to its end, or
   call `Run.result()`.
+- A parent that suspends for approval keeps its workers running while it
+  waits, as Python Linch does: each writes its own log, and the approve (or a
+  resume) in the same server takes them over and hears of their ends. A
+  worker inside a model call or a tool at the suspend is not called or run
+  again.
+- Closing the parent's session (`Agent.close_session`) or the agent while the
+  parent waits cancels its workers: each ends `aborted`, and a later approve
+  or resume of the parent hears that.
 - The worker's durable events reach the parent's log wrapped, at the parent's
   next turn.
 
@@ -413,8 +421,9 @@ refuses a cut that leaves tool calls without their results.
 | Worker ids and display names | Process memory | Process memory; a resumed run knows its own workers again from its log |
 | Mailbox messages | Process memory | Process memory: lost when the server stops, including a message drained just before a crash |
 
-A parent that suspends for approval stops driving its workers; approving or
-resuming it picks them up again.
+A parent that suspends for approval keeps its workers running in the server
+until its approve or resume takes them over there. Only a parent resumed after
+a crash, or in another server, picks its workers up again from their logs.
 
 ---
 
