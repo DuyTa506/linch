@@ -112,11 +112,41 @@ async fn cancel_ends_the_call_even_when_the_provider_ignores_it() {
             CallDisposition::Cancelled,
             "{provider:?}"
         );
-        assert_eq!(outcome.receipt.usage, None, "{provider:?}");
+        // Only a provider that already queued its `message_end` reports usage.
+        let paid = matches!(provider, Stubborn::KeepsStreaming).then(|| usage(1, 1));
+        assert_eq!(outcome.receipt.usage, paid, "{provider:?}");
         assert!(matches!(
             outcome.result.unwrap_err().error,
             ProviderError::Cancelled
         ));
         assert!(deltas <= 1, "{provider:?}");
+    }
+}
+
+/// R1-prov 8: a finished response hands out its queued `message_end` even
+/// after a cancel; its usage is paid and reaches the receipt.
+#[tokio::test]
+async fn a_queued_message_end_keeps_its_usage_after_a_cancel() {
+    for cancel_at in 1..=2 {
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let mut deltas = 0;
+        let mut sink = |_: PartialAssistantEvent| {
+            deltas += 1;
+            if deltas == cancel_at {
+                token.cancel();
+            }
+        };
+        let outcome = call()
+            .drive(
+                &Stubborn::KeepsStreaming,
+                request(),
+                &cancel,
+                Some(&mut sink),
+            )
+            .await;
+        assert_eq!(outcome.receipt.disposition, CallDisposition::Cancelled);
+        assert_eq!(outcome.receipt.usage, Some(usage(1, 1)), "at {cancel_at}");
+        assert_eq!(deltas, cancel_at, "no delta after the cancel");
     }
 }

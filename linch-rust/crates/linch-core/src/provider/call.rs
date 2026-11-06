@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -126,9 +126,10 @@ impl ModelCall {
     /// Dispatch the call and settle it.
     ///
     /// A cancelled `cancel` ends the call even if the provider ignores the
-    /// token. After a stream contract violation the rest of the stream is
-    /// still read for its `message_end`, so the spend the provider reports
-    /// reaches the receipt.
+    /// token; a `message_end` the provider already queued still gives the
+    /// receipt its usage. After a stream contract violation the rest of the
+    /// stream is still read for its `message_end`, so the spend the provider
+    /// reports reaches the receipt.
     ///
     /// Args:
     ///     provider: Provider to call.
@@ -200,6 +201,7 @@ async fn consume(
     while let Some(item) = stream.next().await {
         // A sink may cancel; the provider may not notice before its next item.
         if cancel.is_cancelled() {
+            queued_usage(item, &mut stream, seen);
             return Err(ProviderError::Cancelled);
         }
         let event = item?;
@@ -229,6 +231,32 @@ async fn consume(
         }
     }
     Ok(assembler.finish()?)
+}
+
+/// Before a cancel takes effect, keep the usage of a `message_end` the
+/// provider already queued, starting with `item`: that response is paid.
+/// Only items that are ready now are read.
+fn queued_usage(
+    mut item: Result<ProviderEvent, ProviderError>,
+    stream: &mut ProviderStream,
+    seen: &mut Observed,
+) {
+    loop {
+        match item {
+            Ok(ProviderEvent::MessageEnd(end)) => {
+                if seen.usage.is_none() {
+                    seen.usage = end.usage;
+                }
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        match stream.next().now_or_never() {
+            Some(Some(next)) => item = next,
+            _ => return,
+        }
+    }
 }
 
 /// Read the rest of a broken stream for the usage in its `message_end`.
