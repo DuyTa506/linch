@@ -1,5 +1,7 @@
 //! Extensions built on the public API of the Linch kernel (`linch-core`).
 //!
+//! - [`deep_agent`] is the deep agent preset: its prompts, subagent
+//!   roster, profiles and file memory hook.
 //! - [`evals`] runs an [`Agent`](linch_core::Agent) over eval cases, scores
 //!   each run with built-in scorers, and compares one suite across agents.
 //! - [`reports`] folds one run's event stream into a report of its tool
@@ -16,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod deep_agent;
 pub mod evals;
 #[cfg(feature = "postgres")]
 mod postgres;
