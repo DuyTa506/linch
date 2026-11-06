@@ -3,11 +3,20 @@ name = "linch-rust"
 version = "0.1.0"
 description = "Minimal asyncio client for the Linch Rust core, over the linch-server sidecar."
 requires-python = ">=3.11"
+license = "MIT"
 dependencies = []
 
 [build-system]
-requires = ["uv_build>=0.13.7,<0.14.0"]
-build-backend = "uv_build"
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+# The wheel is the pure-Python client plus the linch-server binary, installed
+# as a script (`bindings = "bin"`): no Python ABI, one wheel per platform.
+[tool.maturin]
+bindings = "bin"
+manifest-path = "../crates/linch-server/Cargo.toml"
+python-source = "src"
+module-name = "linch_rust"
 
 [dependency-groups]
 dev = [
@@ -19,7 +28,14 @@ dev = [
     "psycopg[binary]>=3.2",
 ]
 
+# The dev venv does not install the project: an editable maturin install
+# would put a release linch-server in .venv/bin, which `find_server` prefers
+# and cargo never refreshes. Tests import from src/; `uv build` still builds.
+[tool.uv]
+package = false
+
 [tool.pytest.ini_options]
+pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
