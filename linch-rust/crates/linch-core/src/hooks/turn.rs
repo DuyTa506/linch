@@ -8,7 +8,7 @@ use crate::message::{ContentBlock, Message, TextBlock};
 use crate::policy::HookPoint;
 use crate::run::StopReason;
 
-use super::chain::{ChainResult, HookChain, Step};
+use super::chain::{ChainResult, HookChain, HookRecord, Step};
 use super::hook::{Point, sealed::Sealed};
 
 /// Marker for [`HookPoint::UserPromptSubmit`].
@@ -147,18 +147,26 @@ impl HookChain<ContextBuild> {
     /// failing hook adds nothing; this point cannot fail closed.
     pub async fn run(&self, request: &ContextBuildRequest) -> ChainResult<Vec<TextBlock>> {
         let mut records = Vec::new();
+        let outcome = self.run_into(request, &mut records).await;
+        ChainResult { outcome, records }
+    }
+
+    /// [`Self::run`], pushing each record into `records` as its hook
+    /// returns, so a dropped chain keeps the records of the hooks that did.
+    pub(crate) async fn run_into(
+        &self,
+        request: &ContextBuildRequest,
+        records: &mut Vec<HookRecord>,
+    ) -> Vec<TextBlock> {
         let mut blocks = Vec::new();
         for entry in self.entries().iter() {
             // `Closed` cannot occur: registration rejects a closed fail mode
             // here.
-            if let Step::Answer(response) = entry.invoke(request, &mut records).await {
+            if let Step::Answer(response) = entry.invoke(request, records).await {
                 blocks.extend(response.blocks);
             }
         }
-        ChainResult {
-            outcome: blocks,
-            records,
-        }
+        blocks
     }
 }
 
@@ -234,20 +242,27 @@ impl HookChain<Stop> {
     /// as feedback would pay for one more answer per turn.
     pub async fn run(&self, request: &StopRequest) -> ChainResult<StopOutcome> {
         let mut records = Vec::new();
+        let outcome = self.run_into(request, &mut records).await;
+        ChainResult { outcome, records }
+    }
+
+    /// [`Self::run`], pushing each record into `records` as its hook
+    /// returns, so a dropped chain keeps the records of the hooks that did.
+    pub(crate) async fn run_into(
+        &self,
+        request: &StopRequest,
+        records: &mut Vec<HookRecord>,
+    ) -> StopOutcome {
         for entry in self.entries().iter() {
-            let outcome = match entry.invoke(request, &mut records).await {
+            return match entry.invoke(request, records).await {
                 Step::Skip | Step::Answer(StopResponse::Allow) => continue,
                 Step::Answer(StopResponse::Continue { feedback }) => {
                     StopOutcome::Continue { feedback }
                 }
                 Step::Closed(reason) => StopOutcome::Failed { reason },
             };
-            return ChainResult { outcome, records };
         }
-        ChainResult {
-            outcome: StopOutcome::Stop,
-            records,
-        }
+        StopOutcome::Stop
     }
 }
 
@@ -289,14 +304,20 @@ impl HookChain<PostTurn> {
     /// only recorded.
     pub async fn run(&self, request: &PostTurnRequest) -> ChainResult<()> {
         let mut records = Vec::new();
-        for entry in self.entries().iter() {
-            // `Closed` cannot occur: registration rejects a closed fail mode
-            // here.
-            let _ = entry.invoke(request, &mut records).await;
-        }
+        self.run_into(request, &mut records).await;
         ChainResult {
             outcome: (),
             records,
+        }
+    }
+
+    /// [`Self::run`], pushing each record into `records` as its hook
+    /// returns, so a dropped chain keeps the records of the hooks that did.
+    pub(crate) async fn run_into(&self, request: &PostTurnRequest, records: &mut Vec<HookRecord>) {
+        for entry in self.entries().iter() {
+            // `Closed` cannot occur: registration rejects a closed fail mode
+            // here.
+            let _ = entry.invoke(request, records).await;
         }
     }
 }

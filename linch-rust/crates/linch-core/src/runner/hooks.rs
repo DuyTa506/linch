@@ -5,7 +5,8 @@
 //! [`Event::Hook`] carrying the last durable seq. A chain with no hook is
 //! skipped before its request is built, so a run without hooks does no
 //! hook work. A run cancel drops a chain the run waits on (a dropped RPC
-//! callback is cancelled on the client), and the run aborts.
+//! callback is cancelled on the client), and the run aborts; the hooks
+//! that answered before the cancel still have their records sent.
 
 use std::sync::Arc;
 
@@ -141,9 +142,11 @@ impl Runner {
             run_id: self.run.run_id.clone(),
             messages,
         };
-        let result = self.cancel.run_until_cancelled(chain.run(&request)).await?;
-        self.push_records(result.records, None);
-        Some(result.outcome)
+        let mut records = Vec::new();
+        let run = chain.run_into(&request, &mut records);
+        let blocks = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        blocks
     }
 
     /// Run `stop` on a text-only response.
@@ -157,12 +160,15 @@ impl Runner {
             run_id: self.run.run_id.clone(),
             text: text.to_owned(),
         };
-        let Some(result) = self.cancel.run_until_cancelled(chain.run(&request)).await else {
+        let mut records = Vec::new();
+        let run = chain.run_into(&request, &mut records);
+        let outcome = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        let Some(outcome) = outcome else {
             self.abort().await?;
             return Ok(Stopping::Ended);
         };
-        self.push_records(result.records, None);
-        let feedback = match result.outcome {
+        let feedback = match outcome {
             StopOutcome::Stop => return Ok(Stopping::Stop),
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Failed { reason } => {
@@ -200,11 +206,12 @@ impl Runner {
             turn: self.turn,
             stop_reason,
         };
-        let Some(result) = self.cancel.run_until_cancelled(chain.run(&request)).await else {
-            return false;
-        };
-        self.push_records(result.records, None);
-        true
+        let mut records = Vec::new();
+        let run = chain.run_into(&request, &mut records);
+        let ran = self.cancel.run_until_cancelled(run).await.is_some();
+        // The hooks that answered before a cancel keep their records.
+        self.push_records(records, None);
+        ran
     }
 }
 

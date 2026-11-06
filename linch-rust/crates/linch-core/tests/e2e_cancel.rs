@@ -1,6 +1,7 @@
 //! A run cancel interrupts a hook the run is waiting on, at every point a
-//! run waits on hooks, and approve or resume with a cancelled token aborts
-//! before planning again (R1-rpc 4, R1-core 7).
+//! run waits on hooks, keeping the records of the hooks that answered
+//! before it (R1-rpc 4, R2-core 5); approve or resume with a cancelled
+//! token touches nothing (R1-core 7, R2-core 3).
 
 mod common;
 
@@ -12,7 +13,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common::*;
 use linch_core::events::kinds::ResultSubtype;
-use linch_core::hooks::{ApprovalResponse, PreToolUse, PreToolUseRequest, PreToolUseResponse};
+use linch_core::hooks::{
+    ApprovalResponse, ContextBuild, ContextBuildRequest, ContextBuildResponse, PostTurn,
+    PostTurnRequest, PreToolUse, PreToolUseRequest, PreToolUseResponse, Stop, StopRequest,
+    StopResponse,
+};
 use linch_core::{
     Agent, AgentBuilder, CallbackError, Envelope, Event, Hook, Hooks, PermissionMode, Point,
     RunOptions, RunStatus, RunStore, ScriptedProvider, ScriptedTurn, ToolScope,
@@ -54,6 +59,48 @@ impl Hook<PreToolUse> for Counts {
     ) -> Result<PreToolUseResponse, CallbackError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(PreToolUseResponse::Continue)
+    }
+}
+
+/// A turn-point hook that answers at once, letting the chain go on.
+struct Answers;
+
+#[async_trait]
+impl Hook<ContextBuild> for Answers {
+    fn policy_id(&self) -> &str {
+        "answers"
+    }
+    fn policy_version(&self) -> u32 {
+        1
+    }
+    async fn call(&self, _: &ContextBuildRequest) -> Result<ContextBuildResponse, CallbackError> {
+        Ok(ContextBuildResponse::default())
+    }
+}
+
+#[async_trait]
+impl Hook<Stop> for Answers {
+    fn policy_id(&self) -> &str {
+        "answers"
+    }
+    fn policy_version(&self) -> u32 {
+        1
+    }
+    async fn call(&self, _: &StopRequest) -> Result<StopResponse, CallbackError> {
+        Ok(StopResponse::Allow)
+    }
+}
+
+#[async_trait]
+impl Hook<PostTurn> for Answers {
+    fn policy_id(&self) -> &str {
+        "answers"
+    }
+    fn policy_version(&self) -> u32 {
+        1
+    }
+    async fn call(&self, _: &PostTurnRequest) -> Result<(), CallbackError> {
+        Ok(())
     }
 }
 
@@ -122,6 +169,52 @@ async fn a_cancel_interrupts_the_hook_a_run_waits_on() {
         assert_eq!(subtype(&envelopes), ResultSubtype::Aborted, "{point}");
         let record = stores.runs.load(NS, &run_id).await.unwrap();
         assert_eq!(record.status, RunStatus::Aborted, "{point}");
+    }
+}
+
+/// A cancel during a turn chain's second hook keeps the record of the first
+/// one, which answered: its `hook` envelope still reaches the stream.
+#[tokio::test]
+async fn a_cancel_keeps_the_records_of_hooks_that_answered() {
+    for point in ["context_build", "stop", "post_turn"] {
+        let entered = Arc::new(Notify::new());
+        let hooks = Hooks::default();
+        let waits = || Arc::new(Waits(Arc::clone(&entered)));
+        let registered = match point {
+            "context_build" => [
+                hooks.context_build.register(Arc::new(Answers)),
+                hooks.context_build.register(waits()),
+            ],
+            "stop" => [
+                hooks.stop.register(Arc::new(Answers)),
+                hooks.stop.register(waits()),
+            ],
+            _ => [
+                hooks.post_turn.register(Arc::new(Answers)),
+                hooks.post_turn.register(waits()),
+            ],
+        };
+        assert!(registered.iter().all(Result::is_ok));
+        let stores = Arc::new(Stores::default());
+        let agent = hooked(vec![text_turn("done")], Arc::new(hooks), stores);
+        let mut options = RunOptions::new("s1");
+        let token = CancellationToken::new();
+        options.cancel = token.clone();
+        let canceller = tokio::spawn(async move {
+            entered.notified().await;
+            token.cancel();
+        });
+        let ended = tokio::time::timeout(Duration::from_secs(5), finish(agent.run("go", options)));
+        let envelopes = ended.await.unwrap_or_else(|_| panic!("{point}: no end"));
+        canceller.await.unwrap();
+        assert_eq!(subtype(&envelopes), ResultSubtype::Aborted, "{point}");
+        let answered: Vec<_> = (envelopes.iter())
+            .filter_map(|e| match &e.event {
+                Event::Hook(hook) => Some(hook.policy_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answered, ["answers"], "{point}");
     }
 }
 
