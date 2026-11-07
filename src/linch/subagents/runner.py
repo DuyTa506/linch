@@ -118,14 +118,18 @@ class RunSubagentResult:
 
 def build_child_tools(parent_tools: Any, filter: list[str] | None) -> Any:
     from ..tools import ToolRegistry
+    from ..tools.subagent_continue import SUBAGENT_CONTINUE_TOOL_NAME
+    from ..tools.subagent_stop import TASK_STOP_TOOL_NAME
 
+    # A worker cannot spawn workers, so it never needs the orchestration tools.
+    orchestration = {SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUE_TOOL_NAME, TASK_STOP_TOOL_NAME}
     child = ToolRegistry()
     if filter is None or "*" in filter:
         wanted = None
     else:
         wanted = set(filter)
     for t in parent_tools.list():
-        if t.name == SUBAGENT_TOOL_NAME:
+        if t.name in orchestration:
             continue
         if wanted is None or t.name in wanted:
             child.register(t)

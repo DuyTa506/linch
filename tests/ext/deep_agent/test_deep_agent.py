@@ -375,8 +375,8 @@ async def test_coordinator_worker_retains_heavy_tools(tmp_path: Path) -> None:
     assert general.is_error is False
     assert provider.tool_sets
     assert "Skill" in provider.tool_sets[-1]
-    assert "SubagentContinue" in provider.tool_sets[-1]
-    assert "TaskStop" in provider.tool_sets[-1]
+    # Orchestration tools address the caller's own workers; a worker has none.
+    assert {"Subagent", "SubagentContinue", "TaskStop"}.isdisjoint(provider.tool_sets[-1])
 
 
 async def test_coordinator_worker_preserves_custom_registry_semantics(tmp_path: Path) -> None:
