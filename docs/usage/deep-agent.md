@@ -185,7 +185,10 @@ async for event in session.run(
 Continuing a worker resumes it with its entire prior context, so you can have a
 multi-turn delegation without re-explaining the task. When retention is
 enabled (as in the factory's default profiles), workers remain attached after
-their first run so this remains possible.
+their first run so this remains possible. A worker runs one conversation at a
+time: while a background run or a continuation drives it, its status is
+`running`, and another `SubagentContinue` to it returns a `WorkerBusy` error
+without changing the worker.
 
 `session.workers` is a `dict[str, WorkerHandle]`. Each handle exposes
 `handle.child_session_id`, `handle.status`, and `handle.last_result_text`.

@@ -127,7 +127,7 @@ async for event in session.run(
         print(event.final_text)
 ```
 
-Việc tiếp tục worker resume worker đó với toàn bộ ngữ cảnh trước đây, nên bạn có thể giao việc qua nhiều lượt mà không phải giải thích lại tác vụ. Khi bật chế độ giữ lại (như trong các profile mặc định của factory), worker vẫn được gắn vào session sau run đầu tiên để bạn có thể tiếp tục như vậy.
+Việc tiếp tục worker resume worker đó với toàn bộ ngữ cảnh trước đây, nên bạn có thể giao việc qua nhiều lượt mà không phải giải thích lại tác vụ. Khi bật chế độ giữ lại (như trong các profile mặc định của factory), worker vẫn được gắn vào session sau run đầu tiên để bạn có thể tiếp tục như vậy. Mỗi lúc một worker chỉ chạy một cuộc hội thoại: khi một run nền hoặc một lần tiếp tục đang chạy nó, trạng thái của nó là `running`, và một `SubagentContinue` khác gửi tới nó trả về lỗi `WorkerBusy` mà không thay đổi worker.
 
 `session.workers` là một `dict[str, WorkerHandle]`. Mỗi handle cung cấp `handle.child_session_id`, `handle.status` và `handle.last_result_text`. Các trạng thái gồm `running`, `completed`, `failed` hoặc `killed`. Kiểm tra chúng từ ứng dụng chủ để theo dõi worker nào đang hoạt động, kết quả gần nhất của chúng và session con tương ứng với từng worker.
 
