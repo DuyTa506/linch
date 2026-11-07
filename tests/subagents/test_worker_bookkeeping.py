@@ -155,3 +155,53 @@ async def test_two_continues_in_one_batch_run_one_and_refuse_the_other() -> None
         assert handle.status == "completed"
     finally:
         await agent.close()
+
+
+async def _stop(session: Any, payload: dict[str, Any]) -> Any:
+    from linch.tools.base import ToolContext
+    from linch.tools.subagent_stop import TaskStopTool
+
+    tool = TaskStopTool(get_session=lambda _session_id: session)
+    ctx = ToolContext(cwd=".", session_id=session.id, run_id="r", session_store=session.store)
+    return await tool.execute(tool.validate(payload), ctx)
+
+
+async def test_task_stop_leaves_a_finished_worker_alone() -> None:
+    agent = make_agent(ScriptedProvider([TextTurn("first")]), model="m")
+    try:
+        parent, handle = await _retained_worker(agent)
+
+        result = await _stop(parent, {"task_id": handle.worker_id, "reason": "late"})
+
+        assert not result.is_error
+        assert "not running" in result.content
+        assert handle.status == "completed"
+        assert handle.stop_reason is None
+    finally:
+        await agent.close()
+
+
+async def test_task_stop_records_the_reason_on_a_running_worker() -> None:
+    import asyncio
+
+    from linch.subagents.runner import continue_subagent
+
+    provider = _GatedProvider([TextTurn("first"), TextTurn("second")])
+    agent = make_agent(provider, model="m")
+    try:
+        parent, handle = await _retained_worker(agent)
+        running = asyncio.create_task(
+            continue_subagent(_continue_args(parent, agent, handle, "sa_running"))
+        )
+        await provider.held.wait()
+
+        result = await _stop(parent, {"task_id": handle.worker_id, "reason": "off track"})
+        provider.gate.set()
+        await running
+
+        assert not result.is_error
+        assert handle.status == "killed"
+        assert handle.stop_reason == "off track"
+    finally:
+        provider.gate.set()
+        await agent.close()

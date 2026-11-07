@@ -24,3 +24,5 @@ class WorkerHandle:
     status: WorkerStatus = "running"
     task: Any = field(default=None, repr=False)  # asyncio.Task | None
     last_result_text: str = ""
+    stop_reason: str | None = None
+    """Reason given to the ``TaskStop`` call that killed this worker, if any."""

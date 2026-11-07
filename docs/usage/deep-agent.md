@@ -271,7 +271,10 @@ To stop a running background worker, call `TaskStop` with
 `{"task_id": "agent-xxxx"}` (and optionally `reason`). The handle stays in
 `session.workers` so it can be continued later with `SubagentContinue`.
 Stopping cancels the in-flight task but does not discard the worker — you can
-re-engage it once you have what you need.
+re-engage it once you have what you need. `TaskStop` acts only on a `running`
+worker: it marks the worker `killed` and records `reason` in
+`handle.stop_reason`. A worker that has already finished keeps its status, and
+the result says it was not running.
 
 ---
 
