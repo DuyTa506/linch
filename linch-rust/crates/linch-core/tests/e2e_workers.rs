@@ -279,6 +279,11 @@ async fn task_stop_on_a_finished_worker_does_not_change_its_status() {
         RunStatus::Completed,
         "not killed after the fact"
     );
+    let log = messages(&*stores, "s1").await;
+    let replied = &result_texts(&log[4])[0];
+    assert!(replied.contains("already finished"), "{replied}");
+    assert!(replied.contains("completed"), "{replied}");
+    assert!(!replied.contains("stopped"), "{replied}");
     let marks = envelopes
         .iter()
         .filter(|e| matches!(e.event, Event::ChildRunStatus(_)));
