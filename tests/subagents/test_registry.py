@@ -47,3 +47,15 @@ def test_registry_builtin_and_disk_override() -> None:
     visible = registry.list()
     assert [agent.name for agent in visible].count("verification") == 1
     assert visible[0] is disk_verification
+
+
+def test_registry_extra_builtin_overrides_core_builtin_once() -> None:
+    from linch.ext.deep_agent.subagents import DEEP_AGENT_SUBAGENTS, VERIFICATION_AGENT
+
+    registry = AgentRegistry([], extra_built_ins=DEEP_AGENT_SUBAGENTS)
+
+    names = [agent.name.lower() for agent in registry.list()]
+    assert names.count("verification") == 1
+    assert len(names) == len(set(names))
+    assert registry.get("verification") is VERIFICATION_AGENT
+    assert VERIFICATION_AGENT in registry.list()
