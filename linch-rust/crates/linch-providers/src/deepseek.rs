@@ -48,6 +48,9 @@ pub struct DeepSeekOptions {
     pub api_key: ApiKey,
     /// API root without the `/chat/completions` path.
     pub base_url: String,
+    /// The context window of every model; `None` gives 128000, Python's
+    /// conservative fallback.
+    pub context_window: Option<u64>,
 }
 
 impl DeepSeekOptions {
@@ -56,6 +59,7 @@ impl DeepSeekOptions {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
+            context_window: None,
         }
     }
 
@@ -91,6 +95,10 @@ impl DeepSeek {
 impl Provider for DeepSeek {
     fn id(&self) -> &str {
         "deepseek"
+    }
+
+    fn context_window(&self, _model: &str) -> u64 {
+        (self.options.context_window).unwrap_or(linch_core::DEFAULT_CONTEXT_WINDOW)
     }
 
     async fn stream(

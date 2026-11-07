@@ -217,16 +217,16 @@ impl Allowlists {
 /// server's own `ANTHROPIC_BASE_URL`.
 fn base_url(provider: &ProviderConfig) -> Option<&str> {
     match provider {
-        ProviderConfig::DeepSeek { base_url }
-        | ProviderConfig::OpenAiChat { base_url }
+        ProviderConfig::DeepSeek { base_url, .. }
+        | ProviderConfig::OpenAiChat { base_url, .. }
         | ProviderConfig::OpenAiResponses { base_url, .. }
         | ProviderConfig::Anthropic { base_url, .. }
         | ProviderConfig::Gemini { base_url } => base_url.as_deref(),
         // Their keys are optional, but a key set in the environment is
         // still sent.
-        ProviderConfig::Vllm { base_url }
-        | ProviderConfig::SgLang { base_url }
-        | ProviderConfig::LlamaCpp { base_url } => Some(base_url),
+        ProviderConfig::Vllm { base_url, .. }
+        | ProviderConfig::SgLang { base_url, .. }
+        | ProviderConfig::LlamaCpp { base_url, .. } => Some(base_url),
         ProviderConfig::Scripted { .. } => None,
     }
 }

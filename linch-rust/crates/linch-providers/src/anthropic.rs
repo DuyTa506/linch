@@ -30,6 +30,10 @@ mod stream;
 /// The Claude API root.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
+/// Every model's context window (Python's `anthropic._KNOWN_CONTEXT`,
+/// whose entries all equal its fallback).
+const CONTEXT_WINDOW: u64 = 200_000;
+
 /// The environment variable [`AnthropicOptions::from_env`] reads the key from.
 pub const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
@@ -116,6 +120,11 @@ impl Anthropic {
 impl Provider for Anthropic {
     fn id(&self) -> &str {
         "anthropic"
+    }
+
+    /// 200000 for every model, as Python's table and fallback say.
+    fn context_window(&self, _model: &str) -> u64 {
+        CONTEXT_WINDOW
     }
 
     async fn stream(

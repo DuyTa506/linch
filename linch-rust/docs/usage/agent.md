@@ -226,10 +226,17 @@ spec = {
 
 | Field | Default | What it controls |
 |---|---|---|
-| `threshold_tokens` | required | Compact before a turn whose conversation is estimated at this many tokens or more (about four characters per token, 1000 per image); at least 1 |
+| `threshold_tokens` | none: follow the context window | Compact before a turn whose conversation is estimated at this many tokens or more (about four characters per token, 1000 per image); at least 1 |
 | `keep_recent_turns` | `10` | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | the built-in prompt | Instructions for the summary call |
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
+
+Without `threshold_tokens` (`"compaction": {}` turns it on), the run compacts as
+Python Linch does: when the estimate plus an output reserve reaches 80% of the
+provider's [context window](./providers.md#context-window) for the spec's model.
+The reserve is `spec.max_output_tokens` when set, else a fifth of the window,
+at least 1 and at most 32768. A `threshold_tokens` replaces that rule and
+ignores the window.
 
 Compaction makes one extra provider call on the agent's provider and model,
 and the run reports it with a `compaction` [event](./events.md).
@@ -278,7 +285,8 @@ after the system prompt that teaches the model to use them.
 
 | Field | Default | What it controls |
 |---|---|---|
-| `offload_threshold_tokens` | none: never offload | Move a text tool result estimated above this many tokens (four bytes per token) into the filesystem, leaving its first lines and its path for the model to `read_file` |
+| `offload_threshold_tokens` | none | Move a text tool result estimated above this many tokens (four bytes per token) into the filesystem, leaving its first lines and its path for the model to `read_file` |
+| `offload_threshold_fraction` | none | Offload above this fraction of the provider's [context window](./providers.md#context-window), at least 1000 tokens; Python Linch uses 0.1. Used only without `offload_threshold_tokens`. With neither, results are never offloaded |
 
 With memory stores each session has its own files, gone with the server. With
 Postgres stores every session of the namespace shares them. See

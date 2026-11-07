@@ -103,6 +103,20 @@ async fn the_skill_tool_returns_the_body_and_the_listing_is_cached() {
 }
 
 #[tokio::test]
+async fn the_listing_fits_the_provider_s_context_window() {
+    let provider = ScriptedProvider::new([text_turn("hi")]).with_context_window(1000);
+    let provider = Arc::new(provider);
+    let agent = builder(provider.clone(), Arc::new(ToolRegistry::new()))
+        .skills(vec![fmt_skill()])
+        .build()
+        .unwrap();
+    finish(agent.run("go", RunOptions::new("s1"))).await;
+    // 1000 tokens give the listing 40 characters: the names only.
+    let listing = &provider.requests()[0].system[1].text;
+    assert!(listing.ends_with(":\n\n- fmt\n- verify"), "{listing}");
+}
+
+#[tokio::test]
 async fn skills_are_part_of_the_contract() {
     let provider = Arc::new(ScriptedProvider::new([]));
     let build = |skills: Option<Vec<Skill>>| {

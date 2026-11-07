@@ -211,7 +211,7 @@ mod tests {
         let compaction = read.compaction.unwrap();
         assert_eq!(
             (compaction.threshold_tokens, compaction.keep_recent_turns),
-            (50000, 4)
+            (Some(50000), 4)
         );
     }
 }

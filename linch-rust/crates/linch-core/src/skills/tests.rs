@@ -18,30 +18,51 @@ fn the_listing_sorts_visible_skills_and_adds_hints() {
     review.argument_hint = Some("path".into());
     let mut hidden = skill("hidden", "Not for the model.");
     hidden.disable_model_invocation = true;
-    let text = listing(&[skill("zeta", "Last."), hidden, review]);
+    let text = listing(&[skill("zeta", "Last."), hidden, review], None);
     assert_eq!(
         text,
         "- Review: Review a change. \u{2014} before a merge (args: path)\n- zeta: Last."
     );
-    assert_eq!(listing(&[]), "");
+    assert_eq!(listing(&[], None), "");
 }
 
 #[test]
 fn the_listing_cuts_descriptions_to_fit_its_budget() {
     let long = "x".repeat(300);
-    let one = listing(&[skill("a", &long)]);
+    let one = listing(&[skill("a", &long)], None);
     assert_eq!(one.chars().count(), "- a: ".len() + 250);
     assert!(one.ends_with('\u{2026}'));
     let many: Vec<Skill> = (0..100)
         .map(|i| skill(&format!("s{i:03}"), &long))
         .collect();
-    let text = listing(&many);
+    let text = listing(&many, None);
     assert!(text.chars().count() <= 8000, "{}", text.chars().count());
     assert!(text.lines().all(|line| line.ends_with('\u{2026}')));
     let crowd: Vec<Skill> = (0..1000)
         .map(|i| skill(&format!("s{i:04}"), &long))
         .collect();
-    assert!(listing(&crowd).lines().all(|line| !line.contains(':')));
+    assert!(
+        listing(&crowd, None)
+            .lines()
+            .all(|line| !line.contains(':'))
+    );
+}
+
+#[test]
+fn the_budget_is_one_percent_of_the_context_window_at_four_chars_a_token() {
+    let long = "x".repeat(300);
+    let many: Vec<Skill> = (0..30).map(|i| skill(&format!("s{i:02}"), &long)).collect();
+    // 30 lines of 250-character descriptions: 7680 characters in all.
+    let full = listing(&many, None);
+    assert_eq!(full, listing(&many, Some(200_000)), "8000 characters");
+    // 128000 tokens give 5120 characters: each description gets a share.
+    let window = listing(&many, Some(128_000));
+    assert!(window.chars().count() <= 5120, "{}", window.chars().count());
+    assert!(window.chars().count() > 5000);
+    assert!(window.len() < full.len());
+    // 4096 tokens give 163 characters: names only.
+    let small = listing(&many, Some(4096));
+    assert!(small.lines().all(|line| !line.contains(':')), "{small}");
 }
 
 #[test]
@@ -101,7 +122,7 @@ async fn the_tool_returns_the_substituted_body() {
     fmt.body = "fix $ARGUMENTS in ${LINCH_SESSION_ID}".into();
     let mut off = skill("off", "Hidden.");
     off.disable_model_invocation = true;
-    let set = SkillSet::new(vec![fmt, off]).unwrap();
+    let set = SkillSet::new(vec![fmt, off], 128_000).unwrap();
     let tool = SkillTool::new(crate::agent::Versions::new(Arc::new(set)));
     let out = tool
         .execute(input(json!({"skill": "/fmt", "args": "a.rs"})), context())

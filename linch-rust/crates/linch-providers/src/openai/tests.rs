@@ -183,6 +183,7 @@ fn provider(base_url: String) -> OpenAiChat {
     OpenAiChat::new(OpenAiChatOptions {
         api_key: ApiKey::new(SECRET).unwrap(),
         base_url,
+        context_window: None,
     })
     .unwrap()
 }

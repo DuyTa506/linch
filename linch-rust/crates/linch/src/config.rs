@@ -148,6 +148,9 @@ pub enum ProviderConfig {
         /// API root; the public endpoint when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
+        /// The context window of every model; absent: 128000.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// OpenAI Chat Completions.
     #[serde(rename = "openai-chat")]
@@ -155,6 +158,10 @@ pub enum ProviderConfig {
         /// API root; the public endpoint when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
+        /// The context window of every model; absent: Python's table (gpt-5.5 and gpt-5.4 400000, o1
+        /// 200000, others 128000).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// The OpenAI Responses API.
     #[serde(rename = "openai-responses")]
@@ -199,18 +206,30 @@ pub enum ProviderConfig {
     Vllm {
         /// API root including `/v1`.
         base_url: String,
+        /// The context window of every model; absent: the server is asked when the agent opens
+        /// (`max_model_len` on `/v1/models`), else 128000.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// An SGLang OpenAI-compatible server.
     #[serde(rename = "sglang")]
     SgLang {
         /// API root including `/v1`.
         base_url: String,
+        /// The context window of every model; absent: the server is asked when the agent opens
+        /// (`max_model_len` on `/v1/models`), else 128000.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// A llama.cpp server.
     #[serde(rename = "llamacpp")]
     LlamaCpp {
         /// API root including `/v1`.
         base_url: String,
+        /// The context window of every model; absent: the server is asked when the agent opens
+        /// (`n_ctx` on `/props`), else 128000.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// Replays `turns` in call order, for tests and evals (see
     /// [`linch_core::ScriptedFixture`] for the turn shape).
@@ -218,6 +237,9 @@ pub enum ProviderConfig {
     Scripted {
         /// One turn per provider call.
         turns: Vec<ScriptedTurn>,
+        /// The context window of every model; absent: 128000.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
 }
 

@@ -1,6 +1,7 @@
 //! Compaction: fold the older part of a long provider view into a summary.
 //!
 //! When the estimated provider view reaches [`CompactionSpec::threshold_tokens`],
+//! or without one comes near the provider's context window,
 //! the run asks the model for a summary of everything older than the last
 //! [`CompactionSpec::keep_recent_turns`] assistant turns, in an auxiliary
 //! call with its own delivery and receipt (kind `compaction`). The new view
@@ -38,6 +39,10 @@ const SUMMARY_HEADER: &str = "<summary of earlier conversation>\n\n";
 /// Rough per-image token cost, as in the Python estimator.
 const IMAGE_TOKENS: u64 = 1000;
 
+/// The most output a window-based trigger reserves when the spec sets no
+/// output limit (Python's 32k).
+const MAX_RESERVE: u64 = 32_768;
+
 fn default_keep_recent_turns() -> u32 {
     10
 }
@@ -53,7 +58,12 @@ fn default_max_output_tokens() -> u32 {
 pub struct CompactionSpec {
     /// Compact before a turn whose provider view is estimated at this many
     /// tokens or more (about four characters per token, 1000 per image).
-    pub threshold_tokens: u64,
+    /// `None` (the default) follows the provider's context window instead,
+    /// as Python does: compact once the estimate plus an output reserve
+    /// (the spec's `max_output_tokens`, else a fifth of the window, at
+    /// least 1 and at most 32768) reaches 80% of the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_tokens: Option<u64>,
     /// Assistant turns kept verbatim after the summary (default 10, at
     /// least 1).
     #[serde(default = "default_keep_recent_turns")]
@@ -66,21 +76,32 @@ pub struct CompactionSpec {
     pub max_output_tokens: u32,
 }
 
-impl CompactionSpec {
-    /// Compaction at `threshold_tokens`, with every other field at its
-    /// default.
-    pub fn new(threshold_tokens: u64) -> Self {
+impl Default for CompactionSpec {
+    /// Compaction near the provider's context window, with every other
+    /// field at its default.
+    fn default() -> Self {
         Self {
-            threshold_tokens,
+            threshold_tokens: None,
             keep_recent_turns: default_keep_recent_turns(),
             prompt: None,
             max_output_tokens: default_max_output_tokens(),
         }
     }
+}
+
+impl CompactionSpec {
+    /// Compaction at `threshold_tokens`, with every other field at its
+    /// default.
+    pub fn new(threshold_tokens: u64) -> Self {
+        Self {
+            threshold_tokens: Some(threshold_tokens),
+            ..Self::default()
+        }
+    }
 
     /// Why this spec cannot run, if it cannot.
     pub(crate) fn problem(&self) -> Option<&'static str> {
-        if self.threshold_tokens == 0 {
+        if self.threshold_tokens == Some(0) {
             return Some("compaction.threshold_tokens must be at least 1");
         }
         if self.keep_recent_turns == 0 {
@@ -122,6 +143,30 @@ pub(crate) fn estimate_tokens(messages: &[Arc<Message>]) -> u64 {
         }
     }
     chars as u64 / 4 + images * IMAGE_TOKENS
+}
+
+/// Whether a provider view estimated at `tokens` is due for a summary.
+///
+/// With `threshold_tokens` set, at that many tokens. Without it, Python's
+/// rule: when the estimate plus an output reserve reaches 80% of the
+/// model's context `window`. The reserve is the spec's `max_output_tokens`
+/// when set (not 0), else a fifth of the window, at least 1 and at most
+/// 32768, so a small local window is not always over the line.
+pub(crate) fn due(
+    compaction: &CompactionSpec,
+    max_output_tokens: Option<u32>,
+    window: u64,
+    tokens: u64,
+) -> bool {
+    if let Some(threshold) = compaction.threshold_tokens {
+        return tokens >= threshold;
+    }
+    let reserve = match max_output_tokens.filter(|&limit| limit > 0) {
+        Some(limit) => u64::from(limit),
+        None => (window / 5).clamp(1, MAX_RESERVE),
+    };
+    let projected = u128::from(tokens) + u128::from(reserve);
+    projected * 5 >= u128::from(window) * 4
 }
 
 /// Where the kept turns start: the `keep_recent_turns`-th assistant message

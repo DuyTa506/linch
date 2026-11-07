@@ -70,7 +70,8 @@ impl Runner {
             return Ok(Some(DISPATCH));
         };
         let tokens_before = estimate_tokens(&view);
-        if tokens_before < spec.threshold_tokens {
+        let window = agent.context_window();
+        if !compaction::due(spec, agent.spec.max_output_tokens, window, tokens_before) {
             return Ok(Some(DISPATCH));
         }
         let started = std::time::Instant::now();

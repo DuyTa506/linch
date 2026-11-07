@@ -230,7 +230,8 @@ impl AgentBuilder {
         let mut built_ins = BuiltIns::default();
         let mut skill_versions = None;
         if let Some(skills) = self.skills {
-            let set = SkillSet::new(skills)?;
+            let window = provider.context_window(&self.spec.model);
+            let set = SkillSet::new(skills, window)?;
             let value = serde_json::to_value(&set.skills)
                 .map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("skills".into(), value);

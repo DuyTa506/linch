@@ -32,6 +32,14 @@ mod catalog;
 pub(crate) mod payload;
 mod stream;
 
+/// Python's `openai_responses.KNOWN_CONTEXT_WINDOWS`.
+const KNOWN_CONTEXT: &[(&str, u64)] = &[
+    ("gpt-5", 400_000),
+    ("gpt-4.1", 1_000_000),
+    ("gpt-4o", 128_000),
+    ("o1", 200_000),
+];
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Reasoning models can think for minutes before the first event.
 const READ_TIMEOUT: Duration = Duration::from_secs(600);
@@ -124,6 +132,11 @@ impl OpenAiResponses {
 impl Provider for OpenAiResponses {
     fn id(&self) -> &str {
         "openai-responses"
+    }
+
+    /// Python's `openai_responses.KNOWN_CONTEXT_WINDOWS`, else 128000.
+    fn context_window(&self, model: &str) -> u64 {
+        crate::context::known(KNOWN_CONTEXT, model, linch_core::DEFAULT_CONTEXT_WINDOW)
     }
 
     async fn stream(

@@ -76,7 +76,7 @@ pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
     ProviderRequest, ReasoningEffort, StreamError, Thinking, ToolChoice, ToolDefinition, assemble,
 };
-pub use provider::{Provider, ProviderError, ProviderStream};
+pub use provider::{DEFAULT_CONTEXT_WINDOW, Provider, ProviderError, ProviderStream};
 pub use registration::Registration;
 pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,

@@ -39,7 +39,8 @@ impl Agent {
     pub fn reload_skills(&self, skills: Vec<Skill>) -> Result<Registration, BuildError> {
         let versions = (self.inner.skills.as_ref())
             .ok_or_else(|| BuildError::Invalid("this agent has no skills".into()))?;
-        Ok(versions.push(Arc::new(SkillSet::new(skills)?)))
+        let window = self.inner.context_window();
+        Ok(versions.push(Arc::new(SkillSet::new(skills, window)?)))
     }
 
     /// Replace the subagents the `Subagent` tool runs with `definitions`.

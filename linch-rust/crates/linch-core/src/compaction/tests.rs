@@ -117,3 +117,30 @@ fn the_summary_request_disables_tools_and_keeps_the_conversation() {
     let default = summary_request(&spec, &CompactionSpec::new(1), vec![], vec![]);
     assert_eq!(default.system[0].text, DEFAULT_PROMPT);
 }
+
+#[test]
+fn without_a_threshold_it_is_due_at_80_percent_of_the_window_less_the_reserve() {
+    let by_window: CompactionSpec = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(by_window, CompactionSpec::default());
+    assert_eq!(by_window.threshold_tokens, None);
+    let wire = serde_json::to_value(&by_window).unwrap();
+    assert!(wire.get("threshold_tokens").is_none());
+    // Python's reserve: a fifth of the window, at least 1, at most 32768.
+    assert!(!due(&by_window, None, 100_000, 59_999));
+    assert!(due(&by_window, None, 100_000, 60_000));
+    assert!(!due(&by_window, None, 1_000_000, 800_000 - 32_768 - 1));
+    assert!(due(&by_window, None, 1_000_000, 800_000 - 32_768));
+    assert!(!due(&by_window, None, 4, 2));
+    assert!(due(&by_window, None, 4, 3));
+    // The spec's output limit is the reserve when set, unclamped.
+    assert!(due(&by_window, Some(50_000), 100_000, 30_000));
+    assert!(!due(&by_window, Some(50_000), 100_000, 29_999));
+    assert!(
+        due(&by_window, Some(0), 100_000, 60_000),
+        "0 counts as unset"
+    );
+    // An explicit threshold wins over the window.
+    let explicit = CompactionSpec::new(10);
+    assert!(due(&explicit, None, 1_000_000, 10));
+    assert!(!due(&explicit, Some(1), 1, 9));
+}

@@ -29,6 +29,8 @@ differs in Rust:
 |---|---|
 | `fn id(&self) -> &str` | Stable identifier (`deepseek`, `openai-chat`, `vllm`, ...). The OpenTelemetry layer maps it to `gen_ai.provider.name`. |
 | `async fn stream(&self, request, cancel) -> Result<ProviderStream, ProviderError>` | Start one call. An error before the first event (connect, HTTP status, a request the adapter refuses) is the `Err`. The stream ends after `message_end` or after one error item. Cancelling `cancel` ends it with `ProviderError::Cancelled`. |
+| `fn context_window(&self, model: &str) -> u64` | The model's context window, without I/O; `DEFAULT_CONTEXT_WINDOW` (128000) unless overridden. Compaction without a `threshold_tokens` (`crates/linch-core/src/compaction.rs`, `due`), the skill listing budget and the facade's offload fraction derive from it. |
+| `async fn prepare(&self)` | One-time discovery, a no-op unless overridden; it never fails. The facade calls it when it opens an agent, before anything reads the window; a host that builds an agent in code calls it before `AgentBuilder::build`. |
 
 `ProviderStream` is `BoxStream<'static, Result<ProviderEvent, ProviderError>>`
 (`client.rs:17`), so the stream owns everything it needs and outlives the
@@ -268,6 +270,19 @@ id keeps its raw parts in `provider_metadata` and replays them verbatim.
 become `refusal`; unknown ones fail as a retryable transport error
 (`gemini/stream.rs:293`). The module notes this adapter has not yet run
 against a live key.
+
+### Context windows
+
+Each adapter reports Python Linch's values (`crates/linch-providers/src/context.rs`
+holds the lookups and probes): Anthropic 200000; Gemini 2000000 for
+`gemini-1.5-pro`, else 1048576; Responses and OpenAI Chat their own tables
+(Python keeps two), else 128000; DeepSeek 128000. `DeepSeekOptions`,
+`OpenAiChatOptions` and `ServerOptions` take a `context_window` that wins.
+A server profile states its rule (`ChatProfile::context`): vLLM and SGLang read
+each model's `max_model_len` from `GET /v1/models`, llama.cpp `n_ctx` from
+`GET /props` (then the root's), once in `prepare`, within 2 seconds, with the
+call's bearer key. A failed probe leaves 128000. Unlike Python, a configured
+llama.cpp window skips the probe rather than serving as its fallback.
 
 ### Usage normalization
 

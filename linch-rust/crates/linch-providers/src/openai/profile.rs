@@ -10,6 +10,7 @@ use linch_core::{
 };
 use serde_json::json;
 
+use crate::context::ContextRule;
 use crate::openai_compat::payload;
 use crate::openai_compat::stream::{ReasoningField, WireUsage};
 
@@ -34,6 +35,8 @@ pub(crate) struct ChatProfile {
     pub template_thinking_switch: bool,
     /// Usage normalizer for the target's `usage` object.
     pub usage: fn(&WireUsage) -> Usage,
+    /// How the target's context window is known when none is configured.
+    pub context: ContextRule,
 }
 
 /// Which forced `tool_choice` forms a target accepts; `auto` and `none`
@@ -59,7 +62,16 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     reasoning_effort: true,
     template_thinking_switch: false,
     usage: openai_usage,
+    context: ContextRule::Known(OPENAI_CONTEXT),
 };
+
+/// Python's `openai_chat._KNOWN_CONTEXT`; 128000 for the other models.
+const OPENAI_CONTEXT: &[(&str, u64)] = &[
+    ("gpt-5.5", 400_000),
+    ("gpt-5.4", 400_000),
+    ("gpt-4o", 128_000),
+    ("o1", 200_000),
+];
 
 /// OpenAI's effort values (`none` and `minimal` have no Linch level).
 pub(crate) fn effort_value(effort: ReasoningEffort) -> &'static str {

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use super::client::DEFAULT_CONTEXT_WINDOW;
 use super::{
     MessageEndEvent, MessageStartEvent, Provider, ProviderError, ProviderEvent, ProviderRequest,
     ProviderStream, TextDeltaEvent, ThinkingDeltaEvent, ToolUseEndEvent, ToolUseInputDeltaEvent,
@@ -158,6 +159,8 @@ impl From<OutOfTurns> for ProviderError {
 #[derive(Debug)]
 pub struct ScriptedProvider {
     state: Mutex<State>,
+    /// The context window it reports for every model.
+    window: u64,
 }
 
 #[derive(Debug)]
@@ -178,7 +181,15 @@ impl ScriptedProvider {
                 record: true,
                 requests: Vec::new(),
             }),
+            window: DEFAULT_CONTEXT_WINDOW,
         }
+    }
+
+    /// Report `window` as every model's context window (128000 unless
+    /// set), for tests of what derives from it.
+    pub fn with_context_window(mut self, window: u64) -> Self {
+        self.window = window;
+        self
     }
 
     /// Stop recording requests, so a long benchmark run does not keep every
@@ -233,6 +244,10 @@ impl From<ScriptedFixture> for ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
+    }
+
+    fn context_window(&self, _model: &str) -> u64 {
+        self.window
     }
 
     async fn stream(

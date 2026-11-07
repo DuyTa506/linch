@@ -6,18 +6,27 @@ use super::Skill;
 const MAX_PER_ENTRY: usize = 250;
 /// Shortest description worth keeping when the budget squeezes them.
 const MIN_DESC_LEN: usize = 20;
-/// Characters the whole listing may take.
-const BUDGET: usize = 8000;
+/// Characters the whole listing may take without a context window.
+const FALLBACK_BUDGET: usize = 8000;
+/// The share of the context window the listing may take.
+const BUDGET_FRACTION: f64 = 0.01;
+/// Characters per token, for the budget.
+const CHARS_PER_TOKEN: f64 = 4.0;
 
 /// One `- name: description` line per skill the model may invoke, sorted by
 /// lowercase name; empty when there is none.
 ///
 /// A description is the skill's `description`, then ` — when_to_use` and
-/// ` (args: argument_hint)` when set, cut at 250 characters. When the lines
-/// pass the 8000-character budget, every description is cut to an equal
-/// share of it; when that share is under 20 characters, the listing keeps
-/// the names only.
-pub fn listing(skills: &[Skill]) -> String {
+/// ` (args: argument_hint)` when set, cut at 250 characters. The listing
+/// may take 1% of `context_window` at four characters a token (Python's
+/// budget; 8000 characters without a window). When the lines pass it,
+/// every description is cut to an equal share of it; when that share is
+/// under 20 characters, the listing keeps the names only.
+pub fn listing(skills: &[Skill], context_window: Option<u64>) -> String {
+    let budget = match context_window {
+        Some(window) => (window as f64 * CHARS_PER_TOKEN * BUDGET_FRACTION) as usize,
+        None => FALLBACK_BUDGET,
+    };
     let mut visible: Vec<&Skill> = (skills.iter())
         .filter(|skill| !skill.disable_model_invocation)
         .collect();
@@ -36,14 +45,14 @@ pub fn listing(skills: &[Skill]) -> String {
         lines.join("\n")
     };
     let full = render(&descriptions);
-    if full.chars().count() <= BUDGET {
+    if full.chars().count() <= budget {
         return full;
     }
     let overhead: usize = (visible.iter())
         .map(|skill| format!("- {}: ", skill.name).chars().count())
         .sum();
     let newlines = visible.len() - 1;
-    let share = BUDGET.saturating_sub(overhead + newlines) / visible.len();
+    let share = budget.saturating_sub(overhead + newlines) / visible.len();
     if share < MIN_DESC_LEN {
         let names: Vec<String> = (visible.iter())
             .map(|skill| format!("- {}", skill.name))

@@ -63,6 +63,11 @@ pub struct ServerOptions {
     /// [`linch_core::provider::Thinking::Disabled`]. The switch is defined
     /// by the model's chat template; an empty object sends nothing.
     pub thinking_off_kwargs: JsonObject,
+    /// The context window of every model, which skips the probe. `None`
+    /// asks the server once in [`linch_core::Provider::prepare`] (vLLM and
+    /// SGLang: `max_model_len` on `/v1/models`; llama.cpp: `n_ctx` on
+    /// `/props`), else 128000.
+    pub context_window: Option<u64>,
 }
 
 impl ServerOptions {
@@ -74,6 +79,7 @@ impl ServerOptions {
             base_url: base_url.into(),
             api_key: None,
             thinking_off_kwargs: server.thinking_off_kwargs(),
+            context_window: None,
         }
     }
 }

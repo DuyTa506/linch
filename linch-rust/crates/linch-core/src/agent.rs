@@ -178,6 +178,11 @@ impl AgentInner {
         request
     }
 
+    /// The context window of the agent's model, as its provider reports it.
+    pub(crate) fn context_window(&self) -> u64 {
+        self.provider.context_window(&self.spec.model)
+    }
+
     /// Run every session-close callback for `session`.
     pub(crate) fn close(&self, session: &SessionId) {
         for callback in &self.session_close {

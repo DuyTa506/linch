@@ -43,10 +43,16 @@ class Filesystem(TypedDict, total=False):
     Attributes:
         offload_threshold_tokens: Move a text tool result estimated above
             this many tokens (four bytes per token) into the filesystem,
-            leaving its first lines and its path. Absent: never offload.
+            leaving its first lines and its path. Absent, with no
+            `offload_threshold_fraction` either: never offload.
+        offload_threshold_fraction: Offload above this fraction of the
+            provider's context window for the spec's model, at least 1000
+            tokens (Python Linch's `threshold_fraction`, 0.1 there). Used
+            only when `offload_threshold_tokens` is absent.
     """
 
     offload_threshold_tokens: int
+    offload_threshold_fraction: float
 
 
 class ToolSearch(TypedDict, total=False):

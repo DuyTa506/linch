@@ -274,6 +274,7 @@ fn provider(base_url: String) -> DeepSeek {
     DeepSeek::new(DeepSeekOptions {
         api_key: ApiKey::new(SECRET).unwrap(),
         base_url,
+        context_window: None,
     })
     .unwrap()
 }

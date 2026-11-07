@@ -30,6 +30,8 @@ struct Keyed {
     requests: Mutex<Vec<ProviderRequest>>,
     /// Fail every summary request with a 503.
     failing_summaries: bool,
+    /// The context window the provider reports.
+    window: u64,
 }
 
 impl Keyed {
@@ -43,6 +45,7 @@ impl Keyed {
             calls: Mutex::default(),
             requests: Mutex::default(),
             failing_summaries: false,
+            window: 128_000,
         }
     }
 }
@@ -64,6 +67,10 @@ fn primary_turn(request: &ProviderRequest) -> usize {
 impl Provider for Keyed {
     fn id(&self) -> &str {
         "keyed"
+    }
+
+    fn context_window(&self, _model: &str) -> u64 {
+        self.window
     }
 
     async fn stream(
@@ -236,6 +243,30 @@ async fn compaction_is_off_by_default_and_below_its_threshold() {
             "no summary call"
         );
         assert_eq!(stores.runs.writes().commit, 18);
+    }
+}
+
+#[tokio::test]
+async fn without_a_threshold_compaction_follows_the_context_window() {
+    for (window, summaries) in [(128_000, 0), (1, 2)] {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Keyed {
+            window,
+            ..Keyed::answering()
+        });
+        let tools = registry(vec![Echo::new("Read", ToolScope::Read, &Runs::default())]);
+        let mut spec = spec();
+        spec.compaction = Some(CompactionSpec {
+            keep_recent_turns: 1,
+            ..CompactionSpec::default()
+        });
+        let permissions = policy(PermissionMode::SkipDangerous);
+        let agent = agent_with(spec, provider.clone(), tools, permissions, stores.clone());
+        finish(agent.run("go", RunOptions::new("s1"))).await;
+        let requests = provider.requests.lock().unwrap();
+        let summarizing = |r: &&ProviderRequest| r.tool_choice == Some(ToolChoice::Disabled {});
+        let made = requests.iter().filter(summarizing).count();
+        assert_eq!(made, summaries, "window {window}");
     }
 }
 
