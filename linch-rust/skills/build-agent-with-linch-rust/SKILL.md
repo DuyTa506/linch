@@ -123,11 +123,16 @@ A test that replaces the part you depend on proves nothing about that part. Fake
 
 - A `Server()` sidecar speaks stdio and runs its kernel on one thread (`architecture/rpc.md`).
   With hundreds of sessions at once, spread them over several sidecars, on Postgres stores so any
-  can resume a run. In the linch-rust repository's concurrent-sessions bench (case 14), four
-  sidecars cut the overhead per turn three to seven times against one, from 100 to 2000 sessions.
+  can resume a run. Give each sidecar its share of the database's connections
+  (`stores.max_connections`, below): four at the default pool size can pass Postgres's limit of
+  100. In the linch-rust repository's concurrent-sessions bench (case 14), four sidecars of 20
+  connections each cut the overhead per turn 3.5 to 4.5 times against one, from 100 to 2000
+  sessions.
 - For many processes, machines or tenants, run one multi-threaded `linch-server --config FILE`
   and use `Server.connect`. A tenant drives 16 runs at once unless `max_runs` is raised.
-- A server process has one Postgres pool per DSN of `stores.max_connections` (10 when absent).
+- A server process has one Postgres pool per target (per tenant on a listening server) of
+  `stores.max_connections`: when absent, the machine's cores between 10 and 32. A tenant may
+  ask for at most its `max_pool_connections`.
   Plan two connections per run in flight, and keep the sum over sidecars under the database's
   limit (`usage/stores.md`). Measure your own load before and after.
 

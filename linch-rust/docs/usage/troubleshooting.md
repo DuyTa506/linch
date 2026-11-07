@@ -58,6 +58,7 @@ exception class tells you its family:
 | `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | The tenant holds `max_connections` connections | Close one, or raise the tenant's `max_connections` |
 | `at most <n> logins at once; try again once one ends` (`LimitReached`, `kind == "logins"`) | 32 socket connections wait to log in at once | Retry with backoff; the server is busy, not gone |
 | `at most <n> agents at once; try again once one ends` (`LimitReached`, `kind == "agents"`) by `open_agent` | The tenant keeps `max_agents` agents open, across its connections | Close agents it no longer uses, or raise the tenant's `max_agents` |
+| `stores.max_connections <n> is above the tenant's max_pool_connections <max>` (`NotAllowed`, `kind == "pool_connections"`) by `open_agent` | The config asks for a larger Postgres pool than the tenant may have | Ask for at most `<max>`, leave `max_connections` out, or raise the tenant's `max_pool_connections` (see [Stores](./stores.md#connections-and-pools) before going past 32) |
 | `Server.connect over WebSocket needs the websocket extra` (`ImportError`) | `websockets` is not installed | `pip install 'linch-rust[websocket]'`, or use the socket |
 | `a server reached with Server.connect has no process here` (`LinchError`) | `server.pid` on a remote server | Only a spawned server has a process here |
 

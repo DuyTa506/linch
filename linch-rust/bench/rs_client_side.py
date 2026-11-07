@@ -205,7 +205,7 @@ async def case_sessions(job: Job) -> Result:
     each, against `chat_server.py`, on Postgres stores."""
     provider = {"id": "openai-chat", "base_url": job["base_url"]}
     cfg = config(job, provider, workspace=job["workspace"], tasks=True)
-    if job["raise_caps"]:
+    if job["pg_pool"]:
         cfg["stores"]["max_connections"] = job["pg_pool"] // job["sidecars"]
     async with AsyncExitStack() as stack:
         agents = []

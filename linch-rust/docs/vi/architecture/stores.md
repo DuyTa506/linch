@@ -119,10 +119,10 @@ các test sự cố.
 
 ### Schema và migration
 
-`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:219`) tạo hoặc nâng cấp
+`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:227`) tạo hoặc nâng cấp
 các bảng. Nó an toàn ở mỗi lần khởi động: các migration đã áp dụng bị bỏ qua và các bên
 gọi đồng thời được tuần tự hóa bằng một advisory lock. Các phiên bản đã áp dụng được ghi
-trong `linch_migrations` (`lib.rs:57`), không phải bảng mặc định của sqlx, nên các
+trong `linch_migrations` (`lib.rs:62`), không phải bảng mặc định của sqlx, nên các
 migration sqlx riêng của host trong cùng schema không va chạm. Các bảng không có tiền tố
 schema và bắt đầu bằng `linch_`, nên `search_path` của kết nối chọn schema. Các truy vấn
 được dựng lúc chạy: build crate không cần cơ sở dữ liệu.
@@ -141,7 +141,7 @@ ghi, vì byte của message đi vào prompt cache và digest
 (`migrations/0001_stores.sql:1-3`). Các hàng được giải mã nghiêm ngặt; một hàng không giải
 mã được là một lỗi (`crates/linch-postgres/src/codec.rs:1-4`).
 Migration chỉ được nối thêm: thêm một tệp mới và một mục `Migration::new`
-(`lib.rs:167-203`), không bao giờ sửa một migration đã áp dụng, vì `migrate` thất bại khi
+(`lib.rs:169-211`), không bao giờ sửa một migration đã áp dụng, vì `migrate` thất bại khi
 một migration đã áp dụng khác với bản nhúng.
 
 ### Đường ghi
@@ -156,10 +156,10 @@ một migration đã áp dụng khác với bản nhúng.
 | `edit` của file | Một transaction khóa hàng file bằng `FOR UPDATE` (`crates/linch-postgres/src/files.rs:1-6`) |
 
 Các lần ghi nhiều câu lệnh bắt đầu ở `READ COMMITTED` bất kể mặc định của server hay
-role, vì chúng phải đọc lại một hàng sau khi chờ một bên ghi khác (`lib.rs:146`). Các lần
+role, vì chúng phải đọc lại một hàng sau khi chờ một bên ghi khác (`lib.rs:148`). Các lần
 ghi một câu lệnh chạy ở autocommit với mức cô lập mặc định của pool; trên
 `READ COMMITTED`, một lỗi serialization (`40001`) không ghi gì và được thử lại, tối đa ba
-lần thử (`lib.rs:151-165`).
+lần thử (`lib.rs:153-166`).
 
 Việc nhận run (admission) được thực thi bởi chỉ mục unique một phần, không phải bởi một
 lần đọc. Một vi phạm `linch_runs_one_live_per_session` đọc id của run đang chạy và trả về
@@ -187,14 +187,14 @@ nêu cả hai độ dài (`session.rs:146-168`).
 
 ### Kết nối và định cỡ pool
 
-`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:103`) giới hạn thời gian
+`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:104`) giới hạn thời gian
 của kết nối đầu tiên (mặc định `CONNECT_TIMEOUT`, 5 s); một mình sqlx sẽ thử lại một kết
 nối bị từ chối trong suốt acquire timeout 30 s của nó. Quá giới hạn đó, lỗi nêu tên host
 và port (hoặc socket) mà nó đã thử. Không thông báo lỗi nào chứa DSN.
 
 Pool chỉ ping một kết nối trước khi giao nó ra khi kết nối đó đã nhàn rỗi từ
 `IDLE_PING_AFTER` (1 s) trở lên, và thay nó khi ping thất bại
-(`before_acquire`, `lib.rs:118-127`). sqlx không theo dõi một socket đang nhàn rỗi, nên
+(`before_acquire`, `lib.rs:119-128`). sqlx không theo dõi một socket đang nhàn rỗi, nên
 nếu không có ping, một kết nối mà server đã đóng khi nhàn rỗi (khởi động lại, failover,
 `idle_session_timeout`, một proxy cắt kết nối nhàn rỗi) sẽ làm lần ghi kế tiếp trên nó
 thất bại. Sau một lời gọi model, lần ghi đó là receipt: journal sẽ bị nhiễm lỗi, và lần
@@ -207,8 +207,18 @@ thêm một round trip. Một kết nối mà server đóng trong vòng một gi
 làm lần ghi kế tiếp thất bại, và run dừng ở trạng thái bền vững cuối cùng của nó. Idle
 timeout và vòng đời của sqlx vẫn tái chế các kết nối.
 
-`connect` giữ các mặc định khác của sqlx; `MAX_CONNECTIONS` là 10 của sqlx, và một cấu
-hình facade đặt giá trị riêng bằng `stores.max_connections`. sqlx
+`connect` giữ các mặc định khác của sqlx. Kích thước mặc định của nó,
+`default_max_connections()` (`crates/linch-postgres/src/pool_size.rs:26`), là số core của
+máy được kẹp giữa `MIN_DEFAULT_CONNECTIONS` (10, mặc định của chính sqlx) và
+`MAX_DEFAULT_CONNECTIONS` (32), tính một lần cho mỗi process. Mức sàn giữ một máy nhỏ ở
+khoảng năm run commit cùng lúc. Mức trần dành cho cơ sở dữ liệu: `max_connections` của
+chính Postgres (100 nếu không đặt) được dùng chung bởi mọi pool của mọi process trên nó,
+nên ba process ở mặc định vẫn vừa. Trong bench case 14 (2000 session, store Postgres),
+pool 10 là nút thắt: 3355 ms overhead cho mỗi lượt, so với 382 ms với 40 kết nối; với
+mặc định 32 trên máy 64 core là 646 ms (3914 ms với 10, trong cùng một lần chạy liên
+tiếp). Một cấu hình facade đặt kích thước riêng bằng `stores.max_connections`; trên
+`linch-server`, một tenant được yêu cầu tối đa `max_pool_connections` của nó
+([rpc](./rpc.md)). sqlx
 cũng ping một kết nối trong nền khi nó được trả lại (sqlx-core
 0.9.0, `src/pool/connection.rs:314`), nên một run commit liên tiếp sẽ luân phiên giữa
 hai kết nối. Hãy định cỡ một pool vào khoảng hai kết nối cho mỗi run commit đồng thời.
@@ -271,7 +281,7 @@ async fn pool(dsn: &str, runs: NonZeroU32) -> Result<PgPool, sqlx::Error> {
 
 /// Every suite a store backend must pass, here run on Postgres.
 async fn check_postgres(dsn: &str) -> Result<(), Box<dyn Error>> {
-    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::MAX_CONNECTIONS);
+    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::default_max_connections());
     let pool = linch_postgres::connect(dsn, timeout, max).await?;
     linch_postgres::migrate(&pool).await?;
     let runs = PgRunStore::new(pool.clone());

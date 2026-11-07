@@ -48,8 +48,11 @@
 //! which defaults to `default` and `accept_edits`; `scripted_provider`
 //! and `exec_tools` (`Bash` for workspace agents) are off when absent;
 //! `max_runs`, `max_agents` and `max_connections`, the tenant's caps
-//! across all its connections, default to 16, 16 and 8, and a 0 is
-//! refused when the config loads. See [`linch_rpc::Allowlists`] for how
+//! across all its connections, default to 16, 16 and 8;
+//! `max_pool_connections`, the largest `stores.max_connections` it may
+//! ask for, defaults to the server's default pool size (the machine's
+//! cores, at least 10 and at most 32). A 0 is refused when the config
+//! loads. See [`linch_rpc::Allowlists`] for how
 //! each entry matches.
 //!
 //! # Transports
@@ -71,8 +74,9 @@
 //!   loopback only.
 //!
 //! Every connection is its own session of the protocol: its agent handles
-//! and runs are its own, and it acts for its token's tenant. Agents of all
-//! connections on one Postgres DSN share one pool.
+//! and runs are its own, and it acts for its token's tenant. A tenant's
+//! agents, across all its connections, share one Postgres pool per target;
+//! two tenants never share one.
 
 #![forbid(unsafe_code)]
 

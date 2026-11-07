@@ -212,7 +212,7 @@ async fn serve(
     provider: Arc<dyn Provider>,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
-    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::MAX_CONNECTIONS);
+    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::default_max_connections());
     let pool = linch_postgres::connect(dsn, timeout, max).await?;
     linch_postgres::migrate(&pool).await?;
     linch_worker::migrate(&pool).await?;
@@ -253,7 +253,7 @@ fn main() {
 }
 ```
 
-`connect`'s pool holds at most 10 connections. A worker with `max_jobs`
+The example's pool holds `default_max_connections()`, the machine's cores between 10 and 32. A worker with `max_jobs`
 runs committing at once wants about two connections per run plus the
 listener; see [connecting and sizing a pool](./stores.md#connecting-and-sizing-a-pool).
 

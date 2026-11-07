@@ -212,7 +212,7 @@ async fn serve(
     provider: Arc<dyn Provider>,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
-    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::MAX_CONNECTIONS);
+    let (timeout, max) = (linch_postgres::CONNECT_TIMEOUT, linch_postgres::default_max_connections());
     let pool = linch_postgres::connect(dsn, timeout, max).await?;
     linch_postgres::migrate(&pool).await?;
     linch_worker::migrate(&pool).await?;
@@ -253,7 +253,7 @@ fn main() {
 }
 ```
 
-Pool của `connect` giữ tối đa 10 kết nối. Một worker có `max_jobs` run commit cùng lúc
+Pool trong ví dụ giữ `default_max_connections()`, tức số core của máy, kẹp trong khoảng 10 đến 32. Một worker có `max_jobs` run commit cùng lúc
 cần khoảng hai kết nối cho mỗi run cộng với listener; xem [kết nối và định cỡ pool](./stores.md#kết-nối-và-định-cỡ-pool).
 
 ## Test

@@ -71,8 +71,8 @@ impl Listeners {
     /// Serve every connection until `stop` fires, then stop accepting,
     /// end every connection as at the end of its input (runs dropped,
     /// calls in flight answered, MCP servers closed), wait for them, and
-    /// remove the socket file. Agents of every connection on one Postgres
-    /// DSN share one pool. A failed accept is reported on stderr and
+    /// remove the socket file. Each tenant's agents share one Postgres pool
+    /// per target, across the tenant's connections. A failed accept is reported on stderr and
     /// retried, and a connection's I/O error ends only that connection.
     pub async fn serve(self, stop: CancellationToken) {
         let connections = TaskTracker::new();

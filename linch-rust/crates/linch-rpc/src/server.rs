@@ -60,7 +60,8 @@ struct State {
     /// The tenant a remote client acts for; `None` for a local client,
     /// which is not checked.
     tenant: Option<Arc<Tenant>>,
-    /// Postgres pools, shared with the process's other connections.
+    /// Postgres pools: the tenant's own for a remote client, else the
+    /// process's, shared with its other local connections.
     pools: Arc<PgPools>,
     outbox: Outbox,
     /// Requests from the server to the client.
@@ -132,6 +133,9 @@ impl Server {
         pools: Arc<PgPools>,
         stop: &CancellationToken,
     ) -> Self {
+        let pools = tenant
+            .as_ref()
+            .map_or(pools, |tenant| Arc::clone(tenant.pools()));
         Self(Arc::new(State {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),

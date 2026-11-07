@@ -29,9 +29,10 @@ use crate::error::OpenError;
 /// (`application_name`, `statement-cache-capacity`, keys sqlx ignores),
 /// share one pool. A pool has the `max_connections`, `application_name`
 /// and cache size of the open that connected it; the others share it as
-/// it is. A server keeps one `PgPools` for all its connections;
-/// [`AgentConfig::open`] uses a fresh one, so each agent gets its own
-/// pool. `Debug` shows no DSN.
+/// it is. A server keeps one `PgPools` for its local connections and one
+/// per tenant, so tenants never share a pool; [`AgentConfig::open`] uses
+/// a fresh one, so each agent gets its own pool. `Debug` shows the number
+/// of pools and their sizes, and no DSN.
 ///
 /// [`AgentConfig::open_with`]: crate::AgentConfig::open_with
 /// [`AgentConfig::open`]: crate::AgentConfig::open
@@ -91,7 +92,8 @@ impl PgPools {
     }
 
     /// The pool for the target of `dsn`, connecting it with at most
-    /// `max_connections` ([`linch_postgres::MAX_CONNECTIONS`] when `None`)
+    /// `max_connections` ([`linch_postgres::default_max_connections`] when
+    /// `None`)
     /// and applying the migrations if no open agent uses one. A pool in
     /// use keeps the size it was connected with. Concurrent opens of one
     /// target wait for the same connect; a failed connect is tried again
@@ -102,7 +104,8 @@ impl PgPools {
         max_connections: Option<NonZeroU32>,
     ) -> Result<(Arc<Shared>, PgPool), OpenError> {
         let shared = self.slot(dsn);
-        let max_connections = max_connections.unwrap_or(linch_postgres::MAX_CONNECTIONS);
+        let max_connections =
+            max_connections.unwrap_or_else(linch_postgres::default_max_connections);
         let pool = shared.0.get_or_try_init(|| connect(dsn, max_connections));
         let pool = pool.await?.clone();
         Ok((shared, pool))
@@ -126,9 +129,16 @@ impl PgPools {
 impl fmt::Debug for PgPools {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let pools = lock(&self.pools);
-        let live = pools.values().filter(|slot| slot.strong_count() > 0);
+        let live: Vec<_> = pools.values().filter_map(Weak::upgrade).collect();
+        // The size of each connected pool, smallest first.
+        let mut sizes: Vec<u32> = (live.iter())
+            .filter_map(|slot| slot.pool())
+            .map(|pool| pool.options().get_max_connections())
+            .collect();
+        sizes.sort_unstable();
         f.debug_struct("PgPools")
-            .field("pools", &live.count())
+            .field("pools", &live.len())
+            .field("sizes", &sizes)
             .finish()
     }
 }
@@ -185,8 +195,10 @@ mod tests {
         let (_first, sized) = pools.get(&dsn, NonZeroU32::new(3)).await.unwrap();
         let (_second, shared) = pools.get(&dsn, NonZeroU32::new(7)).await.unwrap();
         assert_eq!((size(&sized), size(&shared)), (3, 3));
+        assert_eq!(format!("{pools:?}"), "PgPools { pools: 1, sizes: [3] }");
         let (_other, default) = PgPools::new().get(&dsn, None).await.unwrap();
-        assert_eq!(size(&default), 10);
+        let expected = linch_postgres::default_max_connections().get();
+        assert_eq!(size(&default), expected);
 
         let drop = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
         let query = sqlx::raw_sql(AssertSqlSafe(drop));
@@ -202,7 +214,7 @@ mod tests {
         drop(first);
         let _held = pools.slot("postgres://db/c");
         assert_eq!(lock(&pools.pools).len(), 1);
-        assert_eq!(format!("{pools:?}"), "PgPools { pools: 1 }");
+        assert_eq!(format!("{pools:?}"), "PgPools { pools: 1, sizes: [] }");
     }
 
     #[test]

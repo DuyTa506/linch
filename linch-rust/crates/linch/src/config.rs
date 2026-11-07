@@ -282,7 +282,8 @@ pub enum StoreConfig {
         #[serde(serialize_with = "redact::dsn")]
         dsn: String,
         /// The most connections the pool opens at once;
-        /// [`linch_postgres::MAX_CONNECTIONS`] (10) when absent. Only the
+        /// [`linch_postgres::default_max_connections`] when absent (the
+        /// machine's cores, at least 10 and at most 32). Only the
         /// open that connects the DSN's pool sets it: agents that share
         /// that pool share its size.
         #[serde(default, skip_serializing_if = "Option::is_none")]

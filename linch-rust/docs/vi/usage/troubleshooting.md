@@ -60,6 +60,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 | `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | Tenant đang giữ `max_connections` kết nối | Đóng một kết nối, hoặc tăng `max_connections` của tenant |
 | `at most <n> logins at once; try again once one ends` (`LimitReached`, `kind == "logins"`) | 32 kết nối socket cùng chờ đăng nhập | Thử lại với backoff; server đang bận, không phải đã biến mất |
 | `at most <n> agents at once; try again once one ends` (`LimitReached`, `kind == "agents"`) từ `open_agent` | Tenant đang giữ mở `max_agents` agent, trên tất cả các kết nối của nó | Đóng các agent không còn dùng, hoặc tăng `max_agents` của tenant |
+| `stores.max_connections <n> is above the tenant's max_pool_connections <max>` (`NotAllowed`, `kind == "pool_connections"`) từ `open_agent` | Cấu hình yêu cầu pool Postgres lớn hơn mức tenant được phép có | Yêu cầu tối đa `<max>`, bỏ `max_connections` đi, hoặc tăng `max_pool_connections` của tenant (xem [Kho lưu trữ](./stores.md#kết-nối-và-pool) trước khi vượt quá 32) |
 | `Server.connect over WebSocket needs the websocket extra` (`ImportError`) | Chưa cài `websockets` | `pip install 'linch-rust[websocket]'`, hoặc dùng socket |
 | `a server reached with Server.connect has no process here` (`LinchError`) | Dùng `server.pid` trên một server từ xa | Chỉ server do chính mình khởi chạy mới có tiến trình ở đây |
 

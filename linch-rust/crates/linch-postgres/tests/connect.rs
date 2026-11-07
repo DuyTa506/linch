@@ -14,7 +14,7 @@ async fn an_unreachable_server_fails_within_the_timeout() {
 
     let started = Instant::now();
     let timeout = Duration::from_millis(300);
-    let error = linch_postgres::connect(&dsn, timeout, linch_postgres::MAX_CONNECTIONS)
+    let error = linch_postgres::connect(&dsn, timeout, linch_postgres::default_max_connections())
         .await
         .expect_err("nothing listens there");
     assert!(
@@ -39,7 +39,7 @@ async fn a_malformed_dsn_fails_at_once() {
     let error = linch_postgres::connect(
         "not a dsn",
         linch_postgres::CONNECT_TIMEOUT,
-        linch_postgres::MAX_CONNECTIONS,
+        linch_postgres::default_max_connections(),
     )
     .await
     .expect_err("not a DSN");

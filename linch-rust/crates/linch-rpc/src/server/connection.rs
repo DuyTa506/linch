@@ -73,9 +73,10 @@ where
 ///     access: How the client is trusted. With [`Access::Login`] the first
 ///         line must be `connection.auth`; a refused login, or none within
 ///         10 s, closes the connection.
-///     pools: Where the connection's agents take their Postgres pools;
+///     pools: Where a local client's agents take their Postgres pools;
 ///         pass one for every connection of a process, so agents on one
-///         DSN share a pool.
+///         target share a pool. A tenant's agents take their tenant's own
+///         pools instead.
 ///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:
@@ -117,7 +118,8 @@ where
 ///         one message per item. It is flushed whenever no message waits,
 ///         and closed at the end.
 ///     access: How the client is trusted.
-///     pools: Where the connection's agents take their Postgres pools.
+///     pools: Where a local client's agents take their Postgres pools; a
+///         tenant's agents take their tenant's own.
 ///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:

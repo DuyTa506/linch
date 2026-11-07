@@ -179,7 +179,10 @@ class AgentConfig(TypedDict, total=False):
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),
             with an optional `base_url`.
         stores: `{"type": "memory"}` (the default: runs live in the agent
-            handle) or `{"type": "postgres", "dsn": ...}`.
+            handle) or `{"type": "postgres", "dsn": ...}`, with an optional
+            `max_connections`: the pool size, by default the server's number
+            of cores between 10 and 32. A remote tenant may ask for at most
+            its `max_pool_connections`.
         workspace: An existing directory, the root of the built-in tools
             `Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash`; a relative
             path resolves against the server's working directory. Absent: no

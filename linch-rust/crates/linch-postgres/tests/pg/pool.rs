@@ -11,16 +11,12 @@ async fn connect_turns_off_the_ping_before_every_acquire() {
         eprintln!("skipping: LINCH_TEST_PG_DSN is not set");
         return;
     };
-    let pool = linch_postgres::connect(
-        &dsn,
-        linch_postgres::CONNECT_TIMEOUT,
-        linch_postgres::MAX_CONNECTIONS,
-    )
-    .await
-    .expect("connect to the test database");
+    let max = linch_postgres::default_max_connections();
+    let pool = linch_postgres::connect(&dsn, linch_postgres::CONNECT_TIMEOUT, max)
+        .await
+        .expect("connect to the test database");
     assert!(!pool.options().get_test_before_acquire());
-    assert_eq!(linch_postgres::MAX_CONNECTIONS.get(), 10, "sqlx's default");
-    assert_eq!(pool.options().get_max_connections(), 10);
+    assert_eq!(pool.options().get_max_connections(), max.get());
     pool.close().await;
 }
 
