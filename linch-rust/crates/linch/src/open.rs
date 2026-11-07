@@ -130,7 +130,7 @@ impl AgentConfig {
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, tasks, pool) = stores(self.stores, pools).await?;
         if self.tasks {
-            for tool in task_tools(tasks, &self.namespace) {
+            for tool in task_tools(tasks, Arc::clone(&runs), &self.namespace) {
                 // The registry lives as long as the agent; the handle is not needed.
                 let _ = tools.register(tool)?;
             }

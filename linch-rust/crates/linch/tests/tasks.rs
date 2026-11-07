@@ -112,6 +112,33 @@ async fn the_model_tracks_its_work_without_asking() {
 }
 
 #[tokio::test]
+async fn a_subagent_updates_the_tasks_of_the_session_that_started_it() {
+    let turns = vec![
+        call("TaskCreate", json!({"subject": "Ship", "description": "d"})),
+        call(
+            "Subagent",
+            json!({"description": "go", "prompt": "Finish task 1.", "subagent_type": "implementer"}),
+        ),
+        call("TaskUpdate", json!({"id": "1", "status": "completed"})),
+        text("finished"),
+        call("TaskList", json!({})),
+        text("done"),
+    ];
+    let extra = json!({
+        "permissions": {"mode": "skip_dangerous", "project_root": "/"},
+        "deep_agent": {"durable": false},
+    });
+    let opened = config(turns, extra).open().await.unwrap();
+    let ran = run(&opened, "s1").await;
+    assert_eq!(
+        ran.results.last().unwrap(),
+        "#1 [completed] Ship",
+        "{:?}",
+        ran.results
+    );
+}
+
+#[tokio::test]
 async fn on_postgres_the_tasks_outlive_the_agent() {
     let Ok(dsn) = std::env::var("LINCH_TEST_PG_DSN") else {
         eprintln!("skipping on_postgres_the_tasks_outlive_the_agent: no LINCH_TEST_PG_DSN");
