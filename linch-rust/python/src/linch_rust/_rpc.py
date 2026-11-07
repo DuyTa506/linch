@@ -7,6 +7,15 @@ task reads every server message: responses resolve pending calls,
 go to the run's queue, and `tool.call` and `hook.call` run as tasks that
 `$/cancelRequest` cancels.
 
+At most `NOTIFICATION_CAPACITY` `run.event` notifications wait unread
+across the connection's runs, as in the Rust client. Past that the reader
+stops until a run's consumer takes one, so the server's outbox fills and
+its runs pause rather than this process's memory growing. Answers and
+server requests wait behind them too: a caller that waits for an answer
+while one of its runs is unread must keep reading that run (`Run.cancel`
+does), and a run left unread with events still coming stalls the
+connection.
+
 Server lines are parsed with `orjson`, about three times faster than `json`
 on envelopes and stricter (no `NaN` or `Infinity`); what this client sends is
 encoded with `json`, which refuses non-finite numbers instead of writing
@@ -32,6 +41,9 @@ JsonObject = dict[str, Any]
 # A host tool's or callback's own failure; the code is application-defined.
 _HANDLER_ERROR = -32000
 _METHOD_NOT_FOUND = -32601
+# Unread `run.event` notifications per connection, as `NOTIFICATION_CAPACITY`
+# in `crates/linch-rpc/src/client.rs`.
+NOTIFICATION_CAPACITY = 1024
 
 
 @dataclass(frozen=True)
@@ -45,10 +57,48 @@ class RunEnd:
 RunItem = list[JsonObject] | RunEnd
 
 
+class RunQueue:
+    """One run's items; each unread `run.event` holds a place of the connection's."""
+
+    def __init__(self, room: asyncio.Semaphore) -> None:
+        self._items: asyncio.Queue[RunItem] = asyncio.Queue()
+        self._room = room
+
+    async def put(self, envelopes: list[JsonObject]) -> None:
+        """Queue a `run.event`'s envelopes once the connection has a place."""
+        await self._room.acquire()
+        self._items.put_nowait(envelopes)
+
+    def end(self, end: RunEnd) -> None:
+        """Queue the run's end; it takes no place."""
+        self._items.put_nowait(end)
+
+    async def get(self) -> RunItem:
+        """The next item, giving its place back."""
+        return self._taken(await self._items.get())
+
+    def get_nowait(self) -> RunItem:
+        """The next item without waiting.
+
+        Raises:
+            asyncio.QueueEmpty: Nothing is queued.
+        """
+        return self._taken(self._items.get_nowait())
+
+    def qsize(self) -> int:
+        """How many items are queued."""
+        return self._items.qsize()
+
+    def _taken(self, item: RunItem) -> RunItem:
+        if not isinstance(item, RunEnd):
+            self._room.release()
+        return item
+
+
 @dataclass(frozen=True)
 class _Pending:
     future: asyncio.Future[JsonObject]
-    run_queue: asyncio.Queue[RunItem] | None
+    run_queue: RunQueue | None
 
 
 @dataclass(frozen=True)
@@ -114,7 +164,8 @@ class Connection:
         self._transport = transport
         self._ids = itertools.count(1)
         self._pending: dict[int, _Pending] = {}
-        self._runs: dict[str, asyncio.Queue[RunItem]] = {}
+        self._runs: dict[str, RunQueue] = {}
+        self._room = asyncio.Semaphore(NOTIFICATION_CAPACITY)
         self._agents: dict[str, _Handlers] = {}
         self._served: dict[Any, asyncio.Task[None]] = {}
         self._closed: str | None = None
@@ -137,11 +188,9 @@ class Connection:
         """Call `method` and return its result object."""
         return await self._call(method, params, None)
 
-    async def request_run(
-        self, method: str, params: JsonObject
-    ) -> tuple[str, asyncio.Queue[RunItem]]:
+    async def request_run(self, method: str, params: JsonObject) -> tuple[str, RunQueue]:
         """Call a run method and return the run id and the queue of its events."""
-        queue: asyncio.Queue[RunItem] = asyncio.Queue()
+        queue = RunQueue(self._room)
         result = await self._call(method, params, queue)
         return str(result["run_id"]), queue
 
@@ -150,9 +199,7 @@ class Connection:
         await self._task
         await asyncio.gather(*self._served.values(), return_exceptions=True)
 
-    async def _call(
-        self, method: str, params: JsonObject, queue: asyncio.Queue[RunItem] | None
-    ) -> JsonObject:
+    async def _call(self, method: str, params: JsonObject, queue: RunQueue | None) -> JsonObject:
         if self._closed is not None:
             raise ConnectionClosed(self._closed)
         id = next(self._ids)
@@ -176,13 +223,13 @@ class Connection:
         try:
             while (message := await self._transport.receive()) is not None:
                 if message.strip():
-                    self._dispatch(orjson.loads(message))
+                    await self._dispatch(orjson.loads(message))
         except Exception as error:
             reason = f"reading the server failed: {error!r}"
         finally:
             self._shutdown(reason)
 
-    def _dispatch(self, message: JsonObject) -> None:
+    async def _dispatch(self, message: JsonObject) -> None:
         method = message.get("method")
         if method is None:
             self._resolve(message)
@@ -193,12 +240,12 @@ class Connection:
         elif method == "run.event":
             queue = self._runs.get(params.get("run_id", ""))
             if queue is not None:
-                queue.put_nowait(params.get("envelopes") or [])
+                await queue.put(params.get("envelopes") or [])
         elif method == "run.end":
             queue = self._runs.pop(params.get("run_id", ""), None)
             error = params.get("error")
             if queue is not None:
-                queue.put_nowait(RunEnd(run_end_error(error) if error else None))
+                queue.end(RunEnd(run_end_error(error) if error else None))
         elif method == "$/cancelRequest":
             task = self._served.get(params.get("id"))
             if task is not None:
@@ -269,7 +316,7 @@ class Connection:
                 pending.future.set_exception(ConnectionClosed(reason))
         self._pending.clear()
         for queue in self._runs.values():
-            queue.put_nowait(RunEnd(ConnectionClosed(reason)))
+            queue.end(RunEnd(ConnectionClosed(reason)))
         self._runs.clear()
         for task in self._served.values():
             task.cancel()

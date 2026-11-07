@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._rpc import Connection, RunEnd, RunItem
+from ._rpc import Connection, RunQueue
 from .config import Principal
 from .errors import LinchError
 from .events import Envelope, decode_envelope
@@ -215,16 +216,18 @@ class Agent:
             raise
         return Run(self._conn, run_id, queue, observer)
 
-    async def _abandon(self, call: asyncio.Future[tuple[str, asyncio.Queue[RunItem]]]) -> None:
+    async def _abandon(self, call: asyncio.Future[tuple[str, RunQueue]]) -> None:
         # Cancel the run a cancelled call started, and read it to its end,
         # after which `close` may free the agent.
         try:
             run_id, queue = await call
-            await self._conn.request("run.cancel", {"run_id": run_id})
+            run = Run(self._conn, run_id, queue)
+            await run.cancel()
         except LinchError:
             return  # Refused, so nothing started; or the connection is gone.
-        while not isinstance(await queue.get(), RunEnd):
-            pass
+        with contextlib.suppress(LinchError):
+            async for _ in run:
+                pass
 
 
 def _decision(decision: Decision) -> dict[str, str]:

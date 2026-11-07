@@ -6,7 +6,7 @@ import asyncio
 from collections import deque
 from typing import Protocol
 
-from ._rpc import Connection, JsonObject, RunEnd, RunItem
+from ._rpc import Connection, JsonObject, RunEnd, RunItem, RunQueue
 from .errors import LinchError
 from .events import Envelope, ResultEvent, SuspendedEvent, decode_envelope
 
@@ -49,7 +49,7 @@ class Run:
         self,
         conn: Connection,
         run_id: str,
-        queue: asyncio.Queue[RunItem],
+        queue: RunQueue,
         observer: Observer | None = None,
     ) -> None:
         self.id = run_id
@@ -102,20 +102,27 @@ class Run:
     async def cancel(self) -> bool:
         """Abort the run; it ends with a `result` of subtype `aborted`.
 
+        The run's envelopes that arrive meanwhile are kept for iteration,
+        so the answer never waits behind a full queue.
+
         Returns:
             Whether the server was driving the run; `False` when it had
             already ended.
         """
-        answer = await self._conn.request("run.cancel", {"run_id": self.id})
-        return bool(answer["cancelled"])
+        answer = asyncio.ensure_future(self._conn.request("run.cancel", {"run_id": self.id}))
+        while not answer.done() and self._end is None:
+            item = asyncio.ensure_future(self._queue.get())
+            try:
+                await asyncio.wait({answer, item}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                # A pending get gives its item up; a finished one is kept.
+                if not item.cancel():
+                    self._keep(item.result())
+        return bool((await answer)["cancelled"])
 
     async def _next(self) -> Envelope | None:
         while not self._received and self._end is None:
-            item = await self._queue.get()
-            if isinstance(item, RunEnd):
-                self._end = item
-            else:
-                self._received.extend(item)
+            self._keep(await self._queue.get())
         if self._received:
             envelope = decode_envelope(self._received.popleft())
             if isinstance(envelope.event, ResultEvent | SuspendedEvent):
@@ -133,3 +140,9 @@ class Run:
         if error is not None:
             raise error
         return None
+
+    def _keep(self, item: RunItem) -> None:
+        if isinstance(item, RunEnd):
+            self._end = item
+        else:
+            self._received.extend(item)

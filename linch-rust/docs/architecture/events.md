@@ -194,14 +194,16 @@ The child's `seq` is not kept; read the child run's own log for it.
 
 `python/src/linch_rust/events.py` has one frozen dataclass per delivered
 kind, with the wire name as the class variable `type`, gathered in the
-`Event` union (`events.py:345`) and the `_KINDS` table (`events.py:375`).
+`Event` union (`events.py:349`) and the `_KINDS` table (`events.py:379`).
 
-- `decode_event` (`events.py:432`) builds the class of the `type`, passing
+- `decode_event` (`events.py:436`) builds the class of the `type`, passing
   only the members the class has, so a member the client does not know is
   dropped. A `subagent` event decodes its child the same way. Any other
-  `type` becomes `UnknownEvent(type, raw)` (`events.py:338`).
-- `decode_envelope` (`events.py:450`) reads `seq`, `run_id`, `ts_ms` and
-  `event`. It reads neither `v` nor `ignorable`.
+  `type` becomes `UnknownEvent(type, raw)` (`events.py:342`).
+- `decode_envelope` (`events.py:454`) reads `seq`, `run_id`, `ts_ms` and
+  `event`, and raises `LinchError` for a `v` other than its `WIRE_VERSION`
+  (1, `events.py:19`), a missing one included. It does not read
+  `ignorable`.
 - Nested values (messages, usage, tool result blocks) stay the JSON dicts
   the server sent.
 - The journal-only kinds have no class; the server never sends them.

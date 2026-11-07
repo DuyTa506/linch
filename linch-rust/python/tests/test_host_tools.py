@@ -145,11 +145,11 @@ def cancel_before_answer(agent: Agent, call: asyncio.Task[Any], run_id: str) -> 
     conn = agent._conn  # pyright: ignore[reportPrivateUsage]
     dispatch = conn._dispatch  # pyright: ignore[reportPrivateUsage]
 
-    def cancel_first(message: dict[str, Any]) -> None:
+    async def cancel_first(message: dict[str, Any]) -> None:
         result = message.get("result")
         if isinstance(result, dict) and result.get("run_id") == run_id:
             call.cancel()
-        dispatch(message)
+        await dispatch(message)
 
     conn._dispatch = cancel_first  # pyright: ignore[reportPrivateUsage]
 

@@ -155,7 +155,7 @@ requests; and its tenant, `None` for a local client.
   spawned (`server.rs:277-288`), so it reaches the client before any
   notification of that run. The Python client relies on it: it files a
   run's notifications under the run id it read from that result
-  (`python/src/linch_rust/_rpc.py:207-218`).
+  (`python/src/linch_rust/_rpc.py:254-265`).
 - Every message goes through one queue to one writer, so the wire keeps the
   queue's order. A batch joins only what is already queued, and any other
   message or another run's envelope closes it (`outgoing.rs:1-10`): a
@@ -184,8 +184,13 @@ There is no buffer that grows without bound on the server:
 4. The Rust client keeps at most 1024 unread notifications
    (`NOTIFICATION_CAPACITY`, `crates/linch-rpc/src/client.rs:29`), then
    stops reading, so answers wait behind them too (`client.rs:103-110`).
-   The Python client queues every `run.event` without a bound
-   (`_rpc.py:144`), so it never pushes back.
+   The Python client does the same with its own 1024
+   (`NOTIFICATION_CAPACITY`, `python/src/linch_rust/_rpc.py:46`): each
+   unread `run.event` holds a place across the connection's runs, and the
+   reader waits for one before it queues the next (`RunQueue`,
+   `_rpc.py:60-96`). `Run.cancel` keeps reading its run while it waits for
+   its answer (`python/src/linch_rust/run.py:102-121`); a run nobody reads
+   while its events keep coming stalls the connection.
 
 `Outbox::send_now` (`connection.rs:267-277`), for code that cannot wait,
 hands a message to a task when the queue is full.
@@ -316,13 +321,13 @@ The Rust `Client` (`client.rs:97-101`) has one generic method,
 `RequestHandler` (`client.rs:57`); `Client::in_process` (`client.rs:174`)
 starts a server on in-memory pipes, as the tests do.
 
-The Python client's `Connection` (`python/src/linch_rust/_rpc.py:110`) has
+The Python client's `Connection` (`python/src/linch_rust/_rpc.py:160`) has
 one reader task. It resolves answers by id, files `run.event` envelopes and
-`run.end` under their run (`_rpc.py:185-205`), runs `tool.call` and
+`run.end` under their run (`_rpc.py:232-252`), runs `tool.call` and
 `hook.call` in a task each and cancels one on `$/cancelRequest`
-(`_rpc.py:220-263`). `Agent` (`python/src/linch_rust/agent.py:49`) wraps the
-methods: `run`, `resume` and `approve` through `_start` (`agent.py:202`),
-and `close`, `close_session` and `events` (`agent.py:158-200`).
+(`_rpc.py:267-310`). `Agent` (`python/src/linch_rust/agent.py:50`) wraps the
+methods: `run`, `resume` and `approve` through `_start` (`agent.py:203`),
+and `close`, `close_session` and `events` (`agent.py:159-201`).
 
 ## Add an RPC method
 

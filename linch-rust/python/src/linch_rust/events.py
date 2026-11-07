@@ -12,7 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any, ClassVar
 
+from .errors import LinchError
+
 JsonObject = dict[str, Any]
+# The envelope `v` this client reads, as `WIRE_VERSION` in linch-core.
+WIRE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -448,7 +452,18 @@ def decode_event(raw: JsonObject) -> Event:
 
 
 def decode_envelope(raw: JsonObject) -> Envelope:
-    """Decode one envelope `{"v", "seq", "run_id", "ts_ms", "event", "ignorable"?}`."""
+    """Decode one envelope `{"v", "seq", "run_id", "ts_ms", "event", "ignorable"?}`.
+
+    Raises:
+        LinchError: The envelope's `v` is not `WIRE_VERSION`: the server
+            speaks a wire this client cannot read.
+    """
+    version = raw.get("v")
+    if version != WIRE_VERSION:
+        raise LinchError(
+            f"envelope wire version {version!r} is not supported: this client reads "
+            f"version {WIRE_VERSION}; use a linch-rust client that matches the server"
+        )
     return Envelope(
         seq=int(raw["seq"]),
         run_id=str(raw["run_id"]),
