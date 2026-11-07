@@ -11,7 +11,7 @@ has its own usage docs.
 ## Conventions
 
 - `file:line` references are relative to `linch-rust/` (for example
-  `crates/linch-core/src/tool.rs:213`) and match the revision the page was
+  `crates/linch-core/src/tool.rs:226`) and match the revision the page was
   written against. Prefer them over re-deriving behavior.
 - Every Rust snippet compiles against the workspace crates at that revision;
   the ones with a `main` that needs no network or database also run.

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsLoadedEvent {
-    /// Skill descriptors visible to the model.
+    /// Every skill's descriptor, those the model may not invoke included.
     pub skills: Vec<JsonObject>,
 }
 

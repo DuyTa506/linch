@@ -68,7 +68,7 @@ encoding.
 | `model_call_delivery` | `ModelCallDeliveryEvent`, `model_call.rs:33` | yes | no | |
 | `model_call_receipt` | `ModelCallReceiptEvent`, `model_call.rs:72` | yes | no | |
 | `model_call_usage_settlement` | `ModelCallUsageSettlementEvent`, `model_call.rs:110` | yes | no | Not emitted at this revision |
-| any other | `IgnorableEvent`, `event/ignorable.rs:51` | yes | yes | Only under an `ignorable` envelope |
+| any other | `IgnorableEvent`, `event/ignorable.rs:52` | yes | yes | Only under an `ignorable` envelope |
 
 "Stored" means written to the run's event log; "Delivered" means yielded by
 the run's stream, and so sent to clients. The two columns are the
@@ -141,7 +141,8 @@ That is the output of the example below. The rules:
   `WIRE_VERSION` (`EventError::UnsupportedVersion`). A known `type` always
   decodes its payload strictly. A `type` the build does not know is
   `EventError::UnknownType` unless the envelope is `ignorable`, when it
-  becomes an `IgnorableEvent` (`event/mod.rs:245-258`). Ignorable never
+  becomes an `IgnorableEvent` (`event/mod.rs:245-258`), which keeps every
+  key and value of the event object but not their order. Ignorable never
   rescues a malformed known kind.
 - **Re-encoding** an envelope whose event holds an `IgnorableEvent`, at any
   depth, writes `ignorable: true` whatever the field says, so every

@@ -25,7 +25,10 @@ the built-in `verify` skill, and every valid skill in
 - Only that directory is scanned: there is no home or global skills
   directory.
 - Skills load once, when the agent opens. To pick up changed files, open a
-  new agent. Reloading skills into an open agent is coming.
+  new agent: reloading is not on the RPC, so this client cannot reload an
+  open agent. A Rust host can, with `OpenedAgent::reload_skills` in the
+  `linch` crate (it rescans the directory) or `Agent::reload_skills` in
+  `linch-core` (it takes the new list).
 
 The system prompt lists every skill the model may invoke, one line each:
 `- <name>: <description> — <when_to_use> (args: <argument_hint>)`. A line is
@@ -255,7 +258,7 @@ without asking. `"skill": "*"` matches every skill.
 | Python Linch | linch-rust |
 |---|---|
 | `FeatureFlags(skills=True)` | `skills: True` in the config |
-| `agent.reload_skills()` | Not yet; open a new agent |
+| `agent.reload_skills()` | Not in this client or on the RPC; open a new agent. Rust hosts have `OpenedAgent::reload_skills` and `Agent::reload_skills` |
 | The listing is a reminder in the first prompt | A cached block of the system prompt |
 | The `Skill` tool is exec-scoped with auto-allow rules | Read-scoped |
 | `skills_loaded` once per session object, so again after a restart | Only on the session's first run, and only when the run offers the `Skill` tool |

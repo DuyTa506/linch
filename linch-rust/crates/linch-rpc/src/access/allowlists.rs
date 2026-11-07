@@ -16,8 +16,10 @@ use super::AccessError;
 pub const DEFAULT_MAX_RUNS: usize = 16;
 
 /// Connections a tenant holds at once unless its allowlists say
-/// otherwise: each may buffer a 16 MiB line (a WebSocket about 128 MiB),
-/// so this bounds one tenant to about 1 GiB of buffers.
+/// otherwise: a socket connection may buffer a 16 MiB line, and a
+/// WebSocket one a 64 MiB message (`linch-server`'s `MAX_MESSAGE_BYTES`)
+/// plus its 64 MiB `String` copy, 128 MiB at peak, so this bounds one
+/// tenant to about 1 GiB of buffers.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
 
 /// Agents a tenant keeps open at once unless its allowlists say

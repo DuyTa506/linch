@@ -171,7 +171,7 @@ impl Event {
         // Removed once up front (rather than per match arm): every known
         // arm's payload uses `deny_unknown_fields`, so `type` must not reach
         // it; the unknown-tag arm below re-inserts it for `IgnorableEvent`'s
-        // verbatim `raw`.
+        // `raw` (same keys and values; the removal may move a key).
         let type_value = obj.remove("type").ok_or(EventError::MissingField("type"))?;
         let type_name = match type_value {
             JsonValue::String(s) => s,
@@ -245,8 +245,8 @@ impl Event {
             other => {
                 if ctx.ignorable {
                     // `obj` had its original "type" field removed above;
-                    // restore it so the sentinel's `raw` is the untouched
-                    // source object.
+                    // restore it so the sentinel's `raw` has every key and
+                    // value of the source object, though not its key order.
                     obj.insert("type".to_string(), JsonValue::String(other.to_string()));
                     Ok(Event::Ignorable(IgnorableEvent::new_trusted(
                         other.to_string(),

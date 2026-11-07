@@ -108,9 +108,9 @@ durable: a session's later runs never send it, after a restart either.
 ## Subagents
 
 `AgentBuilder::subagents` (`builder.rs:164`) turns subagents on with the
-host's `SubagentDefinition`s (`crates/linch-core/src/subagents.rs:144`);
+host's `SubagentDefinition`s (`crates/linch-core/src/subagents.rs:146`);
 the facade loads them from `.linch/agents/*.md`. The `Roster`
-(`subagents.rs:234-276`) adds the built-in `verification` agent unless one
+(`subagents.rs:236-278`) adds the built-in `verification` agent unless one
 has its name, and keeps a general-purpose agent, `_default`, for a call
 with no `subagent_type` (or a blank one, `general-purpose` or `_default`).
 The roster enters the contract as the `subagents` feature, and the
@@ -144,7 +144,7 @@ A call (`tool.rs:167-212`):
 2. refuses `run_in_background` unless `workers.background` is on;
 3. names the child run, and its session, after the call's idempotency key,
    `<parent run id>:<tool_use_id>` (`tool.rs:192`;
-   `crates/linch-core/src/tool.rs:183-190`);
+   `crates/linch-core/src/tool.rs:182-192`);
 4. enlists the worker in the agent's worker registry;
 5. runs the child in the background (see [workers](#background-workers))
    or in the foreground. A foreground child that nothing can address again
@@ -205,7 +205,7 @@ output (`Subagent aborted.`, `Subagent encountered an error: ...`).
 
 A call that its timeout or the run's cancel cuts short cancels the child's
 token and leaves the child to write its abort; the parent waits for every
-child before its terminal write (`subagents.rs:28-31`).
+child before its terminal write (`subagents.rs:30-33`).
 
 The parent's `total_usage` counts its own model calls only; a child's usage
 reaches the parent wrapped, as in Python
@@ -213,7 +213,7 @@ reaches the parent wrapped, as in Python
 
 ## Background workers
 
-`Workers` (`subagents.rs:100-131`) has three settings, all in the contract:
+`Workers` (`subagents.rs:102-133`) has three settings, all in the contract:
 
 | Field | Default | Meaning |
 |---|---|---|

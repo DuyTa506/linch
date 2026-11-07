@@ -22,7 +22,7 @@ describes the same ideas. What differs in Rust:
 
 ## The tool trait
 
-`Tool` (`crates/linch-core/src/tool.rs:213`) is `Send + Sync` and stateless
+`Tool` (`crates/linch-core/src/tool.rs:226`) is `Send + Sync` and stateless
 per call; per-call data arrives in `ToolContext`.
 
 | Method | Default | Contract |
@@ -44,10 +44,12 @@ the host, and optional `details` (`tool.rs:42-83`).
 `ToolContext` (`tool.rs:117`) carries the session id, run id, `tool_use_id`,
 the caller's `principal`, a `cancel` token (cancelled on run abort or when the
 call ends) and the call's `deadline` when the agent sets a call timeout.
-`idempotency_key()` is `run_id:tool_use_id` (`tool.rs:177`). A resumed run
-never re-runs a call whose start was durable but whose end was not: it reports
-it as interrupted. `report_progress` is best effort and never fails the tool
-(`tool.rs:182`).
+`idempotency_key()` is `run_id:tool_use_id` (`tool.rs:182-192`). A resumed
+run never re-runs a call whose start was durable but whose end was not: it
+reports it as interrupted. `Subagent` and `SubagentContinue` are the
+exception: they are planned again and resume their durable child run
+(`crates/linch-core/src/runner/batch.rs:118-139`). `report_progress` is best
+effort and never fails the tool (`tool.rs:195`).
 
 ### Scopes and approval
 
@@ -148,7 +150,7 @@ so the next call waits for it.
 A read call is one whose tool's `parallel(input)` returns true. The default
 returns true only for `Read` scope. A tool may return true for a call that does
 only read work whatever its scope, for example a subagent whose tools all read
-(`tool.rs:237-244`). Never return true for a call that writes or runs
+(`tool.rs:250-257`). Never return true for a call that writes or runs
 anything.
 
 The limit is `AgentSpec::max_tool_concurrency`, 4 by default; 0 counts as 1

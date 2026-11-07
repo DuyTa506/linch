@@ -94,7 +94,7 @@ pub(super) async fn new_run(
         resumed: false,
         turn: 0,
     }));
-    // A session's first run tells which skills the model may load, as
+    // A session's first run lists the agent's skills, as
     // Python does once per session, when the run offers `Skill` (a child
     // may not); it rides the create write.
     if let (true, true, Some(skills)) = (entries.is_empty(), offers_skill, &agent.skills) {

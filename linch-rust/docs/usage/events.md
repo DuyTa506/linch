@@ -346,13 +346,14 @@ The run finished; its stream ends here.
 
 ### `SkillsLoadedEvent` (`skills_loaded`)
 
-The skills the model may load, on a session's first run of an agent with
-skills, between `init` and the prompt's `user` event. A run that does not
-offer the `Skill` tool (a subagent whose definition leaves it out) sends
-none. `skills` holds one
-dict per skill, the built-in `verify` included, sorted by name: `name`,
-`description`, and `when_to_use` and `argument_hint` when the skill sets
-them. Python Linch sends it once per session object, so again after a
+The agent's skills, on a session's first run of an agent with skills,
+between `init` and the prompt's `user` event. A run that does not offer the
+`Skill` tool (a subagent whose definition leaves it out) sends none.
+`skills` holds one dict per skill, sorted by name: the built-in `verify`
+included, and, as in Python, a skill with `disable_model_invocation` that
+the model may not load and the prompt's listing leaves out. Each has
+`name`, `description`, and `when_to_use` and `argument_hint` when the skill
+sets them. Python Linch sends it once per session object, so again after a
 restart; here a session's later runs never do.
 
 ### `SkillInvokedEvent` (`skill_invoked`)
@@ -376,7 +377,7 @@ An event of a subagent's child run.
 | `child_run_id` | The child run: `<parent run id>:<tool_use_id>` of the call that runs it |
 | `tool_use_id` | The parent's call that runs the child: the `Subagent` call, or the `SubagentContinue` call that continues a worker |
 | `ts_ms` | When the child emitted the event, from the child's own envelope. A background child's events reach the parent's log at its next turn, so the outer envelope's `ts_ms` is later |
-| `event` | The child's event, decoded into its own class (an `InitEvent`, a `ToolCallEndEvent`, another `SubagentEvent` for a grandchild, ...) |
+| `event` | The child's event, decoded into its own class (an `InitEvent`, a `ToolCallEndEvent`, ...). Never another `SubagentEvent`: a child cannot spawn |
 
 A foreground subagent's events, its stream-only ones included, reach the
 parent's stream this way; a background worker's durable ones do. See

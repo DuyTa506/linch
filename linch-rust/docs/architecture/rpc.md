@@ -267,13 +267,13 @@ config, refusing unknown fields and a cap of 0; `tokens`
 A run method's `principal`, when given, must name the tenant
 (`admit_principal`, `admit.rs:115-129`); the server does not fill one in.
 
-**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:132-169`)
+**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:134-171`)
 reads a DSN the way the store connects with it, through sqlx's
 `PgConnectOptions`, so a `?host=` or `?user=` override counts and a missing
 user or `sslmode` takes the server's default. An entry allows a DSN with
 the same host, port, socket, database, user, startup `options` and TLS
 files, and an `sslmode` at least as strict as its own, ranked from
-`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:171-192`).
+`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:173-194`).
 
 The facade shares one pool per target across a server's connections
 (`crates/linch/src/pools.rs:19-38`). Its key (`pools.rs:44-73`) is sqlx's
@@ -283,18 +283,18 @@ order or in settings sqlx ignores share a pool. A pool takes its size from
 the open that connected it (`pools.rs:93-109`); the connect gives up after
 5 s and the migrations after 30 s (`pools.rs:136-154`).
 
-**MCP commands.** An `McpCommand` (`allowlists.rs:49-69`) may not list
+**MCP commands.** An `McpCommand` (`allowlists.rs:51-71`) may not list
 `PATH`, `HOME` or the variables known to choose what code a program loads
-(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:71-108`). The list is
+(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:73-110`). The list is
 best effort.
 
 ## Limits
 
 | Limit | Value | Where | Past it |
 |---|---|---|---|
-| `max_connections` per tenant | 8 unless set (`allowlists.rs:21`) | `Tenant::connect` (`access.rs:87-104`); the connection holds the place until it ends (`connection.rs:177-188`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
+| `max_connections` per tenant | 8 unless set (`allowlists.rs:23`) | `Tenant::connect` (`access.rs:87-104`); the connection holds the place until it ends (`connection.rs:177-188`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
 | `max_runs` per tenant | 16 unless set (`allowlists.rs:16`) | `run_place`, taken in `start` and `claim` (`run.rs:152-157`) and held by the driven run | `-32005`, nothing starts |
-| `max_agents` per tenant | 16 unless set (`allowlists.rs:26`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:103-110`) | `-32005`, before any MCP server starts |
+| `max_agents` per tenant | 16 unless set (`allowlists.rs:28`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:103-110`) | `-32005`, before any MCP server starts |
 | Calls in flight per connection | 64 | `server.rs:49` | Reading waits |
 | Logins waiting | 32 per `Tokens` | `access.rs:125-129` | `-32005` `kind: logins`, then close |
 | HTTP upgrades waiting | 32 per server | `http.rs:39-44` | Closed unread |
