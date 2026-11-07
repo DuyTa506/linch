@@ -5,6 +5,29 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## 3.1.3 — 2026-11-07
+
+### Changed (breaking)
+
+- `@tool` and `FunctionTool` require an explicit `scope`. A missing one raises `ConfigError`
+  when the tool is built; the old default (`read`) auto-approved side-effecting functions (#99).
+- `PostgresFileBackend` takes a required `namespace` and keys files by `(namespace, path)`.
+  An old table is rejected, not migrated (#100).
+- Offloaded tool results live in the session store, scoped to the root session of the agent tree,
+  so they survive a takeover and no longer land in the workspace. Postgres adds the
+  `session_offloads` table (#104).
+
+### Fixed
+
+- `DockerBackend` passes `--env KEY` only; values travel in the subprocess environment, not argv (#101).
+- A PreToolUse hook returning `retry` or `force_continue` blocks the call instead of running the tool (#102).
+- Grep kills and reaps `rg` (its process group) on timeout or cancellation (#103).
+- `AgentRegistry` lists a built-in subagent once when an extra built-in shares its name (#105).
+- Task tools resolve to the root session of the agent tree, so workers see the coordinator's tasks (#106).
+- A continue to a busy worker is refused without changing its status; `TaskStop` acts only on a
+  running worker and records the reason; a continuation uses the supplied run id (#107).
+- `SubagentContinue` and `TaskStop` no longer reach the worker tool catalog (#108).
+
 ## 3.1.2 — 2026-11-03
 
 ### Added
