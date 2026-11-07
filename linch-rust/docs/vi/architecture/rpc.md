@@ -14,7 +14,7 @@ server; nó chỉ gọi ngược lại client cho các host tool và cho các
 callback mà client đã khai báo.
 
 Chính giao thức được đặc tả trong crate docs của `linch-rpc`
-(`crates/linch-rpc/src/lib.rs:1-372`): framing, mọi method, request
+(`crates/linch-rpc/src/lib.rs:1-374`): framing, mọi method, request
 và notification của server, và bảng lỗi. Trang này giải thích cách mã
 triển khai nó, các giới hạn và kiểm tra nằm ở đâu, và cách thay đổi
 nó. [Trang hướng dẫn dùng server](../usage/server.md) chỉ cách chạy nó và
@@ -43,12 +43,12 @@ process của chính mình, nên không có wire protocol, tenant hay allowlist.
 | `crates/linch-rpc/src/client.rs` | `Client` Rust |
 | `crates/linch-server/src/main.rs` | Binary: stdio, hoặc các listener với `--config FILE` |
 | `crates/linch-server/src/{config,listen,http}.rs` | Cấu hình, Unix socket và transport HTTP |
-| `crates/linch/src/pools.rs` | `PgPools`: các pool Postgres dùng chung cho mọi kết nối của một process |
+| `crates/linch/src/pools.rs` | `PgPools`: các pool Postgres theo đích; một server giữ một bộ cho mỗi tenant và một bộ cho các kết nối cục bộ của nó |
 
 ## Method và message
 
 Mỗi tên method là một hằng số `method::` (`crates/linch-rpc/src/protocol.rs:25-55`),
-và `Server::dispatch` (`crates/linch-rpc/src/server.rs:293-311`) ánh xạ từng tên
+và `Server::dispatch` (`crates/linch-rpc/src/server.rs:297-315`) ánh xạ từng tên
 tới handler của nó. Các kiểu params từ chối trường không biết; `OpenParams` tách
 `tools` và `callbacks` ra và đọc phần còn lại thành một `AgentConfig` nghiêm ngặt
 (`crates/linch-rpc/src/protocol/open.rs:13-28`).
@@ -80,7 +80,7 @@ không bao giờ trùng với id số của client; một lời gọi thôi khô
 ### Lỗi
 
 `ErrorObject` là `{code, message, data?}`; bảng đầy đủ nằm trong crate
-docs (`lib.rs:326-362`) và các mã nằm trong `crates/linch-rpc/src/error.rs:24-100`.
+docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:24-100`.
 
 | Mã | Đến từ |
 |---|---|
@@ -112,18 +112,18 @@ Client Python ánh xạ mã sang exception trong `_BY_CODE`
 
 ## Bên trong một kết nối
 
-Mỗi kết nối là một `Server` (`server.rs:53-78`): các bảng agent đang mở,
+Mỗi kết nối là một `Server` (`server.rs:53-79`): các bảng agent đang mở,
 run đang được điều khiển và run đang park dưới một khóa, để `agent.close` không thể
 bỏ sót một run bắt đầu trong lúc nó kiểm tra; outbox của nó; peer của nó cho các
 request từ server; và tenant của nó, là `None` đối với client cục bộ.
 
-1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:83-108`)
-   chia một luồng byte thành các dòng; `serve_messages` (`connection.rs:125-148`)
-   nhận một message cho mỗi frame. Cả hai đưa các mục `Inbound` (`connection.rs:151-159`)
-   cho `connection` (`connection.rs:161-219`), thứ spawn task writer,
+1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:84-109`)
+   chia một luồng byte thành các dòng; `serve_messages` (`connection.rs:127-150`)
+   nhận một message cho mỗi frame. Cả hai đưa các mục `Inbound` (`connection.rs:153-161`)
+   cho `connection` (`connection.rs:163-221`), thứ spawn task writer,
    chạy phần đăng nhập khi access là `Login`, và đọc cho đến khi input kết thúc
    hoặc `stop` kích hoạt.
-2. **Vòng lặp đọc.** `Server::receive` (`server.rs:170-206`) parse một dòng,
+2. **Vòng lặp đọc.** `Server::receive` (`server.rs:174-210`) parse một dòng,
    đưa câu trả lời của client cho request của server mà nó nêu tên, và đọc
    mọi thứ khác như một request (`Request::from_value`,
    `crates/linch-rpc/src/message.rs:108`). Một request không có `id` là một
@@ -131,7 +131,7 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    (`MAX_REQUESTS`, `server.rs:49`); vòng lặp await nó, nên request thứ 65
    dừng việc đọc cho đến khi một lời gọi kết thúc. Lời gọi chạy trong task riêng,
    nên một `agent.open` chậm không bao giờ giữ chân một `run.cancel`.
-3. **Dispatch.** `Server::handle` (`server.rs:264-291`) bắt một panic thành
+3. **Dispatch.** `Server::handle` (`server.rs:268-295`) bắt một panic thành
    `-32603`. Một method run trả về stream của nó: kết quả `RunAccepted`
    được xếp hàng trước, rồi một task điều khiển stream.
 4. **Một run.** `Server::drive` (`run.rs:159-196`) mã hóa mỗi envelope một lần,
@@ -139,14 +139,14 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    gỡ run khỏi các bảng (giữ chỗ của nó khi nó park, xem
    [các giới hạn](#các-giới-hạn)) và xếp hàng `run.end`. Một panic của run kết thúc nó với
    `-32603`, tại trạng thái bền vững cuối cùng của nó.
-5. **Writer.** `write_messages` (`connection.rs:223-252`) lấy mọi thứ
+5. **Writer.** `write_messages` (`connection.rs:225-254`) lấy mọi thứ
    đã xếp hàng, gộp các envelope liên tiếp của một run thành một
    `run.event` (`Batch::push`, `crates/linch-rpc/src/server/outgoing.rs:74-83`)
    tối đa 64 KiB (`outgoing.rs:21`), và flush một lần khi không còn gì chờ.
 6. **Request từ server.** `Peer::call` (`peer.rs:92-139`) xếp hàng request
    và chờ câu trả lời, timeout hoặc lệnh hủy của nó; thời gian chờ chỗ trống trong
    outbox được tính vào cả hai.
-7. **Hết input.** `Server::stop` (`server.rs:149-168`) để các lời gọi
+7. **Hết input.** `Server::stop` (`server.rs:153-172`) để các lời gọi
    đã đọc kết thúc, drop mọi run tại chỗ nó đang đứng (một run bền vững vẫn
    resume được), làm các request đang chờ của server thất bại, rồi đóng các MCP server
    của mọi agent. Writer xả hết hàng đợi và kết nối trả về.
@@ -154,7 +154,7 @@ request từ server; và tenant của nó, là `None` đối với client cục 
 ### Thứ tự
 
 - `RunAccepted` của một run được xếp hàng trước khi task điều khiển nó được
-  spawn (`server.rs:277-288`), nên nó đến client trước mọi
+  spawn (`server.rs:281-292`), nên nó đến client trước mọi
   notification của run đó. Client Python dựa vào điều này: nó phân loại các
   notification của một run theo run id mà nó đọc từ kết quả đó
   (`python/src/linch_rust/_rpc.py:254-265`).
@@ -192,7 +192,7 @@ Không có buffer nào tăng không giới hạn trên server:
    câu trả lời (`python/src/linch_rust/run.py:102-121`); một run không ai đọc
    trong khi event của nó vẫn đến sẽ làm kết nối bị nghẽn.
 
-`Outbox::send_now` (`connection.rs:267-277`), dành cho mã không thể chờ,
+`Outbox::send_now` (`connection.rs:269-279`), dành cho mã không thể chờ,
 giao một message cho một task khi hàng đợi đầy.
 
 ## Transport
@@ -213,7 +213,7 @@ supervisor. Mọi thứ không phải pipe dùng `stdin()` và `stdout()` của 
 **Unix socket.** Một tệp socket do một server đã dừng để lại sẽ bị thay thế, và
 một tệp mà một server đang trả lời trên đó thì bị từ chối (`bind_socket`, `listen.rs:105-122`).
 Mỗi kết nối chờ đăng nhập của nó với một trong 32 chỗ
-(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:125-129`): mỗi chỗ có thể
+(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:135-139`): mỗi chỗ có thể
 đệm một dòng 16 MiB trong 10 s, nên các chỗ này giới hạn mức đó ở 512 MiB. Kết nối thứ
 33 nhận `-32005` ngay. Một lần đăng nhập có 10 s (`LOGIN_TIMEOUT`,
 `login.rs:17`); im lặng quá mức đó nhận `-32003` và kết nối đóng
@@ -231,7 +231,8 @@ tenant trong `Linch-Tenant`. Một message WebSocket có thể dài 64 MiB
 16 MiB bị lõi từ chối như một dòng quá khổ. Server nói HTTP thuần:
 hãy đặt TLS phía trước nó hoặc listen trên loopback.
 
-Mọi listener của một server dùng chung một `PgPools` (`listen.rs:77-101`).
+Mọi listener của một server dùng chung một `PgPools` (`listen.rs:77-101`) cho các client
+cục bộ; các kết nối của một tenant dùng `PgPools` riêng của tenant (bên dưới).
 
 ## Tenant và allowlist
 
@@ -240,63 +241,71 @@ cấu hình, từ chối các trường không biết và giới hạn bằng 0;
 (`config.rs:187`) đọc từng token trực tiếp hoặc từ môi trường;
 `AllowConfig::build` (`config.rs:220`) tạo các `Allowlists`.
 
-- Một `Tenant` (`access.rs:40-115`) có tên gồm 1 đến 64 chữ cái ASCII,
+- Một `Tenant` (`access.rs:41-125`) có tên gồm 1 đến 64 chữ cái ASCII,
   chữ số, `.`, `_` hoặc `-` (không bao giờ có `/`), các allowlist của nó, và một semaphore
   cho mỗi loại: run, agent và connection, dùng chung giữa mọi kết nối của nó.
-- `Tokens` (`access.rs:131-196`) giữ mỗi token dưới dạng digest SHA-256 và
+- `Tokens` (`access.rs:141-206`) giữ mỗi token dưới dạng digest SHA-256 và
   so sánh một token được đưa ra với mọi digest trong thời gian hằng số. Không token nào
   được ghi log hay echo lại.
-- `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-113`) kiểm tra một
+- `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-136`) kiểm tra một
   cấu hình `agent.open` trước khi bất cứ thứ gì bắt đầu: không đọc khóa nào, không
   khởi động process MCP nào, không kết nối cơ sở dữ liệu nào cho cấu hình bị từ chối. Mỗi
   lần từ chối là `-32004` với `data.kind`:
 
 | Kiểm tra | `kind` | Ở đâu |
 |---|---|---|
-| Namespace là tên của tenant hoặc bắt đầu bằng `<tenant>/` | `namespace` | `admit.rs:26-36` |
-| Provider scripted chỉ khi được phép; một `base_url` do client chọn chỉ ở một origin được phép, vì khóa của server sẽ được gửi tới đó | `provider`, `provider_base_url` | `admit.rs:131-147`, `admit.rs:218-232` |
-| Chế độ quyền nằm trong danh sách của tenant; `tasks` và `deep_agent`, vốn tự động cho phép các task tool, cần `skip_dangerous` ở đó | `permission_mode`, `auto_allow` | `admit.rs:39-57` |
-| Các mục `auto_allow` và các rule chỉ cho phép khi các chế độ của tenant gồm `skip_dangerous` | `auto_allow`, `permission_rule` | `admit_grants`, `admit.rs:188-212` |
-| `project_root` và `workspace` là thư mục đã tồn tại dưới một gốc được phép, được thay bằng đường dẫn canonical của chúng | `project_root`, `workspace` | `admit.rs:58-70`, `admit_dir` ở `admit.rs:149-158` |
-| Khi skill hoặc subagent bật, thư mục cấu hình là thư mục đã tồn tại dưới một gốc được phép, hoặc `.linch` mặc định ở đó hoặc bị thiếu | `config_dir` | `admit.rs:71-75`, `admit.rs:160-186` |
-| `Bash` chỉ khi tenant cho phép các exec tool; nếu không thì nó bị tắt, không bị từ chối | không có | `admit.rs:76` |
-| Một DSN Postgres chỉ cho một đích được phép | `postgres` | `admit.rs:77-83` |
-| Một MCP stdio server chỉ với `command` và `args` của một mục, chỉ đặt các tên `env` mà mục đó liệt kê; một MCP URL chỉ ở một origin được phép | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:84-111` |
+| Namespace là tên của tenant hoặc bắt đầu bằng `<tenant>/` | `namespace` | `admit.rs:28-38` |
+| Provider scripted chỉ khi được phép; một `base_url` do client chọn chỉ ở một origin được phép, vì khóa của server sẽ được gửi tới đó | `provider`, `provider_base_url` | `admit.rs:154-170`, `admit.rs:241-255` |
+| Chế độ quyền nằm trong danh sách của tenant; `tasks` và `deep_agent`, vốn tự động cho phép các task tool, cần `skip_dangerous` ở đó | `permission_mode`, `auto_allow` | `admit.rs:41-59` |
+| Các mục `auto_allow` và các rule chỉ cho phép khi các chế độ của tenant gồm `skip_dangerous` | `auto_allow`, `permission_rule` | `admit_grants`, `admit.rs:211-235` |
+| `project_root` và `workspace` là thư mục đã tồn tại dưới một gốc được phép, được thay bằng đường dẫn canonical của chúng | `project_root`, `workspace` | `admit.rs:60-72`, `admit_dir` ở `admit.rs:172-181` |
+| Khi skill hoặc subagent bật, thư mục cấu hình là thư mục đã tồn tại dưới một gốc được phép, hoặc `.linch` mặc định ở đó hoặc bị thiếu | `config_dir` | `admit.rs:73-77`, `admit.rs:183-209` |
+| `Bash` chỉ khi tenant cho phép các exec tool; nếu không thì nó bị tắt, không bị từ chối | không có | `admit.rs:78` |
+| Một DSN Postgres chỉ cho một đích được phép | `postgres` | `admit.rs:79-89` |
+| `stores.max_connections` tối đa bằng `max_pool_connections` của tenant (mặc định: kích thước pool mặc định của server); khi không có, nó được đặt thành mặc định hoặc mức trần, tùy giá trị nào nhỏ hơn | `pool_connections`, với `data.max` là mức trần | `admit.rs:90-105` |
+| Một MCP stdio server chỉ với `command` và `args` của một mục, chỉ đặt các tên `env` mà mục đó liệt kê; một MCP URL chỉ ở một origin được phép | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |
 
 `principal` của một method run, khi được đưa ra, phải nêu tên tenant
-(`admit_principal`, `admit.rs:115-129`); server không tự điền nó.
+(`admit_principal`, `admit.rs:138-152`); server không tự điền nó.
 
-**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:134-171`)
+**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:137-174`)
 đọc một DSN theo cách store kết nối với nó, qua `PgConnectOptions` của sqlx,
 nên một ghi đè `?host=` hay `?user=` được tính và một user hay `sslmode` bị thiếu lấy
 mặc định của server. Một mục cho phép một DSN có cùng host, port, socket, database, user,
 `options` khởi động và tệp TLS, và một `sslmode` ít nhất nghiêm ngặt bằng của nó, xếp
-hạng từ `disable` (0) đến `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:173-194`).
+hạng từ `disable` (0) đến `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:176-197`).
 
-Facade dùng chung một pool cho mỗi đích giữa các kết nối của một server
-(`crates/linch/src/pools.rs:19-38`). Khóa của nó (`pools.rs:44-73`) là URL đã chuẩn hóa
+Facade dùng chung một pool cho mỗi đích giữa các agent được mở với cùng một
+`PgPools` (`crates/linch/src/pools.rs:19-39`). Một `Tenant` sở hữu một cái
+(`access.rs:54`, `access.rs:77`) và `Server::new` đưa cho kết nối của tenant cái đó
+thay vì cái của process (`server.rs:136`), nên các pool được khóa theo tenant và đích:
+hai tenant trên cùng một đích không bao giờ dùng chung pool, và một tenant không thể
+đặt kích thước pool của tenant khác (R3 front 5). Mọi kết nối của một tenant dùng chung
+các pool của nó, nên `max_pool_connections` giới hạn các kết nối của tenant trên mỗi
+đích. Các kết nối cục bộ (stdio) giữ các pool của process. Khóa của nó (`pools.rs:45-74`) là URL đã chuẩn hóa
 của sqlx cho DSN cộng với `options` khởi động của nó, thứ mà URL đó bỏ
 đi và có thể đặt `search_path`; các DSN chỉ khác nhau về thứ tự tham số hoặc về
 các cài đặt mà sqlx bỏ qua sẽ dùng chung một pool. Một pool lấy kích thước từ
-lần open đã kết nối nó (`pools.rs:93-109`); việc kết nối bỏ cuộc sau
-5 s và các migration sau 30 s (`pools.rs:136-154`).
+lần open đã kết nối nó (`pools.rs:94-112`); việc kết nối bỏ cuộc sau
+5 s và các migration sau 30 s (`pools.rs:146-164`).
 
-**Lệnh MCP.** Một `McpCommand` (`allowlists.rs:51-71`) không được liệt kê
+**Lệnh MCP.** Một `McpCommand` (`allowlists.rs:54-74`) không được liệt kê
 `PATH`, `HOME` hay các biến được biết là chọn mã nào mà một chương trình nạp
-(`CODE_LOADING_ENV` và các tiền tố của nó, `allowlists.rs:73-110`). Danh sách này là
+(`CODE_LOADING_ENV` và các tiền tố của nó, `allowlists.rs:76-113`). Danh sách này là
 nỗ lực tối đa (best effort).
 
 ## Các giới hạn
 
 | Giới hạn | Giá trị | Ở đâu | Vượt quá |
 |---|---|---|---|
-| `max_connections` cho mỗi tenant | 8 nếu không đặt (`allowlists.rs:23`) | `Tenant::connect` (`access.rs:87-104`); kết nối giữ chỗ cho đến khi nó kết thúc (`connection.rs:177-188`) | Socket: `-32005` dưới id `connection.auth`; HTTP: `429` |
-| `max_runs` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:16`) | `run_place`, lấy trong `start` và `claim` (`run.rs:152-157`) và được run đang điều khiển giữ | `-32005`, không có gì bắt đầu |
-| `max_agents` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:28`) | Lấy trong `open` sau các kiểm tra (`agents.rs:19-26`), được giải phóng khi các MCP server của agent đã tắt (`server.rs:103-110`) | `-32005`, trước khi bất kỳ MCP server nào khởi động |
+| `max_pool_connections` cho mỗi tenant | `linch_postgres::default_max_connections()` nếu không đặt (`allowlists.rs:275-278`) | `Tenant::admit` (`admit.rs:90-105`), trước khi bất cứ thứ gì kết nối | `-32004`, `kind: pool_connections`, `max` là mức trần |
+| `max_connections` cho mỗi tenant | 8 nếu không đặt (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:92-109`); kết nối giữ chỗ cho đến khi nó kết thúc (`connection.rs:179-190`) | Socket: `-32005` dưới id `connection.auth`; HTTP: `429` |
+| `max_runs` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:17`) | `run_place`, lấy trong `start` và `claim` (`run.rs:152-157`) và được run đang điều khiển giữ | `-32005`, không có gì bắt đầu |
+| `max_agents` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:29`) | Lấy trong `open` sau các kiểm tra (`agents.rs:19-26`), được giải phóng khi các MCP server của agent đã tắt (`server.rs:104-111`) | `-32005`, trước khi bất kỳ MCP server nào khởi động |
 | Số lời gọi đang bay cho mỗi kết nối | 64 | `server.rs:49` | Việc đọc phải chờ |
-| Số đăng nhập đang chờ | 32 cho mỗi `Tokens` | `access.rs:125-129` | `-32005` `kind: logins`, rồi đóng |
+| Số đăng nhập đang chờ | 32 cho mỗi `Tokens` | `access.rs:135-139` | `-32005` `kind: logins`, rồi đóng |
 | Số HTTP upgrade đang chờ | 32 cho mỗi server | `http.rs:39-44` | Đóng mà không đọc |
-| Một dòng hoặc một message | 16 MiB (`connection.rs:28`); 64 KiB đầu của nó được giữ để tìm `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:231-250`) | `-32600`, dưới id của request khi phần đầu cho thấy nó; một câu trả lời làm request của server thất bại |
+| Một dòng hoặc một message | 16 MiB (`connection.rs:28`); 64 KiB đầu của nó được giữ để tìm `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:235-254`) | `-32600`, dưới id của request khi phần đầu cho thấy nó; một câu trả lời làm request của server thất bại |
 | Chờ đăng nhập, phần đầu HTTP | 10 s mỗi loại | `login.rs:17`, `http.rs:37` | Đăng nhập nhận `-32003`, rồi kết nối đóng; kết nối HTTP đóng |
 
 Một kết nối cục bộ (stdio) không có giới hạn nào của tenant.
@@ -334,9 +343,9 @@ và `close`, `close_session` và `events` (`agent.py:159-201`).
 | 1. Đặt tên | Một hằng số `method::` trong `protocol.rs:25-55` | Không có gì; mọi bước khác đều dùng nó |
 | 2. Params và kết quả của nó | `protocol.rs` hoặc một tệp `protocol/`, với `deny_unknown_fields` và doc comment | `-32602` cho một trường không biết chỉ khi kiểu đó từ chối chúng |
 | 3. Handler | Một method `impl Server` trong `server/agents.rs` hoặc `server/run.rs`. Chạy các kiểm tra tenant (`admit_principal`, một chỗ) trước mọi thứ khác, và trả về `Reply::Run` cho một run | Test trong `crates/linch-rpc/tests/tenants.rs` và `limits.rs` cho các kiểm tra của nó |
-| 4. Dispatch | Một nhánh trong `Server::dispatch` (`server.rs:293-311`) | `-32601` lúc chạy |
+| 4. Dispatch | Một nhánh trong `Server::dispatch` (`server.rs:297-315`) | `-32601` lúc chạy |
 | 5. Lỗi | Một mã mới trong `error.rs` cùng phép chuyển đổi của nó | `crates/linch-rpc/tests/wire.rs` cho hình dạng trên wire |
-| 6. Tài liệu giao thức | Method trong phần Methods của crate docs, một mã mới trong bảng của nó (`lib.rs:118-244`, `lib.rs:326-362`) | Chỉ review |
+| 6. Tài liệu giao thức | Method trong phần Methods của crate docs, một mã mới trong bảng của nó (`lib.rs:118-246`, `lib.rs:328-364`) | Chỉ review |
 | 7. Client Rust | Không cần: `Client::call` là tổng quát. Một helper có kiểu trong `crates/linch-rpc/tests/common/mod.rs` nếu test cần | Biên dịch các test |
 | 8. Client Python | Một method trên `Agent` (`agent.py`), và với một mã mới thì một exception trong `errors.py` cùng mục `_BY_CODE` của nó | `python/tests/test_protocol.py` |
 | 9. Tài liệu sử dụng | `docs/usage/server.md` và các trang Python gọi nó | Chỉ review |
@@ -426,7 +435,7 @@ mọi envelope của nó đã được xếp hàng trước khi writer chạy v�
 | Một thư viện trong process của host; không có gì đi qua một wire | Một sidecar mà client điều khiển qua JSON-RPC, hoặc cùng kernel đó được nhúng trong Rust |
 | Host tool và hook là các callable Python | Tool và callback của một client từ xa là các request `tool.call` và `hook.call`, mỗi cái có timeout và, với callback, một fail mode |
 | Process của host được tin cậy | stdio được tin cậy; socket và HTTP hoạt động thay cho một tenant, với token, allowlist và giới hạn |
-| Mỗi agent tự kết nối store của nó | Các agent trên cùng một DSN Postgres dùng chung một pool giữa các kết nối của một server |
+| Mỗi agent tự kết nối store của nó | Các agent trên cùng một đích Postgres dùng chung một pool giữa các kết nối của một server, theo từng tenant |
 | `reload_skills()` và `reload_subagents()` trên agent | Không phải method RPC ở revision này; lõi và facade có chúng ([reload](./skills-subagents.md#catalog-và-reload)) |
 
 ## Test

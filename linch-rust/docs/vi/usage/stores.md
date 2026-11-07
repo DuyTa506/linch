@@ -143,12 +143,28 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
   `application_name` của lần mở đã tạo kết nối.
 - Việc mở sẽ bỏ cuộc sau 5 giây khi không đến được cơ sở dữ liệu (`OpenError`, mã
   -32014, nêu host và cổng đã thử), thay vì thử lại lâu hơn.
-- Một pool giữ tối đa `max_connections` kết nối, mặc định 10 khi không có (tối thiểu
-  1). Một run commit liên tiếp dùng khoảng hai kết nối, nên hãy dự trù khoảng hai kết
-  nối cho mỗi run đang chạy cùng lúc, trên mỗi tiến trình server. Lần mở đã kết nối
-  pool của một DSN đặt kích thước của nó; các agent dùng chung pool dùng chung kích
-  thước đó. Nhiều tiến trình server trên cùng một cơ sở dữ liệu mỗi tiến trình có
-  pool riêng.
+- Một pool giữ tối đa `max_connections` kết nối (tối thiểu 1). Khi không có, mặc định
+  theo máy: số core của nó, nhưng không dưới 10 và không quá 32 (32 trên máy 64 core).
+  Hai con số đặt ra các giới hạn này:
+  - Một run commit liên tiếp dùng khoảng hai kết nối, nên hãy dự trù khoảng hai kết
+    nối cho mỗi run đang chạy cùng lúc, trên mỗi pool. Pool quá nhỏ làm các run phải
+    chờ kết nối: trong bench 2000 session, pool 10 thêm 3 đến 4 s cho mỗi lượt, mặc
+    định 32 (trên 64 core) khoảng 0,6 s, và pool 40 khoảng 0,4 s.
+  - `max_connections` của chính Postgres (mặc định 100) được dùng chung bởi mọi pool
+    của mọi tiến trình trên cơ sở dữ liệu, kể cả worker và công cụ quản trị. Đó là lý
+    do mặc định dừng ở 32: ba tiến trình server ở mặc định vẫn vừa. Chỉ tăng
+    `stores.max_connections` quá 32 sau khi đã tăng giới hạn của cơ sở dữ liệu, hoặc đặt
+    một pooler như PgBouncer phía trước.
+- Lần mở đã kết nối một pool đặt kích thước của nó; các agent dùng chung pool dùng
+  chung kích thước đó. Nhiều tiến trình server trên cùng một cơ sở dữ liệu mỗi tiến
+  trình có pool riêng.
+- Trên một `linch-server` có tenant, mỗi tenant có các pool riêng: hai tenant trên cùng
+  một đích không bao giờ dùng chung pool, nên bên nào cũng không đặt được kích thước
+  của bên kia. `stores.max_connections` của một tenant được phép tối đa bằng
+  `max_pool_connections` của nó (kích thước pool mặc định khi không đặt); vượt quá,
+  `open_agent` bị từ chối (`NotAllowed`, `kind == "pool_connections"`). Một cấu hình
+  không có `max_connections` nhận kích thước mặc định hoặc mức trần, tùy giá trị nào
+  nhỏ hơn ([Server](./server.md#config)).
 - Một kết nối nhàn rỗi từ một giây trở lên được kiểm tra trước lần ghi kế tiếp và bị
   thay nếu cơ sở dữ liệu đã đóng nó (do khởi động lại, failover, hoặc idle timeout),
   nên một run đã chờ một lệnh gọi mô hình dài vẫn ghi được câu trả lời của nó. Một

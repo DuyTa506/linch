@@ -90,6 +90,8 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 
 ---
 
+<a id="config"></a>
+
 ## Cấu hình
 
 | Trường | Ý nghĩa |
@@ -110,6 +112,7 @@ thuộc đúng một tenant: cùng một token xuất hiện hai lần sẽ bị
 | `max_runs` | 16 | Số run mà tenant điều khiển cùng lúc, trên tất cả các kết nối của nó |
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
 | `max_connections` | 8 | Số kết nối hành động thay mặt tenant cùng lúc |
+| `max_pool_connections` | Kích thước pool mặc định của server: số core, trong khoảng 10 đến 32 | `stores.max_connections` lớn nhất mà một cấu hình có thể yêu cầu; pool của tenant trên mỗi đích có tối đa chừng này kết nối |
 | `provider_base_urls` | không có | Các endpoint mà `base_url` của provider có thể nêu, khớp theo scheme, host và cổng |
 | `permission_modes` | `default`, `accept_edits` | Các chế độ mà một cấu hình có thể chọn |
 | `workspace_roots` | không có | Các thư mục mà `workspace`, `project_root` hoặc `config_dir` có thể là hoặc nằm dưới |
@@ -296,7 +299,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Kết nối HTTP đang chờ nâng cấp | 32, trên toàn server; kết nối đã nâng cấp trả lại chỗ | Kết nối bị đóng mà không đọc |
 | Phần đầu request HTTP | 10 giây cho mỗi phần đầu trước khi nâng cấp | Kết nối đóng mà không trả lời |
 | Một message | 16 MiB | Request nhận `-32600` |
-| Một pool Postgres | Một pool cho mỗi DSN trên toàn server, `stores.max_connections` kết nối (10 nếu không đặt) | Các truy vấn chờ một kết nối; lần mở đã kết nối một DSN đặt kích thước của nó và các lần mở sau dùng chung ([Kho lưu trữ](./stores.md#kết-nối-và-pool)) |
+| Một pool Postgres | Một pool cho mỗi tenant và đích, `stores.max_connections` kết nối (số core, trong khoảng 10 đến 32, nếu không đặt) | Các truy vấn chờ một kết nối; lần mở của tenant đã kết nối pool của nó đặt kích thước, và các lần mở sau của tenant dùng chung ([Kho lưu trữ](./stores.md#kết-nối-và-pool)) |
+| `max_pool_connections` | Kích thước pool mặc định cho mỗi tenant nếu không đặt | `agent.open` yêu cầu `stores.max_connections` lớn hơn nhận `-32004`, `data: {"kind": "pool_connections", "max": ...}`; không có gì được kết nối |
 | Số request đang xử lý cho mỗi kết nối | 64 | Việc đọc chờ cho đến khi một request được trả lời |
 | Subagent nền cho mỗi run | `workers.max_background` của cấu hình agent, 4 nếu không đặt | Lệnh gọi `Subagent` nhận một lỗi tool và không khởi động gì ([Subagent](./subagents.md#worker-chạy-nền)) |
 
@@ -334,12 +338,13 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `project_root` | Tương tự, cho `permissions.project_root` | Các quy tắc đường dẫn được phân giải theo nó; khi không có root, một cấu hình hoàn toàn không thể gửi `permissions` và giữ chính sách mặc định |
 | `config_dir` | Khi skill hoặc subagent bật: không phải một thư mục tồn tại dưới các root, qua một đường dẫn tuyệt đối, `..` hoặc một symlink | `SKILL.md` và các tệp agent sẽ được nạp từ cây thư mục của tenant khác |
 | `postgres` | Một DSN không khớp chính xác mục `postgres_dsns` nào, hoặc yêu cầu `sslmode` yếu hơn | Một client có thể chọn cơ sở dữ liệu, role, `search_path` hay tệp chứng chỉ khác, hoặc gửi thông tin xác thực của server mà không có TLS |
+| `pool_connections` | `stores.max_connections` lớn hơn `max_pool_connections` của tenant | Mọi pool trên một cơ sở dữ liệu dùng chung giới hạn kết nối của nó; `data.max` là mức trần |
 | `mcp_command` | Một lệnh stdio và danh sách đối số không khớp mục nào | Server sẽ khởi động chương trình đó |
 | `mcp_env` | Một tên `env` mà mục khớp không liệt kê | Nó có thể thay đổi những gì chương trình nạp |
 | `mcp_url` | Một URL MCP HTTP ngoài `mcp_urls` | Server sẽ kết nối tới đó |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
-không thể dò hệ thống tệp của server. Hai thay đổi được thực hiện âm thầm thay vì từ
+không thể dò hệ thống tệp của server. Ba thay đổi được thực hiện âm thầm thay vì từ
 chối:
 
 - Khi không có `exec_tools`, `bash` của cấu hình bị tắt và agent mở mà không có
@@ -347,6 +352,8 @@ chối:
   với cùng cấu hình đó trên stdio.
 - Workspace, project root và thư mục cấu hình được thay bằng các đường dẫn chuẩn tắc
   đã được kiểm tra.
+- Một kho Postgres không có `max_connections` nhận kích thước pool mặc định hoặc
+  `max_pool_connections` của tenant, tùy giá trị nào nhỏ hơn.
 
 ---
 
