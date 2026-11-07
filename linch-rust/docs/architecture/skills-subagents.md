@@ -50,16 +50,16 @@ skills, a new session's block names them only (`set.rs:87-91`).
 
 ### The `Skill` tool
 
-`SkillTool` (`crates/linch-core/src/skills/tool.rs:23`):
+`SkillTool` (`crates/linch-core/src/skills/tool.rs:21`):
 
 | Property | Value |
 |---|---|
 | Input | `skill` (required; a leading `/` is dropped), `args` |
-| Scope | `Read`: it runs without approval and next to other read calls; a rule with a `skill` condition can still deny or ask (`tool.rs:18-22`) |
-| `always_load` | `true`: tool search never defers it (`tool.rs:79`) |
+| Scope | `Read`: it runs without approval and next to other read calls; a rule with a `skill` condition can still deny or ask (`tool.rs:18-20`) |
+| `always_load` | `true`: tool search never defers it (`tool.rs:78`) |
 | Result | The skill's body with its placeholders filled (`substitute`, `crates/linch-core/src/skills/substitute.rs:15`): `$ARGUMENTS`, `${SKILL_DIR}`, `${LINCH_SKILL_DIR}`, `${LINCH_SESSION_ID}` and each named argument, in one pass, with no shell quoting |
-| Errors | `Unknown skill: <name>`; `Skill is not invokable by the model: <name>` (`tool.rs:106-117`) |
-| Events | `skill_invoked` `{name, args}` before the load, `skill_completed` `{name, is_error}` after it (`tool.rs:87-102`); both durable, riding the call's end write, so on the stream they come between the call's `tool_call_start` and `tool_call_end` |
+| Errors | `Unknown skill: <name>`; `Skill is not invokable by the model: <name>` (`tool.rs:94-105`) |
+| Events | `skill_invoked` `{name, args}` just before the call's `tool_call_start`, `skill_completed` `{name, is_error}` just after its `tool_call_end`, as in Python. The run's tool sink stages them with the start and the end, so they ride those writes (`crates/linch-core/src/runner/sink.rs:102-131` and 173-180). A call that is denied, blocked or served gets them too; an unknown tool or invalid input does not (`skill_name`, `sink.rs:104-108`) |
 
 The tool reads the agent's current skill set on every call, so a
 [reload](#catalog-and-reload) takes effect at once.
@@ -477,8 +477,8 @@ async fn main() {
 |---|---|
 | An invoked skill's body is put back as a `<system-reminder>` every turn | The body is the `Skill` tool's result; it comes back as a reminder only after a compaction folds the result away |
 | The `Skill` tool sets a pending overlay (`allowed_tools`, `model`) on the session, kept in checkpoints | The overlay is read from the provider view at each turn; nothing is stored |
-| `skill_invoked` before the call's `tool_call_start`, `skill_completed` after its `tool_call_end` | Both between the call's `tool_call_start` and `tool_call_end`: the tool emits them |
-| `skills_loaded` once per session object (`skills_loaded_emitted`), so again after a restart | Once per session, on its first run (its log is empty) |
+| `skill_invoked` before the call's `tool_call_start`, `skill_completed` after its `tool_call_end` | The same |
+| `skills_loaded` once per session object (`skills_loaded_emitted`), so again after a restart, whenever the agent has skills | Once per session, on its first run (its log is empty), and only when the run offers the `Skill` tool |
 | `reload_skills()` and `reload_subagents()` rescan the project | The core takes the new lists; the facade rescans; neither is on the wire yet |
 | A fresh child's system blocks are built from its tool names; a fork reuses the parent's prefix | A child gets the parent's system blocks and prompt, the listing if it has `Skill`, then its body. Forking is `Agent::fork_session`, not a subagent mode |
 | A background worker is an `asyncio` task: it can outlive the run, and a restart cannot resume it | A child is a durable run the parent's stream drives; the parent waits for its workers before it ends, and resumes them with it on Postgres |

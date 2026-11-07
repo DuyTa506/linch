@@ -10,11 +10,13 @@ use common::subagents::Dying;
 use common::*;
 use linch_core::events::kinds::{SkillCompletedEvent, SkillInvokedEvent};
 use linch_core::journal::INTERRUPTED_TOOL_TEXT;
+use linch_core::permissions::{Rule, RuleDecision, ToolRule};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::FaultTiming;
 use linch_core::{
-    Agent, AgentBuilder, Event, PermissionMode, Provider, RunId, RunOptions, RunStatus, RunStore,
-    ScriptedProvider, ScriptedTurn, SessionStore, Skill, StoreError, SubagentDefinition, ToolScope,
+    Agent, AgentBuilder, Event, PermissionEngine, PermissionLayer, PermissionMode,
+    PermissionPolicy, Provider, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider,
+    ScriptedTurn, SessionStore, Skill, StoreError, SubagentDefinition, ToolScope,
 };
 use serde_json::{Value, json};
 
@@ -65,7 +67,7 @@ fn names(request: &linch_core::ProviderRequest) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn a_skill_call_reports_its_start_and_end_with_its_call_end() {
+async fn a_skill_call_reports_its_start_before_the_call_and_its_end_after() {
     let turns = [skill_call("plain"), skill_call("nope"), text_turn("done")];
     let provider = Arc::new(ScriptedProvider::new(turns));
     let stores = Arc::new(Stores::default());
@@ -75,6 +77,17 @@ async fn a_skill_call_reports_its_start_and_end_with_its_call_end() {
     finish(stream).await;
 
     let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    // As in Python: invoked before the call's start, completed after its end.
+    let kinds: Vec<&str> = (events.iter().map(|e| e.event.type_name()))
+        .filter(|kind| kind.starts_with("skill_") || kind.starts_with("tool_call_"))
+        .collect();
+    let bracket = [
+        "skill_invoked",
+        "tool_call_start",
+        "tool_call_end",
+        "skill_completed",
+    ];
+    assert_eq!(kinds, [bracket, bracket].concat());
     let skills: Vec<&Event> = (events.iter().map(|e| &e.event))
         .filter(|e| matches!(e, Event::SkillInvoked(_) | Event::SkillCompleted(_)))
         .collect();
@@ -101,6 +114,47 @@ async fn a_skill_call_reports_its_start_and_end_with_its_call_end() {
     assert_eq!(skills, expected.iter().collect::<Vec<_>>());
     let run = stores.runs.writes();
     assert_eq!(run.commit, 2 * 5 + 3, "the events ride the call ends");
+}
+
+#[tokio::test]
+async fn a_denied_skill_call_is_bracketed_too() {
+    let provider = Arc::new(ScriptedProvider::new([
+        skill_call("plain"),
+        text_turn("done"),
+    ]));
+    let stores = Arc::new(Stores::default());
+    let mut strict = PermissionPolicy::new(PermissionMode::Default, "/");
+    let rule = ToolRule::new("Skill", RuleDecision::Deny);
+    strict.layers = vec![PermissionLayer::new("runtime", [Rule::Tool(rule)])];
+    let agent = AgentBuilder::new(spec())
+        .provider(provider)
+        .permissions(PermissionEngine::new(strict).unwrap())
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .skills(vec![Skill::new("plain", "/skills/plain", "Plain.", "go")])
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+
+    let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    let kinds: Vec<&str> = (events.iter().map(|e| e.event.type_name()))
+        .filter(|kind| kind.starts_with("skill_") || kind.starts_with("tool_call_"))
+        .collect();
+    let bracket = [
+        "skill_invoked",
+        "tool_call_start",
+        "tool_call_end",
+        "skill_completed",
+    ];
+    assert_eq!(kinds, bracket);
+    let completed = events.iter().find_map(|e| match &e.event {
+        Event::SkillCompleted(completed) => Some(completed.is_error),
+        _ => None,
+    });
+    assert_eq!(completed, Some(true));
 }
 
 #[tokio::test]

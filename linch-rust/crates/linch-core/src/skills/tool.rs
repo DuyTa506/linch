@@ -7,8 +7,6 @@ use std::sync::Arc;
 
 use super::{SKILL_TOOL, SkillSet, substitute};
 use crate::agent::Versions;
-use crate::events::Event;
-use crate::events::kinds::{SkillCompletedEvent, SkillInvokedEvent};
 use crate::json::{JsonObject, JsonValue};
 use crate::tool::{Tool, ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope};
 
@@ -46,7 +44,8 @@ impl SkillTool {
     }
 }
 
-fn requested(input: &JsonObject) -> &str {
+/// The skill a call's input names, without a leading `/`.
+pub(crate) fn requested(input: &JsonObject) -> &str {
     let name = input.get("skill").and_then(JsonValue::as_str).unwrap_or("");
     name.strip_prefix('/').unwrap_or(name)
 }
@@ -87,18 +86,7 @@ impl Tool for SkillTool {
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let name = requested(&input);
         let args = input.get("args").and_then(JsonValue::as_str);
-        ctx.emit(Event::SkillInvoked(SkillInvokedEvent {
-            name: name.to_owned(),
-            args: args.map(str::to_owned),
-            model_override: None,
-            allowed_tools: None,
-        }));
-        let result = self.load(name, args.unwrap_or(""), &ctx);
-        ctx.emit(Event::SkillCompleted(SkillCompletedEvent {
-            name: name.to_owned(),
-            is_error: result.is_err(),
-        }));
-        result
+        self.load(name, args.unwrap_or(""), &ctx)
     }
 }
 

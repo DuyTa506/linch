@@ -357,14 +357,15 @@ restart; here a session's later runs never do.
 
 ### `SkillInvokedEvent` (`skill_invoked`)
 
-The `Skill` tool loaded a skill. `name` is the skill and `args` the argument
-text it was given, or `None`. `model_override` and `allowed_tools` are
+A `Skill` call is about to start, just before its `tool_call_start`.
+`name` is the skill and `args` the argument text it was given, or `None`. `model_override` and `allowed_tools` are
 always `None` today. See [Skills](./skills.md).
 
 ### `SkillCompletedEvent` (`skill_completed`)
 
-That skill's call ended: `name`, and `is_error` (`True` when the skill could
-not be loaded).
+That skill's call ended, just after its `tool_call_end`: `name`, and
+`is_error` (`True` when the call failed: the skill could not be loaded, or
+the call was denied).
 
 ### `SubagentEvent` (`subagent`)
 

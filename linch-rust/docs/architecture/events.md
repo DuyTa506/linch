@@ -102,7 +102,7 @@ is classified.
 
 | Class | Kinds | Where it goes |
 |---|---|---|
-| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:123-130`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:152-157`) |
+| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:123-130`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
 | `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:310-316`) |
 | `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:380-396`), and so does the RPC method `run.events`, which calls it |
 

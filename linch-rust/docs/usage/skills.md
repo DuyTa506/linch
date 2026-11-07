@@ -126,7 +126,6 @@ asyncio.run(main())
 ```text
 offered: ['TaskCreate', 'TaskList', 'TaskGet', 'TaskUpdate', 'Skill']
 skill_invoked: release-notes 1.4.0 'support team'
-skill_completed: release-notes ok
 Skill base directory: /srv/app/.linch/skills/release-notes
 
 # Release notes for 1.4.0
@@ -135,6 +134,7 @@ List the finished tasks with TaskList, then write notes for support team.
 Templates are in /srv/app/.linch/skills/release-notes/templates.
 Full request: 1.4.0 'support team'
 
+skill_completed: release-notes ok
 offered: ['TaskList']
 offered: ['TaskCreate', 'TaskList', 'TaskGet', 'TaskUpdate', 'Skill']
 ```
@@ -207,9 +207,9 @@ the turn after that offered every tool again.
 A session's first run lists the skills in a `SkillsLoadedEvent` right after
 `init`: each skill's `name`, `description`, `when_to_use` and
 `argument_hint`, sorted by name. Each `Skill` call adds a `SkillInvokedEvent` (`name`, and `args` when given)
-and a `SkillCompletedEvent` (`name`, and `is_error` true when the load
-failed) between its `tool_call_start` and `tool_call_end`, as in the loop
-above. Both are durable, so `Agent.events(run_id)` replays them. See
+just before its `tool_call_start` and a `SkillCompletedEvent` (`name`, and
+`is_error` true when the call failed) just after its `tool_call_end`, as in
+Python. Both are durable, so `Agent.events(run_id)` replays them. See
 [Events](./events.md).
 
 ---
@@ -258,8 +258,7 @@ without asking. `"skill": "*"` matches every skill.
 | `agent.reload_skills()` | Not yet; open a new agent |
 | The listing is a reminder in the first prompt | A cached block of the system prompt |
 | The `Skill` tool is exec-scoped with auto-allow rules | Read-scoped |
-| `skill_invoked` comes before the call's `tool_call_start` | It comes after `tool_call_start`, followed by `skill_completed` |
-| `skills_loaded` once per session object, so again after a restart | Only on the session's first run |
+| `skills_loaded` once per session object, so again after a restart | Only on the session's first run, and only when the run offers the `Skill` tool |
 | PyYAML: `yes` is `true`, a repeated key keeps the last value | YAML 1.2: `yes` is a string, a repeated key is invalid |
 
 ---

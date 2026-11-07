@@ -10,6 +10,9 @@
 //! event) waits in an inbox, which the next start or end stages ahead of
 //! itself: it rides that barrier, at the latest the call's own end. A
 //! stream-only one goes to the caller at once, like progress.
+//!
+//! A `Skill` call is bracketed as in Python: `skill_invoked` just before its
+//! start, `skill_completed` just after its end, riding the same writes.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,11 +22,15 @@ use async_trait::async_trait;
 
 use super::Outbox;
 use super::hooks::push_records;
-use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent};
+use crate::events::kinds::{
+    SkillCompletedEvent, SkillInvokedEvent, ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent,
+};
 use crate::events::{Envelope, Event, Persistence, WIRE_VERSION, now_ms};
 use crate::ids::RunId;
 use crate::journal::{Journal, JournalError};
-use crate::scheduler::{CallOutcome, PlannedCall, ToolSink};
+use crate::json::JsonValue;
+use crate::scheduler::{CallOutcome, PlannedAction, PlannedCall, ToolSink};
+use crate::skills::{SKILL_TOOL, requested};
 use crate::tool::ToolProgress;
 
 /// Makes each tool start and end durable and hands it to the caller.
@@ -92,13 +99,35 @@ impl<'a> JournalSink<'a> {
     }
 }
 
-fn start_event(call: &PlannedCall) -> Event {
-    Event::ToolCallStart(ToolCallStartEvent {
+/// The skill a `Skill` call loads, as Python's `_skill_name_from_input`
+/// reads it: none for an unknown tool or invalid input.
+fn skill_name(call: &PlannedCall) -> Option<&str> {
+    let known = !matches!(call.action, PlannedAction::Error { .. });
+    let name = requested(&call.input);
+    (known && call.tool_name == SKILL_TOOL && !name.trim().is_empty()).then_some(name)
+}
+
+/// The call's start, after its `skill_invoked` when it is a skill call.
+fn start_events(call: &PlannedCall) -> Vec<Event> {
+    let invoked = skill_name(call).map(|name| {
+        Event::SkillInvoked(SkillInvokedEvent {
+            name: name.to_owned(),
+            args: call
+                .input
+                .get("args")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned),
+            model_override: None,
+            allowed_tools: None,
+        })
+    });
+    let start = Event::ToolCallStart(ToolCallStartEvent {
         tool_use_id: call.tool_use_id.clone(),
         tool_name: call.tool_name.clone(),
         input: call.input.clone(),
         summary: call.summary.clone(),
-    })
+    });
+    invoked.into_iter().chain([start]).collect()
 }
 
 #[async_trait]
@@ -107,7 +136,7 @@ impl ToolSink for JournalSink<'_> {
 
     async fn tool_starting(&self, call: &PlannedCall) -> Result<(), JournalError> {
         lock(&self.started).insert(call.tool_use_id.clone());
-        self.write(vec![start_event(call)], true).await
+        self.write(start_events(call), true).await
     }
 
     async fn tool_finished(
@@ -141,11 +170,14 @@ impl ToolSink for JournalSink<'_> {
                 Ok(_) => None,
             },
         });
-        let events = if ran {
-            vec![end]
-        } else {
-            vec![start_event(call), end]
-        };
+        let completed = skill_name(call).map(|name| {
+            Event::SkillCompleted(SkillCompletedEvent {
+                name: name.to_owned(),
+                is_error: outcome.block.is_error,
+            })
+        });
+        let mut events = if ran { Vec::new() } else { start_events(call) };
+        events.extend([end].into_iter().chain(completed));
         self.write(events, ran).await
     }
 
