@@ -24,6 +24,7 @@ The tables below list the application-facing changes by area.
 | `Agent(execution_backend=...)` with only shell support | A coherent `.shell`/`.fs` backend; `from linch import LocalExecutionBackend, RemoteExecutionBackend` |
 | `@tool` / `FunctionTool` defaulting to `scope="read"` | `scope` is required and has no default; omitting it raises `ConfigError`. Declare `scope="read"` only for pure lookups, `write` or `exec` otherwise |
 | `DockerBackend` passing `env` and `forward_env` values as `--env KEY=VALUE` argv | `--env KEY` only; values travel in the `docker` subprocess environment and no longer appear in the process list |
+| `PostgresFileBackend(dsn)` with one `agentkit_files` table keyed only by path, shared by every tenant | `PostgresFileBackend(dsn, namespace=...)`; rows are keyed by `(namespace, path)` and every operation is limited to the namespace. Old tables are rejected, not migrated; use a fresh schema |
 | `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch import BashTool` |
 | `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
 | `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |

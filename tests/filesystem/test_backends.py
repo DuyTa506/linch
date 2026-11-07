@@ -24,7 +24,7 @@ def _filesystem(kind: str, tmp_path, pg_dsn: str | None = None) -> Any:
     from linch.filesystem.postgres import PostgresFileBackend
 
     assert pg_dsn is not None
-    return PostgresFileBackend(pg_dsn)
+    return PostgresFileBackend(pg_dsn, namespace="test")
 
 
 def test_normalize_path() -> None:
@@ -184,7 +184,7 @@ async def test_postgres_concurrent_edits_apply_both_changes(pg_dsn) -> None:
     lock_transaction = lock_connection.transaction()
     tasks: list[asyncio.Task[int]] = []
     lock_held = False
-    backend = PostgresFileBackend(pg_dsn, pool=pool)
+    backend = PostgresFileBackend(pg_dsn, namespace="test", pool=pool)
     try:
         await backend.write("/concurrent.txt", "alpha=0\nbeta=0\n")
         await lock_transaction.start()
@@ -228,3 +228,43 @@ async def test_postgres_concurrent_edits_apply_both_changes(pg_dsn) -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
         await lock_connection.close()
         await pool.close()
+
+
+async def test_postgres_namespaces_do_not_see_each_other(pg_dsn) -> None:
+    from linch.filesystem.postgres import PostgresFileBackend
+
+    a = PostgresFileBackend(pg_dsn, namespace="tenant-a")
+    b = PostgresFileBackend(pg_dsn, namespace="tenant-b")
+    try:
+        await a.write("/memories/MEMORY.md", "a-notes")
+        await b.write("/memories/MEMORY.md", "b-notes")
+        await a.write("/only-a.txt", "x")
+
+        assert await a.read("/memories/MEMORY.md") == "a-notes"
+        assert await b.read("/memories/MEMORY.md") == "b-notes"
+        assert await a.ls() == ["/memories/MEMORY.md", "/only-a.txt"]
+        assert await b.ls() == ["/memories/MEMORY.md"]
+        assert await b.ls("/memories") == ["/memories/MEMORY.md"]
+        assert not await b.exists("/only-a.txt")
+        with pytest.raises(FileNotFoundError):
+            await b.read("/only-a.txt")
+        with pytest.raises(FileNotFoundError):
+            await b.edit("/only-a.txt", "x", "y")
+
+        await b.edit("/memories/MEMORY.md", "b-", "B-")
+        assert await a.read("/memories/MEMORY.md") == "a-notes"
+        await b.delete("/memories/MEMORY.md")
+        assert await a.exists("/memories/MEMORY.md")
+    finally:
+        await a.close()
+        await b.close()
+
+
+def test_postgres_backend_requires_namespace() -> None:
+    from linch import ConfigError
+    from linch.filesystem.postgres import PostgresFileBackend
+
+    with pytest.raises(TypeError):
+        PostgresFileBackend("postgresql://unused")  # type: ignore[call-arg]
+    with pytest.raises(ConfigError, match="namespace"):
+        PostgresFileBackend("postgresql://unused", namespace="")

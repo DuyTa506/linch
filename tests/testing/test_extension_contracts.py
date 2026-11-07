@@ -103,7 +103,7 @@ async def test_file_backend_contract_accepts_postgres_backend(
     from linch import assert_file_backend_contract
     from linch.filesystem.postgres import PostgresFileBackend
 
-    await assert_file_backend_contract(lambda: PostgresFileBackend(pg_dsn))
+    await assert_file_backend_contract(lambda: PostgresFileBackend(pg_dsn, namespace="test"))
 
 
 async def test_file_backend_contract_accepts_disk_backend(tmp_path) -> None:

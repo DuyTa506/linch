@@ -68,7 +68,7 @@ async def run_durable_planning(work_dir: str) -> None:
             run_store=PostgresRunStore(dsn),
             filesystem=CompositeFileBackend(
                 default=StateFileBackend(),
-                routes={"/memories/": PostgresFileBackend(dsn)},
+                routes={"/memories/": PostgresFileBackend(dsn, namespace=session_id)},
             ),
             permissions={"mode": "skip-dangerous"},
         )

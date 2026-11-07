@@ -40,7 +40,7 @@ agent = create_deep_agent(
     run_store=PostgresRunStore(dsn),
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": PostgresFileBackend(dsn)},
+        routes={"/memories/": PostgresFileBackend(dsn, namespace="tenant-1")},
     ),
     permissions={"mode": "skip-dangerous"},
 )
