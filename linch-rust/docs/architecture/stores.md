@@ -309,6 +309,9 @@ async fn main() {
 The Postgres tests (`crates/linch-postgres/tests/pg/`) run these suites and
 the refusal, admission, crash and isolation cases, each in its own schema.
 Each test skips when `LINCH_TEST_PG_DSN` is unset.
+Each test opens about six connections, so on a machine with 16 or more
+cores run them with `RUST_TEST_THREADS=8` to stay under Postgres's
+`max_connections` of 100.
 
 ---
 
