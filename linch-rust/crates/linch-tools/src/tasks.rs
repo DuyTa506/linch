@@ -3,14 +3,15 @@
 //!
 //! Names, input schemas, scopes and the texts the model sees are Python's.
 //! Tasks are session data: only the calls and their results enter the
-//! session log.
+//! session log. They belong to the session of the root run of the agent
+//! tree, so a subagent's child session shares its parent's tasks.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use linch_core::{
-    JsonObject, JsonValue, NewTask, StoreError, Task, TaskPatch, TaskStatus, TaskStore, Tool,
-    ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope,
+    JsonObject, JsonValue, NewTask, RunStore, SessionId, StoreError, Task, TaskPatch, TaskStatus,
+    TaskStore, Tool, ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope,
 };
 use serde_json::json;
 
@@ -20,26 +21,67 @@ use crate::input::{coded, invalid, optional_string, schema, string};
 pub const TASK_TOOL_NAMES: [&str; 4] = ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"];
 
 /// `TaskCreate`, `TaskList`, `TaskGet` and `TaskUpdate` over `store`, for
-/// the sessions of `namespace`.
-pub fn task_tools(store: Arc<dyn TaskStore>, namespace: &str) -> Vec<Arc<dyn Tool>> {
+/// the sessions of `namespace`. `runs` finds the root run of a call's tree.
+pub fn task_tools(
+    store: Arc<dyn TaskStore>,
+    runs: Arc<dyn RunStore>,
+    namespace: &str,
+) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(TaskCreate::new(Arc::clone(&store), namespace)),
-        Arc::new(TaskList::new(Arc::clone(&store), namespace)),
-        Arc::new(TaskGet::new(Arc::clone(&store), namespace)),
-        Arc::new(TaskUpdate::new(store, namespace)),
+        Arc::new(TaskCreate::new(
+            Arc::clone(&store),
+            Arc::clone(&runs),
+            namespace,
+        )),
+        Arc::new(TaskList::new(
+            Arc::clone(&store),
+            Arc::clone(&runs),
+            namespace,
+        )),
+        Arc::new(TaskGet::new(
+            Arc::clone(&store),
+            Arc::clone(&runs),
+            namespace,
+        )),
+        Arc::new(TaskUpdate::new(store, runs, namespace)),
     ]
 }
 
 /// A store and the namespace its sessions are in.
 struct Tasks {
     store: Arc<dyn TaskStore>,
+    runs: Arc<dyn RunStore>,
     namespace: String,
 }
 
 impl Tasks {
-    fn new(store: Arc<dyn TaskStore>, namespace: &str) -> Self {
+    fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let namespace = namespace.to_owned();
-        Self { store, namespace }
+        Self {
+            store,
+            runs,
+            namespace,
+        }
+    }
+
+    /// The session that owns the tasks of the call in `ctx`: the session of
+    /// the root run of its tree. A call whose run the store does not know
+    /// uses its own session.
+    async fn session(&self, ctx: &ToolContext) -> Result<SessionId, ToolOutputError> {
+        let mut session = ctx.session_id.clone();
+        let mut run = ctx.run_id.clone();
+        loop {
+            let record = match self.runs.load(&self.namespace, &run).await {
+                Ok(record) => record,
+                Err(StoreError::NotFound { .. }) => return Ok(session),
+                Err(error) => return Err(store_error(error)),
+            };
+            session = record.session_id;
+            match record.parent_run_id {
+                Some(parent) => run = parent,
+                None => return Ok(session),
+            }
+        }
     }
 }
 
@@ -103,7 +145,7 @@ pub struct TaskCreate {
 
 impl TaskCreate {
     /// A `TaskCreate` over `store`, for the sessions of `namespace`.
-    pub fn new(store: Arc<dyn TaskStore>, namespace: &str) -> Self {
+    pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let schema = schema(json!({
             "type": "object",
             "properties": {
@@ -117,7 +159,7 @@ impl TaskCreate {
             },
             "required": ["subject", "description"],
         }));
-        let tasks = Tasks::new(store, namespace);
+        let tasks = Tasks::new(store, runs, namespace);
         Self { tasks, schema }
     }
 }
@@ -163,9 +205,12 @@ impl Tool for TaskCreate {
     }
 
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
-        let Tasks { store, namespace } = &self.tasks;
+        let Tasks {
+            store, namespace, ..
+        } = &self.tasks;
+        let session = self.tasks.session(&ctx).await?;
         let new = new_task(&input)?;
-        let task = store.create_task(namespace, &ctx.session_id, new).await;
+        let task = store.create_task(namespace, &session, new).await;
         let task = task.map_err(store_error)?;
         text(format!("Task #{} created: {}", task.id, task.subject))
     }
@@ -179,9 +224,9 @@ pub struct TaskList {
 
 impl TaskList {
     /// A `TaskList` over `store`, for the sessions of `namespace`.
-    pub fn new(store: Arc<dyn TaskStore>, namespace: &str) -> Self {
+    pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let schema = schema(json!({"type": "object", "properties": {}}));
-        let tasks = Tasks::new(store, namespace);
+        let tasks = Tasks::new(store, runs, namespace);
         Self { tasks, schema }
     }
 }
@@ -209,8 +254,11 @@ impl Tool for TaskList {
     }
 
     async fn execute(&self, _input: JsonObject, ctx: ToolContext) -> ToolResult {
-        let Tasks { store, namespace } = &self.tasks;
-        let tasks = store.list_tasks(namespace, &ctx.session_id).await;
+        let Tasks {
+            store, namespace, ..
+        } = &self.tasks;
+        let session = self.tasks.session(&ctx).await?;
+        let tasks = store.list_tasks(namespace, &session).await;
         let tasks = tasks.map_err(store_error)?;
         if tasks.is_empty() {
             return text("No tasks found.".to_owned());
@@ -227,13 +275,13 @@ pub struct TaskGet {
 
 impl TaskGet {
     /// A `TaskGet` over `store`, for the sessions of `namespace`.
-    pub fn new(store: Arc<dyn TaskStore>, namespace: &str) -> Self {
+    pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let schema = schema(json!({
             "type": "object",
             "properties": {"id": {"type": "string"}},
             "required": ["id"],
         }));
-        let tasks = Tasks::new(store, namespace);
+        let tasks = Tasks::new(store, runs, namespace);
         Self { tasks, schema }
     }
 }
@@ -266,9 +314,12 @@ impl Tool for TaskGet {
     }
 
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
-        let Tasks { store, namespace } = &self.tasks;
+        let Tasks {
+            store, namespace, ..
+        } = &self.tasks;
+        let session = self.tasks.session(&ctx).await?;
         let id = required(&input, "id")?;
-        let task = store.get_task(namespace, &ctx.session_id, id).await;
+        let task = store.get_task(namespace, &session, id).await;
         let task = task.map_err(store_error)?.ok_or_else(not_found)?;
         text(format!("{}\n{}", line(&task), task.description))
     }
@@ -283,7 +334,7 @@ pub struct TaskUpdate {
 
 impl TaskUpdate {
     /// A `TaskUpdate` over `store`, for the sessions of `namespace`.
-    pub fn new(store: Arc<dyn TaskStore>, namespace: &str) -> Self {
+    pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let ids = json!({"type": "array", "items": {"type": "string"}});
         let schema = schema(json!({
             "type": "object",
@@ -305,7 +356,7 @@ impl TaskUpdate {
             },
             "required": ["id"],
         }));
-        let tasks = Tasks::new(store, namespace);
+        let tasks = Tasks::new(store, runs, namespace);
         Self { tasks, schema }
     }
 }
@@ -369,16 +420,19 @@ impl Tool for TaskUpdate {
     }
 
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
-        let Tasks { store, namespace } = &self.tasks;
-        let (id, session) = (required(&input, "id")?, &ctx.session_id);
+        let Tasks {
+            store, namespace, ..
+        } = &self.tasks;
+        let session = self.tasks.session(&ctx).await?;
+        let id = required(&input, "id")?;
         let (patch, delete) = change(&input)?;
         if delete {
             // Deleting a missing task reports the same, as Python does.
-            let deleted = store.delete_task(namespace, session, id).await;
+            let deleted = store.delete_task(namespace, &session, id).await;
             deleted.map_err(store_error)?;
             return text(format!("Task #{id} deleted."));
         }
-        let task = store.update_task(namespace, session, id, patch).await;
+        let task = store.update_task(namespace, &session, id, patch).await;
         let task = task.map_err(store_error)?.ok_or_else(not_found)?;
         text(format!(
             "Task #{} updated: [{}] {}",
