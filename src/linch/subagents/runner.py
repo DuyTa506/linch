@@ -585,7 +585,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     # Re-establish the abort link for this continuation.
     merged_signal = any_signal(child_session._abort_controller, args.signal)
 
-    subagent_run_id = f"sa_cont_{args.handle.worker_id}"
+    subagent_run_id = args.subagent_run_id
     config = (
         child_session._config_seed.config
         if child_session._config_seed is not None
