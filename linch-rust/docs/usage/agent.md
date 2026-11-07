@@ -195,6 +195,7 @@ absent, except `bash`.
 | `max_tool_concurrency` | `4` | Most read-scope tool calls that run at once; `0` counts as 1 |
 | `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |
+| `budget` | none: no cap | A token and USD cap for each run and its subagents, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([below](#budget)) |
 
 ### System blocks
 
@@ -240,6 +241,34 @@ ignores the window.
 
 Compaction makes one extra provider call on the agent's provider and model,
 and the run reports it with a `compaction` [event](./events.md).
+
+### `budget`
+
+| Field | Default | What it controls |
+|---|---|---|
+| `max_tokens` | none: no token cap | Most tokens the run and its subagents may spend, all four usage buckets summed |
+| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); a model without a price adds nothing, so only `max_tokens` binds it |
+| `warn_ratio` | `0.9` | Fraction of either cap at which one `budget` event of kind `warning` fires |
+
+As in Python Linch, every provider call is charged once it ends, and the run
+checks the budget before its next call (a compaction summary call included).
+A run whose spend reached a cap stops there with a `budget` event of kind
+`exceeded`, an `error` named `BudgetExceededError` and a `result` of subtype
+`error`, `stop_reason` `error`. A subagent's child run charges its parent's
+budget, so one budget caps the whole tree, and the warning fires once for it,
+in whichever run's call crossed the ratio. With a cap set, a call whose usage
+is unknown (it failed or was cut off before the provider reported any) means
+the cap can no longer be kept: the next call is refused with an error named
+`BudgetAccountingError`. A run that crashed during a call resumes into that
+error.
+
+Each run of the agent starts with nothing spent. A resumed run starts from
+what its durable record and its children's say was spent, so a crash never
+resets it. The budget is part of the [run contract](#the-run-contract).
+
+```python
+spec = {"model": "claude-sonnet-4-6", "budget": {"max_tokens": 200_000, "max_cost_usd": 2.0}}
+```
 
 ## `permissions`
 

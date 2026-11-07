@@ -172,7 +172,8 @@ class AgentConfig(TypedDict, total=False):
     Attributes:
         namespace: Store key space for this agent's runs and sessions.
         spec: The model, instructions and loop limits, such as
-            `{"model": "deepseek-flash", "system_prompt": "Be brief."}`.
+            `{"model": "deepseek-flash", "system_prompt": "Be brief."}`;
+            `system_blocks` and a token or USD `budget` go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

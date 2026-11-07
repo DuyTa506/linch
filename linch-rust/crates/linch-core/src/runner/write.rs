@@ -121,25 +121,31 @@ impl Runner {
     /// Count a settled receipt: known usage adds up, unknown usage makes
     /// the total incomplete (never a zero fill). A receipt with usage is
     /// priced first, by the model that served it (the agent's model when
-    /// the provider named none), and a known cost adds up too.
+    /// the provider named none), and a known cost adds up too. The budget
+    /// is charged with it either way.
     pub(super) fn settle(&mut self, receipt: &mut ModelCallReceiptEvent) {
-        let Some(usage) = receipt.usage else {
-            self.usage_complete = false;
-            return;
-        };
-        self.usage += usage;
-        if receipt.cost_usd.is_none() {
-            let model = receipt.actual_model.as_deref();
-            let model = model.unwrap_or(&self.agent.spec.model);
-            receipt.cost_usd = self.agent.price(model, &usage);
+        match receipt.usage {
+            Some(usage) => {
+                self.usage += usage;
+                if receipt.cost_usd.is_none() {
+                    let model = receipt.actual_model.as_deref();
+                    let model = model.unwrap_or(&self.agent.spec.model);
+                    receipt.cost_usd = self.agent.price(model, &usage);
+                }
+                if let Some(cost) = receipt.cost_usd {
+                    self.cost = Some(self.cost.unwrap_or(0.0) + cost);
+                }
+            }
+            None => self.usage_complete = false,
         }
-        if let Some(cost) = receipt.cost_usd {
-            self.cost = Some(self.cost.unwrap_or(0.0) + cost);
+        if let Some(meter) = &self.budget {
+            meter.charge(receipt);
         }
     }
 
     /// Stage the `Usage` event of a call that reported `usage`, with the
-    /// call's `cost`, the run's so far, and the model that `served` it.
+    /// call's `cost`, the run's so far, and the model that `served` it;
+    /// then the budget's warning when this call reached its ratio.
     pub(super) fn stage_usage(
         &mut self,
         usage: Option<Usage>,
@@ -154,6 +160,10 @@ impl Runner {
                 cumulative_cost_usd: self.cost,
                 actual_model: served,
             }));
+            // The first charge to reach the warning ratio, once per tree.
+            if let Some(warning) = self.budget.as_ref().and_then(|meter| meter.take_warning()) {
+                self.journal.stage(Event::Budget(warning));
+            }
         }
     }
 }

@@ -201,7 +201,7 @@ impl AgentBuilder {
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
-    ///         namespace is blank, the compaction settings cannot run, a
+    ///         namespace is blank, the compaction or budget settings cannot run, a
     ///         built-in tool's name is taken, or the tool schemas cannot be
     ///         digested.
     pub fn build(self) -> Result<Agent, BuildError> {
@@ -214,6 +214,9 @@ impl AgentBuilder {
             ));
         }
         if let Some(problem) = self.spec.compaction.as_ref().and_then(|c| c.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;

@@ -78,7 +78,7 @@ impl Agent {
         parent_run_id: RunId,
     ) -> RunStream {
         let agent = Arc::clone(&self.inner);
-        runner::start_child(agent, prompt.into(), options, parent_run_id)
+        runner::start_child(agent, prompt.into(), options, parent_run_id, None)
     }
 }
 

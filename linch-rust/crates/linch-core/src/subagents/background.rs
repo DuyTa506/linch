@@ -157,7 +157,7 @@ async fn pick_up(
                      one with TaskStop, then call again."
                 )));
             }
-            runner::start_child(child, prompt, options, run.run_id.clone())
+            runner::start_child(child, prompt, options, run.run_id.clone(), family.budget())
         }
         Ok(record) if record.status.is_terminal() => {
             let outcome = finished(&child, &id).await?;
@@ -169,7 +169,7 @@ async fn pick_up(
             family.complete(Completion::of(id, worker.display_name, outcome));
             return Ok(());
         }
-        Ok(_) => runner::resume(child, id.clone(), None, options),
+        Ok(_) => runner::resume_child(child, id.clone(), options, family.budget()),
         Err(error) => return Err(failed("could not be read", error)),
     };
     // A background worker's id is `<parent run id>:<tool_use_id>` of the

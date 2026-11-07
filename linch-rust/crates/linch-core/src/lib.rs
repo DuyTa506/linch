@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod budget;
 pub mod canonical;
 pub(crate) mod catalog;
 pub mod compaction;
@@ -45,6 +46,7 @@ pub mod usage;
 pub mod vfs;
 
 pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, ForkError, RunError, RunOptions};
+pub use budget::RunBudget;
 pub use canonical::{
     CanonicalError, Digest, JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth, digest,
     digest_with_domain, to_canonical_string,

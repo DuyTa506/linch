@@ -16,8 +16,8 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, CompactionSpec, ContentBlock, Envelope, Event, LogEntry, Message, PermissionMode,
-    Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunId, RunOptions, RunStatus,
-    RunStore, SessionId, SessionLog, SessionStore, ToolChoice, ToolScope, Usage,
+    Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunBudget, RunId, RunOptions,
+    RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolChoice, ToolScope, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -221,6 +221,43 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
     // 3 tool turns and the answer (18), plus two writes per compaction.
     assert_eq!(stores.runs.writes().commit, 18 + 2 * 2);
     assert_eq!(stores.sessions.writes().append, 8 + 2);
+}
+
+/// A spent budget refuses the summary call as well as the primary one.
+#[tokio::test]
+async fn a_spent_budget_makes_no_summary_call() {
+    let stores = Arc::new(Stores::default());
+    let provider = Keyed::new();
+    let runs = Runs::default();
+    let mut spec = compacting_agent(provider.clone(), &runs, stores.clone())
+        .spec()
+        .clone();
+    // Two primary calls spend 30; the third turn would compact first.
+    spec.budget = Some(RunBudget {
+        max_tokens: Some(30),
+        ..RunBudget::default()
+    });
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let agent = agent_with(
+        spec,
+        provider.clone(),
+        tools,
+        policy(PermissionMode::SkipDangerous),
+        stores,
+    );
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    let calls = provider.calls.lock().unwrap().clone();
+    assert!(
+        calls.keys().all(|key| key.starts_with("primary")),
+        "{calls:?}"
+    );
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let error = (envelopes.iter()).find_map(|e| match &e.event {
+        Event::Error(error) => Some(error.error["name"].clone()),
+        _ => None,
+    });
+    assert_eq!(error, Some("BudgetExceededError".into()));
 }
 
 #[tokio::test]

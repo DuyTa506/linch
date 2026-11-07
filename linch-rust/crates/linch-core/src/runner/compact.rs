@@ -62,7 +62,8 @@ impl Runner {
         let Some(spec) = agent.spec.compaction.as_ref() else {
             return Ok(Some(DISPATCH));
         };
-        if self.out_of_turns() {
+        // The primary call ends the run then, with its terminal.
+        if self.out_of_turns() || self.refusal().is_some() {
             return Ok(Some(DISPATCH));
         }
         let view = self.log.provider_view();

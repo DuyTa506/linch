@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::budget::RunBudget;
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
@@ -23,7 +24,7 @@ fn default_concurrency() -> u32 {
 /// What an agent is, as data: the model, its instructions, and the request
 /// and loop limits. Tools, hooks, permissions and stores are bound in code
 /// by [`super::AgentBuilder`]; the spec names none of them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSpec {
     /// Model identifier sent with every request.
@@ -60,6 +61,10 @@ pub struct AgentSpec {
     /// (the default) never compacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionSpec>,
+    /// The token and USD cap of each root run and its subagent children
+    /// (Python's `AgentConfig.budget`); `None` (the default) counts nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<RunBudget>,
 }
 
 impl AgentSpec {
@@ -76,6 +81,7 @@ impl AgentSpec {
             max_tool_concurrency: default_concurrency(),
             call_timeout_ms: None,
             compaction: None,
+            budget: None,
         }
     }
 

@@ -1,6 +1,6 @@
 //! Entering a run: create a new one, or claim and reconcile an existing one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,6 +9,7 @@ use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
 use super::{Driving, Family, Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
+use crate::budget::{Meter, Spent};
 use crate::catalog::{self, Catalog};
 use crate::events::kinds::{InitEvent, SkillsLoadedEvent, UserEvent, UserEventSubtype};
 use crate::events::{Envelope, Event};
@@ -19,11 +20,13 @@ use crate::message::ContentBlock;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::store::{Lease, RunRecord, StoreError};
+use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
 use crate::usage::Usage;
 
 /// Create the run (the `Started` write-through), append the prompt, and go.
-/// `parent` is the parent run of a subagent's child run.
+/// `parent` is the parent run of a subagent's child run, `inherited` the
+/// budget of its tree; a root run with a budget starts its own.
 pub(super) async fn new_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
@@ -31,6 +34,7 @@ pub(super) async fn new_run(
     options: RunOptions,
     shared: Shared,
     parent: Option<RunId>,
+    inherited: Option<Meter>,
 ) -> Result<(), RunError> {
     let Shared { outbox, driving } = shared;
     let started = Instant::now();
@@ -130,6 +134,11 @@ pub(super) async fn new_run(
         }
     };
     let family = drive_family(&agent, &driving, &run_id, &session_id);
+    let budget = inherited.or_else(|| {
+        let limits = agent.spec.budget.clone()?;
+        Some(Meter::new(limits, Spent::default()))
+    });
+    share(&family, &budget);
     outbox.deliver(ready).await;
     let progress = Progress::first(started);
     let run = identity(session_id, run_id, &options.principal, options.trace_id);
@@ -143,6 +152,7 @@ pub(super) async fn new_run(
         progress,
     );
     runner.family = family;
+    runner.budget = budget;
     runner.seen = seen;
     let prompt = Step::Prompt {
         prompt,
@@ -156,12 +166,14 @@ pub(super) async fn new_run(
 /// state, and go on from there. `answers` is set for an approve, which is
 /// accepted only on a run awaiting approval. With a token that is already
 /// cancelled, nothing is claimed or written and the stream ends empty.
+/// `inherited` is the budget of a child run's tree.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
     answers: Option<HashMap<String, ApprovalResponse>>,
     options: RunOptions,
     shared: Shared,
+    inherited: Option<Meter>,
 ) -> Result<(), RunError> {
     let Shared { outbox, driving } = shared;
     let started = Instant::now();
@@ -283,6 +295,18 @@ pub(super) async fn continue_run(
         &options.principal,
         trace_id,
     );
+    // The children picked up below charge the budget too.
+    let budget = match inherited.or_else(|| family.as_ref()?.budget()) {
+        Some(meter) => Some(meter),
+        None => match agent.spec.budget.clone() {
+            Some(limits) => Some(Meter::new(
+                limits,
+                spent(&agent, &run.run_id, &events).await?,
+            )),
+            None => None,
+        },
+    };
+    share(&family, &budget);
     if let Some(family) = &family {
         crate::subagents::reattach(&agent, family, &run, &events).await;
     }
@@ -296,6 +320,7 @@ pub(super) async fn continue_run(
         progress,
     );
     runner.family = family;
+    runner.budget = budget;
     if let Some(decisions) = commit {
         runner.commit_decisions(decisions, assistant_seq).await?;
     }
@@ -314,6 +339,40 @@ fn drive_family(
     let family = agent.family_for(run_id, session_id);
     driving.attach(&family);
     Some(family)
+}
+
+/// Let the children of `family` charge `budget`.
+fn share(family: &Option<Arc<Family>>, budget: &Option<Meter>) {
+    if let (Some(family), Some(meter)) = (family, budget) {
+        family.share_budget(meter);
+    }
+}
+
+/// What the tree of the root run `run_id` spent before this process took
+/// it on: the receipts in its `events` and in the logs of the child runs
+/// its `Subagent` and `SubagentContinue` calls started (each one's id is
+/// `<run id>:<tool_use_id>`). A tool start is durable before its child
+/// exists, so no child is missed; a child's wrapped events in the run's
+/// log are not counted twice.
+async fn spent(agent: &AgentInner, run_id: &RunId, events: &[Envelope]) -> Result<Spent, RunError> {
+    let mut spent = Spent::of(events);
+    let mut seen = HashSet::new();
+    for envelope in events {
+        let Event::ToolCallStart(start) = &envelope.event else {
+            continue;
+        };
+        let spawns = [SUBAGENT_TOOL, CONTINUE_TOOL].contains(&start.tool_name.as_str());
+        if !spawns || !seen.insert(start.tool_use_id.as_str()) {
+            continue;
+        }
+        let child = RunId::new(format!("{run_id}:{}", start.tool_use_id));
+        match agent.runs.events(&agent.namespace, &child, 0).await {
+            Ok(events) => spent = spent.and(Spent::of(&events)),
+            Err(StoreError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(spent)
 }
 
 /// The error for a new run whose id is already taken.
