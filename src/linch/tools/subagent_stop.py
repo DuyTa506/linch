@@ -60,15 +60,18 @@ class TaskStopTool:
         return f"Stop worker: {input.get('task_id', '?')}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-        """Stop a retained worker and leave it available for continuation.
+        """Stop a running worker and leave it available for continuation.
+
+        Only a ``running`` worker is cancelled, marked ``killed``, and given the
+        ``reason``; any other worker is left unchanged.
 
         Args:
             input: Validated worker id or display-name target and optional reason.
             ctx: Runtime context identifying the parent session.
 
         Returns:
-            A result describing the stop, or an error when the target is missing
-            or ambiguous.
+            A result describing the stop or saying the worker was not running,
+            or an error when the target is missing or ambiguous.
         """
         import asyncio
 
@@ -98,6 +101,15 @@ class TaskStopTool:
                 f" Known workers: {', '.join(known)}." if known else " No workers spawned yet."
             )
             return ToolResult(content=msg, summary=self.summarize(input), is_error=True)
+        if handle.status != "running":
+            return ToolResult(
+                content=(
+                    f"Worker '{handle.worker_id}' ({handle.display_name}) is not running"
+                    f" (status: {handle.status}); nothing to stop."
+                ),
+                summary=self.summarize(input),
+                is_error=False,
+            )
 
         # Cancel the asyncio task if it's running
         task = getattr(handle, "task", None)
@@ -113,6 +125,7 @@ class TaskStopTool:
 
         handle.status = "killed"
         reason = str(input.get("reason", ""))
+        handle.stop_reason = reason or None
         msg = f"Worker '{handle.worker_id}' ({handle.display_name}) stopped."
         if reason:
             msg += f" Reason: {reason}"

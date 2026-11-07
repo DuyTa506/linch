@@ -192,7 +192,7 @@ await agent.close()
 
 Với `coordinator=True`, agent cha bỏ các tool workspace tích hợp sẵn phục vụ công việc nặng và giữ các chức năng điều phối. Sau khi `agent.session()` nạp các danh mục tùy chọn, profile mặc định cũng bật tool `Skill`; tool do bên gọi cung cấp và máy chủ MCP đã cấu hình có thể bổ sung thêm tool. Worker dùng registry worker đã cấu hình, giúp ngữ cảnh của agent điều phối tập trung vào quản lý tác vụ thay vì nội dung tệp và đầu ra lệnh.
 
-Để dừng worker chạy nền đang hoạt động, gọi `TaskStop` với `{"task_id": "agent-xxxx"}` (và `reason` tùy chọn). Handle vẫn nằm trong `session.workers` để có thể tiếp tục sau này bằng `SubagentContinue`. Việc dừng hủy tác vụ đang thực thi nhưng không loại bỏ worker — bạn có thể gọi lại worker khi đã có những gì cần thiết.
+Để dừng worker chạy nền đang hoạt động, gọi `TaskStop` với `{"task_id": "agent-xxxx"}` (và `reason` tùy chọn). Handle vẫn nằm trong `session.workers` để có thể tiếp tục sau này bằng `SubagentContinue`. Việc dừng hủy tác vụ đang thực thi nhưng không loại bỏ worker — bạn có thể gọi lại worker khi đã có những gì cần thiết. `TaskStop` chỉ tác động lên worker đang `running`: nó đánh dấu worker là `killed` và ghi `reason` vào `handle.stop_reason`. Worker đã kết thúc giữ nguyên trạng thái, và kết quả cho biết worker không chạy.
 
 ---
 
