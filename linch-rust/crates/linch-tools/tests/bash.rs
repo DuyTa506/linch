@@ -103,6 +103,17 @@ async fn bash_passes_only_allowlisted_and_configured_environment() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_configured_secret_reaches_the_environment_but_not_the_argv() {
+    let ws = Workspace::new();
+    let tool = bash(&ws).with_env([("LINCH_SECRET".to_owned(), "s3cr3t-value".to_owned())]);
+    let command = r#"printf '%s' "$LINCH_SECRET" | wc -c; tr '\0' ' ' < /proc/$$/cmdline"#;
+    let out = text(run(&tool, command, 5_000).await);
+    assert!(out.starts_with("12"), "the child sees the value: {out}");
+    assert!(!out.contains("s3cr3t-value"), "the value is in argv: {out}");
+}
+
 #[tokio::test]
 async fn timeout_kills_the_whole_group_and_keeps_partial_output() {
     let ws = Workspace::new();
