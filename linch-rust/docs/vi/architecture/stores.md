@@ -310,6 +310,8 @@ async fn main() {
 Các test Postgres (`crates/linch-postgres/tests/pg/`) chạy các suite này cùng các
 trường hợp từ chối, admission, sự cố và cô lập, mỗi test trong schema riêng của nó.
 Mỗi test bị bỏ qua khi `LINCH_TEST_PG_DSN` chưa được đặt.
+Mỗi test mở khoảng sáu kết nối, nên trên máy có từ 16 core trở lên hãy chạy với
+`RUST_TEST_THREADS=8` để không vượt `max_connections` 100 của Postgres.
 
 ---
 
