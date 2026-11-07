@@ -28,6 +28,7 @@ def installed(root: Path, target: Path) -> bool:
     ).is_file()
 
 
+@pytest.mark.source
 def test_install_defaults_to_claude_and_codex(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -53,6 +54,7 @@ def test_install_refuses_an_installed_copy_without_force(
     assert not (tmp_path / ".agents").exists(), "nothing is copied when one target is in the way"
 
 
+@pytest.mark.source
 def test_force_replaces_an_installed_copy(tmp_path: Path) -> None:
     assert main(["skill", "install", "--dir", str(tmp_path)]) == 0
     (tmp_path / CLAUDE / "SKILL.md").write_text("old", encoding="utf-8")
@@ -118,6 +120,7 @@ def test_install_fails_without_the_packaged_skill(
     assert not (tmp_path / ".claude").exists()
 
 
+@pytest.mark.source
 def test_the_wheel_ships_the_skill() -> None:
     pyproject = tomllib.loads((PYTHON_DIR / "pyproject.toml").read_text(encoding="utf-8"))
     include = pyproject["tool"]["maturin"]["include"]
@@ -152,6 +155,7 @@ async def test_the_skill_loads_in_a_linch_rust_agent(tmp_path: Path) -> None:
 DOC_PATH = re.compile(r"`((?:usage|architecture)/[\w-]+\.md)(?:#[\w-]+)?`")
 
 
+@pytest.mark.source
 @pytest.mark.parametrize("page", ["SKILL.md", "references/design.md"])
 def test_every_doc_path_the_skill_names_ships(page: str) -> None:
     text = (SKILL / page).read_text(encoding="utf-8")
@@ -160,6 +164,7 @@ def test_every_doc_path_the_skill_names_ships(page: str) -> None:
     assert sorted(path for path in paths if not (WORKSPACE / "docs" / path).is_file()) == []
 
 
+@pytest.mark.source
 def test_the_names_the_skill_teaches_are_public() -> None:
     text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     names = {

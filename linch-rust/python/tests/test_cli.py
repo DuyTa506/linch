@@ -43,6 +43,7 @@ def bare_project(tmp_path: Path, name: str, packages: list[str], dependency: str
     return root
 
 
+@pytest.mark.source
 def test_the_console_script_ships_as_a_wheel_data_script() -> None:
     pyproject = tomllib.loads((PYTHON_DIR / "pyproject.toml").read_text(encoding="utf-8"))
     script = PYTHON_DIR / pyproject["tool"]["maturin"]["data"] / "scripts" / "linch-rust"

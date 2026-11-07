@@ -68,6 +68,7 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = ["source: reads the repository checkout (Rust sources, the skill, pyproject); the installed-wheel test skips it"]
 
 [tool.ruff]
 line-length = 100
