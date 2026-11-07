@@ -98,9 +98,9 @@ agent's, as the message text reads (`error.rs:157-165`, tested at
 `error.rs:222-242`).
 
 The socket login answers its refusals under different ids
-(`login.rs:33-83`): `-32005` `kind: logins` under a null id before anything
+(`login.rs:33-85`): `-32005` `kind: logins` under a null id before anything
 is read; `-32003` under the request's id, or null when the first message
-has none; `-32005` `kind: connections` under the `connection.auth` id.
+has none or none came within the login wait; `-32005` `kind: connections` under the `connection.auth` id.
 The Python client reads the first line it gets as its login's answer,
 whatever the id (`python/src/linch_rust/_remote.py:112-142`).
 
@@ -212,7 +212,8 @@ Each connection waits for its login with one of 32 places
 (`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:125-129`): each may
 buffer a 16 MiB line for 10 s, so the places bound that to 512 MiB. One
 more gets `-32005` at once. A login has 10 s (`LOGIN_TIMEOUT`,
-`login.rs:17`).
+`login.rs:17`); silence past it gets `-32003` and the connection closes
+(`login.rs:42-54`).
 
 **HTTP.** One route, `GET /rpc` (`http.rs:30`). Before its upgrade a
 connection holds one of 32 places across the server
@@ -293,7 +294,7 @@ best effort.
 | Logins waiting | 32 per `Tokens` | `access.rs:125-129` | `-32005` `kind: logins`, then close |
 | HTTP upgrades waiting | 32 per server | `http.rs:39-44` | Closed unread |
 | One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:231-250`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
-| Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:37` | The connection closes |
+| Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:37` | The login gets `-32003`, then the connection closes; the HTTP connection closes |
 
 A local (stdio) connection has none of the tenant caps.
 

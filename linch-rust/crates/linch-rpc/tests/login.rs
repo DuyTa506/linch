@@ -133,6 +133,35 @@ async fn stop_ends_a_connection_that_waits_for_its_login() {
     ended.expect("stop ends the login wait").unwrap().unwrap();
 }
 
+/// Silence past the login wait is refused like a bad login: one `-32003`
+/// answer, then the server closes the connection.
+#[tokio::test(start_paused = true)]
+async fn silence_past_the_login_wait_is_refused_and_closes_the_connection() {
+    let (ours, theirs) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(theirs);
+    let serving = tokio::spawn(linch_rpc::serve_lines(
+        server_reader,
+        server_writer,
+        login(),
+        Arc::new(PgPools::new()),
+        CancellationToken::new(),
+    ));
+    let (reader, _writer) = tokio::io::split(ours);
+    let ended = tokio::time::timeout(Duration::from_secs(60), serving).await;
+    ended
+        .expect("the login wait ends the connection")
+        .unwrap()
+        .unwrap();
+    let mut lines = BufReader::new(reader).lines();
+    let mut seen = Vec::<Value>::new();
+    while let Some(line) = lines.next_line().await.unwrap() {
+        seen.push(serde_json::from_str(&line).unwrap());
+    }
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0]["id"], Value::Null);
+    assert_eq!(seen[0]["error"]["code"], code::UNAUTHENTICATED);
+}
+
 #[tokio::test]
 async fn past_max_pending_logins_a_new_connection_is_refused_at_once() {
     let tokens = tokens();

@@ -18,9 +18,9 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read and answer the first message: the connection's place among its
 /// tenant's connections. `None` when the login was refused (answered with
-/// `-32003`, or `-32005` past the tenant's connection cap or
-/// [`MAX_PENDING_LOGINS`](crate::MAX_PENDING_LOGINS)), timed out, or
-/// `stop` fired.
+/// `-32003`, also after [`LOGIN_TIMEOUT`] of silence, or `-32005` past the
+/// tenant's connection cap or [`MAX_PENDING_LOGINS`](crate::MAX_PENDING_LOGINS)),
+/// the input ended, or `stop` fired.
 pub(super) async fn login<S>(
     input: &mut S,
     tokens: &Tokens,
@@ -42,14 +42,15 @@ where
     let first = tokio::select! {
         biased;
         () = stop.cancelled() => return None,
-        first = tokio::time::timeout(LOGIN_TIMEOUT, input.next()) => first.ok().flatten()?,
+        first = tokio::time::timeout(LOGIN_TIMEOUT, input.next()) => first,
     };
+    // Silence past the wait is refused like a bad first message.
     let request = match first {
-        Inbound::Message(message) => serde_json::from_str::<JsonValue>(&message)
+        Ok(Some(Inbound::Message(message))) => serde_json::from_str::<JsonValue>(&message)
             .ok()
             .and_then(|value| Request::from_value(value).ok()),
-        Inbound::TooLong(_) | Inbound::NotUtf8 => None,
-        Inbound::Failed(_) => return None,
+        Ok(Some(Inbound::TooLong(_) | Inbound::NotUtf8)) | Err(_) => None,
+        Ok(Some(Inbound::Failed(_)) | None) => return None,
     };
     let id = (request.as_ref())
         .and_then(|request| request.id.clone())
