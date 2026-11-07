@@ -40,6 +40,19 @@ fn user_prompt_submit_carries_content_and_reads_each_action() {
     assert!(UserPromptSubmit::decode(json!({"action": "continue", "x": 1})).is_err());
 }
 
+/// Linch 3.x #102: `retry` / `force_continue` are not `pre_tool_use` answers,
+/// so they cannot cut the chain and let the tool run.
+#[test]
+fn pre_tool_use_refuses_actions_the_point_does_not_honour() {
+    for action in ["retry", "force_continue"] {
+        assert!(
+            PreToolUse::decode(json!({ "action": action })).is_err(),
+            "{action}"
+        );
+    }
+    assert!(PreToolUse::decode(json!({"action": "continue"})).is_ok());
+}
+
 #[test]
 fn context_build_carries_the_messages_and_reads_blocks() {
     let (session_id, run_id) = ids();
