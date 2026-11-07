@@ -1,10 +1,12 @@
-"""What `linch-rust new`, `add tool` and `docs path` do (standard library only)."""
+"""What `linch-rust new`, `add tool`, `docs path` and `skill install` do (standard library only)."""
 
 from __future__ import annotations
 
 import keyword
 import re
+import shutil
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 
 from .._binary import WORKSPACE
@@ -17,6 +19,14 @@ _CLIENT = "linch-rust"
 _REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 # A file every docs tree has, to tell a real one from an empty directory.
 _DOCS_MARKER = Path("architecture/README.md")
+_SKILL = "build-agent-with-linch"
+# Where each coding agent looks for a project's skills.
+SKILL_TARGETS = {
+    "claude": Path(".claude/skills"),
+    "codex": Path(".agents/skills"),
+    "linch": Path(".linch/skills"),
+}
+_DEFAULT_SKILL_TARGETS = ("claude", "codex")
 
 
 class ScaffoldError(Exception):
@@ -36,7 +46,8 @@ def scaffold_project(name: str, parent: Path) -> list[Path]:
         parent: The directory the project directory is made in.
 
     Returns:
-        The files written, in order.
+        The files written, in order, then the skill directories installed
+        for Claude Code and Codex.
 
     Raises:
         ScaffoldError: The name is invalid (exit code 2), or the target
@@ -61,7 +72,41 @@ def scaffold_project(name: str, parent: Path) -> list[Path]:
     for path, template in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.substitute(names), encoding="utf-8")
-    return list(files)
+    return [*files, *install_skill(target)]
+
+
+def install_skill(
+    project: Path, targets: Sequence[str] | None = None, *, force: bool = False
+) -> list[Path]:
+    """Copy the `build-agent-with-linch` skill shipped with this client into a project.
+
+    Args:
+        project: The project directory that receives the skill.
+        targets: Keys of `SKILL_TARGETS`, the coding agents to install for;
+            Claude Code and Codex when absent.
+        force: Whether to replace copies that already exist.
+
+    Returns:
+        The installed skill directories, in target order.
+
+    Raises:
+        ScaffoldError: The shipped skill is missing, or a copy exists and
+            `force` is false; nothing is copied then (exit code 1).
+    """
+    source = skill_root()
+    destinations = [
+        project / SKILL_TARGETS[target] / _SKILL
+        for target in dict.fromkeys(targets or _DEFAULT_SKILL_TARGETS)
+    ]
+    existing = [path for path in destinations if path.exists()]
+    if existing and not force:
+        raise ScaffoldError(f"{existing[0]} already exists; pass --force to replace it")
+    for path in destinations:
+        if path.exists():
+            shutil.rmtree(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, path)
+    return destinations
 
 
 def add_tool(name: str, start: Path) -> list[Path]:
@@ -124,6 +169,27 @@ def docs_root() -> Path:
 def docs_roots() -> list[Path]:
     """Where the docs may be: in the installed package, then in a checkout."""
     return [Path(__file__).resolve().parents[1] / "_docs", WORKSPACE / "docs"]
+
+
+def skill_root() -> Path:
+    """Return the directory of the skill shipped with this client.
+
+    Raises:
+        ScaffoldError: Neither the installed package nor the checkout has
+            it.
+    """
+    for root in skill_roots():
+        if (root / _SKILL / "SKILL.md").is_file():
+            return root / _SKILL
+    raise ScaffoldError(
+        "skill not found: reinstall linch-rust from a wheel, or use a checkout "
+        "that has linch-rust/skills"
+    )
+
+
+def skill_roots() -> list[Path]:
+    """Where the skill may be: in the installed package, then in a checkout."""
+    return [Path(__file__).resolve().parents[1] / "_skills", WORKSPACE / "skills"]
 
 
 def _check_name(name: str, kind: str) -> str:

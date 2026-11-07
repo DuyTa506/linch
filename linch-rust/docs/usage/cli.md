@@ -1,7 +1,8 @@
 # CLI
 
-Use the `linch-rust` command to scaffold a project, add host tools to it, and
-find the documentation installed with the package.
+Use the `linch-rust` command to scaffold a project, add host tools to it,
+find the documentation installed with the package, and install the skill
+that teaches a coding agent to use it.
 
 [<- Usage guide](./README.md)
 
@@ -30,6 +31,8 @@ created demo-agent/src/demo_agent/tools/__init__.py
 created demo-agent/src/demo_agent/tools/greet.py
 created demo-agent/tests/test_agent.py
 created demo-agent/tests/test_greet.py
+created demo-agent/.claude/skills/build-agent-with-linch
+created demo-agent/.agents/skills/build-agent-with-linch
 
 Next steps:
   cd demo-agent
@@ -43,6 +46,8 @@ demo-agent/
 ├── pyproject.toml          # hatchling, src layout, pytest configured, depends on linch-rust
 ├── README.md
 ├── .gitignore
+├── .claude/skills/build-agent-with-linch/   # the coding-agent skill, for Claude Code
+├── .agents/skills/build-agent-with-linch/   # the same, for Codex
 ├── src/demo_agent/
 │   ├── __init__.py
 │   ├── agent.py            # build_config(), ask(), and TOOLS
@@ -88,6 +93,8 @@ Options and rules:
   digits with single `-` or `_` separators, and is not a Python keyword or one
   of `linch`, `linch_rust`, `src`, `test`, `tests`.
 - The target directory must not exist or be empty.
+- The project gets the `build-agent-with-linch` skill for Claude Code and
+  Codex, as `linch-rust skill install` writes it ([below](#linch-rust-skill-install)).
 
 ## `linch-rust add tool <name>`
 
@@ -141,13 +148,50 @@ grep -rn "NotSuspended" "$(linch-rust docs path)/usage"
 It looks in the installed package first, then in the checkout the client runs
 from.
 
+## `linch-rust skill install`
+
+Copies the `build-agent-with-linch` skill into a project, so a coding agent
+working there finds these docs and builds on `linch_rust` the way they
+describe. The skill teaches the Python client: where the docs are and how to
+search them, the main objects, testing on the scripted provider, debugging,
+and when to run more than one sidecar. Its `references/design.md` helps choose
+an architecture before building.
+
+```bash
+linch-rust skill install                    # .claude/skills and .agents/skills
+linch-rust skill install --target linch     # .linch/skills
+linch-rust skill install --force            # replace an installed copy after upgrading
+```
+
+```text
+created .claude/skills/build-agent-with-linch
+created .agents/skills/build-agent-with-linch
+```
+
+| `--target` | Directory | For |
+|---|---|---|
+| `claude` | `.claude/skills/build-agent-with-linch` | Claude Code |
+| `codex` | `.agents/skills/build-agent-with-linch` | Codex |
+| `linch` | `.linch/skills/build-agent-with-linch` | An agent with `skills: True` and the default `config_dir` ([Skills](./skills.md)) |
+
+- `--target` can be repeated; without it the skill goes to `claude` and
+  `codex`.
+- `--dir DIR` installs into the project at `DIR` instead of the current
+  directory.
+- An installed copy is never overwritten: the command stops before copying
+  anything, with code 1. `--force` replaces each copy, dropping files an
+  older version had.
+- The skill is the one shipped with the installed package, so it matches its
+  docs. It works offline, from the package first, then from the checkout the
+  client runs from.
+
 ## Exit codes
 
 | Code | Meaning | Example message |
 |---|---|---|
 | 0 | Success, and `--help` | |
-| 2 | Usage error: an unknown command, a missing argument, an invalid name | `linch-rust: error: invalid project name 'My_Agent': use lowercase letters and digits with single '-' or '_' separators, starting with a letter` |
-| 1 | The files on disk are in the way: a non-empty target, no project, an ambiguous package, a file that exists, missing docs | `linch-rust: error: target demo-agent already exists and is not empty` |
+| 2 | Usage error: an unknown command, a missing argument, an invalid name or target | `linch-rust: error: invalid project name 'My_Agent': use lowercase letters and digits with single '-' or '_' separators, starting with a letter` |
+| 1 | The files on disk are in the way: a non-empty target, no project, an ambiguous package, a file or skill that exists, missing docs or skill | `linch-rust: error: target demo-agent already exists and is not empty` |
 
 Other messages with code 1:
 
@@ -155,6 +199,8 @@ Other messages with code 1:
 linch-rust: error: no linch-rust project found from . upward (run it inside a project made by 'linch-rust new'; its pyproject.toml must depend on 'linch-rust')
 linch-rust: error: refusing to overwrite existing file .../src/demo_agent/tools/web_search.py
 linch-rust: error: docs not found: reinstall linch-rust from a wheel, or use a checkout that has linch-rust/docs
+linch-rust: error: .claude/skills/build-agent-with-linch already exists; pass --force to replace it
+linch-rust: error: skill not found: reinstall linch-rust from a wheel, or use a checkout that has linch-rust/skills
 ```
 
 ## Related pages
@@ -162,3 +208,5 @@ linch-rust: error: docs not found: reinstall linch-rust from a wheel, or use a c
 - [Quickstart](./quickstart.md): the same shapes, by hand.
 - [Tools](./tools.md): `@tool`, scopes and approvals.
 - [Providers](./providers.md#the-scripted-provider): scripted turns for tests.
+- [Skills](./skills.md): skills for the agents you build, a different thing
+  from this coding-agent skill.

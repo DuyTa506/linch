@@ -32,11 +32,14 @@ module-name = "linch_rust"
 # whose `#!python` line the installer points at its interpreter (the sdist
 # carries it by the `data/**/*` include below).
 data = "data"
-# `src/linch_rust/_docs` links to linch-rust/docs, which maturin does not walk
-# into: the globs copy its files, as files, into the sdist and the wheel.
+# `src/linch_rust/_docs` links to linch-rust/docs, and `_skills` to
+# linch-rust/skills, which maturin does not walk into: the globs copy their
+# files, as files, into the sdist and the wheel.
 include = [
     { path = "linch_rust/_docs/**/*", format = "sdist" },
     { path = "linch_rust/_docs/**/*", format = "wheel" },
+    { path = "linch_rust/_skills/**/*", format = "sdist" },
+    { path = "linch_rust/_skills/**/*", format = "wheel" },
     { path = "data/**/*", format = "sdist" },
 ]
 

@@ -1,4 +1,4 @@
-"""The `linch-rust` console script: `new`, `add tool` and `docs path`."""
+"""The `linch-rust` console script: `new`, `add tool`, `docs path` and `skill install`."""
 
 from __future__ import annotations
 
@@ -61,8 +61,7 @@ def test_the_console_script_ships_as_a_wheel_data_script() -> None:
 def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--help"]) == 0
     out = capsys.readouterr().out
-    assert "new" in out and "add" in out and "docs" in out
-    assert "skill" not in out
+    assert "new" in out and "add" in out and "docs" in out and "skill" in out
 
 
 def test_the_module_runs_as_a_script() -> None:
@@ -93,6 +92,10 @@ def test_new_creates_the_project_tree(tmp_path: Path, capsys: pytest.CaptureFixt
         "src/my_agent/tools/greet.py",
         "tests/test_agent.py",
         "tests/test_greet.py",
+        ".claude/skills/build-agent-with-linch/SKILL.md",
+        ".claude/skills/build-agent-with-linch/references/design.md",
+        ".agents/skills/build-agent-with-linch/SKILL.md",
+        ".agents/skills/build-agent-with-linch/references/design.md",
     ]
     assert sorted(str(p.relative_to(proj)) for p in proj.rglob("*") if p.is_file()) == sorted(
         expected
