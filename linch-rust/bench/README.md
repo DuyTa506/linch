@@ -113,6 +113,11 @@ Rows for each M: `py` and `rs-kernel` (one process each), `rs-client` with
 one sidecar and with `--sidecars` (4), sessions round-robin; then the
 largest M again on each side with the caps below raised (`caps raised`).
 
+The spread sidecars share one database, so each one sets
+`stores.max_connections` to 80 / N (20 for 4). With the default pool size
+every sidecar may open up to 32, and four of them pass Postgres's
+`max_connections` of 100.
+
 A side opens its agent, does one warm-up run and prints a mark. The
 coordinator reads the process tree's CPU and the database's
 `xact_commit`, then lets it start all M runs; at the second mark it reads

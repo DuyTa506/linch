@@ -115,6 +115,9 @@ SESSIONS = (100, 500, 1000, 2000)
 QUICK_SESSIONS = (20, 50)
 SESSION_TURNS = 4
 RAISED_PG_POOL = 40
+# Spread rows share one database: the sidecars split this many connections,
+# as usage/stores.md asks of N processes on one Postgres.
+SPREAD_PG_POOL = 80
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE_MB = os.sysconf("SC_PAGE_SIZE") / 2**20
 LIVE = {
@@ -432,7 +435,7 @@ class Runner:
                 sessions=int(variant.split("x")[0].split("+")[0]),
                 sidecars=self.args.sidecars if "x" in variant else 1,
                 raise_caps=raised,
-                pg_pool=RAISED_PG_POOL if raised else None,
+                pg_pool=RAISED_PG_POOL if raised else SPREAD_PG_POOL if "x" in variant else None,
                 workspace=str(root),
                 stores="postgres",
                 base_url=self.chat_server(name),

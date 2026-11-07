@@ -152,7 +152,10 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
     định 32 (trên 64 core) khoảng 0,6 s, và pool 40 khoảng 0,4 s.
   - `max_connections` của chính Postgres (mặc định 100) được dùng chung bởi mọi pool
     của mọi tiến trình trên cơ sở dữ liệu, kể cả worker và công cụ quản trị. Đó là lý
-    do mặc định dừng ở 32: ba tiến trình server ở mặc định vẫn vừa. Chỉ tăng
+    do mặc định dừng ở 32: ba tiến trình server ở mặc định vẫn vừa. Bốn thì không: khi đó
+    run lỗi với `pool timed out`. Với N tiến trình (sidecar) trên một cơ sở dữ liệu, đặt
+    `stores.max_connections` của mỗi tiến trình khoảng (giới hạn của cơ sở dữ liệu trừ
+    phần dự phòng) / N, ví dụ 20 cho bốn sidecar với giới hạn 100. Chỉ tăng
     `stores.max_connections` quá 32 sau khi đã tăng giới hạn của cơ sở dữ liệu, hoặc đặt
     một pooler như PgBouncer phía trước.
 - Lần mở đã kết nối một pool đặt kích thước của nó; các agent dùng chung pool dùng

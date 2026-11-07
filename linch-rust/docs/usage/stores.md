@@ -154,8 +154,12 @@ Schema details, write paths and the refusal rules are in the
   - Postgres's own `max_connections` (100 by default) is shared by every pool
     of every process on the database, workers and admin tools included. That
     is why the default stops at 32: three server processes at the default
-    still fit. Raise `stores.max_connections` past 32 only after raising
-    the database's limit, or put a pooler such as PgBouncer in front.
+    still fit. Four do not: runs then fail with `pool timed out`. With N
+    processes (sidecars) on one database, set each one's
+    `stores.max_connections` to about (the database's limit minus headroom)
+    / N, for example 20 for four sidecars on a limit of 100. Raise
+    `stores.max_connections` past 32 only after raising the database's
+    limit, or put a pooler such as PgBouncer in front.
 - The open that connects a pool sets its size; agents that share the pool
   share that size. Several server processes on one database each have their
   own pools.
