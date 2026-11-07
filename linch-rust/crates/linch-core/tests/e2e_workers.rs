@@ -217,6 +217,111 @@ async fn task_stop_stops_a_background_worker_without_a_notification() {
 }
 
 #[tokio::test]
+async fn a_continue_to_a_running_worker_is_refused_and_leaves_it_running() {
+    let continue_ = json!({"to": "r1:sub_0", "message": "more"});
+    let stop = json!({"task_id": "r1:sub_0"});
+    let parent = vec![
+        spawn("sub_0", None, "check x", true),
+        call("c_0", "SubagentContinue", continue_),
+        call("stop_0", "TaskStop", stop),
+        text_turn("done"),
+    ];
+    let family = Arc::new(Family::new(parent, vec![tool_turn(0, 1, "Block")]));
+    let stores = Arc::new(Stores::default());
+    let workers = Workers {
+        background: true,
+        ..Workers::default()
+    };
+    let agent = agent(&family, &stores, workers, &Closed::default());
+    let envelopes = run_r1(&agent).await;
+
+    let log = messages(&*stores, "s1").await;
+    let refused = result_texts(&log[4]);
+    assert!(refused[0].contains("is still running"), "{refused:?}");
+    let ends: Vec<RunStatus> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::ChildRunStatus(mark) => Some(mark.status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends,
+        [RunStatus::Running, RunStatus::Aborted],
+        "the refused continue did not fail the worker"
+    );
+    let child = stores.runs.load(NS, &RunId::new("r1:sub_0")).await.unwrap();
+    assert_eq!(child.status, RunStatus::Aborted);
+    let refused = stores.runs.load(NS, &RunId::new("r1:c_0")).await;
+    assert!(refused.is_err(), "a refused continue starts no run");
+}
+
+#[tokio::test]
+async fn task_stop_on_a_finished_worker_does_not_change_its_status() {
+    let stop = json!({"task_id": "r1:sub_0"});
+    let parent = vec![
+        spawn("sub_0", None, "check x", false),
+        call("stop_0", "TaskStop", stop),
+        text_turn("done"),
+    ];
+    let family = Arc::new(Family::new(parent, vec![text_turn("x holds")]));
+    let stores = Arc::new(Stores::default());
+    let workers = Workers {
+        background: true,
+        retain: true,
+        ..Workers::default()
+    };
+    let agent = agent(&family, &stores, workers, &Closed::default());
+    let envelopes = run_r1(&agent).await;
+
+    let child = stores.runs.load(NS, &RunId::new("r1:sub_0")).await.unwrap();
+    assert_eq!(
+        child.status,
+        RunStatus::Completed,
+        "not killed after the fact"
+    );
+    let marks = envelopes
+        .iter()
+        .filter(|e| matches!(e.event, Event::ChildRunStatus(_)));
+    assert_eq!(marks.count(), 0, "a foreground worker has no status marks");
+}
+
+#[tokio::test]
+async fn a_definition_that_names_the_worker_tools_still_does_not_get_them() {
+    let parent = vec![
+        spawn("sub_0", Some("scout"), "check x", false),
+        text_turn("done"),
+    ];
+    let family = Arc::new(Family::new(parent, vec![text_turn("x holds")]));
+    let stores = Arc::new(Stores::default());
+    let registry = ToolRegistry::new();
+    let block = Block(Arc::new(Notify::new()), object(json!({"type": "object"})));
+    let _ = registry.register(Arc::new(block)).unwrap();
+    let mut scout = SubagentDefinition::new("scout", "Reads around.", "Scout the code.");
+    let names = ["Block", "Subagent", "SubagentContinue", "TaskStop"];
+    scout.tools = Some(names.map(String::from).to_vec());
+    let agent = AgentBuilder::new(spec())
+        .provider(family.clone())
+        .tools(Arc::new(registry))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .subagents(vec![scout])
+        .workers(Workers {
+            background: true,
+            retain: true,
+            ..Workers::default()
+        })
+        .build()
+        .unwrap();
+    run_r1(&agent).await;
+    let child: Vec<String> = (family.requests_of("check x")[0].tools.iter())
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(child, ["Block"]);
+}
+
+#[tokio::test]
 async fn an_unkept_child_closes_its_session_when_it_ends() {
     let parent = vec![spawn("sub_0", None, "check x", false), text_turn("done")];
     let family = Arc::new(Family::new(parent, vec![text_turn("x holds")]));
