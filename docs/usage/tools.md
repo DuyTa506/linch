@@ -53,7 +53,9 @@ later on this page.
 choice for a pure domain agent that should never touch the filesystem or shell.
 `workspace_tools(exclude=..., extra=...)` starts from the standard SWE set
 (`Read`, `Write`, `Edit`, `Bash`, `BashProcess`, `Glob`, `Grep`, `TaskCreate`, `TaskList`,
-`TaskGet`, `TaskUpdate`) and adds or removes from there.
+`TaskGet`, `TaskUpdate`) and adds or removes from there. The task tools keep one
+task list per agent tree: a subagent reads and updates the tasks of the root
+session that spawned it, while unrelated sessions keep separate lists.
 `Agent` copies the registry passed to its constructor. Register tools added later
 on `agent.tools` so request discovery sees them; mutating the original registry
 does not change an existing agent.
