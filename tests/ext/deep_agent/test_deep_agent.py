@@ -100,7 +100,8 @@ def _postgres_storage(dsn: str) -> tuple[Any, Any, Any]:
         PostgresSessionStore(dsn),
         PostgresRunStore(dsn),
         CompositeFileBackend(
-            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(dsn)}
+            default=StateFileBackend(),
+            routes={"/memories/": PostgresFileBackend(dsn, namespace="test")},
         ),
     )
 

@@ -44,7 +44,7 @@ async def _run(tool_obj, *, hooks=(), retry: RetryOptions | None = None):
 
 
 async def test_v2_raw_json_is_normalized_validated_rendered_and_emitted() -> None:
-    @tool(output_schema={"type": "object", "required": ["é"]})
+    @tool(output_schema={"type": "object", "required": ["é"]}, scope="read")
     def canonical():
         return {"z": [1, None], "é": True}
 
@@ -60,7 +60,7 @@ async def test_v2_raw_json_is_normalized_validated_rendered_and_emitted() -> Non
 
 
 async def test_v2_expected_error_bypasses_success_schema() -> None:
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def missing():
         return ToolOutputError("record missing", code="not_found", details={"id": 2})
 
@@ -76,7 +76,7 @@ async def test_v2_validation_error_is_not_retried_and_fires_failure_hook() -> No
     calls = 0
     failures = []
 
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def invalid():
         nonlocal calls
         calls += 1
@@ -112,6 +112,7 @@ async def test_v2_renderer_failure_is_not_retried() -> None:
         render_output=broken_renderer,
         renderer_id="test.broken",
         renderer_version="1",
+        scope="read",
     )
     def broken():
         nonlocal calls
@@ -132,7 +133,7 @@ async def test_v2_renderer_failure_is_not_retried() -> None:
 async def test_post_tool_use_canonical_mutations_revalidate_and_rerender() -> None:
     seen = []
 
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def number():
         return 1
 
@@ -154,7 +155,7 @@ async def test_post_tool_use_canonical_mutations_revalidate_and_rerender() -> No
 
 
 async def test_post_tool_use_legacy_mutation_clears_canonical_output() -> None:
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def number():
         return 1
 
@@ -172,7 +173,7 @@ async def test_post_tool_use_legacy_mutation_clears_canonical_output() -> None:
 async def test_post_tool_use_block_clears_canonical_and_notifies_failure() -> None:
     failures = []
 
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def number():
         return 1
 
@@ -195,7 +196,7 @@ async def test_post_tool_use_block_clears_canonical_and_notifies_failure() -> No
 async def test_pre_tool_use_canonical_resolve_uses_same_boundary() -> None:
     calls = 0
 
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def number():
         nonlocal calls
         calls += 1
@@ -215,7 +216,7 @@ async def test_pre_tool_use_canonical_resolve_uses_same_boundary() -> None:
 async def test_v2_tool_rejects_legacy_tool_result_and_does_not_retry() -> None:
     calls = 0
 
-    @tool(output_schema={"type": "string"})
+    @tool(output_schema={"type": "string"}, scope="read")
     def invalid():
         nonlocal calls
         calls += 1
@@ -237,7 +238,7 @@ async def test_v2_tool_cache_hit_reenters_normalization_boundary() -> None:
 
     calls = 0
 
-    @tool(output_schema={"type": "object"})
+    @tool(output_schema={"type": "object"}, scope="read")
     def cached():
         nonlocal calls
         calls += 1
@@ -273,7 +274,7 @@ async def test_v2_tool_cache_hit_reenters_normalization_boundary() -> None:
 async def test_invalid_canonical_hook_mutation_becomes_failure_without_original_value() -> None:
     failures = []
 
-    @tool(output_schema={"type": "integer"})
+    @tool(output_schema={"type": "integer"}, scope="read")
     def number():
         return 1
 
@@ -299,7 +300,7 @@ async def test_v2_hooks_see_full_projection_before_final_offload() -> None:
     full = "\n".join(f"large output line {index}" for index in range(100))
     seen = []
 
-    @tool(output_schema={"type": "string"})
+    @tool(output_schema={"type": "string"}, scope="read")
     def large():
         return full
 
@@ -345,7 +346,7 @@ async def test_legacy_offload_does_not_store_pre_hook_output_after_mutation(
     from linch.filesystem import OffloadConfig, StateFileBackend
     from linch.hooks import RedactionConfig, RedactionHook, RedactionRule
 
-    @tool
+    @tool(scope="read")
     def legacy():
         return raw
 

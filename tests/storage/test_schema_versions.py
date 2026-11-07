@@ -12,6 +12,8 @@ _PG = [
     ("linch.filesystem.postgres", "PostgresFileBackend", "filesystem", ("agentkit_files",)),
 ]
 
+_KWARGS = {"PostgresFileBackend": {"namespace": "n"}}
+
 
 @pytest.fixture
 async def pg_schema():
@@ -56,7 +58,7 @@ async def test_postgres_rejects_existing_schema_unchanged(
             "CREATE TABLE linch_schema_meta (store TEXT PRIMARY KEY, version INTEGER NOT NULL)"
         )
         await conn.execute("INSERT INTO linch_schema_meta VALUES ($1, $2)", key, version)
-    store = getattr(import_module(module), name)(dsn)
+    store = getattr(import_module(module), name)(dsn, **_KWARGS.get(name, {}))
     try:
         with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
             await store._ensure()
@@ -97,3 +99,23 @@ async def test_postgres_rejects_tampered_metadata_on_reopen(pg_schema, version):
     finally:
         await store.close()
     assert await conn.fetchval("SELECT id FROM runs") == "kept"
+
+
+async def test_filesystem_rejects_pre_namespace_table_with_current_metadata(pg_schema):
+    from linch._wire import WIRE_VERSION
+    from linch.filesystem.postgres import PostgresFileBackend
+
+    dsn, conn = pg_schema
+    await conn.execute("CREATE TABLE agentkit_files (path TEXT PRIMARY KEY, content TEXT)")
+    await conn.execute("INSERT INTO agentkit_files VALUES ('/keep', 'keep')")
+    await conn.execute(
+        "CREATE TABLE linch_schema_meta (store TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+    )
+    await conn.execute("INSERT INTO linch_schema_meta VALUES ('filesystem', $1)", WIRE_VERSION)
+    store = PostgresFileBackend(dsn, namespace="n")
+    try:
+        with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+            await store._ensure()
+    finally:
+        await store.close()
+    assert await conn.fetchval("SELECT content FROM agentkit_files") == "keep"

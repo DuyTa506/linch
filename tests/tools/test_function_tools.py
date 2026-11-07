@@ -14,7 +14,7 @@ def _ctx(deps: Any = None):
 def test_bare_decorator_infers_schema_from_signature():
     from linch.tools import FunctionTool, tool
 
-    @tool
+    @tool(scope="read")
     def greet(name: str, excited: bool = False) -> str:
         """Greet a user."""
         return f"hello {name}{'!' if excited else ''}"
@@ -35,7 +35,7 @@ def test_bare_decorator_infers_schema_from_signature():
 def test_inferred_schema_preserves_default_none_as_json_null():
     from linch.tools import tool
 
-    @tool
+    @tool(scope="read")
     def search(query: str, limit: int | None = None) -> str:
         return query
 
@@ -71,7 +71,7 @@ def test_configured_decorator_uses_explicit_metadata_and_schema():
 def test_validate_requires_inferred_required_fields_and_filters_unknowns():
     from linch.tools import tool
 
-    @tool
+    @tool(scope="read")
     def add(a: int, b: int = 1) -> str:
         return str(a + b)
 
@@ -85,15 +85,15 @@ def test_validate_requires_inferred_required_fields_and_filters_unknowns():
 async def test_execute_supports_sync_async_and_return_conversion():
     from linch.tools import ToolResult, tool
 
-    @tool
+    @tool(scope="read")
     def string_tool(value: str) -> str:
         return value
 
-    @tool
+    @tool(scope="read")
     async def dict_tool(value: str) -> dict[str, str]:
         return {"value": value}
 
-    @tool
+    @tool(scope="read")
     def result_tool() -> ToolResult:
         return ToolResult(content="rich", summary="custom")
 
@@ -116,7 +116,7 @@ async def test_execute_runs_sync_function_off_the_event_loop_thread():
     loop_thread = threading.get_ident()
     seen: dict[str, int] = {}
 
-    @tool
+    @tool(scope="read")
     def blocking(value: str) -> str:
         seen["thread"] = threading.get_ident()
         return value
@@ -132,7 +132,7 @@ async def test_execute_injects_tool_context_when_requested():
 
     deps = {"prefix": "value"}
 
-    @tool
+    @tool(scope="read")
     def read_deps(key: str, ctx: ToolContext) -> str:
         return str(ctx.deps[key])
 
@@ -154,6 +154,7 @@ def test_summary_resources_retry_timeout_and_tags_passthrough():
         retryable=True,
         execution_timeout_ms=2500,
         tags=("lookup",),
+        scope="read",
     )
     def lookup(id: str) -> str:
         return id
@@ -172,7 +173,7 @@ def test_function_tool_explicit_construction_and_registry_schema_export():
     def ping() -> str:
         return "pong"
 
-    tool = FunctionTool(ping, name="Ping", description="Ping service.")
+    tool = FunctionTool(ping, name="Ping", description="Ping service.", scope="read")
     registry = empty_tools(tool)
 
     assert registry.get("Ping") is tool
@@ -183,3 +184,18 @@ def test_function_tool_explicit_construction_and_registry_schema_export():
             "input_schema": {"type": "object", "properties": {}},
         }
     ]
+
+
+def test_tool_without_scope_raises_config_error():
+    from linch import ConfigError
+    from linch.tools import FunctionTool, tool
+
+    def delete_record(record_id: str) -> str:
+        return record_id
+
+    with pytest.raises(ConfigError, match="scope"):
+        tool(delete_record)
+    with pytest.raises(ConfigError, match="scope"):
+        tool(description="Delete.")(delete_record)
+    with pytest.raises(ConfigError, match="scope"):
+        FunctionTool(delete_record)

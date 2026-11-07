@@ -419,7 +419,7 @@ from linch.filesystem.postgres import PostgresFileBackend
 dsn = "postgresql://user:password@localhost/linch"
 filesystem = CompositeFileBackend(
     default=StateFileBackend(),
-    routes={"/memories/": PostgresFileBackend(dsn)},
+    routes={"/memories/": PostgresFileBackend(dsn, namespace="tenant-1")},
 )
 agent = Agent(
     model="your-model",

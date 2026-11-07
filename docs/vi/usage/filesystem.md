@@ -67,7 +67,7 @@ agent = Agent(
     features=FeatureFlags(filesystem=True),
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": PostgresFileBackend(os.environ["LINCH_POSTGRES_DSN"])},
+        routes={"/memories/": PostgresFileBackend(os.environ["LINCH_POSTGRES_DSN"], namespace="tenant-1")},
     ),
 )
 
@@ -89,7 +89,7 @@ Các backend lưu trữ dưới đây khác nhau ở nơi lưu dữ liệu và c
 
 - **`StateFileBackend`** (mặc định cho session đang hoạt động, do agent tạo) — nằm trong bộ nhớ và riêng cho từng session. Không cần thiết lập; tệp nằm trong bộ nhớ, không được lưu lâu dài và session mới nhận một backend mặc định mới. Phù hợp với việc chuyển kết quả ra ngoài thông thường, khi mô hình chỉ cần đọc lại dữ liệu trong cùng một run.
 - **`DiskFileBackend(root=...)`** — tệp thật trong một thư mục gốc được giới hạn bằng sandbox (mặc định là `.linch/offload`, được bỏ qua bởi git). Dữ liệu được lưu lâu dài và có thể kiểm tra trên đĩa, nên bạn có thể mở dữ liệu đã chuyển ra ngoài trong trình soạn thảo khi gỡ lỗi.
-- **`PostgresFileBackend(dsn)`** — lưu lâu dài qua các session trong Postgres. Dùng khi mô hình cần đọc lại tệp từ các run trước.
+- **`PostgresFileBackend(dsn, namespace="tenant-1")`** — lưu lâu dài qua các session trong Postgres. Dùng khi mô hình cần đọc lại tệp từ các run trước. Tệp được khóa theo `(namespace, path)`; các backend có namespace khác nhau trên cùng một database không nhìn thấy tệp của nhau, nên hãy cấp cho mỗi tenant hoặc session một namespace riêng.
 - **`CompositeFileBackend(default=..., routes=...)`** — định tuyến đường dẫn theo tiền tố đến các backend khác nhau. Cách dùng phổ biến là lưu dữ liệu tạm trong bộ nhớ trên `StateFileBackend`, với phân vùng `/memories/` bền vững trên `PostgresFileBackend`, để ghi chú đã chắt lọc được giữ lại còn việc lưu các kết quả lớn vẫn ít tốn kém. Cung cấp tường minh phân vùng `/memories/` này cho cấu hình sẵn deep agent — xem [./deep-agent.md](./deep-agent.md).
 
 Khi không cung cấp backend, agent tạo một `StateFileBackend` mới cho mỗi session. Mọi instance backend được cung cấp tường minh, bao gồm `CompositeFileBackend` trong ví dụ trên và `StateFileBackend` mặc định của nó, đều được chia sẻ giữa các session theo thiết kế.

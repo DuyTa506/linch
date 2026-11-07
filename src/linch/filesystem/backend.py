@@ -408,7 +408,11 @@ class CompositeFileBackend:
 
         CompositeFileBackend(
             default=StateFileBackend(),
-            routes={"/memories/": PostgresFileBackend("postgresql://user:pw@host/db")},
+            routes={
+                "/memories/": PostgresFileBackend(
+                    "postgresql://user:pw@host/db", namespace="tenant-1"
+                )
+            },
         )
 
     Files written under ``/memories/`` land in the persistent backend and

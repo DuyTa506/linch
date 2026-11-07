@@ -251,7 +251,7 @@ async def test_completion_gate_retries_after_real_tool_success() -> None:
 
     calls = 0
 
-    @tool
+    @tool(scope="read")
     async def prepare() -> str:
         nonlocal calls
         calls += 1
@@ -295,12 +295,12 @@ async def test_prerequisite_blocks_same_batch_and_failed_predecessor() -> None:
 
     calls: list[str] = []
 
-    @tool(name="first")
+    @tool(name="first", scope="read")
     async def first() -> ToolResult:
         calls.append("first")
         return ToolResult(content="failed", is_error=True)
 
-    @tool(name="second")
+    @tool(name="second", scope="read")
     async def second() -> str:
         calls.append("second")
         return "should not run"
@@ -354,12 +354,12 @@ async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
 
     calls: list[str] = []
 
-    @tool
+    @tool(scope="read")
     async def prepare() -> str:
         calls.append("prepare")
         return "ready"
 
-    @tool(name="emit_answer")
+    @tool(name="emit_answer", scope="read")
     async def emit_answer() -> str:
         calls.append("emit")
         return "never executes"
@@ -401,13 +401,13 @@ async def test_background_ack_does_not_unlock_prerequisite() -> None:
     finished = asyncio.Event()
     calls: list[str] = []
 
-    @tool
+    @tool(scope="read")
     async def background() -> str:
         calls.append("background")
         finished.set()
         return "background result"
 
-    @tool
+    @tool(scope="read")
     async def dependent() -> str:
         calls.append("dependent")
         return "should not run"
@@ -542,7 +542,7 @@ async def test_invalid_fail_surfaces_listener_error():
 async def test_shared_budget_stops_after_two_corrections(invalid):
     from linch.tools import tool
 
-    @tool
+    @tool(scope="read")
     async def required() -> str:
         return "ready"
 
@@ -619,11 +619,11 @@ async def test_unused_evidence_and_disabled_listener_stay_empty():
 async def test_force_final_cannot_bypass_completion():
     from linch.tools import tool
 
-    @tool
+    @tool(scope="read")
     async def repeat() -> str:
         return "repeat"
 
-    @tool
+    @tool(scope="read")
     async def required() -> str:
         return "ready"
 
@@ -659,7 +659,7 @@ async def test_inferred_terminal_tool_cannot_be_completion_evidence():
     from linch.tools import tool
     from linch.types import OutputSchema
 
-    @tool
+    @tool(scope="read")
     async def answer() -> str:
         raise AssertionError("terminal tool must never execute")
 
@@ -687,11 +687,11 @@ async def test_same_agent_concurrent_runs_keep_prerequisites_isolated():
     barrier, prepared = asyncio.Barrier(2), asyncio.Event()
     calls = []
 
-    @tool
+    @tool(scope="read")
     async def prepare() -> str:
         return "ready"
 
-    @tool
+    @tool(scope="read")
     async def dependent() -> str:
         calls.append("dependent")
         return "done"

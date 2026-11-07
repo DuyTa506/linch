@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from importlib import import_module
 from types import SimpleNamespace
 from typing import Any
@@ -97,7 +98,11 @@ def adapter(request: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(module, "_import_asyncpg", import_driver)
     return SimpleNamespace(
         module=module,
-        store_type=getattr(module, name),
+        store_type=(
+            partial(getattr(module, name), namespace="n")
+            if name == "PostgresFileBackend"
+            else getattr(module, name)
+        ),
         pools=pools,
         creations=creations,
         imports=imports,

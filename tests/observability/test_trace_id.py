@@ -137,7 +137,7 @@ async def test_run_trace_propagates_to_boundary_events_store_tools_and_logs(
     logger.addHandler(handler)
     seen_contexts: list[ToolContext] = []
 
-    @tool
+    @tool(scope="read")
     def capture(ctx: ToolContext) -> str:
         """Capture the run-scoped tool context and emit one log record."""
         seen_contexts.append(ctx)

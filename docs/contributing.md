@@ -86,7 +86,7 @@ hooks, and providers.
 ```python
 from linch import ToolContext, tool
 
-@tool(description="Search project docs.", tags=("rag",))
+@tool(description="Search project docs.", tags=("rag",), scope="read")
 async def search_docs(query: str, ctx: ToolContext) -> str:
     return await ctx.deps.docs.search(query)
 ```

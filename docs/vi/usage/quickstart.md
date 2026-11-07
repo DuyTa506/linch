@@ -123,7 +123,7 @@ from linch import InMemorySessionStore
 from linch import empty_tools
 
 
-@tool(description="Return the current status for a service.")
+@tool(description="Return the current status for a service.", scope="read")
 async def service_status(name: str) -> str:
     return f"{name}: healthy"
 

@@ -127,11 +127,11 @@ def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
     from linch.tools import tool
     from linch.tools.registry import empty_tools
 
-    @tool
+    @tool(scope="read")
     async def prepare() -> str:
         return "prepared"
 
-    @tool
+    @tool(scope="read")
     async def finish() -> str:
         raise AssertionError("final tool must never execute")
 
@@ -327,13 +327,13 @@ async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind
 
     calls = []
 
-    @tool(name="Subagent")
+    @tool(name="Subagent", scope="read")
     async def launch(run_in_background: bool = False) -> str:
         assert run_in_background
         calls.append("launch")
         return "Background worker launched"
 
-    @tool
+    @tool(scope="read")
     async def dependent() -> str:
         calls.append("dependent")
         return "must not execute"

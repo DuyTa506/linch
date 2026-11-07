@@ -12,7 +12,7 @@ instead.
 ```python
 from linch import ToolContext, tool
 
-@tool(description="Search the product knowledge base.", tags=("rag",))
+@tool(description="Search the product knowledge base.", tags=("rag",), scope="read")
 async def search_kb(query: str, ctx: ToolContext) -> str:
     return await ctx.deps.kb.search(query)
 ```

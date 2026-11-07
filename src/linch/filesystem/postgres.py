@@ -14,7 +14,7 @@ Usage::
 
     agent = Agent(
         ...,
-        filesystem=PostgresFileBackend("postgresql://user:pw@host/db"),
+        filesystem=PostgresFileBackend("postgresql://user:pw@host/db", namespace="tenant-1"),
         result_offload=OffloadConfig(),
     )
 """
@@ -25,14 +25,17 @@ import asyncio
 import time
 from typing import Any
 
+from ..kernel.errors import ConfigError
 from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
 from .backend import _slice_lines, normalize_path
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agentkit_files (
-    path        TEXT PRIMARY KEY,
+    namespace   TEXT NOT NULL,
+    path        TEXT NOT NULL,
     content     TEXT NOT NULL,
-    updated_at  DOUBLE PRECISION NOT NULL
+    updated_at  DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (namespace, path)
 );
 """
 
@@ -49,8 +52,13 @@ class PostgresFileBackend:
     implemented.  Connection pooling via ``asyncpg`` means concurrent
     read/write operations truly run in parallel.
 
+    Files are keyed by ``(namespace, path)``: backends with different
+    namespaces on one database never see each other's files.
+
     Args:
         dsn: PostgreSQL connection string.
+        namespace: Non-empty owner scope (for example a tenant or session id)
+            that every read, write, edit, delete, and listing is limited to.
         pool: Host-owned asyncpg pool to reuse; when set, dsn is ignored. The
             backend never closes this pool.
         min_size: Minimum pool connections.
@@ -64,6 +72,7 @@ class PostgresFileBackend:
         self,
         dsn: str,
         *,
+        namespace: str,
         pool: Any = None,
         min_size: int = 1,
         max_size: int = 10,
@@ -72,14 +81,19 @@ class PostgresFileBackend:
 
         Args:
             dsn: PostgreSQL connection string, ignored when ``pool`` is supplied.
+            namespace: Non-empty owner scope that all operations are limited to.
             pool: Optional host-owned asyncpg pool; the backend never closes it.
             min_size: Minimum size for a pool created from ``dsn``.
             max_size: Maximum size for a pool created from ``dsn``.
 
         Raises:
             ModuleNotFoundError: If ``asyncpg`` is not installed.
+            ConfigError: If ``namespace`` is empty.
         """
+        if not isinstance(namespace, str) or not namespace:
+            raise ConfigError("PostgresFileBackend namespace must be a non-empty string")
         _import_asyncpg()
+        self._namespace = namespace
         self._dsn = dsn
         self._pool: Any = pool
         self._owns_pool = pool is None
@@ -90,7 +104,12 @@ class PostgresFileBackend:
 
     async def _ensure(self) -> Any:
         return await ensure_pool(
-            self, _SCHEMA, _import_asyncpg, schema_key="filesystem", tables=("agentkit_files",)
+            self,
+            _SCHEMA,
+            _import_asyncpg,
+            schema_key="filesystem",
+            tables=("agentkit_files",),
+            required_columns={"agentkit_files": ("namespace",)},
         )
 
     # ── FileBackend protocol ─────────────────────────────────────────────────
@@ -112,7 +131,11 @@ class PostgresFileBackend:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT content FROM agentkit_files WHERE path = $1", p)
+            row = await conn.fetchrow(
+                "SELECT content FROM agentkit_files WHERE namespace = $1 AND path = $2",
+                self._namespace,
+                p,
+            )
         if row is None:
             raise FileNotFoundError(p)
         return _slice_lines(row["content"], offset, limit)
@@ -129,12 +152,13 @@ class PostgresFileBackend:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO agentkit_files (path, content, updated_at)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (path) DO UPDATE SET
+                INSERT INTO agentkit_files (namespace, path, content, updated_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (namespace, path) DO UPDATE SET
                     content    = EXCLUDED.content,
                     updated_at = EXCLUDED.updated_at
                 """,
+                self._namespace,
                 p,
                 content,
                 time.time(),
@@ -152,12 +176,17 @@ class PostgresFileBackend:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             if not prefix:
-                rows = await conn.fetch("SELECT path FROM agentkit_files ORDER BY path")
+                rows = await conn.fetch(
+                    "SELECT path FROM agentkit_files WHERE namespace = $1 ORDER BY path",
+                    self._namespace,
+                )
                 return [r["path"] for r in rows]
             pfx = normalize_path(prefix).rstrip("/")
             rows = await conn.fetch(
                 "SELECT path FROM agentkit_files "
-                "WHERE path = $1 OR path LIKE $2 ESCAPE '\\' ORDER BY path",
+                "WHERE namespace = $1 AND (path = $2 OR path LIKE $3 ESCAPE '\\') "
+                "ORDER BY path",
+                self._namespace,
                 pfx,
                 _escape_like(pfx) + "/%",
             )
@@ -184,7 +213,10 @@ class PostgresFileBackend:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT content FROM agentkit_files WHERE path = $1 FOR UPDATE", p
+                    "SELECT content FROM agentkit_files "
+                    "WHERE namespace = $1 AND path = $2 FOR UPDATE",
+                    self._namespace,
+                    p,
                 )
                 if row is None:
                     raise FileNotFoundError(p)
@@ -199,9 +231,11 @@ class PostgresFileBackend:
                     )
                 updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
                 await conn.execute(
-                    "UPDATE agentkit_files SET content=$1, updated_at=$2 WHERE path=$3",
+                    "UPDATE agentkit_files SET content=$1, updated_at=$2 "
+                    "WHERE namespace=$3 AND path=$4",
                     updated,
                     time.time(),
+                    self._namespace,
                     p,
                 )
         return count if replace_all else 1
@@ -218,7 +252,11 @@ class PostgresFileBackend:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT 1 FROM agentkit_files WHERE path = $1", p)
+            row = await conn.fetchrow(
+                "SELECT 1 FROM agentkit_files WHERE namespace = $1 AND path = $2",
+                self._namespace,
+                p,
+            )
         return row is not None
 
     async def delete(self, path: str) -> None:
@@ -230,7 +268,11 @@ class PostgresFileBackend:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM agentkit_files WHERE path = $1", p)
+            await conn.execute(
+                "DELETE FROM agentkit_files WHERE namespace = $1 AND path = $2",
+                self._namespace,
+                p,
+            )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

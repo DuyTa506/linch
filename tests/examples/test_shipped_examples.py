@@ -62,7 +62,7 @@ async def test_deep_agent_example_interrupts_before_resuming(monkeypatch, tmp_pa
 
     session_store, run_store = InMemorySessionStore(), TrackingRunStore()
 
-    @tool(name="echo", description="Return a fixed result.")
+    @tool(name="echo", description="Return a fixed result.", scope="read")
     async def echo() -> str:
         calls.append("echo")
         return "tool result"
@@ -95,9 +95,11 @@ async def test_deep_agent_example_interrupts_before_resuming(monkeypatch, tmp_pa
     # supported import path the example uses for the optional integrations.
     monkeypatch.setattr(linch, "PostgresRunStore", lambda dsn: run_store)
     monkeypatch.setattr(linch, "PostgresSessionStore", lambda dsn: session_store, raising=False)
-    monkeypatch.setattr(linch, "PostgresFileBackend", lambda dsn: StateFileBackend(), raising=False)
+    monkeypatch.setattr(
+        linch, "PostgresFileBackend", lambda dsn, **_: StateFileBackend(), raising=False
+    )
     monkeypatch.setattr(postgres_sessions, "PostgresSessionStore", lambda dsn: session_store)
-    monkeypatch.setattr(postgres_files, "PostgresFileBackend", lambda dsn: StateFileBackend())
+    monkeypatch.setattr(postgres_files, "PostgresFileBackend", lambda dsn, **_: StateFileBackend())
 
     await module.run_durable_planning(str(tmp_path))
 

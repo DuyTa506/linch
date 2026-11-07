@@ -6,7 +6,7 @@ from typing import Any
 async def test_tool_contract_accepts_decorated_function_tool() -> None:
     from linch import assert_tool_contract, tool
 
-    @tool
+    @tool(scope="read")
     def echo(value: str) -> str:
         """Echo a value."""
         return f"echo:{value}"
@@ -103,7 +103,7 @@ async def test_file_backend_contract_accepts_postgres_backend(
     from linch import assert_file_backend_contract
     from linch.filesystem.postgres import PostgresFileBackend
 
-    await assert_file_backend_contract(lambda: PostgresFileBackend(pg_dsn))
+    await assert_file_backend_contract(lambda: PostgresFileBackend(pg_dsn, namespace="test"))
 
 
 async def test_file_backend_contract_accepts_disk_backend(tmp_path) -> None:

@@ -85,7 +85,7 @@ agent = Agent(
     features=FeatureFlags(filesystem=True),
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": PostgresFileBackend(os.environ["LINCH_POSTGRES_DSN"])},
+        routes={"/memories/": PostgresFileBackend(os.environ["LINCH_POSTGRES_DSN"], namespace="tenant-1")},
     ),
 )
 
@@ -112,8 +112,10 @@ The storage backends below differ in where they persist and how they scope files
 - **`DiskFileBackend(root=...)`** — real files under a sandboxed root (default
   `.linch/offload`, gitignored). Persistent and inspectable on disk, so you can
   open offloaded payloads in your editor while debugging.
-- **`PostgresFileBackend(dsn)`** — persistent across sessions in Postgres.
-  Use it when the model should read back files from earlier runs.
+- **`PostgresFileBackend(dsn, namespace="tenant-1")`** — persistent across sessions in Postgres.
+  Use it when the model should read back files from earlier runs. Files are keyed by
+  `(namespace, path)`; backends with different namespaces on one database never see
+  each other's files, so give each tenant or session its own namespace.
 - **`CompositeFileBackend(default=..., routes=...)`** — routes paths by prefix to
   different backends. The common pattern is in-memory scratch on `StateFileBackend`
   with a durable `/memories/` partition on `PostgresFileBackend`, so distilled notes
