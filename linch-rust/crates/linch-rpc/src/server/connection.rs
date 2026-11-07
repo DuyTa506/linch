@@ -45,15 +45,8 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let pools = Arc::new(PgPools::new());
-    serve_lines(
-        reader,
-        writer,
-        Access::Local,
-        pools,
-        CancellationToken::new(),
-    )
-    .await
+    let access = Access::Local(Arc::new(PgPools::new()));
+    serve_lines(reader, writer, access, CancellationToken::new()).await
 }
 
 /// Serve one client of a byte stream pair, one message per line, until
@@ -73,10 +66,6 @@ where
 ///     access: How the client is trusted. With [`Access::Login`] the first
 ///         line must be `connection.auth`; a refused login, or none within
 ///         10 s, closes the connection.
-///     pools: Where a local client's agents take their Postgres pools;
-///         pass one for every connection of a process, so agents on one
-///         target share a pool. A tenant's agents take their tenant's own
-///         pools instead.
 ///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:
@@ -85,7 +74,6 @@ pub async fn serve_lines<R, W>(
     reader: R,
     writer: W,
     access: Access,
-    pools: Arc<PgPools>,
     stop: CancellationToken,
 ) -> io::Result<()>
 where
@@ -105,7 +93,7 @@ where
         LinesCodecError::Io(error) => error,
         other => io::Error::other(other),
     });
-    connection(input, output, access, pools, stop).await
+    connection(input, output, access, stop).await
 }
 
 /// Serve one client of a message transport (one JSON-RPC message per
@@ -118,8 +106,6 @@ where
 ///         one message per item. It is flushed whenever no message waits,
 ///         and closed at the end.
 ///     access: How the client is trusted.
-///     pools: Where a local client's agents take their Postgres pools; a
-///         tenant's agents take their tenant's own.
 ///     stop: Ends the connection as if its input ended.
 ///
 /// Raises:
@@ -128,7 +114,6 @@ pub async fn serve_messages<S, K>(
     incoming: S,
     outgoing: K,
     access: Access,
-    pools: Arc<PgPools>,
     stop: CancellationToken,
 ) -> io::Result<()>
 where
@@ -146,7 +131,7 @@ where
         Ok(message) => Inbound::Message(message),
         Err(error) => Inbound::Failed(error),
     });
-    connection(input, outgoing, access, pools, stop).await
+    connection(input, outgoing, access, stop).await
 }
 
 /// What a transport delivered.
@@ -164,7 +149,6 @@ async fn connection<S, K>(
     mut input: S,
     output: K,
     access: Access,
-    pools: Arc<PgPools>,
     stop: CancellationToken,
 ) -> io::Result<()>
 where
@@ -176,11 +160,17 @@ where
     let outbox = Outbox(sender);
     // A remote connection holds a place among its tenant's connections
     // until it ends.
-    let place = match access {
-        Access::Local => None,
-        Access::Tenant(place) => Some(place),
+    let (place, pools) = match access {
+        Access::Local(pools) => (None, pools),
+        Access::Tenant(place) => {
+            let pools = Arc::clone(place.tenant.pools());
+            (Some(place), pools)
+        }
         Access::Login(tokens) => match login::login(&mut input, &tokens, &outbox, &stop).await {
-            Some(place) => Some(place),
+            Some(place) => {
+                let pools = Arc::clone(place.tenant.pools());
+                (Some(place), pools)
+            }
             None => {
                 drop(outbox);
                 return writing.await.map_err(io::Error::other)?;

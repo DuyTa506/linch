@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use linch::provider::scripted::TurnBuilder;
-use linch::{Envelope, Event, JsonObject, PgPools, RunId, ScriptedTurn};
+use linch::{Envelope, Event, JsonObject, RunId, ScriptedTurn};
 use linch_rpc::protocol::{AgentOpened, RunAccepted, RunEnd, RunEvent, method};
 use linch_rpc::{
     Access, Allowlists, Client, ClientError, ErrorObject, Notifications, RequestHandler, Tenant,
@@ -59,12 +59,6 @@ impl Rpc {
 
     /// A client of an in-process server that trusts it as `access`.
     pub fn remote(access: Access) -> Self {
-        Self::sharing(access, Arc::new(PgPools::new()))
-    }
-
-    /// [`Self::remote`] on a connection that takes its Postgres pools from
-    /// `pools`, as every connection of one server process does.
-    pub fn sharing(access: Access, pools: Arc<PgPools>) -> Self {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (server_reader, server_writer) = tokio::io::split(theirs);
         let stop = CancellationToken::new();
@@ -72,7 +66,6 @@ impl Rpc {
             server_reader,
             server_writer,
             access,
-            pools,
             stop,
         ));
         let (reader, writer) = tokio::io::split(ours);
@@ -88,7 +81,6 @@ impl Rpc {
             server_reader,
             server_writer,
             access,
-            Arc::new(PgPools::new()),
             stop,
         ));
         let (reader, writer) = tokio::io::split(ours);

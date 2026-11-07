@@ -41,12 +41,12 @@ package `linch_rust` (`python/src/linch_rust/`) is a client of this server.
 | `crates/linch-rpc/src/client.rs` | The Rust `Client` |
 | `crates/linch-server/src/main.rs` | The binary: stdio, or the listeners with `--config FILE` |
 | `crates/linch-server/src/{config,listen,http}.rs` | The config, the Unix socket and the HTTP transport |
-| `crates/linch/src/pools.rs` | `PgPools`: Postgres pools by target; a server keeps one set per tenant and one for its local connections |
+| `crates/linch/src/pools.rs` | `PgPools`: Postgres pools by target; each tenant has its own set, and a local connection brings one in `Access::Local` |
 
 ## Methods and messages
 
 Every method name is a `method::` constant (`crates/linch-rpc/src/protocol.rs:25-55`),
-and `Server::dispatch` (`crates/linch-rpc/src/server.rs:297-315`) maps each
+and `Server::dispatch` (`crates/linch-rpc/src/server.rs:294-312`) maps each
 to its handler. Params types refuse unknown fields; `OpenParams` takes
 `tools` and `callbacks` out and reads the rest as a strict `AgentConfig`
 (`crates/linch-rpc/src/protocol/open.rs:13-28`).
@@ -115,13 +115,13 @@ agents, driven runs and parked runs under one lock, so `agent.close` cannot
 miss a run that starts while it checks; its outbox; its peer for server
 requests; and its tenant, `None` for a local client.
 
-1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:84-109`)
-   frames a byte stream into lines; `serve_messages` (`connection.rs:127-150`)
-   takes one message per frame. Both hand `Inbound` items (`connection.rs:153-161`)
-   to `connection` (`connection.rs:163-221`), which spawns the writer task,
+1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:73-97`)
+   frames a byte stream into lines; `serve_messages` (`connection.rs:113-135`)
+   takes one message per frame. Both hand `Inbound` items (`connection.rs:138-146`)
+   to `connection` (`connection.rs:148-211`), which spawns the writer task,
    runs the login when access is `Login`, and reads until the input ends
    or `stop` fires.
-2. **Read loop.** `Server::receive` (`server.rs:174-210`) parses a line,
+2. **Read loop.** `Server::receive` (`server.rs:171-207`) parses a line,
    hands a client's answer to the server request it names, and reads
    anything else as a request (`Request::from_value`,
    `crates/linch-rpc/src/message.rs:108`). A request without an `id` is a
@@ -129,7 +129,7 @@ requests; and its tenant, `None` for a local client.
    (`MAX_REQUESTS`, `server.rs:49`); the loop awaits it, so the 65th
    request stops reading until a call ends. The call runs in its own task,
    so a slow `agent.open` never holds up a `run.cancel`.
-3. **Dispatch.** `Server::handle` (`server.rs:268-295`) catches a panic as
+3. **Dispatch.** `Server::handle` (`server.rs:265-292`) catches a panic as
    `-32603`. A run method returns its stream: the `RunAccepted` result is
    queued first, then a task drives the stream.
 4. **A run.** `Server::drive` (`run.rs:159-196`) encodes each envelope once,
@@ -137,14 +137,14 @@ requests; and its tenant, `None` for a local client.
    removes the run from the tables (keeping its place when it parked, see
    [limits](#limits)) and queues `run.end`. A run's panic ends it with
    `-32603`, at its last durable state.
-5. **Writer.** `write_messages` (`connection.rs:225-254`) takes everything
+5. **Writer.** `write_messages` (`connection.rs:215-244`) takes everything
    already queued, joins consecutive envelopes of one run into one
    `run.event` (`Batch::push`, `crates/linch-rpc/src/server/outgoing.rs:74-83`)
    up to 64 KiB (`outgoing.rs:21`), and flushes once nothing waits.
 6. **Server requests.** `Peer::call` (`peer.rs:92-139`) queues the request
    and waits for its answer, its timeout or its cancel; waiting for room in
    the outbox counts against both.
-7. **End of input.** `Server::stop` (`server.rs:153-172`) lets the calls
+7. **End of input.** `Server::stop` (`server.rs:150-169`) lets the calls
    already read finish, drops every run where it stands (a durable run stays
    resumable), fails the waiting server requests, then closes every agent's
    MCP servers. The writer drains the queue and the connection returns.
@@ -152,7 +152,7 @@ requests; and its tenant, `None` for a local client.
 ### Ordering
 
 - A run's `RunAccepted` is queued before the task that drives it is
-  spawned (`server.rs:281-292`), so it reaches the client before any
+  spawned (`server.rs:278-289`), so it reaches the client before any
   notification of that run. The Python client relies on it: it files a
   run's notifications under the run id it read from that result
   (`python/src/linch_rust/_rpc.py:254-265`).
@@ -192,16 +192,16 @@ There is no buffer that grows without bound on the server:
    its answer (`python/src/linch_rust/run.py:102-121`); a run nobody reads
    while its events keep coming stalls the connection.
 
-`Outbox::send_now` (`connection.rs:269-279`), for code that cannot wait,
+`Outbox::send_now` (`connection.rs:259-269`), for code that cannot wait,
 hands a message to a task when the queue is full.
 
 ## Transports
 
 | Transport | Entry | Access | Runtime |
 |---|---|---|---|
-| stdio | `linch-server` with no arguments; `linch_rpc::serve` (`connection.rs:43-57`) | `Access::Local`: no login, no tenant, no caps | Current-thread (`crates/linch-server/src/main.rs:49-55`): one client, so handing an envelope between its tasks wakes no other thread |
-| Unix socket | `--config FILE` with `socket`; `Listeners` (`crates/linch-server/src/listen.rs:42-101`) | `Access::Login`: the first message is `connection.auth` | Multi-thread |
-| HTTP with WebSocket | `--config FILE` with `http`; `crates/linch-server/src/http.rs:77-116` | `Access::Tenant`: the bearer header is checked before the upgrade | Multi-thread |
+| stdio | `linch-server` with no arguments; `linch_rpc::serve` (`connection.rs:43-50`) | `Access::Local`: no login, no tenant, no caps | Current-thread (`crates/linch-server/src/main.rs:49-55`): one client, so handing an envelope between its tasks wakes no other thread |
+| Unix socket | `--config FILE` with `socket`; `Listeners` (`crates/linch-server/src/listen.rs:41-98`) | `Access::Login`: the first message is `connection.auth` | Multi-thread |
+| HTTP with WebSocket | `--config FILE` with `http`; `crates/linch-server/src/http.rs:74-113` | `Access::Tenant`: the bearer header is checked before the upgrade | Multi-thread |
 
 **stdio.** On Linux the server reopens its pipes through
 `/proc/self/fd/0` and `/proc/self/fd/1` and drives those in non-blocking
@@ -212,28 +212,28 @@ supervisor's other readers. Anything that is not a pipe uses tokio's
 `stdin()` and `stdout()`.
 
 **Unix socket.** A socket file left by a stopped server is replaced, and
-one a server answers on is refused (`bind_socket`, `listen.rs:105-122`).
+one a server answers on is refused (`bind_socket`, `listen.rs:102-119`).
 Each connection waits for its login with one of 32 places
-(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:135-139`): each may
+(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:137-141`): each may
 buffer a 16 MiB line for 10 s, so the places bound that to 512 MiB. One
 more gets `-32005` at once. A login has 10 s (`LOGIN_TIMEOUT`,
 `login.rs:17`); silence past it gets `-32003` and the connection closes
 (`login.rs:42-54`).
 
-**HTTP.** One route, `GET /rpc` (`http.rs:30`). Before its upgrade a
+**HTTP.** One route, `GET /rpc` (`http.rs:29`). Before its upgrade a
 connection holds one of 32 places across the server
-(`MAX_PENDING_UPGRADES`, `http.rs:39-44`); one more is closed unread. Each
-request head has 10 s (`HEADER_READ_TIMEOUT`, `http.rs:32-37`), then the
-connection closes without an answer. `upgrade` (`http.rs:135-171`) checks
+(`MAX_PENDING_UPGRADES`, `http.rs:38-43`); one more is closed unread. Each
+request head has 10 s (`HEADER_READ_TIMEOUT`, `http.rs:31-36`), then the
+connection closes without an answer. `upgrade` (`http.rs:132-168`) checks
 the bearer token first (`401` with `WWW-Authenticate: Bearer`), then takes
 the tenant's connection place (`429`), then answers `101` naming the
 tenant in `Linch-Tenant`. A WebSocket message may be 64 MiB
-(`MAX_MESSAGE_BYTES`, `http.rs:50-53`) before the socket closes; one over
+(`MAX_MESSAGE_BYTES`, `http.rs:49-52`) before the socket closes; one over
 16 MiB is refused by the core like an oversized line. The server speaks
 plain HTTP: put TLS in front of it or listen on loopback.
 
-All listeners of one server share one `PgPools` (`listen.rs:77-101`) for
-local clients; a tenant's connections use the tenant's own (below).
+A listening server keeps no pools of its own: every connection acts for a
+tenant and uses the tenant's pools (below).
 
 ## Tenants and allowlists
 
@@ -242,10 +242,10 @@ config, refusing unknown fields and a cap of 0; `tokens`
 (`config.rs:187`) reads each token inline or from the environment;
 `AllowConfig::build` (`config.rs:220`) makes the `Allowlists`.
 
-- A `Tenant` (`access.rs:41-125`) has a name of 1 to 64 ASCII letters,
+- A `Tenant` (`access.rs:43-127`) has a name of 1 to 64 ASCII letters,
   digits, `.`, `_` or `-` (never `/`), its allowlists, and one semaphore
   each for runs, agents and connections, shared by all its connections.
-- `Tokens` (`access.rs:141-206`) keep each token as a SHA-256 digest and
+- `Tokens` (`access.rs:143-208`) keep each token as a SHA-256 digest and
   compare a presented one with every digest in constant time. No token is
   logged or echoed.
 - `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-136`) checks an
@@ -279,13 +279,13 @@ files, and an `sslmode` at least as strict as its own, ranked from
 
 The facade shares one pool per target among the agents opened with one
 `PgPools` (`crates/linch/src/pools.rs:19-39`). A `Tenant` owns one
-(`access.rs:54`, `access.rs:77`) and `Server::new` gives a tenant's
-connection that one instead of the process's (`server.rs:136`), so pools
+(`access.rs:56`, `access.rs:79`) and `connection` gives a tenant's
+connection that one (`connection.rs:163-179`), so pools
 are keyed by tenant and target: two tenants on one target never share a
 pool, and one tenant cannot set the size of another's (R3 front 5). Every
 connection of one tenant shares its pools, so `max_pool_connections` bounds
-the tenant's connections on each target. Local (stdio) connections keep
-the process's pools. Its key (`pools.rs:45-74`) is sqlx's
+the tenant's connections on each target. A local (stdio) connection takes
+the pools its `Access::Local` carries. Its key (`pools.rs:45-74`) is sqlx's
 normalized URL of the DSN plus its startup `options`, which that URL leaves
 out and which can set the `search_path`; DSNs that differ only in parameter
 order or in settings sqlx ignores share a pool. A pool takes its size from
@@ -302,14 +302,14 @@ best effort.
 | Limit | Value | Where | Past it |
 |---|---|---|---|
 | `max_pool_connections` per tenant | `linch_postgres::default_max_connections()` unless set (`allowlists.rs:275-278`) | `Tenant::admit` (`admit.rs:90-105`), before anything connects | `-32004`, `kind: pool_connections`, `max` the cap |
-| `max_connections` per tenant | 8 unless set (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:92-109`); the connection holds the place until it ends (`connection.rs:179-190`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
+| `max_connections` per tenant | 8 unless set (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:94-111`); the connection holds the place until it ends (`connection.rs:161-180`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
 | `max_runs` per tenant | 16 unless set (`allowlists.rs:17`) | `run_place`, taken in `start` and `claim` (`run.rs:152-157`) and held by the driven run | `-32005`, nothing starts |
 | `max_agents` per tenant | 16 unless set (`allowlists.rs:29`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:104-111`) | `-32005`, before any MCP server starts |
 | Calls in flight per connection | 64 | `server.rs:49` | Reading waits |
-| Logins waiting | 32 per `Tokens` | `access.rs:135-139` | `-32005` `kind: logins`, then close |
-| HTTP upgrades waiting | 32 per server | `http.rs:39-44` | Closed unread |
-| One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:235-254`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
-| Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:37` | The login gets `-32003`, then the connection closes; the HTTP connection closes |
+| Logins waiting | 32 per `Tokens` | `access.rs:137-141` | `-32005` `kind: logins`, then close |
+| HTTP upgrades waiting | 32 per server | `http.rs:38-43` | Closed unread |
+| One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:232-251`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
+| Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:36` | The login gets `-32003`, then the connection closes; the HTTP connection closes |
 
 A local (stdio) connection has none of the tenant caps.
 
@@ -346,7 +346,7 @@ and `close`, `close_session` and `events` (`agent.py:159-201`).
 | 1. Name it | A `method::` constant in `protocol.rs:25-55` | Nothing; every other step uses it |
 | 2. Its params and result | `protocol.rs` or a `protocol/` file, with `deny_unknown_fields` and doc comments | `-32602` for an unknown field only if the type refuses them |
 | 3. The handler | An `impl Server` method in `server/agents.rs` or `server/run.rs`. Run the tenant checks (`admit_principal`, a place) before anything else, and return `Reply::Run` for a run | Tests in `crates/linch-rpc/tests/tenants.rs` and `limits.rs` for its checks |
-| 4. Dispatch | An arm in `Server::dispatch` (`server.rs:297-315`) | `-32601` at run time |
+| 4. Dispatch | An arm in `Server::dispatch` (`server.rs:294-312`) | `-32601` at run time |
 | 5. Errors | A new code in `error.rs` with its conversion | `crates/linch-rpc/tests/wire.rs` for the wire shape |
 | 6. The protocol document | The method in the crate docs' Methods section, a new code in its table (`lib.rs:118-246`, `lib.rs:328-364`) | Review only |
 | 7. The Rust client | Nothing: `Client::call` is generic. A typed helper in `crates/linch-rpc/tests/common/mod.rs` if tests need one | Compilation of the tests |

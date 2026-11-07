@@ -26,8 +26,10 @@ pub use allowlists::{
 #[derive(Debug)]
 pub enum Access {
     /// The client owns the server process, as on stdio: no token, no
-    /// tenant, no allowlists.
-    Local,
+    /// tenant, no allowlists. Its agents take their Postgres pools from
+    /// these; pass one for every local connection of a process, so agents
+    /// on one target share a pool.
+    Local(Arc<PgPools>),
     /// The client already proved it acts for this place's tenant (the
     /// HTTP transport checked its bearer header), and the place, taken
     /// with [`Tenant::connect`] before the connection was accepted, is

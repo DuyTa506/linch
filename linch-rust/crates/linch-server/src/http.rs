@@ -19,7 +19,6 @@ use futures::{SinkExt, StreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
-use linch::PgPools;
 use linch_rpc::{Access, MAX_LINE_BYTES, Tokens};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -57,8 +56,6 @@ const MAX_MESSAGE_BYTES: usize = 4 * MAX_LINE_BYTES;
 pub(crate) struct Shared {
     /// The bearer tokens and their tenants.
     pub(crate) tokens: Arc<Tokens>,
-    /// The Postgres pools of the server's agents.
-    pub(crate) pools: Arc<PgPools>,
     /// Tracks each upgraded connection, so a stop waits for it.
     pub(crate) connections: TaskTracker,
 }
@@ -158,13 +155,13 @@ async fn upgrade(
     };
     // Counted from now, so a stop cannot finish before this connection.
     let counted = shared.connections.token();
-    let (pools, stop) = (shared.pools, http.stop);
+    let stop = http.stop;
     let mut switching =
         socket
             .max_message_size(MAX_MESSAGE_BYTES)
             .on_upgrade(move |socket| async move {
                 let _counted = counted;
-                serve_socket(socket, Access::Tenant(place), pools, stop).await;
+                serve_socket(socket, Access::Tenant(place), stop).await;
             });
     switching.headers_mut().insert(TENANT, name);
     switching
@@ -177,12 +174,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
-async fn serve_socket(
-    socket: WebSocket,
-    access: Access,
-    pools: Arc<PgPools>,
-    stop: CancellationToken,
-) {
+async fn serve_socket(socket: WebSocket, access: Access, stop: CancellationToken) {
     let (sink, stream) = socket.split();
     let incoming = stream.filter_map(|frame| {
         ready(match frame {
@@ -202,5 +194,5 @@ async fn serve_socket(
         .with(|message: String| ready(Ok::<_, axum::Error>(Message::Text(message.into()))))
         .sink_map_err(io::Error::other);
     // A connection's I/O error ends only that connection.
-    let _ = linch_rpc::serve_messages(incoming, Box::pin(outgoing), access, pools, stop).await;
+    let _ = linch_rpc::serve_messages(incoming, Box::pin(outgoing), access, stop).await;
 }

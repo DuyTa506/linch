@@ -210,7 +210,8 @@ timeout và vòng đời của sqlx vẫn tái chế các kết nối.
 `connect` giữ các mặc định khác của sqlx. Kích thước mặc định của nó,
 `default_max_connections()` (`crates/linch-postgres/src/pool_size.rs:26`), là số core của
 máy được kẹp giữa `MIN_DEFAULT_CONNECTIONS` (10, mặc định của chính sqlx) và
-`MAX_DEFAULT_CONNECTIONS` (32), tính một lần cho mỗi process. Mức sàn giữ một máy nhỏ ở
+`MAX_DEFAULT_CONNECTIONS` (32), tính một lần cho mỗi process; nó thay cho
+`MAX_CONNECTIONS` cố định (10), hằng số này đã bị bỏ. Mức sàn giữ một máy nhỏ ở
 khoảng năm run commit cùng lúc. Mức trần dành cho cơ sở dữ liệu: `max_connections` của
 chính Postgres (100 nếu không đặt) được dùng chung bởi mọi pool của mọi process trên nó,
 nên ba process ở mặc định vẫn vừa. Trong bench case 14 (2000 session, store Postgres),

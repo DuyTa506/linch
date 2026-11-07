@@ -94,7 +94,7 @@ async fn a_tenant_drives_at_most_max_runs_at_once_across_its_connections() {
 #[tokio::test]
 async fn a_local_connection_has_no_run_cap() {
     let (arrived, mut calls) = mpsc::unbounded_channel();
-    let (rpc, agent) = waiting(Access::Local, arrived).await;
+    let (rpc, agent) = waiting(Access::Local(Arc::new(PgPools::new())), arrived).await;
     for session in ["s1", "s2", "s3"] {
         rpc.start(&agent, session, "wait").await;
         calls.recv().await.expect("the run waits in its tool");
@@ -226,9 +226,8 @@ impl Raw {
     fn connect(access: Access) -> Self {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = split(theirs);
-        let pools = Arc::new(PgPools::new());
         let stop = CancellationToken::new();
-        let serving = tokio::spawn(linch_rpc::serve_lines(reader, writer, access, pools, stop));
+        let serving = tokio::spawn(linch_rpc::serve_lines(reader, writer, access, stop));
         let (reader, writer) = split(ours);
         let lines = BufReader::new(reader).lines();
         Self {
@@ -333,7 +332,7 @@ async fn a_tenant_keeps_at_most_max_agents_open_across_its_connections() {
 
 #[tokio::test]
 async fn a_local_connection_has_no_agent_cap() {
-    let rpc = Rpc::remote(Access::Local);
+    let rpc = Rpc::remote(Access::Local(Arc::new(PgPools::new())));
     for _ in 0..=linch_rpc::DEFAULT_MAX_AGENTS {
         rpc.open(scripted(vec![], None, "default")).await;
     }
