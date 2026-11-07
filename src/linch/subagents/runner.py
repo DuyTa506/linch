@@ -381,6 +381,9 @@ async def _run_subagent_owned(
     child_session.filesystem = (
         None if args.isolation is not None else getattr(args.parent_session, "filesystem", None)
     )
+    # Offloads belong to the root session, so the parent can read a child's
+    # offloaded results and a forked child can read the parent's.
+    child_session._offloads = getattr(args.parent_session, "_offloads", None)
     if args.fork:
         # Clone the parent's read-file tracker so the child skips re-reading files
         # the parent already loaded.

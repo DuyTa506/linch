@@ -55,8 +55,8 @@ async def fork_session(
     source metadata plus caller overrides, and two provenance keys:
     ``forked_from_session_id`` and ``forked_at_seq`` (the highest copied source
     sequence, or ``0`` for an empty prefix).  It does not inherit provider-view
-    snapshots, run checkpoints, tasks, approvals, workers, filesystem state, or
-    other process-local session state.
+    snapshots, run checkpoints, tasks, approvals, workers, filesystem state,
+    offloaded tool results, or other process-local session state.
 
     Args:
         agent: Agent that owns the source and destination session lifecycle.

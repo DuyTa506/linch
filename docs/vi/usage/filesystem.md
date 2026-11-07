@@ -12,7 +12,7 @@ Kết quả tool lớn — các đoạn RAG, dữ liệu tìm kiếm web, nội 
 
 ## Vì sao cần chuyển kết quả ra ngoài ngữ cảnh
 
-Khi một tool đủ điều kiện trả về kết quả dạng chuỗi quá lớn, scheduler ghi toàn bộ kết quả vào `FileBackend` và thay nội dung mô hình thấy trong `provider_view` bằng bản xem trước ngắn cùng tham chiếu đường dẫn. Kết quả đủ điều kiện phải thành công (không có lỗi), có nội dung là chuỗi, thuộc tool không nằm trong `skip_tools` và có kích thước ước tính vượt ngưỡng đã cấu hình. Mô hình chỉ lấy lại phần cần thiết qua `read_file`, thay vì mang theo toàn bộ dữ liệu trong mỗi lệnh gọi provider sau đó. Sau khi chuyển ra ngoài thành công, toàn bộ nội dung gốc vẫn nằm trong backend và trên `ToolCallEndEvent.tool_result` cho bên tiêu thụ event; chỉ bản sao dành cho mô hình được rút gọn. Nếu ghi vào backend thất bại, kết quả gốc vẫn được giữ nguyên trong hội thoại. Để biết cơ chế này tích hợp vào điểm kiểm soát thực thi tool như thế nào, xem [./tools.md](./tools.md).
+Khi một tool đủ điều kiện trả về kết quả dạng chuỗi quá lớn, scheduler lưu toàn bộ kết quả (xem [nơi lưu kết quả được chuyển ra ngoài](#nơi-lưu-kết-quả-được-chuyển-ra-ngoài)) và thay nội dung mô hình thấy trong `provider_view` bằng bản xem trước ngắn cùng tham chiếu đường dẫn. Kết quả đủ điều kiện phải thành công (không có lỗi), có nội dung là chuỗi, thuộc tool không nằm trong `skip_tools` và có kích thước ước tính vượt ngưỡng đã cấu hình. Mô hình chỉ lấy lại phần cần thiết qua `read_file`, thay vì mang theo toàn bộ dữ liệu trong mỗi lệnh gọi provider sau đó. Sau khi chuyển ra ngoài thành công, toàn bộ nội dung gốc vẫn nằm trong nơi lưu trữ và trên `ToolCallEndEvent.tool_result` cho bên tiêu thụ event; chỉ bản sao dành cho mô hình được rút gọn. Nếu việc ghi thất bại, kết quả gốc vẫn được giữ nguyên trong hội thoại. Để biết cơ chế này tích hợp vào điểm kiểm soát thực thi tool như thế nào, xem [./tools.md](./tools.md).
 
 Kết quả Bash và MCP đã được đánh dấu cắt bớt, kèm `stdout_path`, `stderr_path`
 hoặc `output_path` trong metadata, không được chuyển ra ngoài lần nữa. Tệp spill
@@ -42,7 +42,7 @@ from linch import (
 # Explicit — ephemeral session backend, threshold = 10 % of context window
 agent = Agent(..., features=FeatureFlags(filesystem=True))
 
-# Persist offloaded files under .linch/offload (inspectable, gitignored)
+# Keep model-written files under .linch/offload (inspectable, gitignored)
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
@@ -87,14 +87,18 @@ agent = Agent(..., features=FeatureFlags(filesystem=False))
 
 Các backend lưu trữ dưới đây khác nhau ở nơi lưu dữ liệu và cách xác định phạm vi tệp:
 
-- **`StateFileBackend`** (mặc định cho session đang hoạt động, do agent tạo) — nằm trong bộ nhớ và riêng cho từng session. Không cần thiết lập; tệp nằm trong bộ nhớ, không được lưu lâu dài và session mới nhận một backend mặc định mới. Phù hợp với việc chuyển kết quả ra ngoài thông thường, khi mô hình chỉ cần đọc lại dữ liệu trong cùng một run.
-- **`DiskFileBackend(root=...)`** — tệp thật trong một thư mục gốc được giới hạn bằng sandbox (mặc định là `.linch/offload`, được bỏ qua bởi git). Dữ liệu được lưu lâu dài và có thể kiểm tra trên đĩa, nên bạn có thể mở dữ liệu đã chuyển ra ngoài trong trình soạn thảo khi gỡ lỗi.
+- **`StateFileBackend`** (mặc định cho session đang hoạt động, do agent tạo) — nằm trong bộ nhớ và riêng cho từng session. Không cần thiết lập; tệp nằm trong bộ nhớ, không được lưu lâu dài và session mới nhận một backend mặc định mới. Phù hợp với ghi chú tạm mà mô hình chỉ cần trong cùng một run.
+- **`DiskFileBackend(root=...)`** — tệp thật trong một thư mục gốc được giới hạn bằng sandbox (mặc định là `.linch/offload`, được bỏ qua bởi git). Dữ liệu được lưu lâu dài và có thể kiểm tra trên đĩa, nên bạn có thể mở các tệp mà mô hình đã ghi trong trình soạn thảo khi gỡ lỗi.
 - **`PostgresFileBackend(dsn)`** — lưu lâu dài qua các session trong Postgres. Dùng khi mô hình cần đọc lại tệp từ các run trước.
-- **`CompositeFileBackend(default=..., routes=...)`** — định tuyến đường dẫn theo tiền tố đến các backend khác nhau. Cách dùng phổ biến là lưu dữ liệu tạm trong bộ nhớ trên `StateFileBackend`, với phân vùng `/memories/` bền vững trên `PostgresFileBackend`, để ghi chú đã chắt lọc được giữ lại còn việc lưu các kết quả lớn vẫn ít tốn kém. Cung cấp tường minh phân vùng `/memories/` này cho cấu hình sẵn deep agent — xem [./deep-agent.md](./deep-agent.md).
+- **`CompositeFileBackend(default=..., routes=...)`** — định tuyến đường dẫn theo tiền tố đến các backend khác nhau. Cách dùng phổ biến là lưu dữ liệu tạm trong bộ nhớ trên `StateFileBackend`, với phân vùng `/memories/` bền vững trên `PostgresFileBackend`, để ghi chú đã chắt lọc được giữ lại còn các tệp tạm vẫn ít tốn kém. Cung cấp tường minh phân vùng `/memories/` này cho cấu hình sẵn deep agent — xem [./deep-agent.md](./deep-agent.md).
 
 Khi không cung cấp backend, agent tạo một `StateFileBackend` mới cho mỗi session. Mọi instance backend được cung cấp tường minh, bao gồm `CompositeFileBackend` trong ví dụ trên và `StateFileBackend` mặc định của nó, đều được chia sẻ giữa các session theo thiết kế.
 
 `DiskFileBackend` chạy I/O tệp trên một luồng daemon có giới hạn; khi được khởi tạo, nó phân giải và tạo thư mục gốc. `PostgresFileBackend` dùng asyncpg và import thư viện đó khi được khởi tạo; hãy cài extra `linch[postgres]` trước, còn thao tác với pool và schema vẫn được trì hoãn đến khi cần. Cả hai đều thực hiện I/O backend bên ngoài luồng vòng lặp agent. Cơ chế tự động chuyển kết quả ra ngoài không ghi gì cho đến khi có kết quả đủ điều kiện vượt ngưỡng.
+
+### Nơi lưu kết quả được chuyển ra ngoài
+
+Kết quả được chuyển ra ngoài được giữ trong session store, dưới session gốc của cây agent, bất kể backend hệ thống tệp nào được cấu hình: `StateFileBackend` do agent tạo, `fs` của môi trường thực thi (workspace của người dùng), `Agent(filesystem=...)` tường minh hoặc `RunOptions(deps={"filesystem": ...})`. Chúng không bao giờ xuất hiện trong workspace nào, subagent dùng chung chúng với agent cha, và chúng đi theo session: một agent ở tiến trình khác mở cùng ID session từ cùng store (worker takeover) vẫn đọc lại được. `InMemorySessionStore` và `PostgresSessionStore` hỗ trợ điều này; một session store không có [khả năng tùy chọn](./run-stores.md#kết-quả-chuyển-ra-ngoài-tùy-chọn) sẽ giữ mọi kết quả trong hội thoại. `read_file`, `ls`, `write_file` và `edit_file` truy cập các đường dẫn dưới `path_prefix` (mặc định `/offload`) trong session store; các đường dẫn khác dùng backend hệ thống tệp. Kết quả được chuyển ra ngoài bị xóa cùng session của chúng và không được `fork_session` sao chép.
 
 ---
 

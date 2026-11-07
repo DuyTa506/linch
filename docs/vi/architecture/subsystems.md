@@ -403,14 +403,19 @@ các tool `ls`, `read_file`, `write_file` và `edit_file`. `DiskFileBackend` và
 import từ `linch.filesystem.postgres`.
 
 `OffloadConfig` kiểm soát việc chuyển kết quả lớn ra ngoài. Khi được bật và kết
-quả vượt ngưỡng đã phân giải, bộ lập lịch ghi toàn bộ nội dung vào backend ảo
-và đặt bản xem trước cùng gợi ý đường dẫn vào kết quả dành cho mô hình.
-`ToolResult` đầy đủ vẫn nằm trên `ToolCallEndEvent.tool_result`. Cấu hình
-offload mặc định suy ra ngưỡng bằng 10% cửa sổ ngữ cảnh của provider;
-`preview_lines` mặc định là 10. Nếu ghi backend thất bại, kết quả gốc được giữ nguyên.
+quả vượt ngưỡng đã phân giải, bộ lập lịch ghi toàn bộ nội dung và đặt bản xem
+trước cùng gợi ý đường dẫn vào kết quả dành cho mô hình. Bất kể backend hệ
+thống tệp nào được cấu hình, nội dung được đưa vào session store qua
+`SessionOffloadBackend` (`src/linch/filesystem/offload.py`), thuộc session gốc
+của cây agent, nên nó không bao giờ đi vào workspace nào và một run được resume
+ở tiến trình khác vẫn đọc lại được. `ToolResult` đầy đủ vẫn nằm trên
+`ToolCallEndEvent.tool_result`. Cấu hình offload mặc định suy ra ngưỡng bằng
+10% cửa sổ ngữ cảnh của provider; `preview_lines` mặc định là 10. Nếu việc ghi
+thất bại, kể cả khi session store không có khả năng offload, kết quả gốc được
+giữ nguyên.
 
-Dùng hệ thống tệp tổng hợp dựa trên Postgres khi các tệp bộ nhớ hoặc offload
-phải tồn tại qua lần khởi động lại tiến trình:
+Dùng hệ thống tệp tổng hợp dựa trên Postgres khi các tệp bộ nhớ phải tồn tại
+qua lần khởi động lại tiến trình:
 
 ```python
 from linch import Agent, CompositeFileBackend, FeatureFlags, StateFileBackend

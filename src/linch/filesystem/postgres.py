@@ -1,7 +1,8 @@
 """PostgreSQL-backed :class:`~linch.filesystem.backend.FileBackend`.
 
-Use for cross-session or cross-process persistence (e.g. shared offload
-storage on multi-worker deployments).
+Use for cross-session or cross-process persistence of files the model writes
+(e.g. a shared ``/memories/`` partition on multi-worker deployments). Offloaded
+tool results are kept in the session store instead.
 
 Install::
 
@@ -10,12 +11,11 @@ Install::
 Usage::
 
     from linch.filesystem.postgres import PostgresFileBackend
-    from linch.filesystem import OffloadConfig
 
     agent = Agent(
         ...,
+        features=FeatureFlags(filesystem=True),
         filesystem=PostgresFileBackend("postgresql://user:pw@host/db"),
-        result_offload=OffloadConfig(),
     )
 """
 

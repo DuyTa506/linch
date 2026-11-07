@@ -127,7 +127,10 @@ async def _maybe_offload_block(
         return result
     from .filesystem.backend import resolve_filesystem_backend
 
-    _fs = resolve_filesystem_backend(getattr(session, "run_deps", None))
+    # Offloaded results live in the session store, outside any filesystem.
+    _fs = getattr(session, "_offloads", None)
+    if _fs is None:
+        _fs = resolve_filesystem_backend(getattr(session, "run_deps", None))
     if _fs is None:
         _fs = getattr(session, "filesystem", None)
     if _fs is None:

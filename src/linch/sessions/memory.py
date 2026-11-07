@@ -62,6 +62,7 @@ class InMemorySessionStore:
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, dict[str, Task]] = {}
         self._task_counter: dict[str, int] = {}
+        self._offloads: dict[str, dict[str, str]] = {}
         # Process-local implementation of the durable-inbox protocol.  It has
         # identical dedupe/commit semantics but intentionally no restart
         # guarantee.
@@ -282,6 +283,42 @@ class InMemorySessionStore:
         raw = self._snapshots.get(id)
         return snapshot_from_dict(raw) if raw is not None else None
 
+    async def save_offload(self, id: str, path: str, content: str) -> None:
+        """Store or replace one offloaded tool result for a session.
+
+        Args:
+            id: Session identifier owning the offloaded result.
+            path: Normalized virtual path the model was given.
+            content: Full tool-result text.
+        """
+
+        self._offloads.setdefault(id, {})[path] = content
+
+    async def load_offload(self, id: str, path: str) -> str | None:
+        """Load one offloaded tool result.
+
+        Args:
+            id: Session identifier owning the offloaded result.
+            path: Normalized virtual path to load.
+
+        Returns:
+            The stored text, or ``None`` when the session has no such result.
+        """
+
+        return self._offloads.get(id, {}).get(path)
+
+    async def list_offloads(self, id: str) -> list[str]:
+        """List a session's offloaded-result paths.
+
+        Args:
+            id: Session identifier whose offloaded results should be listed.
+
+        Returns:
+            Sorted virtual paths.
+        """
+
+        return sorted(self._offloads.get(id, {}))
+
     async def update_meta(self, id: str, meta: dict[str, object]) -> SessionRecord:
         """Merge metadata into a session and update its timestamp.
 
@@ -349,6 +386,7 @@ class InMemorySessionStore:
         self._tasks.pop(id, None)
         self._task_counter.pop(id, None)
         self._inbox.pop(id, None)
+        self._offloads.pop(id, None)
 
     async def create_task(self, session_id: str, input: CreateTaskInput) -> Task:
         """Create a pending task with the next session-local numeric ID.

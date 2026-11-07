@@ -13,15 +13,16 @@ conversation with a short preview plus a path the model can read back on demand.
 
 ## Why offloading exists
 
-When an eligible tool returns an oversized string result, the scheduler writes
-the full result to a `FileBackend` and replaces what the model sees in
+When an eligible tool returns an oversized string result, the scheduler stores
+the full result (see [where offloaded results are stored](#where-offloaded-results-are-stored))
+and replaces what the model sees in
 `provider_view` with a short preview and a path reference. Eligibility requires
 a successful (non-error) result whose content is a string, whose tool is not in
 `skip_tools`, and whose estimated size exceeds the configured threshold. The
 model pulls back only the slice it needs via `read_file`, instead of carrying the
 entire dump in every subsequent provider call. After a successful offload, the
-full original content stays in the backend and on `ToolCallEndEvent.tool_result`
-for event consumers; only the model-facing copy is trimmed. If the backend write
+full original content stays in storage and on `ToolCallEndEvent.tool_result`
+for event consumers; only the model-facing copy is trimmed. If the write
 fails, the original result remains inline and unchanged. For how this hooks into
 the tool execution chokepoint, see [./tools.md](./tools.md).
 
@@ -60,7 +61,7 @@ from linch import (
 # Explicit — ephemeral session backend, threshold = 10 % of context window
 agent = Agent(..., features=FeatureFlags(filesystem=True))
 
-# Persist offloaded files under .linch/offload (inspectable, gitignored)
+# Keep model-written files under .linch/offload (inspectable, gitignored)
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
@@ -107,17 +108,17 @@ The storage backends below differ in where they persist and how they scope files
 
 - **`StateFileBackend`** (agent-created active-session default) — in-memory and
   per-session. Zero setup; files are in-memory, not persisted, and a new session
-  receives a fresh default backend. Right for ordinary offloading where the model
-  only needs to read payloads back within the same run.
+  receives a fresh default backend. Right for scratch notes the model only needs
+  within the same run.
 - **`DiskFileBackend(root=...)`** — real files under a sandboxed root (default
   `.linch/offload`, gitignored). Persistent and inspectable on disk, so you can
-  open offloaded payloads in your editor while debugging.
+  open the files the model wrote in your editor while debugging.
 - **`PostgresFileBackend(dsn)`** — persistent across sessions in Postgres.
   Use it when the model should read back files from earlier runs.
 - **`CompositeFileBackend(default=..., routes=...)`** — routes paths by prefix to
   different backends. The common pattern is in-memory scratch on `StateFileBackend`
   with a durable `/memories/` partition on `PostgresFileBackend`, so distilled notes
-  survive while bulk offloads stay cheap. Supply this
+  survive while scratch files stay cheap. Supply this
   `/memories/` partition explicitly to the deep-agent preset — see [./deep-agent.md](./deep-agent.md).
 
 When no backend is supplied, the agent creates a fresh `StateFileBackend` for
@@ -131,6 +132,22 @@ imports it when constructed; install the `linch[postgres]` extra first, while
 pool and schema work remain lazy. Both keep backend I/O off the agent loop
 thread. Automatic offloading performs no write until an eligible result exceeds
 the threshold.
+
+### Where offloaded results are stored
+
+Offloaded results are kept in the session store, under the root session of the
+agent tree, whichever filesystem backend is configured: the agent-created
+`StateFileBackend`, an execution world's `fs` (the user's workspace), an explicit
+`Agent(filesystem=...)`, or `RunOptions(deps={"filesystem": ...})`. They never
+appear in a workspace, subagents share them with their parent, and they follow
+the session: an agent in another process that opens the same session id from the
+same store (worker takeover) still reads them back. `InMemorySessionStore` and
+`PostgresSessionStore` support this; a session store without the
+[optional capability](./run-stores.md#optional-offloaded-results) keeps every
+result inline instead. `read_file`, `ls`, `write_file`, and `edit_file` reach
+paths under `path_prefix` (default `/offload`) in the session store; other paths
+use the filesystem backend. Offloaded results are deleted with their session and
+are not copied by `fork_session`.
 
 ---
 

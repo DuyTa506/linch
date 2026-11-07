@@ -116,8 +116,8 @@ class ToolContext:
     """Per-session virtual :class:`~linch.filesystem.backend.FileBackend`,
     when the filesystem subsystem is enabled (``Agent(filesystem=...)`` or
     ``Agent(result_offload=...)``).  The ls / read_file / write_file / edit_file
-    tools read and write through this, and the scheduler offloads oversized
-    results here.  ``None`` when the subsystem is off."""
+    tools read and write through this, except for offloaded results, which the
+    session store holds.  ``None`` when the subsystem is off."""
 
     idempotency_key: str = ""
     """Stable key for this ``(run, tool call)`` pair, ``f"{run_id}:{tool_use_id}"``.
