@@ -1645,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "linch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "linch-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "criterion",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "linch-ext"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "linch-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "linch-otel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "linch-postgres"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "linch-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -1773,14 +1773,14 @@ dependencies = [
 
 [[package]]
 name = "linch-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pyo3",
 ]
 
 [[package]]
 name = "linch-rpc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "linch-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "futures",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "linch-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "linch-worker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",

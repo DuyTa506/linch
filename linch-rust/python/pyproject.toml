@@ -1,6 +1,6 @@
 [project]
 name = "linch-rust"
-version = "0.1.0"
+version = "0.1.1"
 description = "Minimal asyncio client for the Linch Rust core, over the linch-server sidecar."
 requires-python = ">=3.11"
 license = "MIT"
