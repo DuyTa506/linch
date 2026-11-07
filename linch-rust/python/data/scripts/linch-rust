@@ -1,0 +1,6 @@
+#!python
+"""The linch-rust console script (see `linch_rust.cli`)."""
+
+from linch_rust.cli import main
+
+raise SystemExit(main())

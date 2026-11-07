@@ -1,0 +1,85 @@
+[project]
+name = "linch-rust"
+version = "0.1.0"
+description = "Minimal asyncio client for the Linch Rust core, over the linch-server sidecar."
+requires-python = ">=3.11"
+license = "MIT"
+# orjson parses the server's lines: about three times faster than `json`.
+dependencies = ["orjson>=3.10"]
+
+[project.optional-dependencies]
+# Spans and metrics of each run through the host's OpenTelemetry providers
+# (`linch_rust.otel`); the API only, as in Python Linch: the host owns the SDK.
+otel = ["opentelemetry-api>=1.20"]
+# `Server.connect("ws://...")`: the standard library has no WebSocket client,
+# and RFC 6455 framing, masking, pings, close and TLS are not worth writing
+# here. A Unix socket needs nothing extra.
+websocket = ["websockets>=14"]
+
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+# The wheel is the pure-Python client plus the linch-server binary, installed
+# as a script (`bindings = "bin"`): no Python ABI, one wheel per platform.
+[tool.maturin]
+bindings = "bin"
+manifest-path = "../crates/linch-server/Cargo.toml"
+python-source = "src"
+module-name = "linch_rust"
+# The `linch-rust` console script (`linch_rust.cli:main`). maturin refuses
+# `[project.scripts]` next to a binary, so it ships as a wheel data script
+# whose `#!python` line the installer points at its interpreter (the sdist
+# carries it by the `data/**/*` include below).
+data = "data"
+# `src/linch_rust/_docs` links to linch-rust/docs, and `_skills` to
+# linch-rust/skills, which maturin does not walk into: the globs copy their
+# files, as files, into the sdist and the wheel.
+include = [
+    { path = "linch_rust/_docs/**/*", format = "sdist" },
+    { path = "linch_rust/_docs/**/*", format = "wheel" },
+    { path = "linch_rust/_skills/**/*", format = "sdist" },
+    { path = "linch_rust/_skills/**/*", format = "wheel" },
+    { path = "data/**/*", format = "sdist" },
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    # Test-only: creates and drops the Postgres schema of the resume test.
+    "psycopg[binary]>=3.2",
+    # Test-only: the in-memory span and metric exporters the otel tests read.
+    "opentelemetry-sdk>=1.20",
+    # The `websocket` extra, for the remote connection tests.
+    "websockets>=14",
+]
+
+# The dev venv does not install the project: an editable maturin install
+# would put a release linch-server in .venv/bin, which `find_server` prefers
+# and cargo never refreshes. Tests import from src/; `uv build` still builds.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = ["source: reads the repository checkout (Rust sources, the skill, pyproject); the installed-wheel test skips it"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src", "tests"]
+strict = ["src"]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"

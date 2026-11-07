@@ -1,0 +1,54 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_01","object":"response","status":"in_progress","model":"gpt-5.5-2026-08-01","output":[],"usage":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_01","object":"response","status":"in_progress","model":"gpt-5.5-2026-08-01","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_01","type":"reasoning","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"rs_01","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_01","output_index":0,"summary_index":0,"delta":"**Planning** ","obfuscation":"k2"}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":5,"item_id":"rs_01","output_index":0,"summary_index":0,"delta":"two lookups.","obfuscation":"p"}
+
+event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","sequence_number":6,"item_id":"rs_01","output_index":0,"summary_index":0,"text":"**Planning** two lookups."}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","sequence_number":7,"item_id":"rs_01","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":8,"item_id":"rs_01","output_index":0,"summary_index":1,"delta":"Calling now."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":{"id":"rs_01","type":"reasoning","summary":[{"type":"summary_text","text":"**Planning** two lookups."},{"type":"summary_text","text":"Calling now."}],"encrypted_content":"gAAAAB-enc"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":10,"output_index":1,"item":{"id":"fc_01","type":"function_call","status":"in_progress","call_id":"call_hue","name":"get_weather","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":11,"item_id":"fc_01","output_index":1,"delta":"{\"city\":","obfuscation":"zz"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":12,"item_id":"fc_01","output_index":1,"delta":"\"Hue\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":13,"item_id":"fc_01","output_index":1,"arguments":"{\"city\":\"Hue\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":14,"output_index":1,"item":{"id":"fc_01","type":"function_call","status":"completed","call_id":"call_hue","name":"get_weather","arguments":"{\"city\":\"Hue\"}"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":15,"output_index":2,"item":{"id":"fc_02","type":"function_call","status":"in_progress","call_id":"call_now","name":"get_time","arguments":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":16,"output_index":2,"item":{"id":"fc_02","type":"function_call","status":"completed","call_id":"call_now","name":"get_time","arguments":"{\"zone\":\"ICT\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":17,"response":{"id":"resp_01","object":"response","status":"completed","model":"gpt-5.5-2026-08-01","incomplete_details":null,"error":null,"output":[{"id":"rs_01","type":"reasoning","summary":[{"type":"summary_text","text":"**Planning** two lookups."},{"type":"summary_text","text":"Calling now."}],"encrypted_content":"gAAAAB-enc"},{"id":"fc_01","type":"function_call","status":"completed","call_id":"call_hue","name":"get_weather","arguments":"{\"city\":\"Hue\"}"},{"id":"fc_02","type":"function_call","status":"completed","call_id":"call_now","name":"get_time","arguments":"{\"zone\":\"ICT\"}"}],"usage":{"input_tokens":2000,"input_tokens_details":{"cached_tokens":1500,"cache_write_tokens":300},"output_tokens":120,"output_tokens_details":{"reasoning_tokens":64},"total_tokens":2120}}}
+

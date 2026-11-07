@@ -1,0 +1,37 @@
+[package]
+name = "linch-rpc"
+description = "JSON-RPC 2.0 protocol, server and client for the Linch agent kernel."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+# The line decoder that keeps the head of an oversized line.
+bytes = "1.12.1"
+futures = "0.3.34"
+linch = { path = "../linch" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+# Reads a store DSN the way the store connects with it, for the Postgres
+# allowlist (already built for linch-postgres).
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate"] }
+# Bearer tokens are kept as SHA-256 digests and compared in constant time
+# (`subtle`); provider base URLs are matched by origin (`url`).
+sha2 = "0.11.1"
+subtle = "2.6.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["codec", "rt"] }
+url = "2.5.8"
+
+[dev-dependencies]
+# The `mcp_server` example serves linch-mcp's test server on stdio.
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "rt", "sync", "test-util", "time"] }

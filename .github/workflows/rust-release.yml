@@ -1,0 +1,143 @@
+# Builds the linch-rust wheel (the pure-Python client with the linch-server
+# binary bundled as a script, maturin `bindings = "bin"`) and a standalone
+# linch-server archive for each platform, then installs each wheel in a fresh
+# venv and runs the client tests against it. No Windows: linch-tools and
+# linch-mcp are Unix-only.
+#
+# A `linch-rust-v<version>` tag attaches the archives to a GitHub release.
+# PyPI is manual only: run the workflow with `publish` checked; it uploads the
+# wheels with the PYPI_API_TOKEN secret.
+name: Rust release
+
+on:
+  pull_request:
+    paths:
+      - linch-rust/Cargo.toml
+      - linch-rust/Cargo.lock
+      - linch-rust/rust-toolchain.toml
+      - linch-rust/python/pyproject.toml
+      - linch-rust/python/src/linch_rust/_binary.py
+      - .github/workflows/rust-release.yml
+  push:
+    tags:
+      - linch-rust-v*
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload the wheels to PyPI
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform.triple }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-22.04, target: x86_64, triple: x86_64-unknown-linux-gnu, manylinux: "2_28" }
+          - { runner: ubuntu-24.04-arm, target: aarch64, triple: aarch64-unknown-linux-gnu, manylinux: "2_28" }
+          - { runner: macos-15-intel, target: x86_64, triple: x86_64-apple-darwin }
+          - { runner: macos-latest, target: aarch64, triple: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      # rust-toolchain.toml in linch-rust/ picks the compiler.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: linch-rust/python
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --locked --out dist
+      # The archive holds the same binary as the wheel.
+      - name: Archive the server
+        shell: bash
+        run: |
+          wheel=$(echo linch-rust/python/dist/linch_rust-*.whl)
+          version=$(basename "$wheel" | cut -d- -f2)
+          mkdir -p archive/bin
+          unzip -j "$wheel" '*.data/scripts/linch-server' -d archive/bin
+          chmod 755 archive/bin/linch-server
+          tar -czf "archive/linch-server-$version-${{ matrix.platform.triple }}.tar.gz" \
+            -C archive/bin linch-server
+      - uses: astral-sh/setup-uv@v7
+      # The tests run from a copy outside the checkout, so they import the
+      # installed package and find the bundled server.
+      - name: Test the installed wheel
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/wheel-test"
+          uv venv "$dir/venv" --python 3.11
+          # The extras and the SDK are what the otel and remote tests import.
+          wheel=$(echo linch-rust/python/dist/linch_rust-*.whl)
+          uv pip install --python "$dir/venv/bin/python" "$wheel[otel,websocket]" \
+            "opentelemetry-sdk>=1.20" "pytest>=8.3" "pytest-asyncio>=0.25"
+          cp -R linch-rust/python/tests "$dir/tests"
+          cd "$dir"
+          venv/bin/python -c 'import sys, pathlib, linch_rust as l; s = l.find_server(); print(s); assert s.is_relative_to(pathlib.Path(sys.prefix).resolve()), s'
+          venv/bin/python -m pytest -q -p no:cacheprovider \
+            -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function \
+            -m "not source" tests
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.platform.triple }}
+          path: linch-rust/python/dist/*.whl
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        with:
+          name: server-${{ matrix.platform.triple }}
+          path: archive/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/linch-rust-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: server-*
+          merge-multiple: true
+          path: archives
+      - name: GitHub release
+        working-directory: archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#linch-rust-v}"
+          if [ "$(find . -name "linch-server-$version-*.tar.gz" | wc -l)" -ne 4 ]; then
+            echo "the tag $GITHUB_REF_NAME does not match the built version"; exit 1
+          fi
+          sha256sum -- *.tar.gz > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes "linch-server $version for Linux and macOS."
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+      - uses: astral-sh/setup-uv@v7
+      - name: Publish to PyPI
+        run: |
+          if [ -z "$UV_PUBLISH_TOKEN" ]; then echo "set the PYPI_API_TOKEN secret"; exit 1; fi
+          uv publish dist/*.whl

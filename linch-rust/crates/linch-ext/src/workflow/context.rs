@@ -1,0 +1,223 @@
+//! [`WorkflowContext`]: the handle a workflow function orchestrates with,
+//! and the journal plumbing its calls share. The calls themselves live in
+//! `step`, `interrupt` and `fanout`.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use linch_core::JsonValue;
+use linch_core::events::kinds::{WorkflowEvent, WorkflowKind};
+use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
+
+use super::engine::WorkflowOptions;
+use super::error::WorkflowError;
+use super::journal::{Interrupt, JournalLease, JournalRecord, JournalStore};
+
+/// Receives every [`WorkflowEvent`] a workflow emits, in order.
+pub type EventSink = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
+
+/// The orchestration handle passed to a workflow function.
+///
+/// Cheap to clone; clones share one journal. Only journaled calls
+/// ([`step`](Self::step), [`interrupt`](Self::interrupt),
+/// [`agent`](Self::agent)) replay on
+/// resume: everything else in the workflow function runs again, so its
+/// control flow must not depend on anything the journal never saw
+/// (randomness, the clock, the environment). Put such values inside a
+/// step.
+#[derive(Clone)]
+pub struct WorkflowContext {
+    pub(super) inner: Arc<Inner>,
+}
+
+pub(super) struct Inner {
+    store: Arc<dyn JournalStore>,
+    pub(super) lease: JournalLease,
+    journal: Mutex<Journal>,
+    on_event: Option<EventSink>,
+    pub(super) step_timeout: Option<Duration>,
+    pub(super) cancel: CancellationToken,
+    pub(super) max_concurrency: usize,
+    /// Answers not used yet, by interrupt key; each is used once.
+    pub(super) resume: Mutex<HashMap<String, JsonValue>>,
+    /// The first interrupt that suspended this run.
+    pub(super) suspended: Mutex<Option<Interrupt>>,
+}
+
+/// Journaled results by `(call_key, occurrence)`, and how many calls of
+/// each key this run has made. Inside a fan-out branch the key carries the
+/// branch path (see [`WorkflowContext::next_occurrence`]).
+#[derive(Default)]
+struct Journal {
+    records: HashMap<(String, u64), JsonValue>,
+    counters: HashMap<String, u64>,
+}
+
+impl WorkflowContext {
+    pub(super) fn new(
+        lease: JournalLease,
+        records: Vec<JournalRecord>,
+        options: &WorkflowOptions,
+    ) -> Self {
+        let records = records
+            .into_iter()
+            .map(|record| ((record.call_key, record.occurrence), record.value))
+            .collect();
+        let journal = Journal {
+            records,
+            counters: HashMap::new(),
+        };
+        let inner = Inner {
+            store: options.journal.clone(),
+            lease,
+            journal: Mutex::new(journal),
+            on_event: options.on_event.clone(),
+            step_timeout: options.step_timeout,
+            cancel: options.cancel.clone(),
+            max_concurrency: options.max_concurrency.max(1),
+            resume: Mutex::new(options.resume.clone()),
+            suspended: Mutex::new(None),
+        };
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    /// Emit a `phase` event: a progress marker for observers.
+    pub fn phase(&self, title: impl Into<String>) {
+        self.emit(event(WorkflowKind::Phase, title.into(), String::new(), 0));
+    }
+
+    /// The first interrupt that suspended this run, if any did.
+    pub(super) fn suspended(&self) -> Option<Interrupt> {
+        lock(&self.inner.suspended).clone()
+    }
+
+    /// The journal key of a call with content key `call_key`, this call's
+    /// occurrence of it, and its journaled value when a previous run
+    /// recorded one.
+    ///
+    /// Outside every fan-out the journal key is `call_key`. Inside a
+    /// `parallel` or `settled` branch it is `call_key@<path>`, the path
+    /// being the branch index at each level, outermost first (`1`, `0.2`),
+    /// so each branch counts its own calls. Branches reach their calls in a
+    /// different order on replay, where journaled calls return at once; a
+    /// count shared across branches would hand one branch another's
+    /// record.
+    pub(super) fn next_occurrence(&self, call_key: &str) -> (String, u64, Option<JsonValue>) {
+        let path = branch_path();
+        let key = if path.is_empty() {
+            call_key.to_owned()
+        } else {
+            format!("{call_key}@{path}")
+        };
+        let mut journal = lock(&self.inner.journal);
+        let counter = journal.counters.entry(key.clone()).or_default();
+        let occurrence = *counter;
+        *counter += 1;
+        let cached = journal.records.get(&(key.clone(), occurrence)).cloned();
+        (key, occurrence, cached)
+    }
+
+    /// Make one result durable, then cache it.
+    pub(super) async fn record(
+        &self,
+        call_key: &str,
+        occurrence: u64,
+        value: &JsonValue,
+    ) -> Result<(), WorkflowError> {
+        let record = JournalRecord {
+            call_key: call_key.to_owned(),
+            occurrence,
+            value: value.clone(),
+        };
+        self.inner.store.append(&self.inner.lease, record).await?;
+        let key = (call_key.to_owned(), occurrence);
+        lock(&self.inner.journal).records.insert(key, value.clone());
+        Ok(())
+    }
+
+    /// `Aborted` once the workflow's cancel token fired: no new work starts,
+    /// while replays still return.
+    pub(super) fn check_cancel(&self, label: &str) -> Result<(), WorkflowError> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(WorkflowError::Aborted {
+                label: label.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit(&self, event: WorkflowEvent) {
+        if let Some(sink) = &self.inner.on_event {
+            sink(&event);
+        }
+    }
+}
+
+tokio::task_local! {
+    /// The fan-out branch path of the code being polled: the branch index
+    /// at each level, outermost first, joined by `.`. Unset outside every
+    /// fan-out, and in a task a branch spawns.
+    static BRANCH: String;
+}
+
+/// The branch path of the code being polled; empty outside every fan-out.
+fn branch_path() -> String {
+    BRANCH.try_with(Clone::clone).unwrap_or_default()
+}
+
+/// Poll `future` as branch `index` of the fan-out being started in the
+/// current branch.
+pub(super) fn in_branch<F: Future>(index: usize, future: F) -> impl Future<Output = F::Output> {
+    let parent = branch_path();
+    let path = if parent.is_empty() {
+        index.to_string()
+    } else {
+        format!("{parent}.{index}")
+    };
+    BRANCH.scope(path, future)
+}
+
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // Each update is one map or option write, so a poisoned lock holds no
+    // half-applied change.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A workflow event with no result.
+pub(super) fn event(
+    kind: WorkflowKind,
+    title: String,
+    call_key: String,
+    occurrence: u64,
+) -> WorkflowEvent {
+    WorkflowEvent {
+        kind,
+        title,
+        call_key,
+        occurrence,
+        subagent_type: String::new(),
+        result_text: None,
+        structured_output: None,
+        structured_error: None,
+    }
+}
+
+pub(super) fn encode_error(label: &str, message: String) -> WorkflowError {
+    WorkflowError::Encode {
+        label: label.to_owned(),
+        message,
+    }
+}
+
+pub(super) fn decode<T: DeserializeOwned>(
+    label: &str,
+    value: JsonValue,
+) -> Result<T, WorkflowError> {
+    serde_json::from_value(value)
+        .map_err(|error| encode_error(label, format!("its value does not decode: {error}")))
+}

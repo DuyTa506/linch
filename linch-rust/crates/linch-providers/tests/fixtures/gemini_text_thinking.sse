@@ -1,0 +1,10 @@
+data: {"candidates":[{"content":{"parts":[{"text":"**Planning** the","thought":true}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9},"modelVersion":"gemini-3.8-flash","responseId":"r-text"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" reply.","thought":true}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9},"modelVersion":"gemini-3.8-flash","responseId":"r-text"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Po"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":1,"thoughtsTokenCount":20,"totalTokenCount":30},"modelVersion":"gemini-3.8-flash","responseId":"r-text"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"ng"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"thoughtsTokenCount":20,"totalTokenCount":31},"modelVersion":"gemini-3.8-flash","responseId":"r-text"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"c2lnLXRleHQ="}],"role":"model"},"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"thoughtsTokenCount":20,"cachedContentTokenCount":4,"totalTokenCount":31},"modelVersion":"gemini-3.8-flash","responseId":"r-text"}
+

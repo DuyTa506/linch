@@ -1,0 +1,28 @@
+[package]
+name = "linch-tools"
+description = "Workspace file tools and Bash for the Linch agent kernel."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.34"
+linch-core = { path = "../linch-core" }
+rustix = { version = "1.1.6", features = ["process"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio-util = "0.7.20"
+
+[dev-dependencies]
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }

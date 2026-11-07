@@ -1,0 +1,20 @@
+: keep-alive
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":"List, then read."},"finish_reason":null}],"usage":null}
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[{"index":0,"delta":{"content":"Checking."},"finish_reason":null}],"usage":null}
+
+: keep-alive
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"list_files","arguments":""}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"a.txt\"}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"e1","object":"chat.completion.chunk","model":"deepseek-flash","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":64},"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":56}}
+
+data: [DONE]
+

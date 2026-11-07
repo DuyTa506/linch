@@ -1,0 +1,52 @@
+[package]
+name = "linch"
+description = "Rust facade of the Linch agent kernel: the public API plus one serde config that opens an agent."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+linch-core = { path = "../linch-core" }
+# Re-exported as `linch::ext`. Its `postgres` feature (the durable workflow
+# journal) adds nothing to the build: linch-postgres already pulls in the
+# same sqlx with the same features.
+linch-ext = { path = "../linch-ext", features = ["postgres"] }
+linch-mcp = { path = "../linch-mcp" }
+linch-postgres = { path = "../linch-postgres" }
+linch-providers = { path = "../linch-providers" }
+linch-tools = { path = "../linch-tools" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# Reads a DSN as the store connects with it, to key its pool on where it
+# connects; the sqlx linch-postgres already builds, with its features.
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "sync"] }
+# Replaces only the password of a DSN when a config is serialized (already
+# in the lockfile for linch-rpc).
+url = "2.5.8"
+# Parses the YAML frontmatter of skills and subagents: pure Rust and
+# maintained (serde_yaml is deprecated), and its untyped tree lets the
+# loaders name the exact field that is wrong, as the Python loaders do.
+yaml-rust2 = { version = "0.13.0", default-features = false }
+
+[dev-dependencies]
+# The `bench_driver` example implements `Tool` for its Echo tool.
+async-trait = "0.1.92"
+futures = "0.3.34"
+# The `mcp_stdio_server` example serves linch-mcp's test server on stdio.
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
+# The `bench_driver` example reads the process CPU-time clock.
+rustix = { version = "1.1.6", features = ["time"] }
+tempfile = "3.27.0"
+# The `bench_driver` example's worker case: the queue and its shutdown token.
+linch-worker = { path = "../linch-worker" }
+tokio-util = "0.7.20"
+# `rt-multi-thread`: the `bench_driver` example runs on the runtime
+# `linch-server` uses.
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
