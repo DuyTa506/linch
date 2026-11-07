@@ -30,6 +30,9 @@ has its own usage docs.
 | [Worker](./worker.md) | `linch-worker`: the Postgres job queue, the worker loop, leases and fencing, back-off and dead letters, one active job per run, cron schedules |
 | [Extensions](./ext.md) | `linch-ext`: the eval harness and scorers, run reports, journaled workflows on memory and Postgres journals |
 | [OpenTelemetry](./otel.md) | `linch-otel`: spans and metrics built from the event stream, the mapping to Python Linch's names, content capture, what hosts wire |
+| [Events](./events.md) | `Event` and its kinds, `Envelope`, persistence classes, the wire format and its version, subagent wrapping, the Python client's decoding and the parity test, adding an event kind |
+| [Skills and subagents](./skills-subagents.md) | The `Skill` tool, its listing and overlay; the `Subagent` tool, foreground and background workers, `SubagentContinue` and `TaskStop`; the run family; child contracts; resume after a crash; reloads; the deep agent roster |
+| [RPC protocol and server](./rpc.md) | `linch-rpc` and `linch-server`: methods and notifications, error codes, inside a connection, ordering and backpressure, the stdio, socket and HTTP transports, tenants and allowlists, limits, adding a method |
 
 Coming later (these pages are not written yet; read the source and its doc
 comments until they are):
@@ -38,20 +41,18 @@ comments until they are):
 |---|---|---|
 | Core and kernel | `Agent`, `AgentBuilder`, `AgentSpec`, the run contract digest, hooks, permissions | [kernel](../../../docs/architecture/kernel.md) |
 | Turn lifecycle | The run state machine in `crates/linch-core/src/runner/`, barriers, suspend and resume, reconcile | [turn lifecycle](../../../docs/architecture/turn-lifecycle.md) |
-| Events | `Event`, `Envelope`, persistence classes and the wire format | [events](../../../docs/architecture/events.md) |
 | Compaction | When and how the provider view is summarized | [compaction](../../../docs/architecture/compaction.md) |
-| Skills and subagents | The `Skill` and `Subagent` tools and child runs | [skills and subagents](../../../docs/architecture/skills-subagents.md) |
-| RPC protocol and server | `linch-rpc` (JSON-RPC 2.0 protocol, server and client) and `linch-server` (the sidecar over stdio, a Unix socket, or HTTP with WebSocket) | none |
 
-The Python pages describe the shared concepts only. Each Rust page will say
-where Rust differs; until then the Rust source is the reference. The main
+The Python pages describe the shared concepts only. Each written Rust page
+says where Rust differs; for the pages still to come, the Rust source is the
+reference. The main
 difference in the kernel is under [Shared invariants](#shared-invariants).
 
 ## Crates
 
 | Crate | Role | Page |
 |---|---|---|
-| `linch-core` | Python-free core: types, wire codecs, the provider and tool contracts, the registry, scheduler, runner, journal and store traits | Providers, Tools, Stores (the rest later) |
+| `linch-core` | Python-free core: types, wire codecs, the provider and tool contracts, the registry, scheduler, runner, journal and store traits | Providers, Tools, Stores, Events, Skills and subagents (the rest later) |
 | `linch-providers` | HTTP model provider adapters and pricing | [Providers](./providers.md) |
 | `linch-tools` | Workspace tools, Bash, the virtual filesystem, result offload, session task tools | [Tools](./tools.md) |
 | `linch-mcp` | MCP client: server tools as registry tools | [MCP client](./mcp.md) |
@@ -60,7 +61,7 @@ difference in the kernel is under [Shared invariants](#shared-invariants).
 | `linch-ext` | Evals, run reports, workflows | [Extensions](./ext.md) |
 | `linch-otel` | OpenTelemetry traces and metrics from the event stream | [OpenTelemetry](./otel.md) |
 | `linch` | Rust facade: the public API plus one serde config that opens an agent | later |
-| `linch-rpc`, `linch-server` | The JSON-RPC protocol and the sidecar | later |
+| `linch-rpc`, `linch-server` | The JSON-RPC protocol and the sidecar | [RPC protocol and server](./rpc.md) |
 | `linch-python` | PyO3 extension behind selected internals of the Python package | later |
 
 ## Shared invariants
@@ -71,7 +72,7 @@ These hold across the pages above, as in Python Linch's
 - **Async only on the hot path.** Blocking file work runs on Tokio's blocking
   pool (`crates/linch-tools/src/fs/local.rs:228`,
   `crates/linch-tools/src/vfs/disk.rs:57`); a run advances only while the
-  caller polls its stream (`crates/linch-core/src/runner.rs:36-39`). The core
+  caller polls its stream (`crates/linch-core/src/runner.rs:37-39`). The core
   spawns one kind of task, on the caller's Tokio runtime: the one that drives
   the background subagents of a run suspended for approval until an approve
   or resume takes them over (`crates/linch-core/src/runner/family.rs`).
@@ -95,4 +96,4 @@ What differs from Python: there is no IoC `Context`, event bus or tool
 pipeline; extension points are traits (`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) and hook chains
 (`crates/linch-core/src/hooks.rs`) given to `AgentBuilder::hooks`
-(`crates/linch-core/src/agent/builder.rs:78`).
+(`crates/linch-core/src/agent/builder.rs:84-85`).
