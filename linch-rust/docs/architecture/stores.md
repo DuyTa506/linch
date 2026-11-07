@@ -116,10 +116,10 @@ tests.
 
 ### Schema and migrations
 
-`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:217`) creates or upgrades
+`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:227`) creates or upgrades
 the tables. It is safe on every start: applied migrations are skipped and
 concurrent callers serialize on an advisory lock. Applied versions are
-recorded in `linch_migrations` (`lib.rs:59`), not sqlx's default table, so a
+recorded in `linch_migrations` (`lib.rs:62`), not sqlx's default table, so a
 host's own sqlx migrations in the same schema do not collide. Tables are
 unqualified and prefixed `linch_`, so the connection's `search_path` picks the
 schema. Queries are built at run time: building the crate needs no database.
@@ -138,7 +138,7 @@ hand back exactly what was written, because message bytes feed prompt caches
 and digests (`migrations/0001_stores.sql:1-3`). Rows decode strictly; a row
 that does not decode is an error (`crates/linch-postgres/src/codec.rs:1-4`).
 Migrations are append-only: add a new file and a `Migration::new` entry
-(`lib.rs:165-201`), never edit an applied one, since `migrate` fails when an
+(`lib.rs:169-211`), never edit an applied one, since `migrate` fails when an
 applied migration differs from the embedded one.
 
 ### Write paths
@@ -154,9 +154,9 @@ applied migration differs from the embedded one.
 
 Multi-statement writes begin at `READ COMMITTED` whatever the server or role
 default, because they must read a row again after waiting on another writer
-(`lib.rs:144`). The single-statement writes run in autocommit at the pool's
+(`lib.rs:148`). The single-statement writes run in autocommit at the pool's
 default isolation; above `READ COMMITTED` a serialization failure (`40001`)
-wrote nothing and is retried, up to three tries in all (`lib.rs:149-163`).
+wrote nothing and is retried, up to three tries in all (`lib.rs:153-166`).
 
 Admission is enforced by the partial unique index, not by a read. A violation
 of `linch_runs_one_live_per_session` reads the live run's id and returns
@@ -185,14 +185,14 @@ the same way: `NotFound`, or `Conflict` naming both lengths
 
 ### Connecting and sizing a pool
 
-`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:101`) bounds
+`linch_postgres::connect(dsn, timeout, max_connections)` (`lib.rs:104`) bounds
 the first connection (default `CONNECT_TIMEOUT`, 5 s); sqlx alone would retry a
 refused connection for its 30 s acquire timeout. Past it, the error names the
 host and port (or socket) it tried. No error message holds the DSN.
 
 The pool pings a connection before handing it out only when it sat idle for
 `IDLE_PING_AFTER` (1 s) or longer, and replaces it when the ping fails
-(`before_acquire`, `lib.rs:116-125`). sqlx does not watch an idle socket, so
+(`before_acquire`, `lib.rs:119-128`). sqlx does not watch an idle socket, so
 without the ping a connection the server closed while idle (a restart, a
 failover, `idle_session_timeout`, a proxy's idle kill) would fail the next
 write on it. After a model call, that write is the receipt: the journal would
@@ -216,9 +216,9 @@ pool of every process on it, so three processes at the default still fit. In
 the case 14 bench (2000 sessions, Postgres stores) a pool of 10 was the
 bottleneck: 3355 ms of overhead per turn, against 382 ms with 40 connections;
 with the default of 32 on a 64-core machine it was 646 ms (3914 ms with 10, in
-the same back-to-back run). A
-facade config sets its own with `stores.max_connections`; on `linch-server` a
-tenant may ask for at most its `max_pool_connections` ([rpc](./rpc.md)). sqlx
+the same back-to-back run). A facade config sets its own size with
+`stores.max_connections`; on `linch-server` a tenant may ask for at most its
+`max_pool_connections` ([rpc](./rpc.md)). sqlx
 also pings a connection in the background when it is released (sqlx-core
 0.9.0, `src/pool/connection.rs:314`), so a run that commits back to
 back alternates between two connections. Size a pool at about two
