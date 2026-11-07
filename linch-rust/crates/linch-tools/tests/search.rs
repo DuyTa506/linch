@@ -266,3 +266,32 @@ async fn glob_caps_results_at_one_thousand() {
     assert_eq!(out.lines().count(), 1_001);
     assert!(out.ends_with("… (truncated to 1000 of 1005 results)"));
 }
+
+/// Dropping the call (its deadline) must stop the walk: with one blocking
+/// thread, a follow-up job only starts once the abandoned search ends.
+#[test]
+fn a_dropped_grep_stops_walking_and_frees_its_blocking_thread() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let ws = Workspace::new();
+        for i in 0..6000 {
+            ws.put(&format!("d{}/f{i}.txt", i % 50), "nothing here\n");
+        }
+        let tool = grep(&ws);
+        let run = || tool.execute(input(json!({"pattern": "needle"})), ctx("s1"));
+        let started = std::time::Instant::now();
+        run().await.unwrap();
+        let full = started.elapsed();
+
+        let abandoned = tokio::time::timeout(Duration::from_millis(1), run()).await;
+        assert!(abandoned.is_err(), "the search finished within 1ms");
+        let started = std::time::Instant::now();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        let drained = started.elapsed();
+        assert!(drained < full / 2, "drained in {drained:?}, full {full:?}");
+    });
+}
