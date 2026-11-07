@@ -20,7 +20,7 @@ async fn migrations_run_twice_are_a_no_op() {
     let (first, second) = tokio::join!(migrate(&db.pool), migrate(&db.pool));
     first.expect("first of two racing migrations");
     second.expect("second of two racing migrations");
-    assert_eq!(applied(&db).await, 4);
+    assert_eq!(applied(&db).await, 5);
 
     let store = PgSessionStore::new(db.pool.clone());
     let id = SessionId::new("s1");
@@ -36,7 +36,7 @@ async fn migrations_run_twice_are_a_no_op() {
         .unwrap();
 
     migrate(&db.pool).await.expect("migrate again");
-    assert_eq!(applied(&db).await, 4, "nothing re-applied");
+    assert_eq!(applied(&db).await, 5, "nothing re-applied");
     assert_eq!(store.load("ns", &id).await.unwrap(), [entry], "data kept");
     let default: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
