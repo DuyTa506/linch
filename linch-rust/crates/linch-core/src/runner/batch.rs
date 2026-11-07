@@ -97,7 +97,8 @@ impl Runner {
             ToolRecovery::Replan(_) => fresh.next().expect("execute returns one result per call"),
         });
         let mut blocks: Vec<ContentBlock> = results.map(ContentBlock::ToolResult).collect();
-        blocks.extend(self.notes().await?);
+        let (notes, peers) = self.notes().await?;
+        blocks.extend(notes);
         let notice = self.catalog_loads(&blocks);
         blocks.extend(notice);
         let message = Message::new(Role::User, blocks);
@@ -105,6 +106,7 @@ impl Runner {
             message: message.clone(),
             subtype: UserEventSubtype::ToolResult,
         }));
+        self.hold_peers(peers);
         self.save(Phase::ToolResults {
             message: message.clone(),
         })

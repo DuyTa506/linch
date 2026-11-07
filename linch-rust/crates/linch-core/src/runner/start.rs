@@ -122,7 +122,7 @@ pub(super) async fn new_run(
         Ok(ready) => ready,
         // Nothing of this run is logged, so the drained messages go back.
         Err(error) => {
-            inbox::redeliver(&agent, peers).await;
+            inbox::release(&agent, &peers).await;
             return Err(match error {
                 // Another start with the same id created it first, or the
                 // session already has a run that is not terminal.
@@ -133,6 +133,8 @@ pub(super) async fn new_run(
             });
         }
     };
+    // The create logged the prompt that carries them.
+    inbox::ack(&agent, &peers).await;
     let family = drive_family(&agent, &driving, &run_id, &session_id);
     let budget = inherited.or_else(|| {
         let limits = agent.spec.budget.clone()?;

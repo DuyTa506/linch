@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::end::cut_empty;
 use super::hooks::{Stopping, add_context};
+use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::write::session_log;
 use super::{Family, Outbox};
@@ -115,6 +116,8 @@ pub(super) struct Runner {
     pub(super) family: Option<Arc<Family>>,
     /// The budget of the run's tree; `None` without one.
     pub(super) budget: Option<Meter>,
+    /// Peer messages logged in an event that is not durable yet.
+    pub(super) peers: Option<HeldPeers>,
 }
 
 impl Runner {
@@ -149,6 +152,7 @@ impl Runner {
             started: progress.started,
             family: None,
             budget: None,
+            peers: None,
         };
         runner.narrow();
         runner
@@ -174,8 +178,17 @@ impl Runner {
         overlay.model.clone()
     }
 
-    /// Run steps until the run ends or suspends.
-    pub(super) async fn drive(mut self, mut step: Step) -> Result<(), RunError> {
+    /// Run steps until the run ends or suspends, then settle the peer
+    /// messages it still holds.
+    pub(super) async fn drive(mut self, step: Step) -> Result<(), RunError> {
+        let driven = self.steps(step).await;
+        self.settle_peers(true).await;
+        driven
+    }
+
+    /// Run steps until the run ends or suspends, acking held peer messages
+    /// as soon as a step made them durable.
+    async fn steps(&mut self, mut step: Step) -> Result<(), RunError> {
         loop {
             let next = match step {
                 Step::Prompt {
@@ -212,6 +225,7 @@ impl Runner {
                     Some(self.turn_start())
                 }
             };
+            self.settle_peers(false).await;
             match next {
                 Some(next) => step = next,
                 None => return Ok(()),

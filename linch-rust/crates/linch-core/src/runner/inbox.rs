@@ -1,5 +1,7 @@
 //! The run's inbox: what waits for the session goes into the next logged
 //! user message, after what is already there (see [`crate::coordination`]).
+//! The drained messages are acked once the event that carries them is
+//! durable, and released when the run ends before that.
 
 use super::turn::{Runner, Step};
 use crate::agent::{AgentInner, RunError};
@@ -34,24 +36,40 @@ pub(super) fn blocks(messages: &[MailboxMessage]) -> impl Iterator<Item = Conten
         .map(|message| ContentBlock::text(message.render()))
 }
 
-/// Send back what a run drained but could not log. Best effort: a
-/// mailbox that fails here loses them, and the caller reports its own
-/// error.
-pub(super) async fn redeliver(agent: &AgentInner, messages: Vec<MailboxMessage>) {
-    let Some(mailbox) = &agent.mailbox else {
-        return;
-    };
-    for message in messages {
-        let _ = mailbox.send(message).await;
+/// Ack drained `messages` whose delivery is durable. Best effort: a
+/// failed ack leaves their lease to run out, so they come again (delivery
+/// is at least once).
+pub(super) async fn ack(agent: &AgentInner, messages: &[MailboxMessage]) {
+    if let (Some(mailbox), false) = (&agent.mailbox, messages.is_empty()) {
+        let _ = mailbox.ack(messages).await;
     }
+}
+
+/// Give back drained `messages` a run could not log. Best effort: a
+/// failed release leaves their lease to run out, and the caller reports
+/// its own error.
+pub(super) async fn release(agent: &AgentInner, messages: &[MailboxMessage]) {
+    if let (Some(mailbox), false) = (&agent.mailbox, messages.is_empty()) {
+        let _ = mailbox.release(messages).await;
+    }
+}
+
+/// Peer messages a run logged in an event that is not durable yet.
+pub(super) struct HeldPeers {
+    /// Seq of the event that carries them.
+    seq: u64,
+    messages: Vec<MailboxMessage>,
 }
 
 impl Runner {
     /// The blocks to add to the user message this turn ends with: the
     /// notification of each background child that ended (none for one
     /// `TaskStop` stopped), whose `child_run_status` this stages, then the
-    /// session's peer messages.
-    pub(super) async fn notes(&mut self) -> Result<Vec<ContentBlock>, RunError> {
+    /// session's peer messages, which are returned too for
+    /// [`Self::hold_peers`].
+    pub(super) async fn notes(
+        &mut self,
+    ) -> Result<(Vec<ContentBlock>, Vec<MailboxMessage>), RunError> {
         let mut notes = Vec::new();
         let done = (self.family.as_ref()).map(|family| family.take_done());
         for completion in done.into_iter().flatten() {
@@ -66,7 +84,48 @@ impl Runner {
         }
         let peers = drain(&self.agent, &self.run.session_id).await?;
         notes.extend(blocks(&peers));
-        Ok(notes)
+        Ok((notes, peers))
+    }
+
+    /// Hold `peers`, which the event staged last carries, until it is
+    /// durable (see [`Self::settle_peers`]).
+    pub(super) fn hold_peers(&mut self, peers: Vec<MailboxMessage>) {
+        if peers.is_empty() {
+            return;
+        }
+        let seq = self.journal.last_seq();
+        match &mut self.peers {
+            Some(held) => {
+                held.seq = seq;
+                held.messages.extend(peers);
+            }
+            None => {
+                self.peers = Some(HeldPeers {
+                    seq,
+                    messages: peers,
+                });
+            }
+        }
+    }
+
+    /// Ack the held peer messages once their event is durable; when the
+    /// run stops (`ending`) before that, release them.
+    pub(super) async fn settle_peers(&mut self, ending: bool) {
+        let durable = match &self.peers {
+            None => return,
+            Some(held) => held.seq <= self.journal.durable_seq(),
+        };
+        if !durable && !ending {
+            return;
+        }
+        let Some(held) = self.peers.take() else {
+            return;
+        };
+        if durable {
+            ack(&self.agent, &held.messages).await;
+        } else {
+            release(&self.agent, &held.messages).await;
+        }
     }
 
     /// After a text answer: while a background child runs or ended
@@ -79,7 +138,7 @@ impl Runner {
         let Some(family) = self.family.clone() else {
             return Ok(None);
         };
-        let mut notes = Vec::new();
+        let (mut notes, mut peers) = (Vec::new(), Vec::new());
         while notes.is_empty() {
             if !family.has_background() {
                 return Ok(None);
@@ -90,7 +149,7 @@ impl Runner {
                 self.abort().await?;
                 return Ok(Some(None));
             }
-            notes = self.notes().await?;
+            (notes, peers) = self.notes().await?;
         }
         notes.extend(self.catalog_change());
         let message = Message::new(Role::User, notes);
@@ -98,6 +157,7 @@ impl Runner {
             message: message.clone(),
             subtype: UserEventSubtype::Notification,
         }));
+        self.hold_peers(peers);
         self.save(Phase::ToolResults {
             message: message.clone(),
         })
