@@ -1505,25 +1505,15 @@ class Agent:
                 enable_background_subagents=self.enable_background_subagents,
             )
             self._register_subagent_tool(cast("Tool", subagent_tool))
-            # SubagentTool itself is deliberately excluded from the worker registry:
-            # build_child_tools() strips it from every child regardless, so workers
-            # cannot recursively spawn their own sub-subagents by default.
+            # The orchestration tools stay out of the worker registry, and
+            # build_child_tools() strips them from every child regardless: a
+            # worker cannot spawn workers, so it has none to continue or stop.
             if self.enable_worker_tools:
                 continue_tool = SubagentContinueTool(get_session=get_session)
                 self._register_subagent_tool(cast("Tool", continue_tool))
-                if (
-                    self._subagent_tool_registry is not None
-                    and self._subagent_tool_registry.get(continue_tool.name) is None
-                ):
-                    self._subagent_tool_registry.register(cast("Tool", continue_tool))
             if self.enable_task_stop:
                 stop_tool = TaskStopTool(get_session=get_session)
                 self._register_subagent_tool(cast("Tool", stop_tool))
-                if (
-                    self._subagent_tool_registry is not None
-                    and self._subagent_tool_registry.get(stop_tool.name) is None
-                ):
-                    self._subagent_tool_registry.register(cast("Tool", stop_tool))
             self._refresh_system_blocks()
 
         self._subagents_connect = _load()
@@ -1765,6 +1755,14 @@ class Agent:
                     if self._filesystem_default is not None
                     else StateFileBackend()
                 )
+                # Offloaded results follow the session in its store: never into
+                # a workspace, and readable after a resume in another process.
+                if self.result_offload is not None:
+                    from .filesystem.offload import SessionOffloadBackend
+
+                    session._offloads = SessionOffloadBackend(
+                        store, record.id, self.result_offload.path_prefix
+                    )
 
             session.invoked_skills = []
             for index, rec in enumerate(record.invoked_skills):

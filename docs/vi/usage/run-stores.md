@@ -584,6 +584,30 @@ Hàm lưu hoạt động theo cơ chế cố gắng tối đa đối với các 
 độc lập: hàm tải có thể khôi phục ảnh chụp hiện có mà không cần hàm lưu, và
 hàm lưu có thể lưu các ảnh chụp trong tương lai mà không cần hàm tải.
 
+### Kết quả chuyển ra ngoài tùy chọn
+
+Kho lưu trữ có thể triển khai khả năng tùy chọn sau để giữ
+[kết quả tool được chuyển ra ngoài](./filesystem.md#nơi-lưu-kết-quả-được-chuyển-ra-ngoài)
+cùng session:
+
+~~~text
+async def save_offload(id: str, path: str, content: str) -> None
+
+async def load_offload(id: str, path: str) -> str | None
+
+async def list_offloads(id: str) -> list[str]
+~~~
+
+`id` là session gốc của cây agent và `path` là đường dẫn ảo đã chuẩn hóa mà mô
+hình nhận được. Việc lưu thực hiện upsert toàn bộ văn bản; việc tải trả về `None`
+với đường dẫn không tồn tại; việc liệt kê trả về các đường dẫn đã sắp xếp. Xóa
+session sẽ xóa các kết quả được chuyển ra ngoài của nó. Scheduler chờ việc lưu
+hoàn tất trước khi kết quả đã rút gọn được ghi nối tiếp, nên một run được resume
+không bao giờ tham chiếu tới kết quả bị thiếu. Kho lưu trữ không có
+`save_offload` giữ các kết quả quá lớn trong hội thoại. Các kho lưu trữ tích hợp
+sẵn triển khai cả ba phương thức; `PostgresSessionStore` dùng bảng
+`session_offloads`.
+
 ### Inbox bền vững tùy chọn
 
 `SessionInboxStore` bổ sung khả năng chèn đúng một lần cho các message dành cho

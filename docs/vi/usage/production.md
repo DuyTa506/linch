@@ -43,7 +43,8 @@ agent = Agent(
   checkpoint và event của từng run (bắt buộc để resume bền vững). Các adapter lưu trữ bền vững
   tích hợp sẵn dùng Postgres; `InMemorySessionStore` và `InMemoryRunStore` dành cho
   kiểm thử và phát triển. Cài các adapter Postgres bằng extra `[postgres]`.
-- Hệ thống tệp ảo bị tắt theo mặc định. Nếu kết quả được chuyển ra ngoài hoặc các tệp
+- Hệ thống tệp ảo bị tắt theo mặc định. Kết quả được chuyển ra ngoài được giữ trong
+  session store, nên `PostgresSessionStore` mang chúng qua các tiến trình. Nếu các tệp do mô hình ghi
   phải tồn tại qua nhiều session hoặc tiến trình, hãy bật tính năng hệ thống tệp và
   dùng `PostgresFileBackend` trong [Hệ thống tệp](./filesystem.md).
 - Xem [Agent và session](./agent.md).

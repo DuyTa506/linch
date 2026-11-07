@@ -40,6 +40,11 @@ The tables below list the application-facing changes by area.
 | Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
 | `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
 | Ambiguous worker display names for `SubagentContinue` or `TaskStop` | Pass the unique `worker_id`; unique display names remain accepted |
+| Task tools keyed by the calling session, so a worker saw an empty `TaskList` | `TaskCreate`, `TaskList`, `TaskGet`, and `TaskUpdate` use the root session of the agent tree, found through each child session's `parentSessionId` metadata |
+| `TaskStop` marking any worker `killed` and only echoing `reason` | It stops only a `running` worker and records `reason` in `WorkerHandle.stop_reason`; a finished worker keeps its status and the result says it was not running |
+| A continue to a running worker marking it `failed` | The continue returns a `WorkerBusy` error and leaves the handle unchanged; a worker reads `running` while a continuation drives it |
+| `continue_subagent()` reporting `sa_cont_<worker_id>` as every continuation's `subagent_run_id` | Hooks and `SubagentEvent` carry the `ContinueSubagentArgs.subagent_run_id` supplied by the caller; `SubagentContinue` generates a fresh one per call |
+| Worker subagents offered `SubagentContinue` and `TaskStop` | Only the session that spawned workers has them; every worker catalog omits `Subagent`, `SubagentContinue`, and `TaskStop` |
 | `Agent(mailbox=...)` | Mount the plugin: `await agent.use(MailboxPlugin(), mailbox)`; `from linch import MailboxPlugin` |
 | `Agent(ask_user=...)` | Mount the plugin: `await agent.use(AskUserPlugin(), handler)`; `from linch import AskUserPlugin` |
 | Large tool or skill catalogs | `ToolSearchPlugin` is mounted when the first session is created; use `await agent.tool_search.dispose()` to restore the unfiltered catalog, or mount `ToolSearchPlugin(max_tools=..., max_skills=...)` explicitly |
@@ -131,6 +136,7 @@ the SDK does not discover DSNs from the environment.
 | Silent resume of terminal runs or runs without checkpoints | Raises `RunNotResumableError` with `run_id` and `status`; `from linch import RunNotResumableError` |
 | Cursorless assistant-boundary tool recovery | A valid `tool_batch_event_after_seq` cursor is required |
 | `scripts/run_report.py --runs-db` | `--dsn` or host script environment `LINCH_POSTGRES_DSN`; `load_report` / `render_report` now take a Postgres DSN |
+| Offloaded tool results written to the session filesystem (an execution world's workspace, or an in-memory backend lost on takeover) | Kept in the session store under the root session of the agent tree, whatever filesystem backend is configured; `PostgresSessionStore` adds the `session_offloads` table, and a custom store without `save_offload` / `load_offload` / `list_offloads` keeps results inline |
 
 All persisted envelopes share generation **3** (`linch.RUN_SCHEMA_VERSION`):
 checkpoints, run contracts, model-call intents/receipts/journals, exact model

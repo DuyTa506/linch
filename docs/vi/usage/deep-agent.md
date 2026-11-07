@@ -45,7 +45,7 @@ Khi bỏ qua `profile`, `profile="balanced"` đặt `durable=True`, giới hạn
 
 `durable=True` yêu cầu adapter `session_store` và `run_store` tường minh, cùng `filesystem` tường minh khi tính năng đó được bật. Không có kho lưu trữ lâu dài tự động hay giá trị mặc định ngầm định từ biến môi trường. Thiếu cấu hình sẽ gây ra `ConfigError`; adapter InMemory tường minh được chấp nhận cho kiểm thử do ứng dụng chủ kiểm soát nhưng chỉ lưu trạng thái trong vòng đời tiến trình. Dùng `durable=False` cho bản demo tạm thời. Khi tắt các tính năng hệ thống tệp, bạn không cần cung cấp hệ thống tệp.
 
-Để duy trì trạng thái qua lần khởi động lại, dùng các kho Postgres như trên. Hệ thống tệp kết hợp giữ nội dung lớn được chuyển ra ngoài trong `StateFileBackend` cục bộ của tiến trình và định tuyến `/memories/` đến Postgres. Cấu hình cơ sở dữ liệu cục bộ theo [Hướng dẫn bắt đầu nhanh](./quickstart.md#5-giữ-trạng-thái-khi-tiến-trình-khởi-động-lại). Sau đó, lịch sử session và checkpoint của run có thể resume sau khi khởi động lại. Worker đang chạy tách rời chỉ tồn tại trong tiến trình và không được resume; khi khôi phục, worker có trạng thái checkpoint là `running` được đánh dấu `killed` và thông báo khôi phục cho biết worker chưa hoàn thành. Theo mặc định, thông báo hoàn thành dùng hàng đợi trong bộ nhớ. Truyền `durability=DurabilityOptions(durable_inbox=True)` cùng kho session hỗ trợ hộp thư đến bền vững khi việc chuyển thông báo hoàn thành cần tiếp tục được bảo đảm sau lần khởi động lại.
+Để duy trì trạng thái qua lần khởi động lại, dùng các kho Postgres như trên. Hệ thống tệp kết hợp giữ các tệp tạm trong `StateFileBackend` cục bộ của tiến trình và định tuyến `/memories/` đến Postgres; kết quả tool được chuyển ra ngoài được giữ trong session store Postgres. Cấu hình cơ sở dữ liệu cục bộ theo [Hướng dẫn bắt đầu nhanh](./quickstart.md#5-giữ-trạng-thái-khi-tiến-trình-khởi-động-lại). Sau đó, lịch sử session và checkpoint của run có thể resume sau khi khởi động lại. Worker đang chạy tách rời chỉ tồn tại trong tiến trình và không được resume; khi khôi phục, worker có trạng thái checkpoint là `running` được đánh dấu `killed` và thông báo khôi phục cho biết worker chưa hoàn thành. Theo mặc định, thông báo hoàn thành dùng hàng đợi trong bộ nhớ. Truyền `durability=DurabilityOptions(durable_inbox=True)` cùng kho session hỗ trợ hộp thư đến bền vững khi việc chuyển thông báo hoàn thành cần tiếp tục được bảo đảm sau lần khởi động lại.
 
 Xem [Cấu hình agent](./agent.md) và [Hệ thống tệp ảo](./filesystem.md) để biết các quy ước về kho lưu trữ và định tuyến bên dưới.
 
@@ -127,7 +127,7 @@ async for event in session.run(
         print(event.final_text)
 ```
 
-Việc tiếp tục worker resume worker đó với toàn bộ ngữ cảnh trước đây, nên bạn có thể giao việc qua nhiều lượt mà không phải giải thích lại tác vụ. Khi bật chế độ giữ lại (như trong các profile mặc định của factory), worker vẫn được gắn vào session sau run đầu tiên để bạn có thể tiếp tục như vậy.
+Việc tiếp tục worker resume worker đó với toàn bộ ngữ cảnh trước đây, nên bạn có thể giao việc qua nhiều lượt mà không phải giải thích lại tác vụ. Khi bật chế độ giữ lại (như trong các profile mặc định của factory), worker vẫn được gắn vào session sau run đầu tiên để bạn có thể tiếp tục như vậy. Mỗi lúc một worker chỉ chạy một cuộc hội thoại: khi một run nền hoặc một lần tiếp tục đang chạy nó, trạng thái của nó là `running`, và một `SubagentContinue` khác gửi tới nó trả về lỗi `WorkerBusy` mà không thay đổi worker.
 
 `session.workers` là một `dict[str, WorkerHandle]`. Mỗi handle cung cấp `handle.child_session_id`, `handle.status` và `handle.last_result_text`. Các trạng thái gồm `running`, `completed`, `failed` hoặc `killed`. Kiểm tra chúng từ ứng dụng chủ để theo dõi worker nào đang hoạt động, kết quả gần nhất của chúng và session con tương ứng với từng worker.
 
@@ -192,7 +192,7 @@ await agent.close()
 
 Với `coordinator=True`, agent cha bỏ các tool workspace tích hợp sẵn phục vụ công việc nặng và giữ các chức năng điều phối. Sau khi `agent.session()` nạp các danh mục tùy chọn, profile mặc định cũng bật tool `Skill`; tool do bên gọi cung cấp và máy chủ MCP đã cấu hình có thể bổ sung thêm tool. Worker dùng registry worker đã cấu hình, giúp ngữ cảnh của agent điều phối tập trung vào quản lý tác vụ thay vì nội dung tệp và đầu ra lệnh.
 
-Để dừng worker chạy nền đang hoạt động, gọi `TaskStop` với `{"task_id": "agent-xxxx"}` (và `reason` tùy chọn). Handle vẫn nằm trong `session.workers` để có thể tiếp tục sau này bằng `SubagentContinue`. Việc dừng hủy tác vụ đang thực thi nhưng không loại bỏ worker — bạn có thể gọi lại worker khi đã có những gì cần thiết.
+Để dừng worker chạy nền đang hoạt động, gọi `TaskStop` với `{"task_id": "agent-xxxx"}` (và `reason` tùy chọn). Handle vẫn nằm trong `session.workers` để có thể tiếp tục sau này bằng `SubagentContinue`. Việc dừng hủy tác vụ đang thực thi nhưng không loại bỏ worker — bạn có thể gọi lại worker khi đã có những gì cần thiết. `TaskStop` chỉ tác động lên worker đang `running`: nó đánh dấu worker là `killed` và ghi `reason` vào `handle.stop_reason`. Worker đã kết thúc giữ nguyên trạng thái, và kết quả cho biết worker không chạy.
 
 ---
 

@@ -66,8 +66,9 @@ tests but provide only process-lifetime state. Use `durable=False` for an
 ephemeral demo. When filesystem features are disabled, no filesystem is required.
 
 For restart durability, use the Postgres stores shown above. The composite
-filesystem keeps bulk offloads in process-local `StateFileBackend` storage and
-routes `/memories/` to Postgres. Configure the local database with the
+filesystem keeps scratch files in process-local `StateFileBackend` storage and
+routes `/memories/` to Postgres; offloaded tool results are kept in the
+Postgres session store. Configure the local database with the
 [Quickstart](./quickstart.md#5-keep-state-when-the-process-restarts). Session
 history and run checkpoints can then resume after restart. A running detached
 worker is process-local and is not resumed; on recovery, a worker checkpointed
@@ -185,7 +186,10 @@ async for event in session.run(
 Continuing a worker resumes it with its entire prior context, so you can have a
 multi-turn delegation without re-explaining the task. When retention is
 enabled (as in the factory's default profiles), workers remain attached after
-their first run so this remains possible.
+their first run so this remains possible. A worker runs one conversation at a
+time: while a background run or a continuation drives it, its status is
+`running`, and another `SubagentContinue` to it returns a `WorkerBusy` error
+without changing the worker.
 
 `session.workers` is a `dict[str, WorkerHandle]`. Each handle exposes
 `handle.child_session_id`, `handle.status`, and `handle.last_result_text`.
@@ -268,7 +272,10 @@ To stop a running background worker, call `TaskStop` with
 `{"task_id": "agent-xxxx"}` (and optionally `reason`). The handle stays in
 `session.workers` so it can be continued later with `SubagentContinue`.
 Stopping cancels the in-flight task but does not discard the worker — you can
-re-engage it once you have what you need.
+re-engage it once you have what you need. `TaskStop` acts only on a `running`
+worker: it marks the worker `killed` and records `reason` in
+`handle.stop_reason`. A worker that has already finished keeps its status, and
+the result says it was not running.
 
 ---
 

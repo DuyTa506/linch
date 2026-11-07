@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS session_inbox (
 
 CREATE INDEX IF NOT EXISTS session_inbox_pending_idx
     ON session_inbox (session_id, message_seq, inbox_seq);
+
+CREATE TABLE IF NOT EXISTS session_offloads (
+    session_id  TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    PRIMARY KEY (session_id, path)
+);
 """
 
 
@@ -178,6 +185,7 @@ class PostgresSessionStore:
                 "task_edges",
                 "session_snapshots",
                 "session_inbox",
+                "session_offloads",
             ),
             required_columns={"sessions": ("last_message_seq",)},
         )
@@ -554,6 +562,64 @@ class PostgresSessionStore:
             )
         return snapshot_from_dict(json.loads(row["snapshot"])) if row is not None else None
 
+    async def save_offload(self, id: str, path: str, content: str) -> None:
+        """Persist or replace one offloaded tool result for a session.
+
+        Args:
+            id: Session identifier owning the offloaded result.
+            path: Normalized virtual path the model was given.
+            content: Full tool-result text.
+        """
+
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO session_offloads (session_id, path, content)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (session_id, path) DO UPDATE SET content = EXCLUDED.content
+                """,
+                id,
+                path,
+                content,
+            )
+
+    async def load_offload(self, id: str, path: str) -> str | None:
+        """Load one offloaded tool result.
+
+        Args:
+            id: Session identifier owning the offloaded result.
+            path: Normalized virtual path to load.
+
+        Returns:
+            The stored text, or ``None`` when the session has no such result.
+        """
+
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT content FROM session_offloads WHERE session_id = $1 AND path = $2",
+                id,
+                path,
+            )
+
+    async def list_offloads(self, id: str) -> list[str]:
+        """List a session's offloaded-result paths.
+
+        Args:
+            id: Session identifier whose offloaded results should be listed.
+
+        Returns:
+            Sorted virtual paths.
+        """
+
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT path FROM session_offloads WHERE session_id = $1 ORDER BY path", id
+            )
+        return [row["path"] for row in rows]
+
     async def update_meta(self, id: str, meta: dict[str, object]) -> SessionRecord:
         """Merge metadata into a session in one transaction.
 
@@ -663,6 +729,7 @@ class PostgresSessionStore:
                 await conn.execute("DELETE FROM task_counters WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM session_snapshots WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM session_inbox WHERE session_id = $1", id)
+                await conn.execute("DELETE FROM session_offloads WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM messages WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM sessions WHERE id = $1", id)
 

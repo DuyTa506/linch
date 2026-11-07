@@ -118,14 +118,18 @@ class RunSubagentResult:
 
 def build_child_tools(parent_tools: Any, filter: list[str] | None) -> Any:
     from ..tools import ToolRegistry
+    from ..tools.subagent_continue import SUBAGENT_CONTINUE_TOOL_NAME
+    from ..tools.subagent_stop import TASK_STOP_TOOL_NAME
 
+    # A worker cannot spawn workers, so it never needs the orchestration tools.
+    orchestration = {SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUE_TOOL_NAME, TASK_STOP_TOOL_NAME}
     child = ToolRegistry()
     if filter is None or "*" in filter:
         wanted = None
     else:
         wanted = set(filter)
     for t in parent_tools.list():
-        if t.name == SUBAGENT_TOOL_NAME:
+        if t.name in orchestration:
             continue
         if wanted is None or t.name in wanted:
             child.register(t)
@@ -377,6 +381,9 @@ async def _run_subagent_owned(
     child_session.filesystem = (
         None if args.isolation is not None else getattr(args.parent_session, "filesystem", None)
     )
+    # Offloads belong to the root session, so the parent can read a child's
+    # offloaded results and a forked child can read the parent's.
+    child_session._offloads = getattr(args.parent_session, "_offloads", None)
     if args.fork:
         # Clone the parent's read-file tracker so the child skips re-reading files
         # the parent already loaded.
@@ -527,10 +534,13 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     so the model receives the complete conversation history on continuation.
 
     If the child session is no longer live (process restart), returns an error
-    result instead of raising.
+    result instead of raising. A worker that is still running is refused with
+    a ``WorkerBusy`` error result and its handle is left unchanged.
     """
     agent = args.parent_agent
     handle = args.handle
+    if handle.status == "running":
+        return _worker_busy(handle)
     child_session = agent._sessions.get(handle.child_session_id)
 
     if child_session is None:
@@ -547,6 +557,8 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
                 ),
             },
         )
+    if child_session._active:
+        return _worker_busy(handle)
 
     if args.signal is not None and args.signal.aborted:
         throw_if_aborted(args.signal)
@@ -581,7 +593,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     # Re-establish the abort link for this continuation.
     merged_signal = any_signal(child_session._abort_controller, args.signal)
 
-    subagent_run_id = f"sa_cont_{args.handle.worker_id}"
+    subagent_run_id = args.subagent_run_id
     config = (
         child_session._config_seed.config
         if child_session._config_seed is not None
@@ -592,6 +604,9 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)
     hook_dispatcher = HookDispatcher(config.hooks)
     result: RunSubagentResult | None = None
+    # Claim the worker before the first await, so a second continue in the
+    # same tool batch is refused above instead of racing this one.
+    handle.status = "running"
     try:
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
@@ -623,6 +638,8 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
         # Always release the merged-signal watcher task and dispatch
         # SUBAGENT_STOP so cleanup runs on all failure and cancellation paths.
         merged_signal.close()
+        if result is None and handle.status == "running":
+            handle.status = "failed"
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
                 lifecycle.SUBAGENT_STOP,
@@ -641,5 +658,23 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
 
     assert result is not None  # _drive_child succeeded if we reach here
     handle.last_result_text = result_text_for_caller(result)
-    handle.status = "failed" if result.errored else "completed"
+    # TaskStop may have marked the worker killed while this continuation ran.
+    if handle.status == "running":
+        handle.status = "failed" if result.errored else "completed"
     return result
+
+
+def _worker_busy(handle: WorkerHandle) -> RunSubagentResult:
+    return RunSubagentResult(
+        child_session_id=handle.child_session_id,
+        final_text="",
+        aborted=False,
+        errored=True,
+        error={
+            "name": "WorkerBusy",
+            "message": (
+                f"Worker '{handle.worker_id}' is still running."
+                " Wait for its result before continuing it."
+            ),
+        },
+    )

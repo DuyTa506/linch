@@ -8,9 +8,12 @@ Agents behaviour: *"detect a tool response exceeding 20,000 tokens, offload it t
 the filesystem, and substitute a file path reference and a preview of the first
 10 lines."*
 
-Opt-in: nothing happens unless ``Agent(result_offload=OffloadConfig(...))`` is
-set.  The full result still travels on ``ToolCallEndEvent.tool_result`` for
-observers; only what the LLM sees in conversation history is shrunk.
+Offload is on by default but runs only while the filesystem subsystem is active
+(``FeatureFlags(filesystem=True)``).  The full text is kept in the session store
+(:class:`SessionOffloadBackend`), never in a workspace, whichever filesystem
+backend is configured.  The full result still travels on
+``ToolCallEndEvent.tool_result`` for observers; only what the LLM sees in
+conversation history is shrunk.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from typing import Any
 
 from .._token_estimation import custom_token_estimate
 from ..tools.base import ToolResult
-from .backend import FileBackend, normalize_path
+from .backend import FileBackend, StateFileBackend, _slice_lines, normalize_path
 
 
 @dataclass
@@ -97,6 +100,126 @@ def estimate_tokens(text: str, estimator: Any = None, model: str | None = None) 
         except Exception:
             pass
     return len(text) // _CHARS_PER_TOKEN
+
+
+class SessionOffloadBackend:
+    """File backend that keeps offloaded results in the session store.
+
+    Bound to the root session of an agent tree (subagents share their parent's
+    instance), so offloads never land in a workspace and follow the session
+    across processes. Needs the store's ``save_offload`` / ``load_offload`` /
+    ``list_offloads`` capability; without it writes fail and nothing is offloaded.
+
+    Args:
+        store: Session store holding the offloaded results.
+        session_id: Session that owns the offloaded results.
+        prefix: Virtual directory routed to this backend.
+    """
+
+    def __init__(self, store: Any, session_id: str, prefix: str) -> None:
+        self.store = store
+        self.session_id = session_id
+        self.prefix = prefix
+
+    async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+        """Read an offloaded result, optionally returning a line window.
+
+        Args:
+            path: Virtual path of the offloaded result.
+            offset: 1-indexed line to start at; ``0`` and ``1`` start at the first line.
+            limit: Maximum number of lines; non-positive or ``None`` reads to the end.
+
+        Returns:
+            The selected text.
+
+        Raises:
+            FileNotFoundError: If the session has no result at ``path``.
+        """
+        path = normalize_path(path)
+        loader = getattr(self.store, "load_offload", None)
+        content = await loader(self.session_id, path) if loader is not None else None
+        if content is None:
+            raise FileNotFoundError(path)
+        return _slice_lines(content, offset, limit)
+
+    async def write(self, path: str, content: str) -> None:
+        """Store an offloaded result durably with the session.
+
+        Args:
+            path: Virtual path of the offloaded result.
+            content: Full text to store.
+
+        Raises:
+            NotImplementedError: If the session store cannot hold offloaded results.
+        """
+        saver = getattr(self.store, "save_offload", None)
+        if saver is None:
+            raise NotImplementedError("this session store does not persist offloaded results")
+        await saver(self.session_id, normalize_path(path), content)
+
+    async def ls(self, prefix: str = "") -> list[str]:
+        """List offloaded-result paths under ``prefix``.
+
+        Args:
+            prefix: Optional path prefix; an empty prefix lists every result.
+
+        Returns:
+            Sorted virtual paths.
+        """
+        lister = getattr(self.store, "list_offloads", None)
+        paths = await lister(self.session_id) if lister is not None else []
+        if not prefix:
+            return sorted(paths)
+        pfx = normalize_path(prefix)
+        return sorted(p for p in paths if p == pfx or p.startswith(pfx.rstrip("/") + "/"))
+
+    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
+        """Replace exact text in an offloaded result.
+
+        Args:
+            path: Virtual path of the offloaded result.
+            old: Exact text to find.
+            new: Replacement text.
+            replace_all: Whether to replace every occurrence instead of requiring a unique match.
+
+        Returns:
+            Number of replacements made.
+
+        Raises:
+            FileNotFoundError: If the session has no result at ``path``.
+            ValueError: If ``old`` is absent or is not unique when ``replace_all`` is false.
+        """
+        path = normalize_path(path)
+        scratch = StateFileBackend({path: await self.read(path)})
+        count = await scratch.edit(path, old, new, replace_all=replace_all)
+        await self.write(path, await scratch.read(path))
+        return count
+
+    async def exists(self, path: str) -> bool:
+        """Check whether the session has an offloaded result at ``path``.
+
+        Args:
+            path: Virtual path to check.
+
+        Returns:
+            ``True`` when the result is stored; otherwise ``False``.
+        """
+        try:
+            await self.read(path)
+        except FileNotFoundError:
+            return False
+        return True
+
+    async def delete(self, path: str) -> None:
+        """Refuse deletion: offloaded results live as long as their session.
+
+        Args:
+            path: Virtual path of the offloaded result.
+
+        Raises:
+            PermissionError: Always.
+        """
+        raise PermissionError(f"offloaded results are kept with the session: {path}")
 
 
 def _preview(text: str, lines: int) -> str:

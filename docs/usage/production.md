@@ -42,9 +42,11 @@ agent = Agent(
   adapters are Postgres; `InMemorySessionStore` and `InMemoryRunStore` are for
   tests and development. Install the Postgres adapters with the `[postgres]`
   extra.
-- A virtual filesystem is disabled by default. If offloaded results or files
-  must survive across sessions or processes, enable the filesystem feature and
-  use `PostgresFileBackend` from [Filesystem](./filesystem.md).
+- A virtual filesystem is disabled by default. Offloaded results are kept in
+  the session store, so `PostgresSessionStore` carries them across processes.
+  If files the model writes must survive across sessions or processes, enable
+  the filesystem feature and use `PostgresFileBackend` from
+  [Filesystem](./filesystem.md).
 - See [Agent & session](./agent.md).
 - For Postgres run persistence, optional worker leases, and stream reconnect by
   sequence, see [Run stores](./run-stores.md).

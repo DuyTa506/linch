@@ -87,7 +87,7 @@ tokens while retaining workers; `coordinator` has the same bounds and strips
 heavy tools from the parent. `unbounded` is an explicit escape hatch for a
 host that owns equivalent lifetime and cost controls.
 
-- **`coordinator=True`** — the parent agent strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` is injected via `SystemPromptConfig`; `TaskStopTool` is registered on the coordinator. Worker subagents receive full tool access via `build_child_tools`.
+- **`coordinator=True`** — the parent agent strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` is injected via `SystemPromptConfig`; `TaskStopTool` is registered on the coordinator. Worker subagents receive the worker registry via `build_child_tools`, which strips the orchestration tools (`Subagent`, `SubagentContinue`, `TaskStop`): a worker has no workers of its own to continue or stop.
 - **`durable=True`** — requires explicit session/run stores and an explicit filesystem when enabled. Supply `PostgresSessionStore`, `PostgresRunStore`, and a `CompositeFileBackend` with a `/memories` route to `PostgresFileBackend` for restart durability. An active detached worker task is process-local and is not reconstructed after a crash.
 
 ### Background workers and fork/continue
@@ -120,8 +120,8 @@ sequenceDiagram
 - `session.workers: dict[str, WorkerHandle]` indexes retained foreground and background workers by `worker_id`.
 - **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task calls `Session.notify()` with a stable delivery ID before recording its `BackgroundWorkerEvent`. The default notification is in-memory; durable inbox mode persists an already-enqueued completion across restart.
 - The loop drains the selected next-turn channel at the top of each new turn, yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
-- `SubagentContinueTool` resolves a worker by exact id or a unique display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`. An ambiguous display name is rejected with the matching worker ids; callers must use the id.
-- `TaskStopTool` uses the same exact-id or unique-name resolution before it cancels the background `asyncio.Task` and signals abort on the child session; an ambiguous name stops neither worker. The `WorkerHandle` remains in `session.workers` so the worker can be continued later.
+- `SubagentContinueTool` resolves a worker by exact id or a unique display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`. The handle reads `running` while the continuation runs; a continue to a worker that is already running returns a `WorkerBusy` error and leaves the handle unchanged. An ambiguous display name is rejected with the matching worker ids; callers must use the id.
+- `TaskStopTool` uses the same exact-id or unique-name resolution before it cancels the background `asyncio.Task` and signals abort on the child session; an ambiguous name stops neither worker. It acts only on a `running` worker, marking it `killed` and recording `reason` in `WorkerHandle.stop_reason`; a finished worker is left unchanged. The `WorkerHandle` remains in `session.workers` so the worker can be continued later.
 - `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
 - A process restart cannot resume an active detached task. Durable inbox mode
   preserves only completions that reached `Session.notify()`; hosts that need

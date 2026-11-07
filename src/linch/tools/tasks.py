@@ -6,9 +6,27 @@ from linch.sessions.tasks import CreateTaskInput, TaskPatch, TaskStatus
 from linch.tools.base import ToolContext, ToolResult, ToolScope, require_str
 
 
+async def _task_list_id(ctx: ToolContext) -> str:
+    """Return the root session of the agent tree, which owns the task list.
+
+    A subagent's child session records its parent under ``parentSessionId``
+    (see ``linch.subagents.runner``), so walking that chain through the store
+    lets workers share the coordinator's tasks, also after a takeover.
+    """
+    session_id = ctx.session_id
+    seen = {session_id}
+    while True:
+        record = await ctx.session_store.load(session_id)
+        parent = record.meta.get("parentSessionId") if record is not None else None
+        if not isinstance(parent, str) or not parent or parent in seen:
+            return session_id
+        seen.add(parent)
+        session_id = parent
+
+
 class TaskCreateTool:
     name = "TaskCreate"
-    description = "Create a new persistent task in the current session."
+    description = "Create a new persistent task in the task list shared by the agent tree."
     input_schema = {
         "type": "object",
         "properties": {
@@ -45,7 +63,7 @@ class TaskCreateTool:
         active_form = input.get("active_form")
         metadata = input.get("metadata")
         task = await ctx.session_store.create_task(
-            ctx.session_id,
+            await _task_list_id(ctx),
             CreateTaskInput(
                 subject=str(input["subject"]),
                 description=str(input["description"]),
@@ -66,7 +84,7 @@ class TaskCreateTool:
 
 class TaskListTool:
     name = "TaskList"
-    description = "List all tasks for the current session."
+    description = "List all tasks in the task list shared by the agent tree."
     input_schema = {"type": "object", "properties": {}}
     scope: ToolScope = "read"
     parallel: bool = True
@@ -75,7 +93,7 @@ class TaskListTool:
         return {}
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-        tasks = await ctx.session_store.list_tasks(ctx.session_id)
+        tasks = await ctx.session_store.list_tasks(await _task_list_id(ctx))
         if not tasks:
             return ToolResult(content="No tasks found.", summary="List tasks")
         rows = [f"#{task.id} [{task.status}] {task.subject}" for task in tasks]
@@ -100,7 +118,7 @@ class TaskGetTool:
         return {"id": require_str(raw, "id")}
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-        task = await ctx.session_store.get_task(ctx.session_id, str(input["id"]))
+        task = await ctx.session_store.get_task(await _task_list_id(ctx), str(input["id"]))
         if task is None:
             return ToolResult(
                 content="Task not found.",
@@ -201,7 +219,9 @@ class TaskUpdateTool:
             ),
             metadata=cast("dict[str, object]", metadata) if isinstance(metadata, dict) else None,
         )
-        task = await ctx.session_store.update_task(ctx.session_id, str(input["id"]), patch)
+        task = await ctx.session_store.update_task(
+            await _task_list_id(ctx), str(input["id"]), patch
+        )
         if task is None and patch.status == "deleted":
             return ToolResult(
                 content=f"Task #{input['id']} deleted.",

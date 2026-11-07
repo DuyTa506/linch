@@ -19,7 +19,7 @@ automatically.
 from __future__ import annotations
 
 from ..tools.base import ToolContext, ToolResult, ToolScope
-from .backend import FileBackend, resolve_filesystem_backend
+from .backend import CompositeFileBackend, FileBackend, resolve_filesystem_backend
 
 
 def _get_backend(ctx: ToolContext) -> FileBackend:
@@ -34,7 +34,11 @@ def _get_backend(ctx: ToolContext) -> FileBackend:
             "No filesystem backend attached. Pass Agent(filesystem=StateFileBackend()) "
             "or set ctx.deps.filesystem to a FileBackend."
         )
-    return fs
+    # Offloaded results live in the session store, not in the session filesystem.
+    offloads = getattr(getattr(ctx, "_session", None), "_offloads", None)
+    if offloads is None:
+        return fs
+    return CompositeFileBackend(default=fs, routes={offloads.prefix: offloads})
 
 
 class LsTool:

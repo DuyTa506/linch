@@ -1332,7 +1332,7 @@ async def test_retained_child_continuation_keeps_seed_services_and_restrictions(
     original = child._config_seed
     assert original.profile is profile
     assert cleaned == []
-    handle = WorkerHandle("worker", child.id, "child", _child_definition())
+    handle = WorkerHandle("worker", child.id, "child", _child_definition(), status="completed")
     # Pass a profile with its own plugin on the continuation call to prove it
     # is ignored, not just absent -- continue_subagent() always re-derives
     # `config` from the retained child's own `_config_seed`, never from
