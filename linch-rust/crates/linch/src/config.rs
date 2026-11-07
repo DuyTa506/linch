@@ -75,9 +75,11 @@ pub struct AgentConfig {
     /// when absent; it needs `subagents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<Workers>,
-    /// Whether the agent has an in-process mailbox and the `send_message`
-    /// tool, for messages between its sessions (see
-    /// [`linch_core::coordination`]). Off when absent.
+    /// Whether the agent has a mailbox and the `send_message` tool, for
+    /// messages between its sessions (see [`linch_core::coordination`]):
+    /// a [`linch_postgres::PgMailbox`] of the agent's namespace with
+    /// Postgres stores, an in-process one with memory stores. Off when
+    /// absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mailbox: bool,
     /// Past which sizes part of the catalog waits for the model to find it

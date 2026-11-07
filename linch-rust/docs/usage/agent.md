@@ -173,7 +173,7 @@ absent, except `bash`.
 | `skills` | `False` | The `Skill` tool, with the built-in `verify` skill and those in `config_dir/skills` ([Skills](./skills.md)) |
 | `subagents` | `False` | The `Subagent` tool, with the built-in `verification` subagent and those in `config_dir/agents` ([Subagents](./subagents.md)) |
 | `workers` | none | `{"background": bool, "retain": bool}`, both `False` when absent: background workers and kept workers. Needs `subagents` ([Subagents](./subagents.md)) |
-| `mailbox` | `False` | An in-process mailbox and the `send_message` tool between sessions of this agent ([Subagents](./subagents.md)) |
+| `mailbox` | `False` | A mailbox and the `send_message` tool between sessions of this agent: in process with memory stores, the `linch_mailbox` table with Postgres stores ([Subagents](./subagents.md)) |
 | `tool_search` | none | `{"max_tools": int, "max_skills": int}`, 30 and 50 when absent. Past `max_tools` a new session is offered only the tools that always load and `tool_search`, which the model calls to load the rest by keyword or `select:a,b` |
 | `config_dir` | `.linch` | Directory holding `skills/` and `agents/`. A relative path resolves against the workspace, or the server's working directory without one. Unused unless `skills` or `subagents` is on |
 | `filesystem` | none | The virtual filesystem tools and large-result offload ([below](#filesystem)) |

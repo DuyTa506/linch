@@ -339,8 +339,11 @@ final: Stopped the CI watcher.
 
 ## The mailbox
 
-`mailbox: True` gives the agent an in-process mailbox and the `send_message`
-tool, for messages between its sessions. An address is a session id.
+`mailbox: True` gives the agent a mailbox and the `send_message` tool, for
+messages between its sessions. An address is a session id. With memory stores
+the mailbox is in process; with Postgres stores it is the `linch_mailbox`
+table, keyed by namespace and session id, so a message waits there across a
+server restart.
 
 ```python
 import asyncio
@@ -398,6 +401,11 @@ alice reads: <peer-message><from>lead</from><type>message</type><request-id>req-
 - A run drains its session's inbox at its start and after each tool batch.
   Each message joins the logged prompt or tool-results message as a
   `<peer-message>` block, so the model sees it in its next request.
+- A drain leases the messages it takes. The run deletes them once the event
+  that carries them is durable, and gives them back when it ends first (its
+  prompt is refused, or it fails). On Postgres, a lease from a server that
+  stopped in between runs out after 60 seconds and the next run takes the
+  message again: delivery is at least once.
 - A worker's session id is its worker id, so a message to `review-1:c1`
   reaches that worker at its next run, such as a `SubagentContinue`. A display
   name is not an address.
@@ -427,7 +435,7 @@ refuses a cut that leaves tool calls without their results.
 | A foreground call cut by a crash | Lost with the server | Resuming the parent runs the call again, which resumes the child run; a model call it already paid is not made twice |
 | A background worker | Lost with the server | Resuming the parent resumes each worker its log marks `running`, or reads back one that finished |
 | Worker ids and display names | Process memory | Process memory; a resumed run knows its own workers again from its log |
-| Mailbox messages | Process memory | Process memory: lost when the server stops, including a message drained just before a crash |
+| Mailbox messages | Process memory | Durable in `linch_mailbox` until a run logs them; a message drained just before a crash comes again once its lease runs out |
 
 A parent that suspends for approval keeps its workers running in the server
 until its approve or resume takes them over there. Only a parent resumed after
@@ -448,7 +456,7 @@ before resuming the parent) cannot continue: resuming the parent ends it
 | Worker ids look like `agent-a1b2` | `<parent run id>:<tool_use_id>`, as the tool descriptions say |
 | A background worker can outlive the run and notify a later one | The run waits for its workers before it ends |
 | A running worker is marked `killed` after a restart | It is resumed with its parent run (Postgres) |
-| `Correlator`, `MailboxPlugin`, durable inbox | Mailbox in process only; `Correlator` in Rust only |
+| `Correlator`, `MailboxPlugin`, durable inbox | Every drain is leased and acked once logged; the mailbox is durable with Postgres stores; `Correlator` in Rust only |
 | `generate_subagent_definition()` | Not in the client; write the file yourself |
 | `session.workers` handles | Not exposed; follow `ChildRunStatusEvent` and `SubagentEvent` |
 | `agent.fork_session(...)` | Rust only, `Agent::fork_session` |
