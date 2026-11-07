@@ -79,8 +79,9 @@ order (`hooks.rs:84-100`), so changing a hook's behavior means bumping its
 - `Registration::noop` is an already-undone handle (`registration.rs:31-34`).
   `is_disposed` says whether the undo has run (`registration.rs:51-56`).
 
-Each undo removes only what its registration added. The three places that
-hand them out:
+Each undo removes only what its registration added. In `linch-core`, they come
+from the tool registry, the hook chains and the agent's reloads (the reloads
+build theirs with `Versions::push`, `agent/versions.rs:49`):
 
 | Registry | Registration | Undo |
 |---|---|---|
