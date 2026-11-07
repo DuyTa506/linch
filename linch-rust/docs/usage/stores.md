@@ -149,7 +149,8 @@ Schema details, write paths and the refusal rules are in the
   - A run that commits back to back uses about two connections, so plan about
     two connections per run in flight at once, per pool. Too small a pool makes
     runs wait for a connection: in the 2000-session bench, a pool of 10 added
-    about 3.4 s to each turn and a pool of 40 about 0.4 s.
+    3 to 4 s to each turn, the default of 32 (on 64 cores) about 0.6 s, and a
+    pool of 40 about 0.4 s.
   - Postgres's own `max_connections` (100 by default) is shared by every pool
     of every process on the database, workers and admin tools included. That
     is why the default stops at 32: three server processes at the default

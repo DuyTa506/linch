@@ -214,7 +214,9 @@ a small machine at about five runs committing at once. The ceiling is for the
 database: Postgres's own `max_connections` (100 unless set) is shared by every
 pool of every process on it, so three processes at the default still fit. In
 the case 14 bench (2000 sessions, Postgres stores) a pool of 10 was the
-bottleneck: 3355 ms of overhead per turn, against 382 ms with 40 connections. A
+bottleneck: 3355 ms of overhead per turn, against 382 ms with 40 connections;
+with the default of 32 on a 64-core machine it was 646 ms (3914 ms with 10, in
+the same back-to-back run). A
 facade config sets its own with `stores.max_connections`; on `linch-server` a
 tenant may ask for at most its `max_pool_connections` ([rpc](./rpc.md)). sqlx
 also pings a connection in the background when it is released (sqlx-core
