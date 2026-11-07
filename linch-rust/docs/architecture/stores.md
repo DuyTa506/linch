@@ -20,7 +20,8 @@ are single statements.
 Every record is keyed by a host-chosen namespace plus an id, so tenants never
 share a key space (`store.rs:3-4`). An agent's namespace
 (`AgentBuilder::namespace`) is the namespace of its runs and sessions;
-`task_tools` takes the namespace of the sessions it serves.
+`task_tools` takes the namespace of the sessions it serves and the run store
+that finds the root run of a call's tree.
 
 ## Run store
 

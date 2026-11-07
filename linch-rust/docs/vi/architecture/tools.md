@@ -299,12 +299,15 @@ không thấy tệp.
 
 ## Tool task của session
 
-`task_tools(store, namespace)` (`crates/linch-tools/src/tasks.rs:24`) trả về
+`task_tools(store, runs, namespace)` (`crates/linch-tools/src/tasks.rs:25`) trả về
 `TaskCreate` và `TaskUpdate` (scope write) cùng `TaskList` và `TaskGet` (scope read)
 trên một `TaskStore` (`crates/linch-core/src/store/tasks.rs`). Tên, schema và các văn bản
 mà model nhìn thấy khớp với của Python. Task là dữ liệu của session, không phải log entry:
-chỉ các lời gọi và kết quả của chúng đi vào session log. Hợp đồng của store nằm ở trang
-[stores](./stores.md#task-store).
+chỉ các lời gọi và kết quả của chúng đi vào session log. Task của một lời gọi thuộc về
+session của run gốc trong cây của nó: `Tasks::session` (`tasks.rs:70`) đi theo
+`parent_run_id` qua `RunStore`, nên một subagent dùng chung task của coordinator (Python
+gắn chúng với session đang gọi). Một run mà store không biết thì dùng session của chính
+nó. Hợp đồng của store nằm ở trang [stores](./stores.md#task-store).
 
 ## Viết một tool bằng Rust
 

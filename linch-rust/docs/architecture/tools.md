@@ -294,12 +294,16 @@ not the file.
 
 ## Session task tools
 
-`task_tools(store, namespace)` (`crates/linch-tools/src/tasks.rs:24`) returns
+`task_tools(store, runs, namespace)` (`crates/linch-tools/src/tasks.rs:25`) returns
 `TaskCreate` and `TaskUpdate` (write scope) and `TaskList` and `TaskGet` (read
 scope) over a `TaskStore` (`crates/linch-core/src/store/tasks.rs`). Names,
 schemas and the texts the model sees match Python's. Tasks are session data,
-not log entries: only the calls and their results enter the session log. The
-store contract is on the [stores](./stores.md#task-store) page.
+not log entries: only the calls and their results enter the session log. A
+call's tasks belong to the session of the root run of its tree: `Tasks::session`
+(`tasks.rs:70`) follows `parent_run_id` through the `RunStore`, so a subagent
+shares its coordinator's tasks (Python scopes them to the calling session). A
+run the store does not know uses its own session. The store contract is on the
+[stores](./stores.md#task-store) page.
 
 ## Write a tool in Rust
 

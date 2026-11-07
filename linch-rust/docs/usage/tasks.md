@@ -8,8 +8,9 @@ lasts across the runs of one conversation.
 `tasks: True` in the agent config gives the model four tools, `TaskCreate`,
 `TaskList`, `TaskGet` and `TaskUpdate`. Tasks are rows in the session store,
 keyed by namespace and session id: the next run in the same session finds
-them, and another session starts with none. Only the tool calls and their
-results enter the conversation history.
+them, and another session starts with none. A subagent's child shares the
+tasks of the session that started it. Only the tool calls and their results
+enter the conversation history.
 
 ---
 
@@ -116,9 +117,10 @@ On a [remote server](./server.md), that grant is the reason a tenant needs
 | Memory (the default) | Inside the opened agent handle; gone when the server exits |
 | Postgres | The `linch_tasks` and `linch_task_edges` tables; they survive a restart, and any server on the same DSN and namespace sees them |
 
-A subagent's child runs in a session of its own, so its task tools see the
-child's list, which starts empty, not the parent's. With `subagents` on as
-well, this run shows it (the scripted provider gives the child the third
+A subagent's child runs in a session of its own, but its task tools use the
+session of the root run of the tree, so a worker lists and updates its
+coordinator's tasks. Tasks of unrelated sessions stay apart. With `subagents`
+on as well, this run shows it (the scripted provider gives the child the third
 turn):
 
 ```python
@@ -132,7 +134,7 @@ turns = [
     tool_turn("c1", "TaskCreate", {"subject": "Parent task", "description": "x"}),
     tool_turn("c2", "Subagent", {"description": "List", "prompt": "List the tasks"}),
     tool_turn("k1", "TaskList", {}),  # the child's first turn
-    text_turn("The child saw no tasks."),  # the child's answer
+    text_turn("The child saw the parent's task."),  # the child's answer
     text_turn("done"),
 ]
 
@@ -163,11 +165,12 @@ asyncio.run(main())
 
 ```text
 parent: Task #1 created: Parent task
-child: No tasks found.
-parent: The child saw no tasks.
+child: #1 [pending] Parent task
+parent: The child saw the parent's task.
 ```
 
-The same holds for the [deep agent](./deep-agent.md)'s workers.
+The same holds for the [deep agent](./deep-agent.md)'s workers, which read and
+update the coordinator's task ids.
 
 ---
 

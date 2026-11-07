@@ -9,8 +9,8 @@ Dùng task của session khi mô hình cần giữ một danh sách việc cần
 `tasks: True` trong cấu hình agent cung cấp cho mô hình bốn tool: `TaskCreate`,
 `TaskList`, `TaskGet` và `TaskUpdate`. Task là các hàng trong kho session, khóa theo
 namespace và id của session: run kế tiếp trong cùng session tìm thấy chúng, còn một
-session khác bắt đầu mà không có task nào. Chỉ các lệnh gọi tool và kết quả của chúng
-đi vào lịch sử hội thoại.
+session khác bắt đầu mà không có task nào. Run con của một subagent dùng chung task của
+session đã khởi chạy nó. Chỉ các lệnh gọi tool và kết quả của chúng đi vào lịch sử hội thoại.
 
 ---
 
@@ -116,10 +116,10 @@ Trên một [server từ xa](./server.md), quyền cấp đó là lý do một t
 | Bộ nhớ (mặc định) | Bên trong handle của agent đã mở; mất khi server thoát |
 | Postgres | Các bảng `linch_tasks` và `linch_task_edges`; chúng tồn tại sau khi khởi động lại, và mọi server dùng cùng DSN và namespace đều thấy chúng |
 
-Run con của một subagent chạy trong session riêng, nên các tool task của nó thấy danh
-sách của run con, vốn bắt đầu rỗng, không phải danh sách của run cha. Khi bật thêm
-`subagents`, lần chạy này cho thấy điều đó (scripted provider đưa lượt thứ ba cho run
-con):
+Run con của một subagent chạy trong session riêng, nhưng các tool task của nó dùng
+session của run gốc trong cây, nên một worker liệt kê và cập nhật task của coordinator.
+Task của các session không liên quan vẫn tách biệt. Khi bật thêm `subagents`, lần chạy
+này cho thấy điều đó (scripted provider đưa lượt thứ ba cho run con):
 
 ```python
 import asyncio
@@ -132,7 +132,7 @@ turns = [
     tool_turn("c1", "TaskCreate", {"subject": "Parent task", "description": "x"}),
     tool_turn("c2", "Subagent", {"description": "List", "prompt": "List the tasks"}),
     tool_turn("k1", "TaskList", {}),  # the child's first turn
-    text_turn("The child saw no tasks."),  # the child's answer
+    text_turn("The child saw the parent's task."),  # the child's answer
     text_turn("done"),
 ]
 
@@ -163,11 +163,12 @@ asyncio.run(main())
 
 ```text
 parent: Task #1 created: Parent task
-child: No tasks found.
-parent: The child saw no tasks.
+child: #1 [pending] Parent task
+parent: The child saw the parent's task.
 ```
 
-Điều tương tự áp dụng cho các worker của [deep agent](./deep-agent.md).
+Điều tương tự áp dụng cho các worker của [deep agent](./deep-agent.md): chúng đọc và
+cập nhật id task của coordinator.
 
 ---
 

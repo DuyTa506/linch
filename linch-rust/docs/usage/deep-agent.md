@@ -217,8 +217,8 @@ The descriptions and instructions are Python Linch's. This `verification`
 replaces the core's built-in one, which has `Bash`. With `subagents: True`, a
 file of the same name in `<config_dir>/agents/` replaces a roster entry.
 
-Each worker runs in its own session, so its task tools see its own list, not
-the parent's (see [Session tasks](./tasks.md#where-tasks-live)). The
+Each worker runs in its own session, but its task tools use the coordinator's
+task list (see [Session tasks](./tasks.md#where-tasks-live)). The
 `researcher`, `planner` and `verification` calls can run alongside each other
 when every tool they list is registered and read-scoped, which needs a
 workspace.
