@@ -60,3 +60,98 @@ async def test_continue_uses_the_supplied_subagent_run_id() -> None:
         assert run_ids == {"sa_cont_supplied"}
     finally:
         await agent.close()
+
+
+def _continue_args(parent: Any, agent: Any, handle: Any, run_id: str) -> Any:
+    from linch.subagents.runner import ContinueSubagentArgs
+
+    return ContinueSubagentArgs(
+        parent_session=parent,
+        parent_agent=agent,
+        handle=handle,
+        message="again",
+        subagent_run_id=run_id,
+    )
+
+
+class _GatedProvider(ScriptedProvider):
+    """Hold every call after the first until the gate opens."""
+
+    def __init__(self, turns: list[Any]) -> None:
+        import asyncio
+
+        super().__init__(turns)
+        self.gate = asyncio.Event()
+        self.held = asyncio.Event()
+
+    async def stream(self, req: Any) -> Any:
+        if self.requests:
+            self.held.set()
+            await self.gate.wait()
+        async for event in super().stream(req):
+            yield event
+
+
+async def test_continue_to_a_running_worker_is_refused_without_changing_status() -> None:
+    import asyncio
+
+    from linch.subagents.runner import continue_subagent
+
+    provider = _GatedProvider([TextTurn("first"), TextTurn("second")])
+    agent = make_agent(provider, model="m")
+    try:
+        parent, handle = await _retained_worker(agent)
+        running = asyncio.create_task(
+            continue_subagent(_continue_args(parent, agent, handle, "sa_running"))
+        )
+        await provider.held.wait()
+        status_while_running = handle.status
+
+        refused = await continue_subagent(_continue_args(parent, agent, handle, "sa_refused"))
+
+        assert refused.errored
+        assert refused.error is not None and refused.error["name"] == "WorkerBusy"
+        assert handle.status == status_while_running
+        provider.gate.set()
+        finished = await running
+        assert not finished.errored
+        assert handle.status == "completed"
+    finally:
+        provider.gate.set()
+        await agent.close()
+
+
+async def test_two_continues_in_one_batch_run_one_and_refuse_the_other() -> None:
+    import asyncio
+
+    from linch.subagents.runner import continue_subagent
+
+    class Hooks:
+        resume_policy_id = "test.worker-bookkeeping"
+
+        def __init__(self) -> None:
+            self.started: list[str] = []
+
+        async def on_subagent_start(self, ctx: Any) -> None:
+            self.started.append(ctx.subagent_run_id)
+            await asyncio.sleep(0)
+
+    hooks = Hooks()
+    provider = ScriptedProvider([TextTurn("first"), TextTurn("second"), TextTurn("third")])
+    agent = make_agent(provider, model="m", hooks=[hooks])
+    try:
+        parent, handle = await _retained_worker(agent)
+        hooks.started.clear()
+
+        results = await asyncio.gather(
+            continue_subagent(_continue_args(parent, agent, handle, "sa_a")),
+            continue_subagent(_continue_args(parent, agent, handle, "sa_b")),
+        )
+
+        refused = [result for result in results if result.errored]
+        assert len(refused) == 1
+        assert refused[0].error is not None and refused[0].error["name"] == "WorkerBusy"
+        assert len(hooks.started) == 1
+        assert handle.status == "completed"
+    finally:
+        await agent.close()
