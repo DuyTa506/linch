@@ -376,6 +376,7 @@ class DockerBackend:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=os.name != "nt",
+            env={**os.environ, **self.env},
         )
         return _LocalProcess(proc, cwd, lambda: self._remove_container(docker, container_name))
 
@@ -415,11 +416,11 @@ class DockerBackend:
             args.append("--read-only")
         for entry in self.tmpfs:
             args.extend(["--tmpfs", entry])
-        for key, value in self.env.items():
-            args.extend(["--env", f"{key}={value}"])
+        for key in self.env:
+            args.extend(["--env", key])
         for key in self.forward_env:
             if key in os.environ:
-                args.extend(["--env", f"{key}={os.environ[key]}"])
+                args.extend(["--env", key])
         if self.user is not None:
             args.extend(["--user", self.user])
         args.extend(

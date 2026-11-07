@@ -394,6 +394,8 @@ Dùng `workspace_mount="ro"` để kiểm tra workspace chỉ đọc,
 `env={...}` cho biến môi trường container tường minh,
 `forward_env=(...)` để allowlist biến môi trường host và `user="1000:1000"`
 để chạy container không phải root.
+Giá trị biến môi trường được truyền cho client `docker` qua môi trường của tiến trình
+(`--env KEY`), không bao giờ nằm trong dòng lệnh.
 
 Khi bỏ qua `docker_path`, `DockerBackend` dùng `shutil.which("docker")` (không
 cần dependency Docker SDK). `docker_path` tường minh bỏ qua việc tra cứu đó.

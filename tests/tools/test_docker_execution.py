@@ -114,9 +114,9 @@ async def test_none_disables_limits_and_existing_policy_args_survive(docker, tmp
         "--tmpfs",
         "/tmp:size=64m",
         "--env",
-        "APP_MODE=test",
+        "APP_MODE",
         "--env",
-        "FORWARDED_TOKEN=host-secret",
+        "FORWARDED_TOKEN",
         "--user",
         "1000:1000",
         "-w",
@@ -252,3 +252,34 @@ async def test_repeated_cancellation_finishes_container_removal(docker, tmp_path
             await task
     assert not (tmp_path / "container").exists()
     assert not (tmp_path / "removed-before-cli-exit").exists()
+
+
+async def test_env_values_stay_out_of_argv_and_reach_spawn_env(docker, tmp_path, monkeypatch):
+    from linch.tools import execution
+    from linch.tools.execution import DockerBackend
+
+    monkeypatch.setenv("FORWARDED_TOKEN", "host-secret-value")
+    spawned: list[tuple[tuple[str, ...], dict]] = []
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def fake_spawn(*args, **kwargs):
+        spawned.append((args, kwargs))
+        return await real_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(execution.asyncio, "create_subprocess_exec", fake_spawn)
+    backend = DockerBackend(
+        docker_path=docker,
+        image="alpine:3.20",
+        env={"APP_KEY": "app-secret-value"},
+        forward_env=("FORWARDED_TOKEN",),
+        resume_fingerprint_key=b"k" * 16,
+    )
+    await backend.run("true", cwd=str(tmp_path), timeout_s=2)
+
+    args, kwargs = next((a, k) for a, k in spawned if a[1] == "run")
+    assert "app-secret-value" not in " ".join(args)
+    assert "host-secret-value" not in " ".join(args)
+    flagged = [args[i + 1] for i, a in enumerate(args) if a == "--env"]
+    assert flagged == ["APP_KEY", "FORWARDED_TOKEN"]
+    assert kwargs["env"]["APP_KEY"] == "app-secret-value"
+    assert kwargs["env"]["FORWARDED_TOKEN"] == "host-secret-value"

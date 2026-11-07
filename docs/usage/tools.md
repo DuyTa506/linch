@@ -396,6 +396,8 @@ and non-`None`, JSON-safe `resume_policy_config` (plus optional
 Use `workspace_mount="ro"` for read-only workspace inspection, `env={...}` for
 explicit container environment variables, `forward_env=(...)` to allowlist host
 environment variables, and `user="1000:1000"` for non-root container execution.
+Environment values are passed to the `docker` client through its process
+environment (`--env KEY`), never in the command line.
 
 `DockerBackend` uses `shutil.which("docker")` when `docker_path` is omitted
 (no Docker SDK dependency). An explicit `docker_path` bypasses that lookup.
