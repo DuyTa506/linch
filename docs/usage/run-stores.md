@@ -584,6 +584,28 @@ saver is best-effort for ordinary failures. The loader and saver are detected
 independently: a loader can restore an existing snapshot without a saver, and
 a saver can persist future snapshots without a loader.
 
+### Optional offloaded results
+
+A store may implement this optional capability to keep
+[offloaded tool results](./filesystem.md#where-offloaded-results-are-stored)
+with the session:
+
+~~~text
+async def save_offload(id: str, path: str, content: str) -> None
+
+async def load_offload(id: str, path: str) -> str | None
+
+async def list_offloads(id: str) -> list[str]
+~~~
+
+`id` is the root session of the agent tree and `path` is the normalized virtual
+path the model was given. Saving upserts the full text; loading returns `None`
+for an unknown path; listing returns sorted paths. Deleting the session deletes
+its offloaded results. The scheduler awaits the save before the trimmed result
+is appended, so a resumed run never references a missing result. A store
+without `save_offload` keeps oversized results inline. The built-in stores
+implement all three; `PostgresSessionStore` uses the `session_offloads` table.
+
 ### Optional durable inbox
 
 `SessionInboxStore` adds exactly-once insertion for messages destined for a later

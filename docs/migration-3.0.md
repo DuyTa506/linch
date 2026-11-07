@@ -136,6 +136,7 @@ the SDK does not discover DSNs from the environment.
 | Silent resume of terminal runs or runs without checkpoints | Raises `RunNotResumableError` with `run_id` and `status`; `from linch import RunNotResumableError` |
 | Cursorless assistant-boundary tool recovery | A valid `tool_batch_event_after_seq` cursor is required |
 | `scripts/run_report.py --runs-db` | `--dsn` or host script environment `LINCH_POSTGRES_DSN`; `load_report` / `render_report` now take a Postgres DSN |
+| Offloaded tool results written to the session filesystem (an execution world's workspace, or an in-memory backend lost on takeover) | Kept in the session store under the root session of the agent tree, whatever filesystem backend is configured; `PostgresSessionStore` adds the `session_offloads` table, and a custom store without `save_offload` / `load_offload` / `list_offloads` keeps results inline |
 
 All persisted envelopes share generation **3** (`linch.RUN_SCHEMA_VERSION`):
 checkpoints, run contracts, model-call intents/receipts/journals, exact model

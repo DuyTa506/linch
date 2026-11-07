@@ -184,6 +184,7 @@ class Session:
         _abort_controller: Abort controller for the active run.
         run_deps: Dependencies resolved for the active run.
         filesystem: Session virtual filesystem backend.
+        _offloads: Session-store backend for offloaded tool results.
         workers: Retained child-worker handles.
         pending_child_events: Child events waiting for host delivery.
         pending_notifications: Background-worker notifications waiting for delivery.
@@ -285,6 +286,10 @@ class Session:
     """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
     Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
     tool call.  ``None`` when the filesystem subsystem is disabled."""
+    _offloads: Any = field(default=None, repr=False)
+    """Session-store backend holding this agent tree's offloaded tool results,
+    owned by the root session and shared with its subagents. ``None`` when the
+    filesystem subsystem or result offload is off."""
     workers: dict[str, Any] = field(default_factory=dict)
     """Live in-process worker handles keyed by worker_id.
 

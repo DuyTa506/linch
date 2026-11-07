@@ -152,7 +152,7 @@ cơ sở dữ liệu/bộ lắng nghe tạm thời, thử lại các lỗi hạ 
 | `filesystem/backend.py` | `FileBackend` ảo, chuẩn hóa đường dẫn, backend có phạm vi, trạng thái trong bộ nhớ và định tuyến kết hợp. |
 | `filesystem/disk.py` | Các tệp ảo lưu trên đĩa. |
 | `filesystem/postgres.py` | `PostgresFileBackend` cho các tệp ảo bền vững; nhập từ `linch.filesystem.postgres`. |
-| `filesystem/offload.py` | Chuyển kết quả lớn sang hệ thống tệp ảo dựa trên ngưỡng. |
+| `filesystem/offload.py` | Chuyển kết quả lớn ra ngoài dựa trên ngưỡng, giữ trong session store và đọc lại qua các tool hệ thống tệp ảo. |
 | `filesystem/tools.py` | Các tool hệ thống tệp ảo `ls`, `read_file`, `write_file` và `edit_file`. |
 | `hooks/` | Ngữ cảnh hook có kiểu, bộ điều phối vòng đời, chèn ngữ cảnh, middleware tool, che dữ liệu, đọc trước khi ghi, bộ nhớ đệm, kiểm chứng và hook dừng. |
 | `skills/` | Nạp `SKILL.md`, liệt kê, thay thế, các lớp phủ, skill tích hợp sẵn và lời nhắc hệ thống. |

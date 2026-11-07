@@ -1755,6 +1755,14 @@ class Agent:
                     if self._filesystem_default is not None
                     else StateFileBackend()
                 )
+                # Offloaded results follow the session in its store: never into
+                # a workspace, and readable after a resume in another process.
+                if self.result_offload is not None:
+                    from .filesystem.offload import SessionOffloadBackend
+
+                    session._offloads = SessionOffloadBackend(
+                        store, record.id, self.result_offload.path_prefix
+                    )
 
             session.invoked_skills = []
             for index, rec in enumerate(record.invoked_skills):

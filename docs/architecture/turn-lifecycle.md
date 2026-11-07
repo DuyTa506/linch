@@ -51,7 +51,7 @@ sequenceDiagram
 
             SC-->>Caller: ToolCallStartEvent x N
             SC-->>Caller: ToolProgressEvent (optional, stream-only)
-            Note over SC: with filesystem enabled and a configured backend/offload,<br/>maybe_offload() writes results over the threshold to FileBackend<br/>and replaces provider-facing content with a preview
+            Note over SC: with filesystem enabled and a configured backend/offload,<br/>maybe_offload() writes results over the threshold to the session store<br/>and replaces provider-facing content with a preview
             SC-->>Caller: ToolCallEndEvent x N (preview when offloaded, tool_result=full)
             SC-->>RL: provider-facing result_blocks (offload preview when applicable)
 

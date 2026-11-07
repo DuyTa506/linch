@@ -401,15 +401,20 @@ and `PostgresFileBackend` are optional backend implementations; the latter is
 imported from `linch.filesystem.postgres`.
 
 `OffloadConfig` controls large-result offload. When enabled and a result is
-above its resolved threshold, the scheduler writes the full content to the
-virtual backend and puts a preview plus path hint in the model-facing result.
-The full `ToolResult` remains on `ToolCallEndEvent.tool_result`. The default
-offload configuration derives its threshold as 10% of the provider context
-window; `preview_lines` defaults to 10. A backend write failure leaves the
-original result unchanged.
+above its resolved threshold, the scheduler writes the full content and puts a
+preview plus path hint in the model-facing result. Whatever filesystem backend
+is configured, the content goes to the session store through
+`SessionOffloadBackend` (`src/linch/filesystem/offload.py`), owned by the root
+session of the agent tree, so it never enters a workspace and a run resumed in
+another process reads it back. The full `ToolResult` remains on
+`ToolCallEndEvent.tool_result`. The
+default offload configuration derives its threshold as 10% of the provider
+context window; `preview_lines` defaults to 10. A write failure, including a
+session store without the offload capability, leaves the original result
+unchanged.
 
-Use a Postgres-backed composite filesystem when memory or offload files must
-survive process restarts:
+Use a Postgres-backed composite filesystem when memory files must survive
+process restarts:
 
 ```python
 from linch import Agent, CompositeFileBackend, FeatureFlags, StateFileBackend

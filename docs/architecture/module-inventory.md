@@ -150,7 +150,7 @@ durable.
 | `filesystem/backend.py` | Virtual `FileBackend`, path normalization, scoped backends, in-memory state, and composite routing. |
 | `filesystem/disk.py` | Disk-backed virtual files. |
 | `filesystem/postgres.py` | `PostgresFileBackend` for durable virtual files; import it from `linch.filesystem.postgres`. |
-| `filesystem/offload.py` | Threshold-based large-result offload to a virtual filesystem. |
+| `filesystem/offload.py` | Threshold-based large-result offload, kept in the session store and read back through the virtual filesystem tools. |
 | `filesystem/tools.py` | `ls`, `read_file`, `write_file`, and `edit_file` virtual filesystem tools. |
 | `hooks/` | Typed hook contexts, lifecycle dispatcher, context injection, tool middleware, redaction, read-before-write, caching, verification, and stop hooks. |
 | `skills/` | `SKILL.md` loading, listing, substitution, overlays, built-in skills, and system reminders. |

@@ -66,8 +66,9 @@ tests but provide only process-lifetime state. Use `durable=False` for an
 ephemeral demo. When filesystem features are disabled, no filesystem is required.
 
 For restart durability, use the Postgres stores shown above. The composite
-filesystem keeps bulk offloads in process-local `StateFileBackend` storage and
-routes `/memories/` to Postgres. Configure the local database with the
+filesystem keeps scratch files in process-local `StateFileBackend` storage and
+routes `/memories/` to Postgres; offloaded tool results are kept in the
+Postgres session store. Configure the local database with the
 [Quickstart](./quickstart.md#5-keep-state-when-the-process-restarts). Session
 history and run checkpoints can then resume after restart. A running detached
 worker is process-local and is not resumed; on recovery, a worker checkpointed
