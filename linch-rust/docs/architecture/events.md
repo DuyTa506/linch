@@ -53,7 +53,7 @@ encoding.
 | `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:105` | yes | yes | |
-| `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | Not emitted: the core has no run budget at this revision |
+| `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | A spec `budget` (`crates/linch-core/src/budget.rs`): `warning` right after the `usage` that crossed the ratio, once per run tree; `exceeded` in the terminal write, before its `error` |
 | `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:168` | yes | yes | Not emitted at this revision |
 | `skills_loaded` | `SkillsLoadedEvent`, `kinds/skills.rs:10` | yes | yes | |
 | `skill_invoked` | `SkillInvokedEvent`, `kinds/skills.rs:18` | yes | yes | |
@@ -104,7 +104,7 @@ is classified.
 |---|---|---|
 | `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:123-130`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:152-157`) |
 | `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:310-316`) |
-| `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:371-387`), and so does the RPC method `run.events`, which calls it |
+| `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:380-396`), and so does the RPC method `run.events`, which calls it |
 
 The journal-only records are what resume reads to settle a model call it
 may already have paid for (`crates/linch-core/src/journal/reconcile.rs`).
@@ -177,7 +177,7 @@ The child's `seq` is not kept; read the child run's own log for it.
   `tool_progress` is stream-only, a wrapped `model_call_receipt` journal-only.
 - **A foreground child** is driven inside the call. Every envelope its
   stream yields, stream-only ones included, is wrapped and handed to the
-  parent through the call's context (`crates/linch-core/src/subagents/run.rs:144-161`).
+  parent through the call's context (`crates/linch-core/src/subagents/run.rs:147-164`).
   A wrapped durable event rides the parent's next write, the call's end at
   the latest.
 - **A background child** keeps only its durable envelopes

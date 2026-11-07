@@ -152,7 +152,7 @@ only read work whatever its scope, for example a subagent whose tools all read
 anything.
 
 The limit is `AgentSpec::max_tool_concurrency`, 4 by default; 0 counts as 1
-(`crates/linch-core/src/agent/spec.rs:47-49`). `call_timeout_ms` bounds each
+(`crates/linch-core/src/agent/spec.rs:53-55`). `call_timeout_ms` bounds each
 call: at the deadline the scheduler drops the call's future and reports a
 timeout error.
 
@@ -441,7 +441,7 @@ fn main() {
 ```
 
 The run contract digest covers the tools registered when
-`AgentBuilder::build` runs (`crates/linch-core/src/agent/builder.rs:201`). A
+`AgentBuilder::build` runs (`crates/linch-core/src/agent/builder.rs:216`). A
 tool registered later, such as an MCP tool after a relist, is offered from the
 next turn's snapshot but is not part of the contract.
 
