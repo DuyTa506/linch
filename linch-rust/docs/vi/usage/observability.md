@@ -248,6 +248,8 @@ Giá trị là văn bản JSON, và chỉ được dựng cho các span đang gh
 
 ---
 
+<a id="correlate-logs-and-traces"></a>
+
 ## Liên kết log và trace
 
 `run.trace_id` là id trace của các span của một run được trace, dưới dạng 32 chữ số

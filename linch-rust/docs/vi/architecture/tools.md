@@ -168,6 +168,8 @@ trước khi nó chạy, và phần kết thúc ngay sau khi nó trả về
 phần bắt đầu và kết thúc được stage và ghi cùng barrier kế tiếp. Xem
 [stores](./stores.md#số-lần-ghi-của-group-commit) cho số lần ghi trên mỗi lượt.
 
+<a id="workspace-tools"></a>
+
 ## Tool workspace
 
 `workspace_tools(fs, reads)` (`crates/linch-tools/src/lib.rs:51`) trả về
@@ -292,6 +294,8 @@ bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài,
 
 Với `MemorySessions`, một run được resume trong process khác sẽ thấy con trỏ nhưng
 không thấy tệp.
+
+<a id="session-task-tools"></a>
 
 ## Tool task của session
 

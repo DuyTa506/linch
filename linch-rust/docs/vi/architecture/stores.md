@@ -110,6 +110,8 @@ store cho mỗi lượt; các lần ghi bị từ chối và các lần ghi task
 bọc một trong hai và làm lần ghi thứ `n` thất bại, trước hoặc sau khi nó được ghi, cho
 các test sự cố.
 
+<a id="postgres-stores"></a>
+
 ## Store Postgres
 
 `linch-postgres` triển khai `PgRunStore`, `PgSessionStore` (cũng là
@@ -213,6 +215,8 @@ hai kết nối. Hãy định cỡ một pool vào khoảng hai kết nối cho 
 Một `Worker` cần thêm một kết nối cho kết nối `LISTEN` của nó
 (`crates/linch-worker/src/worker.rs:87-90`). Ví dụ bên dưới định cỡ pool của nó theo cách
 đó bằng `connect`.
+
+<a id="group-commit-write-counts"></a>
 
 ## Số lần ghi của group commit
 

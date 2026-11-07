@@ -1,5 +1,7 @@
 # Using linch-rust from Python
 
+[Tiếng Việt](../vi/usage/README.md)
+
 Use this guide to build agents in Python with the `linch_rust` client, and to
 find the page for each feature.
 

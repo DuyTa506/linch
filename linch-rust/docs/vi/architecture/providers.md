@@ -38,6 +38,8 @@ trong Rust:
 (`client.rs:17`), nên stream sở hữu mọi thứ nó cần và sống lâu hơn
 phần mượn `self`.
 
+<a id="event-vocabulary"></a>
+
 ### Tập event
 
 `ProviderEvent` (`crates/linch-core/src/provider/event.rs:24`) được gắn tag bằng
@@ -188,6 +190,8 @@ và mọi token `Bearer`, kể cả với một server cục bộ không có kh�
 một khóa). Mỗi struct options có `from_env()`, đọc biến của adapter
 và trả về `None` khi nó chưa được đặt hoặc rỗng.
 
+<a id="the-adapters"></a>
+
 ## Các adapter
 
 Mọi adapter lấy model từ mỗi request, không lấy từ options của nó.
@@ -213,6 +217,8 @@ bật nó (`deepseek.rs:129`). Khi thinking bật, mọi lượt assistant trư�
 thất bại với 400 (`deepseek.rs:147-153`). Một `tool_choice` bắt buộc khi thinking bật,
 và mọi `output_schema`, thất bại ngay tại chỗ với `InvalidRequest`.
 Effort ánh xạ `medium` và `xhigh` sang `high` (`deepseek.rs:184`).
+
+<a id="openai-chat-completions-and-server-profiles"></a>
 
 ### OpenAI Chat Completions và các server profile
 
@@ -291,6 +297,8 @@ vào số đếm prompt: DeepSeek trừ các cache hit của nó (`deepseek.rs:1
 token cached và cache-write (`profile.rs:89`), vLLM trừ token cached và token cache được
 tạo (`servers/vllm.rs:54`), SGLang và llama.cpp trừ token cached
 (`servers.rs:89`).
+
+<a id="pricing"></a>
 
 ## Bảng giá
 

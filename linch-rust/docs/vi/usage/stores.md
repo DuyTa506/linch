@@ -155,6 +155,8 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
   kết nối lỗi giữa chừng một lần ghi sẽ dừng run ở trạng thái bền vững cuối cùng;
   hãy resume nó.
 
+<a id="the-virtual-filesystem"></a>
+
 ## Hệ thống tệp ảo
 
 Khi `filesystem` bật, nơi các tệp nằm phụ thuộc vào kho lưu trữ:

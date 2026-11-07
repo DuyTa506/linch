@@ -21,6 +21,8 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 
 ---
 
+<a id="the-server-binary"></a>
+
 ## Binary của server
 
 `Server()` tìm `linch-server` theo thứ tự này:
@@ -64,6 +66,8 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 Việc từ chối `open_agent` và `run` trên server từ xa là `NotAllowed` (-32004), có
 `kind` nêu tên bước kiểm tra, và `LimitReached` (-32005) với `max_agents` và
 `max_runs`; [Server](./server.md#những-gì-admission-từ-chối-và-lý-do) liệt kê chúng.
+
+<a id="opening-an-agent"></a>
 
 ## Mở một agent
 
@@ -110,6 +114,8 @@ Thông báo không bao giờ chứa DSN.
 
 Nếu kết nối bị đứt giữa chừng một run, stream của run đó kết thúc với `RunError`
 (mã -32020); run giữ nguyên ở trạng thái bền vững cuối cùng và có thể được resume.
+
+<a id="runs"></a>
 
 ## Run
 

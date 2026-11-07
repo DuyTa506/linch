@@ -138,6 +138,8 @@ lệnh trần được tìm trong `PATH` của server; hãy ưu tiên đường 
 
 ---
 
+<a id="connect-from-python"></a>
+
 ## Kết nối từ Python
 
 `Server.connect(address, token=...)` nhận địa chỉ mà server đã in khi khởi động:
@@ -265,6 +267,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 ```
 
 ---
+
+<a id="tenants-and-namespaces"></a>
 
 ## Tenant và namespace
 
