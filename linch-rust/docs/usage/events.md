@@ -347,7 +347,9 @@ The run finished; its stream ends here.
 ### `SkillsLoadedEvent` (`skills_loaded`)
 
 The skills the model may load, on a session's first run of an agent with
-skills, between `init` and the prompt's `user` event. `skills` holds one
+skills, between `init` and the prompt's `user` event. A run that does not
+offer the `Skill` tool (a subagent whose definition leaves it out) sends
+none. `skills` holds one
 dict per skill, the built-in `verify` included, sorted by name: `name`,
 `description`, and `when_to_use` and `argument_hint` when the skill sets
 them. Python Linch sends it once per session object, so again after a

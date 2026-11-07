@@ -19,6 +19,7 @@ use crate::journal::{Journal, JournalError, Recovery, reconcile};
 use crate::message::ContentBlock;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
+use crate::skills::SKILL_TOOL;
 use crate::store::{Lease, RunRecord, StoreError};
 use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
@@ -81,6 +82,7 @@ pub(super) async fn new_run(
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, 0);
     let tools = agent.snapshot().definitions();
+    let offers_skill = tools.iter().any(|tool| tool.name == SKILL_TOOL);
     journal.stage(Event::Init(InitEvent {
         session_id: session_id.clone(),
         run_id: run_id.clone(),
@@ -93,8 +95,9 @@ pub(super) async fn new_run(
         turn: 0,
     }));
     // A session's first run tells which skills the model may load, as
-    // Python does once per session; it rides the create write.
-    if let (true, Some(skills)) = (entries.is_empty(), &agent.skills) {
+    // Python does once per session, when the run offers `Skill` (a child
+    // may not); it rides the create write.
+    if let (true, true, Some(skills)) = (entries.is_empty(), offers_skill, &agent.skills) {
         let skills = skills.current().descriptors();
         if !skills.is_empty() {
             journal.stage(Event::SkillsLoaded(SkillsLoadedEvent { skills }));

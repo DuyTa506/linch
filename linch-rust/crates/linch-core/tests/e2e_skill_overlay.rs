@@ -14,7 +14,7 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::FaultTiming;
 use linch_core::{
     Agent, AgentBuilder, Event, PermissionMode, Provider, RunId, RunOptions, RunStatus, RunStore,
-    ScriptedProvider, ScriptedTurn, SessionStore, Skill, StoreError, ToolScope,
+    ScriptedProvider, ScriptedTurn, SessionStore, Skill, StoreError, SubagentDefinition, ToolScope,
 };
 use serde_json::{Value, json};
 
@@ -169,6 +169,39 @@ async fn a_sessions_first_run_lists_its_skills_after_init() {
         .unwrap();
     let envelopes = finish(plain.run("go", RunOptions::new("s2"))).await;
     assert!(!listed(&envelopes), "an agent without skills lists none");
+}
+
+#[tokio::test]
+async fn a_run_without_the_skill_tool_lists_no_skills() {
+    let provider = Arc::new(ScriptedProvider::new([text_turn("a"), text_turn("b")]));
+    let stores = Arc::new(Stores::default());
+    let runs = Runs::default();
+    let tools = registry(vec![Echo::new("Echo", ToolScope::Read, &runs)]);
+    let mut scout = SubagentDefinition::new("scout", "Reads around.", "Scout the code.");
+    scout.tools = Some(vec!["Echo".into()]);
+    let mut reader = SubagentDefinition::new("reader", "Reads skills.", "Read.");
+    reader.tools = Some(vec!["Echo".into(), "Skill".into()]);
+    let agent = AgentBuilder::new(spec())
+        .provider(provider)
+        .tools(tools)
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .skills(vec![review()])
+        .subagents(vec![scout, reader])
+        .build()
+        .unwrap();
+    let listed = |envelopes: &[linch_core::Envelope]| {
+        (envelopes.iter()).any(|e| matches!(e.event, Event::SkillsLoaded(_)))
+    };
+    let parent = RunId::new("wf-1");
+    let scout = agent.subagent(Some("scout")).unwrap();
+    let envelopes = finish(scout.run_child("look", RunOptions::new("c1"), parent.clone())).await;
+    assert!(!listed(&envelopes), "no Skill tool, no listing");
+    let reader = agent.subagent(Some("reader")).unwrap();
+    let envelopes = finish(reader.run_child("look", RunOptions::new("c2"), parent)).await;
+    assert!(listed(&envelopes), "a child with Skill lists them");
 }
 
 #[tokio::test]
