@@ -3,7 +3,7 @@
 `linch-rust new <name>` writes a runnable agent project that tests offline
 on the scripted provider; `linch-rust add tool <name>` adds a host tool and
 its test to one; `linch-rust docs path` prints where the docs shipped in the
-package are; `linch-rust skill install` copies the `build-agent-with-linch`
+package are; `linch-rust skill install` copies the `build-agent-with-linch-rust`
 skill into a project, so a coding agent finds those docs. The generated code
 is plain `linch_rust` usage that the project owns. Standard library only.
 """
@@ -86,7 +86,7 @@ def _parser() -> argparse.ArgumentParser:
     skill = commands.add_parser("skill", help="install the coding-agent skill")
     skill_commands = skill.add_subparsers(dest="skill_command", required=True)
     install = skill_commands.add_parser(
-        "install", help="copy build-agent-with-linch into a project"
+        "install", help="copy build-agent-with-linch-rust into a project"
     )
     install.add_argument(
         "--target",

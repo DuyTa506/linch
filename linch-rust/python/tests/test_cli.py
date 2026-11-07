@@ -92,10 +92,10 @@ def test_new_creates_the_project_tree(tmp_path: Path, capsys: pytest.CaptureFixt
         "src/my_agent/tools/greet.py",
         "tests/test_agent.py",
         "tests/test_greet.py",
-        ".claude/skills/build-agent-with-linch/SKILL.md",
-        ".claude/skills/build-agent-with-linch/references/design.md",
-        ".agents/skills/build-agent-with-linch/SKILL.md",
-        ".agents/skills/build-agent-with-linch/references/design.md",
+        ".claude/skills/build-agent-with-linch-rust/SKILL.md",
+        ".claude/skills/build-agent-with-linch-rust/references/design.md",
+        ".agents/skills/build-agent-with-linch-rust/SKILL.md",
+        ".agents/skills/build-agent-with-linch-rust/references/design.md",
     ]
     assert sorted(str(p.relative_to(proj)) for p in proj.rglob("*") if p.is_file()) == sorted(
         expected

@@ -19,7 +19,7 @@ _CLIENT = "linch-rust"
 _REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 # A file every docs tree has, to tell a real one from an empty directory.
 _DOCS_MARKER = Path("architecture/README.md")
-_SKILL = "build-agent-with-linch"
+_SKILL = "build-agent-with-linch-rust"
 # Where each coding agent looks for a project's skills.
 SKILL_TARGETS = {
     "claude": Path(".claude/skills"),
@@ -78,7 +78,7 @@ def scaffold_project(name: str, parent: Path) -> list[Path]:
 def install_skill(
     project: Path, targets: Sequence[str] | None = None, *, force: bool = False
 ) -> list[Path]:
-    """Copy the `build-agent-with-linch` skill shipped with this client into a project.
+    """Copy the `build-agent-with-linch-rust` skill shipped with this client into a project.
 
     Args:
         project: The project directory that receives the skill.
