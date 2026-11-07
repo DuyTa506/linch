@@ -215,8 +215,8 @@ Mô tả và chỉ dẫn là của Python Linch. `verification` này thay thế 
 lõi, vốn có `Bash`. Với `subagents: True`, một tệp cùng tên trong
 `<config_dir>/agents/` sẽ thay thế một mục trong danh sách.
 
-Mỗi worker chạy trong session riêng, nên các tool task của nó thấy danh sách của chính
-nó, không phải của agent cha (xem [Task của session](./tasks.md#task-được-lưu-ở-đâu)). Các
+Mỗi worker chạy trong session riêng, nhưng các tool task của nó dùng danh sách task của
+coordinator (xem [Task của session](./tasks.md#task-được-lưu-ở-đâu)). Các
 lệnh gọi `researcher`, `planner` và `verification` có thể chạy song song với nhau khi
 mọi tool chúng liệt kê đều đã đăng ký và có scope read, điều này cần có workspace.
 

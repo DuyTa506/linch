@@ -142,6 +142,13 @@ mod tests {
     }
 
     #[test]
+    fn a_host_tool_without_a_scope_is_rejected() {
+        let wire = json!({"name": "lookup", "description": "Find.",
+                          "input_schema": {"type": "object"}});
+        assert!(serde_json::from_value::<HostToolSpec>(wire).is_err());
+    }
+
+    #[test]
     fn open_params_send_the_secrets_the_config_hides() {
         let wire = json!({
             "namespace": "t",

@@ -272,7 +272,9 @@ the parent's.
 
 `TaskStop` takes `{"task_id": <id or display name>, "reason": ...}`. The
 worker's run ends `aborted`, with no notification, and it stays addressable
-for `SubagentContinue`.
+for `SubagentContinue`. A worker that already finished is left as it is: the
+reply says it already finished and how it ended (`completed`, `failed` or
+`killed`), not that it stopped.
 
 ```python
 import asyncio

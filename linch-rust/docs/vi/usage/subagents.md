@@ -272,7 +272,9 @@ khi worker đó vẫn đang chạy nền. Worker được giữ theo từng sess
 
 `TaskStop` nhận `{"task_id": <id or display name>, "reason": ...}`. Run của worker kết
 thúc `aborted`, không có thông báo, và vẫn có thể được định địa chỉ cho
-`SubagentContinue`.
+`SubagentContinue`. Một worker đã kết thúc thì được giữ nguyên: câu trả lời nói rằng nó
+đã kết thúc và kết thúc ra sao (`completed`, `failed` hoặc `killed`), chứ không nói là
+đã dừng.
 
 ```python
 import asyncio

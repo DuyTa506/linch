@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use common::{ctx, input};
 use linch_core::{
-    MemorySessionStore, SessionId, SessionStore, TaskStatus, TaskStore, Tool, ToolRegistry,
-    ToolResult, ToolScope,
+    MemoryRunStore, MemorySessionStore, SessionId, SessionStore, TaskStatus, TaskStore, Tool,
+    ToolRegistry, ToolResult, ToolScope,
 };
 use linch_tools::{TASK_TOOL_NAMES, task_tools};
 use serde_json::{Value, json};
@@ -23,7 +23,7 @@ impl Board {
     async fn new() -> Self {
         let store = Arc::new(MemorySessionStore::new());
         store.create("ns", &SessionId::from("s1")).await.unwrap();
-        let tools = task_tools(store.clone(), "ns");
+        let tools = task_tools(store.clone(), Arc::new(MemoryRunStore::new()), "ns");
         Self { store, tools }
     }
 

@@ -22,7 +22,8 @@ câu lệnh đơn.
 Mỗi bản ghi được khóa bằng một namespace do host chọn cộng với một id, nên các tenant
 không bao giờ dùng chung không gian khóa (`store.rs:3-4`). Namespace của một agent
 (`AgentBuilder::namespace`) là namespace của các run và session của nó;
-`task_tools` nhận namespace của các session mà nó phục vụ.
+`task_tools` nhận namespace của các session mà nó phục vụ và run store dùng để tìm run
+gốc trong cây của một lời gọi.
 
 ## Run store
 

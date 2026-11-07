@@ -39,3 +39,16 @@ fn a_run_may_have_four_background_children_unless_told_otherwise() {
     let one: Workers = serde_json::from_value(serde_json::json!({"max_background": 1})).unwrap();
     assert_eq!(one.max_background, 1);
 }
+
+#[test]
+fn task_stop_names_how_a_finished_worker_ended() {
+    use crate::run::RunStatus::*;
+    use control::ended;
+
+    assert_eq!(ended(Completed), Some("completed"));
+    assert_eq!(ended(Failed), Some("failed"));
+    assert_eq!(ended(Aborted), Some("killed"));
+    for live in [Pending, Running, AwaitingApproval, AwaitingInput] {
+        assert_eq!(ended(live), None, "{live:?} has not ended");
+    }
+}

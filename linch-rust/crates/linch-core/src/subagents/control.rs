@@ -11,6 +11,7 @@ use super::{CONTINUE_TOOL, STOP_TOOL, run};
 use crate::agent::AgentInner;
 use crate::ids::SessionId;
 use crate::json::{JsonObject, JsonValue};
+use crate::run::RunStatus;
 use crate::tool::{Tool, ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope};
 
 /// The agent a worker tool belongs to, set once it is built. Weak, since
@@ -165,6 +166,16 @@ impl Tool for ContinueTool {
     }
 }
 
+/// How a worker run ended, as `TaskStop` tells it; `None` while it has not.
+pub(super) fn ended(status: RunStatus) -> Option<&'static str> {
+    match status {
+        RunStatus::Completed => Some("completed"),
+        RunStatus::Failed => Some("failed"),
+        RunStatus::Aborted => Some("killed"),
+        _ => None,
+    }
+}
+
 /// Stops a background worker; it stays addressable.
 pub(crate) struct StopTool {
     agent: Handle,
@@ -233,7 +244,22 @@ impl Tool for StopTool {
                 known.join(", ")
             ),
         })?;
-        if let Some(family) = agent.family(&ctx.run_id) {
+        let family = agent.family(&ctx.run_id);
+        if !family
+            .as_ref()
+            .is_some_and(|family| family.is_running(&worker.id))
+        {
+            // Nothing to stop: say how the worker ended instead.
+            let record = agent.runs.load(&agent.namespace, &worker.id).await;
+            if let Some(ended) = record.ok().and_then(|record| ended(record.status)) {
+                return Ok(ToolOutput::new(format!(
+                    "Worker '{}' ({}) already finished ({ended}). Use SubagentContinue to \
+                     re-engage if needed.",
+                    worker.id, worker.display_name
+                )));
+            }
+        }
+        if let Some(family) = family {
             family.stop(&worker.id);
         }
         let mut message = format!("Worker '{}' ({}) stopped.", worker.id, worker.display_name);
