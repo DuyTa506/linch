@@ -40,6 +40,7 @@ The tables below list the application-facing changes by area.
 | Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
 | `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
 | Ambiguous worker display names for `SubagentContinue` or `TaskStop` | Pass the unique `worker_id`; unique display names remain accepted |
+| Task tools keyed by the calling session, so a worker saw an empty `TaskList` | `TaskCreate`, `TaskList`, `TaskGet`, and `TaskUpdate` use the root session of the agent tree, found through each child session's `parentSessionId` metadata |
 | `TaskStop` marking any worker `killed` and only echoing `reason` | It stops only a `running` worker and records `reason` in `WorkerHandle.stop_reason`; a finished worker keeps its status and the result says it was not running |
 | A continue to a running worker marking it `failed` | The continue returns a `WorkerBusy` error and leaves the handle unchanged; a worker reads `running` while a continuation drives it |
 | `continue_subagent()` reporting `sa_cont_<worker_id>` as every continuation's `subagent_run_id` | Hooks and `SubagentEvent` carry the `ContinueSubagentArgs.subagent_run_id` supplied by the caller; `SubagentContinue` generates a fresh one per call |

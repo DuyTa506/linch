@@ -57,7 +57,9 @@ engine cho phép tool read mà không hỏi.
 lựa chọn phù hợp cho agent miền nghiệp vụ thuần, không bao giờ được chạm vào hệ
 thống tệp hoặc shell. `workspace_tools(exclude=..., extra=...)` bắt đầu từ bộ
 SWE chuẩn (`Read`, `Write`, `Edit`, `Bash`, `BashProcess`, `Glob`, `Grep`, `TaskCreate`,
-`TaskList`, `TaskGet`, `TaskUpdate`) rồi thêm hoặc bớt tool.
+`TaskList`, `TaskGet`, `TaskUpdate`) rồi thêm hoặc bớt tool. Các tool task giữ
+một danh sách task cho mỗi cây agent: một subagent đọc và cập nhật task của
+session gốc đã tạo ra nó, còn các session không liên quan giữ danh sách riêng.
 `Agent` sao chép registry được truyền vào constructor. Hãy đăng ký các tool thêm
 về sau trên `agent.tools` để cơ chế discovery của request nhìn thấy chúng; việc
 thay đổi registry gốc không làm thay đổi agent hiện có.
