@@ -421,6 +421,8 @@ details.
 - `AgentRegistry` lists each subagent name once; extra built-ins (such as the
   deep-agent `verification`) override the core built-in of the same name, so the
   `Subagent` tool description no longer shows duplicates.
+- The `Grep` tool runs `rg` in its own process group and, on timeout or
+  cancellation, kills the group and awaits it instead of leaving it running.
 
 ## Internal cleanup for adapter maintainers
 

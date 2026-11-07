@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import signal
 from pathlib import Path
 from typing import Any, cast
 
@@ -721,6 +722,18 @@ def _run_grep_via_rg(
     return stdout.decode(errors="replace"), proc.returncode or 0
 
 
+async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+    await asyncio.shield(proc.wait())
+
+
 async def _run_grep_via_rg_async(
     args: list[str],
     search_root: str,
@@ -735,8 +748,14 @@ async def _run_grep_via_rg_async(
         cwd=search_root,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=os.name != "nt",
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except BaseException:
+        # Timeout or cancellation: do not leave rg running or unreaped.
+        await _kill_and_reap(proc)
+        raise
     return (
         stdout.decode(errors="replace"),
         proc.returncode or 0,
