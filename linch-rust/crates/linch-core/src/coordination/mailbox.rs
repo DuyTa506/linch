@@ -86,33 +86,73 @@ pub struct MailboxError(#[source] pub Box<dyn std::error::Error + Send + Sync>);
 
 /// Where peer messages wait for their recipient.
 ///
+/// Delivery is at least once. A drain leases what it returns: the
+/// messages stay in the mailbox, hidden from other drains, until the
+/// drainer acks them (their delivery is durable) or releases them (it is
+/// not). A durable backend also ends a lease after a while, so what a
+/// process that died between drain and ack held is drained again.
+///
 /// An agent built with [`crate::AgentBuilder::mailbox`] drains the inbox
 /// of a run's session at the run's start and at the end of each tool
-/// batch.
+/// batch, and acks once the message that carries them is logged.
 #[async_trait]
 pub trait Mailbox: Send + Sync {
     /// Queue `message` in its recipient's inbox. Returns once the message
     /// is accepted; concurrent sends to one inbox never drop a message.
     async fn send(&self, message: MailboxMessage) -> Result<(), MailboxError>;
 
-    /// Remove and return every message waiting for `recipient`, oldest
-    /// first. A message is returned by at most one drain.
+    /// Lease and return every message waiting for `recipient` that no
+    /// other drain holds, oldest first. Concurrent drains never return
+    /// one message twice.
     async fn drain(&self, recipient: &str) -> Result<Vec<MailboxMessage>, MailboxError>;
+
+    /// Remove for good the drained `messages`, once their delivery is
+    /// durable. Messages this mailbox does not hold leased are ignored.
+    async fn ack(&self, messages: &[MailboxMessage]) -> Result<(), MailboxError>;
+
+    /// End the lease on the drained `messages`, so they wait again in
+    /// their place for a later drain. Messages this mailbox does not hold
+    /// leased are ignored.
+    async fn release(&self, messages: &[MailboxMessage]) -> Result<(), MailboxError>;
+}
+
+/// One queued message and whether a drain holds it.
+#[derive(Debug)]
+struct Entry {
+    message: MailboxMessage,
+    leased: bool,
 }
 
 /// The in-process mailbox: one FIFO inbox per recipient.
 ///
 /// Messages live as long as the mailbox value, which agents, sessions and
-/// workers may share; nothing survives the process.
+/// workers may share; nothing survives the process, so a lease lasts until
+/// its ack or release.
 #[derive(Debug, Default)]
 pub struct InMemoryMailbox {
-    inboxes: Mutex<HashMap<String, Vec<MailboxMessage>>>,
+    inboxes: Mutex<HashMap<String, Vec<Entry>>>,
 }
 
 impl InMemoryMailbox {
     /// An empty mailbox.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Apply `change` to each leased entry of `messages`, then drop the
+    /// inboxes left empty.
+    fn settle(&self, messages: &[MailboxMessage], change: impl Fn(&mut Vec<Entry>, &str)) {
+        let mut inboxes = self.inboxes.lock().unwrap_or_else(PoisonError::into_inner);
+        for message in messages {
+            if let Some(inbox) = inboxes.get_mut(&message.recipient) {
+                change(inbox, &message.id);
+                // Removing the bucket keeps the map from growing by one
+                // stale entry per address ever written to.
+                if inbox.is_empty() {
+                    inboxes.remove(&message.recipient);
+                }
+            }
+        }
     }
 }
 
@@ -121,21 +161,53 @@ impl Mailbox for InMemoryMailbox {
     async fn send(&self, message: MailboxMessage) -> Result<(), MailboxError> {
         let mut inboxes = self.inboxes.lock().unwrap_or_else(PoisonError::into_inner);
         let inbox = inboxes.entry(message.recipient.clone()).or_default();
-        inbox.push(message);
+        inbox.push(Entry {
+            message,
+            leased: false,
+        });
         Ok(())
     }
 
     async fn drain(&self, recipient: &str) -> Result<Vec<MailboxMessage>, MailboxError> {
         let mut inboxes = self.inboxes.lock().unwrap_or_else(PoisonError::into_inner);
-        // Removing the bucket keeps the map from growing by one stale entry
-        // per address ever written to.
-        Ok(inboxes.remove(recipient).unwrap_or_default())
+        let Some(inbox) = inboxes.get_mut(recipient) else {
+            return Ok(Vec::new());
+        };
+        let waiting = inbox.iter_mut().filter(|entry| !entry.leased);
+        Ok(waiting
+            .map(|entry| {
+                entry.leased = true;
+                entry.message.clone()
+            })
+            .collect())
+    }
+
+    async fn ack(&self, messages: &[MailboxMessage]) -> Result<(), MailboxError> {
+        self.settle(messages, |inbox, id| {
+            inbox.retain(|entry| !(entry.leased && entry.message.id == id));
+        });
+        Ok(())
+    }
+
+    async fn release(&self, messages: &[MailboxMessage]) -> Result<(), MailboxError> {
+        self.settle(messages, |inbox, id| {
+            for entry in inbox.iter_mut().filter(|entry| entry.message.id == id) {
+                entry.leased = false;
+            }
+        });
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordination::conformance::mailbox_suite;
+
+    #[tokio::test]
+    async fn the_in_memory_mailbox_passes_the_conformance_suite() {
+        mailbox_suite(&InMemoryMailbox::new()).await;
+    }
 
     #[tokio::test]
     async fn a_drain_takes_one_inbox_in_order_and_once() {
@@ -150,7 +222,10 @@ mod tests {
         let contents: Vec<&str> = drained.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(contents, ["one", "two"]);
         assert!(mailbox.drain("alice").await.unwrap().is_empty());
-        assert_eq!(mailbox.drain("bob").await.unwrap().len(), 1);
+        let bobs = mailbox.drain("bob").await.unwrap();
+        assert_eq!(bobs.len(), 1);
+        mailbox.ack(&drained).await.unwrap();
+        mailbox.ack(&bobs).await.unwrap();
         assert!(mailbox.inboxes.lock().unwrap().is_empty());
     }
 

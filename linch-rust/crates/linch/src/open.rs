@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use linch_core::{
-    Agent, AgentBuilder, Hooks, InMemoryMailbox, MemoryRunStore, MemorySessionStore,
+    Agent, AgentBuilder, Hooks, InMemoryMailbox, Mailbox, MemoryRunStore, MemorySessionStore,
     PermissionEngine, PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider,
     SessionStore, TaskStore, Tool, ToolRegistry,
 };
 use linch_mcp::McpServer;
-use linch_postgres::{PgRunStore, PgSessionStore};
+use linch_postgres::{PgMailbox, PgRunStore, PgSessionStore};
 use linch_providers::{
     Anthropic, AnthropicOptions, ApiKey, DeepSeek, DeepSeekOptions, Gemini, GeminiOptions,
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
@@ -136,6 +136,13 @@ impl AgentConfig {
             }
         }
         let pg = pool.as_deref().and_then(Shared::pool);
+        // Postgres stores keep the messages in a table too.
+        let mailbox = self.mailbox.then(|| -> Arc<dyn Mailbox> {
+            match pg {
+                Some(pool) => Arc::new(PgMailbox::new(pool.clone(), &self.namespace)),
+                None => Arc::new(InMemoryMailbox::new()),
+            }
+        });
         let mut files = Files::wire(
             self.filesystem.as_ref(),
             &tools,
@@ -178,8 +185,8 @@ impl AgentConfig {
         if let Some(workers) = self.workers {
             builder = builder.workers(workers);
         }
-        if self.mailbox {
-            builder = builder.mailbox(Arc::new(InMemoryMailbox::new()));
+        if let Some(mailbox) = mailbox {
+            builder = builder.mailbox(mailbox);
         }
         if let Some(search) = self.tool_search {
             builder = builder.tool_search(search);

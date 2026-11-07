@@ -197,10 +197,11 @@ class AgentConfig(TypedDict, total=False):
             `verification` and those in `config_dir/agents`, run through
             the `Subagent` tool on the same provider.
         workers: How subagents keep their workers; see `Workers`.
-        mailbox: Whether the agent has an in-process mailbox and the
-            `send_message` tool. A message addressed to a session id is
-            added to that session's next user message (the next run's
-            prompt when it is idle); it is lost if the server stops first.
+        mailbox: Whether the agent has a mailbox and the `send_message`
+            tool. A message addressed to a session id is added to that
+            session's next user message (the next run's prompt when it is
+            idle). It is in process with memory stores, lost if the server
+            stops first; with Postgres stores it waits in a table.
         tool_search: Whether a large catalog waits for the model to search
             it, and past which sizes; see `ToolSearch`.
         config_dir: Directory holding `skills/` and `agents/`; `.linch`

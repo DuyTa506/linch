@@ -8,17 +8,22 @@
 //! at the run's start and at the end of each tool batch: every waiting
 //! message goes into the logged prompt or tool-results message as a
 //! `<peer-message>` text block, after what is already there, so the model
-//! sees it in its next request and no write is added. A run whose prompt
-//! cannot be created sends the messages it drained back.
+//! sees it in its next request and no run write is added. A drain leases
+//! the messages: the run acks them once the event that carries them is
+//! durable, and releases them when it ends before that (a prompt that
+//! cannot be created, a run that fails first).
 //!
 //! A mailbox address is a session id: `send_message` sends from the calling
 //! session, to the session id the model names. What a message means is the
 //! host's choreography, never core policy.
 //!
-//! A drained message is model-visible only once its prompt or tool results
-//! are logged; a process that dies in between loses it, as the in-process
-//! mailbox loses everything on exit.
+//! Delivery is at least once. A process that dies between drain and ack
+//! leaves the lease to run out in a durable mailbox (linch-postgres'
+//! `PgMailbox`), whose next drain returns the message again; the
+//! in-process mailbox loses everything on exit. Every backend passes
+//! [`conformance::mailbox_suite`].
 
+pub mod conformance;
 mod correlation;
 mod mailbox;
 mod send;

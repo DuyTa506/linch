@@ -130,6 +130,7 @@ schema. Queries are built at run time: building the crate needs no database.
 | `0002_one_live_run_per_session.sql` | The partial unique index `linch_runs_one_live_per_session` on `(namespace, session_id)` where the status is not terminal |
 | `0003_files.sql` | `linch_files`, with `path` in `COLLATE "C"` so the primary key orders by bytes and serves prefix scans |
 | `0004_tasks.sql` | `linch_sessions.next_task_id`, `linch_tasks`, `linch_task_edges` |
+| `0005_mailbox.sql` | `linch_mailbox` (`PgMailbox`: peer messages by namespace and recipient, leased by a drain, deleted by its ack) |
 
 JSON payloads (checkpoints, envelopes, log entries, task metadata) are `TEXT`,
 not `JSONB`: JSONB reorders keys and rewrites numbers, and the stores must
