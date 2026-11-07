@@ -51,6 +51,7 @@ def final(envelopes: list[Envelope]) -> ResultEvent:
     return last
 
 
+@pytest.mark.source
 def test_the_typed_config_names_every_field_the_server_reads() -> None:
     source = CONFIG_RS.read_text(encoding="utf-8")
     body = source.split("pub struct AgentConfig {", 1)[1].split("\n}", 1)[0]

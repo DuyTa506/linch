@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import get_args
 
+import pytest
+
 from linch_rust import (
     ChildRunStatusEvent,
     CompactionEvent,
@@ -130,6 +132,7 @@ def rust_kinds() -> dict[str, set[str]]:
     return kinds
 
 
+@pytest.mark.source
 def test_every_rust_event_kind_has_a_class_with_its_fields() -> None:
     classes = [cls for cls in get_args(Event) if cls is not UnknownEvent]
     python = {cls.type: {field.name for field in dataclasses.fields(cls)} for cls in classes}

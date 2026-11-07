@@ -78,13 +78,16 @@ jobs:
         run: |
           dir="$RUNNER_TEMP/wheel-test"
           uv venv "$dir/venv" --python 3.11
-          uv pip install --python "$dir/venv/bin/python" linch-rust/python/dist/*.whl \
-            "pytest>=8.3" "pytest-asyncio>=0.25"
+          # The extras and the SDK are what the otel and remote tests import.
+          wheel=$(echo linch-rust/python/dist/linch_rust-*.whl)
+          uv pip install --python "$dir/venv/bin/python" "$wheel[otel,websocket]" \
+            "opentelemetry-sdk>=1.20" "pytest>=8.3" "pytest-asyncio>=0.25"
           cp -R linch-rust/python/tests "$dir/tests"
           cd "$dir"
           venv/bin/python -c 'import sys, pathlib, linch_rust as l; s = l.find_server(); print(s); assert s.is_relative_to(pathlib.Path(sys.prefix).resolve()), s'
           venv/bin/python -m pytest -q -p no:cacheprovider \
-            -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function tests
+            -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function \
+            -m "not source" tests
       - uses: actions/upload-artifact@v6
         with:
           name: wheel-${{ matrix.platform.triple }}
