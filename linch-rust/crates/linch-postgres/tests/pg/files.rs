@@ -28,6 +28,10 @@ async fn namespaces_hold_separate_files() {
     assert!(b.ls("").await.unwrap().is_empty());
     b.write("/notes.txt", "from b").await.unwrap();
     assert_eq!(a.read("/notes.txt").await.unwrap(), "from a");
+    a.edit("/notes.txt", "from a", "edited", false)
+        .await
+        .unwrap();
+    assert_eq!(b.read("/notes.txt").await.unwrap(), "from b");
     b.delete("/notes.txt").await.unwrap();
     assert_eq!(a.ls("/").await.unwrap(), ["/notes.txt"]);
     db.finish().await;
