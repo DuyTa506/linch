@@ -12,7 +12,9 @@ only; the Rust side is described in the
 [architecture pages](../architecture/README.md).
 
 The docs ship with the package: `linch-rust docs path` prints where they are
-installed, so you can read or search them offline.
+installed, so you can read or search them offline. `linch-rust skill install`
+puts a skill in your project that points Claude Code or Codex at them
+([CLI](./cli.md#linch-rust-skill-install)); `linch-rust new` adds it for you.
 
 ---
 
@@ -55,7 +57,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Runs](./runs.md) | Start, stream, resume, approve, cancel; errors at the end of a stream; what is durable and when |
 | [Events](./events.md) | Every event type the client decodes, with its fields; sequence numbers and replay; usage and cost |
 | [Stores](./stores.md) | Memory and Postgres stores, DSNs, schemas, migrations, namespaces, pools |
-| [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path` |
+| [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
 | [Troubleshooting](./troubleshooting.md) | Errors from the server binary to runs and tools, with causes and fixes |
 | [Skills](./skills.md) | The `Skill` tool, the built-in `verify` skill, skills in `config_dir/skills` |
 | [Subagents](./subagents.md) | The `Subagent` tool: foreground and background workers, continue, stop, fork, the mailbox |
