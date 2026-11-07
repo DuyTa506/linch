@@ -50,16 +50,16 @@ skills, a new session's block names them only (`set.rs:87-91`).
 
 ### The `Skill` tool
 
-`SkillTool` (`crates/linch-core/src/skills/tool.rs:23`):
+`SkillTool` (`crates/linch-core/src/skills/tool.rs:21`):
 
 | Property | Value |
 |---|---|
 | Input | `skill` (required; a leading `/` is dropped), `args` |
-| Scope | `Read`: it runs without approval and next to other read calls; a rule with a `skill` condition can still deny or ask (`tool.rs:18-22`) |
-| `always_load` | `true`: tool search never defers it (`tool.rs:79`) |
+| Scope | `Read`: it runs without approval and next to other read calls; a rule with a `skill` condition can still deny or ask (`tool.rs:18-20`) |
+| `always_load` | `true`: tool search never defers it (`tool.rs:78`) |
 | Result | The skill's body with its placeholders filled (`substitute`, `crates/linch-core/src/skills/substitute.rs:15`): `$ARGUMENTS`, `${SKILL_DIR}`, `${LINCH_SKILL_DIR}`, `${LINCH_SESSION_ID}` and each named argument, in one pass, with no shell quoting |
-| Errors | `Unknown skill: <name>`; `Skill is not invokable by the model: <name>` (`tool.rs:106-117`) |
-| Events | `skill_invoked` `{name, args}` before the load, `skill_completed` `{name, is_error}` after it (`tool.rs:87-102`); both durable, riding the call's end write, so on the stream they come between the call's `tool_call_start` and `tool_call_end` |
+| Errors | `Unknown skill: <name>`; `Skill is not invokable by the model: <name>` (`tool.rs:94-105`) |
+| Events | `skill_invoked` `{name, args}` just before the call's `tool_call_start`, `skill_completed` `{name, is_error}` just after its `tool_call_end`, as in Python. The run's tool sink stages them with the start and the end, so they ride those writes (`crates/linch-core/src/runner/sink.rs:102-131` and 173-180). A call that is denied, blocked or served gets them too; an unknown tool or invalid input does not (`skill_name`, `sink.rs:104-108`) |
 
 The tool reads the agent's current skill set on every call, so a
 [reload](#catalog-and-reload) takes effect at once.
@@ -97,9 +97,10 @@ the tool.
 
 ### `skills_loaded`
 
-A new run stages `skills_loaded` when its agent has skills and its session's
-log is empty, between `init` and the prompt's `user` event, so it rides the
-create write (`crates/linch-core/src/runner/start.rs:95-102`). It holds one
+A new run stages `skills_loaded` when its agent has skills, the run offers
+the `Skill` tool (a child whose definition leaves it out does not), and its
+session's log is empty, between `init` and the prompt's `user` event, so it
+rides the create write (`crates/linch-core/src/runner/start.rs:97-105`). It holds one
 descriptor per skill, sorted by name: `name`, `description`, and
 `when_to_use` and `argument_hint` when set (`set.rs:55-78`). The rule is
 durable: a session's later runs never send it, after a restart either.
@@ -107,9 +108,9 @@ durable: a session's later runs never send it, after a restart either.
 ## Subagents
 
 `AgentBuilder::subagents` (`builder.rs:164`) turns subagents on with the
-host's `SubagentDefinition`s (`crates/linch-core/src/subagents.rs:144`);
+host's `SubagentDefinition`s (`crates/linch-core/src/subagents.rs:146`);
 the facade loads them from `.linch/agents/*.md`. The `Roster`
-(`subagents.rs:234-276`) adds the built-in `verification` agent unless one
+(`subagents.rs:236-278`) adds the built-in `verification` agent unless one
 has its name, and keeps a general-purpose agent, `_default`, for a call
 with no `subagent_type` (or a blank one, `general-purpose` or `_default`).
 The roster enters the contract as the `subagents` feature, and the
@@ -143,7 +144,7 @@ A call (`tool.rs:167-212`):
 2. refuses `run_in_background` unless `workers.background` is on;
 3. names the child run, and its session, after the call's idempotency key,
    `<parent run id>:<tool_use_id>` (`tool.rs:192`;
-   `crates/linch-core/src/tool.rs:183-190`);
+   `crates/linch-core/src/tool.rs:182-192`);
 4. enlists the worker in the agent's worker registry;
 5. runs the child in the background (see [workers](#background-workers))
    or in the foreground. A foreground child that nothing can address again
@@ -204,7 +205,7 @@ output (`Subagent aborted.`, `Subagent encountered an error: ...`).
 
 A call that its timeout or the run's cancel cuts short cancels the child's
 token and leaves the child to write its abort; the parent waits for every
-child before its terminal write (`subagents.rs:28-31`).
+child before its terminal write (`subagents.rs:30-33`).
 
 The parent's `total_usage` counts its own model calls only; a child's usage
 reaches the parent wrapped, as in Python
@@ -212,7 +213,7 @@ reaches the parent wrapped, as in Python
 
 ## Background workers
 
-`Workers` (`subagents.rs:100-131`) has three settings, all in the contract:
+`Workers` (`subagents.rs:102-133`) has three settings, all in the contract:
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -265,7 +266,7 @@ session.
 A run's children are its `Family` (`crates/linch-core/src/runner/family.rs:44`).
 The family lives on the agent, listed by run id (`family.rs:370-401`), from
 the run's create or claim until its stream lets go of it
-(`crates/linch-core/src/runner/start.rs:330-342`). That is what lets it
+(`crates/linch-core/src/runner/start.rs:333-345`). That is what lets it
 outlive a stream that ends with the run suspended.
 
 - **While a stream drives the run, the core spawns no task.**
@@ -306,13 +307,13 @@ durable state like its parent. Resuming the parent picks the children up:
   contract changed.
 - **Background:** after the claim, `reattach`
   (`crates/linch-core/src/subagents/background.rs:184-252`, called at
-  `start.rs:310-312`) enlists the run's workers again from its
+  `start.rs:313-315`) enlists the run's workers again from its
   `tool_call_start` events, in call order, then takes each child that a
   `child_run_status` marks `running` with no later end, and that the family
   does not hold already: it resumes it, starts it (its create never landed),
   or reads its end back. One that cannot be picked up reports a failed end.
 - **Suspended in this process:** the family is still listed, so the resume
-  or approve takes it over as it is (`start.rs:203-205`).
+  or approve takes it over as it is (`start.rs:206-208`).
 
 The children's contracts come from the parent's build, so a resume after a
 registration on the parent still matches; a definition changed by a reload
@@ -476,8 +477,8 @@ async fn main() {
 |---|---|
 | An invoked skill's body is put back as a `<system-reminder>` every turn | The body is the `Skill` tool's result; it comes back as a reminder only after a compaction folds the result away |
 | The `Skill` tool sets a pending overlay (`allowed_tools`, `model`) on the session, kept in checkpoints | The overlay is read from the provider view at each turn; nothing is stored |
-| `skill_invoked` before the call's `tool_call_start`, `skill_completed` after its `tool_call_end` | Both between the call's `tool_call_start` and `tool_call_end`: the tool emits them |
-| `skills_loaded` once per session object (`skills_loaded_emitted`), so again after a restart | Once per session, on its first run (its log is empty) |
+| `skill_invoked` before the call's `tool_call_start`, `skill_completed` after its `tool_call_end` | The same |
+| `skills_loaded` once per session object (`skills_loaded_emitted`), so again after a restart, whenever the agent has skills | Once per session, on its first run (its log is empty), and only when the run offers the `Skill` tool |
 | `reload_skills()` and `reload_subagents()` rescan the project | The core takes the new lists; the facade rescans; neither is on the wire yet |
 | A fresh child's system blocks are built from its tool names; a fork reuses the parent's prefix | A child gets the parent's system blocks and prompt, the listing if it has `Skill`, then its body. Forking is `Agent::fork_session`, not a subagent mode |
 | A background worker is an `asyncio` task: it can outlive the run, and a restart cannot resume it | A child is a durable run the parent's stream drives; the parent waits for its workers before it ends, and resumes them with it on Postgres |

@@ -195,6 +195,13 @@ The run the server may have started for it is cancelled as soon as its answer
 arrives, and `agent.close()` waits for that run to end before it frees the
 agent.
 
+Read every run you start to its end. A connection holds at most 1024 unread
+event batches across its runs; past that the client stops reading, so the
+server pauses its runs instead of the client's memory growing. Answers wait
+behind those batches too: a run left unread while it still produces events
+stalls the other calls on its connection. `cancel()` keeps reading its run
+while it waits, so it never waits on itself.
+
 ## Resume
 
 `resume(run_id)` continues a run from its last durable state. Use it after

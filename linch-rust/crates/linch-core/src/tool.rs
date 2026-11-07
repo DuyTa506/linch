@@ -182,7 +182,9 @@ impl ToolContext {
     /// Stable `run_id:tool_use_id` key for this call.
     ///
     /// A resumed run never re-runs a call that started durably: a call with a
-    /// durable start and no durable end is reported as interrupted. The key
+    /// durable start and no durable end is reported as interrupted. The
+    /// exception is `Subagent` and `SubagentContinue`, which are planned and
+    /// run again so they resume their durable child run. The key
     /// lets a tool deduplicate a kernel-side retry of the same call within a
     /// run, since a retry keeps its `tool_use_id`.
     pub fn idempotency_key(&self) -> String {

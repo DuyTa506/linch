@@ -11,7 +11,7 @@ has its own usage docs.
 ## Conventions
 
 - `file:line` references are relative to `linch-rust/` (for example
-  `crates/linch-core/src/tool.rs:213`) and match the revision the page was
+  `crates/linch-core/src/tool.rs:226`) and match the revision the page was
   written against. Prefer them over re-deriving behavior.
 - Every Rust snippet compiles against the workspace crates at that revision;
   the ones with a `main` that needs no network or database also run.
@@ -33,26 +33,19 @@ has its own usage docs.
 | [Events](./events.md) | `Event` and its kinds, `Envelope`, persistence classes, the wire format and its version, subagent wrapping, the Python client's decoding and the parity test, adding an event kind |
 | [Skills and subagents](./skills-subagents.md) | The `Skill` tool, its listing and overlay; the `Subagent` tool, foreground and background workers, `SubagentContinue` and `TaskStop`; the run family; child contracts; resume after a crash; reloads; the deep agent roster |
 | [RPC protocol and server](./rpc.md) | `linch-rpc` and `linch-server`: methods and notifications, error codes, inside a connection, ordering and backpressure, the stdio, socket and HTTP transports, tenants and allowlists, limits, adding a method |
+| [Kernel](./kernel.md) | `Agent` as the per-agent scope, `AgentBuilder` and the run contract digest, `Registration`, the seven hook chains and how each combines answers, the plan and execute path of a tool batch, no globals |
+| [Turn lifecycle](./turn-lifecycle.md) | One run: the turn steps, why the loop continues, barriers and group commit, the tool batch and read-only parallelism, suspend, resume and reconcile, terminals |
+| [Compaction](./compaction.md) | The trigger, the summary call, the logged projection on the session log, recovery of a paid summary, what the model sees |
 
-Coming later (these pages are not written yet; read the source and its doc
-comments until they are):
-
-| Page | Will cover | Python counterpart |
-|---|---|---|
-| Core and kernel | `Agent`, `AgentBuilder`, `AgentSpec`, the run contract digest, hooks, permissions | [kernel](../../../docs/architecture/kernel.md) |
-| Turn lifecycle | The run state machine in `crates/linch-core/src/runner/`, barriers, suspend and resume, reconcile | [turn lifecycle](../../../docs/architecture/turn-lifecycle.md) |
-| Compaction | When and how the provider view is summarized | [compaction](../../../docs/architecture/compaction.md) |
-
-The Python pages describe the shared concepts only. Each written Rust page
-says where Rust differs; for the pages still to come, the Rust source is the
-reference. The main
-difference in the kernel is under [Shared invariants](#shared-invariants).
+The Python pages describe the shared concepts only. Each Rust page says where
+Rust differs. The main difference in the kernel is under
+[Shared invariants](#shared-invariants) and on the [kernel](./kernel.md) page.
 
 ## Crates
 
 | Crate | Role | Page |
 |---|---|---|
-| `linch-core` | Python-free core: types, wire codecs, the provider and tool contracts, the registry, scheduler, runner, journal and store traits | Providers, Tools, Stores, Events, Skills and subagents (the rest later) |
+| `linch-core` | Python-free core: types, wire codecs, the provider and tool contracts, the registry, scheduler, runner, journal and store traits | [Kernel](./kernel.md), [Turn lifecycle](./turn-lifecycle.md), [Compaction](./compaction.md), Providers, Tools, Stores, Events, Skills and subagents |
 | `linch-providers` | HTTP model provider adapters and pricing | [Providers](./providers.md) |
 | `linch-tools` | Workspace tools, Bash, the virtual filesystem, result offload, session task tools | [Tools](./tools.md) |
 | `linch-mcp` | MCP client: server tools as registry tools | [MCP client](./mcp.md) |
@@ -92,8 +85,8 @@ These hold across the pages above, as in Python Linch's
 - **Observability is OpenTelemetry**, built from the event stream with Python
   Linch's names ([OpenTelemetry](./otel.md)).
 
-What differs from Python: there is no IoC `Context`, event bus or tool
-pipeline; extension points are traits (`Provider`, `Tool`, `RunStore`,
+What differs from Python ([kernel](./kernel.md)): there is no IoC `Context`,
+event bus or tool pipeline; extension points are traits (`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) and hook chains
 (`crates/linch-core/src/hooks.rs`) given to `AgentBuilder::hooks`
 (`crates/linch-core/src/agent/builder.rs:85-86`).

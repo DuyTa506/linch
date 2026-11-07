@@ -24,7 +24,7 @@
 //!   **`connection.auth`** `{token}` ([`AuthParams`](protocol::AuthParams)),
 //!   answered with [`Authenticated`](protocol::Authenticated)
 //!   `{"tenant": "acme"}`. Any other first message or an unknown token gets
-//!   `-32003` and the connection closes; so does silence for 10 s. At most
+//!   `-32003` and the connection closes, and so does 10 s of silence. At most
 //!   [`MAX_PENDING_LOGINS`] connections wait for their login at once; one
 //!   more gets `-32005` (`kind: logins`) at once and closes.
 //! - **HTTP** ([`serve_messages`] with [`Access::Tenant`]): `GET /rpc` with

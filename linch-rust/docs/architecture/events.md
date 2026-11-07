@@ -68,7 +68,7 @@ encoding.
 | `model_call_delivery` | `ModelCallDeliveryEvent`, `model_call.rs:33` | yes | no | |
 | `model_call_receipt` | `ModelCallReceiptEvent`, `model_call.rs:72` | yes | no | |
 | `model_call_usage_settlement` | `ModelCallUsageSettlementEvent`, `model_call.rs:110` | yes | no | Not emitted at this revision |
-| any other | `IgnorableEvent`, `event/ignorable.rs:51` | yes | yes | Only under an `ignorable` envelope |
+| any other | `IgnorableEvent`, `event/ignorable.rs:52` | yes | yes | Only under an `ignorable` envelope |
 
 "Stored" means written to the run's event log; "Delivered" means yielded by
 the run's stream, and so sent to clients. The two columns are the
@@ -102,7 +102,7 @@ is classified.
 
 | Class | Kinds | Where it goes |
 |---|---|---|
-| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:123-130`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:152-157`) |
+| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:123-130`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
 | `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:310-316`) |
 | `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:380-396`), and so does the RPC method `run.events`, which calls it |
 
@@ -141,7 +141,8 @@ That is the output of the example below. The rules:
   `WIRE_VERSION` (`EventError::UnsupportedVersion`). A known `type` always
   decodes its payload strictly. A `type` the build does not know is
   `EventError::UnknownType` unless the envelope is `ignorable`, when it
-  becomes an `IgnorableEvent` (`event/mod.rs:245-258`). Ignorable never
+  becomes an `IgnorableEvent` (`event/mod.rs:245-258`), which keeps every
+  key and value of the event object but not their order. Ignorable never
   rescues a malformed known kind.
 - **Re-encoding** an envelope whose event holds an `IgnorableEvent`, at any
   depth, writes `ignorable: true` whatever the field says, so every
@@ -194,14 +195,16 @@ The child's `seq` is not kept; read the child run's own log for it.
 
 `python/src/linch_rust/events.py` has one frozen dataclass per delivered
 kind, with the wire name as the class variable `type`, gathered in the
-`Event` union (`events.py:345`) and the `_KINDS` table (`events.py:375`).
+`Event` union (`events.py:349`) and the `_KINDS` table (`events.py:379`).
 
-- `decode_event` (`events.py:432`) builds the class of the `type`, passing
+- `decode_event` (`events.py:436`) builds the class of the `type`, passing
   only the members the class has, so a member the client does not know is
   dropped. A `subagent` event decodes its child the same way. Any other
-  `type` becomes `UnknownEvent(type, raw)` (`events.py:338`).
-- `decode_envelope` (`events.py:450`) reads `seq`, `run_id`, `ts_ms` and
-  `event`. It reads neither `v` nor `ignorable`.
+  `type` becomes `UnknownEvent(type, raw)` (`events.py:342`).
+- `decode_envelope` (`events.py:454`) reads `seq`, `run_id`, `ts_ms` and
+  `event`, and raises `LinchError` for a `v` other than its `WIRE_VERSION`
+  (1, `events.py:19`), a missing one included. It does not read
+  `ignorable`.
 - Nested values (messages, usage, tool result blocks) stay the JSON dicts
   the server sent.
 - The journal-only kinds have no class; the server never sends them.

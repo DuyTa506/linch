@@ -460,7 +460,7 @@ before resuming the parent) cannot continue: resuming the parent ends it
 | `generate_subagent_definition()` | Not in the client; write the file yourself |
 | `session.workers` handles | Not exposed; follow `ChildRunStatusEvent` and `SubagentEvent` |
 | `agent.fork_session(...)` | Rust only, `Agent::fork_session` |
-| Reloading subagents | Not yet; open a new agent |
+| Reloading subagents | Not in this client or on the RPC; open a new agent. Rust hosts have `OpenedAgent::reload_subagents` and `Agent::reload_subagents` |
 
 ---
 

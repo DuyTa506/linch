@@ -13,12 +13,13 @@
 //! `<system-reminder>` in the summary message, which is part of the logged
 //! projection: it reaches the provider view and never the full history.
 //!
-//! A call reports a `skill_invoked` and a `skill_completed` event, with its
-//! end. A skill whose frontmatter names `allowed_tools` or a `model` sets
-//! them for the next model turn only: that turn offers only those tools (a
-//! call of another is refused as not registered) and uses that model. The
-//! overlay only narrows: it never allows a call the permission policy
-//! would ask about.
+//! A call reports a `skill_invoked` event before its `tool_call_start` and
+//! a `skill_completed` one after its `tool_call_end`, as Python does. A
+//! skill whose frontmatter names `allowed_tools` or a `model` sets them for
+//! the next model turn only: that turn offers only those tools (a call of
+//! another is refused as not registered) and uses that model. The overlay
+//! only narrows: it never allows a call the permission policy would ask
+//! about.
 
 mod listing;
 mod overlay;
@@ -39,7 +40,7 @@ pub use overlay::model_override;
 pub(crate) use overlay::{Overlays, overlay, overlays};
 pub(crate) use set::{SkillSet, deferred_listing};
 pub use substitute::{split_args, substitute};
-pub(crate) use tool::SkillTool;
+pub(crate) use tool::{SkillTool, requested};
 
 /// Name of the tool that loads a skill.
 pub const SKILL_TOOL: &str = "Skill";

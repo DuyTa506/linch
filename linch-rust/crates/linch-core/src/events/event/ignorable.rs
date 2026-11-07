@@ -43,8 +43,9 @@ pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
 /// Decoding a `type` this build does not recognize fails unless the
 /// enclosing [`crate::events::Envelope`] (or, nested, the enclosing
 /// `subagent`'s envelope context) is marked `ignorable`; in that case the
-/// event round-trips verbatim as this sentinel rather than aborting the
-/// whole decode. Ignorability is a producer-declared compatibility
+/// event round-trips as this sentinel, with the same keys and values but
+/// not necessarily in the same key order, rather than aborting the whole
+/// decode. Ignorability is a producer-declared compatibility
 /// property, not a fallback for a malformed *known* event — see
 /// `docs/architecture/events.md`.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,8 +90,8 @@ impl IgnorableEvent {
         &self.type_name
     }
 
-    /// The original event envelope, including its `type` field, preserved
-    /// verbatim for re-serialization.
+    /// The original event object, including its `type` field, kept for
+    /// re-serialization: the same keys and values, not their order.
     pub fn raw(&self) -> &JsonObject {
         &self.raw
     }

@@ -11,6 +11,7 @@ import pytest
 from linch_rust import (
     AgentNotFound,
     ConnectionClosed,
+    LinchError,
     NotSuspended,
     OpenError,
     PromptBlocked,
@@ -23,10 +24,12 @@ from linch_rust import (
     ToolCallEndEvent,
     UnknownEvent,
     UsageEvent,
+    _rpc,
 )
 from linch_rust._rpc import Connection, RunEnd, StreamTransport
 from linch_rust.errors import error_from
 from linch_rust.events import decode_envelope, decode_event
+from linch_rust.run import Run
 
 
 class Answering:
@@ -98,6 +101,70 @@ async def test_a_server_line_with_a_non_finite_number_closes_the_connection() ->
     with pytest.raises(ConnectionClosed, match="reading the server failed"):
         await call
     await conn.finish()
+
+
+def _event_line(seq: int) -> bytes:
+    envelope = {"v": 1, "seq": seq, "run_id": "r1", "ts_ms": 0, "event": {"type": "x"}}
+    params = {"run_id": "r1", "envelopes": [envelope]}
+    return json.dumps({"jsonrpc": "2.0", "method": "run.event", "params": params}).encode() + b"\n"
+
+
+async def _settle() -> None:
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+async def test_a_slow_run_consumer_stops_the_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_rpc, "NOTIFICATION_CAPACITY", 4, raising=False)
+    reader = asyncio.StreamReader()
+    lines = [{"jsonrpc": "2.0", "result": {"run_id": "r1"}}]
+    conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, Answering(reader, lines))))
+    _, queue = await conn.request_run("run.start", {})
+    reader.feed_data(b"".join(_event_line(seq) for seq in range(10)))
+    await _settle()
+
+    # Four batches wait unread; the reader stops before the fifth.
+    assert queue.qsize() == 4
+    seen = [await queue.get() for _ in range(10)]
+    assert seen == [[json.loads(_event_line(seq))["params"]["envelopes"][0]] for seq in range(10)]
+    reader.feed_eof()
+    await conn.finish()
+
+
+async def test_cancel_reads_on_while_the_run_queue_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_rpc, "NOTIFICATION_CAPACITY", 2, raising=False)
+    reader = asyncio.StreamReader()
+    lines = [{"jsonrpc": "2.0", "result": {"run_id": "r1"}}]
+    writer = Answering(reader, lines)
+    conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, writer)))
+    run_id, queue = await conn.request_run("run.start", {})
+    writer.lines = []  # The test answers the cancel itself, behind the events.
+    run = Run(conn, run_id, queue)
+    reader.feed_data(b"".join(_event_line(seq) for seq in range(6)))
+    await _settle()
+
+    cancel = asyncio.create_task(run.cancel())
+    await _settle()
+    # The answer is behind the events the full queue holds back.
+    answer = {"jsonrpc": "2.0", "id": 2, "result": {"cancelled": True}}
+    reader.feed_data(json.dumps(answer).encode() + b"\n")
+    end = {"jsonrpc": "2.0", "method": "run.end", "params": {"run_id": "r1"}}
+    reader.feed_data(json.dumps(end).encode() + b"\n")
+
+    assert await asyncio.wait_for(cancel, 5) is True
+    assert [envelope.seq async for envelope in run] == list(range(6))
+    reader.feed_eof()
+    await conn.finish()
+
+
+def test_an_envelope_of_an_unknown_wire_version_is_refused() -> None:
+    raw = {"v": 2, "seq": 1, "run_id": "r1", "ts_ms": 0, "event": {"type": "x"}}
+    with pytest.raises(LinchError, match="wire version 2"):
+        decode_envelope(raw)
+    with pytest.raises(LinchError, match="wire version None"):
+        decode_envelope({key: value for key, value in raw.items() if key != "v"})
 
 
 def test_events_decode_tolerantly_and_keep_unknown_kinds() -> None:

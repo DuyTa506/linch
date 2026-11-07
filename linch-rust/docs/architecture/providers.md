@@ -128,7 +128,7 @@ Nothing in linch-rust retries a provider call:
 - The `attempt` number of a delivery is not a retry counter. It grows only
   when a resumed run finds a call that was dispatched but never settled and
   dispatches it again (`Recovery::Redispatch`,
-  `crates/linch-core/src/runner/start.rs:177`).
+  `crates/linch-core/src/runner/start.rs:221`).
 
 There is no deadline on a whole provider call. Each adapter's HTTP client has
 a 30 s connect timeout and a read timeout between reads (below); cancel the

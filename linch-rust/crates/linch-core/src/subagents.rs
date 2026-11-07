@@ -20,7 +20,9 @@
 //!   the skill listing when the child has the `Skill` tool), then the
 //!   definition's body;
 //! - it sees the parent's tools minus `Subagent` (a child cannot spawn),
-//!   only those the definition names when it names any;
+//!   `SubagentContinue` and `TaskStop` (it has no workers) and
+//!   `tool_search` (it is offered every tool), only those the definition
+//!   names when it names any;
 //! - it cannot suspend: a call that needs approval is denied, unless a
 //!   rule or a `permission_request` hook allows it;
 //! - each of its events reaches the parent's log wrapped in a `subagent`

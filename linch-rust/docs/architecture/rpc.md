@@ -98,9 +98,9 @@ agent's, as the message text reads (`error.rs:157-165`, tested at
 `error.rs:222-242`).
 
 The socket login answers its refusals under different ids
-(`login.rs:33-83`): `-32005` `kind: logins` under a null id before anything
+(`login.rs:33-85`): `-32005` `kind: logins` under a null id before anything
 is read; `-32003` under the request's id, or null when the first message
-has none; `-32005` `kind: connections` under the `connection.auth` id.
+has none or none came within the login wait; `-32005` `kind: connections` under the `connection.auth` id.
 The Python client reads the first line it gets as its login's answer,
 whatever the id (`python/src/linch_rust/_remote.py:112-142`).
 
@@ -155,7 +155,7 @@ requests; and its tenant, `None` for a local client.
   spawned (`server.rs:277-288`), so it reaches the client before any
   notification of that run. The Python client relies on it: it files a
   run's notifications under the run id it read from that result
-  (`python/src/linch_rust/_rpc.py:207-218`).
+  (`python/src/linch_rust/_rpc.py:254-265`).
 - Every message goes through one queue to one writer, so the wire keeps the
   queue's order. A batch joins only what is already queued, and any other
   message or another run's envelope closes it (`outgoing.rs:1-10`): a
@@ -184,8 +184,13 @@ There is no buffer that grows without bound on the server:
 4. The Rust client keeps at most 1024 unread notifications
    (`NOTIFICATION_CAPACITY`, `crates/linch-rpc/src/client.rs:29`), then
    stops reading, so answers wait behind them too (`client.rs:103-110`).
-   The Python client queues every `run.event` without a bound
-   (`_rpc.py:144`), so it never pushes back.
+   The Python client does the same with its own 1024
+   (`NOTIFICATION_CAPACITY`, `python/src/linch_rust/_rpc.py:46`): each
+   unread `run.event` holds a place across the connection's runs, and the
+   reader waits for one before it queues the next (`RunQueue`,
+   `_rpc.py:60-96`). `Run.cancel` keeps reading its run while it waits for
+   its answer (`python/src/linch_rust/run.py:102-121`); a run nobody reads
+   while its events keep coming stalls the connection.
 
 `Outbox::send_now` (`connection.rs:267-277`), for code that cannot wait,
 hands a message to a task when the queue is full.
@@ -212,7 +217,8 @@ Each connection waits for its login with one of 32 places
 (`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:125-129`): each may
 buffer a 16 MiB line for 10 s, so the places bound that to 512 MiB. One
 more gets `-32005` at once. A login has 10 s (`LOGIN_TIMEOUT`,
-`login.rs:17`).
+`login.rs:17`); silence past it gets `-32003` and the connection closes
+(`login.rs:42-54`).
 
 **HTTP.** One route, `GET /rpc` (`http.rs:30`). Before its upgrade a
 connection holds one of 32 places across the server
@@ -261,13 +267,13 @@ config, refusing unknown fields and a cap of 0; `tokens`
 A run method's `principal`, when given, must name the tenant
 (`admit_principal`, `admit.rs:115-129`); the server does not fill one in.
 
-**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:132-169`)
+**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:134-171`)
 reads a DSN the way the store connects with it, through sqlx's
 `PgConnectOptions`, so a `?host=` or `?user=` override counts and a missing
 user or `sslmode` takes the server's default. An entry allows a DSN with
 the same host, port, socket, database, user, startup `options` and TLS
 files, and an `sslmode` at least as strict as its own, ranked from
-`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:171-192`).
+`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:173-194`).
 
 The facade shares one pool per target across a server's connections
 (`crates/linch/src/pools.rs:19-38`). Its key (`pools.rs:44-73`) is sqlx's
@@ -277,23 +283,23 @@ order or in settings sqlx ignores share a pool. A pool takes its size from
 the open that connected it (`pools.rs:93-109`); the connect gives up after
 5 s and the migrations after 30 s (`pools.rs:136-154`).
 
-**MCP commands.** An `McpCommand` (`allowlists.rs:49-69`) may not list
+**MCP commands.** An `McpCommand` (`allowlists.rs:51-71`) may not list
 `PATH`, `HOME` or the variables known to choose what code a program loads
-(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:71-108`). The list is
+(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:73-110`). The list is
 best effort.
 
 ## Limits
 
 | Limit | Value | Where | Past it |
 |---|---|---|---|
-| `max_connections` per tenant | 8 unless set (`allowlists.rs:21`) | `Tenant::connect` (`access.rs:87-104`); the connection holds the place until it ends (`connection.rs:177-188`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
+| `max_connections` per tenant | 8 unless set (`allowlists.rs:23`) | `Tenant::connect` (`access.rs:87-104`); the connection holds the place until it ends (`connection.rs:177-188`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
 | `max_runs` per tenant | 16 unless set (`allowlists.rs:16`) | `run_place`, taken in `start` and `claim` (`run.rs:152-157`) and held by the driven run | `-32005`, nothing starts |
-| `max_agents` per tenant | 16 unless set (`allowlists.rs:26`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:103-110`) | `-32005`, before any MCP server starts |
+| `max_agents` per tenant | 16 unless set (`allowlists.rs:28`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:103-110`) | `-32005`, before any MCP server starts |
 | Calls in flight per connection | 64 | `server.rs:49` | Reading waits |
 | Logins waiting | 32 per `Tokens` | `access.rs:125-129` | `-32005` `kind: logins`, then close |
 | HTTP upgrades waiting | 32 per server | `http.rs:39-44` | Closed unread |
 | One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:231-250`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
-| Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:37` | The connection closes |
+| Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:37` | The login gets `-32003`, then the connection closes; the HTTP connection closes |
 
 A local (stdio) connection has none of the tenant caps.
 
@@ -315,13 +321,13 @@ The Rust `Client` (`client.rs:97-101`) has one generic method,
 `RequestHandler` (`client.rs:57`); `Client::in_process` (`client.rs:174`)
 starts a server on in-memory pipes, as the tests do.
 
-The Python client's `Connection` (`python/src/linch_rust/_rpc.py:110`) has
+The Python client's `Connection` (`python/src/linch_rust/_rpc.py:160`) has
 one reader task. It resolves answers by id, files `run.event` envelopes and
-`run.end` under their run (`_rpc.py:185-205`), runs `tool.call` and
+`run.end` under their run (`_rpc.py:232-252`), runs `tool.call` and
 `hook.call` in a task each and cancels one on `$/cancelRequest`
-(`_rpc.py:220-263`). `Agent` (`python/src/linch_rust/agent.py:49`) wraps the
-methods: `run`, `resume` and `approve` through `_start` (`agent.py:202`),
-and `close`, `close_session` and `events` (`agent.py:158-200`).
+(`_rpc.py:267-310`). `Agent` (`python/src/linch_rust/agent.py:50`) wraps the
+methods: `run`, `resume` and `approve` through `_start` (`agent.py:203`),
+and `close`, `close_session` and `events` (`agent.py:159-201`).
 
 ## Add an RPC method
 
