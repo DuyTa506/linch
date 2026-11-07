@@ -162,7 +162,7 @@ GREET_TOOL = Template(
 from linch import tool
 
 
-@tool(description="Greet a person by name.")
+@tool(description="Greet a person by name.", scope="read")
 async def greet(name: str) -> str:
     return f"Hello, {name}!"
 '''
@@ -231,7 +231,7 @@ TOOL_STUB = Template(
 from linch import tool
 
 
-@tool(description="TODO: describe ${tool}.")
+@tool(description="TODO: describe ${tool}.", scope="read")
 async def ${tool}(query: str) -> str:
     # TODO: implement ${tool}.
     return f"${tool} results for: {query}"

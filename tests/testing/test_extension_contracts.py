@@ -6,7 +6,7 @@ from typing import Any
 async def test_tool_contract_accepts_decorated_function_tool() -> None:
     from linch import assert_tool_contract, tool
 
-    @tool
+    @tool(scope="read")
     def echo(value: str) -> str:
         """Echo a value."""
         return f"echo:{value}"

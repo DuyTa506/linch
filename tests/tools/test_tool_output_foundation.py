@@ -135,11 +135,11 @@ async def test_v2_function_tool_preserves_raw_value_and_rejects_tool_result() ->
 
     schema = {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer"}}}
 
-    @tool(output_schema=schema)
+    @tool(output_schema=schema, scope="read")
     def canonical() -> dict[str, int]:
         return {"n": 2}
 
-    @tool(output_schema=schema)
+    @tool(output_schema=schema, scope="read")
     def invalid_contract() -> ToolResult:
         return ToolResult(content="legacy")
 
@@ -152,14 +152,14 @@ def test_registry_validates_v2_schema_and_renderer_identity() -> None:
     from linch.errors import ConfigError
     from linch.tools import ToolRegistry, tool
 
-    @tool(output_schema={"type": "not-a-json-schema-type"})
+    @tool(output_schema={"type": "not-a-json-schema-type"}, scope="read")
     def bad_schema():
         return None
 
     with pytest.raises(ConfigError, match="output_schema is invalid"):
         ToolRegistry().register(bad_schema)
 
-    @tool(output_schema={"type": "integer"}, render_output=str)
+    @tool(output_schema={"type": "integer"}, render_output=str, scope="read")
     def anonymous_renderer():
         return 1
 
@@ -171,6 +171,7 @@ def test_registry_validates_v2_schema_and_renderer_identity() -> None:
         render_output=lambda value: f"value={value}",
         renderer_id="example.integer",
         renderer_version="1",
+        scope="read",
     )
     def valid():
         return 1
@@ -183,7 +184,7 @@ def test_registry_validates_v2_schema_and_renderer_identity() -> None:
 def test_legacy_function_tool_behavior_is_unchanged() -> None:
     from linch.tools import FunctionTool, ToolResult, tool
 
-    @tool
+    @tool(scope="read")
     def legacy() -> dict[str, int]:
         return {"z": 2, "a": 1}
 

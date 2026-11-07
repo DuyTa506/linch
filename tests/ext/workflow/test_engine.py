@@ -995,7 +995,7 @@ async def test_wf_agent_passes_isolation_to_subagent() -> None:
 
     recorded: list[str] = []
 
-    @tool
+    @tool(scope="read")
     def record_cwd(ctx: Any) -> str:
         """Record the execution cwd."""
         recorded.append(ctx.cwd)

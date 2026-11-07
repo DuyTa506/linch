@@ -28,7 +28,7 @@ protocol plumbing.
 from linch import Agent, ToolContext, tool
 from linch import empty_tools, workspace_tools
 
-@tool(description="Search the internal knowledge base.", tags=("rag",))
+@tool(description="Search the internal knowledge base.", tags=("rag",), scope="read")
 async def search_kb(query: str, ctx: ToolContext) -> str:
     results = await ctx.deps.kb.search(query)
     return "\n".join(results)
@@ -45,9 +45,11 @@ The schema is inferred from your annotations, so name your parameters
 descriptively — the model sees them. The `ctx` parameter is special: when you
 declare it, the runtime injects a `ToolContext` (see [Dependencies](#dependencies-shared-app-state)
 below) instead of treating it as a model-supplied argument. The `@tool`
-decorator also accepts `scope`, `parallel`, `tags`, `summary`, `resources`,
+decorator requires `scope` (`"read"`, `"write"` or `"exec"`; omitting it raises
+`ConfigError`) and also accepts `parallel`, `tags`, `summary`, `resources`,
 `retryable`, and `execution_timeout_ms` to override the defaults discussed
-later on this page.
+later on this page. Declare `scope="read"` only for pure lookups: the
+permission engine allows read tools without asking.
 
 `empty_tools(...)` builds a registry with *only* the tools you pass — the right
 choice for a pure domain agent that should never touch the filesystem or shell.
@@ -631,7 +633,7 @@ async def execute(self, input, ctx: ToolContext) -> ToolResult:
 # Or inside a function tool:
 from linch import tool
 
-@tool
+@tool(scope="read")
 async def search_docs(query: str, ctx: ToolContext) -> str:
     return await ctx.deps["vector_store"].search(query)
 
@@ -738,7 +740,7 @@ retain their existing behavior.
 Tools can use the tenant to scope application queries:
 
 ```python
-@tool
+@tool(scope="read")
 async def customer(customer_id: str, ctx: ToolContext) -> dict:
     if ctx.principal is None:
         raise ValueError("An authenticated principal is required")

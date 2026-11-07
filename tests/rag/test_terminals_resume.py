@@ -19,7 +19,7 @@ async def test_final_tool_checks_nested_values_before_ack(payload, success):
 
     from linch import ToolRegistry, Usage, register_grounding_check, register_rag_connector, tool
 
-    @tool
+    @tool(scope="read")
     async def finish(nested: list[Any] | None = None) -> str:
         raise AssertionError("terminal tool must never execute")
 
@@ -47,7 +47,7 @@ async def test_final_tool_checks_nested_values_before_ack(payload, success):
 async def test_forced_final_runs_grounding(answer, success):
     from linch import ToolRegistry, Usage, register_grounding_check, register_rag_connector, tool
 
-    @tool
+    @tool(scope="read")
     async def repeat() -> str:
         return "again"
 

@@ -1840,7 +1840,7 @@ from linch import FunctionTool
 ```
 
 ```text
-FunctionTool(fn: Callable[..., Any], name: str | None = None, description: str | None = None, input_schema: dict[str, Any] | None = None, scope: ToolScope = 'read', parallel: bool = True, tags: tuple[str, ...] = (), summary: str | Callable[[dict[str, Any]], str] | None = None, resources_fn: Callable[[dict[str, Any]], list[ResourceAccess] | list[dict[str, Any]]] | None = None, retryable: bool = False, execution_timeout_ms: float | None = None, output_schema: dict[str, Any] | None = None, render_output: RenderOutput | None = None, renderer_id: str | None = None, renderer_version: str | None = None)
+FunctionTool(fn: Callable[..., Any], name: str | None = None, description: str | None = None, input_schema: dict[str, Any] | None = None, scope: ToolScope | None = None, parallel: bool = True, tags: tuple[str, ...] = (), summary: str | Callable[[dict[str, Any]], str] | None = None, resources_fn: Callable[[dict[str, Any]], list[ResourceAccess] | list[dict[str, Any]]] | None = None, retryable: bool = False, execution_timeout_ms: float | None = None, output_schema: dict[str, Any] | None = None, render_output: RenderOutput | None = None, renderer_id: str | None = None, renderer_version: str | None = None)
 ```
 
 Adapt a Python callable to the :class:`~linch.tools.base.Tool` protocol.
@@ -2692,7 +2692,7 @@ from linch import tool
 ```
 
 ```text
-def tool(fn: Callable[..., Any] | None=None, *, name: str | None=None, description: str | None=None, input_schema: dict[str, Any] | None=None, output_schema: dict[str, Any] | None=None, render_output: RenderOutput | None=None, renderer_id: str | None=None, renderer_version: str | None=None, scope: ToolScope='read', parallel: bool=True, tags: tuple[str, ...]=(), summary: str | Callable[[dict[str, Any]], str] | None=None, resources: Callable[[dict[str, Any]], list[ResourceAccess] | list[dict[str, Any]]] | None=None, retryable: bool=False, execution_timeout_ms: float | None=None) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]
+def tool(fn: Callable[..., Any] | None=None, *, name: str | None=None, description: str | None=None, input_schema: dict[str, Any] | None=None, output_schema: dict[str, Any] | None=None, render_output: RenderOutput | None=None, renderer_id: str | None=None, renderer_version: str | None=None, scope: ToolScope | None=None, parallel: bool=True, tags: tuple[str, ...]=(), summary: str | Callable[[dict[str, Any]], str] | None=None, resources: Callable[[dict[str, Any]], list[ResourceAccess] | list[dict[str, Any]]] | None=None, retryable: bool=False, execution_timeout_ms: float | None=None) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]
 ```
 
 Create a :class:`FunctionTool` directly or as a decorator.

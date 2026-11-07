@@ -65,7 +65,7 @@ async def test_close_drains_own_workers_without_touching_other_agent() -> None:
     def _hanging_agent() -> tuple[Any, asyncio.Event]:
         started = asyncio.Event()
 
-        @tool
+        @tool(scope="read")
         async def hang() -> str:
             """Blocks forever until cancelled."""
             started.set()

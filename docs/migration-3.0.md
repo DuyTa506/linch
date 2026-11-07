@@ -22,6 +22,7 @@ The tables below list the application-facing changes by area.
 | Domain configuration selected only at Agent construction | `Profile` layers selected with `RunOptions(profile=...)`; pass the pinned id/version/definition again on resume or takeover; see [profiles](usage/profiles.md) |
 | `Agent.openai` provider property | `agent.provider`; the separate `Agent(openai=...)` configuration argument remains |
 | `Agent(execution_backend=...)` with only shell support | A coherent `.shell`/`.fs` backend; `from linch import LocalExecutionBackend, RemoteExecutionBackend` |
+| `@tool` / `FunctionTool` defaulting to `scope="read"` | `scope` is required and has no default; omitting it raises `ConfigError`. Declare `scope="read"` only for pure lookups, `write` or `exec` otherwise |
 | `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch import BashTool` |
 | `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
 | `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, get_args, get_origin
 
+from ..kernel.errors import ConfigError
 from .base import (
     CanonicalToolOutput,
     JsonValue,
@@ -157,7 +158,7 @@ class FunctionTool:
         name: Optional model-visible tool name.
         description: Optional model-visible description.
         input_schema: Optional explicit input schema.
-        scope: Access scope used for scheduling and policy.
+        scope: Required access scope ("read", "write" or "exec") used for scheduling and policy.
         parallel: Whether calls may run in parallel.
         tags: Search and selection tags.
         summary: Static or callable invocation summary.
@@ -174,7 +175,7 @@ class FunctionTool:
     name: str | None = None
     description: str | None = None
     input_schema: dict[str, Any] | None = None
-    scope: ToolScope = "read"
+    scope: ToolScope | None = None
     parallel: bool = True
     tags: tuple[str, ...] = ()
     summary: str | Callable[[dict[str, Any]], str] | None = None
@@ -194,6 +195,11 @@ class FunctionTool:
     _ctx_param: str | None = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.scope is None:
+            raise ConfigError(
+                f"tool {self.name or self.fn.__name__!r} must declare scope "
+                '("read", "write" or "exec"); there is no default'
+            )
         self._signature = inspect.signature(self.fn)
         inferred, required, params, accepts_kwargs = _make_schema(self._signature)
         self.input_schema = self.input_schema or inferred
@@ -301,7 +307,7 @@ def tool(
     render_output: RenderOutput | None = None,
     renderer_id: str | None = None,
     renderer_version: str | None = None,
-    scope: ToolScope = "read",
+    scope: ToolScope | None = None,
     parallel: bool = True,
     tags: tuple[str, ...] = (),
     summary: str | Callable[[dict[str, Any]], str] | None = None,
@@ -322,7 +328,7 @@ def tool(
         render_output: Optional synchronous output renderer.
         renderer_id: Optional renderer identity.
         renderer_version: Optional renderer version.
-        scope: Access scope used for scheduling and policy.
+        scope: Required access scope ("read", "write" or "exec") used for scheduling and policy.
         parallel: Whether calls may run in parallel.
         tags: Search and selection tags.
         summary: Static or callable invocation summary.

@@ -62,7 +62,7 @@ async def test_deep_agent_example_interrupts_before_resuming(monkeypatch, tmp_pa
 
     session_store, run_store = InMemorySessionStore(), TrackingRunStore()
 
-    @tool(name="echo", description="Return a fixed result.")
+    @tool(name="echo", description="Return a fixed result.", scope="read")
     async def echo() -> str:
         calls.append("echo")
         return "tool result"

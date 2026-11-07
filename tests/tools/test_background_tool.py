@@ -26,7 +26,7 @@ async def test_background_disabled_runs_inline() -> None:
 
     ran = asyncio.Event()
 
-    @tool
+    @tool(scope="read")
     async def quick(**kwargs: Any) -> str:
         """Runs inline; accepts extra kwargs so the passthrough hint is harmless."""
         ran.set()
@@ -57,7 +57,7 @@ async def test_abort_cancels_background_tool() -> None:
     gate = asyncio.Event()
     started = asyncio.Event()
 
-    @tool
+    @tool(scope="read")
     async def hang() -> str:
         """Blocks forever until cancelled."""
         started.set()
@@ -98,7 +98,7 @@ async def test_background_tool_completion_runs_post_tool_use_hooks() -> None:
     from linch.types import ToolUseBlock
     from tests.support.scheduler import scheduler_agent, scheduler_session
 
-    @tool
+    @tool(scope="read")
     async def secret() -> str:
         """Return a secret for the redaction regression."""
         return "SECRET_VALUE"
@@ -152,7 +152,7 @@ async def test_background_tool_completion_uses_captured_origin_lease() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    @tool
+    @tool(scope="read")
     async def slow() -> str:
         """Wait until the test releases the detached completion."""
         started.set()

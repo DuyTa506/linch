@@ -30,7 +30,7 @@ decorator xử lý phần kết nối protocol.
 from linch import Agent, ToolContext, tool
 from linch import empty_tools, workspace_tools
 
-@tool(description="Search the internal knowledge base.", tags=("rag",))
+@tool(description="Search the internal knowledge base.", tags=("rag",), scope="read")
 async def search_kb(query: str, ctx: ToolContext) -> str:
     results = await ctx.deps.kb.search(query)
     return "\n".join(results)
@@ -47,9 +47,11 @@ Schema được suy ra từ annotation, vì vậy hãy đặt tên parameter th�
 — model sẽ nhìn thấy chúng. Parameter `ctx` là trường hợp đặc biệt: khi khai
 báo nó, runtime inject một `ToolContext` (xem [Dependency](#dependency-trạng-thái-ứng-dụng-dùng-chung)
 bên dưới) thay vì coi đây là argument do model cung cấp. Decorator `@tool`
-cũng nhận `scope`, `parallel`, `tags`, `summary`, `resources`, `retryable` và
+yêu cầu `scope` (`"read"`, `"write"` hoặc `"exec"`; bỏ qua sẽ ném `ConfigError`) và
+cũng nhận `parallel`, `tags`, `summary`, `resources`, `retryable` và
 `execution_timeout_ms` để ghi đè các giá trị mặc định được thảo luận ở phần sau
-của trang này.
+của trang này. Chỉ khai báo `scope="read"` cho các lệnh tra cứu thuần túy: permission
+engine cho phép tool read mà không hỏi.
 
 `empty_tools(...)` tạo một registry chỉ chứa các tool bạn truyền vào — đây là
 lựa chọn phù hợp cho agent miền nghiệp vụ thuần, không bao giờ được chạm vào hệ
@@ -629,7 +631,7 @@ async def execute(self, input, ctx: ToolContext) -> ToolResult:
 # Or inside a function tool:
 from linch import tool
 
-@tool
+@tool(scope="read")
 async def search_docs(query: str, ctx: ToolContext) -> str:
     return await ctx.deps["vector_store"].search(query)
 
@@ -735,7 +737,7 @@ kiện nhìn thấy role set rỗng; rule không có điều kiện role vẫn g
 Tool có thể dùng tenant để scope các query ứng dụng:
 
 ```python
-@tool
+@tool(scope="read")
 async def customer(customer_id: str, ctx: ToolContext) -> dict:
     if ctx.principal is None:
         raise ValueError("An authenticated principal is required")

@@ -58,7 +58,7 @@ async def test_tool_content_capture_uses_post_tool_redaction(otel, monkeypatch):
     monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
     context, exporter, _ = otel
 
-    @tool
+    @tool(scope="read")
     def read_secret() -> str:
         """Return a value that the post-tool policy redacts."""
         return "SECRET_VALUE"
@@ -373,7 +373,7 @@ async def test_completed_runs_do_not_retain_earlier_run_background_tasks(
     release = asyncio.Event()
     started = asyncio.Event()
 
-    @tool
+    @tool(scope="read")
     async def slow() -> str:
         """Wait until later runs have finished."""
         started.set()
@@ -449,7 +449,7 @@ async def test_detached_post_tool_failure_closes_only_its_pending_span(
             entered[name].set()
             await release_hooks[name].wait()
 
-    @tool
+    @tool(scope="read")
     async def slow(name: str) -> str:
         """Finish execution only after the foreground run has closed."""
         await release_tools.wait()

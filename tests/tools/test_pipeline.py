@@ -486,7 +486,7 @@ async def test_pipeline_cannot_mutate_away_v2_normalization_boundary() -> None:
     def number_fn() -> int:
         return 1
 
-    number = FunctionTool(number_fn, output_schema={"type": "integer"})
+    number = FunctionTool(number_fn, output_schema={"type": "integer"}, scope="read")
 
     pipeline = ToolPipeline()
 

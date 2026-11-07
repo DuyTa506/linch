@@ -118,7 +118,7 @@ async def test_tool_tree_and_content_switch(otel, monkeypatch, capture):
         monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
     context, exporter, _ = otel
 
-    @tool
+    @tool(scope="read")
     def echo(secret: str) -> str:
         """Echo the input."""
         return "private result " + secret
@@ -159,7 +159,7 @@ async def test_failing_tool_sets_error_status(otel, failure):
 
     context, exporter, _ = otel
 
-    @tool
+    @tool(scope="read")
     def fail() -> ToolResult:
         """Fail deliberately."""
         if failure == "raise":
@@ -276,7 +276,7 @@ async def test_real_subagent_is_nested_under_parent_tool_and_run(otel):
     parent = None
     agent = None
 
-    @tool
+    @tool(scope="read")
     async def delegate() -> str:
         """Run a child agent."""
         result = await run_subagent(
