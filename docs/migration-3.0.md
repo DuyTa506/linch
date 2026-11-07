@@ -423,6 +423,9 @@ details.
   `Subagent` tool description no longer shows duplicates.
 - The `Grep` tool runs `rg` in its own process group and, on timeout or
   cancellation, kills the group and awaits it instead of leaving it running.
+- A `PreToolUse` hook that returns `retry` or `force_continue` (actions that point
+  does not honor) now blocks the tool call with an error instead of skipping
+  later PreToolUse hooks and running the tool as if it had returned `continue`.
 
 ## Internal cleanup for adapter maintainers
 

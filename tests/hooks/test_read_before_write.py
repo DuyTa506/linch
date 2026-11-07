@@ -421,3 +421,28 @@ async def test_cached_full_read_cannot_promote_newer_partial_read(tmp_path: Any)
     assert _tool_end(events, "Write").is_error
     assert target.read_text(encoding="utf-8") == changed
     await agent.close()
+
+
+@pytest.mark.parametrize("action", ["retry", "force_continue"])
+async def test_pre_tool_use_unsupported_action_blocks_call(tmp_path: Any, action: str) -> None:
+    from linch import HookResult
+
+    class Unsupported:
+        async def on_pre_tool_use(self, ctx: Any) -> HookResult:
+            if action == "retry":
+                return HookResult.retry("again")
+            return HookResult.force_continue("go on")
+
+    target = tmp_path / "new.txt"
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Write",
+        ToolUseTurn(
+            tool_name="Write",
+            tool_input={"file_path": "new.txt", "content": "hi"},
+        ),
+        hooks=[Unsupported()],
+    )
+    assert end.is_error
+    assert action in end.result and "PreToolUse" in end.result
+    assert not target.exists()

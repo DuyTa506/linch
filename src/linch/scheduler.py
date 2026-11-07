@@ -911,6 +911,15 @@ async def _dispatch_pre_tool_use(
     if result.action in {"block", "stop"}:
         reason = result.reason or result.feedback or "Tool call blocked"
         return final_input, reason, None, outcome.events
+    if result.action != "continue":
+        # retry/force_continue are not honoured at PreToolUse. The dispatcher already
+        # ended the chain on them, so later guards (read-before-write, cache) never
+        # ran: refuse the call rather than run the tool as if it had continued.
+        reason = (
+            f"PreToolUse hook returned unsupported action {result.action!r}; "
+            "tool call blocked (supported: continue, mutate, block, stop, resolve)"
+        )
+        return final_input, reason, None, outcome.events
     return final_input, None, None, outcome.events
 
 

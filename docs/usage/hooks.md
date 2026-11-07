@@ -116,7 +116,8 @@ Which actions are honored depends on the chokepoint:
   Further turns are bounded by `max_turns` and the run
   [budget](./agent.md#runbudget).
   A `BeforeProviderCall` `force_continue` re-runs the turn without calling the
-  provider.
+  provider. `PreToolUse` does not honor them: a hook that returns either blocks
+  the tool call with an error.
 - A graceful early **success** stop is available at `BeforeProviderCall`: return
   `HookResult.stop("stop_when", metadata={"subtype": "success"})` (this is how
   `StopPredicateHook` works).
