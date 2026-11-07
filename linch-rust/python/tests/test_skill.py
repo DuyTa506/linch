@@ -1,4 +1,4 @@
-"""`linch-rust skill install`, and the `build-agent-with-linch` skill it copies."""
+"""`linch-rust skill install`, and the `build-agent-with-linch-rust` skill it copies."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from linch_rust.cli import _scaffold, main
 
 PYTHON_DIR = Path(__file__).resolve().parents[1]
 WORKSPACE = PYTHON_DIR.parent
-NAME = "build-agent-with-linch"
+NAME = "build-agent-with-linch-rust"
 SKILL = WORKSPACE / "skills" / NAME
 CLAUDE = Path(".claude/skills") / NAME
 CODEX = Path(".agents/skills") / NAME

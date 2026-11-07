@@ -96,4 +96,4 @@ What differs from Python: there is no IoC `Context`, event bus or tool
 pipeline; extension points are traits (`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) and hook chains
 (`crates/linch-core/src/hooks.rs`) given to `AgentBuilder::hooks`
-(`crates/linch-core/src/agent/builder.rs:84-85`).
+(`crates/linch-core/src/agent/builder.rs:85-86`).

@@ -21,11 +21,12 @@ pub(crate) struct SkillSet {
 }
 
 impl SkillSet {
-    /// The set of `skills` plus the built-ins.
+    /// The set of `skills` plus the built-ins, listed within the budget of
+    /// a `context_window` (see [`listing`]).
     ///
     /// Raises:
     ///     CanonicalError: If a skill cannot be digested.
-    pub(crate) fn new(skills: Vec<Skill>) -> Result<Self, CanonicalError> {
+    pub(crate) fn new(skills: Vec<Skill>, context_window: u64) -> Result<Self, CanonicalError> {
         let skills = with_builtins(skills);
         let mut listed = Vec::new();
         for skill in skills
@@ -42,7 +43,7 @@ impl SkillSet {
         }
         listed.sort_by(|a, b| a.stamp.name.cmp(&b.stamp.name));
         Ok(Self {
-            listing: listing_block(&skills),
+            listing: listing_block(&skills, context_window),
             overlays: overlays(&skills),
             listed,
             skills,
@@ -78,8 +79,8 @@ impl SkillSet {
 
 /// The skill listing as a cacheable system block; `None` when no skill is
 /// visible to the model.
-fn listing_block(skills: &[Skill]) -> Option<SystemBlock> {
-    let listing = listing(skills);
+fn listing_block(skills: &[Skill], context_window: u64) -> Option<SystemBlock> {
+    let listing = listing(skills, Some(context_window));
     (!listing.is_empty()).then(|| block(&listing))
 }
 

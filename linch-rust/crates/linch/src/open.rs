@@ -51,7 +51,10 @@ impl AgentConfig {
     /// goes with the filesystem's registrations, and its roster joins the
     /// config directory's subagents), and applies the `profile` (its spec
     /// changes, and its permission layer on the policy). Then reads the
-    /// provider key from the environment, registers the workspace
+    /// provider key from the environment, runs the provider's
+    /// [`Provider::prepare`] (a self-hosted server without a configured
+    /// `context_window` is asked for one, for at most 2 s, and the open
+    /// goes on whatever it answers), registers the workspace
     /// tools into `tools`, validates the permission policy, opens the stores
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), registers
@@ -102,6 +105,10 @@ impl AgentConfig {
             self.spec = profile.spec(self.spec);
         }
         let provider = provider(self.provider)?;
+        // A self-hosted server reports its context window here, before the
+        // offload threshold and the skill listing are derived from it.
+        provider.prepare().await;
+        let window = provider.context_window(&self.spec.model);
         let reads = Arc::new(ReadTracker::new());
         let root = match self.workspace {
             Some(root) => {
@@ -135,6 +142,7 @@ impl AgentConfig {
             &hooks,
             pg,
             &self.namespace,
+            window,
         )?;
         if deep.is_some() {
             files.remember(&hooks);
@@ -339,15 +347,32 @@ async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenErro
 
 fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
     let built: Arc<dyn Provider> = match config {
-        ProviderConfig::Scripted { turns } => return Ok(Arc::new(ScriptedProvider::new(turns))),
-        ProviderConfig::DeepSeek { base_url } => {
+        ProviderConfig::Scripted {
+            turns,
+            context_window,
+        } => {
+            let scripted = ScriptedProvider::new(turns);
+            return Ok(Arc::new(match context_window {
+                Some(window) => scripted.with_context_window(window),
+                None => scripted,
+            }));
+        }
+        ProviderConfig::DeepSeek {
+            base_url,
+            context_window,
+        } => {
             let mut options = DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV)?);
             override_url(&mut options.base_url, base_url);
+            options.context_window = context_window;
             Arc::new(DeepSeek::new(options).map_err(OpenError::Provider)?)
         }
-        ProviderConfig::OpenAiChat { base_url } => {
+        ProviderConfig::OpenAiChat {
+            base_url,
+            context_window,
+        } => {
             let mut options = OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV)?);
             override_url(&mut options.base_url, base_url);
+            options.context_window = context_window;
             Arc::new(OpenAiChat::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::OpenAiResponses {
@@ -381,11 +406,18 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             override_url(&mut options.base_url, base_url);
             Arc::new(Gemini::new(options).map_err(OpenError::Provider)?)
         }
-        ProviderConfig::Vllm { base_url } => server(Server::Vllm, base_url, "VLLM_API_KEY")?,
-        ProviderConfig::SgLang { base_url } => server(Server::SgLang, base_url, "SGLANG_API_KEY")?,
-        ProviderConfig::LlamaCpp { base_url } => {
-            server(Server::LlamaCpp, base_url, "LLAMA_API_KEY")?
-        }
+        ProviderConfig::Vllm {
+            base_url,
+            context_window,
+        } => server(Server::Vllm, base_url, context_window, "VLLM_API_KEY")?,
+        ProviderConfig::SgLang {
+            base_url,
+            context_window,
+        } => server(Server::SgLang, base_url, context_window, "SGLANG_API_KEY")?,
+        ProviderConfig::LlamaCpp {
+            base_url,
+            context_window,
+        } => server(Server::LlamaCpp, base_url, context_window, "LLAMA_API_KEY")?,
     };
     Ok(built)
 }
@@ -401,14 +433,17 @@ fn override_url(target: &mut String, base_url: Option<String>) {
     }
 }
 
-/// A self-hosted server; its key is optional.
+/// A self-hosted server; its key is optional, and without a
+/// `context_window` it is asked for one when the agent opens.
 fn server(
     server: Server,
     base_url: String,
+    context_window: Option<u64>,
     env: &'static str,
 ) -> Result<Arc<dyn Provider>, OpenError> {
     let mut options = ServerOptions::new(server, base_url);
     options.api_key = ApiKey::from_env(env);
+    options.context_window = context_window;
     Ok(Arc::new(
         OpenAiChat::server(options).map_err(OpenError::Provider)?,
     ))

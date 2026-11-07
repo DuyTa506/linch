@@ -22,13 +22,15 @@ differs in Rust:
 
 ## The contract
 
-`Provider` (`crates/linch-core/src/provider/client.rs:21`) is
+`Provider` (`crates/linch-core/src/provider/client.rs:25`) is
 `Send + Sync` and object safe; the agent holds it as `Arc<dyn Provider>`.
 
 | Method | Contract |
 |---|---|
 | `fn id(&self) -> &str` | Stable identifier (`deepseek`, `openai-chat`, `vllm`, ...). The OpenTelemetry layer maps it to `gen_ai.provider.name`. |
 | `async fn stream(&self, request, cancel) -> Result<ProviderStream, ProviderError>` | Start one call. An error before the first event (connect, HTTP status, a request the adapter refuses) is the `Err`. The stream ends after `message_end` or after one error item. Cancelling `cancel` ends it with `ProviderError::Cancelled`. |
+| `fn context_window(&self, model: &str) -> u64` | The model's context window, without I/O; `DEFAULT_CONTEXT_WINDOW` (128000) unless overridden. Compaction without a `threshold_tokens` (`crates/linch-core/src/compaction.rs`, `due`), the skill listing budget and the facade's offload fraction derive from it. |
+| `async fn prepare(&self)` | One-time discovery, a no-op unless overridden; it never fails. The facade calls it when it opens an agent, before anything reads the window; a host that builds an agent in code calls it before `AgentBuilder::build`. |
 
 `ProviderStream` is `BoxStream<'static, Result<ProviderEvent, ProviderError>>`
 (`client.rs:17`), so the stream owns everything it needs and outlives the
@@ -54,7 +56,7 @@ borrow of `self`.
 message. Adapters use it to replay what the vendor needs back on the next
 turn: Responses output items under `openai_responses`
 (`crates/linch-providers/src/responses/stream.rs:26`), Gemini raw parts under
-`gemini_parts` (`crates/linch-providers/src/gemini.rs:44`).
+`gemini_parts` (`crates/linch-providers/src/gemini.rs:51`).
 
 ### Stream rules
 
@@ -93,7 +95,8 @@ required fields and optional controls an adapter may ignore or refuse:
 | `model`, `system`, `tools`, `messages` | Always set by the runner. |
 | `max_output_tokens`, `temperature`, `stop_sequences` | Optional. |
 | `effort` (`ReasoningEffort`), `thinking` (`Thinking`) | `None` keeps the provider default. Each adapter maps them itself. |
-| `cache_control`, `output_schema`, `tool_choice` | Optional. |
+| `cache_control` | Set (no TTL) on every primary call of a run, as Python's `cache_prompt=True`; a compaction summary call has none (`crates/linch-core/src/agent.rs`). |
+| `output_schema`, `tool_choice` | Optional. |
 | `appended_tools` | The names of the `tools` a session added after its frozen prefix; empty outside a session's catalog. Only the native catalog changes of the Anthropic and Responses adapters read it. |
 
 There is no cancel signal, retry budget or native-catalog switch in the
@@ -101,7 +104,7 @@ request; the cancel token is the second argument of `stream`.
 
 ## Errors and retries
 
-`ProviderError` (`client.rs:39`) has five variants. Messages are written by
+`ProviderError` (`client.rs:58`) has five variants. Messages are written by
 the adapter and must never hold credentials or request headers.
 
 | Variant | Meaning | `retryable()` |
@@ -117,15 +120,15 @@ Nothing in linch-rust retries a provider call:
 - Adapters never retry (`crates/linch-providers/src/lib.rs:4`).
 - `retryable()` and `retry_after` are advice for the caller
   (`client.rs:1-5`).
-- The runner's `dispatch` (`crates/linch-core/src/runner/turn.rs:217`) ends
+- The runner's `dispatch` (`crates/linch-core/src/runner/turn.rs:221`) ends
   the run `failed` with an `Error` event on any failure but `Cancelled`, which
-  aborts the run (`turn.rs:285-292`). The error event carries `retryable` and
+  aborts the run (`turn.rs:298-305`). The error event carries `retryable` and
   `status` (`crates/linch-core/src/provider/call.rs:306`), so a host can
   decide to start a new run.
 - The `attempt` number of a delivery is not a retry counter. It grows only
   when a resumed run finds a call that was dispatched but never settled and
   dispatches it again (`Recovery::Redispatch`,
-  `crates/linch-core/src/runner/start.rs:165`).
+  `crates/linch-core/src/runner/start.rs:177`).
 
 There is no deadline on a whole provider call. Each adapter's HTTP client has
 a 30 s connect timeout and a read timeout between reads (below); cancel the
@@ -204,32 +207,32 @@ the date; read it before changing the adapter.
 
 `crates/linch-providers/src/deepseek.rs`. `thinking` is always sent, because
 DeepSeek thinks by default; `Thinking::Disabled` turns it off and every other
-state turns it on (`deepseek.rs:121`). With thinking on, every earlier
+state turns it on (`deepseek.rs:129`). With thinking on, every earlier
 assistant turn sends `reasoning_content`, `""` when it has none, or a request
-with tools fails with 400 (`deepseek.rs:139-145`). A forced `tool_choice`
+with tools fails with 400 (`deepseek.rs:147-153`). A forced `tool_choice`
 with thinking on, and any `output_schema`, fail locally as `InvalidRequest`.
-Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:176`).
+Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:184`).
 
 ### OpenAI Chat Completions and server profiles
 
-One type, `OpenAiChat` (`crates/linch-providers/src/openai.rs:90`), serves
+One type, `OpenAiChat` (`crates/linch-providers/src/openai.rs:98`), serves
 OpenAI and each OpenAI-compatible server. The difference is a `ChatProfile`
-(`crates/linch-providers/src/openai/profile.rs:18`), a static table with no
+(`crates/linch-providers/src/openai/profile.rs:19`), a static table with no
 defaults: every target states every rule, so a server never inherits OpenAI's
 behavior by accident.
 
 | Profile | Reasoning field | Echo reasoning | Named `tool_choice` | Output limit field | Thinking off |
 |---|---|---|---|---|---|
-| OpenAI (`profile.rs:50`) | none | no | yes | `max_completion_tokens` | not sent |
+| OpenAI (`profile.rs:53`) | none | no | yes | `max_completion_tokens` | not sent |
 | vLLM (`servers/vllm.rs:33`) | `delta.reasoning` | yes | yes | `max_completion_tokens` | `enable_thinking: false` |
 | SGLang (`servers/sglang.rs:31`) | `delta.reasoning_content` | yes | yes | `max_completion_tokens` | `enable_thinking: false`, `thinking: false` |
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | yes | no (fails locally) | `max_tokens` | `enable_thinking: false` |
 
 A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:71`), which fills the
+(`crates/linch-providers/src/servers.rs:76`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
-left out (`profile.rs:132-142`). `output_schema` is not supported by any chat
+left out (`profile.rs:144-154`). `output_schema` is not supported by any chat
 profile yet.
 
 ### OpenAI Responses
@@ -246,9 +249,9 @@ parameter.
 ### Anthropic
 
 `crates/linch-providers/src/anthropic.rs`. `anthropic-version` is pinned to
-`2023-06-01` (`anthropic.rs:40`) because the newer version removes
+`2023-06-01` (`anthropic.rs:44`) because the newer version removes
 `temperature`, which `ProviderRequest` still carries. `max_tokens` is
-required and defaults to 8192 (`anthropic.rs:43`). Thinking blocks are sent
+required and defaults to 8192 (`anthropic.rs:47`). Thinking blocks are sent
 back with their signatures unchanged. A request's `cache_control` marks
 the last cacheable system block and the last block of the last user message
 (`anthropic/payload.rs:39`).
@@ -260,7 +263,7 @@ a retryable transport error (`anthropic/stream.rs:311`).
 
 `crates/linch-providers/src/gemini.rs`. The model is percent-encoded as one
 path segment, so `/`, `?`, `#` and `:` in a model name cannot change the URL
-(`gemini.rs:52`). Function calls without an `id` get a random one per
+(`gemini.rs:59`). Function calls without an `id` get a random one per
 response that is never sent back. A turn with a thought signature or a call
 id keeps its raw parts in `provider_metadata` and replays them verbatim.
 `cache_control` is ignored (caching is implicit). Safety-type finish reasons
@@ -268,15 +271,28 @@ become `refusal`; unknown ones fail as a retryable transport error
 (`gemini/stream.rs:293`). The module notes this adapter has not yet run
 against a live key.
 
+### Context windows
+
+Each adapter reports Python Linch's values (`crates/linch-providers/src/context.rs`
+holds the lookups and probes): Anthropic 200000; Gemini 2000000 for
+`gemini-1.5-pro`, else 1048576; Responses and OpenAI Chat their own tables
+(Python keeps two), else 128000; DeepSeek 128000. `DeepSeekOptions`,
+`OpenAiChatOptions` and `ServerOptions` take a `context_window` that wins.
+A server profile states its rule (`ChatProfile::context`): vLLM and SGLang read
+each model's `max_model_len` from `GET /v1/models`, llama.cpp `n_ctx` from
+`GET /props` (then the root's), once in `prepare`, within 2 seconds, with the
+call's bearer key. A failed probe leaves 128000. Unlike Python, a configured
+llama.cpp window skips the probe rather than serving as its fallback.
+
 ### Usage normalization
 
 Linch's `Usage` (`crates/linch-core/src/usage.rs:13`) counts uncached input,
 output, cache reads and cache writes in four separate buckets; `input_tokens`
 excludes both cache buckets. Each adapter subtracts what its vendor folds
-into the prompt count: DeepSeek its cache hits (`deepseek.rs:185`), OpenAI
-cached and cache-write tokens (`profile.rs:77`), vLLM cached and created
+into the prompt count: DeepSeek its cache hits (`deepseek.rs:193`), OpenAI
+cached and cache-write tokens (`profile.rs:89`), vLLM cached and created
 cache tokens (`servers/vllm.rs:54`), SGLang and llama.cpp cached tokens
-(`servers.rs:83`).
+(`servers.rs:89`).
 
 ## Pricing
 
@@ -289,9 +305,9 @@ model, including every OpenAI, DeepSeek, Gemini and local model, prices to
 supplies.
 
 Pricing is opt-in on the agent: `AgentBuilder::pricing`
-(`crates/linch-core/src/agent/builder.rs:120`) takes any
+(`crates/linch-core/src/agent/builder.rs:121`) takes any
 `Fn(&str, &Usage) -> Option<f64>`. The `linch` crate passes
-`linch_providers::cost` (`crates/linch/src/open.rs:136`). When a receipt has
+`linch_providers::cost` (`crates/linch/src/open.rs:143`). When a receipt has
 usage, the runner prices it by the model that served the call, else the
 agent's model (`crates/linch-core/src/runner/write.rs:107`). A missing price
 or a non-finite one stays `None` (`crates/linch-core/src/agent.rs:141`), and a

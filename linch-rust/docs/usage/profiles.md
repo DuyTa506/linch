@@ -156,7 +156,7 @@ the server does not store it.
 |---|---|
 | `RunOptions(profile=...)` per run on one agent | One profile per opened agent |
 | `tool_allow` | Not yet; use `tool_deny` |
-| `plugins`, `output_schema`, `budget` | Not yet |
+| `plugins`, `output_schema`, `budget` | Not yet; a budget goes in [`spec.budget`](./agent.md#budget) |
 | The contract pins `id`, `version` and `content_hash` | The contract covers only the prompt and `max_turns` changes |
 
 `DeepAgentProfile` is a different thing: it sets the deep agent's

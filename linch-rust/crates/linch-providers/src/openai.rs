@@ -27,13 +27,17 @@
 //! - Auth is `Authorization: Bearer <key>`, and the key is required.
 //!   `Retry-After` is whole seconds.
 
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::{JsonObject, Provider, ProviderError, ProviderRequest, ProviderStream};
+use linch_core::{
+    DEFAULT_CONTEXT_WINDOW, JsonObject, Provider, ProviderError, ProviderRequest, ProviderStream,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
+use crate::context::{self, ContextRule, Probed};
 use crate::openai_compat::stream::Translator;
 use crate::openai_compat::{http, stream};
 use crate::servers::ServerOptions;
@@ -67,6 +71,9 @@ pub struct OpenAiChatOptions {
     pub api_key: ApiKey,
     /// API root without the `/chat/completions` path.
     pub base_url: String,
+    /// The context window of every model; `None` takes Python's table
+    /// (gpt-5.5 and gpt-5.4 400000, o1 200000, others 128000).
+    pub context_window: Option<u64>,
 }
 
 impl OpenAiChatOptions {
@@ -75,6 +82,7 @@ impl OpenAiChatOptions {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
+            context_window: None,
         }
     }
 
@@ -93,6 +101,10 @@ pub struct OpenAiChat {
     base_url: String,
     api_key: Option<ApiKey>,
     thinking_off: JsonObject,
+    /// The configured context window, which wins over the profile's rule.
+    context_window: Option<u64>,
+    /// What [`Provider::prepare`] read from the server.
+    probed: Arc<OnceLock<Probed>>,
 }
 
 impl OpenAiChat {
@@ -107,6 +119,7 @@ impl OpenAiChat {
             options.base_url,
             Some(options.api_key),
             JsonObject::new(),
+            options.context_window,
         )
     }
 
@@ -122,6 +135,7 @@ impl OpenAiChat {
             options.base_url,
             options.api_key,
             options.thinking_off_kwargs,
+            options.context_window,
         )
     }
 
@@ -130,6 +144,7 @@ impl OpenAiChat {
         base_url: String,
         api_key: Option<ApiKey>,
         thinking_off: JsonObject,
+        context_window: Option<u64>,
     ) -> Result<Self, ProviderError> {
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(api_key.as_ref(), &err))?;
@@ -139,6 +154,8 @@ impl OpenAiChat {
             base_url,
             api_key,
             thinking_off,
+            context_window,
+            probed: Arc::default(),
         })
     }
 }
@@ -147,6 +164,30 @@ impl OpenAiChat {
 impl Provider for OpenAiChat {
     fn id(&self) -> &str {
         self.profile.id
+    }
+
+    /// The configured window, else the profile's: OpenAI's table, or
+    /// what the server told [`Provider::prepare`].
+    fn context_window(&self, model: &str) -> u64 {
+        if let Some(window) = self.context_window {
+            return window;
+        }
+        match self.profile.context {
+            ContextRule::Known(table) => context::known(table, model, DEFAULT_CONTEXT_WINDOW),
+            ContextRule::Models | ContextRule::Props => {
+                context::probed_window(self.probed.get(), model)
+            }
+        }
+    }
+
+    /// Ask a server for its context window once, unless one is configured.
+    async fn prepare(&self) {
+        if self.context_window.is_some() || self.probed.get().is_some() {
+            return;
+        }
+        let key = self.api_key.as_ref();
+        let probed = context::probe(&self.client, self.profile.context, &self.base_url, key).await;
+        let _ = self.probed.set(probed);
     }
 
     async fn stream(

@@ -37,6 +37,13 @@ mod stream;
 /// The Gemini API root.
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
+/// Python's `gemini._KNOWN_CONTEXT`, less the entries equal to
+/// [`DEFAULT_CONTEXT_WINDOW`].
+const KNOWN_CONTEXT: &[(&str, u64)] = &[("gemini-1.5-pro", 2_000_000)];
+
+/// The window of a Gemini model the table does not name.
+const DEFAULT_CONTEXT_WINDOW: u64 = 1_048_576;
+
 /// The environment variable [`GeminiOptions::from_env`] reads.
 pub const API_KEY_ENV: &str = "GEMINI_API_KEY";
 
@@ -107,6 +114,11 @@ impl Gemini {
 impl Provider for Gemini {
     fn id(&self) -> &str {
         "gemini"
+    }
+
+    /// Python's table: 2000000 for `gemini-1.5-pro`, else 1048576.
+    fn context_window(&self, model: &str) -> u64 {
+        crate::context::known(KNOWN_CONTEXT, model, DEFAULT_CONTEXT_WINDOW)
     }
 
     async fn stream(

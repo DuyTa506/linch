@@ -187,6 +187,7 @@ absent, except `bash`.
 |---|---|---|
 | `model` | required | Model id sent with every request; not blank |
 | `system_prompt` | `""` | The system prompt; empty sends no system block |
+| `system_blocks` | `[]` | Your own system blocks, `{"text": str, "cacheable": bool}` (`cacheable` `False` when absent), sent in order before the system prompt ([below](#system-blocks)) |
 | `max_turns` | none: no limit | Most provider calls one run may make. A run that needs one more ends with a `loop_guard` event (`reason: "max_turns"`) and a `result` of subtype `error` |
 | `thinking` | none: the provider's default | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` or `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` is `summarized` or `omitted`. How each provider maps it is in the [architecture providers page](../architecture/providers.md#the-adapters) |
 | `effort` | none | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`, for providers that support it |
@@ -194,18 +195,80 @@ absent, except `bash`.
 | `max_tool_concurrency` | `4` | Most read-scope tool calls that run at once; `0` counts as 1 |
 | `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |
+| `budget` | none: no cap | A token and USD cap for each run and its subagents, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([below](#budget)) |
+
+### System blocks
+
+Every request sends the system blocks in this order: `system_blocks` as you
+wrote them, then `system_prompt` (never cacheable), then the skill listing
+when `skills` is on (cacheable). A session keeps the blocks of its first run
+for all its requests, and a subagent gets the same blocks followed by its
+definition's instructions. No block may be blank, and the blocks are part of
+the [run contract](#the-run-contract), flags included.
+
+Mark a block `cacheable` when it is stable: a provider that takes cache
+breakpoints (Anthropic) puts the system breakpoint on the last cacheable block,
+so everything up to it may be served from the prompt cache. Blocks after it,
+such as the system prompt when no skill listing follows, sit outside that
+breakpoint.
+
+```python
+spec = {
+    "model": "claude-sonnet-4-6",
+    "system_prompt": "Answer billing questions.",
+    "system_blocks": [
+        {"text": "Company policy: ...", "cacheable": True},
+        {"text": "Today's promotions: ..."},
+    ],
+}
+```
 
 ### `compaction`
 
 | Field | Default | What it controls |
 |---|---|---|
-| `threshold_tokens` | required | Compact before a turn whose conversation is estimated at this many tokens or more (about four characters per token, 1000 per image); at least 1 |
+| `threshold_tokens` | none: follow the context window | Compact before a turn whose conversation is estimated at this many tokens or more (about four characters per token, 1000 per image); at least 1 |
 | `keep_recent_turns` | `10` | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | the built-in prompt | Instructions for the summary call |
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
 
+Without `threshold_tokens` (`"compaction": {}` turns it on), the run compacts as
+Python Linch does: when the estimate plus an output reserve reaches 80% of the
+provider's [context window](./providers.md#context-window) for the spec's model.
+The reserve is `spec.max_output_tokens` when set, else a fifth of the window,
+at least 1 and at most 32768. A `threshold_tokens` replaces that rule and
+ignores the window.
+
 Compaction makes one extra provider call on the agent's provider and model,
 and the run reports it with a `compaction` [event](./events.md).
+
+### `budget`
+
+| Field | Default | What it controls |
+|---|---|---|
+| `max_tokens` | none: no token cap | Most tokens the run and its subagents may spend, all four usage buckets summed |
+| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); a model without a price adds nothing, so only `max_tokens` binds it |
+| `warn_ratio` | `0.9` | Fraction of either cap at which one `budget` event of kind `warning` fires |
+
+As in Python Linch, every provider call is charged once it ends, and the run
+checks the budget before its next call (a compaction summary call included).
+A run whose spend reached a cap stops there with a `budget` event of kind
+`exceeded`, an `error` named `BudgetExceededError` and a `result` of subtype
+`error`, `stop_reason` `error`. A subagent's child run charges its parent's
+budget, so one budget caps the whole tree, and the warning fires once for it,
+in whichever run's call crossed the ratio. With a cap set, a call whose usage
+is unknown (it failed or was cut off before the provider reported any) means
+the cap can no longer be kept: the next call is refused with an error named
+`BudgetAccountingError`. A run that crashed during a call resumes into that
+error.
+
+Each run of the agent starts with nothing spent. A resumed run starts from
+what its durable record and its children's say was spent, so a crash never
+resets it. The budget is part of the [run contract](#the-run-contract).
+
+```python
+spec = {"model": "claude-sonnet-4-6", "budget": {"max_tokens": 200_000, "max_cost_usd": 2.0}}
+```
 
 ## `permissions`
 
@@ -251,7 +314,8 @@ after the system prompt that teaches the model to use them.
 
 | Field | Default | What it controls |
 |---|---|---|
-| `offload_threshold_tokens` | none: never offload | Move a text tool result estimated above this many tokens (four bytes per token) into the filesystem, leaving its first lines and its path for the model to `read_file` |
+| `offload_threshold_tokens` | none | Move a text tool result estimated above this many tokens (four bytes per token) into the filesystem, leaving its first lines and its path for the model to `read_file` |
+| `offload_threshold_fraction` | none | Offload above this fraction of the provider's [context window](./providers.md#context-window), at least 1000 tokens; Python Linch uses 0.1. Used only without `offload_threshold_tokens`. With neither, results are never offloaded |
 
 With memory stores each session has its own files, gone with the server. With
 Postgres stores every session of the namespace shares them. See

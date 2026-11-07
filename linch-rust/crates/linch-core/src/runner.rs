@@ -48,6 +48,7 @@ use futures::Stream;
 use futures::future::BoxFuture;
 
 use crate::agent::{AgentInner, RunError, RunOptions};
+use crate::budget::Meter;
 
 use crate::events::Envelope;
 use crate::hooks::ApprovalResponse;
@@ -156,17 +157,19 @@ impl Stream for RunStream {
 
 /// Start a new run (see [`crate::agent::Agent::run`]).
 pub(crate) fn start(agent: Arc<AgentInner>, prompt: String, options: RunOptions) -> RunStream {
-    start_under(agent, prompt, options, None)
+    start_under(agent, prompt, options, None, None)
 }
 
-/// Start a subagent's child run of `parent` (see [`crate::subagents`]).
+/// Start a subagent's child run of `parent` (see [`crate::subagents`]),
+/// charging the parent's `budget` when it has one.
 pub(crate) fn start_child(
     agent: Arc<AgentInner>,
     prompt: String,
     options: RunOptions,
     parent: RunId,
+    budget: Option<Meter>,
 ) -> RunStream {
-    start_under(agent, prompt, options, Some(parent))
+    start_under(agent, prompt, options, Some(parent), budget)
 }
 
 fn start_under(
@@ -174,12 +177,21 @@ fn start_under(
     prompt: String,
     options: RunOptions,
     parent: Option<RunId>,
+    budget: Option<Meter>,
 ) -> RunStream {
     let run_id =
         (options.run_id.clone()).unwrap_or_else(|| RunId::new(uuid::Uuid::new_v4().to_string()));
     let shared = Shared::default();
     let (outbox, driving) = (shared.outbox.clone(), shared.driving.clone());
-    let run = start::new_run(agent, run_id.clone(), prompt, options, shared, parent);
+    let run = start::new_run(
+        agent,
+        run_id.clone(),
+        prompt,
+        options,
+        shared,
+        parent,
+        budget,
+    );
     RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 
@@ -190,9 +202,30 @@ pub(crate) fn resume(
     answers: Option<HashMap<String, ApprovalResponse>>,
     options: RunOptions,
 ) -> RunStream {
+    resume_under(agent, run_id, answers, options, None)
+}
+
+/// Resume a subagent's child run, charging its parent's `budget` when it
+/// has one.
+pub(crate) fn resume_child(
+    agent: Arc<AgentInner>,
+    run_id: RunId,
+    options: RunOptions,
+    budget: Option<Meter>,
+) -> RunStream {
+    resume_under(agent, run_id, None, options, budget)
+}
+
+fn resume_under(
+    agent: Arc<AgentInner>,
+    run_id: RunId,
+    answers: Option<HashMap<String, ApprovalResponse>>,
+    options: RunOptions,
+    budget: Option<Meter>,
+) -> RunStream {
     let shared = Shared::default();
     let (outbox, driving) = (shared.outbox.clone(), shared.driving.clone());
-    let run = start::continue_run(agent, run_id.clone(), answers, options, shared);
+    let run = start::continue_run(agent, run_id.clone(), answers, options, shared, budget);
     RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 

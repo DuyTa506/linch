@@ -1,4 +1,5 @@
-//! The run's terminals: completed, failed, aborted and the turn limit.
+//! The run's terminals: completed, failed, aborted, the turn limit and
+//! the budget.
 
 use std::time::Duration;
 
@@ -6,6 +7,7 @@ use serde_json::json;
 
 use super::turn::Runner;
 use crate::agent::RunError;
+use crate::budget::Refusal;
 use crate::events::Event;
 use crate::events::kinds::{
     ChildRunStatusEvent, ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent,
@@ -101,6 +103,20 @@ impl Runner {
         });
         let error = error.as_object().cloned().unwrap_or_default();
         self.journal.stage(Event::Error(ErrorEvent { error }));
+        let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
+        self.end(RunStatus::Failed, subtype, stop, None).await
+    }
+
+    /// The terminal for a budget that admits no more calls, as Python's
+    /// `_budget_exhausted_tail` emits it: the `exceeded` event when a cap
+    /// was reached, then the error and a failed result. A capped budget
+    /// that cannot count a call of its tree fails with a
+    /// `BudgetAccountingError` and no `budget` event.
+    pub(super) async fn over_budget(&mut self, refusal: Refusal) -> Result<(), RunError> {
+        if let Refusal::Exceeded(event) = &refusal {
+            self.journal.stage(Event::Budget(event.clone()));
+        }
+        self.journal.stage(Event::Error(refusal.error()));
         let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
         self.end(RunStatus::Failed, subtype, stop, None).await
     }

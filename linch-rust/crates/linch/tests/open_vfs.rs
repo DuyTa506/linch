@@ -134,6 +134,41 @@ async fn an_offloaded_result_reads_back_through_read_file() {
 }
 
 #[tokio::test]
+async fn a_threshold_fraction_follows_the_context_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines = |n: usize| (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>();
+    std::fs::write(dir.path().join("big.txt"), lines(2000).join("\n")).unwrap();
+    std::fs::write(dir.path().join("small.txt"), lines(200).join("\n")).unwrap();
+    let tenth = json!({"offload_threshold_fraction": 0.1});
+    let both = json!({"offload_threshold_fraction": 0.1, "offload_threshold_tokens": 100_000});
+    let cases = [
+        // 2000 tokens.
+        ("big.txt", 20_000, &tenth, true),
+        // 100000 tokens.
+        ("big.txt", 1_000_000, &tenth, false),
+        // 100 tokens, raised to Python's floor of 1000.
+        ("small.txt", 1_000, &tenth, false),
+        // The token threshold wins.
+        ("big.txt", 20_000, &both, false),
+    ];
+    for (file, window, filesystem, offloaded) in cases {
+        let turns = [
+            call("call_1", "Read", json!({"file_path": file})),
+            text("Read it."),
+        ];
+        let extra = json!({
+            "workspace": dir.path(),
+            "filesystem": filesystem,
+            "provider": {"id": "scripted", "turns": turns, "context_window": window},
+        });
+        let opened = config(vec![], extra).open().await.unwrap();
+        let (_, ends) = run(&opened, "s1").await;
+        let moved = ends[0].text.contains("offloaded to");
+        assert_eq!(moved, offloaded, "{file} at {window}: {filesystem}");
+    }
+}
+
+#[tokio::test]
 async fn each_session_has_its_own_files_until_it_closes() {
     let read = |id: &str| call(id, "read_file", json!({"path": "/notes.md"}));
     let turns = vec![

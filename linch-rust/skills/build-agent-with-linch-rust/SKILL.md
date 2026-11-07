@@ -1,5 +1,5 @@
 ---
-name: build-agent-with-linch
+name: build-agent-with-linch-rust
 description: Design, build, extend, debug, and test AI agents on linch-rust, the Rust kernel of Linch that Python drives through the linch_rust client and its linch-server sidecar. Use this skill whenever a task touches linch-rust, linch_rust, `import linch_rust` or `from linch_rust import`, or asks for an agent with host tools, callbacks, approvals, MCP servers, skills, subagents, a deep agent, profiles, durable resume on Postgres, a shared server for tenants, scaling out sidecars, or choosing an architecture for an agent pipeline, even if the request only says "make an agent" inside a project that depends on linch-rust.
 ---
 

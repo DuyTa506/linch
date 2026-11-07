@@ -78,7 +78,7 @@ impl Agent {
         parent_run_id: RunId,
     ) -> RunStream {
         let agent = Arc::clone(&self.inner);
-        runner::start_child(agent, prompt.into(), options, parent_run_id)
+        runner::start_child(agent, prompt.into(), options, parent_run_id, None)
     }
 }
 
@@ -94,9 +94,9 @@ impl AgentInner {
     }
 
     /// The agent of a `definition` subagent of this agent: the same
-    /// bindings and spec, the child's tools, the system prompt with the
-    /// skill listing when the child has the `Skill` tool, then the
-    /// definition's body, and a contract that also covers the definition.
+    /// bindings and spec, the child's tools, the spec's system blocks (the
+    /// host's, then the system prompt) with the skill listing when the
+    /// child has the `Skill` tool, then the definition's body, and a contract that also covers the definition.
     /// It offers no subagents, so its runs cannot spawn.
     ///
     /// The contract is digested from the tools and hook policies this
@@ -109,7 +109,7 @@ impl AgentInner {
     pub(crate) fn child(&self, definition: &SubagentDefinition) -> Result<Self, BuildError> {
         let filter = ChildTools::of(definition);
         let tools = filter.apply(&self.built_tools);
-        let mut system = spec::prompt_block(&self.spec);
+        let mut system = spec::system_blocks(&self.spec);
         let listing_at = (tools.resolve(SKILL_TOOL).is_some()).then_some(system.len());
         system.push(SystemBlock {
             text: format!("User-provided instructions:\n\n{}", definition.body),

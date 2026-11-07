@@ -31,8 +31,8 @@ created demo-agent/src/demo_agent/tools/__init__.py
 created demo-agent/src/demo_agent/tools/greet.py
 created demo-agent/tests/test_agent.py
 created demo-agent/tests/test_greet.py
-created demo-agent/.claude/skills/build-agent-with-linch
-created demo-agent/.agents/skills/build-agent-with-linch
+created demo-agent/.claude/skills/build-agent-with-linch-rust
+created demo-agent/.agents/skills/build-agent-with-linch-rust
 
 Next steps:
   cd demo-agent
@@ -46,8 +46,8 @@ demo-agent/
 ├── pyproject.toml          # hatchling, src layout, pytest configured, depends on linch-rust
 ├── README.md
 ├── .gitignore
-├── .claude/skills/build-agent-with-linch/   # the coding-agent skill, for Claude Code
-├── .agents/skills/build-agent-with-linch/   # the same, for Codex
+├── .claude/skills/build-agent-with-linch-rust/   # the coding-agent skill, for Claude Code
+├── .agents/skills/build-agent-with-linch-rust/   # the same, for Codex
 ├── src/demo_agent/
 │   ├── __init__.py
 │   ├── agent.py            # build_config(), ask(), and TOOLS
@@ -93,7 +93,7 @@ Options and rules:
   digits with single `-` or `_` separators, and is not a Python keyword or one
   of `linch`, `linch_rust`, `src`, `test`, `tests`.
 - The target directory must not exist or be empty.
-- The project gets the `build-agent-with-linch` skill for Claude Code and
+- The project gets the `build-agent-with-linch-rust` skill for Claude Code and
   Codex, as `linch-rust skill install` writes it ([below](#linch-rust-skill-install)).
 
 ## `linch-rust add tool <name>`
@@ -150,7 +150,7 @@ from.
 
 ## `linch-rust skill install`
 
-Copies the `build-agent-with-linch` skill into a project, so a coding agent
+Copies the `build-agent-with-linch-rust` skill into a project, so a coding agent
 working there finds these docs and builds on `linch_rust` the way they
 describe. The skill teaches the Python client: where the docs are and how to
 search them, the main objects, testing on the scripted provider, debugging,
@@ -164,15 +164,15 @@ linch-rust skill install --force            # replace an installed copy after up
 ```
 
 ```text
-created .claude/skills/build-agent-with-linch
-created .agents/skills/build-agent-with-linch
+created .claude/skills/build-agent-with-linch-rust
+created .agents/skills/build-agent-with-linch-rust
 ```
 
 | `--target` | Directory | For |
 |---|---|---|
-| `claude` | `.claude/skills/build-agent-with-linch` | Claude Code |
-| `codex` | `.agents/skills/build-agent-with-linch` | Codex |
-| `linch` | `.linch/skills/build-agent-with-linch` | An agent with `skills: True` and the default `config_dir` ([Skills](./skills.md)) |
+| `claude` | `.claude/skills/build-agent-with-linch-rust` | Claude Code |
+| `codex` | `.agents/skills/build-agent-with-linch-rust` | Codex |
+| `linch` | `.linch/skills/build-agent-with-linch-rust` | An agent with `skills: True` and the default `config_dir` ([Skills](./skills.md)) |
 
 - `--target` can be repeated; without it the skill goes to `claude` and
   `codex`.
@@ -199,7 +199,7 @@ Other messages with code 1:
 linch-rust: error: no linch-rust project found from . upward (run it inside a project made by 'linch-rust new'; its pyproject.toml must depend on 'linch-rust')
 linch-rust: error: refusing to overwrite existing file .../src/demo_agent/tools/web_search.py
 linch-rust: error: docs not found: reinstall linch-rust from a wheel, or use a checkout that has linch-rust/docs
-linch-rust: error: .claude/skills/build-agent-with-linch already exists; pass --force to replace it
+linch-rust: error: .claude/skills/build-agent-with-linch-rust already exists; pass --force to replace it
 linch-rust: error: skill not found: reinstall linch-rust from a wheel, or use a checkout that has linch-rust/skills
 ```
 

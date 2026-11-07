@@ -12,6 +12,7 @@ use super::progress::Progress;
 use super::write::session_log;
 use super::{Family, Outbox};
 use crate::agent::{AgentInner, RunError};
+use crate::budget::{Meter, Refusal};
 use crate::catalog::Catalog;
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
@@ -112,6 +113,8 @@ pub(super) struct Runner {
     pub(super) started: Instant,
     /// The run's subagent child runs; `None` without subagents.
     pub(super) family: Option<Arc<Family>>,
+    /// The budget of the run's tree; `None` without one.
+    pub(super) budget: Option<Meter>,
 }
 
 impl Runner {
@@ -145,6 +148,7 @@ impl Runner {
             stop_reason: progress.stop_reason,
             started: progress.started,
             family: None,
+            budget: None,
         };
         runner.narrow();
         runner
@@ -234,6 +238,11 @@ impl Runner {
         (self.agent.spec.max_turns).is_some_and(|max| self.turn >= max)
     }
 
+    /// Why the budget allows no more provider calls; `None` when it does.
+    pub(super) fn refusal(&self) -> Option<Refusal> {
+        self.budget.as_ref()?.refusal()
+    }
+
     /// One provider call: the `ProviderPending` barrier, the call, and the
     /// `AssistantReceived` write-through.
     async fn dispatch(
@@ -253,6 +262,10 @@ impl Runner {
             && self.turn >= max
         {
             self.max_turns(max).await?;
+            return Ok(None);
+        }
+        if let Some(refusal) = self.refusal() {
+            self.over_budget(refusal).await?;
             return Ok(None);
         }
         self.stage_children();

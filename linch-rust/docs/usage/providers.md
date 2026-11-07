@@ -16,19 +16,40 @@ the [architecture providers page](../architecture/providers.md).
 
 | `id` | Key variable | Default endpoint | Extra fields |
 |---|---|---|---|
-| `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `base_url` |
-| `openai-chat` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `base_url` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `base_url`, `context_window` |
+| `openai-chat` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `base_url`, `context_window` |
 | `openai-responses` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `base_url`, `reasoning_summary`, `store`, `native_catalog_changes` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`, else `https://api.anthropic.com` | `base_url`, `native_catalog_changes` |
 | `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com` | `base_url` |
-| `vllm` | `VLLM_API_KEY`, optional | none | `base_url`, required |
-| `sglang` | `SGLANG_API_KEY`, optional | none | `base_url`, required |
-| `llamacpp` | `LLAMA_API_KEY`, optional | none | `base_url`, required |
-| `scripted` | none | none | `turns`, required |
+| `vllm` | `VLLM_API_KEY`, optional | none | `base_url`, required; `context_window` |
+| `sglang` | `SGLANG_API_KEY`, optional | none | `base_url`, required; `context_window` |
+| `llamacpp` | `LLAMA_API_KEY`, optional | none | `base_url`, required; `context_window` |
+| `scripted` | none | none | `turns`, required; `context_window` |
 
 `base_url` replaces the provider's endpoint. Any other field is refused at open
 with a `ProtocolError` (code -32602), so a config can never carry an
 `api_key`.
+
+### Context window
+
+Each provider knows the context window of the spec's model, in tokens. It
+sets when compaction runs without a `threshold_tokens`, the offload threshold
+a `filesystem.offload_threshold_fraction` gives, and how long the skill
+listing may be ([Agent config](./agent.md#compaction)). `context_window`
+replaces it for every model. Absent, it is Python Linch's:
+
+| `id` | Window |
+|---|---|
+| `anthropic` | 200000 |
+| `gemini` | 2000000 for `gemini-1.5-pro`, else 1048576 |
+| `openai-responses` | `gpt-5` 400000, `gpt-4.1` 1000000, `o1` 200000, else 128000 |
+| `openai-chat` | `gpt-5.5` and `gpt-5.4` 400000, `o1` 200000, else 128000 |
+| `deepseek`, `scripted` | 128000 |
+| `vllm`, `sglang` | Asked when the agent opens: the model's `max_model_len` on `GET /v1/models` (a server with one model answers for any name), else 128000 |
+| `llamacpp` | Asked when the agent opens: `n_ctx` on `GET /props`, else 128000 |
+
+A server is asked once, for at most 2 seconds, with the same key as its calls;
+one that does not answer leaves 128000 and the open goes on.
 
 A live provider, for example Anthropic (needs `ANTHROPIC_API_KEY`; the open was
 checked with a fake key, the call was not):

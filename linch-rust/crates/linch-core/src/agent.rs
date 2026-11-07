@@ -21,7 +21,7 @@ use crate::json::JsonObject;
 use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
-use crate::provider::{Provider, ProviderRequest, ToolDefinition};
+use crate::provider::{CacheControl, Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
 use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
@@ -162,7 +162,10 @@ pub(crate) struct AgentInner {
 }
 
 impl AgentInner {
-    /// A request for `messages` with `system` blocks and `tools`.
+    /// A primary request for `messages` with `system` blocks and `tools`.
+    /// It asks for prompt caching, as Python's `cache_prompt=True` does: an
+    /// adapter that takes breakpoints (Anthropic) marks the last cacheable
+    /// system block and the last user block; the others ignore it.
     pub(crate) fn request(
         &self,
         system: Vec<SystemBlock>,
@@ -171,7 +174,13 @@ impl AgentInner {
     ) -> ProviderRequest {
         let mut request = self.spec.request(tools, messages);
         request.system = system;
+        request.cache_control = Some(CacheControl { ttl: None });
         request
+    }
+
+    /// The context window of the agent's model, as its provider reports it.
+    pub(crate) fn context_window(&self) -> u64 {
+        self.provider.context_window(&self.spec.model)
     }
 
     /// Run every session-close callback for `session`.

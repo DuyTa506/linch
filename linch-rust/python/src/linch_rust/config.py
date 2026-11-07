@@ -43,10 +43,16 @@ class Filesystem(TypedDict, total=False):
     Attributes:
         offload_threshold_tokens: Move a text tool result estimated above
             this many tokens (four bytes per token) into the filesystem,
-            leaving its first lines and its path. Absent: never offload.
+            leaving its first lines and its path. Absent, with no
+            `offload_threshold_fraction` either: never offload.
+        offload_threshold_fraction: Offload above this fraction of the
+            provider's context window for the spec's model, at least 1000
+            tokens (Python Linch's `threshold_fraction`, 0.1 there). Used
+            only when `offload_threshold_tokens` is absent.
     """
 
     offload_threshold_tokens: int
+    offload_threshold_fraction: float
 
 
 class ToolSearch(TypedDict, total=False):
@@ -166,7 +172,8 @@ class AgentConfig(TypedDict, total=False):
     Attributes:
         namespace: Store key space for this agent's runs and sessions.
         spec: The model, instructions and loop limits, such as
-            `{"model": "deepseek-flash", "system_prompt": "Be brief."}`.
+            `{"model": "deepseek-flash", "system_prompt": "Be brief."}`;
+            `system_blocks` and a token or USD `budget` go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

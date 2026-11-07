@@ -29,8 +29,10 @@ the built-in `verify` skill, and every valid skill in
 
 The system prompt lists every skill the model may invoke, one line each:
 `- <name>: <description> — <when_to_use> (args: <argument_hint>)`. A line is
-cut at 250 characters. When the listing passes 8000 characters, every
-description is cut to an equal share; when a share would be under 20
+cut at 250 characters. The listing may take 1% of the provider's
+[context window](./providers.md#context-window) at four characters a token
+(5120 characters for 128000 tokens), as in Python Linch. When it passes that,
+every description is cut to an equal share; when a share would be under 20
 characters, only the names are listed. The listing is part of the cached
 prefix of each request.
 
@@ -254,7 +256,6 @@ without asking. `"skill": "*"` matches every skill.
 |---|---|
 | `FeatureFlags(skills=True)` | `skills: True` in the config |
 | `agent.reload_skills()` | Not yet; open a new agent |
-| The listing budget follows the context window | A fixed 8000 characters |
 | The listing is a reminder in the first prompt | A cached block of the system prompt |
 | The `Skill` tool is exec-scoped with auto-allow rules | Read-scoped |
 | `skill_invoked` comes before the call's `tool_call_start` | It comes after `tool_call_start`, followed by `skill_completed` |

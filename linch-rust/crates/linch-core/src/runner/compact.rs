@@ -62,7 +62,8 @@ impl Runner {
         let Some(spec) = agent.spec.compaction.as_ref() else {
             return Ok(Some(DISPATCH));
         };
-        if self.out_of_turns() {
+        // The primary call ends the run then, with its terminal.
+        if self.out_of_turns() || self.refusal().is_some() {
             return Ok(Some(DISPATCH));
         }
         let view = self.log.provider_view();
@@ -70,7 +71,8 @@ impl Runner {
             return Ok(Some(DISPATCH));
         };
         let tokens_before = estimate_tokens(&view);
-        if tokens_before < spec.threshold_tokens {
+        let window = agent.context_window();
+        if !compaction::due(spec, agent.spec.max_output_tokens, window, tokens_before) {
             return Ok(Some(DISPATCH));
         }
         let started = std::time::Instant::now();

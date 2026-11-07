@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from scripted import config, text_turn, tool_turn
+from scripted import MODEL, config, text_turn, tool_turn
 
 from linch_rust import (
     AgentConfig,
+    BudgetEvent,
     Envelope,
+    ErrorEvent,
     InitEvent,
     OpenError,
     Profile,
@@ -91,6 +93,21 @@ async def test_subagents_run_a_child_on_the_same_provider(tmp_path: Path) -> Non
     assert tools_of(envelopes) == ["Subagent"]
     assert results(envelopes) == ["child answer"]
     assert final(envelopes).final_text == "done"
+
+
+async def test_a_spec_budget_caps_the_run_and_its_children(tmp_path: Path) -> None:
+    turns = [subagent_call(), text_turn("child answer"), text_turn("done")]
+    cfg = config(turns, mode="skip_dangerous", subagents=True, config_dir=str(tmp_path))
+    cfg["spec"] = {"model": MODEL, "budget": {"max_tokens": 8}}
+    envelopes = await run_once(cfg)
+
+    # The parent's call and its child's spent 4 tokens each: no third call.
+    assert results(envelopes) == ["child answer"]
+    [exceeded] = [e.event for e in envelopes if isinstance(e.event, BudgetEvent)]
+    assert (exceeded.kind, exceeded.spent_tokens, exceeded.max_tokens) == ("exceeded", 8, 8)
+    [error] = [e.event for e in envelopes if isinstance(e.event, ErrorEvent)]
+    assert error.error["name"] == "BudgetExceededError"
+    assert (final(envelopes).subtype, final(envelopes).stop_reason) == ("error", "error")
 
 
 async def test_retained_workers_answer_with_their_worker_id(tmp_path: Path) -> None:

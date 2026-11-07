@@ -18,10 +18,10 @@ show them from the Python client.
 
 ## Skills
 
-`AgentBuilder::skills` (`crates/linch-core/src/agent/builder.rs:142`) turns
+`AgentBuilder::skills` (`crates/linch-core/src/agent/builder.rs:152`) turns
 skills on with the host's `Skill` values (`crates/linch-core/src/skills.rs:49`);
 the `linch` facade loads them from `.linch/skills/*/SKILL.md`. At build
-(`builder.rs:217-226`):
+(`builder.rs:235-245`):
 
 - the built-in `verify` skill joins them unless one has its name,
   case-insensitively, and the set is sorted by lowercase name
@@ -35,16 +35,18 @@ A bare agent has no skills and no `Skill` tool.
 
 ### The listing
 
-`listing` (`crates/linch-core/src/skills/listing.rs:20`) writes one
+`listing` (`crates/linch-core/src/skills/listing.rs:25`) writes one
 `- name: description` line per skill the model may invoke (not those with
 `disable_model_invocation`), sorted by lowercase name. A description is the
 skill's `description`, then ` — when_to_use` and ` (args: argument_hint)`
-when set, cut at 250 characters. Past 8000 characters in all, every
+when set, cut at 250 characters. The listing may take 1% of the provider's
+context window at four characters a token (5120 characters for 128000;
+8000 without a window), as Python's budget does. Past that, every
 description is cut to an equal share; under a 20-character share the
-listing keeps the names only (`listing.rs:5-10`). The block reads
+listing keeps the names only (`listing.rs:5-14`, `listing.rs:26-29`). The block reads
 "The following skills are available for use with the Skill tool:"
-(`crates/linch-core/src/skills/set.rs:92-99`). When tool search defers the
-skills, a new session's block names them only (`set.rs:86-90`).
+(`crates/linch-core/src/skills/set.rs:93-100`). When tool search defers the
+skills, a new session's block names them only (`set.rs:87-91`).
 
 ### The `Skill` tool
 
@@ -74,7 +76,7 @@ the model turn right after it loads, and only that turn (`skills.rs:16-21`):
 
 1. `overlays` (`crates/linch-core/src/skills/overlay.rs:27`) keeps, per
    skill, a non-empty `allowed_tools` and a non-empty `model`.
-2. At each turn, `Runner::narrow` (`crates/linch-core/src/runner/turn.rs:155-171`)
+2. At each turn, `Runner::narrow` (`crates/linch-core/src/runner/turn.rs:159-175`)
    looks at the provider view: the last skill with an overlay among the
    successful `Skill` calls of the assistant message just before the last
    user message (`overlay.rs:45-69`).
@@ -82,7 +84,7 @@ the model turn right after it loads, and only that turn (`skills.rs:16-21`):
    only those, and a call of another is refused as not registered. Its
    `model` replaces the request's model, with the run model's `[1m]`
    suffix added when the run model has it (`model_override`, `overlay.rs:73`;
-   `turn.rs:259-271`).
+   `turn.rs:272-284`).
 
 Nothing is stored for the overlay; a resumed turn reads the one it was
 dispatched with from the same view (`overlay.rs:1-5`). The overlay only
@@ -97,14 +99,14 @@ the tool.
 
 A new run stages `skills_loaded` when its agent has skills and its session's
 log is empty, between `init` and the prompt's `user` event, so it rides the
-create write (`crates/linch-core/src/runner/start.rs:91-98`). It holds one
+create write (`crates/linch-core/src/runner/start.rs:95-102`). It holds one
 descriptor per skill, sorted by name: `name`, `description`, and
-`when_to_use` and `argument_hint` when set (`set.rs:54-77`). The rule is
+`when_to_use` and `argument_hint` when set (`set.rs:55-78`). The rule is
 durable: a session's later runs never send it, after a restart either.
 
 ## Subagents
 
-`AgentBuilder::subagents` (`builder.rs:154`) turns subagents on with the
+`AgentBuilder::subagents` (`builder.rs:164`) turns subagents on with the
 host's `SubagentDefinition`s (`crates/linch-core/src/subagents.rs:144`);
 the facade loads them from `.linch/agents/*.md`. The `Roster`
 (`subagents.rs:234-276`) adds the built-in `verification` agent unless one
@@ -113,7 +115,7 @@ with no `subagent_type` (or a blank one, `general-purpose` or `_default`).
 The roster enters the contract as the `subagents` feature, and the
 `Workers` setting, when given, as `workers`.
 
-The build registers (`builder.rs:242-258`):
+The build registers (`builder.rs:261-277`):
 
 | Tool | When | Scope |
 |---|---|---|
@@ -121,7 +123,7 @@ The build registers (`builder.rs:242-258`):
 | `SubagentContinue` | `workers.background` or `workers.retain` | `Exec` |
 | `TaskStop` | `workers.background` | `Exec` |
 
-`workers` without `subagents` fails the build (`builder.rs:233-235`).
+`workers` without `subagents` fails the build (`builder.rs:252-254`).
 
 ### The `Subagent` tool
 
@@ -158,8 +160,9 @@ the agent a child run runs with:
 - the parent's tools through `ChildTools` (`child.rs:15-40`): never
   `Subagent`, `SubagentContinue`, `TaskStop` or `tool_search`, and only the
   named ones when the definition names any (`*` names all);
-- the parent's system prompt, the skill listing when the child keeps the
-  `Skill` tool, then `User-provided instructions:` and the definition's body;
+- the parent's system blocks (the spec's `system_blocks`, then its system
+  prompt), the skill listing when the child keeps the `Skill` tool, then
+  `User-provided instructions:` and the definition's body;
 - no subagents, so a child cannot spawn; and `child: true`, so a call that
   would ask is denied instead (`crates/linch-core/src/runner/batch.rs:23-24`,
   `batch.rs:73-75`), unless a rule or a `permission_request` hook allows it.
@@ -175,28 +178,28 @@ with `Agent::subagent` and start its runs under a parent with
 
 ### A foreground child
 
-`subagents::run::run` (`crates/linch-core/src/subagents/run.rs:27-73`)
+`subagents::run::run` (`crates/linch-core/src/subagents/run.rs:27-76`)
 loads the child run first:
 
 | Found | Then |
 |---|---|
 | Nothing | Start it with the parent's run as `parent_run_id`, the call's principal and trace id, and a child token of the call's cancel token |
-| A terminal run | Read its end back from its events (`run.rs:133-142`) |
-| A run of another contract | Fail it for good, so its session takes runs again, and give the parent the `ContractMismatch` (`run.rs:110-130`) |
+| A terminal run | Read its end back from its events (`run.rs:136-145`) |
+| A run of another contract | Fail it for good, so its session takes runs again, and give the parent the `ContractMismatch` (`run.rs:113-133`) |
 | A live run | Resume it |
 
-When the child run exists, `first_use` (`run.rs:75-108`) first refuses a call
+When the child run exists, `first_use` (`run.rs:78-111`) first refuses a call
 whose id an earlier response of the run already used: the parent's log
 holds events of that child before its last response, so the provider
 repeated a tool-use id.
 
 The parent's family adopts the child, and the call waits for it. Each
 envelope of the child's stream is wrapped in a `subagent` event and handed
-to the parent (`run.rs:144-161`); see [subagent wrapping](./events.md#subagent-wrapping).
+to the parent (`run.rs:147-164`); see [subagent wrapping](./events.md#subagent-wrapping).
 Stream-only events reach the parent's stream at once and durable ones with
 the call's end, so on the parent's stream a child's `partial_assistant` can
 come before its `init`. The child's end becomes the result
-(`run.rs:192-221`): its final text, or an error that keeps the partial
+(`run.rs:195-224`): its final text, or an error that keeps the partial
 output (`Subagent aborted.`, `Subagent encountered an error: ...`).
 
 A call that its timeout or the run's cancel cuts short cancels the child's
@@ -239,7 +242,7 @@ The child goes on next to the parent, driven by the parent's stream:
   `notification`, so the model takes another turn;
 - a parent that ends anyway (cancelled, failed, out of turns) cancels its
   children, waits for their aborts, and records each end it did not report
-  in its terminal write (`crates/linch-core/src/runner/end.rs:17-40`).
+  in its terminal write (`crates/linch-core/src/runner/end.rs:19-42`).
 
 `SubagentContinue` (`crates/linch-core/src/subagents/control.rs:74-166`)
 resolves a worker of the calling session by id or unique display name
@@ -253,39 +256,39 @@ stays addressable.
 The worker registry (`workers.rs:26-130`) keeps, per parent session and in
 process memory, each worker's display name (its definition's name, or
 `Agent #N` for the N-th general-purpose worker) and whether it is
-addressable. `Agent::close_session` (`crates/linch-core/src/agent.rs:320-336`)
+addressable. `Agent::close_session` (`crates/linch-core/src/agent.rs:329-345`)
 closes the session's suspended families, its workers' sessions, then the
 session.
 
 ## The run family
 
-A run's children are its `Family` (`crates/linch-core/src/runner/family.rs:43`).
-The family lives on the agent, listed by run id (`family.rs:357-387`), from
+A run's children are its `Family` (`crates/linch-core/src/runner/family.rs:44`).
+The family lives on the agent, listed by run id (`family.rs:370-401`), from
 the run's create or claim until its stream lets go of it
-(`crates/linch-core/src/runner/start.rs:305-318`). That is what lets it
+(`crates/linch-core/src/runner/start.rs:330-342`). That is what lets it
 outlive a stream that ends with the run suspended.
 
 - **While a stream drives the run, the core spawns no task.**
   `RunStream::poll_next` polls the family's children next to the run future
-  (`crates/linch-core/src/runner.rs:127-155`), so children advance only while
+  (`crates/linch-core/src/runner.rs:128-156`), so children advance only while
   the caller polls.
 - **Suspend:** before the `AwaitingApproval` write, the runner parks the
   family; a failed write unparks it (`crates/linch-core/src/runner/batch.rs:141-180`).
 - **The keeper:** when the stream of a parked run stops, its children go to
   one task, spawned on the caller's Tokio runtime, which drives them until a
-  stream of the run attaches again or none is left (`family.rs:217-255`).
+  stream of the run attaches again or none is left (`family.rs:230-268`).
   Without a runtime they wait, unpolled, for that stream. This is the one
   kind of task the core spawns.
 - **Take-over:** an approve or a resume in this process attaches a new
   stream to the same family; the keeper sees the driver change and exits
-  (`family.rs:167-198`). The children never went through a crash.
+  (`family.rs:180-211`). The children never went through a crash.
 - **Close:** closing the run's session or dropping the agent cancels a
   parked family's children; the keeper drives them until their aborts are
-  durable (`family.rs:257-277`; `agent.rs:193-196`).
+  durable (`family.rs:270-290`; `agent.rs:202-205`).
 - **Any other stop** (a dropped stream, a failed run) drops the children
   with the family, like a crash.
 
-`Agent::parked_children` (`agent.rs:339-359`) gives a future that resolves
+`Agent::parked_children` (`agent.rs:348-368`) gives a future that resolves
 once a suspended run's children are done. The RPC server uses it to keep a
 suspended run's place under `max_runs` while its workers run
 ([RPC](./rpc.md#limits)).
@@ -303,13 +306,13 @@ durable state like its parent. Resuming the parent picks the children up:
   contract changed.
 - **Background:** after the claim, `reattach`
   (`crates/linch-core/src/subagents/background.rs:184-252`, called at
-  `start.rs:286-288`) enlists the run's workers again from its
+  `start.rs:310-312`) enlists the run's workers again from its
   `tool_call_start` events, in call order, then takes each child that a
   `child_run_status` marks `running` with no later end, and that the family
   does not hold already: it resumes it, starts it (its create never landed),
   or reads its end back. One that cannot be picked up reports a failed end.
 - **Suspended in this process:** the family is still listed, so the resume
-  or approve takes it over as it is (`start.rs:191-193`).
+  or approve takes it over as it is (`start.rs:203-205`).
 
 The children's contracts come from the parent's build, so a resume after a
 registration on the parent still matches; a definition changed by a reload
@@ -325,11 +328,11 @@ exactly that value, so a later push stays current, and disposing twice does
 nothing. The run contract stays the one the agent was built with, so runs
 resume across reloads (`crates/linch-core/src/agent/reload.rs:1-9`).
 
-| | `Agent::reload_skills` (`reload.rs:20-43`) | `Agent::reload_subagents` (`reload.rs:45-86`) |
+| | `Agent::reload_skills` (`reload.rs:20-44`) | `Agent::reload_subagents` (`reload.rs:46-87`) |
 |---|---|---|
 | Takes | The new skills; `verify` joins as at build | The new definitions |
 | Replaces | The current `SkillSet`; the `Skill` tool reads it per call | The roster, and the `Subagent` tool, through `ToolRegistry::replace`, since its description lists the roster |
-| Dispose | Brings back the earlier set | Brings back the earlier tool and roster. The agent keeps the registration and disposes it when it drops, so the replaced tool never outlives the agent in the registry it shares (`agent.rs:197-204`) |
+| Dispose | Brings back the earlier set | Brings back the earlier tool and roster. The agent keeps the registration and disposes it when it drops, so the replaced tool never outlives the agent in the registry it shares (`agent.rs:206-213`) |
 | Refused | `BuildError::Invalid` when built without skills | `BuildError::Invalid` when built without subagents |
 
 A session that already has a frozen prefix keeps it byte for byte and is
@@ -361,7 +364,7 @@ The facade turns the preset on from `AgentConfig.deep_agent`: `deep::expand`
 workers (unless the config sets them) and the spec; `deep::add_roster`
 (`deep.rs:35-45`) turns skills on, so the built-in `verify` skill joins, and
 adds the roster after the config directory's subagents, at open
-(`crates/linch/src/open.rs:148`) and at each reload. Two parts of Python's preset have no kernel support yet
+(`crates/linch/src/open.rs:156`) and at each reload. Two parts of Python's preset have no kernel support yet
 (`deep_agent.rs:33-39`): a coordinator keeps the workspace tools
 (`COORDINATOR_EXCLUDED_TOOLS` is only named), and the profile's
 `max_tokens` is not enforced.
@@ -476,12 +479,12 @@ async fn main() {
 | `skill_invoked` before the call's `tool_call_start`, `skill_completed` after its `tool_call_end` | Both between the call's `tool_call_start` and `tool_call_end`: the tool emits them |
 | `skills_loaded` once per session object (`skills_loaded_emitted`), so again after a restart | Once per session, on its first run (its log is empty) |
 | `reload_skills()` and `reload_subagents()` rescan the project | The core takes the new lists; the facade rescans; neither is on the wire yet |
-| A fresh child's system blocks are built from its tool names; a fork reuses the parent's prefix | A child gets the parent's prompt, the listing if it has `Skill`, then its body. Forking is `Agent::fork_session`, not a subagent mode |
+| A fresh child's system blocks are built from its tool names; a fork reuses the parent's prefix | A child gets the parent's system blocks and prompt, the listing if it has `Skill`, then its body. Forking is `Agent::fork_session`, not a subagent mode |
 | A background worker is an `asyncio` task: it can outlive the run, and a restart cannot resume it | A child is a durable run the parent's stream drives; the parent waits for its workers before it ends, and resumes them with it on Postgres |
 | No cap on background workers | `max_background`, 4 by default |
 | Worker ids like `agent-a1b2` | `<parent run id>:<tool_use_id>` |
 | Notifications drained at the top of the next turn, optionally from a durable inbox | Ends are recorded as `child_run_status` events and the notification joins the parent's next logged user message |
-| A `RunBudget` shared across the subagent tree | No run budget at this revision; a parent's totals count its own calls, as Python's `ResultEvent` does |
+| A `RunBudget` object on the agent config (or the run options), shared by every run that uses it and inherited by the subagent tree | A spec `budget` gives each root run its own meter (`crates/linch-core/src/budget.rs`), which the run's family hands to every child; a resumed root run sums its own and its children's durable receipts. A parent's totals still count its own calls, as Python's `ResultEvent` does |
 | A coordinator loses its heavy tools | Not applied: the kernel offers a parent every tool its subagents can use |
 
 ## Tests
@@ -497,6 +500,7 @@ async fn main() {
 | `crates/linch-core/tests/e2e_child_contract.rs`, `e2e_child.rs` | Child contracts from the parent's build; host-driven child runs |
 | `crates/linch-core/tests/e2e_reload.rs` | Reloads as registrations, prefixes kept, catalog notices |
 | `crates/linch-core/tests/e2e_subagent_cleanup.rs` | A cut-short call leaves its child aborted before the parent ends |
+| `crates/linch-core/tests/e2e_budget.rs` | A child's spend counts against its parent's budget, an exhausted tree refuses a child's first call, a resumed tree keeps its children's spend |
 
 ---
 

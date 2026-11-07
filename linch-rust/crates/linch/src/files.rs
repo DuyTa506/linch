@@ -31,7 +31,8 @@ pub(crate) struct Files {
 
 impl Files {
     /// Register the four tools in `tools`, and the offload hook on
-    /// `hooks.post_tool_use` when `config` sets a threshold. The files are
+    /// `hooks.post_tool_use` when `config` sets a threshold (a fraction of
+    /// it is of the context `window`). The files are
     /// the namespace's `linch_files` rows on `pool` (Postgres stores), else
     /// a fresh memory backend per session. Nothing when `config` is `None`.
     ///
@@ -43,6 +44,7 @@ impl Files {
         hooks: &Hooks,
         pool: Option<&PgPool>,
         namespace: &str,
+        window: u64,
     ) -> Result<Self, OpenError> {
         let Some(config) = config else {
             return Ok(Self::default());
@@ -68,7 +70,7 @@ impl Files {
         for tool in vfs_tools(Arc::clone(&files)) {
             wired.registrations.push(tools.register(tool)?);
         }
-        if let Some(threshold) = config.offload_threshold_tokens {
+        if let Some(threshold) = config.offload_threshold(window) {
             let offload = ResultOffload::new(files, OffloadConfig::new(threshold))
                 .expect("the default offload prefix is a valid path");
             let registration = (hooks.post_tool_use.register(Arc::new(offload)))

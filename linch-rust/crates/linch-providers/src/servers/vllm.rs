@@ -27,6 +27,7 @@ use linch_core::{JsonObject, Usage};
 use serde_json::json;
 
 use super::kwargs;
+use crate::context::ContextRule;
 use crate::openai::{ChatProfile, ToolChoiceSupport};
 use crate::openai_compat::stream::{ReasoningField, WireUsage};
 
@@ -42,6 +43,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     reasoning_effort: true,
     template_thinking_switch: true,
     usage,
+    context: ContextRule::Models,
 };
 
 pub(super) fn thinking_off_kwargs() -> JsonObject {

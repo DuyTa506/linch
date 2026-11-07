@@ -16,8 +16,8 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, CompactionSpec, ContentBlock, Envelope, Event, LogEntry, Message, PermissionMode,
-    Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunId, RunOptions, RunStatus,
-    RunStore, SessionId, SessionLog, SessionStore, ToolChoice, ToolScope, Usage,
+    Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunBudget, RunId, RunOptions,
+    RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolChoice, ToolScope, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +30,8 @@ struct Keyed {
     requests: Mutex<Vec<ProviderRequest>>,
     /// Fail every summary request with a 503.
     failing_summaries: bool,
+    /// The context window the provider reports.
+    window: u64,
 }
 
 impl Keyed {
@@ -43,6 +45,7 @@ impl Keyed {
             calls: Mutex::default(),
             requests: Mutex::default(),
             failing_summaries: false,
+            window: 128_000,
         }
     }
 }
@@ -64,6 +67,10 @@ fn primary_turn(request: &ProviderRequest) -> usize {
 impl Provider for Keyed {
     fn id(&self) -> &str {
         "keyed"
+    }
+
+    fn context_window(&self, _model: &str) -> u64 {
+        self.window
     }
 
     async fn stream(
@@ -216,6 +223,43 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
     assert_eq!(stores.sessions.writes().append, 8 + 2);
 }
 
+/// A spent budget refuses the summary call as well as the primary one.
+#[tokio::test]
+async fn a_spent_budget_makes_no_summary_call() {
+    let stores = Arc::new(Stores::default());
+    let provider = Keyed::new();
+    let runs = Runs::default();
+    let mut spec = compacting_agent(provider.clone(), &runs, stores.clone())
+        .spec()
+        .clone();
+    // Two primary calls spend 30; the third turn would compact first.
+    spec.budget = Some(RunBudget {
+        max_tokens: Some(30),
+        ..RunBudget::default()
+    });
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let agent = agent_with(
+        spec,
+        provider.clone(),
+        tools,
+        policy(PermissionMode::SkipDangerous),
+        stores,
+    );
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    let calls = provider.calls.lock().unwrap().clone();
+    assert!(
+        calls.keys().all(|key| key.starts_with("primary")),
+        "{calls:?}"
+    );
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let error = (envelopes.iter()).find_map(|e| match &e.event {
+        Event::Error(error) => Some(error.error["name"].clone()),
+        _ => None,
+    });
+    assert_eq!(error, Some("BudgetExceededError".into()));
+}
+
 #[tokio::test]
 async fn compaction_is_off_by_default_and_below_its_threshold() {
     for compaction in [None, Some(CompactionSpec::new(1_000_000))] {
@@ -236,6 +280,30 @@ async fn compaction_is_off_by_default_and_below_its_threshold() {
             "no summary call"
         );
         assert_eq!(stores.runs.writes().commit, 18);
+    }
+}
+
+#[tokio::test]
+async fn without_a_threshold_compaction_follows_the_context_window() {
+    for (window, summaries) in [(128_000, 0), (1, 2)] {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Keyed {
+            window,
+            ..Keyed::answering()
+        });
+        let tools = registry(vec![Echo::new("Read", ToolScope::Read, &Runs::default())]);
+        let mut spec = spec();
+        spec.compaction = Some(CompactionSpec {
+            keep_recent_turns: 1,
+            ..CompactionSpec::default()
+        });
+        let permissions = policy(PermissionMode::SkipDangerous);
+        let agent = agent_with(spec, provider.clone(), tools, permissions, stores.clone());
+        finish(agent.run("go", RunOptions::new("s1"))).await;
+        let requests = provider.requests.lock().unwrap();
+        let summarizing = |r: &&ProviderRequest| r.tool_choice == Some(ToolChoice::Disabled {});
+        let made = requests.iter().filter(summarizing).count();
+        assert_eq!(made, summaries, "window {window}");
     }
 }
 

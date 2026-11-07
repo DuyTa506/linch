@@ -16,11 +16,30 @@ use super::{ProviderEvent, ProviderRequest, StreamError};
 /// The event stream of one provider call.
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
 
+/// The context window a provider reports for a model it knows nothing
+/// about (Python's `ProviderCapabilities.context_window` default).
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+
 /// A model provider.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable identifier, for example `deepseek` or `scripted`.
     fn id(&self) -> &str;
+
+    /// The most tokens `model` takes in one request, prompt and output
+    /// together. It never does I/O: a value a server reports is read once
+    /// by [`Self::prepare`]. The run derives compaction's trigger and the
+    /// skill listing's size from it.
+    fn context_window(&self, _model: &str) -> u64 {
+        DEFAULT_CONTEXT_WINDOW
+    }
+
+    /// One-time discovery before the provider is used, such as asking a
+    /// self-hosted server for its context window. It never fails: a probe
+    /// that does not answer leaves the configured or default value. The
+    /// `linch` facade calls it when it opens an agent; a host that builds
+    /// one in code calls it before [`crate::AgentBuilder::build`].
+    async fn prepare(&self) {}
 
     /// Start one call. The stream ends after `message_end` or an error.
     /// Cancelling `cancel` ends the stream with [`ProviderError::Cancelled`].

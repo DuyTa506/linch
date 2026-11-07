@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
 use futures::StreamExt;
@@ -35,6 +35,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentInner;
+use crate::budget::Meter;
 use crate::events::Event;
 use crate::ids::{RunId, SessionId};
 use crate::subagents::Completion;
@@ -54,6 +55,8 @@ pub(crate) struct Family {
     joined: AtomicBool,
     state: Mutex<State>,
     changed: Notify,
+    /// The budget the run and its children charge, once the run set it.
+    budget: OnceLock<Meter>,
 }
 
 /// The children and who polls them.
@@ -141,6 +144,16 @@ impl Family {
         state.done.push(completion);
         drop(state);
         self.changed.notify_waiters();
+    }
+
+    /// The budget the run's children charge; `None` without one.
+    pub(crate) fn budget(&self) -> Option<Meter> {
+        self.budget.get().cloned()
+    }
+
+    /// Let the run's children charge `meter`; a family keeps the first.
+    pub(super) fn share_budget(&self, meter: &Meter) {
+        let _ = self.budget.set(meter.clone());
     }
 
     /// Whether the child `child` runs.
@@ -381,6 +394,7 @@ impl AgentInner {
                 joined: AtomicBool::new(false),
                 state: Mutex::default(),
                 changed: Notify::new(),
+                budget: OnceLock::new(),
             })
         });
         Arc::clone(family)

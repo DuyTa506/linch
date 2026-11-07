@@ -8,6 +8,7 @@
 
 pub mod anthropic;
 mod api_key;
+mod context;
 pub mod deepseek;
 pub mod gemini;
 mod native;

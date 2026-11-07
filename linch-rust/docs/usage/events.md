@@ -296,6 +296,14 @@ The run hit its turn limit: `reason` (`max_turns`), `detail` (for example
 `Maximum turns (20) reached.`) and `action` (`stop`). An `error` event and a
 `result` of subtype `error` follow.
 
+### `BudgetEvent` (`budget`)
+
+The run's [budget](./agent.md#budget) crossed its warning ratio (`kind`
+`warning`, once per run and its subagents) or stopped the run (`exceeded`,
+followed by an `error` event and a `result` of subtype `error`). It carries
+`spent_tokens` and `spent_usd` across the tree, and the caps, `max_tokens` and
+`max_cost_usd` (`None` when not set).
+
 ### `HookEvent` (`hook`), stream-only
 
 One [callback](./agent.md#callbacks) call and how it ended.
@@ -315,6 +323,7 @@ An error the run recorded. `error` is a dict with `name` and `message`, and
 ```text
 {'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503}
 {'name': 'TurnLimitError', 'message': 'max turns exceeded', 'retryable': False}
+{'name': 'BudgetExceededError', 'message': 'run budget exhausted (30 tokens, $0.0400 spent)', 'retryable': False}
 ```
 
 A `result` of subtype `error` follows.
@@ -383,7 +392,6 @@ but no run emits them today:
 | Class (`type`) | Fields |
 |---|---|
 | `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` or `workflow_interrupt`), `prompt` |
-| `BudgetEvent` (`budget`) | `kind` (`warning` or `exceeded`), `spent_tokens`, `spent_usd`, `max_tokens`, `max_cost_usd` |
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
 | `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |

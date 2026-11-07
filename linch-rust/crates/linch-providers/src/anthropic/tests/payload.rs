@@ -360,3 +360,63 @@ fn misplaced_blocks_and_output_schema_fail_locally() {
         ..request()
     }));
 }
+
+/// The system blocks an agent with host blocks sends: the breakpoint lands
+/// on the last cacheable host block, before the system prompt, or on the
+/// skill listing after it when the agent has skills.
+#[tokio::test]
+async fn an_agent_s_host_blocks_carry_the_system_breakpoint() {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use linch_core::{
+        AgentBuilder, AgentSpec, MemoryRunStore, MemorySessionStore, PermissionEngine,
+        PermissionMode, PermissionPolicy, RunOptions, ScriptedProvider, ScriptedTurn, Skill,
+    };
+
+    async fn sent(skills: bool) -> ProviderRequest {
+        let mut spec = AgentSpec::new("claude-sonnet-4-6");
+        spec.system_prompt = "Be brief.".into();
+        spec.system_blocks = vec![system("Policy.", true), system("Tone.", false)];
+        let reply = ScriptedTurn::builder("claude-sonnet-4-6").text("hi");
+        let provider = Arc::new(ScriptedProvider::new([reply.build()]));
+        let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+        let mut builder = AgentBuilder::new(spec)
+            .provider(provider.clone())
+            .permissions(PermissionEngine::new(policy).unwrap())
+            .run_store(Arc::new(MemoryRunStore::default()))
+            .session_store(Arc::new(MemorySessionStore::default()))
+            .namespace("ns");
+        if skills {
+            builder = builder.skills(vec![Skill::new("fmt", "/s/fmt", "Format.", "fix")]);
+        }
+        let agent = builder.build().unwrap();
+        let mut stream = agent.run("go", RunOptions::new("s1"));
+        while stream.next().await.is_some() {}
+        provider.requests().remove(0)
+    }
+
+    let cache = Some(CacheControl { ttl: None });
+    let body = build(&ProviderRequest {
+        cache_control: cache,
+        ..sent(false).await
+    });
+    let breakpoint = json!({"type": "ephemeral"});
+    assert_eq!(
+        body["system"],
+        json!([
+            {"type": "text", "text": "Policy.", "cache_control": breakpoint},
+            {"type": "text", "text": "Tone."},
+            {"type": "text", "text": "Be brief."},
+        ])
+    );
+    let body = build(&ProviderRequest {
+        cache_control: cache,
+        ..sent(true).await
+    });
+    let marked: Vec<usize> = (0..4)
+        .filter(|&i| body["system"][i].get("cache_control").is_some())
+        .collect();
+    assert_eq!(marked, [3], "the listing, the last cacheable block");
+    assert_eq!(body["system"][2]["text"], "Be brief.");
+}

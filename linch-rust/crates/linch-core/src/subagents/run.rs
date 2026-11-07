@@ -49,18 +49,21 @@ pub(super) async fn run(
     if loaded.is_ok() {
         first_use(parent, ctx, &child_id).await?;
     }
+    // The child charges the parent's budget.
+    let family = parent.family(&ctx.run_id);
+    let budget = family.as_ref().and_then(|family| family.budget());
     let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
-            runner::start_child(child, prompt, options, ctx.run_id.clone())
+            runner::start_child(child, prompt, options, ctx.run_id.clone(), budget)
         }
         Ok(record) if record.status.is_terminal() => return finished(&child, &child_id).await,
         Ok(record) if record.contract != child.contract => {
             return mismatched(&child, &record, options).await;
         }
-        Ok(_) => runner::resume(child, child_id.clone(), None, options),
+        Ok(_) => runner::resume_child(child, child_id.clone(), options, budget),
         Err(error) => return Err(failed("could not be read", error)),
     };
-    let Some(family) = parent.family(&ctx.run_id) else {
+    let Some(family) = family else {
         return drive(stream, child_id, ctx).await;
     };
     let (done, result) = oneshot::channel();

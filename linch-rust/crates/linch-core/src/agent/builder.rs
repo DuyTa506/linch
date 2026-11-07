@@ -8,6 +8,7 @@ use crate::coordination::{Mailbox, SendMessageTool};
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
 use crate::json::JsonObject;
+use crate::message::SystemBlock;
 use crate::permissions::PermissionEngine;
 use crate::provider::Provider;
 use crate::registration::Registration;
@@ -132,6 +133,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Add `blocks` after the spec's own [`AgentSpec::system_blocks`]: host
+    /// system blocks bound in code (a tool's instructions, say), sent
+    /// before the system prompt with their `cacheable` flags. They become
+    /// part of [`Agent::spec`] and so of the run contract.
+    pub fn system_blocks(mut self, blocks: impl IntoIterator<Item = SystemBlock>) -> Self {
+        self.spec.system_blocks.extend(blocks);
+        self
+    }
+
     /// Turn skills on with `skills` (see [`crate::skills`]).
     ///
     /// The built-in `verify` skill joins them unless one has its name
@@ -191,14 +201,22 @@ impl AgentBuilder {
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
-    ///         namespace is blank, the compaction settings cannot run, a
+    ///         namespace is blank, the compaction or budget settings cannot run, a
     ///         built-in tool's name is taken, or the tool schemas cannot be
     ///         digested.
     pub fn build(self) -> Result<Agent, BuildError> {
         if self.spec.model.trim().is_empty() {
             return Err(BuildError::Invalid("the model must not be blank".into()));
         }
+        if (self.spec.system_blocks.iter()).any(|block| block.text.trim().is_empty()) {
+            return Err(BuildError::Invalid(
+                "a system block must not be blank".into(),
+            ));
+        }
         if let Some(problem) = self.spec.compaction.as_ref().and_then(|c| c.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;
@@ -215,7 +233,8 @@ impl AgentBuilder {
         let mut built_ins = BuiltIns::default();
         let mut skill_versions = None;
         if let Some(skills) = self.skills {
-            let set = SkillSet::new(skills)?;
+            let window = provider.context_window(&self.spec.model);
+            let set = SkillSet::new(skills, window)?;
             let value = serde_json::to_value(&set.skills)
                 .map_err(|e| BuildError::Invalid(e.to_string()))?;
             features.insert("skills".into(), value);
@@ -267,7 +286,7 @@ impl AgentBuilder {
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
         let contract = spec::contract_digest(&self.spec, &tools, built_hooks, &features)?;
-        let system = spec::prompt_block(&self.spec);
+        let system = spec::system_blocks(&self.spec);
         let listing_at = skill_versions.as_ref().map(|_| system.len());
         let inner = Arc::new(AgentInner {
             provider,

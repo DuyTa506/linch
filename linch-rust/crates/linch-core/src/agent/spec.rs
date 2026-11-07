@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::budget::RunBudget;
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
@@ -23,7 +24,7 @@ fn default_concurrency() -> u32 {
 /// What an agent is, as data: the model, its instructions, and the request
 /// and loop limits. Tools, hooks, permissions and stores are bound in code
 /// by [`super::AgentBuilder`]; the spec names none of them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSpec {
     /// Model identifier sent with every request.
@@ -31,6 +32,11 @@ pub struct AgentSpec {
     /// System prompt; empty sends no system block.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub system_prompt: String,
+    /// The host's own system blocks, sent in order before the system
+    /// prompt, each with its `cacheable` flag (Python's
+    /// `SystemPromptConfig.blocks`). None may be blank.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_blocks: Vec<SystemBlock>,
     /// Most provider calls one run may make; `None` sets no limit. A run that
     /// would need one more call ends with status `failed` (Python's
     /// `max_turns` tail).
@@ -55,6 +61,10 @@ pub struct AgentSpec {
     /// (the default) never compacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionSpec>,
+    /// The token and USD cap of each root run and its subagent children
+    /// (Python's `AgentConfig.budget`); `None` (the default) counts nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<RunBudget>,
 }
 
 impl AgentSpec {
@@ -63,6 +73,7 @@ impl AgentSpec {
         Self {
             model: model.into(),
             system_prompt: String::new(),
+            system_blocks: Vec::new(),
             max_turns: None,
             thinking: None,
             effort: None,
@@ -70,6 +81,7 @@ impl AgentSpec {
             max_tool_concurrency: default_concurrency(),
             call_timeout_ms: None,
             compaction: None,
+            budget: None,
         }
     }
 
@@ -103,15 +115,17 @@ impl AgentSpec {
     }
 }
 
-/// The system prompt as a system block; none when it is empty.
-pub(crate) fn prompt_block(spec: &AgentSpec) -> Vec<SystemBlock> {
-    if spec.system_prompt.is_empty() {
-        return Vec::new();
+/// The spec's system blocks: the host's in order, then the system prompt
+/// unless it is empty.
+pub(crate) fn system_blocks(spec: &AgentSpec) -> Vec<SystemBlock> {
+    let mut system = spec.system_blocks.clone();
+    if !spec.system_prompt.is_empty() {
+        system.push(SystemBlock {
+            text: spec.system_prompt.clone(),
+            cacheable: false,
+        });
     }
-    vec![SystemBlock {
-        text: spec.system_prompt.clone(),
-        cacheable: false,
-    }]
+    system
 }
 
 /// Digest of the run contract: the spec, each tool's definition and scope,
@@ -203,7 +217,7 @@ mod tests {
         let compaction = read.compaction.unwrap();
         assert_eq!(
             (compaction.threshold_tokens, compaction.keep_recent_turns),
-            (50000, 4)
+            (Some(50000), 4)
         );
     }
 }
