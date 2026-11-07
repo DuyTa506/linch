@@ -133,9 +133,6 @@ impl Server {
         pools: Arc<PgPools>,
         stop: &CancellationToken,
     ) -> Self {
-        let pools = tenant
-            .as_ref()
-            .map_or(pools, |tenant| Arc::clone(tenant.pools()));
         Self(Arc::new(State {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),

@@ -43,12 +43,12 @@ process của chính mình, nên không có wire protocol, tenant hay allowlist.
 | `crates/linch-rpc/src/client.rs` | `Client` Rust |
 | `crates/linch-server/src/main.rs` | Binary: stdio, hoặc các listener với `--config FILE` |
 | `crates/linch-server/src/{config,listen,http}.rs` | Cấu hình, Unix socket và transport HTTP |
-| `crates/linch/src/pools.rs` | `PgPools`: các pool Postgres theo đích; một server giữ một bộ cho mỗi tenant và một bộ cho các kết nối cục bộ của nó |
+| `crates/linch/src/pools.rs` | `PgPools`: các pool Postgres theo đích; mỗi tenant có một bộ riêng, và một kết nối cục bộ mang một bộ trong `Access::Local` |
 
 ## Method và message
 
 Mỗi tên method là một hằng số `method::` (`crates/linch-rpc/src/protocol.rs:25-55`),
-và `Server::dispatch` (`crates/linch-rpc/src/server.rs:297-315`) ánh xạ từng tên
+và `Server::dispatch` (`crates/linch-rpc/src/server.rs:294-312`) ánh xạ từng tên
 tới handler của nó. Các kiểu params từ chối trường không biết; `OpenParams` tách
 `tools` và `callbacks` ra và đọc phần còn lại thành một `AgentConfig` nghiêm ngặt
 (`crates/linch-rpc/src/protocol/open.rs:13-28`).
@@ -117,13 +117,13 @@ run đang được điều khiển và run đang park dưới một khóa, để
 bỏ sót một run bắt đầu trong lúc nó kiểm tra; outbox của nó; peer của nó cho các
 request từ server; và tenant của nó, là `None` đối với client cục bộ.
 
-1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:84-109`)
-   chia một luồng byte thành các dòng; `serve_messages` (`connection.rs:127-150`)
-   nhận một message cho mỗi frame. Cả hai đưa các mục `Inbound` (`connection.rs:153-161`)
-   cho `connection` (`connection.rs:163-221`), thứ spawn task writer,
+1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:73-97`)
+   chia một luồng byte thành các dòng; `serve_messages` (`connection.rs:113-135`)
+   nhận một message cho mỗi frame. Cả hai đưa các mục `Inbound` (`connection.rs:138-146`)
+   cho `connection` (`connection.rs:148-211`), thứ spawn task writer,
    chạy phần đăng nhập khi access là `Login`, và đọc cho đến khi input kết thúc
    hoặc `stop` kích hoạt.
-2. **Vòng lặp đọc.** `Server::receive` (`server.rs:174-210`) parse một dòng,
+2. **Vòng lặp đọc.** `Server::receive` (`server.rs:171-207`) parse một dòng,
    đưa câu trả lời của client cho request của server mà nó nêu tên, và đọc
    mọi thứ khác như một request (`Request::from_value`,
    `crates/linch-rpc/src/message.rs:108`). Một request không có `id` là một
@@ -131,7 +131,7 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    (`MAX_REQUESTS`, `server.rs:49`); vòng lặp await nó, nên request thứ 65
    dừng việc đọc cho đến khi một lời gọi kết thúc. Lời gọi chạy trong task riêng,
    nên một `agent.open` chậm không bao giờ giữ chân một `run.cancel`.
-3. **Dispatch.** `Server::handle` (`server.rs:268-295`) bắt một panic thành
+3. **Dispatch.** `Server::handle` (`server.rs:265-292`) bắt một panic thành
    `-32603`. Một method run trả về stream của nó: kết quả `RunAccepted`
    được xếp hàng trước, rồi một task điều khiển stream.
 4. **Một run.** `Server::drive` (`run.rs:159-196`) mã hóa mỗi envelope một lần,
@@ -139,14 +139,14 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    gỡ run khỏi các bảng (giữ chỗ của nó khi nó park, xem
    [các giới hạn](#các-giới-hạn)) và xếp hàng `run.end`. Một panic của run kết thúc nó với
    `-32603`, tại trạng thái bền vững cuối cùng của nó.
-5. **Writer.** `write_messages` (`connection.rs:225-254`) lấy mọi thứ
+5. **Writer.** `write_messages` (`connection.rs:215-244`) lấy mọi thứ
    đã xếp hàng, gộp các envelope liên tiếp của một run thành một
    `run.event` (`Batch::push`, `crates/linch-rpc/src/server/outgoing.rs:74-83`)
    tối đa 64 KiB (`outgoing.rs:21`), và flush một lần khi không còn gì chờ.
 6. **Request từ server.** `Peer::call` (`peer.rs:92-139`) xếp hàng request
    và chờ câu trả lời, timeout hoặc lệnh hủy của nó; thời gian chờ chỗ trống trong
    outbox được tính vào cả hai.
-7. **Hết input.** `Server::stop` (`server.rs:153-172`) để các lời gọi
+7. **Hết input.** `Server::stop` (`server.rs:150-169`) để các lời gọi
    đã đọc kết thúc, drop mọi run tại chỗ nó đang đứng (một run bền vững vẫn
    resume được), làm các request đang chờ của server thất bại, rồi đóng các MCP server
    của mọi agent. Writer xả hết hàng đợi và kết nối trả về.
@@ -154,7 +154,7 @@ request từ server; và tenant của nó, là `None` đối với client cục 
 ### Thứ tự
 
 - `RunAccepted` của một run được xếp hàng trước khi task điều khiển nó được
-  spawn (`server.rs:281-292`), nên nó đến client trước mọi
+  spawn (`server.rs:278-289`), nên nó đến client trước mọi
   notification của run đó. Client Python dựa vào điều này: nó phân loại các
   notification của một run theo run id mà nó đọc từ kết quả đó
   (`python/src/linch_rust/_rpc.py:254-265`).
@@ -192,16 +192,16 @@ Không có buffer nào tăng không giới hạn trên server:
    câu trả lời (`python/src/linch_rust/run.py:102-121`); một run không ai đọc
    trong khi event của nó vẫn đến sẽ làm kết nối bị nghẽn.
 
-`Outbox::send_now` (`connection.rs:269-279`), dành cho mã không thể chờ,
+`Outbox::send_now` (`connection.rs:259-269`), dành cho mã không thể chờ,
 giao một message cho một task khi hàng đợi đầy.
 
 ## Transport
 
 | Transport | Điểm vào | Access | Runtime |
 |---|---|---|---|
-| stdio | `linch-server` không có đối số; `linch_rpc::serve` (`connection.rs:43-57`) | `Access::Local`: không đăng nhập, không tenant, không giới hạn | Current-thread (`crates/linch-server/src/main.rs:49-55`): một client, nên chuyển một envelope giữa các task của nó không đánh thức thread nào khác |
-| Unix socket | `--config FILE` với `socket`; `Listeners` (`crates/linch-server/src/listen.rs:42-101`) | `Access::Login`: message đầu tiên là `connection.auth` | Multi-thread |
-| HTTP với WebSocket | `--config FILE` với `http`; `crates/linch-server/src/http.rs:77-116` | `Access::Tenant`: header bearer được kiểm tra trước khi upgrade | Multi-thread |
+| stdio | `linch-server` không có đối số; `linch_rpc::serve` (`connection.rs:43-50`) | `Access::Local`: không đăng nhập, không tenant, không giới hạn | Current-thread (`crates/linch-server/src/main.rs:49-55`): một client, nên chuyển một envelope giữa các task của nó không đánh thức thread nào khác |
+| Unix socket | `--config FILE` với `socket`; `Listeners` (`crates/linch-server/src/listen.rs:41-98`) | `Access::Login`: message đầu tiên là `connection.auth` | Multi-thread |
+| HTTP với WebSocket | `--config FILE` với `http`; `crates/linch-server/src/http.rs:74-113` | `Access::Tenant`: header bearer được kiểm tra trước khi upgrade | Multi-thread |
 
 **stdio.** Trên Linux, server mở lại các pipe của nó qua
 `/proc/self/fd/0` và `/proc/self/fd/1` và điều khiển chúng ở chế độ non-blocking
@@ -211,28 +211,28 @@ pipe; các description mới giữ cờ này không rò sang các reader khác c
 supervisor. Mọi thứ không phải pipe dùng `stdin()` và `stdout()` của tokio.
 
 **Unix socket.** Một tệp socket do một server đã dừng để lại sẽ bị thay thế, và
-một tệp mà một server đang trả lời trên đó thì bị từ chối (`bind_socket`, `listen.rs:105-122`).
+một tệp mà một server đang trả lời trên đó thì bị từ chối (`bind_socket`, `listen.rs:102-119`).
 Mỗi kết nối chờ đăng nhập của nó với một trong 32 chỗ
-(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:135-139`): mỗi chỗ có thể
+(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:137-141`): mỗi chỗ có thể
 đệm một dòng 16 MiB trong 10 s, nên các chỗ này giới hạn mức đó ở 512 MiB. Kết nối thứ
 33 nhận `-32005` ngay. Một lần đăng nhập có 10 s (`LOGIN_TIMEOUT`,
 `login.rs:17`); im lặng quá mức đó nhận `-32003` và kết nối đóng
 (`login.rs:42-54`).
 
-**HTTP.** Một route, `GET /rpc` (`http.rs:30`). Trước khi upgrade, một
+**HTTP.** Một route, `GET /rpc` (`http.rs:29`). Trước khi upgrade, một
 kết nối giữ một trong 32 chỗ trên toàn server
-(`MAX_PENDING_UPGRADES`, `http.rs:39-44`); kết nối thứ 33 bị đóng mà không đọc. Mỗi
-phần đầu request có 10 s (`HEADER_READ_TIMEOUT`, `http.rs:32-37`), sau đó
-kết nối đóng mà không trả lời. `upgrade` (`http.rs:135-171`) kiểm tra
+(`MAX_PENDING_UPGRADES`, `http.rs:38-43`); kết nối thứ 33 bị đóng mà không đọc. Mỗi
+phần đầu request có 10 s (`HEADER_READ_TIMEOUT`, `http.rs:31-36`), sau đó
+kết nối đóng mà không trả lời. `upgrade` (`http.rs:132-168`) kiểm tra
 bearer token trước (`401` với `WWW-Authenticate: Bearer`), rồi lấy
 chỗ kết nối của tenant (`429`), rồi trả lời `101` nêu tên
 tenant trong `Linch-Tenant`. Một message WebSocket có thể dài 64 MiB
-(`MAX_MESSAGE_BYTES`, `http.rs:50-53`) trước khi socket đóng; một message trên
+(`MAX_MESSAGE_BYTES`, `http.rs:49-52`) trước khi socket đóng; một message trên
 16 MiB bị lõi từ chối như một dòng quá khổ. Server nói HTTP thuần:
 hãy đặt TLS phía trước nó hoặc listen trên loopback.
 
-Mọi listener của một server dùng chung một `PgPools` (`listen.rs:77-101`) cho các client
-cục bộ; các kết nối của một tenant dùng `PgPools` riêng của tenant (bên dưới).
+Một server đang listen không giữ pool riêng: mọi kết nối hành động thay cho một tenant
+và dùng các pool của tenant đó (bên dưới).
 
 ## Tenant và allowlist
 
@@ -241,10 +241,10 @@ cấu hình, từ chối các trường không biết và giới hạn bằng 0;
 (`config.rs:187`) đọc từng token trực tiếp hoặc từ môi trường;
 `AllowConfig::build` (`config.rs:220`) tạo các `Allowlists`.
 
-- Một `Tenant` (`access.rs:41-125`) có tên gồm 1 đến 64 chữ cái ASCII,
+- Một `Tenant` (`access.rs:43-127`) có tên gồm 1 đến 64 chữ cái ASCII,
   chữ số, `.`, `_` hoặc `-` (không bao giờ có `/`), các allowlist của nó, và một semaphore
   cho mỗi loại: run, agent và connection, dùng chung giữa mọi kết nối của nó.
-- `Tokens` (`access.rs:141-206`) giữ mỗi token dưới dạng digest SHA-256 và
+- `Tokens` (`access.rs:143-208`) giữ mỗi token dưới dạng digest SHA-256 và
   so sánh một token được đưa ra với mọi digest trong thời gian hằng số. Không token nào
   được ghi log hay echo lại.
 - `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-136`) kiểm tra một
@@ -277,12 +277,12 @@ hạng từ `disable` (0) đến `verify-full` (5) (`PgTarget::allows`, `allowli
 
 Facade dùng chung một pool cho mỗi đích giữa các agent được mở với cùng một
 `PgPools` (`crates/linch/src/pools.rs:19-39`). Một `Tenant` sở hữu một cái
-(`access.rs:54`, `access.rs:77`) và `Server::new` đưa cho kết nối của tenant cái đó
-thay vì cái của process (`server.rs:136`), nên các pool được khóa theo tenant và đích:
+(`access.rs:56`, `access.rs:79`) và `connection` đưa cho kết nối của tenant cái đó
+(`connection.rs:163-179`), nên các pool được khóa theo tenant và đích:
 hai tenant trên cùng một đích không bao giờ dùng chung pool, và một tenant không thể
 đặt kích thước pool của tenant khác (R3 front 5). Mọi kết nối của một tenant dùng chung
 các pool của nó, nên `max_pool_connections` giới hạn các kết nối của tenant trên mỗi
-đích. Các kết nối cục bộ (stdio) giữ các pool của process. Khóa của nó (`pools.rs:45-74`) là URL đã chuẩn hóa
+đích. Một kết nối cục bộ (stdio) dùng các pool mà `Access::Local` của nó mang theo. Khóa của nó (`pools.rs:45-74`) là URL đã chuẩn hóa
 của sqlx cho DSN cộng với `options` khởi động của nó, thứ mà URL đó bỏ
 đi và có thể đặt `search_path`; các DSN chỉ khác nhau về thứ tự tham số hoặc về
 các cài đặt mà sqlx bỏ qua sẽ dùng chung một pool. Một pool lấy kích thước từ
@@ -299,14 +299,14 @@ nỗ lực tối đa (best effort).
 | Giới hạn | Giá trị | Ở đâu | Vượt quá |
 |---|---|---|---|
 | `max_pool_connections` cho mỗi tenant | `linch_postgres::default_max_connections()` nếu không đặt (`allowlists.rs:275-278`) | `Tenant::admit` (`admit.rs:90-105`), trước khi bất cứ thứ gì kết nối | `-32004`, `kind: pool_connections`, `max` là mức trần |
-| `max_connections` cho mỗi tenant | 8 nếu không đặt (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:92-109`); kết nối giữ chỗ cho đến khi nó kết thúc (`connection.rs:179-190`) | Socket: `-32005` dưới id `connection.auth`; HTTP: `429` |
+| `max_connections` cho mỗi tenant | 8 nếu không đặt (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:94-111`); kết nối giữ chỗ cho đến khi nó kết thúc (`connection.rs:161-180`) | Socket: `-32005` dưới id `connection.auth`; HTTP: `429` |
 | `max_runs` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:17`) | `run_place`, lấy trong `start` và `claim` (`run.rs:152-157`) và được run đang điều khiển giữ | `-32005`, không có gì bắt đầu |
 | `max_agents` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:29`) | Lấy trong `open` sau các kiểm tra (`agents.rs:19-26`), được giải phóng khi các MCP server của agent đã tắt (`server.rs:104-111`) | `-32005`, trước khi bất kỳ MCP server nào khởi động |
 | Số lời gọi đang bay cho mỗi kết nối | 64 | `server.rs:49` | Việc đọc phải chờ |
-| Số đăng nhập đang chờ | 32 cho mỗi `Tokens` | `access.rs:135-139` | `-32005` `kind: logins`, rồi đóng |
-| Số HTTP upgrade đang chờ | 32 cho mỗi server | `http.rs:39-44` | Đóng mà không đọc |
-| Một dòng hoặc một message | 16 MiB (`connection.rs:28`); 64 KiB đầu của nó được giữ để tìm `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:235-254`) | `-32600`, dưới id của request khi phần đầu cho thấy nó; một câu trả lời làm request của server thất bại |
-| Chờ đăng nhập, phần đầu HTTP | 10 s mỗi loại | `login.rs:17`, `http.rs:37` | Đăng nhập nhận `-32003`, rồi kết nối đóng; kết nối HTTP đóng |
+| Số đăng nhập đang chờ | 32 cho mỗi `Tokens` | `access.rs:137-141` | `-32005` `kind: logins`, rồi đóng |
+| Số HTTP upgrade đang chờ | 32 cho mỗi server | `http.rs:38-43` | Đóng mà không đọc |
+| Một dòng hoặc một message | 16 MiB (`connection.rs:28`); 64 KiB đầu của nó được giữ để tìm `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:232-251`) | `-32600`, dưới id của request khi phần đầu cho thấy nó; một câu trả lời làm request của server thất bại |
+| Chờ đăng nhập, phần đầu HTTP | 10 s mỗi loại | `login.rs:17`, `http.rs:36` | Đăng nhập nhận `-32003`, rồi kết nối đóng; kết nối HTTP đóng |
 
 Một kết nối cục bộ (stdio) không có giới hạn nào của tenant.
 
@@ -343,7 +343,7 @@ và `close`, `close_session` và `events` (`agent.py:159-201`).
 | 1. Đặt tên | Một hằng số `method::` trong `protocol.rs:25-55` | Không có gì; mọi bước khác đều dùng nó |
 | 2. Params và kết quả của nó | `protocol.rs` hoặc một tệp `protocol/`, với `deny_unknown_fields` và doc comment | `-32602` cho một trường không biết chỉ khi kiểu đó từ chối chúng |
 | 3. Handler | Một method `impl Server` trong `server/agents.rs` hoặc `server/run.rs`. Chạy các kiểm tra tenant (`admit_principal`, một chỗ) trước mọi thứ khác, và trả về `Reply::Run` cho một run | Test trong `crates/linch-rpc/tests/tenants.rs` và `limits.rs` cho các kiểm tra của nó |
-| 4. Dispatch | Một nhánh trong `Server::dispatch` (`server.rs:297-315`) | `-32601` lúc chạy |
+| 4. Dispatch | Một nhánh trong `Server::dispatch` (`server.rs:294-312`) | `-32601` lúc chạy |
 | 5. Lỗi | Một mã mới trong `error.rs` cùng phép chuyển đổi của nó | `crates/linch-rpc/tests/wire.rs` cho hình dạng trên wire |
 | 6. Tài liệu giao thức | Method trong phần Methods của crate docs, một mã mới trong bảng của nó (`lib.rs:118-246`, `lib.rs:328-364`) | Chỉ review |
 | 7. Client Rust | Không cần: `Client::call` là tổng quát. Một helper có kiểu trong `crates/linch-rpc/tests/common/mod.rs` nếu test cần | Biên dịch các test |

@@ -209,7 +209,8 @@ recycle connections.
 `connect` keeps sqlx's other defaults. Its default size,
 `default_max_connections()` (`crates/linch-postgres/src/pool_size.rs:26`), is the
 machine's cores clamped to `MIN_DEFAULT_CONNECTIONS` (10, sqlx's own default)
-and `MAX_DEFAULT_CONNECTIONS` (32), computed once per process. The floor keeps
+and `MAX_DEFAULT_CONNECTIONS` (32), computed once per process; it replaces
+the fixed `MAX_CONNECTIONS` (10), which is gone. The floor keeps
 a small machine at about five runs committing at once. The ceiling is for the
 database: Postgres's own `max_connections` (100 unless set) is shared by every
 pool of every process on it, so three processes at the default still fit. In

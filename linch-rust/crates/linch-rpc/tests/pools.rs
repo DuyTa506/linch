@@ -26,8 +26,8 @@ async fn two_connections_of_one_server_share_a_pool() {
         return;
     };
     let pools = Arc::new(PgPools::new());
-    let first = Rpc::sharing(Access::Local, Arc::clone(&pools));
-    let mut second = Rpc::sharing(Access::Local, pools);
+    let first = Rpc::remote(Access::Local(Arc::clone(&pools)));
+    let mut second = Rpc::remote(Access::Local(pools));
     let closing = first.open(on_postgres(&db, "one")).await;
     let staying = second.open(on_postgres(&db, "two")).await;
     assert_eq!(db.connections().await, 1);
@@ -65,12 +65,8 @@ async fn two_tenants_on_one_target_get_pools_of_their_own_sizes() {
         }
         config
     };
-    // One server's pools, as every connection of a process shares them.
-    let pools = Arc::new(PgPools::new());
-    let connect = |tenant: &Arc<Tenant>| {
-        let access = Access::Tenant(Arc::clone(tenant).connect().unwrap());
-        Rpc::sharing(access, Arc::clone(&pools))
-    };
+    let connect =
+        |tenant: &Arc<Tenant>| Rpc::remote(Access::Tenant(Arc::clone(tenant).connect().unwrap()));
     let first = connect(&acme);
     first.open(config("acme", Some(3))).await;
     // Beta asks for no size: its pool gets its own cap, below the default.

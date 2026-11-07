@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use linch::PgPools;
 use linch_rpc::protocol::{Authenticated, method};
 use linch_rpc::{Access, Allowlists, ClientError, MAX_PENDING_LOGINS, Tenant, Tokens, code};
 use serde_json::{Value, json};
@@ -58,7 +57,6 @@ async fn refused_lines(first: &str) -> Vec<Value> {
         server_reader,
         server_writer,
         login(),
-        Arc::new(PgPools::new()),
         stop,
     ));
     let (reader, mut writer) = tokio::io::split(ours);
@@ -125,7 +123,6 @@ async fn stop_ends_a_connection_that_waits_for_its_login() {
         server_reader,
         server_writer,
         login(),
-        Arc::new(PgPools::new()),
         stop.clone(),
     ));
     stop.cancel();
@@ -143,7 +140,6 @@ async fn silence_past_the_login_wait_is_refused_and_closes_the_connection() {
         server_reader,
         server_writer,
         login(),
-        Arc::new(PgPools::new()),
         CancellationToken::new(),
     ));
     let (reader, _writer) = tokio::io::split(ours);
@@ -169,9 +165,8 @@ async fn past_max_pending_logins_a_new_connection_is_refused_at_once() {
     let connect = || {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(theirs);
-        let pools = Arc::new(PgPools::new());
         let access = Access::Login(Arc::clone(&tokens));
-        let serve = linch_rpc::serve_lines(reader, writer, access, pools, stop.clone());
+        let serve = linch_rpc::serve_lines(reader, writer, access, stop.clone());
         (tokio::io::split(ours), tokio::spawn(serve))
     };
     let mut waiting: Vec<_> = (0..MAX_PENDING_LOGINS).map(|_| connect()).collect();

@@ -142,8 +142,8 @@
 //! `stores` defaults to `{"type": "memory"}`: stores owned by this agent
 //! handle, so resume and approve must use the same handle. Local agents on
 //! one Postgres target share one pool across all connections of a server
-//! process (the [`PgPools`](linch::PgPools) given to [`serve_lines`] or
-//! [`serve_messages`]); a tenant's agents share pools of the tenant's own,
+//! process (the [`PgPools`](linch::PgPools) in their [`Access::Local`]);
+//! a tenant's agents share pools of the tenant's own,
 //! each at most its `max_pool_connections`. Only an open that finds no
 //! pool in use connects,
 //! giving up after 5 s, and runs the migrations, giving up after 30 s;
