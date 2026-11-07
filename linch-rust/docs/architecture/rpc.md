@@ -41,7 +41,7 @@ package `linch_rust` (`python/src/linch_rust/`) is a client of this server.
 | `crates/linch-rpc/src/client.rs` | The Rust `Client` |
 | `crates/linch-server/src/main.rs` | The binary: stdio, or the listeners with `--config FILE` |
 | `crates/linch-server/src/{config,listen,http}.rs` | The config, the Unix socket and the HTTP transport |
-| `crates/linch/src/pools.rs` | `PgPools`: Postgres pools shared by every connection of a process |
+| `crates/linch/src/pools.rs` | `PgPools`: Postgres pools by target; a server keeps one set per tenant and one for its local connections |
 
 ## Methods and messages
 
