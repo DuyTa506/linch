@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use common::*;
@@ -411,4 +412,47 @@ async fn an_mcp_http_url_must_share_an_allowed_origin() {
     assert_eq!(refusal(error).0, code::MCP_UNAVAILABLE);
     let outside = config(http("http://127.0.0.1:1/mcp".into()));
     assert_eq!(refused(&rpc, outside).await.as_deref(), Some("mcp_url"));
+}
+
+#[tokio::test]
+async fn a_store_pool_may_not_exceed_the_tenants_max_pool_connections() {
+    let address = hangs_up().await;
+    let dsn = format!("postgres://acme@{address}/linch?sslmode=disable");
+    let dsns = [dsn.clone()];
+    let store = |max: Option<u32>| {
+        let mut stores = json!({"type": "postgres", "dsn": dsn});
+        if let Some(max) = max {
+            stores["max_connections"] = json!(max);
+        }
+        config(json!({ "stores": stores }))
+    };
+    let cap = NonZeroU32::new(5).unwrap();
+    let rpc = Rpc::remote(acme(|allow| {
+        let allow = allow.postgres_dsns(&dsns).unwrap();
+        allow.max_pool_connections(cap)
+    }));
+    // Past the cap: refused before any connect, naming the cap.
+    let error = rpc.call(method::AGENT_OPEN, store(Some(6))).await;
+    let linch_rpc::ClientError::Rpc(error) = error.unwrap_err() else {
+        panic!("expected an error object");
+    };
+    assert_eq!(error.code, code::NOT_ALLOWED);
+    let data = json!({"kind": "pool_connections", "max": 5});
+    assert_eq!(error.data, Some(data));
+    let message = &error.message;
+    assert!(message.contains("max_pool_connections"), "{message}");
+    // At the cap, below it, or absent: admitted, so the open goes on to
+    // the fake server and fails there.
+    for max in [Some(5), Some(1), None] {
+        let error = rpc.call(method::AGENT_OPEN, store(max)).await.unwrap_err();
+        assert_eq!(refusal(error), (code::STORE_UNAVAILABLE, None), "{max:?}");
+    }
+
+    // Without the field the cap is the server's default pool size.
+    let default = linch::postgres::default_max_connections().get();
+    let rpc = Rpc::remote(acme(|allow| allow.postgres_dsns(&dsns).unwrap()));
+    let kind = refused(&rpc, store(Some(default + 1))).await;
+    assert_eq!(kind.as_deref(), Some("pool_connections"));
+    let error = rpc.call(method::AGENT_OPEN, store(Some(default))).await;
+    assert_eq!(refusal(error.unwrap_err()), (code::STORE_UNAVAILABLE, None));
 }

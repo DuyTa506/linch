@@ -20,8 +20,10 @@ impl Tenant {
     /// Refuse `config` unless its namespace is this tenant's and its
     /// provider, endpoints, permissions, workspace, store and MCP servers
     /// are all allowed. The workspace, the project root and the config
-    /// directory are replaced by the paths that were checked, and `bash` is
-    /// turned off unless the tenant may run exec tools.
+    /// directory are replaced by the paths that were checked, `bash` is
+    /// turned off unless the tenant may run exec tools, and a Postgres
+    /// store that names no pool size gets the default size or the tenant's
+    /// `max_pool_connections`, whichever is smaller.
     pub(crate) async fn admit(&self, config: &mut AgentConfig) -> Result<(), ErrorObject> {
         let namespace = &config.namespace;
         let own = namespace == &self.name
@@ -74,12 +76,33 @@ impl Tenant {
             config.config_dir = Some(dir.await?);
         }
         config.bash &= allow.exec_tools;
-        if let StoreConfig::Postgres { dsn, .. } = &config.stores
-            && !PgTarget::parse(dsn)
-                .is_some_and(|target| allow.postgres.iter().any(|entry| entry.allows(&target)))
+        if let StoreConfig::Postgres {
+            dsn,
+            max_connections,
+        } = &mut config.stores
         {
-            let message = "the store DSN does not name a server in the tenant's postgres_dsns";
-            return Err(refused("postgres", message.into()));
+            if !PgTarget::parse(dsn)
+                .is_some_and(|target| allow.postgres.iter().any(|entry| entry.allows(&target)))
+            {
+                let message = "the store DSN does not name a server in the tenant's postgres_dsns";
+                return Err(refused("postgres", message.into()));
+            }
+            let cap = allow.max_pool_connections;
+            match *max_connections {
+                Some(asked) if asked > cap => {
+                    let message = format!(
+                        "stores.max_connections {asked} is above the tenant's \
+                         max_pool_connections {cap}"
+                    );
+                    let data = json!({"kind": "pool_connections", "max": cap});
+                    return Err(ErrorObject::new(code::NOT_ALLOWED, message).with_data(data));
+                }
+                Some(_) => {}
+                // The pool is the tenant's own, so the cap bounds it too.
+                None => {
+                    *max_connections = Some(linch::postgres::default_max_connections().min(cap));
+                }
+            }
         }
         for server in &config.mcp_servers {
             let refusal = match &server.transport {

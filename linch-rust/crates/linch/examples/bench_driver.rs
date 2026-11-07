@@ -367,7 +367,7 @@ fn reset_workspace(job: &Value) -> Result<(), String> {
 
 async fn pg_pool(job: &Value) -> Result<linch::postgres::PgPool, String> {
     let dsn = text(job, "pg_dsn")?;
-    let max = linch::postgres::MAX_CONNECTIONS;
+    let max = linch::postgres::default_max_connections();
     linch::postgres::connect(dsn, Duration::from_secs(10), max)
         .await
         .map_err(err)

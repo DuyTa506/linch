@@ -1,5 +1,6 @@
 //! [`Allowlists`]: what a tenant's `agent.open` may ask for.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -32,7 +33,8 @@ pub const DEFAULT_MAX_AGENTS: usize = 16;
 /// `accept_edits`, the live providers at their public endpoints, and
 /// nothing else: no `Bash`, no workspace; and at most
 /// [`DEFAULT_MAX_RUNS`] live runs, [`DEFAULT_MAX_AGENTS`] open agents and
-/// [`DEFAULT_MAX_CONNECTIONS`] connections at once.
+/// [`DEFAULT_MAX_CONNECTIONS`] connections at once, and Postgres pools of
+/// at most [`linch::postgres::default_max_connections`] connections.
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
@@ -40,6 +42,7 @@ pub struct Allowlists {
     pub(super) max_runs: usize,
     pub(super) max_agents: usize,
     pub(super) max_connections: usize,
+    pub(super) max_pool_connections: NonZeroU32,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
     pub(super) workspace_roots: Vec<PathBuf>,
@@ -209,6 +212,7 @@ impl Allowlists {
             max_runs: DEFAULT_MAX_RUNS,
             max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_pool_connections: linch::postgres::default_max_connections(),
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
             workspace_roots: Vec::new(),
@@ -259,6 +263,17 @@ impl Allowlists {
     /// `-32005`).
     pub fn max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
+        self
+    }
+
+    /// The largest Postgres pool the tenant's agents may ask for with
+    /// `stores.max_connections`; an `agent.open` asking for more is refused
+    /// (`kind: pool_connections`), and one that asks for no size gets the
+    /// default size or this, whichever is smaller. The tenant's agents
+    /// share pools only with each other, one per target, so this bounds
+    /// what the tenant holds of the database's connections on each target.
+    pub fn max_pool_connections(mut self, max: NonZeroU32) -> Self {
+        self.max_pool_connections = max;
         self
     }
 

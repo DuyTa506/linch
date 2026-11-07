@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -79,6 +80,11 @@ pub struct AllowConfig {
     /// Agents the tenant's connections may keep open at once, together,
     /// at least 1; [`linch_rpc::DEFAULT_MAX_AGENTS`] when absent.
     pub max_agents: Option<usize>,
+    /// The largest `stores.max_connections` a config may ask for, and so
+    /// the most connections of each of the tenant's own Postgres pools, at
+    /// least 1; the server's default pool size
+    /// ([`linch::postgres::default_max_connections`]) when absent.
+    pub max_pool_connections: Option<u32>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
@@ -114,7 +120,8 @@ pub enum ConfigError {
     /// No tenant has a token, so every connection would be refused.
     #[error("the config gives no tenant a token")]
     NoToken,
-    /// A tenant's `max_runs`, `max_connections` or `max_agents` is 0.
+    /// A tenant's `max_runs`, `max_connections`, `max_agents` or
+    /// `max_pool_connections` is 0.
     #[error(
         "tenant {tenant:?}: {field} is 0, which lets it do nothing; \
          set at least 1, or leave it out for the default"
@@ -122,7 +129,8 @@ pub enum ConfigError {
     ZeroCap {
         /// The tenant.
         tenant: String,
-        /// `max_runs`, `max_connections` or `max_agents`.
+        /// `max_runs`, `max_connections`, `max_agents` or
+        /// `max_pool_connections`.
         field: &'static str,
     },
     /// A token's environment variable is unset or not UTF-8.
@@ -157,10 +165,12 @@ impl ServerConfig {
         }
         for (name, tenant) in &config.tenants {
             let allow = &tenant.allow;
+            let pool = allow.max_pool_connections.map(|max| max as usize);
             let caps = [
                 ("max_runs", allow.max_runs),
                 ("max_connections", allow.max_connections),
                 ("max_agents", allow.max_agents),
+                ("max_pool_connections", pool),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
@@ -224,6 +234,10 @@ impl AllowConfig {
             .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
             .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
             .max_agents(self.max_agents.unwrap_or(linch_rpc::DEFAULT_MAX_AGENTS))
+            .max_pool_connections(
+                (self.max_pool_connections.and_then(NonZeroU32::new))
+                    .unwrap_or_else(linch::postgres::default_max_connections),
+            )
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?

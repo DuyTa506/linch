@@ -7,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use linch::PgPools;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -38,9 +39,11 @@ pub enum Access {
 }
 
 /// A tenant: the name its agents and runs belong to, what its agents may
-/// use, and its places for live runs, open agents and connections, shared
-/// by every connection that acts for it (share one `Arc<Tenant>` among
-/// them).
+/// use, its places for live runs, open agents and connections, and its
+/// Postgres pools, shared by every connection that acts for it (share one
+/// `Arc<Tenant>` among them). Its agents share pools with each other only,
+/// so no other tenant sets their size. `Debug` shows the pools' sizes, no
+/// DSN.
 #[derive(Debug)]
 pub struct Tenant {
     name: String,
@@ -48,6 +51,7 @@ pub struct Tenant {
     runs: Arc<Semaphore>,
     agents: Arc<Semaphore>,
     connections: Arc<Semaphore>,
+    pools: Arc<PgPools>,
 }
 
 impl Tenant {
@@ -70,6 +74,7 @@ impl Tenant {
             runs: places(allow.max_runs),
             agents: places(allow.max_agents),
             connections: places(allow.max_connections),
+            pools: Arc::new(PgPools::new()),
             allow,
         })
     }
@@ -106,6 +111,11 @@ impl Tenant {
     /// The tenant name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Where this tenant's agents take their Postgres pools.
+    pub(crate) fn pools(&self) -> &Arc<PgPools> {
+        &self.pools
     }
 
     /// What this tenant's agents may use.

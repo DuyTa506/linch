@@ -142,11 +142,29 @@ Schema details, write paths and the refusal rules are in the
 - Opening gives up after 5 seconds when the database cannot be reached
   (`OpenError`, code -32014, naming the host and port it tried), instead of
   retrying for longer.
-- A pool holds at most `max_connections` connections, 10 when absent (at
-  least 1). A run that commits back to back uses about two, so plan about two
-  connections per run in flight at once, per server process. The open that
-  connects a DSN's pool sets its size; agents that share the pool share that
-  size. Several server processes on one database each have their own pools.
+- A pool holds at most `max_connections` connections (at least 1). When
+  absent, the default follows the machine: its number of cores, but no fewer
+  than 10 and no more than 32 (32 on a 64-core machine). Two numbers set
+  these bounds:
+  - A run that commits back to back uses about two connections, so plan about
+    two connections per run in flight at once, per pool. Too small a pool makes
+    runs wait for a connection: in the 2000-session bench, a pool of 10 added
+    about 3.4 s to each turn and a pool of 40 about 0.4 s.
+  - Postgres's own `max_connections` (100 by default) is shared by every pool
+    of every process on the database, workers and admin tools included. That
+    is why the default stops at 32: three server processes at the default
+    still fit. Raise `stores.max_connections` past 32 only after raising
+    the database's limit, or put a pooler such as PgBouncer in front.
+- The open that connects a pool sets its size; agents that share the pool
+  share that size. Several server processes on one database each have their
+  own pools.
+- On a `linch-server` with tenants, each tenant has pools of its own: two
+  tenants on one target never share a pool, so neither sets the other's
+  size. A tenant's `stores.max_connections` may be at most its
+  `max_pool_connections` (the default pool size when unset); above it,
+  `open_agent` is refused (`NotAllowed`, `kind == "pool_connections"`). A
+  config without `max_connections` gets the default size or the cap,
+  whichever is smaller ([Server](./server.md#config)).
 - A connection that sat idle for a second or more is checked before its next
   write and replaced if the database closed it (a restart, a failover, an
   idle timeout), so a run that waited on a long model call still writes its

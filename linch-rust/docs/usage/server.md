@@ -111,6 +111,7 @@ token names exactly one tenant: the same token twice is refused.
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |
+| `max_pool_connections` | The server's default pool size: the number of cores, between 10 and 32 | The largest `stores.max_connections` a config may ask for; the tenant's pool on each target has at most this many connections |
 | `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host and port |
 | `permission_modes` | `default`, `accept_edits` | The modes a config may choose |
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
@@ -296,7 +297,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | HTTP connections waiting for their upgrade | 32, across the server; an upgraded one gives its place back | The connection is closed unread |
 | HTTP request head | 10 seconds for each head before the upgrade | The connection closes without an answer |
 | One message | 16 MiB | The request gets `-32600` |
-| A Postgres pool | One per DSN across the server, `stores.max_connections` connections (10 unless set) | Queries wait for a connection; the open that connects a DSN sets its size and later opens share it ([Stores](./stores.md#connections-and-pools)) |
+| A Postgres pool | One per tenant and target, `stores.max_connections` connections (the number of cores, between 10 and 32, unless set) | Queries wait for a connection; the tenant's open that connects its pool sets the size and its later opens share it ([Stores](./stores.md#connections-and-pools)) |
+| `max_pool_connections` | The default pool size per tenant unless set | `agent.open` asking for a larger `stores.max_connections` gets `-32004`, `data: {"kind": "pool_connections", "max": ...}`; nothing connects |
 | Requests in flight per connection | 64 | Reading waits until one is answered |
 | Background subagents per run | The agent config's `workers.max_background`, 4 unless set | The `Subagent` call gets a tool error and starts nothing ([Subagents](./subagents.md#background-workers)) |
 
@@ -334,12 +336,13 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `project_root` | The same, for `permissions.project_root` | Path rules resolve against it; with no roots, a config cannot send `permissions` at all and keeps the default policy |
 | `config_dir` | With skills or subagents on: not an existing directory under the roots, through an absolute path, `..` or a symlink | `SKILL.md` and agent files would load from another tenant's tree |
 | `postgres` | A DSN that matches no `postgres_dsns` entry exactly, or asks for a weaker `sslmode` | A client could pick another database, role, `search_path` or certificate file, or send the server's credentials without TLS |
+| `pool_connections` | `stores.max_connections` above the tenant's `max_pool_connections` | Every pool on a database shares its connection limit; `data.max` is the cap |
 | `mcp_command` | A stdio command and argument list that match no entry | The server would start that program |
 | `mcp_env` | An `env` name the matching entry does not list | It could change what the program loads |
 | `mcp_url` | An MCP HTTP URL outside `mcp_urls` | The server would connect there |
 
 A path that does not exist is refused like one outside the roots, so a
-client cannot probe the server's file system. Two changes are made
+client cannot probe the server's file system. Three changes are made
 silently instead:
 
 - Without `exec_tools`, the config's `bash` is turned off and the agent opens
@@ -347,6 +350,8 @@ silently instead:
   its contract differs from the same config on stdio.
 - The workspace, the project root and the config directory are replaced by
   the canonical paths that were checked.
+- A Postgres store without `max_connections` gets the default pool size or
+  the tenant's `max_pool_connections`, whichever is smaller.
 
 ---
 

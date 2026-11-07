@@ -12,7 +12,7 @@ the server; it calls back into the client only for host tools and for the
 callbacks the client declared.
 
 The protocol itself is specified in the crate docs of `linch-rpc`
-(`crates/linch-rpc/src/lib.rs:1-372`): framing, every method, server
+(`crates/linch-rpc/src/lib.rs:1-374`): framing, every method, server
 request and notification, and the error table. This page explains how the
 code implements it, where its limits and checks live, and how to change
 it. The [server usage page](../usage/server.md) shows how to run it and
@@ -46,7 +46,7 @@ package `linch_rust` (`python/src/linch_rust/`) is a client of this server.
 ## Methods and messages
 
 Every method name is a `method::` constant (`crates/linch-rpc/src/protocol.rs:25-55`),
-and `Server::dispatch` (`crates/linch-rpc/src/server.rs:293-311`) maps each
+and `Server::dispatch` (`crates/linch-rpc/src/server.rs:297-315`) maps each
 to its handler. Params types refuse unknown fields; `OpenParams` takes
 `tools` and `callbacks` out and reads the rest as a strict `AgentConfig`
 (`crates/linch-rpc/src/protocol/open.rs:13-28`).
@@ -78,7 +78,7 @@ they never equal a client's numeric ids; a call that stops waiting sends
 ### Errors
 
 `ErrorObject` is `{code, message, data?}`; the full table is in the crate
-docs (`lib.rs:326-362`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
+docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
 
 | Codes | From |
 |---|---|
@@ -110,18 +110,18 @@ The Python client maps codes to exceptions in `_BY_CODE`
 
 ## Inside a connection
 
-Each connection is one `Server` (`server.rs:53-78`): its tables of open
+Each connection is one `Server` (`server.rs:53-79`): its tables of open
 agents, driven runs and parked runs under one lock, so `agent.close` cannot
 miss a run that starts while it checks; its outbox; its peer for server
 requests; and its tenant, `None` for a local client.
 
-1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:83-108`)
-   frames a byte stream into lines; `serve_messages` (`connection.rs:125-148`)
-   takes one message per frame. Both hand `Inbound` items (`connection.rs:151-159`)
-   to `connection` (`connection.rs:161-219`), which spawns the writer task,
+1. **Transport.** `serve_lines` (`crates/linch-rpc/src/server/connection.rs:84-109`)
+   frames a byte stream into lines; `serve_messages` (`connection.rs:127-150`)
+   takes one message per frame. Both hand `Inbound` items (`connection.rs:153-161`)
+   to `connection` (`connection.rs:163-221`), which spawns the writer task,
    runs the login when access is `Login`, and reads until the input ends
    or `stop` fires.
-2. **Read loop.** `Server::receive` (`server.rs:170-206`) parses a line,
+2. **Read loop.** `Server::receive` (`server.rs:174-210`) parses a line,
    hands a client's answer to the server request it names, and reads
    anything else as a request (`Request::from_value`,
    `crates/linch-rpc/src/message.rs:108`). A request without an `id` is a
@@ -129,7 +129,7 @@ requests; and its tenant, `None` for a local client.
    (`MAX_REQUESTS`, `server.rs:49`); the loop awaits it, so the 65th
    request stops reading until a call ends. The call runs in its own task,
    so a slow `agent.open` never holds up a `run.cancel`.
-3. **Dispatch.** `Server::handle` (`server.rs:264-291`) catches a panic as
+3. **Dispatch.** `Server::handle` (`server.rs:268-295`) catches a panic as
    `-32603`. A run method returns its stream: the `RunAccepted` result is
    queued first, then a task drives the stream.
 4. **A run.** `Server::drive` (`run.rs:159-196`) encodes each envelope once,
@@ -137,14 +137,14 @@ requests; and its tenant, `None` for a local client.
    removes the run from the tables (keeping its place when it parked, see
    [limits](#limits)) and queues `run.end`. A run's panic ends it with
    `-32603`, at its last durable state.
-5. **Writer.** `write_messages` (`connection.rs:223-252`) takes everything
+5. **Writer.** `write_messages` (`connection.rs:225-254`) takes everything
    already queued, joins consecutive envelopes of one run into one
    `run.event` (`Batch::push`, `crates/linch-rpc/src/server/outgoing.rs:74-83`)
    up to 64 KiB (`outgoing.rs:21`), and flushes once nothing waits.
 6. **Server requests.** `Peer::call` (`peer.rs:92-139`) queues the request
    and waits for its answer, its timeout or its cancel; waiting for room in
    the outbox counts against both.
-7. **End of input.** `Server::stop` (`server.rs:149-168`) lets the calls
+7. **End of input.** `Server::stop` (`server.rs:153-172`) lets the calls
    already read finish, drops every run where it stands (a durable run stays
    resumable), fails the waiting server requests, then closes every agent's
    MCP servers. The writer drains the queue and the connection returns.
@@ -152,7 +152,7 @@ requests; and its tenant, `None` for a local client.
 ### Ordering
 
 - A run's `RunAccepted` is queued before the task that drives it is
-  spawned (`server.rs:277-288`), so it reaches the client before any
+  spawned (`server.rs:281-292`), so it reaches the client before any
   notification of that run. The Python client relies on it: it files a
   run's notifications under the run id it read from that result
   (`python/src/linch_rust/_rpc.py:254-265`).
@@ -192,7 +192,7 @@ There is no buffer that grows without bound on the server:
    its answer (`python/src/linch_rust/run.py:102-121`); a run nobody reads
    while its events keep coming stalls the connection.
 
-`Outbox::send_now` (`connection.rs:267-277`), for code that cannot wait,
+`Outbox::send_now` (`connection.rs:269-279`), for code that cannot wait,
 hands a message to a task when the queue is full.
 
 ## Transports
@@ -214,7 +214,7 @@ supervisor's other readers. Anything that is not a pipe uses tokio's
 **Unix socket.** A socket file left by a stopped server is replaced, and
 one a server answers on is refused (`bind_socket`, `listen.rs:105-122`).
 Each connection waits for its login with one of 32 places
-(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:125-129`): each may
+(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:135-139`): each may
 buffer a 16 MiB line for 10 s, so the places bound that to 512 MiB. One
 more gets `-32005` at once. A login has 10 s (`LOGIN_TIMEOUT`,
 `login.rs:17`); silence past it gets `-32003` and the connection closes
@@ -232,7 +232,8 @@ tenant in `Linch-Tenant`. A WebSocket message may be 64 MiB
 16 MiB is refused by the core like an oversized line. The server speaks
 plain HTTP: put TLS in front of it or listen on loopback.
 
-All listeners of one server share one `PgPools` (`listen.rs:77-101`).
+All listeners of one server share one `PgPools` (`listen.rs:77-101`) for
+local clients; a tenant's connections use the tenant's own (below).
 
 ## Tenants and allowlists
 
@@ -241,64 +242,73 @@ config, refusing unknown fields and a cap of 0; `tokens`
 (`config.rs:187`) reads each token inline or from the environment;
 `AllowConfig::build` (`config.rs:220`) makes the `Allowlists`.
 
-- A `Tenant` (`access.rs:40-115`) has a name of 1 to 64 ASCII letters,
+- A `Tenant` (`access.rs:41-125`) has a name of 1 to 64 ASCII letters,
   digits, `.`, `_` or `-` (never `/`), its allowlists, and one semaphore
   each for runs, agents and connections, shared by all its connections.
-- `Tokens` (`access.rs:131-196`) keep each token as a SHA-256 digest and
+- `Tokens` (`access.rs:141-206`) keep each token as a SHA-256 digest and
   compare a presented one with every digest in constant time. No token is
   logged or echoed.
-- `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-113`) checks an
+- `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-136`) checks an
   `agent.open` config before anything starts: no key is read, no MCP
   process started, no database connected for a refused one. Each refusal is
   `-32004` with `data.kind`:
 
 | Check | `kind` | Where |
 |---|---|---|
-| The namespace is the tenant's name or starts with `<tenant>/` | `namespace` | `admit.rs:26-36` |
-| The scripted provider only if allowed; a client-chosen `base_url` only at an allowed origin, since the server's key goes there | `provider`, `provider_base_url` | `admit.rs:131-147`, `admit.rs:218-232` |
-| The permission mode is in the tenant's list; `tasks` and `deep_agent`, which auto-allow the task tools, need `skip_dangerous` there | `permission_mode`, `auto_allow` | `admit.rs:39-57` |
-| `auto_allow` entries and rules that allow only when the tenant's modes include `skip_dangerous` | `auto_allow`, `permission_rule` | `admit_grants`, `admit.rs:188-212` |
-| `project_root` and `workspace` are existing directories under an allowed root, replaced by their canonical paths | `project_root`, `workspace` | `admit.rs:58-70`, `admit_dir` at `admit.rs:149-158` |
-| With skills or subagents on, the config directory is an existing directory under an allowed root, or the default `.linch` there or missing | `config_dir` | `admit.rs:71-75`, `admit.rs:160-186` |
-| `Bash` only when the tenant allows exec tools; otherwise it is turned off, not refused | none | `admit.rs:76` |
-| A Postgres DSN only for an allowed target | `postgres` | `admit.rs:77-83` |
-| An MCP stdio server only with an entry's `command` and `args`, setting only the `env` names it lists; an MCP URL only at an allowed origin | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:84-111` |
+| The namespace is the tenant's name or starts with `<tenant>/` | `namespace` | `admit.rs:28-38` |
+| The scripted provider only if allowed; a client-chosen `base_url` only at an allowed origin, since the server's key goes there | `provider`, `provider_base_url` | `admit.rs:154-170`, `admit.rs:241-255` |
+| The permission mode is in the tenant's list; `tasks` and `deep_agent`, which auto-allow the task tools, need `skip_dangerous` there | `permission_mode`, `auto_allow` | `admit.rs:41-59` |
+| `auto_allow` entries and rules that allow only when the tenant's modes include `skip_dangerous` | `auto_allow`, `permission_rule` | `admit_grants`, `admit.rs:211-235` |
+| `project_root` and `workspace` are existing directories under an allowed root, replaced by their canonical paths | `project_root`, `workspace` | `admit.rs:60-72`, `admit_dir` at `admit.rs:172-181` |
+| With skills or subagents on, the config directory is an existing directory under an allowed root, or the default `.linch` there or missing | `config_dir` | `admit.rs:73-77`, `admit.rs:183-209` |
+| `Bash` only when the tenant allows exec tools; otherwise it is turned off, not refused | none | `admit.rs:78` |
+| A Postgres DSN only for an allowed target | `postgres` | `admit.rs:79-89` |
+| `stores.max_connections` at most the tenant's `max_pool_connections` (default: the server's default pool size); absent, it is set to the default or the cap, whichever is smaller | `pool_connections`, with `data.max` the cap | `admit.rs:90-105` |
+| An MCP stdio server only with an entry's `command` and `args`, setting only the `env` names it lists; an MCP URL only at an allowed origin | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |
 
 A run method's `principal`, when given, must name the tenant
-(`admit_principal`, `admit.rs:115-129`); the server does not fill one in.
+(`admit_principal`, `admit.rs:138-152`); the server does not fill one in.
 
-**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:134-171`)
+**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:137-174`)
 reads a DSN the way the store connects with it, through sqlx's
 `PgConnectOptions`, so a `?host=` or `?user=` override counts and a missing
 user or `sslmode` takes the server's default. An entry allows a DSN with
 the same host, port, socket, database, user, startup `options` and TLS
 files, and an `sslmode` at least as strict as its own, ranked from
-`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:173-194`).
+`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:176-197`).
 
-The facade shares one pool per target across a server's connections
-(`crates/linch/src/pools.rs:19-38`). Its key (`pools.rs:44-73`) is sqlx's
+The facade shares one pool per target among the agents opened with one
+`PgPools` (`crates/linch/src/pools.rs:19-39`). A `Tenant` owns one
+(`access.rs:54`, `access.rs:77`) and `Server::new` gives a tenant's
+connection that one instead of the process's (`server.rs:136`), so pools
+are keyed by tenant and target: two tenants on one target never share a
+pool, and one tenant cannot set the size of another's (R3 front 5). Every
+connection of one tenant shares its pools, so `max_pool_connections` bounds
+the tenant's connections on each target. Local (stdio) connections keep
+the process's pools. Its key (`pools.rs:45-74`) is sqlx's
 normalized URL of the DSN plus its startup `options`, which that URL leaves
 out and which can set the `search_path`; DSNs that differ only in parameter
 order or in settings sqlx ignores share a pool. A pool takes its size from
-the open that connected it (`pools.rs:93-109`); the connect gives up after
-5 s and the migrations after 30 s (`pools.rs:136-154`).
+the open that connected it (`pools.rs:94-112`); the connect gives up after
+5 s and the migrations after 30 s (`pools.rs:146-164`).
 
-**MCP commands.** An `McpCommand` (`allowlists.rs:51-71`) may not list
+**MCP commands.** An `McpCommand` (`allowlists.rs:54-74`) may not list
 `PATH`, `HOME` or the variables known to choose what code a program loads
-(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:73-110`). The list is
+(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:76-113`). The list is
 best effort.
 
 ## Limits
 
 | Limit | Value | Where | Past it |
 |---|---|---|---|
-| `max_connections` per tenant | 8 unless set (`allowlists.rs:23`) | `Tenant::connect` (`access.rs:87-104`); the connection holds the place until it ends (`connection.rs:177-188`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
-| `max_runs` per tenant | 16 unless set (`allowlists.rs:16`) | `run_place`, taken in `start` and `claim` (`run.rs:152-157`) and held by the driven run | `-32005`, nothing starts |
-| `max_agents` per tenant | 16 unless set (`allowlists.rs:28`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:103-110`) | `-32005`, before any MCP server starts |
+| `max_pool_connections` per tenant | `linch_postgres::default_max_connections()` unless set (`allowlists.rs:275-278`) | `Tenant::admit` (`admit.rs:90-105`), before anything connects | `-32004`, `kind: pool_connections`, `max` the cap |
+| `max_connections` per tenant | 8 unless set (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:92-109`); the connection holds the place until it ends (`connection.rs:179-190`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
+| `max_runs` per tenant | 16 unless set (`allowlists.rs:17`) | `run_place`, taken in `start` and `claim` (`run.rs:152-157`) and held by the driven run | `-32005`, nothing starts |
+| `max_agents` per tenant | 16 unless set (`allowlists.rs:29`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:104-111`) | `-32005`, before any MCP server starts |
 | Calls in flight per connection | 64 | `server.rs:49` | Reading waits |
-| Logins waiting | 32 per `Tokens` | `access.rs:125-129` | `-32005` `kind: logins`, then close |
+| Logins waiting | 32 per `Tokens` | `access.rs:135-139` | `-32005` `kind: logins`, then close |
 | HTTP upgrades waiting | 32 per server | `http.rs:39-44` | Closed unread |
-| One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:231-250`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
+| One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:235-254`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
 | Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:37` | The login gets `-32003`, then the connection closes; the HTTP connection closes |
 
 A local (stdio) connection has none of the tenant caps.
@@ -336,9 +346,9 @@ and `close`, `close_session` and `events` (`agent.py:159-201`).
 | 1. Name it | A `method::` constant in `protocol.rs:25-55` | Nothing; every other step uses it |
 | 2. Its params and result | `protocol.rs` or a `protocol/` file, with `deny_unknown_fields` and doc comments | `-32602` for an unknown field only if the type refuses them |
 | 3. The handler | An `impl Server` method in `server/agents.rs` or `server/run.rs`. Run the tenant checks (`admit_principal`, a place) before anything else, and return `Reply::Run` for a run | Tests in `crates/linch-rpc/tests/tenants.rs` and `limits.rs` for its checks |
-| 4. Dispatch | An arm in `Server::dispatch` (`server.rs:293-311`) | `-32601` at run time |
+| 4. Dispatch | An arm in `Server::dispatch` (`server.rs:297-315`) | `-32601` at run time |
 | 5. Errors | A new code in `error.rs` with its conversion | `crates/linch-rpc/tests/wire.rs` for the wire shape |
-| 6. The protocol document | The method in the crate docs' Methods section, a new code in its table (`lib.rs:118-244`, `lib.rs:326-362`) | Review only |
+| 6. The protocol document | The method in the crate docs' Methods section, a new code in its table (`lib.rs:118-246`, `lib.rs:328-364`) | Review only |
 | 7. The Rust client | Nothing: `Client::call` is generic. A typed helper in `crates/linch-rpc/tests/common/mod.rs` if tests need one | Compilation of the tests |
 | 8. The Python client | A method on `Agent` (`agent.py`), and for a new code an exception in `errors.py` and its `_BY_CODE` entry | `python/tests/test_protocol.py` |
 | 9. Usage docs | `docs/usage/server.md` and the Python pages that call it | Review only |
@@ -428,7 +438,7 @@ delivered:
 | A library in the host's process; nothing crosses a wire | A sidecar a client drives over JSON-RPC, or the same kernel embedded in Rust |
 | Host tools and hooks are Python callables | A remote client's tools and callbacks are `tool.call` and `hook.call` requests, each with a timeout and, for a callback, a fail mode |
 | The host process is trusted | stdio is trusted; the socket and HTTP act for a tenant, with tokens, allowlists and caps |
-| Each agent connects its own store | Agents on one Postgres DSN share one pool across a server's connections |
+| Each agent connects its own store | Agents on one Postgres target share one pool across a server's connections, per tenant |
 | `reload_skills()` and `reload_subagents()` on the agent | Not RPC methods at this revision; the core and facade have them ([reload](./skills-subagents.md#catalog-and-reload)) |
 
 ## Tests

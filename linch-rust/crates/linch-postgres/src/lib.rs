@@ -13,9 +13,9 @@
 //!
 //! ```no_run
 //! # async fn start(dsn: &str) -> Result<(), Box<dyn std::error::Error>> {
-//! use linch_postgres::{CONNECT_TIMEOUT, MAX_CONNECTIONS};
+//! use linch_postgres::{CONNECT_TIMEOUT, default_max_connections};
 //!
-//! let pool = linch_postgres::connect(dsn, CONNECT_TIMEOUT, MAX_CONNECTIONS).await?;
+//! let pool = linch_postgres::connect(dsn, CONNECT_TIMEOUT, default_max_connections()).await?;
 //! linch_postgres::migrate(&pool).await?;
 //! let runs = linch_postgres::PgRunStore::new(pool.clone());
 //! let sessions = linch_postgres::PgSessionStore::new(pool);
@@ -41,6 +41,7 @@ use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 mod codec;
 mod files;
 mod mailbox;
+mod pool_size;
 mod run;
 mod session;
 mod tasks;
@@ -48,6 +49,7 @@ mod tasks;
 pub use codec::CodecError;
 pub use files::PgFileBackend;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
+pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};
 pub use run::PgRunStore;
 pub use session::PgSessionStore;
 pub use sqlx::PgPool;
@@ -61,10 +63,6 @@ pub const MIGRATIONS_TABLE: &str = "linch_migrations";
 
 /// How long [`connect`] waits for the first connection by default.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The most connections a [`connect`] pool opens by default (sqlx's own
-/// default).
-pub const MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::new(10).unwrap();
 
 /// How long a connection sits idle in a [`connect`] pool before the pool
 /// pings it on its way out.
@@ -93,7 +91,7 @@ pub const IDLE_PING_AFTER: Duration = Duration::from_secs(1);
 ///     dsn: Connection string, for example `postgres://user:pass@host/db`.
 ///     timeout: Longest wait for the first connection.
 ///     max_connections: The most connections the pool opens at once
-///         ([`MAX_CONNECTIONS`] unless the host needs more).
+///         ([`default_max_connections`] unless the host needs more).
 ///
 /// Returns:
 ///     A pool holding one open connection.

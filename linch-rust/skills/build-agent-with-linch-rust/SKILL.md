@@ -127,7 +127,9 @@ A test that replaces the part you depend on proves nothing about that part. Fake
   sidecars cut the overhead per turn three to seven times against one, from 100 to 2000 sessions.
 - For many processes, machines or tenants, run one multi-threaded `linch-server --config FILE`
   and use `Server.connect`. A tenant drives 16 runs at once unless `max_runs` is raised.
-- A server process has one Postgres pool per DSN of `stores.max_connections` (10 when absent).
+- A server process has one Postgres pool per target (per tenant on a listening server) of
+  `stores.max_connections`: when absent, the machine's cores between 10 and 32. A tenant may
+  ask for at most its `max_pool_connections`.
   Plan two connections per run in flight, and keep the sum over sidecars under the database's
   limit (`usage/stores.md`). Measure your own load before and after.
 
