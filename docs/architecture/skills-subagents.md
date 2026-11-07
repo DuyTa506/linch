@@ -87,7 +87,7 @@ tokens while retaining workers; `coordinator` has the same bounds and strips
 heavy tools from the parent. `unbounded` is an explicit escape hatch for a
 host that owns equivalent lifetime and cost controls.
 
-- **`coordinator=True`** — the parent agent strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` is injected via `SystemPromptConfig`; `TaskStopTool` is registered on the coordinator. Worker subagents receive full tool access via `build_child_tools`.
+- **`coordinator=True`** — the parent agent strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` is injected via `SystemPromptConfig`; `TaskStopTool` is registered on the coordinator. Worker subagents receive the worker registry via `build_child_tools`, which strips the orchestration tools (`Subagent`, `SubagentContinue`, `TaskStop`): a worker has no workers of its own to continue or stop.
 - **`durable=True`** — requires explicit session/run stores and an explicit filesystem when enabled. Supply `PostgresSessionStore`, `PostgresRunStore`, and a `CompositeFileBackend` with a `/memories` route to `PostgresFileBackend` for restart durability. An active detached worker task is process-local and is not reconstructed after a crash.
 
 ### Background workers and fork/continue

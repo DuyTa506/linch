@@ -93,7 +93,7 @@ hạn một run ở 64 lượt và 1.000.000 token, đồng thời giữ lại c
 `unbounded` là lựa chọn tường minh để bỏ các giới hạn này cho ứng dụng chủ đã tự
 quản lý vòng đời và chi phí bằng các cơ chế tương đương.
 
-- **`coordinator=True`** — agent cha loại bỏ các tool nặng (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` được chèn qua `SystemPromptConfig`; `TaskStopTool` được đăng ký trên coordinator. Các subagent worker nhận toàn bộ quyền truy cập tool qua `build_child_tools`.
+- **`coordinator=True`** — agent cha loại bỏ các tool nặng (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` được chèn qua `SystemPromptConfig`; `TaskStopTool` được đăng ký trên coordinator. Các subagent worker nhận registry của worker qua `build_child_tools`, hàm này loại bỏ các tool điều phối (`Subagent`, `SubagentContinue`, `TaskStop`): một worker không có worker riêng nào để tiếp tục hay dừng.
 - **`durable=True`** — yêu cầu cung cấp tường minh các kho lưu trữ session/run và một filesystem tường minh khi được bật. Cung cấp `PostgresSessionStore`, `PostgresRunStore` và một `CompositeFileBackend` có tuyến `/memories` đến `PostgresFileBackend` để dữ liệu tồn tại sau khi khởi động lại. Một tác vụ worker tách rời đang hoạt động chỉ tồn tại trong tiến trình và không được dựng lại sau khi tiến trình gặp sự cố.
 
 ### Worker chạy nền và fork/continue
