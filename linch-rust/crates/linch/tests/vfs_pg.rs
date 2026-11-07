@@ -116,3 +116,60 @@ async fn the_sessions_of_a_namespace_share_its_postgres_files() {
     opened.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn an_offloaded_result_outlives_the_agent_and_stays_out_of_the_workspace() {
+    let Some(db) = TestDb::empty("vfs_offload").await else {
+        return;
+    };
+    let workspace = tempfile::tempdir().unwrap();
+    let body: Vec<String> = (1..=200).map(|n| format!("line {n}")).collect();
+    std::fs::write(workspace.path().join("big.txt"), body.join("\n")).unwrap();
+    let open = |turns: Vec<Value>| {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "namespace": "p10a-tenant",
+            "spec": {"model": MODEL},
+            "provider": {"id": "scripted", "turns": turns},
+            "stores": {"type": "postgres", "dsn": db.dsn},
+            "permissions": {"mode": "accept_edits", "project_root": "/"},
+            "workspace": workspace.path(),
+            "filesystem": {"offload_threshold_tokens": 10},
+        }))
+        .unwrap();
+        config.open()
+    };
+    let turns = vec![
+        call("call_1", "Read", json!({"file_path": "big.txt"})),
+        text("Read."),
+    ];
+    let opened = open(turns).await.unwrap();
+    let pointer = tool_result(opened.agent(), "s1").await;
+    assert!(pointer.contains("/offload/Read_call_1.txt"), "{pointer}");
+    opened.close().await;
+    let path = "/offload/Read_call_1.txt";
+    assert_eq!(
+        db.files().await,
+        [("p10a-tenant".to_owned(), path.to_owned())]
+    );
+    let names: Vec<_> = std::fs::read_dir(workspace.path()).unwrap().collect();
+    assert_eq!(
+        names.len(),
+        1,
+        "only big.txt is in the workspace: {names:?}"
+    );
+
+    // A second agent, as another process would be, reads it back.
+    let turns = vec![
+        call(
+            "call_2",
+            "read_file",
+            json!({"path": path, "offset": 150, "limit": 1}),
+        ),
+        text("Read."),
+    ];
+    let opened = open(turns).await.unwrap();
+    let back = tool_result(opened.agent(), "s2").await;
+    assert!(back.contains("line 150"), "{back}");
+    opened.close().await;
+    db.drop().await;
+}
