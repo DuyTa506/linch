@@ -1,5 +1,7 @@
 # linch-rust architecture
 
+[Tiếng Việt](../vi/architecture/README.md)
+
 Developer reference for linch-rust, the Rust port of the Linch agent kernel.
 It describes the contracts, data flow and invariants of each crate, and how
 to extend them in Rust. It is for people who maintain linch-rust or add
