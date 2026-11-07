@@ -15,11 +15,12 @@ class AgentRegistry:
         self._map: dict[str, AgentDefinition] = {}
         disk_keys = {agent.name.lower() for agent in disk_agents}
 
-        visible_built_ins = [
-            agent
+        # Extra built-ins override core built-ins of the same name (last wins).
+        built_ins = {
+            agent.name.lower(): agent
             for agent in [*BUILT_IN_NAMED_AGENTS, *(extra_built_ins or [])]
-            if agent.name.lower() not in disk_keys
-        ]
+        }
+        visible_built_ins = [agent for key, agent in built_ins.items() if key not in disk_keys]
 
         for agent in visible_built_ins:
             self._map[agent.name.lower()] = agent

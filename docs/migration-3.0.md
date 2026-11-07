@@ -416,6 +416,12 @@ See [Events](usage/events.md), [Agent & session](usage/agent.md), and
 [Compaction architecture](architecture/compaction.md) for the operational
 details.
 
+## Tool, hook, and subagent fixes
+
+- `AgentRegistry` lists each subagent name once; extra built-ins (such as the
+  deep-agent `verification`) override the core built-in of the same name, so the
+  `Subagent` tool description no longer shows duplicates.
+
 ## Internal cleanup for adapter maintainers
 
 Adapter code must target the current wire-generation-3 contracts. Persisted
