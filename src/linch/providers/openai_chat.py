@@ -350,7 +350,10 @@ def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dic
                         {
                             "id": b.id,
                             "type": "function",
-                            "function": {"name": b.name, "arguments": json.dumps(b.input)},
+                            "function": {
+                                "name": b.name,
+                                "arguments": json.dumps(b.input, ensure_ascii=False),
+                            },
                         }
                     )
             entry: dict[str, Any] = {

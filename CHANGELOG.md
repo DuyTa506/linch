@@ -5,6 +5,14 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+### Fixed
+
+- OpenAI-compatible providers replay tool-call arguments as UTF-8 literal JSON
+  (`ensure_ascii=False`) instead of `\uXXXX` escapes, so non-ASCII arguments keep their
+  form and token count across turns.
+
 ## 3.1.3 — 2026-11-07
 
 ### Changed (breaking)
