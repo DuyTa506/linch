@@ -407,3 +407,29 @@ async def test_stream_normalizes_empty_tool_arguments(
     assert json.loads(raw_input) == {}
     assert sum(event["type"] == "tool_use_end" for event in events) == 1
     assert events[-1]["stop_reason"] == "tool_use"
+
+
+def test_replayed_tool_call_arguments_keep_non_ascii_literal() -> None:
+    """Tool-call arguments replayed in history must stay UTF-8 literal, not \\uXXXX-escaped."""
+    import json
+
+    from linch.providers.openai_chat import _build_chat_payload
+    from linch.types import Message, TextBlock, ToolUseBlock
+
+    args = {"room_name": "Phòng họp B2", "note": "東京"}
+    req = ProviderRequest(
+        model="m",
+        system=[],
+        tools=[],
+        messages=[
+            Message(role="user", content=[TextBlock(text="đặt phòng")]),
+            Message(
+                role="assistant", content=[ToolUseBlock(id="c1", name="room_reserve", input=args)]
+            ),
+        ],
+    )
+    payload = _build_chat_payload(req)
+    call = next(m for m in payload["messages"] if m.get("tool_calls"))["tool_calls"][0]
+    raw = call["function"]["arguments"]
+    assert "\\u" not in raw
+    assert json.loads(raw) == args
