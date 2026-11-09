@@ -5,6 +5,14 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+### Fixed
+
+- `AskUser` no longer fails with "questions entries must be objects" whenever any hook is registered:
+  `AskUserTool.validate` is now idempotent, so the scheduler's re-validation after `PreToolUse`
+  accepts already-validated questions.
+
 ## 3.1.3 — 2026-11-07
 
 ### Changed (breaking)

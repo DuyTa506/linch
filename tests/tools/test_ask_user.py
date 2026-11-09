@@ -204,3 +204,57 @@ async def test_ask_user_times_out_to_declined() -> None:
     tool = AskUserTool(handler, timeout_s=0.05)
     result = await tool.execute(tool.validate(_input()), _ctx())
     assert result.summary == "User declined AskUser"
+
+
+@pytest.mark.asyncio
+async def test_ask_user_validate_is_idempotent() -> None:
+    from linch.tools import AskUserTool
+
+    tool = AskUserTool(lambda req, ctx: None)
+    once = tool.validate(_input())
+    assert tool.validate(once) == once
+
+
+@pytest.mark.asyncio
+async def test_ask_user_works_when_any_hook_is_registered() -> None:
+    """A registered hook triggers re-validation after PreToolUse; AskUser must survive it."""
+    from linch import (
+        Agent,
+        AskUserPlugin,
+        AskUserResponse,
+        FeatureFlags,
+        InMemorySessionStore,
+        empty_tools,
+    )
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+
+    class NoopHook:
+        def on_before_provider_call(self, ctx):
+            return None
+
+    calls = []
+
+    def handler(req, ctx):
+        calls.append(req)
+        return AskUserResponse(accepted=True, answers={"mode": "Fast"})
+
+    agent = Agent(
+        model="scripted",
+        provider=ScriptedProvider(
+            [ToolUseTurn(tool_name="AskUser", tool_input=_input()), TextTurn(text="done")]
+        ),
+        tools=empty_tools(),
+        hooks=[NoopHook()],
+        session_store=InMemorySessionStore(),
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        permissions={"mode": "skip-dangerous"},
+    )
+    await agent.use(AskUserPlugin(), handler)
+    try:
+        session = await agent.session()
+        events = [ev async for ev in session.run("hi")]
+    finally:
+        await agent.close()
+    ends = [ev for ev in events if ev.type == "tool_call_end"]
+    assert calls, "AskUser handler was never reached"
+    assert ends and not ends[0].is_error, ends
