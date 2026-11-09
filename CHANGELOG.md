@@ -9,9 +9,13 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ### Fixed
 
+
 - OpenAI-compatible providers replay tool-call arguments as UTF-8 literal JSON
   (`ensure_ascii=False`) instead of `\uXXXX` escapes, so non-ASCII arguments keep their
   form and token count across turns.
+- `AskUser` no longer fails with "questions entries must be objects" whenever any hook is registered:
+  `AskUserTool.validate` is now idempotent, so the scheduler's re-validation after `PreToolUse`
+
 
 ## 3.1.3 — 2026-11-07
 
