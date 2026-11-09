@@ -269,7 +269,12 @@ class AskUserTool:
         questions_raw = raw.get("questions")
         if not isinstance(questions_raw, list) or not 1 <= len(questions_raw) <= 4:
             raise ValueError("AskUser requires 1-4 questions")
-        questions = [_question_from_raw(item) for item in questions_raw]
+        # Idempotent: the scheduler re-validates after PreToolUse when hooks are
+        # registered, so already-validated questions must pass through unchanged.
+        questions = [
+            item if isinstance(item, AskUserQuestion) else _question_from_raw(item)
+            for item in questions_raw
+        ]
         ids = [question.id for question in questions]
         if len(ids) != len(set(ids)):
             raise ValueError("question ids must be unique")
