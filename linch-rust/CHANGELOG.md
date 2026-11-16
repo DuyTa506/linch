@@ -123,6 +123,11 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   prices a model with, replacing the published table for it or adding a model
   the table lacks, such as one a local server serves. Without it a model the
   table does not list costs `None`, as in Python.
+- Eval scorer `cost_under` (`budget_usd`): passes when the run's total cost is
+  below the budget, unknown when it has none. Python's `cost_under`.
+- Eval results report each case's `run_id`, `total_cost_usd`, `usage` and
+  `duration_ms` and the same totals for the whole eval; the Markdown report has
+  a Cost USD column, as Python's does.
 
 ### Changed
 

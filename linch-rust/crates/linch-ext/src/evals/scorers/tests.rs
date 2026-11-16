@@ -299,3 +299,30 @@ async fn tool_scorers_read_a_real_run_and_keep_duplicate_names() {
     assert!(!case.passed);
     assert_eq!(case.error, None);
 }
+
+fn costing(usd: Option<f64>) -> Event {
+    let Event::Result(mut result) = result(ResultSubtype::Success) else {
+        unreachable!()
+    };
+    result.total_cost_usd = usd;
+    Event::Result(result)
+}
+
+/// Python's `cost_under`: strictly below the budget; unknown without a
+/// result or when the run has no cost.
+#[test]
+fn cost_under_passes_strictly_below_the_budget() {
+    let under = Scorer::CostUnder { budget_usd: 0.5 };
+    assert_eq!(under.name(), "cost_under:0.5");
+    assert_eq!(
+        Scorer::CostUnder { budget_usd: 1.0 }.name(),
+        "cost_under:1.0"
+    );
+    assert_eq!(score(&under, vec![costing(Some(0.25))]), Some(true));
+    assert_eq!(score(&under, vec![costing(Some(0.5))]), Some(false));
+    assert_eq!(score(&under, vec![costing(Some(0.75))]), Some(false));
+    assert_eq!(score(&under, vec![costing(None)]), None);
+    assert_eq!(score(&under, vec![start("c1", "Probe")]), None);
+    let wire = json!({"type": "cost_under", "budget_usd": 0.5});
+    assert_eq!(serde_json::from_value::<Scorer>(wire).unwrap(), under);
+}
