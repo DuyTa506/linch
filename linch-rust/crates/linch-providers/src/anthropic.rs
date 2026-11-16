@@ -236,7 +236,16 @@ impl Provider for Anthropic {
         );
         let key = &self.options.api_key;
         let beta = native.then_some(catalog::BETA);
-        let response = http::post(&self.client, &url, key, &body, beta, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            key,
+            !self.options.request.sets_key_header(),
+            &body,
+            beta,
+            &cancel,
+        )
+        .await?;
         let translator = stream::Translator::new(request.model, key.clone());
         Ok(stream::events(
             response.bytes_stream(),

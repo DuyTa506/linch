@@ -204,3 +204,42 @@ async fn a_timeout_ends_a_call_that_the_server_never_answers() {
     assert!(matches!(result, Err(ProviderError::Transport { .. })));
     assert!(started.elapsed() < Duration::from_secs(4));
 }
+
+#[tokio::test]
+async fn a_key_header_from_the_caller_replaces_the_provider_key() {
+    let (url, handle) = serve_once(bad_request());
+    let mut o = OpenAiChatOptions::new(key());
+    o.base_url = url;
+    o.request = RequestOptions::default()
+        .header("Authorization", "Bearer gw-token")
+        .unwrap();
+    let (head, _) = sent(&OpenAiChat::new(o).unwrap(), handle, request("m")).await;
+    assert_eq!(head.matches("authorization:").count(), 1, "{head}");
+    assert!(
+        head.contains("bearer gw-token") && !head.contains("sk-test-key"),
+        "{head}"
+    );
+
+    let (url, handle) = serve_once(bad_request());
+    let mut o = AnthropicOptions::new(key());
+    o.base_url = url;
+    o.request = RequestOptions::default()
+        .header("x-api-key", "gw-token")
+        .unwrap();
+    let (head, _) = sent(&Anthropic::new(o).unwrap(), handle, request("m")).await;
+    assert_eq!(head.matches("x-api-key:").count(), 1, "{head}");
+    assert!(
+        head.contains("gw-token") && !head.contains("sk-test-key"),
+        "{head}"
+    );
+
+    let (url, handle) = serve_once(bad_request());
+    let mut o = GeminiOptions::new(key());
+    o.base_url = url;
+    o.request = RequestOptions::default()
+        .header("x-goog-api-key", "gw-token")
+        .unwrap();
+    let (head, _) = sent(&Gemini::new(o).unwrap(), handle, request("m")).await;
+    assert_eq!(head.matches("x-goog-api-key:").count(), 1, "{head}");
+    assert!(!head.contains("sk-test-key"), "{head}");
+}

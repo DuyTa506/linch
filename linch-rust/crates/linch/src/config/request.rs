@@ -25,11 +25,11 @@ pub struct RequestConfig {
     /// adapter sets, except `model`, `stream` and `temperature`.
     #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
     pub extra_body: JsonObject,
-    /// Headers sent with every request, for gateways. The key headers
-    /// (`authorization`, `x-api-key`, `x-goog-api-key`) are refused, since
-    /// the key comes from the environment, and so are `host`,
-    /// `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`
-    /// and `trailer`.
+    /// Headers sent with every request, for gateways. One of
+    /// `authorization`, `x-api-key` or `x-goog-api-key` replaces the
+    /// provider key: that key is then not sent and need not be set in the
+    /// environment. `host`, `content-length`, `transfer-encoding`,
+    /// `connection`, `upgrade`, `te` and `trailer` are refused.
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
@@ -46,6 +46,13 @@ pub struct RequestConfig {
 impl RequestConfig {
     pub(super) fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// Whether a header replaces the provider key.
+    pub fn sets_key_header(&self) -> bool {
+        const NAMES: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
+        (self.default_headers.keys())
+            .any(|name| NAMES.contains(&name.to_ascii_lowercase().as_str()))
     }
 
     /// The options an adapter takes.
