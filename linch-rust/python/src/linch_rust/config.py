@@ -11,7 +11,7 @@ are documented in the `linch` crate's `AgentConfig`.
 # No `from __future__ import annotations`: `TypedDict` sees `Required` only in
 # evaluated annotations, and `__required_keys__` must list the three.
 from collections.abc import Mapping, Sequence
-from typing import Any, Required, TypedDict
+from typing import Any, Literal, Required, TypedDict
 
 
 class ModelRates(TypedDict, total=False):
@@ -73,6 +73,81 @@ class Filesystem(TypedDict, total=False):
 
     offload_threshold_tokens: int
     offload_threshold_fraction: float
+
+
+class LocalExecution(TypedDict):
+    """The default execution backend: `Bash` runs as the server's user.
+
+    Attributes:
+        backend: `"local"`.
+    """
+
+    backend: Literal["local"]
+
+
+class SandboxExecution(TypedDict, total=False):
+    """`Bash` under Landlock, a seccomp filter and rlimits.
+
+    Needs Linux 6.12 or later (Landlock ABI 6) and `prlimit`; the agent
+    does not open otherwise. A command reads only the workspace, its
+    session's private `HOME` (also `TMPDIR`) and system directories, writes
+    only the workspace and that home, opens no Unix socket, and cannot
+    signal the server. Every field but `backend` has a default.
+
+    Attributes:
+        backend: `"sandbox"`.
+        network: Whether commands may open network sockets; off when absent.
+        memory_bytes: Address space of each process; 2 GiB when absent.
+        max_processes: Processes a command may add to those the server's
+            user runs; 512 when absent.
+        cpu_seconds: CPU time of each process; 1800 when absent.
+        file_size_bytes: Largest file a process may write; 1 GiB when absent.
+        read_paths: Absolute paths a command may also read and execute.
+    """
+
+    backend: Required[Literal["sandbox"]]
+    network: bool
+    memory_bytes: int
+    max_processes: int
+    cpu_seconds: int
+    file_size_bytes: int
+    read_paths: Sequence[str]
+
+
+class DockerExecution(TypedDict, total=False):
+    """`Bash` in a fresh `docker run --rm` container per command.
+
+    The workspace is mounted at its own path. Every field but `backend` has
+    a default: Python Linch's limits, with the network off.
+
+    Attributes:
+        backend: `"docker"`.
+        image: The image; `python:3.12-slim` when absent.
+        docker_path: The `docker` client; found on the server's `PATH`
+            when absent.
+        network: `--network`; `none` when absent.
+        memory_bytes: `--memory`; 2 GiB when absent.
+        cpu_millis: `--cpus` in thousandths of a CPU; 2000 when absent.
+        pids_limit: `--pids-limit`; 512 when absent.
+        read_only_root: Whether the container's root is read-only.
+        tmpfs: `--tmpfs` entries.
+        user: `--user`; the server's uid and gid when absent.
+    """
+
+    backend: Required[Literal["docker"]]
+    image: str
+    docker_path: str
+    network: str
+    memory_bytes: int
+    cpu_millis: int
+    pids_limit: int
+    read_only_root: bool
+    tmpfs: Sequence[str]
+    user: str
+
+
+Execution = LocalExecution | SandboxExecution | DockerExecution
+"""Where `Bash` runs its commands; see `AgentConfig.execution`."""
 
 
 class ToolSearch(TypedDict, total=False):
@@ -487,8 +562,13 @@ class AgentConfig(TypedDict, total=False):
             `BashKill`; a relative path resolves against the server's working directory. Absent: no
             workspace tools.
         bash: Whether the workspace tools include `Bash`, which runs
-            commands as the server's user, and `BashOutput` and `BashKill`
+            commands through `execution`, and `BashOutput` and `BashKill`
             for its background commands. On when absent.
+        execution: Where `Bash` runs its commands: `{"backend": "local"}`,
+            as the server's user, when absent; a `SandboxExecution` or a
+            `DockerExecution`. A non-local backend is part of the run
+            contract. A remote tenant may name only a backend its server
+            lists, and one naming none gets the server's first.
         permissions: The mode, `project_root` and rules; see
             `Permissions`. `project_root` is required and must be an
             absolute path: path rules resolve against it. Mode `default`
@@ -531,6 +611,7 @@ class AgentConfig(TypedDict, total=False):
     stores: Mapping[str, Any]
     workspace: str
     bash: bool
+    execution: Execution
     permissions: Permissions
     mcp_servers: Sequence[Mapping[str, Any]]
     skills: bool
