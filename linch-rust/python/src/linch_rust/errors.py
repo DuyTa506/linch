@@ -66,7 +66,7 @@ class LimitReached(RpcError):
 
     @property
     def kind(self) -> str:
-        """`runs`, `connections` or `logins`."""
+        """`runs`, `agents`, `connections`, `logins`, `schedules` or `jobs`."""
         return _field(self.data, "kind")
 
     @property

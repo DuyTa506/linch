@@ -33,9 +33,11 @@ async fn a_heartbeat_skips_a_fire_while_its_last_one_is_unfinished() {
     let Some(db) = TestDb::new("beat_job").await else {
         return;
     };
-    create_schedule(&db.pool, &hourly("beat"), None)
-        .await
-        .unwrap();
+    // An interval: an hourly cron due a second ago has its next tick in the
+    // past when the test runs in the first second of an hour.
+    let mut beat = hourly("beat");
+    beat.timing = Timing::Every(Duration::from_secs(3600));
+    create_schedule(&db.pool, &beat, None).await.unwrap();
     make_due(&db, "1 second").await;
     assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
     // Its job is still queued: the next fire is skipped, not stacked.
