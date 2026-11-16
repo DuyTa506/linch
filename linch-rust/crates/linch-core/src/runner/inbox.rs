@@ -29,11 +29,23 @@ pub(super) async fn drain(
     drained.map_err(|error| StoreError::Backend(Box::new(error)).into())
 }
 
-/// The model-facing blocks of drained peer messages.
-pub(super) fn blocks(messages: &[MailboxMessage]) -> impl Iterator<Item = ContentBlock> + '_ {
+/// The model-facing blocks of drained peer messages, scrubbed like tool
+/// results: another agent wrote them, from its tool call's input.
+pub(super) fn blocks<'a>(
+    agent: &'a AgentInner,
+    messages: &'a [MailboxMessage],
+) -> impl Iterator<Item = ContentBlock> + 'a {
     messages
         .iter()
-        .map(|message| ContentBlock::text(message.render()))
+        .map(|message| ContentBlock::text(scrub(agent, message.render())))
+}
+
+/// `text` with the agent's tool-result redaction applied, if it has one.
+fn scrub(agent: &AgentInner, text: String) -> String {
+    match agent.result_redactor() {
+        Some(redactor) => redactor.text(&text).into_owned(),
+        None => text,
+    }
 }
 
 /// Ack drained `messages` whose delivery is durable. Best effort: a
@@ -79,11 +91,13 @@ impl Runner {
             };
             self.journal.stage(Event::ChildRunStatus(mark));
             if !completion.stopped {
-                notes.push(ContentBlock::text(completion.notification()));
+                // A background worker's answer, scrubbed like a foreground one.
+                let note = scrub(&self.agent, completion.notification());
+                notes.push(ContentBlock::text(note));
             }
         }
         let peers = drain(&self.agent, &self.run.session_id).await?;
-        notes.extend(blocks(&peers));
+        notes.extend(blocks(&self.agent, &peers));
         Ok((notes, peers))
     }
 

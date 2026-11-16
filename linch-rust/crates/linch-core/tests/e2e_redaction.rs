@@ -24,6 +24,7 @@ use linch_core::{
     RunStatus, RunStore, ScriptedProvider, ScriptedTurn, SessionId, SessionStore, StoreError, Tool,
     ToolContext, ToolOutput, ToolRegistry, ToolResult, ToolScope,
 };
+use linch_core::{InMemoryMailbox, Mailbox, MailboxMessage};
 use serde_json::json;
 
 const SECRET: &str = "sk-live0123456789";
@@ -338,12 +339,27 @@ impl SessionStore for Recorded {
 /// A crash at any write, before or after it lands, then a resume (or a new
 /// run when the first never started): no write ever carries the raw text,
 /// and the session ends as a clean run leaves it, but for a tool the crash
-/// interrupted.
+/// interrupted. With an `after_provider_call` hook attached the paid
+/// receipt is written before the hook runs, so that path is crashed too.
 #[tokio::test]
 async fn a_crash_at_any_write_never_stores_the_raw_text() {
+    for hooks in [Hooks::default as fn() -> Hooks, passing] {
+        crash_everywhere(hooks).await;
+    }
+}
+
+/// A pass-through `after_provider_call` hook.
+fn passing() -> Hooks {
+    let hooks = Hooks::default();
+    let pass = hook::<AfterProviderCall>("pass", |_| Ok(AfterProviderCallResponse::Continue));
+    let _ = hooks.after_provider_call.register(pass.arc()).unwrap();
+    hooks
+}
+
+async fn crash_everywhere(hooks: fn() -> Hooks) {
     let replay = || Arc::new(Replay::new(turns()));
     let clean = Arc::new(Recorded::default());
-    let agent = build(redacting(), replay(), Hooks::default(), clean.clone());
+    let agent = build(redacting(), replay(), hooks(), clean.clone());
     finish(agent.run("go", RunOptions::new("s1"))).await;
     assert!(!clean.leaked());
     let want = messages(&clean.stores, "s1").await;
@@ -353,11 +369,11 @@ async fn a_crash_at_any_write_never_stores_the_raw_text() {
             let context = format!("write {n} failing {timing:?}");
             let stores = Arc::new(Recorded::default());
             let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
-            let stream = build(redacting(), replay(), Hooks::default(), faulty)
-                .run("go", RunOptions::new("s1"));
+            let stream =
+                build(redacting(), replay(), hooks(), faulty).run("go", RunOptions::new("s1"));
             let run_id = stream.run_id().clone();
             assert!(drain(stream).await.1.is_some(), "{context}");
-            let agent = build(redacting(), replay(), Hooks::default(), stores.clone());
+            let agent = build(redacting(), replay(), hooks(), stores.clone());
             let run_id = match stores.stores.runs.load(NS, &run_id).await {
                 Ok(record) if record.status.is_terminal() => run_id,
                 Ok(_) => {
@@ -421,4 +437,29 @@ async fn a_subagent_takes_the_redaction_but_not_the_verifiers() {
         log[1],
         Message::assistant_text(format!("child says {MASK}"))
     );
+}
+
+/// A peer message was written by another agent, from its tool call's
+/// input, so it is scrubbed like a tool result before the prompt it joins
+/// is logged.
+#[tokio::test]
+async fn a_peer_message_is_scrubbed_like_a_tool_result() {
+    let mailbox = Arc::new(InMemoryMailbox::default());
+    let note = MailboxMessage::new("bob", "s1", format!("use {SECRET}"));
+    mailbox.send(note).await.unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![text_turn("ok")]));
+    let stores = Arc::new(Stores::default());
+    let agent = AgentBuilder::new(redacting())
+        .provider(provider.clone())
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .mailbox(mailbox)
+        .build()
+        .unwrap();
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let log = messages(&*stores, "s1").await;
+    assert!(log[0].text().contains(MASK), "{:?}", log[0]);
+    assert!(!leaks(&log) && !leaks(&envelopes) && !leaks(provider.requests()));
 }

@@ -77,7 +77,7 @@ pub(super) async fn new_run(
     // notice of a catalog change since the session's last run.
     let peers = inbox::drain(&agent, &session_id).await?;
     let mut prompt = prompt;
-    prompt.content.extend(inbox::blocks(&peers));
+    prompt.content.extend(inbox::blocks(&agent, &peers));
     let seen = Catalog::of_entries(&entries).map(|known| {
         let version = catalog::version(&agent);
         let change = known.change(&catalog::live(&agent, Some(&known), &Loads::default()));
