@@ -36,6 +36,7 @@ use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::policy::Principal;
 
+pub(crate) use execute::ABORTED;
 pub use execute::{CallOutcome, ExecuteOptions, ToolSink, execute};
 pub use plan::{BatchPlan, PlannedAction, PlannedCall, plan};
 

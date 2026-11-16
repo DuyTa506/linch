@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
+use super::cancel::Unpaired;
 use super::end::cut_empty;
 use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
@@ -89,6 +90,8 @@ pub(super) enum Step {
     /// Append the tool results (or stop feedback) unless `appended`, then
     /// start the next turn.
     Results { message: Message, appended: bool },
+    /// The run was cancelled: pair the session, then end it `aborted`.
+    Abort(Unpaired),
 }
 
 /// The tool calls of one response, as far as they got.
@@ -295,6 +298,10 @@ impl Runner {
                     self.turn += 1;
                     self.summary_calls = 0;
                     Some(self.turn_start().await)
+                }
+                Step::Abort(unpaired) => {
+                    self.cancelled(unpaired).await?;
+                    None
                 }
             };
             self.settle_peers(false).await;

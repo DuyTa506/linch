@@ -8,8 +8,8 @@
 //!   it. A stream-only event is never stored: it comes back at once, with the
 //!   last durable seq.
 //! - [`Journal::save`] applies the phase rule:
-//!   `Started`, `AssistantReceived` and `Compacted` (a paid summary) write
-//!   through, `AwaitingApproval` and `AwaitingInput` write through with
+//!   `Started`, `AssistantReceived`, `Compacted` (a paid summary) and
+//!   `Aborting` (a cancel's intent) write through, `AwaitingApproval` and `AwaitingInput` write through with
 //!   status `awaiting_approval` and `awaiting_input`, and
 //!   `ProviderPending`, `CompactionPending`, `ToolBatch` and `ToolResults`
 //!   are held. A held checkpoint is a snapshot: it covers only the events
@@ -202,9 +202,10 @@ impl Journal {
     ///     JournalError: If a write-through fails, or the journal is poisoned.
     pub async fn save(&mut self, checkpoint: Checkpoint) -> Result<Vec<Envelope>, JournalError> {
         let status = match checkpoint.phase {
-            Phase::Started { .. } | Phase::AssistantReceived { .. } | Phase::Compacted { .. } => {
-                None
-            }
+            Phase::Started { .. }
+            | Phase::AssistantReceived { .. }
+            | Phase::Compacted { .. }
+            | Phase::Aborting { .. } => None,
             Phase::AwaitingApproval { .. } => Some(RunStatus::AwaitingApproval),
             Phase::AwaitingInput { .. } => Some(RunStatus::AwaitingInput),
             Phase::ProviderPending { .. }
