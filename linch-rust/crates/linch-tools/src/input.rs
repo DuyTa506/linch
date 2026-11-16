@@ -86,7 +86,7 @@ impl From<FsError> for ToolOutputError {
             FsError::NotAFile { .. } => "not_a_file",
             FsError::NotADirectory { .. } => "not_a_directory",
             FsError::TooLarge { .. } => "too_large",
-            FsError::Changed { .. } => "changed",
+            FsError::Changed { .. } | FsError::ChangedWhileReading { .. } => "changed",
             FsError::InvalidQuery(_) => "invalid_query",
             FsError::Cancelled => "cancelled",
             FsError::Io { .. } => "io",

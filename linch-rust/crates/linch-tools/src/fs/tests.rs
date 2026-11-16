@@ -274,3 +274,14 @@ async fn searches_never_follow_symlinks_out_of_the_root() {
     let paths: Vec<_> = hits.iter().map(|hit| hit.path.as_str()).collect();
     assert_eq!(paths, ["src/a.txt"]);
 }
+
+#[test]
+fn a_file_changed_while_reading_has_the_python_text() {
+    let error = FsError::ChangedWhileReading {
+        path: "a.txt".to_owned(),
+    };
+    assert_eq!(
+        error.to_string(),
+        "File changed while reading; Read this file again."
+    );
+}
