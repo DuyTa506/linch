@@ -128,13 +128,13 @@ raise chúng.
 | `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | Session có một run đang chạy hoặc đang chờ phê duyệt hay câu trả lời | Resume, phê duyệt, trả lời hoặc hủy `busy.run_id` trước, hoặc xếp prompt vào hàng đợi ([Run](./runs.md#one-live-run-per-session)) |
 | `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` dùng lại một id | Dùng id mới, hoặc `resume` run hiện có |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | Không có run đó trong kho lưu trữ của agent; với kho trong bộ nhớ, một handle `Agent` khác đã bắt đầu nó, hoặc server đã khởi động lại | Với kho trong bộ nhớ, dùng handle đã bắt đầu run; với Postgres, kiểm tra namespace và DSN |
-| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` hoặc `answer` một run đã kết thúc; `data["status"]` là trạng thái của nó | Bắt đầu một run mới trong session |
-| `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (tên các khóa của `data`) | Spec, tool hoặc callback của agent khác với những gì run đã bắt đầu | Mở lại với cấu hình gốc, hoặc để run kết thúc trước ([Hợp đồng của run](./agent.md#the-run-contract)) |
+| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` hoặc `answer` một run đã kết thúc, kể cả run đã bị hủy (`data["status"]` là `aborted`); `data["status"]` là trạng thái của nó | Bắt đầu một run mới trong session |
+| `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (tên các khóa của `data`) | Spec, tool, callback hoặc (khi không phải mặc định) permission policy của agent khác với những gì run đã bắt đầu; sau một lần nâng cấp, một run do binary cũ hơn bắt đầu dưới một policy không mặc định | Mở lại với cấu hình gốc, hoặc để run kết thúc trước; một run bị tạm dừng vẫn có thể được kết thúc bằng `agent.cancel` ([Hợp đồng của run](./agent.md#the-run-contract)) |
 | `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | Một approve hoặc answer được gửi lại sau khi nó đã được commit (tiến trình hoặc kết nối của bạn đã chết), hoặc một câu trả lời cho run đang chờ phê duyệt | Gọi `agent.resume(run_id)` ([Run](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | lý do của callback, trong `.reason` | Một callback `user_prompt_submit` đã chặn prompt | Không có gì được ghi; đổi prompt hoặc callback |
 | `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` nhận một schema không compile được, hoặc root của nó không phải `{"type": "object"}` | Không có gì được ghi; sửa schema ([Structured output](./structured-output.md)) |
-| `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Một server khác (một agent handle khác) đang điều khiển run trên Postgres, hoặc đã crash chưa đầy một lease trước | Chờ run đó dừng, hoặc thử lại sau `.expires_in` giây ([Kho lưu trữ](./stores.md#run-leases)) |
-| `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Một server khác đã tiếp quản run (server này đứng quá lease của nó) hoặc đã fail nó | Ở đây không có gì để sửa: bên điều khiển mới của run đang giữ nó. Nếu server này bị tạm dừng, hãy kiểm tra các lần dừng GC hay mạng kéo dài, hoặc tăng `stores.lease_ttl_ms` |
+| `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Một server khác (một agent handle khác) đang điều khiển run trên Postgres, hoặc đã crash chưa đầy một lease trước; từ `agent.cancel`, một approve ở nơi khác vừa claim run bị tạm dừng | Chờ run đó dừng, hoặc thử lại sau `.expires_in` giây ([Kho lưu trữ](./stores.md#run-leases)) |
+| `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Một server khác đã tiếp quản run (server này đứng quá lease của nó) hoặc đã fail nó; từ `agent.cancel`, một approve hoặc answer đã claim run sau cancel, và nó tiếp tục | Ở đây không có gì để sửa: bên điều khiển mới của run đang giữ nó. Nếu server này bị tạm dừng, hãy kiểm tra các lần dừng GC hay mạng kéo dài, hoặc tăng `stores.lease_ttl_ms` |
 | `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (lý do nằm trong `.reason`) | `agent.answer` nêu tên một request không đang chờ, bỏ sót một câu hỏi chưa trả lời, hoặc đưa danh sách cho câu hỏi chọn một | Không có gì được ghi và run vẫn chờ; hãy trả lời lại ([Tool](./tools.md#hỏi-người-dùng)) |
 
 Do chính lệnh gọi raise:
@@ -143,6 +143,11 @@ Do chính lệnh gọi raise:
 |---|---|---|
 | `RunBusy` (-32002) | Server này đã đang điều khiển run đó, ví dụ `resume` trong khi bạn vẫn đang stream nó | Chờ stream kết thúc, hoặc `cancel()` nó |
 | `ConnectionClosed` | `Agent` thuộc về một server đã thoát; một handle chỉ hoạt động trên server đã mở nó | Mở lại agent trên một `Server` mới |
+
+`agent.cancel` và `run.cancel()` của một run bị tạm dừng tự raise `RunNotFound`,
+`RunLeased` và `LeaseLost`, với các nguyên nhân ở trên. `False` từ chúng không phải
+lỗi: run đã kết thúc, hoặc nó đang chạy và kết nối này không điều khiển nó
+([Run](./runs.md#cancel-a-suspended-run)).
 
 Một run thất bại bên trong, không có exception, kết thúc bằng một event `error` và
 một `result` có subtype `error`:

@@ -19,7 +19,8 @@ của run sau đó được stream về dưới dạng `Envelope`.
 | `await agent.answer(run_id, answers, *, principal=None)` | Trả lời các câu hỏi `AskUser` của một run bị tạm dừng và tiếp tục nó |
 | `async for envelope in run` | Mọi envelope của lời gọi này, theo thứ tự, kết thúc sau `result` hoặc `suspended` |
 | `await run.result()` | Đọc phần còn lại và trả về `ResultEvent` hoặc `SuspendedEvent` |
-| `await run.cancel()` | Hủy run; `True` khi server đang điều khiển nó |
+| `await run.cancel()` | Hủy run, đang chạy hay bị tạm dừng; `True` khi nó đã bị hủy |
+| `await agent.cancel(run_id)` | Hủy một run theo id, kể cả run bị tạm dừng, từ bất kỳ tiến trình nào ([bên dưới](#cancel-a-suspended-run)) |
 | `await agent.events(run_id, after_seq=0)` | Các envelope bền vững của run sau `after_seq`, lấy từ các kho lưu trữ |
 | `run.id` | Run id, dùng cho `resume`, `approve` và `events` |
 | `run.trace_id` | Trace id của các span của lời gọi khi nó được trace ([Observability](./observability.md#correlate-logs-and-traces)) |
@@ -195,9 +196,10 @@ cancel again: False
 
 `cancel()` hủy lời gọi model hoặc tool đang chạy (task của một host tool bị hủy) và
 kết thúc run bằng một `result` có subtype `aborted`; hãy tiếp tục đọc stream để
-thấy nó. Nó trả về `False`, không phải lỗi, khi server không còn điều khiển run.
-Một run bị abort là đã kết thúc: session của nó nhận được run mới. Chỉ server đang
-điều khiển một run mới hủy được nó.
+thấy nó. Nó trả về `False`, không phải lỗi, khi không còn gì để hủy: run đã kết
+thúc. Một run bị abort là đã kết thúc: session của nó nhận được run mới. Chỉ server
+đang điều khiển một run đang chạy mới hủy được nó; một run bị tạm dừng có thể được
+hủy từ bất kỳ đâu ([bên dưới](#cancel-a-suspended-run)).
 
 Hủy chính lời gọi `run`, `resume` hoặc `approve` (chẳng hạn bằng
 `asyncio.wait_for`) trước khi nó trả về sẽ raise `CancelledError` như thường lệ.
@@ -210,6 +212,90 @@ dừng các run của nó thay vì để bộ nhớ của client tăng lên. Cá
 phải chờ sau các batch đó: một run bị bỏ không đọc trong khi nó vẫn sinh event sẽ
 làm các lời gọi khác trên kết nối của nó bị kẹt. `cancel()` vẫn đọc run của nó
 trong lúc chờ, nên nó không bao giờ tự chờ chính mình.
+
+<a id="cancel-a-suspended-run"></a>
+
+### Hủy một run bị tạm dừng
+
+Một run đang chờ một approval hoặc một câu trả lời không có stream: server không
+điều khiển nó. `agent.cancel(run_id)`, hoặc `cancel()` trên `Run` có stream kết thúc
+bằng `suspended`, kết thúc nó thông qua các kho lưu trữ của agent thay vì approve,
+deny hay answer nó:
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, ResultEvent, RunTerminal, Server, SuspendedEvent, tool
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+
+@tool(scope="write")
+async def deploy(service: str) -> str:
+    """Deploy a service."""
+    return "deployed"
+
+
+config: AgentConfig = {
+    "namespace": "runs-demo",
+    "spec": {"model": MODEL},
+    "provider": {
+        "id": "scripted",
+        "turns": [tool_turn("c1", "deploy", {"service": "api"}), text_turn("Nothing deployed.")],
+    },
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config, tools=[deploy])
+        run = await agent.run("s1", "Deploy api")
+        assert isinstance(await run.result(), SuspendedEvent)
+
+        print("cancelled:", await agent.cancel(run.id))
+        events = [e.event for e in await agent.events(run.id)]
+        print(events[-3].result["content"][0]["text"], "/", events[-1].subtype)
+        try:
+            await (await agent.approve(run.id, {})).result()
+        except RunTerminal as late:
+            print("late approve:", late.data["status"])
+        print("cancel again:", await agent.cancel(run.id))
+
+        # The session goes on: the next run sees the call answered.
+        result = await (await agent.run("s1", "What happened?")).result()
+        assert isinstance(result, ResultEvent)
+        print(result.final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+cancelled: True
+Tool call aborted / aborted
+late approve: aborted
+cancel again: False
+Nothing deployed.
+```
+
+- Mọi lời gọi của response chưa có kết quả đều nhận một kết quả lỗi,
+  `Tool call aborted` (cả một câu hỏi `AskUser` cũng vậy; một lời gọi đã bắt đầu
+  trước một lần crash giữ placeholder bị gián đoạn của nó), rồi run kết thúc bằng
+  một `result` có subtype `aborted` và trạng thái `aborted`. Các kết quả được đưa
+  vào session, nên model của một run sau đó trong session thấy từng lời gọi đã được
+  trả lời.
+- Một `approve` hoặc `answer` về sau kết thúc bằng `RunTerminal`; một lần cancel khác
+  trả về `False`.
+- **Postgres**: cancel có thể đến từ một tiến trình khác, hoặc sau khi server đã
+  suspend run khởi động lại. Một run mà server khác đang điều khiển ngay lúc đó (một
+  approve đến trước) không bị lấy khỏi nó: cancel trả về `False` khi approve đó đã
+  commit các quyết định của nó, hoặc raise `RunLeased` khi approve mới chỉ claim run.
+- Một cancel và một approve (hoặc answer) chạy đua để lại một bên thắng: bên claim
+  run sau cùng loại bên kia ra. Một cancel thua trả về `False` hoặc raise
+  `LeaseLost`; một approve thua kết thúc bằng `RunTerminal` hoặc `LeaseLost`.
+- Cancel bền vững từ lần ghi đầu tiên: nếu server chết giữa chừng, `resume` hoặc một
+  `cancel` khác sẽ hoàn tất nó, còn một `approve` nhận `NotSuspended`.
+- Contract của run không được kiểm tra, nên một run của một config cũ hơn vẫn có thể
+  bị hủy.
 
 ## Resume
 

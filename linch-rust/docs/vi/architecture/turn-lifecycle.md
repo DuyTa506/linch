@@ -35,6 +35,13 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   point chỉ quan sát, chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ
   với event vừa được stream vừa được ghi bền — không bao giờ cho record của chính một
   hook, cũng không cho một delta chỉ stream.
+- Một run bị suspend chờ trong store, nên có thể bị hủy ở đó
+  (`Agent::cancel`, [bên dưới](#cancel-a-suspended-run)). Các lần chờ permission và
+  `AskUser` của Python chạy bên trong run đang sống (trạng thái
+  `waiting_permission`): `session.abort()` kết thúc chúng bằng `AbortError`
+  (`src/linch/scheduler.py:1335`, `src/linch/tools/ask_user.py:323-326`) và terminal
+  abort (`src/linch/loop/runtime.py:968-1006`); một tiến trình khác chỉ có thể đánh
+  dấu một run như vậy là failed qua store (`mark_failed`, `src/linch/run_store.py:709`).
 - Run của một subagent không thể suspend: một lời gọi cần phê duyệt sẽ bị từ chối
   (`runner/batch.rs:73-75`).
 
@@ -188,7 +195,7 @@ Một `Journal` giữ các event và checkpoint của một run trong bộ nhớ
 
 | Phase | Ghi | Trạng thái |
 |---|---|---|
-| `Started`, `AssistantReceived`, `Compacted` | Write-through, ngay lập tức | không đổi |
+| `Started`, `AssistantReceived`, `Compacted`, `Aborting` | Write-through, ngay lập tức | không đổi |
 | `AwaitingApproval` | Write-through, ngay lập tức | `awaiting_approval` |
 | `AwaitingInput` | Write-through, ngay lập tức | `awaiting_input` |
 | `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` | Giữ lại | không đổi |
@@ -366,6 +373,7 @@ Những gì `reconcile` làm với từng phase (`journal/reconcile.rs:170-231`)
 | `ToolResults` | `ToolResults` | Nối message trừ khi nó đã có trong session, rồi đến lượt kế tiếp |
 | `CompactionPending` | `Recompact` hoặc `Redispatch` | Một lần tóm tắt khác, hoặc lời gọi chính khi lời gọi tóm tắt đã kết thúc mà không có bản tóm tắt |
 | `Compacted` | `Compacted` | Nối projection trừ khi nó đã có trong session, rồi dispatch |
+| `Aborting` | `Aborting` | Nối các kết quả của cancel trừ khi chúng đã có trong session, rồi terminal `aborted` ([bên dưới](#cancel-a-suspended-run)) |
 
 Mỗi lời gọi tool của một batch được khôi phục sẽ tự khôi phục riêng
 (`reconcile.rs:309-332`):
@@ -386,6 +394,55 @@ Một allow đã ghi chỉ bao phủ input mà host đã thấy, và một deny 
 Một approve hoặc answer được thử lại nhận `NotSuspended`: khi nó đã commit thì run ở
 `ToolBatch`, và host tiếp tục nó bằng `resume`
 (`agent.rs:262-273`, `start.rs:432-437`).
+
+<a id="cancel-a-suspended-run"></a>
+
+### Hủy một run bị suspend
+
+Một run bị suspend không có stream, nên không cancel token nào chạm tới nó.
+`Agent::cancel` (`agent.rs`) kết thúc nó qua store: nó vào `continue_run` với
+`Reply::Cancel` (`runner/start.rs`), và các bước khác với một approve:
+
+1. `check` nhận một run có phase là `AwaitingApproval`, `AwaitingInput` hoặc
+   `Aborting` (một cancel bị cắt ngắn), dưới bất kỳ contract nào: cancel không chạy
+   gì của agent. Mọi run khác là `NotSuspended` và một run terminal là `Terminal`;
+   `Agent::cancel` biến cả hai thành `false`.
+2. `claim`, như với một approve. Sau claim, cancel không kiểm tra phase nữa: claim đã
+   loại bên điều khiển run kể từ lần check, nên cancel kết thúc run từ bất cứ chỗ nào
+   nó đang đứng. Chỉ một run đã kết thúc từ đó mới là `Terminal`.
+3. `reconcile`, rồi `cancel::step` (`runner/cancel.rs`) chọn thứ session còn nợ.
+   Runner nhận một token đã bị hủy sẵn, nên một bước `Dispatch` hoặc `Compact` stage
+   receipt bị bỏ của nó và abort trước mọi lời gọi.
+4. `Step::Abort` ghép cặp session, rồi kết thúc run. Với các lời gọi của response cuối
+   không có end bền vững (mọi lời gọi của một batch bị suspend, đọc từ các event sau
+   response) nó stage một `tool_call_start` và một `tool_call_end` với `ABORTED`
+   ("Tool call aborted", `scheduler/execute.rs`), hoặc end của placeholder bị gián
+   đoạn cho một lời gọi đã bắt đầu, rồi event `user` của các kết quả, và lưu
+   `Aborting` cùng message đó: một lần write-through. Sau đó nó nối message vào
+   session (barrier không thấy gì bị giữ) và gọi `abort`, mà `end_with` của nó dừng
+   các run con chạy nền của run và commit `Result` (subtype `aborted`) với trạng thái
+   `aborted`.
+
+Một cancel của run `AwaitingApproval` như vậy tốn bốn lần ghi: claim, commit
+`Aborting`, nối session, commit terminal. Một crash trước lần thứ hai để run vẫn bị
+suspend (trạng thái `running` với phase suspend, mà một cancel hoặc một approve vẫn
+nhận); sau nó, cancel là bền vững: `reconcile` biến `Aborting` thành
+`Recovery::Aborting`, và một resume hoặc một cancel khác nối message trừ khi nó đã có
+và kết thúc run, còn một approve hoặc answer nhận `NotSuspended`. Một message kết quả
+được giữ trong `ToolResults` cũng được lưu thành `Aborting` trước; một session đã
+ghép cặp (claim thấy run đã qua batch của nó) được kết thúc ngay.
+
+Hai continuation chạy đua trên một run bị suspend đều qua `check`; claim sau chuyển
+epoch và loại claim trước. Một cancel claim sau cùng thắng: lần ghi kế tiếp của
+approve thất bại với `LeaseLost`, hoặc check của nó sau claim thấy run là `aborted`.
+Một approve claim sau cùng thắng: lần ghi đầu tiên của cancel thất bại với
+`LeaseLost`, hoặc, khi approve đã kết thúc run, check của cancel sau claim trả về
+`Terminal`. Trên Postgres một claim bị từ chối khi lease của một holder khác còn
+sống (`RunLeased`), nên một cancel không bao giờ lấy một run mà một approve ở nơi
+khác đang điều khiển; khi approve đó đã commit các quyết định của nó, run không còn
+bị suspend và cancel trả về `false` mà không claim. Các test là
+`crates/linch-core/tests/e2e_cancel_suspended.rs` (cả hai kiểu xen kẽ, và một crash
+trước và sau mỗi trong bốn lần ghi) và `crates/linch-postgres/tests/pg/cancel.rs`.
 
 ### Một lần crash giữa receipt và response của nó
 
@@ -429,7 +486,7 @@ thái cuối của chúng, dựng `Result` và gọi `Journal::finish` (`runner/
 | Terminal | Trạng thái | Khi nào |
 |---|---|---|
 | `Result` success | `completed` | Một response chỉ có văn bản, sau `stop` và `post_turn` (`turn.rs:407-414`) |
-| Abort | `aborted` | Cancel token đã kích hoạt (`end.rs:61-64`) |
+| Abort | `aborted` | Cancel token đã kích hoạt (`end.rs:61-64`), hoặc `Agent::cancel` đã kết thúc một run bị suspend (`runner/cancel.rs`) |
 | Hook fail closed | `failed` | Một hook `stop` fail closed (`end.rs:66-74`) |
 | Giới hạn đầu ra | `failed` | Response không có văn bản hoặc lời gọi tool trọn vẹn (`end.rs:76-90`) |
 | Giới hạn lượt | `failed` | Đạt `max_turns`, kèm một event `loop_guard` (`end.rs:92-108`) |

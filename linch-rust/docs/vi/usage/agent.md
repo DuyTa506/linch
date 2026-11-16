@@ -378,7 +378,13 @@ khi bắt đầu, và `resume` cùng `approve` từ chối một agent có contr
   tool, filesystem tool và MCP tool), mỗi tool kèm name, description, schema và
   scope;
 - `point`, `policy_id` và `policy_version` của từng callback, theo thứ tự khai báo;
-- các định nghĩa skill và subagent được nạp lúc mở.
+- các định nghĩa skill và subagent được nạp lúc mở;
+- policy `permissions`, khi nó không phải policy mặc định: một `mode` khác `default`,
+  hoặc bất kỳ `layers`, `auto_allow`, `path_fields` hay `command_fields` nào, và khi
+  đó cả `project_root` của nó. Vì vậy một run không bao giờ tiếp tục dưới một policy
+  cho phép nhiều hơn (hoặc ít hơn) policy nó đã bắt đầu. Policy mặc định không thêm
+  gì, dù `project_root` của nó là gì, nên nó để contract như trước khi policy được
+  tính.
 
 Nó không bao gồm namespace, các kho lưu trữ, config của provider, `timeout` của
 một host tool, các lượt scripted, hay id, version và tool bị từ chối của một
@@ -523,6 +529,10 @@ async def cite(request: dict[str, Any]) -> dict[str, Any]:
 Session là một chuỗi id bất kỳ. Run đầu tiên trên một id sẽ tạo ra nó; các run sau
 trên cùng id tiếp tục cuộc hội thoại với toàn bộ lịch sử của nó. Một session có
 nhiều nhất một run chưa kết thúc ([Run](./runs.md#một-run-đang-chạy-cho-mỗi-session)).
+Một run bị bỏ lại đang chờ một approval hoặc một câu trả lời giữ session cho đến khi
+nó được approve, answer, hoặc kết thúc bằng `await agent.cancel(run_id)`
+([Run](./runs.md#cancel-a-suspended-run)), thứ trả lời các lời gọi đang chờ của nó
+như đã bị abort để run kế tiếp của session có thể bắt đầu.
 
 `await agent.close_session(session_id)` báo cho agent rằng bạn tạm xong với một
 session: các workspace tool quên những gì chúng đã đọc (nên một lệnh ghi sau đó
