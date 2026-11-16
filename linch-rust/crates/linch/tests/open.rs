@@ -168,8 +168,7 @@ async fn a_config_retries_then_fails_over_and_prices_the_model_that_answered() {
         other => panic!("last event {other:?}"),
     }
     let mut bad = scripted(json!([]), None);
-    bad.spec.provider_retry = Some(Default::default());
-    bad.spec.provider_retry.as_mut().unwrap().max_attempts = 0;
+    bad.spec.provider_retry.max_attempts = 0;
     assert!(matches!(
         bad.open().await,
         Err(OpenError::Build(BuildError::Invalid(_)))

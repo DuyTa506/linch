@@ -26,12 +26,12 @@ use tokio_util::sync::CancellationToken;
 /// A policy that waits `base_delay_ms` doubled, with no jitter.
 fn retrying(max_attempts: u32, base_delay_ms: u64) -> AgentSpec {
     let mut spec = spec();
-    spec.provider_retry = Some(ProviderRetry {
+    spec.provider_retry = ProviderRetry {
         max_attempts,
         base_delay_ms,
         max_delay_ms: 1_000,
         jitter: 0.0,
-    });
+    };
     spec
 }
 
@@ -178,7 +178,7 @@ async fn a_retry_after_is_waited_and_one_past_the_cap_is_not() {
         message: "slow down".into(),
     };
     let mut spec = retrying(3, 1);
-    spec.provider_retry.as_mut().unwrap().jitter = 1.0;
+    spec.provider_retry.jitter = 1.0;
     let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, after(60)));
     let started = Instant::now();
     let agent = flaky_agent(spec.clone(), provider, Arc::new(Stores::default()));
@@ -231,7 +231,7 @@ async fn a_cancel_during_the_backoff_aborts_at_once() {
     let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, busy()));
     let stores = Arc::new(Stores::default());
     let mut spec = retrying(3, 60_000);
-    spec.provider_retry.as_mut().unwrap().max_delay_ms = 60_000;
+    spec.provider_retry.max_delay_ms = 60_000;
     let cancel = CancellationToken::new();
     let mut options = RunOptions::new("s1");
     options.cancel = cancel.clone();
@@ -256,7 +256,7 @@ async fn a_run_dropped_during_the_backoff_resumes_with_the_next_call() {
     let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, busy()));
     let stores = Arc::new(Stores::default());
     let mut spec = retrying(2, 60_000);
-    spec.provider_retry.as_mut().unwrap().max_delay_ms = 60_000;
+    spec.provider_retry.max_delay_ms = 60_000;
     let agent = flaky_agent(spec, provider.clone(), stores.clone());
     let mut stream = agent.run("go", RunOptions::new("s1"));
     let run_id = stream.run_id().clone();
@@ -291,7 +291,7 @@ async fn a_resumed_run_does_not_start_the_turn_s_retries_over() {
     let provider = Arc::new(Flaky::new(vec![text_turn("done")]).down(MODEL));
     let stores = Arc::new(Stores::default());
     let mut spec = retrying(2, 60_000);
-    spec.provider_retry.as_mut().unwrap().max_delay_ms = 60_000;
+    spec.provider_retry.max_delay_ms = 60_000;
     let agent = flaky_agent(spec, provider.clone(), stores.clone());
     let mut stream = agent.run("go", RunOptions::new("s1"));
     let run_id = stream.run_id().clone();
@@ -383,14 +383,13 @@ async fn trace(spec: AgentSpec) -> (Vec<serde_json::Value>, Vec<serde_json::Valu
     (commits, requests)
 }
 
-/// With the policy on and fallbacks set, a run with no failure writes the
-/// same events, checkpoints and write groups, and sends the same requests,
-/// as a run of the same spec without them.
+/// With retries on (the default) and fallbacks set, a run with no failure
+/// writes the same events, checkpoints and write groups, and sends the same
+/// requests, as a run with retries off and no fallbacks.
 #[tokio::test]
 async fn reliability_costs_nothing_when_no_call_fails() {
-    let plain = trace(spec()).await;
+    let plain = trace(retrying(1, 1)).await;
     let mut reliable = spec();
-    reliable.provider_retry = Some(ProviderRetry::default());
     reliable.fallback_models = vec!["fallback-model".into()];
     assert_eq!(trace(reliable).await, plain);
 }
@@ -479,12 +478,34 @@ async fn under_a_capped_budget_a_call_that_may_have_been_paid_ends_the_run() {
     }
 }
 
-/// Without a policy a failure ends the run as it always did.
+/// A spec that says nothing retries with the defaults: the first 429 does
+/// not end the run.
 #[tokio::test]
-async fn without_a_policy_a_failure_ends_the_run() {
-    let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, busy()));
+async fn a_spec_that_says_nothing_retries() {
+    let limited = ScriptedError::Status {
+        status: 429,
+        retry_after_ms: Some(1),
+        message: "slow down".into(),
+    };
+    let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, limited));
     let agent = flaky_agent(spec(), provider.clone(), Arc::new(Stores::default()));
     let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    assert_eq!(provider.calls().len(), 2);
+    assert_eq!(retries(&envelopes).len(), 1);
+    assert_eq!(result(&envelopes).subtype, ResultSubtype::Success);
+}
+
+/// One attempt turns retries off: a failure ends the run at once.
+#[tokio::test]
+async fn one_attempt_turns_retries_off() {
+    let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, busy()));
+    let agent = flaky_agent(
+        retrying(1, 1),
+        provider.clone(),
+        Arc::new(Stores::default()),
+    );
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
     assert_eq!(provider.calls().len(), 1);
+    assert!(retries(&envelopes).is_empty());
     assert_eq!(result(&envelopes).subtype, ResultSubtype::Error);
 }

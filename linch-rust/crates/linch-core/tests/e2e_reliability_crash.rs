@@ -22,12 +22,12 @@ const FALLBACK: &str = "fallback-a";
 fn spec_() -> AgentSpec {
     let mut spec = spec();
     spec.fallback_models = vec![FALLBACK.into()];
-    spec.provider_retry = Some(ProviderRetry {
+    spec.provider_retry = ProviderRetry {
         max_attempts: 2,
         base_delay_ms: 1,
         max_delay_ms: 1_000,
         jitter: 0.0,
-    });
+    };
     spec
 }
 

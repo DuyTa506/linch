@@ -67,9 +67,12 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<RunBudget>,
     /// How a provider call that failed with a retryable error is retried
-    /// on the same model; `None` (the default) never retries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_retry: Option<ProviderRetry>,
+    /// on the same model: on by default, with Python's `RetryOptions`;
+    /// `max_attempts: 1` turns it off. The default is left off the wire,
+    /// so a spec that does not set it keeps the contract of a spec written
+    /// before retries existed.
+    #[serde(default, skip_serializing_if = "ProviderRetry::is_default")]
+    pub provider_retry: ProviderRetry,
     /// Models to fail over to, in order, once a model has no retry left
     /// for a retryable failure; the run keeps the one it fails over to.
     /// Empty (the default) fails the run instead.
@@ -92,7 +95,7 @@ impl AgentSpec {
             call_timeout_ms: None,
             compaction: None,
             budget: None,
-            provider_retry: None,
+            provider_retry: ProviderRetry::default(),
             fallback_models: Vec::new(),
         }
     }
@@ -223,22 +226,59 @@ mod tests {
             "fallback_models": ["n", "o"],
         }))
         .unwrap();
-        let retry = read.provider_retry.clone().unwrap();
+        let retry = &read.provider_retry;
         assert_eq!(
             (retry.max_attempts, retry.base_delay_ms, retry.max_delay_ms),
             (3, 1000, 30000)
         );
         assert_eq!(read.fallback_models, ["n", "o"]);
-        let on: AgentSpec =
-            serde_json::from_value(json!({"model": "m", "provider_retry": {}})).unwrap();
-        assert_eq!(on.provider_retry, Some(ProviderRetry::default()));
         let typo = json!({"model": "m", "provider_retry": {"attempts": 3}});
         assert!(serde_json::from_value::<AgentSpec>(typo).is_err());
+        let null = json!({"model": "m", "provider_retry": null});
+        assert!(
+            serde_json::from_value::<AgentSpec>(null).is_err(),
+            "off is max_attempts 1"
+        );
         let hooks = crate::hooks::Hooks::default().policy_digest();
         let none = JsonObject::new();
         let base = contract_digest(&AgentSpec::new("m"), &[], hooks, &none).unwrap();
         assert_ne!(base, contract_digest(&read, &[], hooks, &none).unwrap());
-        assert_ne!(base, contract_digest(&on, &[], hooks, &none).unwrap());
+    }
+
+    /// Retries are on unless the spec turns them off: unset, `{}` and the
+    /// defaults spelled out are one spec, with the wire shape (and so the
+    /// contract) of a spec written before retries existed; one attempt is
+    /// off, and a contract of its own.
+    #[test]
+    fn retries_are_on_by_default_and_off_with_one_attempt() {
+        let unset = AgentSpec::new("m");
+        assert_eq!(unset.provider_retry, ProviderRetry::default());
+        assert_eq!(unset.provider_retry.max_attempts, 5);
+        for on in [
+            json!({}),
+            serde_json::to_value(ProviderRetry::default()).unwrap(),
+        ] {
+            let read: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "provider_retry": on})).unwrap();
+            assert_eq!(read, unset);
+            let wire = serde_json::to_value(&read).unwrap();
+            assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+        }
+        let off: AgentSpec = serde_json::from_value(json!({
+            "model": "m",
+            "provider_retry": {"max_attempts": 1},
+        }))
+        .unwrap();
+        assert_eq!(off.provider_retry.max_attempts, 1);
+        let wire = serde_json::to_value(&off).unwrap();
+        assert_eq!(
+            wire["provider_retry"],
+            json!({"max_attempts": 1, "base_delay_ms": 1000, "max_delay_ms": 30000, "jitter": 0.2})
+        );
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let on = contract_digest(&unset, &[], hooks, &none).unwrap();
+        assert_ne!(on, contract_digest(&off, &[], hooks, &none).unwrap());
     }
 
     #[test]

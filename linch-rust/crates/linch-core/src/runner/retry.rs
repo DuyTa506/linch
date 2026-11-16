@@ -56,28 +56,26 @@ impl Runner {
             abandoned: None,
         };
         let agent = std::sync::Arc::clone(&self.agent);
-        if let Some(policy) = &agent.spec.provider_retry {
-            let retry = self.standing.retries + 1;
-            let seed = format!("{}:primary:{}:{attempt}", self.run.run_id, self.turn);
-            if let Some(delay) = policy.delay(retry, &failure.error, &seed) {
-                self.standing.retries = retry;
-                self.journal.stage(Event::ProviderRetry(ProviderRetryEvent {
-                    model: model.to_owned(),
-                    retry,
-                    delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                    error: failure.event.error.clone(),
-                }));
-                self.save(Phase::ProviderPending { attempt }).await?;
-                let ready = self.journal.flush().await?;
-                self.event_emit(&ready).await;
-                self.outbox.deliver(ready).await;
-                let waited = self.cancel.run_until_cancelled(tokio::time::sleep(delay));
-                if waited.await.is_none() {
-                    self.abort().await?;
-                    return Ok(Recovered::Ended);
-                }
-                return Ok(Recovered::Call(next));
+        let retry = self.standing.retries + 1;
+        let seed = format!("{}:primary:{}:{attempt}", self.run.run_id, self.turn);
+        if let Some(delay) = (agent.spec.provider_retry).delay(retry, &failure.error, &seed) {
+            self.standing.retries = retry;
+            self.journal.stage(Event::ProviderRetry(ProviderRetryEvent {
+                model: model.to_owned(),
+                retry,
+                delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                error: failure.event.error.clone(),
+            }));
+            self.save(Phase::ProviderPending { attempt }).await?;
+            let ready = self.journal.flush().await?;
+            self.event_emit(&ready).await;
+            self.outbox.deliver(ready).await;
+            let waited = self.cancel.run_until_cancelled(tokio::time::sleep(delay));
+            if waited.await.is_none() {
+                self.abort().await?;
+                return Ok(Recovered::Ended);
             }
+            return Ok(Recovered::Call(next));
         }
         let Some(to_model) = agent.spec.fallback_models.get(self.standing.fallbacks) else {
             return Ok(Recovered::Failed);

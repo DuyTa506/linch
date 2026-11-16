@@ -39,8 +39,8 @@ fn default_jitter() -> f64 {
 }
 
 /// How a provider call that failed with a retryable error is retried on the
-/// same model. Off unless an [`AgentSpec`](crate::AgentSpec) sets one; `{}`
-/// turns it on with the defaults, which are Python's `RetryOptions`.
+/// same model. On by default in every [`AgentSpec`](crate::AgentSpec), with
+/// Python's `RetryOptions`; `max_attempts: 1` turns it off.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderRetry {
@@ -76,6 +76,11 @@ impl Default for ProviderRetry {
 }
 
 impl ProviderRetry {
+    /// Whether this is the default policy, which a spec leaves off the wire.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Why this policy cannot run, if it cannot.
     pub(crate) fn problem(&self) -> Option<&'static str> {
         if self.max_attempts == 0 {

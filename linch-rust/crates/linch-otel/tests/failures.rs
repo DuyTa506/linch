@@ -21,7 +21,17 @@ async fn a_failed_provider_call_marks_the_chat_the_step_and_the_run() {
         retry_after_ms: None,
         message: "secret detail".into(),
     };
-    let agent = agent(vec![ScriptedTurn::failing(error)], vec![]);
+    // Retries off, so the one failed call ends the run.
+    let mut spec = AgentSpec::new(MODEL);
+    spec.provider_retry.max_attempts = 1;
+    let turns = vec![ScriptedTurn::failing(error)];
+    let agent = agent_with(
+        spec,
+        turns,
+        vec![],
+        PermissionMode::Default,
+        &Stores::default(),
+    );
     let mut observer = sdk.observer();
     let envelopes = observe(agent.run("hi", RunOptions::new("s1")), &mut observer).await;
     drop(observer);

@@ -23,16 +23,16 @@ const FIRST: &str = "fallback-a";
 const SECOND: &str = "fallback-b";
 
 /// A spec that fails over to `FIRST`, then `SECOND`, after `max_attempts`
-/// calls to each model (no retry policy when `None`).
-fn failing_over(max_attempts: Option<u32>) -> AgentSpec {
+/// calls to each model (1: no retry).
+fn failing_over(max_attempts: u32) -> AgentSpec {
     let mut spec = spec();
     spec.fallback_models = vec![FIRST.into(), SECOND.into()];
-    spec.provider_retry = max_attempts.map(|max_attempts| ProviderRetry {
+    spec.provider_retry = ProviderRetry {
         max_attempts,
         base_delay_ms: 1,
         max_delay_ms: 1_000,
         jitter: 0.0,
-    });
+    };
     spec
 }
 
@@ -92,7 +92,7 @@ fn calls(models: &[(usize, &str)]) -> Vec<(usize, String)> {
 async fn after_its_retries_a_model_fails_over_to_the_next() {
     let provider = Arc::new(Flaky::new(vec![text_turn("done")]).down(MODEL));
     let stores = Arc::new(Stores::default());
-    let agent = priced(failing_over(Some(2)), provider.clone(), stores);
+    let agent = priced(failing_over(2), provider.clone(), stores);
     let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
 
     assert_eq!(
@@ -125,7 +125,7 @@ async fn the_run_keeps_the_fallback_for_its_later_turns() {
         Flaky::new(vec![tool_turn(0, 1, "Read"), text_turn("done")]).fail_with(0, MODEL, busy()),
     );
     let agent = priced(
-        failing_over(None),
+        failing_over(1),
         provider.clone(),
         Arc::new(Stores::default()),
     );
@@ -148,7 +148,7 @@ async fn when_every_model_fails_the_run_fails_with_the_last_error() {
             .down(SECOND),
     );
     let agent = priced(
-        failing_over(Some(2)),
+        failing_over(2),
         provider.clone(),
         Arc::new(Stores::default()),
     );
@@ -180,7 +180,7 @@ async fn a_failure_that_is_not_retryable_does_not_fail_over() {
     };
     let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, refused));
     let agent = priced(
-        failing_over(Some(2)),
+        failing_over(2),
         provider.clone(),
         Arc::new(Stores::default()),
     );
@@ -197,7 +197,7 @@ async fn a_resumed_run_stays_on_its_fallback() {
     let provider =
         Arc::new(Flaky::new(vec![tool_turn(0, 1, "Read"), text_turn("done")]).down(MODEL));
     let stores = Arc::new(Stores::default());
-    let agent = priced(failing_over(None), provider.clone(), stores.clone());
+    let agent = priced(failing_over(1), provider.clone(), stores.clone());
     let mut stream = agent.run("go", RunOptions::new("s1"));
     let run_id = stream.run_id().clone();
     while let Some(item) = stream.next().await {
@@ -231,7 +231,7 @@ async fn a_turn_that_failed_over_calls_the_fallback_over_a_skill_s_model() {
     let turns = vec![skill_call, tool_turn(1, 1, "Read"), text_turn("done")];
     let provider = Arc::new(Flaky::new(turns).fail_with(1, "other-model", busy()));
     let stores = Arc::new(Stores::default());
-    let agent = AgentBuilder::new(failing_over(None))
+    let agent = AgentBuilder::new(failing_over(1))
         .provider(provider.clone())
         .tools(registry(vec![Echo::new(
             "Read",
@@ -258,7 +258,7 @@ async fn a_compaction_after_failing_over_asks_the_fallback() {
         tool_turn(1, 1, "Read"),
         text_turn("done"),
     ];
-    let mut spec = failing_over(None);
+    let mut spec = failing_over(1);
     let mut compaction = CompactionSpec::new(1);
     compaction.keep_recent_turns = 1;
     spec.compaction = Some(compaction);
@@ -294,7 +294,7 @@ async fn a_subagents_child_retries_and_fails_over_on_its_own() {
     let stores = Arc::new(Stores::default());
     let mut scout = linch_core::SubagentDefinition::new("scout", "Reads around.", "Scout.");
     scout.tools = Some(vec!["Read".into()]);
-    let agent = AgentBuilder::new(failing_over(Some(2)))
+    let agent = AgentBuilder::new(failing_over(2))
         .provider(provider.clone())
         .tools(registry(vec![Echo::new(
             "Read",

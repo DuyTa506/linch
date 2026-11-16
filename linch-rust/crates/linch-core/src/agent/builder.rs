@@ -220,7 +220,7 @@ impl AgentBuilder {
         if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
-        if let Some(problem) = (self.spec.provider_retry.as_ref()).and_then(|r| r.problem()) {
+        if let Some(problem) = self.spec.provider_retry.problem() {
             return Err(BuildError::Invalid(problem.into()));
         }
         let (model, fallbacks) = (&self.spec.model, &self.spec.fallback_models);

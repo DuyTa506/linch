@@ -240,7 +240,8 @@ async fn a_provider_error_fails_the_run_with_an_error_result() {
         message: "busy".into(),
     });
     let provider = Arc::new(ScriptedProvider::new([failing]));
-    let agent = agent(
+    let agent = agent_with(
+        single_attempt(),
         provider,
         registry(vec![]),
         policy(PermissionMode::Default),

@@ -151,8 +151,19 @@ async def test_a_capped_budget_retries_a_call_that_cost_nothing() -> None:
     assert final(envelopes).usage_complete
 
 
-async def test_a_spec_without_a_retry_policy_ends_the_run_on_a_failure() -> None:
-    envelopes = await run_once(config([overloaded(), text_turn("never")]))
+async def test_a_spec_that_says_nothing_retries_a_rate_limit() -> None:
+    limited = {"error": {"type": "status", "status": 429, "retry_after_ms": 1, "message": "slow"}}
+    envelopes = await run_once(config([limited, text_turn("done")]))
+
+    [retried] = [e.event for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
+    assert (retried.retry, retried.delay_ms, retried.error["status"]) == (1, 1, 429)
+    assert final(envelopes).final_text == "done"
+
+
+async def test_one_attempt_turns_retries_off() -> None:
+    cfg = config([overloaded(), text_turn("never")])
+    cfg["spec"] = {"model": MODEL, "provider_retry": {"max_attempts": 1}}
+    envelopes = await run_once(cfg)
 
     assert not [e for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
     [error] = [e.event for e in envelopes if isinstance(e.event, ErrorEvent)]

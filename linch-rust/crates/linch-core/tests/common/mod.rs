@@ -141,6 +141,13 @@ pub fn spec() -> AgentSpec {
     spec
 }
 
+/// [`spec`] with provider retries off: a failed call ends the run at once.
+pub fn single_attempt() -> AgentSpec {
+    let mut spec = spec();
+    spec.provider_retry.max_attempts = 1;
+    spec
+}
+
 /// An agent on `stores` for both run and session storage.
 pub fn agent_with<S: RunStore + SessionStore + 'static>(
     spec: AgentSpec,

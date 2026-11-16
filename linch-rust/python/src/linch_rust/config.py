@@ -77,13 +77,14 @@ class ToolSearch(TypedDict, total=False):
 class ProviderRetry(TypedDict, total=False):
     """How a provider call that failed with a retryable error is retried, as `spec.provider_retry`.
 
-    Retryable is no response at all (connect, reset, timeout), a 408, a 429
-    or a 5xx. `{}` turns retries on with these defaults, which are Python
-    Linch's `RetryOptions`; without `provider_retry` a failure ends the run,
-    or fails over to `spec.fallback_models`. Each retry waits, then calls
-    the same model again; once a model has had `max_attempts` calls in a
-    turn, the run fails over to the next of `spec.fallback_models` (keeping
-    it for the rest of the run) or fails with the last error.
+    Retryable is no connection or no response at all (refused, reset,
+    timeout), a 408, a 429 or a 5xx. Retries are on by default, with these
+    defaults, which are Python Linch's `RetryOptions`; set only the fields
+    to change, and `{"max_attempts": 1}` to turn retries off. Each retry
+    waits, then calls the same model again; once a model has had
+    `max_attempts` calls in a turn, the run fails over to the next of
+    `spec.fallback_models` (keeping it for the rest of the run) or fails
+    with the last error.
 
     Attributes:
         max_attempts: Most calls to one model in one turn, the first
