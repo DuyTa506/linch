@@ -86,6 +86,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `Edit` accepts an empty `old_string`, as Python's does, instead of refusing it as invalid input: an empty file takes `new_string`; a non-empty file is refused as ambiguous unless `replace_all` is set, which inserts at every position and needs the whole file read.
 - `Edit` and `Write` on a file changed since it was read now say `Read this file again before editing it.` / `Read this file again before writing it.` (were `<path> changed since it was last read; Read it again.`), and `Read` of a file that changed mid-read says `File changed while reading; Read this file again.`, the words Python's tools use. The error codes are unchanged.
 
+### Upgrading
+
+- Runs of workspace agents started before this release cannot be resumed: the workspace tool list gained `BashOutput` and `BashKill`, so the run contract changed and a resume ends with `ContractMismatch`. Let those runs finish on the old binary, or start new runs.
+
 ## 0.1.1 - 2026-11-07
 
 ### Fixed
