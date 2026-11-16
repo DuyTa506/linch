@@ -12,24 +12,48 @@
 //! ends the run at once with `LeaseLost`, as a fenced write would, unless
 //! the run already suspended or ended. A run that stops without suspending
 //! or ending (an error, a dropped stream) releases its lease, so another
-//! process need not wait out the TTL. With a store that has no TTL (the
-//! memory stores) nothing of this runs.
+//! process need not wait out the TTL; the agent keeps each such release in
+//! its [`Releases`], so a host can wait for them before it exits. With a
+//! store that has no TTL (the memory stores) nothing of this runs.
 
 use std::future::{Future, pending};
 use std::pin::pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::future::{Either, select};
+use tokio::task::JoinHandle;
 
-use crate::agent::RunError;
+use crate::agent::{AgentInner, RunError};
 use crate::journal::{Journal, JournalError};
 use crate::store::{Lease, RunStore, StoreError};
+
+/// The lease releases of an agent's dropped runs still in flight, shared
+/// with its subagents' agents.
+#[derive(Clone, Default)]
+pub(crate) struct Releases(Arc<Mutex<Vec<JoinHandle<()>>>>);
+
+impl Releases {
+    fn push(&self, release: JoinHandle<()>) {
+        let mut releases = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        releases.retain(|release| !release.is_finished());
+        releases.push(release);
+    }
+
+    /// Wait for every release started so far.
+    pub(crate) async fn wait(&self) {
+        let releases = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        for release in releases {
+            let _ = release.await;
+        }
+    }
+}
 
 /// The lease of one claimed run: renewed while the run is driven, released
 /// when the run stops without settling.
 pub(super) struct Held {
+    releases: Releases,
     store: Arc<dyn RunStore>,
     lease: Lease,
     /// The store's TTL; `None` when claims never expire.
@@ -41,12 +65,13 @@ pub(super) struct Held {
 }
 
 impl Held {
-    /// The lease just claimed on `store`.
-    pub(super) fn new(store: &Arc<dyn RunStore>, lease: &Lease) -> Self {
+    /// The lease `agent` just claimed on its run store.
+    pub(super) fn new(agent: &AgentInner, lease: &Lease) -> Self {
         Self {
-            store: Arc::clone(store),
+            releases: agent.releases.clone(),
+            store: Arc::clone(&agent.runs),
             lease: lease.clone(),
-            ttl: store.lease_ttl(),
+            ttl: agent.runs.lease_ttl(),
             settled: None,
             done: false,
         }
@@ -93,9 +118,9 @@ impl Drop for Held {
             return;
         };
         let (store, lease) = (Arc::clone(&self.store), self.lease.clone());
-        runtime.spawn(async move {
+        self.releases.push(runtime.spawn(async move {
             let _ = store.release(&lease).await;
-        });
+        }));
     }
 }
 

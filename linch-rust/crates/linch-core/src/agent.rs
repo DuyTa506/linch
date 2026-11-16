@@ -27,7 +27,7 @@ use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
-use crate::runner::{self, Families, RunStream};
+use crate::runner::{self, Families, Releases, RunStream};
 use crate::skills::SkillSet;
 use crate::store::{RunStore, SessionStore};
 use crate::structured::OutputContract;
@@ -173,6 +173,8 @@ pub(crate) struct AgentInner {
     /// The subagent child runs of each run that is live or suspended in
     /// this process (see [`runner::Family`]).
     pub(crate) families: Families,
+    /// The lease releases of runs dropped mid-run, still in flight.
+    pub(crate) releases: Releases,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
@@ -440,6 +442,15 @@ impl Agent {
         run_id: &RunId,
     ) -> Option<impl Future<Output = ()> + Send + use<>> {
         self.inner.family(run_id)?.parked_children()
+    }
+
+    /// Wait until the lease releases of this agent's runs that were dropped
+    /// or stopped by an error have landed (or failed), so another process
+    /// can resume them at once. Call it before the process exits after
+    /// dropping run streams; a release cut off by the exit leaves the run
+    /// to wait out its lease. Nothing to wait for on the memory stores.
+    pub async fn released(&self) {
+        self.inner.releases.wait().await;
     }
 
     /// The status of `run_id`, from its record alone.

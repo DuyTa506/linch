@@ -79,9 +79,9 @@ process.
   is never refused: `Agent::fail` and a parent resuming its child runs
   (`resume_child`) take the run over (`runner/start.rs:214-248`,
   `runner/fail.rs:28`).
-- **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:30`)
+- **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:55`)
   renews the lease every third of the TTL on a timer, next to the run in
-  the run future (`lease.rs:65-80`, `lease.rs:114-133`), so a long model
+  the run future (`lease.rs:90-105`, `lease.rs:139-158`), so a long model
   call, a tool or a retry back-off keeps it; it beats only while the
   stream is polled, so a host that stalls or crashes lets it run out. One
   small `UPDATE` per interval per running run; nothing on commits.
@@ -91,7 +91,12 @@ process.
 - **Release.** A run that stops without suspending or ending (an error, a
   dropped stream) releases its lease from `Held`'s `Drop`, in a spawned
   one-write task, so another process need not wait out the TTL
-  (`lease.rs:83-100`). A crash releases nothing; the lease runs out.
+  (`lease.rs:108-125`). The agent keeps each release task, and
+  `Agent::released` (`crates/linch-core/src/agent.rs:452`) waits for them;
+  `OpenedAgent::close` waits up to `RELEASE_WAIT` (5 s,
+  `crates/linch/src/open.rs:348`) before it disconnects, so a
+  `linch-server` that exits after dropping its runs still frees them. A
+  crash releases nothing; the lease runs out.
 - **Memory stores** have no TTL: they never refuse a claim, start no timer
   and write nothing more. They are for one process.
 

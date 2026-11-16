@@ -191,13 +191,19 @@ khi run đó dừng, kết thúc, hoặc chờ một phê duyệt hay một câu
 ghi gì; `.owner` nêu owner của holder và `.expires_in` là số giây lease của nó còn lại.
 
 - Một run có stream kết thúc với lỗi, hoặc có kết nối bị đứt, được release ngay: server
-  khác có thể resume nó liền.
+  khác có thể resume nó liền. Các run của một server thoát bình thường (đầu vào của nó
+  đóng, rời khỏi `async with Server()`) cũng vậy: nó chờ tối đa 5 s cho các lần release
+  đó trước khi thoát.
 - Một server crash hoặc treo không release gì. Các run của nó bị từ chối trong tối đa
   độ dài lease (mặc định 30 s), rồi server nào cũng resume được.
 - Nếu một server bị đứng lâu hơn lease của nó (một lần tạm dừng dài, mất mạng), server
   khác có thể tiếp quản các run của nó. Khi nó tỉnh lại, lần ghi kế tiếp của nó bị từ
   chối và run kết thúc với `LeaseLost` (mã -32022) mà không ghi gì: bên điều khiển mới
   của run sở hữu nó.
+- Lease chỉ được gia hạn khi run còn tiến triển trên server của nó. Một client ngừng đọc
+  event của một run đủ lâu để hàng đợi của server đầy (xem
+  [backpressure](../architecture/rpc.md#backpressure)) sẽ làm run tạm dừng, và sau trọn một lease, server khác có thể
+  tiếp quản nó; run bị tạm dừng sau đó kết thúc với `LeaseLost` khi nó chạy tiếp.
 - `stores.lease_ttl_ms` đặt độ dài lease, tối thiểu 1000. Ngắn hơn nghĩa là các run của
   một server đã crash được giải phóng sớm hơn, đổi lại thêm một lần ghi nhỏ cho mỗi run
   đang chạy mỗi một phần ba của nó.

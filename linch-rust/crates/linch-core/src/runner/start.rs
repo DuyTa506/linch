@@ -150,7 +150,7 @@ pub(super) async fn new_run(
             });
         }
     };
-    let mut held = Held::new(&agent.runs, journal.lease());
+    let mut held = Held::new(&agent, journal.lease());
     held.watch(&journal);
     // The create logged the prompt that carries them.
     inbox::ack(&agent, &peers).await;
@@ -245,7 +245,7 @@ pub(super) async fn continue_run(
         Err(error) => return Err(error.into()),
     };
     // From here on, a return that leaves the run `running` releases it.
-    let mut held = Held::new(runs, &lease);
+    let mut held = Held::new(&agent, &lease);
     let record = runs.load(namespace, &run_id).await?;
     check(&record, &agent, reply.as_ref())?;
     // A family this process still holds (the run suspended here) is taken

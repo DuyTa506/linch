@@ -264,12 +264,16 @@ impl OpenedAgent {
         &self.mcp
     }
 
-    /// Disconnect every MCP server and wait for each to close (a stdio
-    /// server's process to exit). Clones of the agent keep working, but
-    /// the MCP tools are no longer registered; the workspace and virtual
-    /// filesystem tools and the offload hook stay. The Postgres pool is not
-    /// closed: other agents may share it, and it goes once nothing uses it.
+    /// Wait (at most [`RELEASE_WAIT`]) for the lease releases of runs
+    /// that were dropped, so another process can resume them at once (see
+    /// [`Agent::released`]); then disconnect every MCP server and wait for
+    /// each to close (a stdio server's process to exit). Clones of the
+    /// agent keep working, but the MCP tools are no longer registered; the
+    /// workspace and virtual filesystem tools and the offload hook stay.
+    /// The Postgres pool is not closed: other agents may share it, and it
+    /// goes once nothing uses it.
     pub async fn close(self) {
+        let _ = tokio::time::timeout(RELEASE_WAIT, self.agent.released()).await;
         drop(self.pool);
         disconnect(self.mcp).await;
     }
@@ -337,6 +341,11 @@ async fn register_workspace(
     }
     Ok(canonical)
 }
+
+/// The longest [`OpenedAgent::close`] waits for the lease releases of
+/// dropped runs: each is one small write, so a database that does not take
+/// it within this long leaves those runs to wait out their leases.
+pub const RELEASE_WAIT: Duration = Duration::from_secs(5);
 
 /// The workspace tools that run commands, which the `bash` switch turns off
 /// together.

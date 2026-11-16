@@ -78,9 +78,9 @@ holder, không theo tên owner, vì `RunOptions::owner` mặc định là `linch
   release không từ chối ai. `seize` không bao giờ bị từ chối: `Agent::fail` và một run
   cha resume các run con của nó (`resume_child`) tiếp quản run
   (`runner/start.rs:214-248`, `runner/fail.rs:28`).
-- **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:30`)
+- **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:55`)
   gia hạn lease mỗi một phần ba TTL theo bộ hẹn giờ, cạnh run trong run future
-  (`lease.rs:65-80`, `lease.rs:114-133`), nên một lần gọi model dài, một tool hay một
+  (`lease.rs:90-105`, `lease.rs:139-158`), nên một lần gọi model dài, một tool hay một
   back-off retry vẫn giữ được nó; nó chỉ đập khi stream được poll, nên một host bị
   treo hoặc sập để lease hết hạn. Một `UPDATE` nhỏ cho mỗi khoảng, mỗi run đang chạy;
   không có gì thêm trên các commit.
@@ -89,8 +89,11 @@ holder, không theo tên owner, vì `RunOptions::owner` mặc định là `linch
   run ra khỏi `running` (`Journal::settled`).
 - **Release.** Một run dừng mà không suspend hay kết thúc (một lỗi, một stream bị drop)
   release lease của nó từ `Drop` của `Held`, trong một task sinh ra ghi một lần, để
-  process khác không phải chờ hết TTL (`lease.rs:83-100`). Một sự cố sập không release
-  gì; lease tự hết hạn.
+  process khác không phải chờ hết TTL (`lease.rs:108-125`). Agent giữ từng task release
+  đó, và `Agent::released` (`crates/linch-core/src/agent.rs:452`) chờ chúng;
+  `OpenedAgent::close` chờ tối đa `RELEASE_WAIT` (5 s, `crates/linch/src/open.rs:348`)
+  trước khi ngắt kết nối, nên một `linch-server` thoát sau khi drop các run của nó vẫn
+  giải phóng chúng. Một sự cố sập không release gì; lease tự hết hạn.
 - **Store trong bộ nhớ** không có TTL: chúng không bao giờ từ chối một claim, không
   khởi động bộ hẹn giờ và không ghi thêm gì. Chúng dành cho một process.
 

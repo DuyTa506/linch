@@ -243,3 +243,22 @@ async def test_a_second_server_cannot_take_a_live_run(pg_dsn: str) -> None:
 
     assert refused.value.run_id == run.id
     assert refused.value.expires_in is not None and 20 < refused.value.expires_in <= 30
+
+
+async def test_a_server_that_exits_frees_its_runs_at_once(pg_dsn: str) -> None:
+    # The default lease: only the release on exit makes the run free now.
+    stores = {"type": "postgres", "dsn": pg_dsn}
+    wait, started = blocking_tool()
+    first = config([tool_turn("call_1", "wait", {"q": "x"})], stores=stores)
+    async with Server() as server:
+        agent = await server.open_agent(first, tools=[wait])
+        run = await agent.run("s1", "Wait for x")
+        await asyncio.wait_for(started.wait(), 10)
+
+    wait, started = blocking_tool()
+    second = config([text_turn("Recovered.")], stores=stores)
+    async with Server() as server:
+        agent = await server.open_agent(second, tools=[wait])
+        result = await (await agent.resume(run.id)).result()
+
+    assert isinstance(result, ResultEvent) and result.final_text == "Recovered."

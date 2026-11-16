@@ -62,7 +62,7 @@ pub use config::{
 };
 pub use error::OpenError;
 pub use linch_core::*;
-pub use open::OpenedAgent;
+pub use open::{OpenedAgent, RELEASE_WAIT};
 pub use pools::PgPools;
 pub use profile::{Profile, ProfileError};
 

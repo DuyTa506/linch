@@ -92,6 +92,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - Run leases on Postgres: one server drives a run at a time. Another agent's `resume`, `approve` or `answer` of a run that is driven elsewhere ends with `RunLeased` (code -32033, `StoreError::RunLeased`, `data: {run_id, owner, expires_in_ms}`) and writes nothing. A crashed server's runs are free once their lease runs out (30 s by default; `stores.lease_ttl_ms`, at least 1000, or `PgRunStore::with_lease_ttl`). The driver renews the lease on a timer, one small `UPDATE` per running run every third of the lease, so a long model call keeps it. Memory stores have no leases and are unchanged.
 - `RunStore::seize`, `lease_ttl`, `renew` and `release`, defaulted for a store whose claims never expire, and `store::conformance::run_lease_suite` for one whose claims do. A wrapper store must forward them.
 - `LeaseLost` (-32022) and `RunLeased` (-32033) in the Python client, both `RunError`s.
+- `Agent::released` waits for the lease releases of runs that were dropped; `OpenedAgent::close` waits for them (at most `RELEASE_WAIT`, 5 s), so a `linch-server` that exits normally frees the runs it was driving at once.
+- A workflow `agent` call whose run is still leased to a runner that crashed waits until the lease runs out (or the workflow is cancelled) instead of failing.
 
 ### Changed
 

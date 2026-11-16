@@ -59,6 +59,7 @@ use crate::events::Envelope;
 use crate::ids::RunId;
 pub(crate) use fail::fail;
 pub(crate) use family::{Families, Family};
+pub(crate) use lease::Releases;
 pub(crate) use start::Reply;
 pub(crate) use write::session_log;
 

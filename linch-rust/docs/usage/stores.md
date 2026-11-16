@@ -194,7 +194,9 @@ answer, another agent's `resume`, `approve` or `answer` is refused with
 owner and `.expires_in` the seconds its lease has left.
 
 - A run whose stream ended with an error, or whose connection dropped, is
-  released at once: another server can resume it right away.
+  released at once: another server can resume it right away. So are the
+  runs of a server that exits normally (its input closed, `async with
+  Server()` left): it waits up to 5 s for those releases before it exits.
 - A server that crashed or hung releases nothing. Its runs are refused for
   up to the lease's length (30 s by default), then any server can resume
   them.
@@ -202,6 +204,11 @@ owner and `.expires_in` the seconds its lease has left.
   another server can take its runs over. When it wakes, its next write is
   refused and its run ends with `LeaseLost` (code -32022) without writing
   anything: the run's new driver owns it.
+- The lease is renewed only while the run makes progress on its server. A
+  client that stops reading a run's events long enough for the server's
+  queue to fill ([backpressure](../architecture/rpc.md#backpressure)) pauses the run,
+  and after a whole lease another server can take it over; the paused run
+  then ends with `LeaseLost` when it goes on.
 - `stores.lease_ttl_ms` sets the lease's length, at least 1000. Shorter means
   a crashed server's runs are free sooner, against one more small write per
   running run each third of it.
