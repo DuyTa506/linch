@@ -28,6 +28,7 @@ time is the database clock (`now()`), never a worker's.
 | `0003_job_failures.sql` | `failures`, counted apart from `attempts` |
 | `0004_queue_limits.sql` | `linch_worker_queues` (`name`, `max_held`) |
 | `0005_scheduler.sql` | `linch_worker_agents` (stored agent definitions by digest); interval, time-zone and fixed-session columns on schedules, with `fires`, `skips` and `last_fire`; `agent`, `schedule_id`, `fire_at` and `created_at` on jobs; `linch_worker_history` |
+| `0006_background_principal.sql` | `principal` (a `Principal` as JSON) on schedules and jobs; partial indexes on their `agent` column |
 
 A job starts a run (`session_id` and `prompt`), continues one (`run_id`), or
 approves one (`run_id` and `approvals`); check constraints keep those shapes
@@ -271,6 +272,28 @@ worker closes the agent its factory returns. `linch-rpc`'s
 `BackgroundAgents` is the factory `linch-server` uses: the definition is an
 agent config, re-admitted against its tenant at every attempt
 ([RPC](./rpc.md#background-runs)).
+
+A definition holds the config's secrets in plain text, so
+`prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) deletes
+the ones no schedule and no unfinished job names, after setting `agent` to
+NULL on failed jobs (never run again). A worker runs it with the history
+pruning, from its first poll and every 10 minutes after, whether or not it
+keeps history. A writer storing a definition locks its row
+(`ON CONFLICT ... DO UPDATE`) until it commits, and the prune locks its
+candidates with `FOR UPDATE SKIP LOCKED`, so a definition about to be named
+is skipped; one named by a writer that committed after the prune read the
+references fails the delete's foreign key, and that prune deletes nothing
+(it runs again later).
+
+## Principals
+
+A schedule and a job may carry a principal (`Schedule::principal`,
+`RunRequest::principal`), stored as JSON; a fire copies its schedule's to
+its job. The worker decodes it at every attempt and sets it on the
+`RunOptions` of the start, resume or approve (`execute.rs`), since core keeps
+no principal with the run (a resume takes it from its options). A row whose
+principal does not decode fails its job. Python's worker restores
+`RunRequest.principal` the same way (`linch/worker/runtime.py`).
 
 ## Example
 

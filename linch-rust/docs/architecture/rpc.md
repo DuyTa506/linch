@@ -346,6 +346,19 @@ asked ([usage](../usage/scheduler.md)).
   the tenant's pools and no host tools or hooks. A namespace whose root is
   neither a tenant nor one of `local_namespaces` is refused, and the worker
   does not even dequeue it.
+- **Principal.** `schedule.create` and `job.enqueue` take a `principal`,
+  checked by `Tenant::admit_principal` as for `run.start`, and stored with
+  the schedule or job; the worker gives it to every attempt of the run
+  ([worker](./worker.md#principals)).
+- **Secrets.** The stored definition keeps the config's secrets
+  (`to_value_with_secrets`, the DSN blanked); only `linch_worker_agents`
+  holds them, rows elsewhere name the digest, and no answer or error
+  carries them (`tests/schedule.rs`, a sentinel in an MCP env value). A
+  definition nothing names any more is pruned.
+- **Which database.** Rows go to the opened agent's own pool, so a
+  schedule lives with its agent's runs; a worker serves only its section's
+  DSN and opens its runs there, so a fire never runs against a database
+  other than the one it was stored in.
 
 The worker lives in the sidecar so one config holds the tenants, their
 allowlists and the worker, and background runs share the tenants' run caps

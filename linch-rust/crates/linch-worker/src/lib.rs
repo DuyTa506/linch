@@ -31,7 +31,9 @@
 //!   session (a heartbeat) skips a fire while that session is busy.
 //! - **Definitions.** A job or schedule may carry a stored agent definition,
 //!   which an [`AgentFactory`] opens for every attempt
-//!   ([`Worker::definitions`]), so the worker needs no agent built ahead.
+//!   ([`Worker::definitions`]), so the worker needs no agent built ahead;
+//!   [`prune_definitions`] deletes the ones nothing names any more. A job
+//!   or schedule may also carry the principal its runs act for.
 //! - **History.** A job that ends moves to `linch_worker_history` in the
 //!   statement that deletes it; [`job`] and [`jobs`] read both.
 //!

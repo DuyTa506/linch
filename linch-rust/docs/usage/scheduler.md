@@ -62,6 +62,14 @@ Run as many such servers on one database as you like: each fire is queued
 once and each job runs on one worker at a time. A server without a `worker`
 section runs no loop and sends no query for it.
 
+A schedule or queued run is stored in the database and schema of the
+agent that made it, and a worker serves only those of its own `dsn`, where
+it also runs them. An agent whose store DSN names another database (or
+schema) needs a worker there: no other worker ever fires its schedules.
+Point `worker.dsn` at the same database and schema as the agents' store
+DSN. When they differ only in the user, the background runs connect as the
+worker's user.
+
 The worker runs the jobs of every tenant in the config. Each job's agent is
 checked against its tenant's allowlists again at every attempt, as
 `open_agent` would be, except the store DSN, which is the worker's. So a
@@ -86,11 +94,31 @@ callbacks: a background run has no client to call back. Otherwise the call
 raises `NotBackground` with `reason` `memory_store`, `host_tools` or
 `callbacks`. Give the agent workspace or MCP tools instead.
 
+A schedule always runs the config it was created with; open the agent again
+and create a new schedule to change it.
+
+### What is stored at rest
+
 The agent's config, as it was opened (after the tenant's checks), is stored
-with each schedule and queued run, without its store DSN. It does include
-the MCP `env` and header values, which the worker needs to connect again, so
-they are stored in that database. A schedule always runs the config it was
-created with; open the agent again and create a new schedule to change it.
+in plain text in the `linch_worker_agents` table of the agent's database,
+once per distinct config, because the worker must open the same agent
+again. Everything in it is stored **except the store DSN** (the worker
+connects with its own):
+
+- MCP stdio `env` values and arguments, and MCP HTTP URLs and header
+  values, as given;
+- the provider settings, including any request headers and extra body
+  fields the config sets;
+- the rest of the config: `spec`, permissions, workspace, profiles.
+
+Nothing else holds them: job, history and schedule rows name the config by
+its SHA-256 digest, and no `schedule.*` or `job.*` answer or error, nor a
+background run's error, carries its values. A stored config is deleted once
+no schedule and no unfinished job names it: a worker checks from its first
+poll and every 10 minutes after (`prune_definitions`). Keep secrets out of
+a scheduled config where you can (a key the server reads from its
+environment is never stored), and protect the database as you protect
+those secrets.
 
 ## Schedule a run
 
@@ -112,8 +140,8 @@ async with Server.connect("unix:/run/linch/linch.sock", token=token) as server:
 
 | Call | Does |
 |---|---|
-| `await agent.create_schedule(prompt, *, cron=None, timezone=None, interval_ms=None, session_id=None, id=None, queue=None)` | Store a schedule; give `cron` (five fields, or six with leading seconds) or `interval_ms`. `timezone` is an IANA name, UTC when absent. `id` defaults to a uuid |
-| `await agent.heartbeat(session_id, *, interval_ms=None, cron=None, timezone=None, prompt=CHECK_IN, id=None, queue=None)` | A schedule whose fires continue one session (below) |
+| `await agent.create_schedule(prompt, *, cron=None, timezone=None, interval_ms=None, session_id=None, id=None, queue=None, principal=None)` | Store a schedule; give `cron` (five fields, or six with leading seconds) or `interval_ms`. `timezone` is an IANA name, UTC when absent. `id` defaults to a uuid |
+| `await agent.heartbeat(session_id, *, interval_ms=None, cron=None, timezone=None, prompt=CHECK_IN, id=None, queue=None, principal=None)` | A schedule whose fires continue one session (below) |
 | `await agent.schedules()` | The schedules of the agent's namespace, by id |
 | `await agent.pause_schedule(id)` | Stop its fires; queued runs stay queued |
 | `await agent.resume_schedule(id)` | Fire again from the next tick after now |
@@ -138,6 +166,18 @@ Without `session_id`, each fire starts its own session,
 run at the same time.
 
 With `session_id`, every fire is a new run in that session: a heartbeat.
+
+### Who a background run acts for
+
+Pass the same `principal` you would pass to `agent.run`
+([permission rules](./tools.md#permission-rules)). It is stored with the schedule or queued run,
+and every fire's run (and its resume or approval by the worker) acts for
+it, so a permission rule with `role` or `unless_role` holds in the
+background as it does for a run started directly. Without one, the run
+holds no role: a rule with `role` never matches it and one with
+`unless_role` always does. A tenant's principal must name the tenant
+(`NotAllowed`, `kind == "principal"`). Schedule for a restricted caller
+with that caller's principal, never without one.
 
 ## Heartbeat: one session, checked in on
 
@@ -175,7 +215,7 @@ if done["state"] == "done":
 
 | Call | Does |
 |---|---|
-| `await agent.enqueue(session_id, prompt, *, queue=None)` | Queue a run; a worker starts it. A session with a live run makes it wait (retrying) until that run ends |
+| `await agent.enqueue(session_id, prompt, *, queue=None, principal=None)` | Queue a run; a worker starts it. A session with a live run makes it wait (retrying) until that run ends |
 | `await agent.job(job_id)` | One job of the agent's namespace, live or ended |
 | `await agent.jobs(*, schedule_id=None, limit=None)` | Jobs newest first (50 by default, at most 500); only one schedule's with `schedule_id` |
 | `await agent.wait_job(job_id, *, poll=0.25, timeout=None)` | Poll until the job is `done`, `failed` or `superseded` |
@@ -224,7 +264,7 @@ agent of the namespace. Background runs send no live stream to any client.
 | `ScheduleExists` (-32042) | `create_schedule` with an id the namespace has |
 | `JobNotFound` (-32043) | `job` of an id the namespace lacks, or whose history was pruned |
 | `InvalidSchedule` (-32044) | A cron pattern that does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `.reason` |
-| `NotAllowed` (-32004) | A tenant without `max_schedules` or `max_queued_jobs`, or a schedule faster than `min_schedule_interval_ms`; `.kind` |
+| `NotAllowed` (-32004) | A tenant without `max_schedules` or `max_queued_jobs`, or a schedule faster than `min_schedule_interval_ms`, or a principal of another tenant; `.kind` |
 | `LimitReached` (-32005) | The tenant holds its `max_schedules` (`kind == "schedules"`) or `max_queued_jobs` (`kind == "jobs"`) |
 
 All are `SchedulerError`s except the last two.
@@ -238,6 +278,7 @@ All are `SchedulerError`s except the last two.
 | Fires of one session queue behind each other | A heartbeat skips a fire while its session is busy |
 | `cancel_schedule` disables future fires | `pause_schedule`, `resume_schedule` and `delete_schedule` |
 | The host passes an `agent_factory` to its `Worker` | The agent's config is stored with the schedule; the server's worker opens it |
+| `RunRequest.principal` is restored by the worker | `principal=` on `create_schedule` and `enqueue`, given to every fire's run |
 | `register_schedule_tools` lets the model schedule | Not available yet |
 | Missed fires catch up in order | The same |
 

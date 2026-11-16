@@ -147,6 +147,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - An agent with memory stores, host tools or callbacks cannot be scheduled or queued: -32040 (`NotBackground`, `data.reason`). Also -32041 `ScheduleNotFound`, -32042 `ScheduleExists`, -32043 `JobNotFound`, -32044 `InvalidSchedule`, all `SchedulerError`s in Python.
 - `linch-server --config` takes a `worker` section: the server fires schedules and runs queued jobs on that database, opening each job's stored agent config and checking it against its tenant's allowlists again at every attempt; each background run takes one of the tenant's `max_runs` places. A config may have only a worker, whose tenants need no token. Without the section nothing polls.
 - Tenant allowlists take `max_schedules` and `max_queued_jobs` (absent: none allowed, `NotAllowed` kinds `schedules` and `background_runs`; at the cap `LimitReached` kinds `schedules` and `jobs`, counted across servers) and `min_schedule_interval_ms` (60000 unless set; `NotAllowed` kind `schedule_interval`).
+- A schedule's fires and a queued run act for a principal: `schedule.create` and `job.enqueue` take `principal`, admitted as for `run.start` (a tenant's must name the tenant), stored with the schedule or job, and given to every start, resume and approve of the background run, so a permission rule with `role` or `unless_role` holds there as it does for a run started directly. Python: `principal=` on `create_schedule`, `heartbeat` and `enqueue`; Python Linch's `RunRequest.principal`.
+- A stored agent definition (which holds the config's MCP env and header values) is deleted once no schedule and no unfinished job names it: `linch_worker::prune_definitions`, which a worker runs with the history pruning, from its first poll and every 10 minutes after.
 - `linch-worker`: `Timing` (cron in a time zone, or an interval), `create_schedule` with an optional `Cap`, `get_schedule`, `pause_schedule`, `resume_schedule`, `delete_schedule`, `enqueue` with a stored agent definition, `AgentFactory` and `Worker::definitions`, `job`, `jobs` and `prune_history`, and `WorkerConfig::history_retention` (7 days). A job that ends moves to `linch_worker_history` instead of being deleted.
 
 ### Changed
@@ -170,7 +172,6 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A run whose stream ends with an error or is dropped releases its Postgres lease (one extra write), so another server can resume it at once; a run that ends or suspends writes nothing more.
 - A worker job whose run another process leases waits like a busy session (released with back-off, not counting a failure).
 - `store::conformance::run_lease_suite` takes two pairs of handles, `(short, long)`: the steps that expect a live lease without renewing it use the long TTL, so a pause on a loaded machine no longer lets their lease run out; only the renewal and expiry steps wait out the short one.
-- `linch_worker::cancel_schedule` is gone: use `pause_schedule` or `delete_schedule`. `Schedule` has `timing` (`Timing::Cron { pattern, timezone }` or `Timing::Every`) instead of `cron`, `session_id: Option<SessionId>` and `agent`; `create_schedule` takes a cap and returns the stored `ScheduleInfo`.
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
   after 30 seconds: it waits until the client answers, the run is cancelled or the
@@ -186,7 +187,14 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - Postgres migration 6 adds `linch_runs.lease_holder` and `lease_until` (nullable, no rewrite). As with every migration, a server of an earlier version then refuses to start on that database, and a running one ignores leases: until every server is upgraded, an old one can still take over a run a new one drives (the epoch still fences the loser's writes).
 
-- Worker migration 5 (`linch-worker/migrations/0005_scheduler.sql`) adds `linch_worker_agents` and `linch_worker_history` and new nullable or defaulted columns on schedules and jobs. Existing schedules keep their cron pattern, read in UTC.
+- Worker migrations 5 and 6 (`crates/linch-worker/migrations/0005_scheduler.sql`, `0006_background_principal.sql`) run when a worker, or the first scheduler call on a database, calls `linch_worker::migrate`. Migration 5 adds `linch_worker_agents` and `linch_worker_history` and new nullable or defaulted columns on schedules and jobs (`cron` and `session_id` become nullable); migration 6 adds `principal` to schedules and jobs and two partial indexes on their `agent` column. None rewrites a table. Existing schedules keep their cron pattern, read in UTC, and their fixed session. As with every migration, a worker of an earlier version then refuses to start on that database; one already running does not know the new columns, and one with its own agent for a namespace may take a job queued with a stored definition and run it with that agent, without the job's principal. Upgrade every worker on a database before scheduling there through `linch-server`.
+- A job that ends now moves to `linch_worker_history` instead of being deleted: code that counted `linch_worker_jobs` rows to see finished work should read `job` or `jobs` (or `linch_worker_history`) instead.
+- `linch_worker` API breaks, for code that uses the crate directly:
+  - `cancel_schedule` is gone: use `pause_schedule` (keeps the schedule) or `delete_schedule`.
+  - `Schedule` has `timing` (`Timing::Cron { pattern, timezone }` or `Timing::Every(Duration)`) instead of `cron: String`; `session_id` is an `Option<SessionId>` (`None`: each fire starts its own session); it gains `agent` and `principal`, so a struct literal must set them (`None` keeps the old behaviour).
+  - `RunRequest` gains `agent` and `principal`.
+  - `create_schedule(pool, &schedule, cap)` takes a cap (`None` for none) and returns the stored `ScheduleInfo` instead of the first fire time.
+- `store::conformance::run_lease_suite(a, b)` is now `run_lease_suite((a, b), (long_a, long_b))`: give a second pair of handles whose lease TTL outlasts any pause (60 s for Postgres).
 
 - Runs of workspace agents started before this release cannot be resumed: the workspace tool list gained `BashOutput` and `BashKill`, so the run contract changed and a resume ends with `ContractMismatch`. Let those runs finish on the old binary, or start new runs.
 

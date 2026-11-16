@@ -44,7 +44,8 @@
 //! - `agent.open`: the `namespace` is the tenant's name or starts with
 //!   `<tenant>/`. Stores are scoped by namespace, so on a shared Postgres
 //!   another tenant's runs and sessions look missing (`-32021`).
-//! - `run.start`, `run.resume`, `run.approve`, `run.answer`: a `principal`, if given, has
+//! - `run.start`, `run.resume`, `run.approve`, `run.answer`, `schedule.create`,
+//!   `job.enqueue`: a `principal`, if given, has
 //!   the tenant's name as its `tenant`. The server does not fill one in.
 //! - `agent.open`: the config passes the tenant's [`Allowlists`]:
 //!   - the scripted provider only if allowed, and a client-chosen provider
@@ -283,10 +284,13 @@
 //! `callbacks`). Its namespace scopes the schedules and jobs, and its
 //! config as opened, without its store DSN, is stored with each one: the
 //! worker opens it again for every attempt and checks it against the
-//! tenant's allowlists again. Times are RFC 3339 strings in UTC.
+//! tenant's allowlists again. Its secrets stay in that stored config,
+//! which is deleted once nothing names it. A `principal`, as for
+//! `run.start`, is stored too and every attempt acts for it. Times are
+//! RFC 3339 strings in UTC.
 //!
 //! **`schedule.create`** `{agent, prompt, id?, cron?, timezone?,
-//! interval_ms?, session_id?, queue?}`
+//! interval_ms?, session_id?, queue?, principal?}`
 //! ([`ScheduleCreateParams`](protocol::ScheduleCreateParams)) stores a
 //! schedule and returns it ([`ScheduleInfo`](protocol::ScheduleInfo)).
 //! Exactly one of `cron` (five fields, or six with seconds, read in the
@@ -307,7 +311,7 @@
 //! **`schedule.delete`** `{agent, id}` returns `{"deleted": bool}`; its
 //! queued and running jobs go on.
 //!
-//! **`job.enqueue`** `{agent, session_id, prompt, queue?}`
+//! **`job.enqueue`** `{agent, session_id, prompt, queue?, principal?}`
 //! ([`JobEnqueueParams`](protocol::JobEnqueueParams)) queues a one-off
 //! background run and returns its job ([`JobInfo`](protocol::JobInfo)). A
 //! tenant needs `max_queued_jobs` (`-32004`, `kind: background_runs`;
