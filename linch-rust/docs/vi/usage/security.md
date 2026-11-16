@@ -88,13 +88,15 @@ Mỗi bề mặt bao phủ những gì:
 | Bề mặt | Được che | Không được gửi khi nó bật |
 |---|---|---|
 | `response` | Văn bản và reasoning không có chữ ký của mọi response assistant, trước khi các callback `after_provider_call` thấy nó và trước khi nó được ghi log; một bản rewrite của callback thì che lại; câu trả lời cuối cùng sau một rewrite `stop`; các bản tóm tắt compaction | Các delta `partial_assistant`: một match có thể nằm vắt qua hai delta |
-| `tool_results` | Mọi chuỗi của một kết quả tool (value và metadata của output, message và details của một lỗi) trước khi các callback `post_tool_use` thấy nó, và lần nữa sau khi một callback thay thế nó; các câu trả lời `AskUser` | Các event `tool_progress` |
+| `tool_results` | Mọi chuỗi của một kết quả tool (value và metadata của output, message và details của một lỗi) trước khi các callback `post_tool_use` thấy nó, và lần nữa sau khi một callback thay thế nó, nên một kết quả được offload được lưu ở dạng đã che; các câu trả lời `AskUser`; câu trả lời của một background worker; các message peer từ mailbox | Các event `tool_progress` |
 | `prompt` | Văn bản prompt của một run mới, trước các callback `user_prompt_submit`, và lần nữa sau một rewrite | không có gì |
 
-Thứ được che là thứ session ghi log và thứ model đọc lại ở lượt kế tiếp: văn bản thô
-không bao giờ đến một store, một event, một callback hay request kế tiếp. Một lần crash
-ở bất kỳ lần ghi nào vẫn giữ điều đó, vì không có gì chứa văn bản response được ghi
-trước khi redaction chạy.
+Trên mỗi bề mặt đang bật, thứ được che là thứ session ghi log và thứ model đọc lại ở
+lượt kế tiếp: văn bản đó không bao giờ đến một store, một event, một callback hay
+request kế tiếp ở dạng thô. Một lần crash ở bất kỳ lần ghi nào vẫn giữ điều đó, vì
+không có gì chứa văn bản response được ghi trước khi redaction chạy. Các phần liệt kê
+bên dưới không được che, và đến các event `assistant` và `tool_call_start` cùng log
+đúng như được viết.
 
 Không bao giờ bị thay đổi:
 
