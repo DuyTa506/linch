@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+pub mod flaky;
 pub mod hooks;
 pub mod subagents;
 

@@ -17,6 +17,7 @@ use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, reconcile};
 use crate::message::ContentBlock;
+use crate::reliability::Standing;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::skills::SKILL_TOOL;
@@ -284,7 +285,9 @@ pub(super) async fn continue_run(
         },
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
-    let progress = Progress::of(checkpoint, last_stop(&events), started);
+    let fallbacks = &agent.spec.fallback_models;
+    let standing = Standing::of(&events, fallbacks);
+    let progress = Progress::of(checkpoint, last_stop(&events), standing, started);
     let trace_id = trace_of(&events);
     // This call's start, for observers; it rides the first barrier.
     let tools = agent.snapshot().definitions();

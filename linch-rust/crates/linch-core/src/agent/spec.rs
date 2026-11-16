@@ -12,6 +12,7 @@ use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
 use crate::message::SystemBlock;
 use crate::provider::{ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
+use crate::reliability::ProviderRetry;
 use crate::tool::ToolScope;
 
 /// Domain separator for the run contract digest.
@@ -65,6 +66,15 @@ pub struct AgentSpec {
     /// (Python's `AgentConfig.budget`); `None` (the default) counts nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<RunBudget>,
+    /// How a provider call that failed with a retryable error is retried
+    /// on the same model; `None` (the default) never retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_retry: Option<ProviderRetry>,
+    /// Models to fail over to, in order, once a model has no retry left
+    /// for a retryable failure; the run keeps the one it fails over to.
+    /// Empty (the default) fails the run instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_models: Vec<String>,
 }
 
 impl AgentSpec {
@@ -82,6 +92,8 @@ impl AgentSpec {
             call_timeout_ms: None,
             compaction: None,
             budget: None,
+            provider_retry: None,
+            fallback_models: Vec::new(),
         }
     }
 
@@ -201,6 +213,32 @@ mod tests {
         let mut features = JsonObject::new();
         features.insert("skills".into(), json!([]));
         assert_ne!(base, contract_digest(&spec, &[], hooks, &features).unwrap());
+    }
+
+    #[test]
+    fn a_spec_reads_provider_retry_and_fallback_models() {
+        let read: AgentSpec = serde_json::from_value(json!({
+            "model": "m",
+            "provider_retry": {"max_attempts": 3},
+            "fallback_models": ["n", "o"],
+        }))
+        .unwrap();
+        let retry = read.provider_retry.clone().unwrap();
+        assert_eq!(
+            (retry.max_attempts, retry.base_delay_ms, retry.max_delay_ms),
+            (3, 1000, 30000)
+        );
+        assert_eq!(read.fallback_models, ["n", "o"]);
+        let on: AgentSpec =
+            serde_json::from_value(json!({"model": "m", "provider_retry": {}})).unwrap();
+        assert_eq!(on.provider_retry, Some(ProviderRetry::default()));
+        let typo = json!({"model": "m", "provider_retry": {"attempts": 3}});
+        assert!(serde_json::from_value::<AgentSpec>(typo).is_err());
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let base = contract_digest(&AgentSpec::new("m"), &[], hooks, &none).unwrap();
+        assert_ne!(base, contract_digest(&read, &[], hooks, &none).unwrap());
+        assert_ne!(base, contract_digest(&on, &[], hooks, &none).unwrap());
     }
 
     #[test]

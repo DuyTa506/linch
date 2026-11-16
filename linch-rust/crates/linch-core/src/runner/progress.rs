@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use crate::reliability::Standing;
 use crate::run::{Checkpoint, StopReason};
 use crate::usage::Usage;
 
@@ -19,6 +20,9 @@ pub(super) struct Progress {
     pub(super) stop_reason: StopReason,
     /// When this call started, for the result's `duration_ms`.
     pub(super) started: Instant,
+    /// Where the run stands on its fallback models and in its turn's
+    /// retries.
+    pub(super) standing: Standing,
 }
 
 impl Progress {
@@ -31,12 +35,18 @@ impl Progress {
             cost: None,
             stop_reason: StopReason::EndTurn,
             started,
+            standing: Standing::default(),
         }
     }
 
     /// A run continued at `started` from `checkpoint`, whose last response
-    /// stopped for `stop_reason`.
-    pub(super) fn of(checkpoint: &Checkpoint, stop_reason: StopReason, started: Instant) -> Self {
+    /// stopped for `stop_reason`, standing where its events left it.
+    pub(super) fn of(
+        checkpoint: &Checkpoint,
+        stop_reason: StopReason,
+        standing: Standing,
+        started: Instant,
+    ) -> Self {
         Self {
             turn: checkpoint.turn,
             usage: checkpoint.usage,
@@ -44,6 +54,7 @@ impl Progress {
             cost: checkpoint.cost_usd,
             stop_reason,
             started,
+            standing,
         }
     }
 }

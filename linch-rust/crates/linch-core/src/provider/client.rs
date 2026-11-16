@@ -112,7 +112,10 @@ mod tests {
         };
         assert!(status(429).retryable());
         assert!(status(503).retryable());
-        assert!(status(408).retryable(), "a request timeout, as Python retries it");
+        assert!(
+            status(408).retryable(),
+            "a request timeout, as Python retries it"
+        );
         assert!(!status(400).retryable());
         assert!(!status(409).retryable());
         assert!(!status(401).retryable());
