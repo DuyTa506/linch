@@ -70,6 +70,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Deep agent](./deep-agent.md) | The `deep_agent` preset and its profiles |
 | [Profiles](./profiles.md) | Versioned domain profiles for an agent's runs |
 | [Observability](./observability.md) | OpenTelemetry spans and metrics from the client |
+| [Monitoring](./monitoring.md) | What is traced, how cost is computed and priced, running an eval, reading a run report |
 | [Server](./server.md) | Running `linch-server` for remote tenants, and `Server.connect`: tokens, allowlists, limits |
 
 Coming later:

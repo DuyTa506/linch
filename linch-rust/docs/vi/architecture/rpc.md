@@ -65,6 +65,8 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
 | `run.cancel` | `CancelParams` | `run.rs:60-69`: hủy một run mà kết nối này điều khiển | `{cancelled}` |
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, các envelope bền vững sau `after_seq` |
+| `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` trên agent; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
+| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown}`; run không tồn tại là `-32021` |
 
 Server gửi hai notification. `run.event` `{run_id, envelopes}`
 (`RunEvent`, `protocol.rs:256`) mang một hoặc nhiều envelope liên tiếp

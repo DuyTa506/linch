@@ -471,6 +471,13 @@ của một run chỉ cộng các lời gọi có giá. Chi phí xuất hiện d
 receipt và các event `Usage` và `total_cost_usd` trên `Result`. Bảng giá không phải
 là một phần của run contract.
 
+Bảng của Python là nguồn duy nhất: nó chỉ định giá sáu id Claude, nên không model
+OpenAI, Gemini, DeepSeek hay model của server cục bộ nào có giá trừ khi agent tự
+đặt. `AgentConfig.pricing` (`crates/linch/src/config/pricing.rs`) chứa các
+`ModelRates` theo từng model mà `open` đặt trước bảng: `crate::config::pricing` trả
+về giá ghi đè của model, nếu không thì `linch_providers::cost`. Nó theo từng agent
+và không thuộc contract. Server cục bộ có giá `None` nếu không ghi đè, như ở Python.
+
 ## Thêm một provider bằng Rust
 
 Một provider ngoài cây mã triển khai `Provider` trực tiếp; `Decoder` và

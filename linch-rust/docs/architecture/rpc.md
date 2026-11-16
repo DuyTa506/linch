@@ -63,6 +63,8 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |
 | `run.cancel` | `CancelParams` | `run.rs:60-69`: cancels a run this connection drives | `{cancelled}` |
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, the durable envelopes after `after_seq` |
+| `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` on the agent; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
+| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown}`; an unknown run is `-32021` |
 
 The server sends two notifications. `run.event` `{run_id, envelopes}`
 (`RunEvent`, `protocol.rs:256`) carries one or more consecutive envelopes

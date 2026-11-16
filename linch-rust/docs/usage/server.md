@@ -241,7 +241,8 @@ final: Hello over WebSocket.
   must be `connection.auth` with a token, answered with `{"tenant": "acme"}`;
   after that the connection takes the same methods as stdio: `agent.open`
   with an [agent config](./agent.md), `run.start`, `run.resume`,
-  `run.approve`, `run.cancel`, `run.events`, `session.close`, `agent.close`.
+  `run.approve`, `run.cancel`, `run.events`, `eval.run`, `run.report`,
+  `session.close`, `agent.close`.
   A first message other than `connection.auth`, or an unknown token, gets
   `-32003` and the connection closes; so does 10 seconds of silence.
 - **HTTP:** `GET /rpc` with `Authorization: Bearer <token>` upgrades to a
