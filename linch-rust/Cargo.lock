@@ -1822,6 +1822,7 @@ dependencies = [
  "hyper-util",
  "linch",
  "linch-rpc",
+ "linch-worker",
  "rustix",
  "serde",
  "serde_json",

@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use linch::PermissionMode;
 use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
@@ -28,6 +29,57 @@ pub struct ServerConfig {
     pub http: Option<SocketAddr>,
     /// Every tenant by name.
     pub tenants: BTreeMap<String, TenantConfig>,
+    /// Run a worker in this process: it fires the schedules and runs the
+    /// queued jobs of the tenants' namespaces (and of `local_namespaces`)
+    /// in one database. Absent: no worker, no scheduler loop, no query.
+    #[serde(default)]
+    pub worker: Option<WorkerSection>,
+}
+
+/// The `worker` section: where the worker's queue is and how it runs.
+/// Each field but `dsn` takes [`linch_worker::WorkerConfig`]'s default
+/// when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerSection {
+    /// The Postgres DSN of the database (and `search_path` schema) whose
+    /// queue this worker serves, inline or from the environment: the one
+    /// the tenants' agents store in. Background runs store through it, not
+    /// through the DSN of the agent that scheduled them.
+    pub dsn: TokenSource,
+    /// The owner name of its job holds and run claims; unique per worker.
+    /// `linch-server-<pid>-<start time>` when absent.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// The queues it serves, one job from each in turn; `["default"]`.
+    #[serde(default)]
+    pub queues: Option<Vec<String>>,
+    /// The most jobs it runs at once; 32.
+    #[serde(default)]
+    pub max_jobs: Option<usize>,
+    /// The size of its own Postgres pool (the queue and the run records;
+    /// each run's agent uses its tenant's pool); the default pool size.
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+    /// The longest wait between polls, and between two checks for due
+    /// schedules; 1000.
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
+    /// How long a taken job stays hidden without a heartbeat; 30000. Keep
+    /// the agents' `stores.lease_ttl_ms` no longer than this.
+    #[serde(default)]
+    pub visibility_timeout_ms: Option<u64>,
+    /// The wait before a job's second attempt, doubling each time; 5000.
+    #[serde(default)]
+    pub retry_delay_ms: Option<u64>,
+    /// How long ended jobs stay in the history; 7 days.
+    #[serde(default)]
+    pub history_retention_ms: Option<u64>,
+    /// Namespace roots outside every tenant whose jobs it also runs,
+    /// without checks (those a stdio client scheduled): a root `dev`
+    /// covers `dev` and `dev/...`.
+    #[serde(default)]
+    pub local_namespaces: Vec<String>,
 }
 
 /// One tenant: the tokens that name it and what its agents may use.
@@ -35,6 +87,8 @@ pub struct ServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct TenantConfig {
     /// Bearer tokens, each given inline or by environment variable.
+    /// None for a tenant that only a worker serves.
+    #[serde(default)]
     pub tokens: Vec<TokenSource>,
     /// The tenant's allowlists; every list empty when absent.
     #[serde(default)]
@@ -86,6 +140,16 @@ pub struct AllowConfig {
     /// least 1; the server's default pool size
     /// ([`linch::postgres::default_max_connections`]) when absent.
     pub max_pool_connections: Option<u32>,
+    /// Schedules the tenant may keep in each database, at least 1; absent,
+    /// it may create none.
+    pub max_schedules: Option<u64>,
+    /// The shortest time between two fires of its schedules, in
+    /// milliseconds; [`linch_rpc::DEFAULT_MIN_SCHEDULE_INTERVAL`] (60 s)
+    /// when absent.
+    pub min_schedule_interval_ms: Option<u64>,
+    /// Background runs (`job.enqueue`) it may have unfinished at once in
+    /// each database, at least 1; absent, it may queue none.
+    pub max_queued_jobs: Option<u64>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
@@ -115,14 +179,14 @@ pub enum ConfigError {
     /// The JSON is malformed or has an unknown or mistyped field.
     #[error("invalid config: {0}")]
     Json(#[source] serde_json::Error),
-    /// Neither `socket` nor `http` is set.
-    #[error("the config sets neither socket nor http")]
+    /// Neither `socket` nor `http` is set, and there is no `worker`.
+    #[error("the config sets neither socket nor http nor worker")]
     NoListener,
     /// No tenant has a token, so every connection would be refused.
     #[error("the config gives no tenant a token")]
     NoToken,
-    /// A tenant's `max_runs`, `max_connections`, `max_agents` or
-    /// `max_pool_connections` is 0.
+    /// A tenant's `max_runs`, `max_connections`, `max_agents`,
+    /// `max_pool_connections`, `max_schedules` or `max_queued_jobs` is 0.
     #[error(
         "tenant {tenant:?}: {field} is 0, which lets it do nothing; \
          set at least 1, or leave it out for the default"
@@ -161,7 +225,7 @@ impl ServerConfig {
     ///         a tenant a cap of 0.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_json::from_str(text).map_err(ConfigError::Json)?;
-        if config.socket.is_none() && config.http.is_none() {
+        if config.socket.is_none() && config.http.is_none() && config.worker.is_none() {
             return Err(ConfigError::NoListener);
         }
         for (name, tenant) in &config.tenants {
@@ -172,6 +236,11 @@ impl ServerConfig {
                 ("max_connections", allow.max_connections),
                 ("max_agents", allow.max_agents),
                 ("max_pool_connections", pool),
+                ("max_schedules", allow.max_schedules.map(|max| max as usize)),
+                (
+                    "max_queued_jobs",
+                    allow.max_queued_jobs.map(|max| max as usize),
+                ),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
@@ -179,6 +248,15 @@ impl ServerConfig {
             }
         }
         Ok(config)
+    }
+
+    /// Build every tenant and its tokens, reading `{"env": ...}` tokens
+    /// with `env`; [`Self::build`] without the tenants.
+    ///
+    /// Raises:
+    ///     ConfigError: As [`Self::build`].
+    pub fn tokens(&self, env: impl Fn(&str) -> Option<String>) -> Result<Tokens, ConfigError> {
+        Ok(self.build(env)?.tokens)
     }
 
     /// Build every tenant and its tokens, reading `{"env": ...}` tokens
@@ -190,13 +268,16 @@ impl ServerConfig {
     ///         `|name| std::env::var(name).ok()`.
     ///
     /// Returns:
-    ///     The token table the listeners check every connection against.
+    ///     The token table the listeners check every connection against,
+    ///     and the tenants it names, which a worker shares.
     ///
     /// Raises:
     ///     ConfigError: If a variable is unset, a tenant, token or
-    ///         allowlist entry is invalid, or no tenant has a token.
-    pub fn tokens(&self, env: impl Fn(&str) -> Option<String>) -> Result<Tokens, ConfigError> {
+    ///         allowlist entry is invalid, or the config has a listener
+    ///         and no tenant has a token.
+    pub fn build(&self, env: impl Fn(&str) -> Option<String>) -> Result<Built, ConfigError> {
         let mut tokens = Tokens::new();
+        let mut tenants = Vec::new();
         for (name, tenant) in &self.tenants {
             let access = |source| ConfigError::Access {
                 tenant: name.clone(),
@@ -214,12 +295,23 @@ impl ServerConfig {
                 };
                 tokens.insert(&token, Arc::clone(&built)).map_err(access)?;
             }
+            tenants.push(built);
         }
-        if tokens.is_empty() {
+        let listens = self.socket.is_some() || self.http.is_some();
+        if listens && tokens.is_empty() {
             return Err(ConfigError::NoToken);
         }
-        Ok(tokens)
+        Ok(Built { tokens, tenants })
     }
+}
+
+/// What [`ServerConfig::build`] makes: the token table and the tenants.
+#[derive(Debug)]
+pub struct Built {
+    /// The tokens the listeners check.
+    pub tokens: Tokens,
+    /// Every tenant, each shared by its tokens.
+    pub tenants: Vec<Arc<Tenant>>,
 }
 
 impl AllowConfig {
@@ -243,7 +335,12 @@ impl AllowConfig {
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?
             .mcp_commands(&self.mcp_commands)?
-            .mcp_urls(&self.mcp_urls)?;
+            .mcp_urls(&self.mcp_urls)?
+            .max_schedules(self.max_schedules)
+            .max_queued_jobs(self.max_queued_jobs);
+        if let Some(ms) = self.min_schedule_interval_ms {
+            allow = allow.min_schedule_interval(Duration::from_millis(ms));
+        }
         if let Some(modes) = &self.permission_modes {
             allow = allow.permission_modes(modes);
         }

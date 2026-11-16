@@ -84,7 +84,11 @@
 mod config;
 mod http;
 mod listen;
+mod worker;
 
-pub use config::{AllowConfig, ConfigError, ServerConfig, TenantConfig, TokenSource};
+pub use config::{
+    AllowConfig, Built, ConfigError, ServerConfig, TenantConfig, TokenSource, WorkerSection,
+};
 pub use http::{HEADER_READ_TIMEOUT, MAX_PENDING_UPGRADES, PATH};
 pub use listen::Listeners;
+pub use worker::{BackgroundWorker, WorkerStartError};

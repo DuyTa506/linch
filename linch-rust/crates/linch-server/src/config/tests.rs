@@ -106,6 +106,8 @@ fn a_cap_of_zero_is_refused_when_the_config_loads() {
         "max_connections",
         "max_agents",
         "max_pool_connections",
+        "max_schedules",
+        "max_queued_jobs",
     ] {
         let text = json!({"http": "127.0.0.1:1",
                           "tenants": {"acme": {"tokens": [{"value": "t"}],
@@ -119,4 +121,46 @@ fn a_cap_of_zero_is_refused_when_the_config_loads() {
                                           "allow": {"max_runs": 1, "max_connections": 1,
                                                     "max_agents": 1}}}});
     assert!(ServerConfig::from_json(&one.to_string()).is_ok());
+}
+
+#[test]
+fn a_worker_section_runs_without_listeners_or_tokens() {
+    let text = json!({
+        "worker": {"dsn": {"env": "LINCH_WORKER_DSN"}, "max_jobs": 4, "queues": ["a", "b"],
+                   "poll_interval_ms": 250, "local_namespaces": ["dev"]},
+        "tenants": {"acme": {"allow": {"max_schedules": 3, "max_queued_jobs": 9,
+                                       "min_schedule_interval_ms": 1000}}}
+    })
+    .to_string();
+    let config = ServerConfig::from_json(&text).unwrap();
+    let worker = config.worker.as_ref().unwrap();
+    assert_eq!(worker.dsn, TokenSource::Env("LINCH_WORKER_DSN".into()));
+    assert_eq!(
+        (worker.max_jobs, worker.poll_interval_ms),
+        (Some(4), Some(250))
+    );
+    assert_eq!(worker.local_namespaces, ["dev"]);
+    let allow = &config.tenants["acme"].allow;
+    assert_eq!(
+        (
+            allow.max_schedules,
+            allow.max_queued_jobs,
+            allow.min_schedule_interval_ms
+        ),
+        (Some(3), Some(9), Some(1000))
+    );
+    // No listener, so no tenant needs a token; the worker still knows it.
+    let built = config.build(no_env).unwrap();
+    assert!(built.tokens.is_empty());
+    assert_eq!(built.tenants.len(), 1);
+    assert_eq!(built.tenants[0].name(), "acme");
+    // Without a worker section there is none.
+    let listening = json!({"http": "127.0.0.1:1",
+                           "tenants": {"acme": {"tokens": [{"value": "t"}]}}});
+    let listening = ServerConfig::from_json(&listening.to_string()).unwrap();
+    assert!(listening.worker.is_none());
+    let unknown = json!({"worker": {"dsn": {"value": "postgres://x"}, "threads": 2},
+                         "tenants": {}});
+    let error = ServerConfig::from_json(&unknown.to_string()).unwrap_err();
+    assert!(error.to_string().contains("unknown field"), "{error}");
 }
