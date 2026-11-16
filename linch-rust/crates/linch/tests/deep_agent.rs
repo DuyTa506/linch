@@ -144,6 +144,8 @@ async fn a_deep_agent_has_the_presets_tools_instructions_and_limit() {
     assert_eq!(spec.max_turns, Some(64));
     let mut expected = [
         "Bash",
+        "BashKill",
+        "BashOutput",
         "Edit",
         "Glob",
         "Grep",

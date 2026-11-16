@@ -4,8 +4,10 @@
 //! through one [`ExecutionFs`]; [`LocalFs`] confines them to a root
 //! directory with symlinks resolved. `Read`, `Write` and `Edit` share one
 //! [`ReadTracker`], so a file is only changed after the model has seen it.
-//! [`Bash`] runs a command in its own process group in the same root.
-//! [`workspace_tools`] wires all six together.
+//! [`Bash`] runs a command in its own process group in the same root; with
+//! `run_in_background` it starts the command in a per-agent [`Processes`]
+//! registry, which [`BashOutput`] reads and [`BashKill`] stops.
+//! [`workspace_tools`] wires all eight together.
 //!
 //! [`vfs`] is the virtual filesystem apart from the workspace: file
 //! backends, the `ls`, `read_file`, `write_file` and `edit_file` tools, and
@@ -34,7 +36,7 @@ use std::sync::Arc;
 
 use linch_core::Tool;
 
-pub use bash::Bash;
+pub use bash::{Bash, BashKill, BashOutput, MAX_RUNNING, NO_SUCH_PROCESS_CODE, Processes};
 pub use edit::Edit;
 pub use fs::{ExecutionFs, FsError, LocalFs};
 pub use glob::Glob;
@@ -45,11 +47,17 @@ pub use tasks::{TASK_TOOL_NAMES, TaskCreate, TaskGet, TaskList, TaskUpdate, task
 pub use tracker::ReadTracker;
 pub use write::Write;
 
-/// `Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash` over one local
-/// workspace, sharing `reads`. The host keeps `reads` to call
-/// [`ReadTracker::forget`] when a session ends.
-pub fn workspace_tools(fs: Arc<LocalFs>, reads: Arc<ReadTracker>) -> Vec<Arc<dyn Tool>> {
-    let bash = Bash::new(fs.root());
+/// `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
+/// `BashKill` over one local workspace, sharing `reads`, with `Bash`'s
+/// background commands in `processes`. The host keeps `reads` and
+/// `processes` to call [`ReadTracker::forget`] and
+/// [`Processes::close_session`] when a session ends.
+pub fn workspace_tools(
+    fs: Arc<LocalFs>,
+    reads: Arc<ReadTracker>,
+    processes: Arc<Processes>,
+) -> Vec<Arc<dyn Tool>> {
+    let bash = Bash::new(fs.root()).with_processes(Arc::clone(&processes));
     let fs: Arc<dyn ExecutionFs> = fs;
     vec![
         Arc::new(Read::new(fs.clone(), reads.clone())),
@@ -58,5 +66,7 @@ pub fn workspace_tools(fs: Arc<LocalFs>, reads: Arc<ReadTracker>) -> Vec<Arc<dyn
         Arc::new(Grep::new(fs.clone())),
         Arc::new(Glob::new(fs)),
         Arc::new(bash),
+        Arc::new(BashOutput::new(Arc::clone(&processes))),
+        Arc::new(BashKill::new(processes)),
     ]
 }

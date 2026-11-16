@@ -1,11 +1,14 @@
-//! The `Bash` tool.
+//! The `Bash` tool, and the background commands it starts.
 
+mod background;
 mod capture;
+mod control;
 mod process;
 
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,8 +18,12 @@ use linch_core::{
 use serde_json::json;
 use tokio::time::Instant;
 
-use crate::input::{coded, optional_count, schema, string};
+use crate::input::{coded, flag, optional_count, schema, string};
+use background::StartError;
 use process::{End, Finished};
+
+pub use background::{MAX_RUNNING, Processes};
+pub use control::{BashKill, BashOutput, NO_SUCH_PROCESS_CODE};
 
 /// Timeout when the call gives none, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -45,9 +52,18 @@ const ALLOWED_ENV: [&str; 9] = [
 /// A call with a [`ToolContext::deadline`] (the scheduler's call timeout)
 /// cuts its timeout to end 100 ms before it, so the output so far reaches
 /// the model instead of a generic timeout.
+///
+/// With [`Bash::with_processes`], `run_in_background` starts the command
+/// in that registry and returns its id at once; [`BashOutput`] reads it and
+/// [`BashKill`] stops it. A background command keeps its process group
+/// until it exits, its `timeout_ms` (30 min when absent) passes, it is
+/// killed, its session closes or the registry drops; it also dies with the
+/// server process, even on `SIGKILL`. A session runs at most
+/// [`MAX_RUNNING`] at once.
 pub struct Bash {
     cwd: PathBuf,
     env: BTreeMap<String, String>,
+    processes: Option<Arc<Processes>>,
     schema: JsonObject,
 }
 
@@ -66,7 +82,11 @@ impl Bash {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Kill the command after this many milliseconds. Default 120000, max 1800000."
+                    "description": "Kill the command after this many milliseconds. Default 120000 (1800000 in the background), max 1800000."
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Start the command and return its process id at once; read it with BashOutput, stop it with BashKill."
                 }
             },
             "required": ["command"]
@@ -74,8 +94,17 @@ impl Bash {
         Self {
             cwd: cwd.into(),
             env,
+            processes: None,
             schema,
         }
+    }
+
+    /// Start `run_in_background` commands in `processes`, which
+    /// [`BashOutput`] and [`BashKill`] read. Without it such a call is
+    /// refused.
+    pub fn with_processes(mut self, processes: Arc<Processes>) -> Self {
+        self.processes = Some(processes);
+        self
     }
 
     /// Also set `vars` in the command's environment, overriding host values.
@@ -95,7 +124,10 @@ impl Tool for Bash {
         "Run a shell command (/bin/sh) in the workspace root with stdin closed. \
          The command and everything it starts are killed on timeout (default 120 s, \
          max 30 min) or cancellation, and background jobs are killed when the \
-         command exits. Each output stream keeps its first 4000 and last 26000 bytes."
+         command exits. Each output stream keeps its first 4000 and last 26000 bytes. \
+         With run_in_background the command keeps running and the call returns its \
+         process id: read it with BashOutput, stop it with BashKill (default timeout \
+         30 min, at most 4 at once)."
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -121,17 +153,66 @@ impl Tool for Bash {
 
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let command = string(&input, "command")?;
+        let background = flag(&input, "run_in_background")?;
+        let default = if background {
+            MAX_TIMEOUT_MS
+        } else {
+            DEFAULT_TIMEOUT_MS
+        };
         let timeout_ms = optional_count(&input, "timeout_ms")?
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .unwrap_or(default)
             .clamp(1, MAX_TIMEOUT_MS);
         if ctx.cancel.is_cancelled() {
             return Err(coded("[aborted before start]", "aborted"));
+        }
+        if background {
+            return self.start(command, Duration::from_millis(timeout_ms), &ctx);
         }
         let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline);
         let finished = process::run(command, &self.cwd, &self.env, timeout, &ctx.cancel)
             .await
             .map_err(|error| coded(format!("could not start /bin/sh: {error}"), "spawn_failed"))?;
         render(finished, timeout.as_millis())
+    }
+}
+
+impl Bash {
+    /// Start `command` in the background for the call's session.
+    fn start(&self, command: &str, timeout: Duration, ctx: &ToolContext) -> ToolResult {
+        let Some(processes) = &self.processes else {
+            let message = "run_in_background is not available: this Bash has no process registry";
+            return Err(coded(message, "no_background"));
+        };
+        let started = processes.start(&ctx.session_id, command, &self.cwd, &self.env, timeout);
+        let proc = match started {
+            Ok(proc) => proc,
+            Err(StartError::Full) => {
+                let message = format!(
+                    "{MAX_RUNNING} background processes already run in this session; stop one \
+                     with BashKill or wait for one to end first"
+                );
+                return Err(coded(message, "too_many_processes"));
+            }
+            Err(StartError::Spawn(error)) => {
+                let message = format!("could not start /bin/sh: {error}");
+                return Err(coded(message, "spawn_failed"));
+            }
+        };
+        let ms = timeout.as_millis();
+        let text = format!(
+            "[started background process {}; read its output with BashOutput, stop it with \
+             BashKill; it is killed after {ms} ms, when the session closes, or when the \
+             server stops]",
+            proc.id
+        );
+        let mut output = ToolOutput::new(text);
+        output
+            .metadata
+            .insert("process_id".into(), proc.id.clone().into());
+        if let Some(pid) = proc.pid {
+            output.metadata.insert("pid".into(), pid.into());
+        }
+        Ok(output)
     }
 }
 

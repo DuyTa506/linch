@@ -40,14 +40,16 @@ pub struct AgentConfig {
     #[serde(default)]
     pub stores: StoreConfig,
     /// Workspace root for the built-in tools (`Read`, `Write`, `Edit`,
-    /// `Grep`, `Glob`, and `Bash` unless `bash` is off). It must be an
-    /// existing directory; a relative path resolves against the process's
-    /// working directory. Absent: the agent has no tools.
+    /// `Grep`, `Glob`, and `Bash`, `BashOutput` and `BashKill` unless
+    /// `bash` is off). It must be an existing directory; a relative path
+    /// resolves against the process's working directory. Absent: the agent
+    /// has no tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
-    /// Whether the workspace tools include `Bash`, which runs commands
-    /// unconfined, as the process's user. On when absent; unused without a
-    /// workspace.
+    /// Whether the workspace tools include `Bash` (which runs commands
+    /// unconfined, as the process's user) and `BashOutput` and `BashKill`,
+    /// which read and stop its background commands. On when absent; unused
+    /// without a workspace.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub bash: bool,
     /// Permission rules. Absent: mode `default` (read tools run, write and
