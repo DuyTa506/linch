@@ -233,6 +233,12 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
             .prop_map(Event::LoopGuard)
             .boxed(),
         builders::budget_event().prop_map(Event::Budget).boxed(),
+        builders::provider_retry_event()
+            .prop_map(Event::ProviderRetry)
+            .boxed(),
+        builders::model_fallback_event()
+            .prop_map(Event::ModelFallback)
+            .boxed(),
         builders::prompt_cache_advisory_event()
             .prop_map(Event::PromptCacheAdvisory)
             .boxed(),

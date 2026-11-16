@@ -21,6 +21,8 @@ pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
     "compaction",
     "loop_guard",
     "budget",
+    "provider_retry",
+    "model_fallback",
     "prompt_cache_advisory",
     "skills_loaded",
     "skill_invoked",

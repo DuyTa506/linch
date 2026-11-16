@@ -26,6 +26,8 @@ impl Event {
             Event::Compaction(_) => "compaction",
             Event::LoopGuard(_) => "loop_guard",
             Event::Budget(_) => "budget",
+            Event::ProviderRetry(_) => "provider_retry",
+            Event::ModelFallback(_) => "model_fallback",
             Event::PromptCacheAdvisory(_) => "prompt_cache_advisory",
             Event::SkillsLoaded(_) => "skills_loaded",
             Event::SkillInvoked(_) => "skill_invoked",

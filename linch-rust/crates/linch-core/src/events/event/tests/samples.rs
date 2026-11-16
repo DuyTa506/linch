@@ -108,6 +108,17 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             max_tokens: None,
             max_cost_usd: None,
         }),
+        Event::ProviderRetry(ProviderRetryEvent {
+            model: "m".into(),
+            retry: 1,
+            delay_ms: 1000,
+            error: JsonObject::new(),
+        }),
+        Event::ModelFallback(ModelFallbackEvent {
+            from_model: "m".into(),
+            to_model: "n".into(),
+            error: JsonObject::new(),
+        }),
         Event::PromptCacheAdvisory(PromptCacheAdvisoryEvent {
             reason: PromptCacheAdvisoryReason::ModelChanged,
             detail: "model changed".into(),

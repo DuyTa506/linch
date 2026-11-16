@@ -237,6 +237,27 @@ pub(super) fn budget_event() -> impl Strategy<Value = BudgetEvent> {
         )
 }
 
+pub(super) fn provider_retry_event() -> impl Strategy<Value = ProviderRetryEvent> {
+    (short_string(), any::<u32>(), any::<u64>(), json_object(1)).prop_map(
+        |(model, retry, delay_ms, error)| ProviderRetryEvent {
+            model,
+            retry,
+            delay_ms,
+            error,
+        },
+    )
+}
+
+pub(super) fn model_fallback_event() -> impl Strategy<Value = ModelFallbackEvent> {
+    (short_string(), short_string(), json_object(1)).prop_map(|(from_model, to_model, error)| {
+        ModelFallbackEvent {
+            from_model,
+            to_model,
+            error,
+        }
+    })
+}
+
 pub(super) fn prompt_cache_advisory_event() -> impl Strategy<Value = PromptCacheAdvisoryEvent> {
     (
         prop_oneof![
