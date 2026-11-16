@@ -74,7 +74,8 @@ impl Server {
     }
 
     /// Run the agent's session-close callbacks, which drop what its
-    /// workspace tools recorded as read in the session. Nothing is written.
+    /// workspace tools recorded as read in the session and kill its
+    /// background `Bash` commands. Nothing is written.
     pub(super) fn close_session(
         &self,
         params: SessionCloseParams,

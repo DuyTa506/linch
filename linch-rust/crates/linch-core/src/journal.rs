@@ -10,9 +10,10 @@
 //! - [`Journal::save`] applies the phase rule:
 //!   `Started`, `AssistantReceived` and `Compacted` (a paid summary) write
 //!   through, `AwaitingApproval` and `AwaitingInput` write through with
-//!   status `awaiting_approval` and `awaiting_input`, and `ProviderPending`, `CompactionPending`,
-//!   `ToolBatch` and `ToolResults` are held. A held checkpoint is a snapshot:
-//!   it covers only the events pending when it was saved.
+//!   status `awaiting_approval` and `awaiting_input`, and
+//!   `ProviderPending`, `CompactionPending`, `ToolBatch` and `ToolResults`
+//!   are held. A held checkpoint is a snapshot: it covers only the events
+//!   pending when it was saved.
 //! - The caller places the barriers: [`Journal::flush`] before a provider
 //!   dispatch, after a summary call that gave no summary, and around every
 //!   tool that really runs (its start and its end), and

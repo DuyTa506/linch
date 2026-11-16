@@ -199,8 +199,9 @@
 //! ([`SessionCloseParams`](protocol::SessionCloseParams)) tells the agent
 //! the client is done with a session and answers `{}`: the workspace tools
 //! forget what the session read, so a later write there must read the file
-//! again. Nothing is written; the session and its runs stay, and a run of
-//! it still in progress just has to read again before it writes.
+//! again, and its background `Bash` commands are killed. Nothing is
+//! written; the session and its runs stay, and a run of it still in
+//! progress just has to read again before it writes.
 //!
 //! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?, output_schema?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is

@@ -247,8 +247,8 @@ class Agent:
         """Tell the agent this client is done with a session.
 
         Its workspace tools forget what the session read, so a later write
-        there must read the file again. Nothing is written: the session and
-        its runs stay.
+        there must read the file again, and its background `Bash` commands
+        are killed. Nothing is written: the session and its runs stay.
 
         Raises:
             AgentNotFound: The agent handle is unknown to the server.
