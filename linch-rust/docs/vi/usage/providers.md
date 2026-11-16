@@ -453,12 +453,18 @@ mua một câu trả lời hai lần:
 - Một run được resume sau khi crash trong lúc chờ sẽ gọi lại ngay, không chờ nốt
   phần còn lại, và tiếp tục đếm các lần thử lại của turn.
 - Một run đã chuyển model sẽ resume trên model fallback.
-- Một lần thử thất bại mà không tốn gì, một kết nối chưa bao giờ được tạo hoặc một
-  status lỗi trước khi có bất kỳ đầu ra nào, được tính là usage bằng không: nó không
-  gửi event `usage` và để `usage_complete` là true.
-- Một request đã gửi đi mà không có gì trả về (reset, timeout đọc), hoặc một lỗi sau
-  khi đầu ra đã bắt đầu, có thể đã bị tính tiền, nên usage của nó không rõ và
-  `result` của run có `usage_complete` là false.
+- Khi có một callback `provider_call_stop` hoặc `after_provider_call` được gắn, usage của
+  một câu trả lời đã trả phí được ghi trước khi các callback đó chạy. Nếu server crash
+  trong lúc một callback chạy, run được resume giữ usage và chi phí đó trong các tổng của
+  nó và gọi lại model; lời gọi đó không tốn lần thử lại nào của turn.
+- Một lần thử thất bại mà không tốn gì, một kết nối chưa bao giờ được tạo hoặc một lần
+  từ chối trước khi có bất kỳ đầu ra nào (status 4xx, kể cả 408 và 429, hoặc 503 hay
+  529), được tính là usage bằng không: nó không gửi event `usage` và để `usage_complete`
+  là true.
+- Một request đã gửi đi mà không có gì trả về (reset, timeout đọc), một 500, 502 hoặc 504
+  (một gateway có thể gửi nó sau khi model đã chạy và tính tiền), bất kỳ status lỗi nào
+  khác, hoặc một lỗi sau khi đầu ra đã bắt đầu, có thể đã bị tính tiền, nên usage của nó
+  không rõ và `result` của run có `usage_complete` là false.
 - Dưới một [`budget`](./agent.md#budget) có giới hạn, một lời gọi không rõ usage
   nghĩa là không còn giữ được giới hạn, nên run không được thử lại sau nó: nó kết
   thúc với lỗi của provider. Một lời gọi không tốn gì vẫn được thử lại như thường.
