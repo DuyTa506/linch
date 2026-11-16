@@ -248,8 +248,8 @@ class Redaction(TypedDict, total=False):
             reasoning), the final answer after a `stop` rewrite and
             compaction summaries are scrubbed. On when absent.
         tool_results: Whether tool results (every string of the value,
-            metadata, error) and `AskUser` answers are scrubbed. On when
-            absent.
+            metadata, error), `AskUser` answers, background workers'
+            answers and mailbox peer messages are scrubbed. On when absent.
         prompt: Whether a new run's prompt is scrubbed. Off when absent.
     """
 

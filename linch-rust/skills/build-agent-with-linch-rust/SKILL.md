@@ -52,6 +52,7 @@ Most tasks need more than one row. Paths are relative to `$DOCS`.
 | Start, stream, resume, approve, cancel; what is durable | `usage/runs.md` |
 | Rendering a stream, replay, usage and cost | `usage/events.md` |
 | A final answer another program parses (a JSON Schema) | `usage/structured-output.md` |
+| Permission modes, redacting secrets, checking the final answer | `usage/security.md` |
 | Memory or Postgres stores, DSNs, pools | `usage/stores.md` |
 | Skills, subagents and workers for your agent | `usage/skills.md`, `usage/subagents.md` |
 | A model that plans, delegates and keeps notes | `usage/deep-agent.md`, `usage/tasks.md` |

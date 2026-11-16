@@ -201,7 +201,8 @@ pub enum StopAnswer {
         feedback: String,
     },
     /// Ask for another answer, as Python's `before_final_answer` `retry`:
-    /// honoured once per run call, after which it counts as `allow`.
+    /// honoured once per run call (with `spec.verification`, while its
+    /// `max_retries` lasts), after which it counts as `allow`.
     Retry {
         /// What to fix.
         feedback: String,

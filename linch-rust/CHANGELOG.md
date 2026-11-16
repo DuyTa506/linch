@@ -11,7 +11,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - Redaction: `spec.redaction` holds regex rules that scrub assistant
   responses (text and unsigned reasoning, before `after_provider_call` and
   before they are logged), tool results (before `post_tool_use`, and
-  `AskUser` answers) and, when asked, the prompt; a hook's rewrite is
+  `AskUser` answers, background workers' answers and mailbox peer
+  messages) and, when asked, the prompt; a hook's rewrite is
   scrubbed again, and `partial_assistant` or `tool_progress` events are not
   streamed while their surface is scrubbed. Python's `RedactionHook`.
 - Final-answer verifiers: `spec.verification` holds built-in checks (a

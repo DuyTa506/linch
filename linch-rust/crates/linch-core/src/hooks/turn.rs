@@ -214,7 +214,8 @@ pub enum StopResponse {
     /// Do not accept this answer yet: the model gets `feedback` and answers
     /// again. Python's `before_final_answer` `retry`/`force_continue`, and
     /// bounded like it: honoured once per run call (a resume starts
-    /// afresh). While honoured it stops the chain; once spent it counts as
+    /// afresh), or, for an agent with a `verification` spec, while its
+    /// durable `max_retries` lasts. While honoured it stops the chain; once spent it counts as
     /// [`StopResponse::Allow`], so the remaining hooks still run, and the
     /// answer stops the run unless one of them says otherwise.
     Retry {

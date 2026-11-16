@@ -87,13 +87,15 @@ What each surface covers:
 | Surface | Scrubbed | Not sent while it is on |
 |---|---|---|
 | `response` | The text and unsigned reasoning of every assistant response, before the `after_provider_call` callbacks see it and before it is logged; a callback's rewrite again; the final answer after a `stop` rewrite; compaction summaries | `partial_assistant` deltas: a match can span two of them |
-| `tool_results` | Every string of a tool result (the output's value and metadata, an error's message and details) before the `post_tool_use` callbacks see it, and again after one replaced it; `AskUser` answers | `tool_progress` events |
+| `tool_results` | Every string of a tool result (the output's value and metadata, an error's message and details) before the `post_tool_use` callbacks see it, and again after one replaced it, so an offloaded result is stored scrubbed; `AskUser` answers; a background worker's answer; peer messages from the mailbox | `tool_progress` events |
 | `prompt` | The text of a new run's prompt, before the `user_prompt_submit` callbacks, and again after a rewrite | nothing |
 
-What is scrubbed is what the session logs and what the model reads back on
-the next turn: the raw text never reaches a store, an event, a callback or
-the next request. A crash at any write keeps it that way, since nothing
-holding response text is written before the redaction.
+On each surface that is on, what is scrubbed is what the session logs and
+what the model reads back on the next turn: that text never reaches a
+store, an event, a callback or the next request in its raw form. A crash at
+any write keeps it that way, since nothing holding response text is written
+before the redaction. The parts listed below are not scrubbed, and do reach
+the `assistant` and `tool_call_start` events and the log as written.
 
 Never changed:
 
