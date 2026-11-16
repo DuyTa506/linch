@@ -62,7 +62,8 @@ pub enum ProviderError {
         /// Redacted description.
         message: String,
     },
-    /// The provider answered with a non-success HTTP status.
+    /// The provider answered with a non-success HTTP status. Retryable for
+    /// 408, 429 and 5xx.
     #[error("provider returned HTTP {status}: {message}")]
     Status {
         /// HTTP status code.
@@ -87,11 +88,12 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// Whether retrying the same request may succeed.
+    /// Whether retrying the same request may succeed: no response at all,
+    /// a request timeout (408), a rate limit (429) or a server error (5xx).
     pub fn retryable(&self) -> bool {
         match self {
             Self::Transport { .. } => true,
-            Self::Status { status, .. } => *status == 429 || *status >= 500,
+            Self::Status { status, .. } => matches!(*status, 408 | 429) || *status >= 500,
             Self::InvalidRequest { .. } | Self::Stream(_) | Self::Cancelled => false,
         }
     }
@@ -110,7 +112,9 @@ mod tests {
         };
         assert!(status(429).retryable());
         assert!(status(503).retryable());
+        assert!(status(408).retryable(), "a request timeout, as Python retries it");
         assert!(!status(400).retryable());
+        assert!(!status(409).retryable());
         assert!(!status(401).retryable());
         assert!(
             ProviderError::Transport {
