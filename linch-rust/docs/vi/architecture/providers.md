@@ -19,7 +19,8 @@ trong Rust:
   `context_window`, `capabilities`, `prepare` hay `aclose`; một adapter không
   thể đáp ứng một trường của request sẽ làm lời gọi thất bại với `InvalidRequest`.
 - `stream` nhận một `CancellationToken` tường minh.
-- Usage không xác định là `None`, không bao giờ là một `Usage` toàn số không.
+- Usage không xác định là `None`, không bao giờ là một `Usage` toàn số không; số
+  không nghĩa là đã biết chắc không tốn gì ([bên dưới](#retry-và-fallback-model)).
 - Event là một enum đóng, từ chối các trường và tag không biết khi giải mã.
 
 ## Hợp đồng
@@ -191,7 +192,7 @@ free không gửi event `usage` (`runner/turn.rs:375`, và tương tự trong
 usage không rõ (`budget.rs:110`), nên một lỗi free được retry dưới giới hạn; một lỗi có
 thể đã bị tính tiền vẫn kết thúc run với lỗi của provider. Python đánh dấu usage của
 mọi lời gọi thất bại là `unknown` (`src/linch/loop/streaming.py:412-415`) rồi từ chối
-mọi lời gọi dưới giới hạn (`src/linch/model_calls.py:643-650`), nên dưới giới hạn nó
+mọi lời gọi dưới giới hạn (`src/linch/model_calls.py:643-650`, kiểm tra trước mỗi delivery, kể cả một lần retry, tại `src/linch/loop/streaming.py:467`), nên dưới giới hạn nó
 không bao giờ retry.
 
 Hai event, cả hai đều bền vững:

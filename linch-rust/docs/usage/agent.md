@@ -259,10 +259,13 @@ A run whose spend reached a cap stops there with a `budget` event of kind
 `error`, `stop_reason` `error`. A subagent's child run charges its parent's
 budget, so one budget caps the whole tree, and the warning fires once for it,
 in whichever run's call crossed the ratio. With a cap set, a call whose usage
-is unknown (it failed or was cut off before the provider reported any) means
-the cap can no longer be kept: the next call is refused with an error named
-`BudgetAccountingError`. A run that crashed during a call resumes into that
-error.
+is unknown (it got no answer, or was cut off after output began, before the
+provider reported any) means the cap can no longer be kept: the next call,
+a [retry](./providers.md#failures-and-retries) included, is refused with an
+error named `BudgetAccountingError`. A call that failed before costing
+anything (no connection, or an error status before any output) counts as
+zero and is retried as usual. A run that crashed during a call resumes into
+that error.
 
 Each run of the agent starts with nothing spent. A resumed run starts from
 what its durable record and its children's say was spent, so a crash never
@@ -447,7 +450,7 @@ report, so the answer is always `{}` and none of them can fail closed.
 | `agent_stop` | `status`, `stop_reason` |
 | `turn_start` | `turn` |
 | `provider_call_start` | `turn`, `model` |
-| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?`, `duration_ms` |
+| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?` (absent when unknown; zero for a failed call that cost nothing), `duration_ms` |
 | `tool_use_start` | `tool_use_id`, `tool_name`, `input` |
 | `tool_use_stop` | `tool_use_id`, `tool_name`, `is_error`, `duration_ms` |
 | `post_tool_use_failure` | `tool_use_id`, `tool_name`, `input`, `error` |

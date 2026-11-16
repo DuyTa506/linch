@@ -17,7 +17,8 @@ differs in Rust:
   `context_window`, `capabilities`, `prepare` or `aclose`; an adapter that
   cannot honor a request field fails the call with `InvalidRequest`.
 - `stream` takes an explicit `CancellationToken`.
-- Unknown usage is `None`, never a zero `Usage`.
+- Unknown usage is `None`, never a zero `Usage`; a zero means known to have
+  cost nothing ([below](#retries-and-fallback-models)).
 - Events are a closed enum that rejects unknown fields and tags on decode.
 
 ## The contract
@@ -194,7 +195,7 @@ call after an unknown usage (`budget.rs:110`), so a free failure is retried
 under a cap; one that may have been billed still ends the run with the
 provider's error. Python marks every failed call's usage `unknown`
 (`src/linch/loop/streaming.py:412-415`) and then refuses any call under a cap
-(`src/linch/model_calls.py:643-650`), so under a cap it never retries.
+(`src/linch/model_calls.py:643-650`, checked before every delivery, a retry included, at `src/linch/loop/streaming.py:467`), so under a cap it never retries.
 
 The two events, both durable:
 
