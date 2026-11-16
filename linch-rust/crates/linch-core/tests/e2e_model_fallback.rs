@@ -277,3 +277,56 @@ async fn a_compaction_after_failing_over_asks_the_fallback() {
     });
     assert_eq!(summary.expect("a summary call").model, FIRST);
 }
+
+/// A subagent's child run takes the parent's spec, so it retries and fails
+/// over on its own; the parent's next call stays on the parent's model.
+#[tokio::test]
+async fn a_subagents_child_retries_and_fails_over_on_its_own() {
+    let failing = || ScriptedTurn::failing(busy());
+    let turns = vec![
+        common::subagents::spawn_turn(Some("scout"), &["look"]),
+        failing(),
+        failing(),
+        text_turn("found it"),
+        text_turn("done"),
+    ];
+    let provider = Arc::new(linch_core::provider::scripted::ScriptedProvider::new(turns));
+    let stores = Arc::new(Stores::default());
+    let mut scout = linch_core::SubagentDefinition::new("scout", "Reads around.", "Scout.");
+    scout.tools = Some(vec!["Read".into()]);
+    let agent = AgentBuilder::new(failing_over(Some(2)))
+        .provider(provider.clone())
+        .tools(registry(vec![Echo::new(
+            "Read",
+            ToolScope::Read,
+            &Runs::default(),
+        )]))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .subagents(vec![scout])
+        .build()
+        .unwrap();
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    assert_eq!(result(&envelopes).subtype, ResultSubtype::Success);
+    let models: Vec<String> = provider
+        .requests()
+        .iter()
+        .map(|r| r.model.clone())
+        .collect();
+    assert_eq!(models, [MODEL, MODEL, MODEL, FIRST, MODEL]);
+    let child: Vec<String> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::Subagent(sub) => Some(kind(&sub.event)),
+            _ => None,
+        })
+        .filter(|k| k == "provider_retry" || k == "model_fallback")
+        .collect();
+    assert_eq!(child, ["provider_retry", "model_fallback"]);
+    assert!(
+        fallbacks(&envelopes).is_empty(),
+        "the parent never failed over"
+    );
+}
