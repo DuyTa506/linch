@@ -484,6 +484,89 @@ async fn a_crash_at_any_write_of_a_skipped_turn_resumes_without_a_call() {
     }
 }
 
+/// Skips the first call only, keyed on the request: the prompt alone.
+fn first_skipped() -> Hooks {
+    let hooks = Hooks::default();
+    let plan = hook::<BeforeProviderCall>("plan", |request| {
+        Ok(match request.request.messages.len() {
+            1 => BeforeProviderCallResponse::ForceContinue {
+                feedback: "plan first".into(),
+            },
+            _ => BeforeProviderCallResponse::Continue,
+        })
+    });
+    let _ = hooks.before_provider_call.register(plan.arc()).unwrap();
+    hooks
+}
+
+/// A tool batch after a skipped turn resumes from any crash as after any
+/// other turn: a turn with no response does not shift the batch's turn,
+/// the tool runs at most once, and the skipped turn never gets a call.
+#[tokio::test]
+async fn a_crash_at_any_write_after_a_skipped_turn_resumes_its_tool_batch() {
+    let turns = || {
+        Arc::new(Replay::new(vec![
+            tool_turn(0, 1, "Read"),
+            text_turn("done"),
+        ]))
+    };
+    let clean = Arc::new(Stores::default());
+    let agent = hooked(turns(), first_skipped(), clean.clone(), &Runs::default());
+    finish(agent.run("go", RunOptions::new("s1"))).await;
+    let want = messages(&*clean, "s1").await;
+    assert_eq!(want.len(), 5, "{want:?}");
+    assert_eq!(want[1], Message::user_text(reminder("plan first")));
+    let writes = clean.log.lock().unwrap().len() as u64;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let (stores, runs, provider) = (Arc::new(Stores::default()), Runs::default(), turns());
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let stream = hooked(provider.clone(), first_skipped(), faulty, &runs)
+                .run("go", RunOptions::new("s1"));
+            let run_id = stream.run_id().clone();
+            assert!(drain(stream).await.1.is_some(), "{context}");
+            let agent = hooked(provider.clone(), first_skipped(), stores.clone(), &runs);
+            let run_id = match stores.runs.load(NS, &run_id).await {
+                Ok(record) if record.status.is_terminal() => run_id,
+                Ok(_) => {
+                    finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
+                    run_id
+                }
+                Err(_) => {
+                    let stream = agent.run("go", RunOptions::new("s1"));
+                    let run_id = stream.run_id().clone();
+                    finish(stream).await;
+                    run_id
+                }
+            };
+            let record = stores.runs.load(NS, &run_id).await.unwrap();
+            assert_eq!(record.status, RunStatus::Completed, "{context}");
+            let got = messages(&*stores, "s1").await;
+            assert_eq!(got.len(), 5, "{context}: {got:?}");
+            assert_eq!(got[..3], want[..3], "{context}");
+            assert_eq!(got[4], want[4], "{context}");
+            let ran = runs.lock().unwrap().clone();
+            assert!(ran.values().all(|&n| n == 1), "{context}: {ran:?}");
+            // A crash between the tool's start and its end leaves a
+            // placeholder instead of running it again.
+            let real = !tool_results(&got[3])[0].1;
+            assert!(!real || ran.len() == 1, "{context}: {ran:?}");
+            if ran.len() == 1 && real {
+                assert_eq!(got[3], want[3], "{context}");
+            }
+            let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+            let delivered = delivered_turns(&events);
+            assert!(
+                delivered.contains(&1) && delivered.contains(&2) && !delivered.contains(&0),
+                "{context}: deliveries for turns {delivered:?}"
+            );
+            let calls = provider.calls();
+            assert!(calls.values().all(|&n| n <= 2), "{context}: {calls:?}");
+        }
+    }
+}
+
 /// Skips the call once the tool results are in, until the feedback is;
 /// records the turn of every request it sees in `asked`.
 fn after_results(asked: &Arc<Mutex<Vec<u32>>>) -> Hooks {
