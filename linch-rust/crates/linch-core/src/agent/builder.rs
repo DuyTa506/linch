@@ -223,6 +223,10 @@ impl AgentBuilder {
         if let Some(problem) = self.spec.compaction.as_ref().and_then(|c| c.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
+        let truncation = self.spec.truncation_recovery.as_ref();
+        if let Some(problem) = truncation.and_then(|t| t.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
         if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }

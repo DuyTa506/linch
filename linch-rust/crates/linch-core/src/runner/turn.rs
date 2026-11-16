@@ -158,6 +158,12 @@ pub(super) struct Runner {
     /// Summary deliveries of the current turn, so the next one takes the
     /// next attempt id.
     pub(super) summary_calls: u32,
+    /// Cut answers the run continued (see [`crate::truncation`]), counted
+    /// from its durable log on a resume.
+    pub(super) truncations: u32,
+    /// The cut parts the next text answer continues; its final answer
+    /// starts with them.
+    pub(super) truncated: String,
 }
 
 impl Runner {
@@ -201,6 +207,8 @@ impl Runner {
             verify_retries: 0,
             forced: 0,
             summary_calls: 0,
+            truncations: 0,
+            truncated: String::new(),
         };
         runner.narrow();
         runner
@@ -542,7 +550,15 @@ impl Runner {
         if let Some(retry) = retry {
             return Ok(Some(self.feedback(retry).await?));
         }
+        // The parts the output limit cut off before this response.
+        let parts = std::mem::take(&mut self.truncated);
         if calls.is_empty() {
+            if let Some(reminder) = self.continuing(stop_reason, &text) {
+                self.truncated = parts + &text;
+                self.truncations += 1;
+                return Ok(Some(self.feedback(Message::user_text(reminder)).await?));
+            }
+            let text = parts + &text;
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);
             }
@@ -574,5 +590,14 @@ impl Runner {
             approvals: HashMap::new(),
             after_seq: None,
         })))
+    }
+
+    /// The feedback that continues a text answer with `text` that stopped
+    /// for `stop_reason`, when it is cut off and the spec's truncation
+    /// recovery has an attempt left; `None` takes it as the answer.
+    fn continuing(&self, stop_reason: StopReason, text: &str) -> Option<String> {
+        let spec = self.agent.spec.truncation_recovery.as_ref()?;
+        let left = self.truncations < spec.max_attempts;
+        (left && crate::truncation::cut(stop_reason, text)).then(|| spec.reminder())
     }
 }

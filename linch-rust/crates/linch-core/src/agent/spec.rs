@@ -15,6 +15,7 @@ use crate::provider::{OutputSchema, ProviderRequest, ReasoningEffort, Thinking, 
 use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
 use crate::tool::ToolScope;
+use crate::truncation::TruncationRecovery;
 use crate::verification::VerificationSpec;
 
 /// Domain separator for the run contract digest.
@@ -109,6 +110,11 @@ pub struct AgentSpec {
     /// do not take it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationSpec>,
+    /// How a text answer the output limit cut off is continued instead of
+    /// taken as final (Python's `TruncationRecovery`; see
+    /// [`crate::truncation`]). `None` (the default) takes it as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_recovery: Option<TruncationRecovery>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -136,6 +142,7 @@ impl AgentSpec {
             structured_output_retries: 0,
             redaction: None,
             verification: None,
+            truncation_recovery: None,
         }
     }
 

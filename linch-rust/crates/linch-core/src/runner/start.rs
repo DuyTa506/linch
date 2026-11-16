@@ -30,6 +30,7 @@ use crate::store::{Lease, RunRecord, StoreError};
 use crate::structured::{self, OutputContract};
 use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
+use crate::truncation::Truncated;
 use crate::usage::Usage;
 
 /// Create the run (the `Started` write-through), append the prompt, and go.
@@ -465,6 +466,15 @@ pub(super) async fn continue_run(
     runner.verify_retries = crate::verification::retries_spent(&events);
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
+    if let Some(truncation) = &runner.agent.spec.truncation_recovery {
+        let spent = Truncated::of(&events, &truncation.reminder());
+        runner.truncations = spent.attempts;
+        // A response already received continues the parts before it.
+        runner.truncated = match checkpoint.phase {
+            Phase::AssistantReceived { .. } => spent.before_latest,
+            _ => spent.chain,
+        };
+    }
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }
