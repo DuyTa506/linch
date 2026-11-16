@@ -35,6 +35,7 @@
 
 use std::mem;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use thiserror::Error;
 
@@ -73,6 +74,9 @@ pub struct Journal {
     pending: Vec<Envelope>,
     held: Option<Held>,
     poisoned: bool,
+    /// Set once a write moved the run out of `running` (suspended or
+    /// ended); the run's lease no longer matters then.
+    settled: Arc<AtomicBool>,
 }
 
 /// A held checkpoint and how many pending events it covers.
@@ -97,12 +101,19 @@ impl Journal {
             pending: Vec::new(),
             held: None,
             poisoned: false,
+            settled: Arc::default(),
         }
     }
 
     /// The lease this journal writes under.
     pub fn lease(&self) -> &Lease {
         &self.lease
+    }
+
+    /// Whether a write of this journal moved the run out of `running`,
+    /// shared with whoever watches the lease.
+    pub(crate) fn settled(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.settled)
     }
 
     /// Seq of the last durable event.
@@ -279,8 +290,12 @@ impl Journal {
         if commit.is_empty() {
             return Ok(ready);
         }
+        let settles = status.is_some_and(|status| status != RunStatus::Running);
         let result = self.store.commit(&self.lease, commit).await;
         result.map_err(|error| self.poison(error))?;
+        if settles {
+            self.settled.store(true, Ordering::SeqCst);
+        }
         self.durable_seq += count as u64;
         Ok(ready)
     }

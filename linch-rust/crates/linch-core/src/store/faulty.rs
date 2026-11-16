@@ -2,14 +2,16 @@
 //!
 //! [`Faulty`] wraps a [`RunStore`], a [`SessionStore`], or one value that is
 //! both, and numbers writes from 1 across both traits: run `create`,
-//! `claim` and `commit`, session `create` and `append`. Write `n` fails with
-//! [`StoreError::Backend`] holding an [`InjectedFault`], either before it
-//! reaches the inner store or after it has landed there. Reads and every
+//! `claim`, `seize` and `commit`, session `create` and `append`. Write `n`
+//! fails with [`StoreError::Backend`] holding an [`InjectedFault`], either
+//! before it reaches the inner store or after it has landed there. Reads,
+//! lease renewals and releases (timer driven, not run state), and every
 //! other write pass through.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -100,6 +102,27 @@ impl<S: RunStore + ?Sized> RunStore for Faulty<S> {
         owner: &str,
     ) -> Result<Lease, StoreError> {
         self.write(self.inner.claim(namespace, run_id, owner)).await
+    }
+
+    async fn seize(
+        &self,
+        namespace: &str,
+        run_id: &RunId,
+        owner: &str,
+    ) -> Result<Lease, StoreError> {
+        self.write(self.inner.seize(namespace, run_id, owner)).await
+    }
+
+    fn lease_ttl(&self) -> Option<Duration> {
+        self.inner.lease_ttl()
+    }
+
+    async fn renew(&self, lease: &Lease) -> Result<(), StoreError> {
+        self.inner.renew(lease).await
+    }
+
+    async fn release(&self, lease: &Lease) -> Result<(), StoreError> {
+        self.inner.release(lease).await
     }
 
     async fn load(&self, namespace: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {

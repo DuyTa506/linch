@@ -37,8 +37,11 @@
 //! writes; one more run write when an `after_provider_call` hook is
 //! attached, which writes the paid receipt before the hooks run.
 //! [`RunStream`] holds the run future and polls it only while the
-//! caller polls the stream. The one task the core spawns drives the
-//! background subagents of a run suspended for approval (see `family`).
+//! caller polls the stream; a run on a store whose claims expire renews
+//! its lease inside that future (see `lease`). The one task the core
+//! spawns drives the background subagents of a run suspended for approval
+//! (see `family`), apart from the one-write release of a lease whose run
+//! is dropped.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -67,6 +70,7 @@ mod fail;
 mod family;
 mod hooks;
 mod inbox;
+mod lease;
 mod progress;
 mod retry;
 mod sink;
@@ -207,7 +211,7 @@ pub(crate) fn resume(
     reply: Option<start::Reply>,
     options: RunOptions,
 ) -> RunStream {
-    resume_under(agent, run_id, reply, options, None)
+    resume_under(agent, run_id, reply, options, None, false)
 }
 
 /// Resume a subagent's child run, charging its parent's `budget` when it
@@ -218,7 +222,7 @@ pub(crate) fn resume_child(
     options: RunOptions,
     budget: Option<Meter>,
 ) -> RunStream {
-    resume_under(agent, run_id, None, options, budget)
+    resume_under(agent, run_id, None, options, budget, true)
 }
 
 fn resume_under(
@@ -227,10 +231,11 @@ fn resume_under(
     reply: Option<start::Reply>,
     options: RunOptions,
     budget: Option<Meter>,
+    seize: bool,
 ) -> RunStream {
     let shared = Shared::default();
     let (outbox, driving) = (shared.outbox.clone(), shared.driving.clone());
-    let run = start::continue_run(agent, run_id.clone(), reply, options, shared, budget);
+    let run = start::continue_run(agent, run_id.clone(), reply, options, shared, budget, seize);
     RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 

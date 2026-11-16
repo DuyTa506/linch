@@ -15,7 +15,7 @@ use crate::journal::Journal;
 use crate::run::{Phase, RunStatus, StopReason};
 use crate::store::StoreError;
 
-/// Claim `run_id`, then commit an `Error` holding `reason`, the `Result`
+/// Seize `run_id` (a live holder elsewhere is fenced out), then commit an `Error` holding `reason`, the `Result`
 /// and status `failed` in one write.
 pub(crate) async fn fail(
     agent: &AgentInner,
@@ -25,7 +25,7 @@ pub(crate) async fn fail(
 ) -> Result<Vec<Envelope>, RunError> {
     let started = Instant::now();
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
-    let lease = match runs.claim(namespace, &run_id, &options.owner).await {
+    let lease = match runs.seize(namespace, &run_id, &options.owner).await {
         Ok(lease) => lease,
         Err(StoreError::InvalidTransition { from, .. }) if from.is_terminal() => {
             return Err(RunError::Terminal {

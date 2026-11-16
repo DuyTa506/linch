@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::batch::{answer_decision, approvals, turn_events, upsert};
+use super::lease::Held;
 use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
 use super::{Driving, Family, Shared, hooks, inbox};
@@ -149,6 +150,8 @@ pub(super) async fn new_run(
             });
         }
     };
+    let mut held = Held::new(&agent.runs, journal.lease());
+    held.watch(&journal);
     // The create logged the prompt that carries them.
     inbox::ack(&agent, &peers).await;
     let family = drive_family(&agent, &driving, &run_id, &session_id);
@@ -182,7 +185,7 @@ pub(super) async fn new_run(
         appended: false,
         moved: false,
     };
-    runner.drive(prompt).await
+    held.drive(runner.drive(prompt)).await
 }
 
 /// What an approve or an answer brings to a suspended run.
@@ -198,7 +201,9 @@ pub(crate) enum Reply {
 /// only on a run awaiting approval, or an answer, accepted only on a run
 /// awaiting input and only when it fits the questions. With a token that is
 /// already cancelled, nothing is claimed or written and the stream ends
-/// empty. `inherited` is the budget of a child run's tree.
+/// empty. `inherited` is the budget of a child run's tree. A child run is
+/// `seize`d: its parent's driver takes it over even from a live holder,
+/// which a refusal would otherwise report to the parent as a failed child.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
@@ -206,6 +211,7 @@ pub(super) async fn continue_run(
     options: RunOptions,
     shared: Shared,
     inherited: Option<Meter>,
+    seize: bool,
 ) -> Result<(), RunError> {
     let Shared { outbox, driving } = shared;
     let started = Instant::now();
@@ -224,7 +230,11 @@ pub(super) async fn continue_run(
         let events = runs.events(namespace, &run_id, 0).await?;
         check_answers(&run_id, &events, pending, answers)?;
     }
-    let lease = match runs.claim(namespace, &run_id, &options.owner).await {
+    let claimed = match seize {
+        true => runs.seize(namespace, &run_id, &options.owner).await,
+        false => runs.claim(namespace, &run_id, &options.owner).await,
+    };
+    let lease = match claimed {
         Ok(lease) => lease,
         Err(StoreError::InvalidTransition { from, .. }) if from.is_terminal() => {
             return Err(RunError::Terminal {
@@ -234,6 +244,8 @@ pub(super) async fn continue_run(
         }
         Err(error) => return Err(error.into()),
     };
+    // From here on, a return that leaves the run `running` releases it.
+    let mut held = Held::new(runs, &lease);
     let record = runs.load(namespace, &run_id).await?;
     check(&record, &agent, reply.as_ref())?;
     // A family this process still holds (the run suspended here) is taken
@@ -375,6 +387,7 @@ pub(super) async fn continue_run(
         },
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
+    held.watch(&journal);
     let fallbacks = &agent.spec.fallback_models;
     let standing = Standing::of(&events, fallbacks);
     let progress = Progress::of(checkpoint, last_stop(&events), standing, started);
@@ -433,10 +446,13 @@ pub(super) async fn continue_run(
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }
-    if let Some(decisions) = commit {
-        runner.commit_decisions(decisions, assistant_seq).await?;
-    }
-    runner.drive(step).await
+    held.drive(async move {
+        if let Some(decisions) = commit {
+            runner.commit_decisions(decisions, assistant_seq).await?;
+        }
+        runner.drive(step).await
+    })
+    .await
 }
 
 /// The family of `run_id` this run's stream drives from now on, when the
