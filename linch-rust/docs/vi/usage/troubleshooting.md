@@ -14,7 +14,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 |---|---|---|
 | `ProtocolError` | -32700 đến -32600 | Một cấu hình hoặc khai báo mà server không đọc được |
 | `OpenError` | -32010 đến -32015 | `open_agent`: cấu hình, provider, kho lưu trữ hoặc một MCP server bị lỗi |
-| `RunError` và các lớp con | -32020 đến -32032 | Cuối stream của một run, hoặc `agent.events` |
+| `RunError` và các lớp con | -32020 đến -32033 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
 | `ConnectionClosed` | không có | Mọi lệnh gọi hoặc stream, khi server đã biến mất |
 | `LinchError` | không có | Lớp cơ sở của tất cả các lớp trên, và việc dùng sai `Server` |
@@ -133,6 +133,8 @@ raise chúng.
 | `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | Một approve hoặc answer được gửi lại sau khi nó đã được commit (tiến trình hoặc kết nối của bạn đã chết), hoặc một câu trả lời cho run đang chờ phê duyệt | Gọi `agent.resume(run_id)` ([Run](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | lý do của callback, trong `.reason` | Một callback `user_prompt_submit` đã chặn prompt | Không có gì được ghi; đổi prompt hoặc callback |
 | `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` nhận một schema không compile được, hoặc root của nó không phải `{"type": "object"}` | Không có gì được ghi; sửa schema ([Structured output](./structured-output.md)) |
+| `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Một server khác (một agent handle khác) đang điều khiển run trên Postgres, hoặc đã crash chưa đầy một lease trước | Chờ run đó dừng, hoặc thử lại sau `.expires_in` giây ([Kho lưu trữ](./stores.md#run-leases)) |
+| `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Một server khác đã tiếp quản run (server này đứng quá lease của nó) hoặc đã fail nó | Ở đây không có gì để sửa: bên điều khiển mới của run đang giữ nó. Nếu server này bị tạm dừng, hãy kiểm tra các lần dừng GC hay mạng kéo dài, hoặc tăng `stores.lease_ttl_ms` |
 | `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (lý do nằm trong `.reason`) | `agent.answer` nêu tên một request không đang chờ, bỏ sót một câu hỏi chưa trả lời, hoặc đưa danh sách cho câu hỏi chọn một | Không có gì được ghi và run vẫn chờ; hãy trả lời lại ([Tool](./tools.md#hỏi-người-dùng)) |
 
 Do chính lệnh gọi raise:

@@ -13,7 +13,7 @@ exception class tells you its family:
 |---|---|---|
 | `ProtocolError` | -32700 to -32600 | A config or declaration the server cannot read |
 | `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed |
-| `RunError` and its subclasses | -32020 to -32032 | The end of a run's stream, or `agent.events` |
+| `RunError` and its subclasses | -32020 to -32033 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
 | `ConnectionClosed` | none | Any call or stream, when the server went away |
 | `LinchError` | none | The base of all of these, and misuse of `Server` |

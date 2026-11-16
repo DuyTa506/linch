@@ -88,7 +88,7 @@ run yield ra, và do đó gửi tới client. Hai cột này là
 | `ignorable` | Cam kết của bên tạo rằng một `event.type` không biết có thể bị bỏ qua. Không xuất hiện trên wire khi là false |
 | `event` | Event |
 
-Journal của run tạo mọi envelope (`crates/linch-core/src/journal.rs:297`):
+Journal của run tạo mọi envelope (`crates/linch-core/src/journal.rs:315`):
 `v` là `WIRE_VERSION`, `ts_ms` là thời điểm event được stage, và
 `ignorable` là false. Thời điểm một envelope trở nên bền vững theo quy tắc
 [group commit](./stores.md#số-lần-ghi-của-group-commit): một event bền vững
@@ -103,8 +103,8 @@ phân loại.
 
 | Lớp | Các loại | Đi đến đâu |
 |---|---|---|
-| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` trả nó ngay lập tức với seq bền vững gần nhất và không bao giờ lưu nó (`crates/linch-core/src/journal.rs:123-130`). Tiến độ của tool đi thẳng vào outbox của stream (`crates/linch-core/src/runner/sink.rs:184-189`) |
-| `Both` | mọi loại đã biết khác, và `IgnorableEvent` | Được stage với seq kế tiếp, giữ đến lần ghi barrier kế tiếp, rồi được delivery theo thứ tự seq (`journal.rs:310-316`) |
+| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` trả nó ngay lập tức với seq bền vững gần nhất và không bao giờ lưu nó (`crates/linch-core/src/journal.rs:136-143`). Tiến độ của tool đi thẳng vào outbox của stream (`crates/linch-core/src/runner/sink.rs:184-189`) |
+| `Both` | mọi loại đã biết khác, và `IgnorableEvent` | Được stage với seq kế tiếp, giữ đến lần ghi barrier kế tiếp, rồi được delivery theo thứ tự seq (`journal.rs:328-334`) |
 | `JournalOnly` | ba loại `model_call_*` | Được stage với seq kế tiếp và lưu như `Both`, nhưng không bao giờ được delivery. `Agent::events` cũng bỏ chúng ra (`crates/linch-core/src/agent.rs:380-396`), và method RPC `run.events`, vốn gọi nó, cũng vậy |
 
 Các bản ghi chỉ dành cho journal là thứ mà resume đọc để kết thúc một lời gọi model mà

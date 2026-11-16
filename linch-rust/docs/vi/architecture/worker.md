@@ -115,14 +115,18 @@ Hai lớp fence bảo vệ một run, mỗi lớp một tầng:
   ba lần thử (`lease.rs:57-87`).
 - **Run.** Điều khiển run sẽ claim nó trong run store, việc này cộng 1 vào epoch của nó và
   fence mọi bên giữ trước đó
-  ([stores](./stores.md#fencing)).
+  ([stores](./stores.md#fencing)). `PgRunStore` còn cho agent của worker thuê lease
+  run ([leases](./stores.md#leases)): khi một process khác đang điều khiển run và
+  gia hạn lease của nó, một claim bị từ chối với `RunLeased`, và job chờ (`Busy`).
+  Hãy giữ lease của run không dài hơn visibility timeout (cả hai mặc định 30 s), để
+  một job bị tiếp quản sau khi worker của nó im lặng thấy run đã rảnh.
 
 Trong khi run stream, `keep_alive` gia hạn visibility của job mỗi một phần ba
 timeout (`crates/linch-worker/src/execute.rs:151-172`). Job bị coi là mất
 khi một heartbeat thấy một bên giữ khác, hoặc khi không có lần gia hạn nào thành công
 trong cả một timeout kể từ lần được xác nhận gần nhất. Mất job làm run stream bị drop,
-việc này là một sự cố đối với run: nó vẫn resume được, và lần claim của worker kế tiếp
-fence worker này ra theo epoch. Worker không bao giờ hủy token của run vì lý do
+việc này là một sự cố đối với run: nó vẫn resume được, lease run của nó được release,
+và lần claim của worker kế tiếp fence worker này ra theo epoch. Worker không bao giờ hủy token của run vì lý do
 này, vì một lần hủy kết thúc run với trạng thái `aborted` (`execute.rs:5-9`).
 
 ### Chọn run, resume hay approve
@@ -156,7 +160,7 @@ Mỗi lần thử kết thúc bằng một `Outcome` (`crates/linch-worker/src/o
 |---|---|---|
 | `Done` | Stream kết thúc ở `Result` hoặc `Suspended`; run đã terminal | Bị xóa |
 | `Retry` | Một lỗi store hoặc journal, kể cả xung đột append của session; không có agent cho namespace | Được release với back-off, tính một lần thất bại |
-| `Busy` | Một job start mà session của nó có một run đang chạy (`SessionBusy`) | Được release với back-off, không tính thất bại |
+| `Busy` | Một job start mà session của nó có một run đang chạy (`SessionBusy`), hoặc một run mà process khác đang giữ lease còn sống (`RunLeased`) | Được release với back-off, không tính thất bại |
 | `Fail` | Một approve muộn (`NotSuspended`), một prompt bị chặn, approval không giải mã được, một run bị thiếu | Bị đánh dấu thất bại vĩnh viễn |
 | `FailRun` | Trạng thái của run không reconcile được, hoặc contract của nó khác với của agent | Run bị đánh dấu thất bại qua `Agent::fail`, rồi đến job |
 | `Fenced` | `LeaseLost`: một owner khác đã claim run | Bị xóa không retry, vì retry sẽ lấy lại run |
@@ -264,7 +268,8 @@ cần khoảng hai kết nối cho mỗi run cộng với listener; xem [kết n
 
 `crates/linch-worker/tests/pg/` bao phủ một job cho mỗi run, việc giữ độc quyền và
 giới hạn hàng đợi, retry và back-off, session bận, suspend và approve,
-tiếp quản sau khi mất heartbeat, kích hoạt lịch, và việc cố định
+tiếp quản sau khi mất heartbeat (các agent test thuê lease run trong 1,5 s, dưới
+visibility timeout 3 s của một worker mà test định làm mất), kích hoạt lịch, và việc cố định
 `READ COMMITTED`; `crates/linch-worker/src/lease/tests.rs` chạy từng lần ghi bị fence sau
 một bản cập nhật khác của hàng job của nó dưới `REPEATABLE READ`. Mỗi test bị bỏ qua khi
 `LINCH_TEST_PG_DSN` chưa được đặt.

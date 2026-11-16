@@ -125,6 +125,8 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | `SessionBusy` | -32030 | Session có một run đang chạy |
 | `InvalidOutputSchema` | -32031 | `output_schema` của run không compile được hoặc root của nó không phải object; `.reason` nêu lý do. Không có run hay session nào được tạo |
 | `InvalidAnswer` | -32032 | Các câu trả lời không khớp với các câu hỏi `AskUser` đang chờ; `.reason` nêu lý do. Không có gì được ghi: run vẫn chờ ([bên dưới](#answer)) |
+| `RunLeased` | -32033 | Một server khác đang điều khiển run (Postgres); `.owner` và `.expires_in` (giây) cho biết lease của ai và còn bao lâu. Không có gì được ghi ([Kho lưu trữ](./stores.md#run-leases)) |
+| `LeaseLost` | -32022 | Một server khác đã tiếp quản run, hoặc đã fail nó, trong khi server này điều khiển; run dừng ở đây mà không ghi gì |
 | `RunError` | -32020 đến -32028 | Việc ghi vào kho hoặc journal thất bại, hoặc trạng thái đã lưu không khớp với nhau; run giữ nguyên ở trạng thái bền vững cuối cùng của nó |
 | `ConnectionClosed` | không có | Server biến mất giữa chừng stream |
 
@@ -222,7 +224,23 @@ Handle nào resume được phụ thuộc vào các kho lưu trữ:
 - **Kho memory**: run nằm trong agent handle đã bắt đầu nó. Hãy resume và phê duyệt
   hoặc trả lời nó qua chính `Agent` đó; nó mất khi server dừng.
 - **Kho Postgres**: bất kỳ agent nào được mở với cùng config và tool (nên cùng
-  contract), trên bất kỳ server nào, đều resume được.
+  contract), trên bất kỳ server nào, đều resume được, nhưng không phải khi một
+  server khác đang điều khiển nó: lần resume đó bị từ chối với `RunLeased`. Một
+  server đã crash giữ các run của nó cho đến khi lease hết hạn (mặc định 30 s, xem
+  [Run leases](./stores.md#run-leases)); hãy thử lại sau `.expires_in` giây:
+
+```python
+from linch_rust import RunLeased
+
+
+async def resume_when_free(agent, run_id):
+    while True:
+        run = await agent.resume(run_id)
+        try:
+            return await run.result()
+        except RunLeased as leased:
+            await asyncio.sleep(leased.expires_in or 1)
+```
 
 Trên Postgres, sau một lần crash (ví dụ này đọc DSN từ `DATABASE_URL`):
 
