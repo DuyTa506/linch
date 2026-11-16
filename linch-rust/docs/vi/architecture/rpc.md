@@ -90,7 +90,7 @@ docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32004 | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó |
 | -32005 | Đạt một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 đến -32015 | `agent.open`: `BuildError`, provider, store và MCP server không khả dụng |
-| -32020 đến -32030 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận |
+| -32020 đến -32031 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` không dùng được |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng

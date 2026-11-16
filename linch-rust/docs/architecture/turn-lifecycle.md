@@ -117,7 +117,20 @@ run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   provider's `stop_reason` does not decide this; the blocks do.
 - **Without**, the run first waits for any background subagent it has, which
   can add a notification and another turn (`turn.rs:433-435`,
-  `runner/inbox.rs:137-168`). Then the `stop` hook chain runs: a hook can keep
+  `runner/inbox.rs:137-168`). With an output schema (`spec.output_schema`,
+  or the run's own from its first `init` event) the answer is checked next
+  (`runner/structured.rs`, `structured.rs`). A failing one, while
+  `structured_output_retries` lasts, stages a `verification` event
+  (`verifier: "output_schema"`, `action: "retry"`) and the feedback as a
+  `notification`, held as `ToolResults`, so both are in the same commit
+  before the session append; the next turn starts. The count of retries is
+  read back from those events on resume, so a crash never resets it. Past
+  the bound the run ends failed in one terminal write: `verification` with
+  `action: "stop"`, an `Error` named `StructuredOutputError`, and a `Result`
+  with `structured_error`. A resume from `AssistantReceived` checks the same
+  stored answer again and stages the same retry; no paid response is bought
+  twice. Then the `stop` hook chain runs, on a valid answer only and with the
+  parsed `structured_output` in its request: a hook can keep
   the run going with feedback (`continue`, bounded only by `max_turns`), ask
   for another answer (`retry`, honoured once per run call, after which it
   counts as an allow and the later hooks decide), rewrite the final-answer
@@ -125,8 +138,12 @@ run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   the stop outright, ending the run failed (`turn.rs:436-440`,
   `runner/hooks.rs`). Feedback from either reaches the model as Python's
   does, in a `<system-reminder>` user message staged as a `notification`,
-  and another turn starts. When every hook lets it stop, `post_turn` runs
-  and the run ends `completed` with that text (`turn.rs:441-448`).
+  and another turn starts. With an output schema a rewrite is checked again,
+  and one that fails it ends the run failed without asking the model again;
+  the answer after a `retry` or `continue` is checked from the start, on its
+  own budget. When every hook lets it stop, `post_turn` runs and the run
+  ends `completed` with that text, and the parsed value as the result's
+  `structured_output` (`turn.rs:441-448`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
 is not made and the run fails with `TurnLimitError` (`runner/end.rs:93-108`).

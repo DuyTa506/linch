@@ -25,7 +25,7 @@ with each one. Skip any question the request already answers, and record your as
 | Failure | If it dies halfway, may it start over? What must never happen twice? | Stores, run ids, idempotent host tools |
 | Risk | Which actions need a person's approval first? | Scopes, permission rules, approvals |
 | Knowledge | Where does the data live, how large is it, how fresh must it be? | Host tools, MCP, `context_build` callbacks |
-| Output | Who consumes the result, a person or another program? | Streaming, what the host parses |
+| Output | Who consumes the result, a person or another program? | Streaming, or `spec.output_schema` for an answer a program parses (`usage/structured-output.md`) |
 | Limits | What is the budget per run, and how long may it take? | `max_turns`, timeouts, model choice |
 | Load | How often does it run, how many at once, how many tenants? | Sidecars, a shared server, pools |
 | Proof | What would make you say it works? | Tests and a task set, section 5 |

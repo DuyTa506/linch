@@ -54,12 +54,20 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A call that failed before costing anything (`Connect`, or an error status before any stream event) settles with a zero usage instead of an unknown one: no `usage` event, `usage_complete` stays true, and a capped budget may retry it. A reset, a read timeout or a failure after output began stays unknown and, under a cap, still ends the run.
 - `spec.fallback_models` fails a run over to the next model, in order, once a model has no retry left; the run keeps that model, a resumed run included, and its usage and cost name it. Empty by default.
 - `provider_retry` and `model_fallback` events report each retry (`model`, `retry`, `delay_ms`, `error`) and each failover (`from_model`, `to_model`, `error`); the Python client decodes them as `ProviderRetryEvent` and `ModelFallbackEvent`.
+- Structured output: `spec.output_schema` (`{name, schema, strict?, description?}`) makes the final answer a JSON object checked against the schema (raw or in a fenced block); the parsed value is `result.structured_output`. `OutputSchema` in `linch_rust` and `linch-core`.
+- `spec.structured_output_retries` (default 0) sends a failing answer back to the model with Python's feedback wording, recorded as a `verification` event (`verifier: "output_schema"`, `action: "retry"`); the count is read back on resume, so a crash never grants more.
+- Past `structured_output_retries` the run fails: `verification` with `action: "stop"`, an `error` named `StructuredOutputError`, and a `result` of subtype `error` with `structured_error`.
+- `stop` runs only on an answer that satisfies the schema and gets the parsed `structured_output` in its request; a `rewrite` is checked again and one that fails the schema fails the run.
+- `Agent.run(output_schema=...)`, `run.start` `output_schema` and `RunOptions::output_schema` give one run its own schema; it is stored on the run's first `init` (`InitEvent.output_schema`) so a resume or approve keeps it.
+- `InvalidOutputSchema` (code -32031, `RunError::InvalidOutputSchema`): a run's own schema does not compile or its root is not an object; nothing is written.
+- Anthropic, OpenAI Chat, OpenAI Responses and Gemini send the output schema in their native structured-output form (`output_config.format`, `response_format`, `text.format`, `responseMimeType` with `responseJsonSchema`); no forced final tool.
 
 ### Changed
 
 - `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
 
 - `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.
+- DeepSeek and the vLLM, SGLang and llama.cpp profiles still refuse an output schema, now saying why: no native JSON-schema response format that carries the schema.
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
   after 30 seconds: it waits until the client answers, the run is cancelled or the

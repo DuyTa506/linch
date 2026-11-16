@@ -39,7 +39,7 @@ encoding.
 
 | `type` | Payload, in `events/` | Stored | Delivered | Notes |
 |---|---|---|---|---|
-| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in |
+| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in. The start's carries the run's own `output_schema`, which a resume reads back |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
@@ -63,7 +63,7 @@ encoding.
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | as wrapped | as wrapped | See [subagent wrapping](#subagent-wrapping) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Never in a run's log: `linch-ext` workflows hand it to their event sink ([extensions](./ext.md)) |
-| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | Not emitted at this revision |
+| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | The output-schema check (`runner/structured.rs`), `verifier` `output_schema`: `retry` with the feedback staged beside it, or `stop` in the terminal write. A resume counts the retries spent from these |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | The terminal outcome |

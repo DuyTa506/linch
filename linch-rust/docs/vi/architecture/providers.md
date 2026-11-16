@@ -307,7 +307,9 @@ DeepSeek mặc định suy nghĩ; `Thinking::Disabled` tắt nó và mọi trạ
 bật nó (`deepseek.rs:129`). Khi thinking bật, mọi lượt assistant trước đó gửi
 `reasoning_content`, là `""` khi nó không có, nếu không một request có tool sẽ
 thất bại với 400 (`deepseek.rs:147-153`). Một `tool_choice` bắt buộc khi thinking bật,
-và mọi `output_schema`, thất bại ngay tại chỗ với `InvalidRequest`.
+và mọi `output_schema`, thất bại ngay tại chỗ với `InvalidRequest`:
+DeepSeek không có response format JSON-schema, chế độ `json_object` không
+mang schema, và việc ép một tool cuối bị từ chối khi thinking bật.
 Effort ánh xạ `medium` và `xhigh` sang `high` (`deepseek.rs:184`).
 
 <a id="openai-chat-completions-and-server-profiles"></a>
@@ -330,7 +332,11 @@ Một server được chọn bằng `ServerOptions::new(Server::Vllm, base_url)`
 (`crates/linch-providers/src/servers.rs:76`), thứ điền
 `chat_template_kwargs` mà tài liệu của server đó nêu để tắt thinking. Khi
 một request yêu cầu `Thinking::Disabled`, các kwargs đó được gửi và effort bị
-bỏ ra (`profile.rs:144-154`). `output_schema` hiện chưa được chat profile nào hỗ trợ.
+bỏ ra (`profile.rs:144-154`). Một `output_schema` được gửi dưới dạng
+`response_format: {"type": "json_schema", "json_schema": {name, strict,
+schema, description?}}` khi quy tắc `json_schema` của profile bật, mà chỉ
+profile của OpenAI bật; vLLM, SGLang và llama.cpp từ chối nó ngay tại chỗ với
+`InvalidRequest` cho đến khi từng cái được đối chiếu với tài liệu của server.
 
 ### OpenAI Responses
 
@@ -340,7 +346,8 @@ viết lại một schema sang chế độ strict. Các output item của mỗi 
 kể cả reasoning, được giữ trong `provider_metadata` và gửi lại nguyên văn;
 không gửi `previous_response_id`, nên mọi request đều mang đầy đủ
 lịch sử. `ResponsesOptions::store` tắt sẽ gửi `store: false` và yêu cầu reasoning
-được mã hóa. Stop sequence bị từ chối: API không có tham số như vậy.
+được mã hóa. Stop sequence bị từ chối: API không có tham số như vậy. Một `output_schema` được gửi dưới dạng `text.format: {"type":
+"json_schema", name, strict, schema, description?}` (`responses/payload.rs`).
 
 ### Anthropic
 
@@ -351,6 +358,11 @@ bắt buộc và mặc định 8192 (`anthropic.rs:47`). Các block thinking đ�
 lại với chữ ký không đổi. `cache_control` của một request đánh dấu
 block system cacheable cuối cùng và block cuối của message user cuối
 (`anthropic/payload.rs:39`).
+Một `output_schema` được gửi dưới dạng `output_config.format: {"type": "json_schema",
+"schema": ...}`, bên cạnh `output_config.effort` (`anthropic/payload.rs`). Nó
+không cần beta header và hoạt động với tool, thinking và streaming; nó chỉ định hình
+phần text, nên model vẫn gọi tool. Không dùng tool cuối bị ép:
+các model Claude hiện tại từ chối một `tool_choice` bắt buộc khi thinking bật.
 `message_delta.usage` là tích lũy: một trường có mặt thay thế giá trị của
 `message_start`. `pause_turn` và các stop reason không biết làm lời gọi thất bại
 dưới dạng một lỗi transport có thể retry (`anthropic/stream.rs:311`).
@@ -364,7 +376,10 @@ response và id đó không bao giờ được gửi lại. Một lượt có th
 id giữ các part thô của nó trong `provider_metadata` và phát lại nguyên văn.
 `cache_control` bị bỏ qua (caching là ngầm định). Các finish reason loại an toàn
 trở thành `refusal`; những loại không biết thất bại dưới dạng lỗi transport có thể retry
-(`gemini/stream.rs:293`). Module ghi chú rằng adapter này chưa chạy
+(`gemini/stream.rs:293`). Một `output_schema` được gửi dưới dạng
+`generationConfig.responseMimeType: "application/json"` cùng với
+`responseJsonSchema` (`gemini/payload.rs`); Gemini kết hợp nó với function
+calling từ Gemini 3 trở đi. Module ghi chú rằng adapter này chưa chạy
 với một khóa thật.
 
 ### Cửa sổ ngữ cảnh

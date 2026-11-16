@@ -170,6 +170,7 @@ The run started.
 | `trace_id` | The `trace_id` given to `agent.run`, kept for the whole run and its subagents' runs; `None` when none was given ([Observability](./observability.md#correlate-logs-and-traces)) |
 | `resumed` | `True` on the `init` that starts a resume or approve of the run, with the run's current tools; `False` on the run's first |
 | `turn` | The turn the call continues in: the run checkpoint's, for a resumed `init`; `0` on the run's first |
+| `output_schema` | The run's own [output schema](./structured-output.md#give-one-run-its-own-schema), on the first `init` of a run started with one; `None` otherwise |
 
 Every `run`, `resume` and `approve` stream starts with `init`. A resumed one
 is durable, so replayed events show each call's start.
@@ -358,7 +359,7 @@ The run finished; its stream ends here.
 | `usage_complete` | `False` when some call's usage was unknown and is not in the sum |
 | `duration_ms` | Wall time of the `run`, `resume` or `approve` call that ended the run. The whole run's span is this envelope's `ts_ms` minus the first `init` envelope's (the one not `resumed`) |
 | `total_cost_usd` | Cost of the run's priced calls; `None` when none was priced |
-| `structured_output`, `structured_error` | For runs with an output schema; `None` with this client |
+| `structured_output`, `structured_error` | With an [output schema](./structured-output.md): the parsed answer, or why the last answer failed the schema (the run then ends `error`); `None` without one |
 | `trace_id` | The run's `trace_id`, as on `InitEvent` |
 
 ### `SkillsLoadedEvent` (`skills_loaded`)
@@ -414,7 +415,7 @@ but no run emits them today:
 |---|---|
 | `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` or `workflow_interrupt`), `prompt` |
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
-| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt` |
+| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt`. The [output schema](./structured-output.md#what-the-run-checks) check emits it with `verifier` `output_schema` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

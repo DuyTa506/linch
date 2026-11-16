@@ -58,6 +58,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Tools](./tools.md) | Host tools, the workspace tools, scopes, permission modes and rules, approvals, the virtual filesystem, MCP tools |
 | [Runs](./runs.md) | Start, stream, resume, approve, cancel; errors at the end of a stream; what is durable and when |
 | [Events](./events.md) | Every event type the client decodes, with its fields; sequence numbers and replay; usage and cost |
+| [Structured output](./structured-output.md) | A JSON Schema the final answer must satisfy: on the agent or one run, retries, callbacks, what each provider receives |
 | [Stores](./stores.md) | Memory and Postgres stores, DSNs, schemas, migrations, namespaces, pools |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
 | [Troubleshooting](./troubleshooting.md) | Errors from the server binary to runs and tools, with causes and fixes |

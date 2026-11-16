@@ -310,7 +310,9 @@ DeepSeek thinks by default; `Thinking::Disabled` turns it off and every other
 state turns it on (`deepseek.rs:129`). With thinking on, every earlier
 assistant turn sends `reasoning_content`, `""` when it has none, or a request
 with tools fails with 400 (`deepseek.rs:147-153`). A forced `tool_choice`
-with thinking on, and any `output_schema`, fail locally as `InvalidRequest`.
+with thinking on, and any `output_schema`, fail locally as `InvalidRequest`:
+DeepSeek has no JSON-schema response format, `json_object` mode does not
+carry the schema, and forcing a final tool is refused with thinking on.
 Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:184`).
 
 ### OpenAI Chat Completions and server profiles
@@ -332,8 +334,11 @@ A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
 (`crates/linch-providers/src/servers.rs:76`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
-left out (`profile.rs:144-154`). `output_schema` is not supported by any chat
-profile yet.
+left out (`profile.rs:144-154`). An `output_schema` is sent as
+`response_format: {"type": "json_schema", "json_schema": {name, strict,
+schema, description?}}` when the profile's `json_schema` rule is on, which only
+OpenAI's is; vLLM, SGLang and llama.cpp refuse it locally as `InvalidRequest`
+until each is checked against its server's docs.
 
 ### OpenAI Responses
 
@@ -344,7 +349,8 @@ reasoning included, are kept in `provider_metadata` and sent back verbatim;
 no `previous_response_id` is sent, so every request carries its full
 history. `ResponsesOptions::store` off sends `store: false` and asks for
 encrypted reasoning. Stop sequences are rejected: the API has no such
-parameter.
+parameter. An `output_schema` is sent as `text.format: {"type":
+"json_schema", name, strict, schema, description?}` (`responses/payload.rs`).
 
 ### Anthropic
 
@@ -355,6 +361,11 @@ required and defaults to 8192 (`anthropic.rs:47`). Thinking blocks are sent
 back with their signatures unchanged. A request's `cache_control` marks
 the last cacheable system block and the last block of the last user message
 (`anthropic/payload.rs:39`).
+An `output_schema` is sent as `output_config.format: {"type": "json_schema",
+"schema": ...}`, beside `output_config.effort` (`anthropic/payload.rs`). It
+needs no beta header and works with tools, thinking and streaming; it shapes
+only the text, so the model keeps calling tools. No forced final tool is used:
+current Claude models refuse a forced `tool_choice` with thinking on.
 `message_delta.usage` is cumulative: a present field replaces the
 `message_start` value. `pause_turn` and unknown stop reasons fail the call as
 a retryable transport error (`anthropic/stream.rs:311`).
@@ -368,7 +379,10 @@ response that is never sent back. A turn with a thought signature or a call
 id keeps its raw parts in `provider_metadata` and replays them verbatim.
 `cache_control` is ignored (caching is implicit). Safety-type finish reasons
 become `refusal`; unknown ones fail as a retryable transport error
-(`gemini/stream.rs:293`). The module notes this adapter has not yet run
+(`gemini/stream.rs:293`). An `output_schema` is sent as
+`generationConfig.responseMimeType: "application/json"` with
+`responseJsonSchema` (`gemini/payload.rs`); Gemini combines it with function
+calling from Gemini 3 on. The module notes this adapter has not yet run
 against a live key.
 
 ### Context windows

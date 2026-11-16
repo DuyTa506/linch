@@ -14,7 +14,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 |---|---|---|
 | `ProtocolError` | -32700 đến -32600 | Một cấu hình hoặc khai báo mà server không đọc được |
 | `OpenError` | -32010 đến -32015 | `open_agent`: cấu hình, provider, kho lưu trữ hoặc một MCP server bị lỗi |
-| `RunError` và các lớp con | -32020 đến -32030 | Cuối stream của một run, hoặc `agent.events` |
+| `RunError` và các lớp con | -32020 đến -32031 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
 | `ConnectionClosed` | không có | Mọi lệnh gọi hoặc stream, khi server đã biến mất |
 | `LinchError` | không có | Lớp cơ sở của tất cả các lớp trên, và việc dùng sai `Server` |
@@ -132,6 +132,7 @@ raise chúng.
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (tên các khóa của `data`) | Spec, tool hoặc callback của agent khác với những gì run đã bắt đầu | Mở lại với cấu hình gốc, hoặc để run kết thúc trước ([Hợp đồng của run](./agent.md#the-run-contract)) |
 | `NotSuspended` (-32027) | `run <id> is not awaiting approval; if an approve already committed its answers, continue the run with resume` | Một approve được gửi lại sau khi các câu trả lời của nó đã được commit (tiến trình hoặc kết nối của bạn đã chết) | Gọi `agent.resume(run_id)` ([Run](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | lý do của callback, trong `.reason` | Một callback `user_prompt_submit` đã chặn prompt | Không có gì được ghi; đổi prompt hoặc callback |
+| `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` nhận một schema không compile được, hoặc root của nó không phải `{"type": "object"}` | Không có gì được ghi; sửa schema ([Structured output](./structured-output.md)) |
 
 Do chính lệnh gọi raise:
 
