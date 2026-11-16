@@ -12,6 +12,9 @@
 //!   leaving the field out is that 400 and `""` is accepted.
 //! - A forced `tool_choice` (`required` or a named tool) with thinking on
 //!   is a 400, so it fails locally instead.
+//! - `output_schema` is refused. DeepSeek has no JSON-schema response
+//!   format, only `json_object` mode, which does not carry the schema, and
+//!   a forced final tool is refused while thinking is on.
 
 use std::time::Duration;
 
@@ -140,7 +143,7 @@ pub(crate) fn build_payload(request: &ProviderRequest) -> Result<JsonValue, Prov
     }
     if request.output_schema.is_some() {
         return Err(invalid(
-            "the DeepSeek adapter does not support output_schema yet",
+            "the DeepSeek adapter does not support output_schema",
         ));
     }
     let mut messages = payload::messages(&request.system, &request.messages, true)?;

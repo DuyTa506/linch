@@ -13,6 +13,14 @@
 //!   block of the last user message.
 //! - `message_delta.usage` is cumulative and may restate input and cache
 //!   counts; a present field replaces the `message_start` value.
+//! - Structured output (checked 2026-11-17) is native JSON outputs:
+//!   `output_config.format` = `{"type": "json_schema", "schema"}`, beside
+//!   `output_config.effort`, with no beta header; it works with tools,
+//!   thinking and streaming. The API takes a subset of JSON Schema (every
+//!   object needs `additionalProperties: false`; no numeric or string
+//!   length bounds), so the schema is sent as given and a rejected one
+//!   fails the call. A forced final tool is not used: current models
+//!   refuse a forced `tool_choice`.
 
 use std::time::Duration;
 

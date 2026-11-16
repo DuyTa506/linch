@@ -11,11 +11,6 @@ use super::PARTS_KEY;
 
 /// The request body for `request`.
 pub(crate) fn build(request: &ProviderRequest) -> Result<JsonValue, ProviderError> {
-    if request.output_schema.is_some() {
-        return Err(invalid(
-            "the Gemini adapter does not support output_schema yet",
-        ));
-    }
     let mut body = json!({"contents": contents(&request.messages)?});
     let system: Vec<JsonValue> = request
         .system
@@ -47,6 +42,10 @@ pub(crate) fn build(request: &ProviderRequest) -> Result<JsonValue, ProviderErro
     }
     if let Some(thinking) = thinking_config(request)? {
         config.insert("thinkingConfig".into(), thinking);
+    }
+    if let Some(output) = &request.output_schema {
+        config.insert("responseMimeType".into(), "application/json".into());
+        config.insert("responseJsonSchema".into(), output.schema.clone().into());
     }
     if !config.is_empty() {
         body["generationConfig"] = config.into();

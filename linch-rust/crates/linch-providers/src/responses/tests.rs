@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use linch_core::provider::{OutputSchema, Thinking};
 use linch_core::{
-    ContentBlock, ImageBlock, ImageSource, JsonObject, Message, ProviderError, ProviderRequest,
+    ContentBlock, ImageBlock, ImageSource, Message, ProviderError, ProviderRequest,
     ReasoningEffort, Role, StopReason, SystemBlock, TextBlock, ThinkingBlock, ToolChoice,
     ToolResultBlock, ToolResultPart, ToolUseBlock,
 };
@@ -126,7 +126,7 @@ fn store_off_asks_for_encrypted_reasoning() {
 }
 
 #[test]
-fn stop_sequences_and_output_schema_are_rejected() {
+fn stop_sequences_are_rejected() {
     let stop = ProviderRequest {
         stop_sequences: vec!["END".into()],
         ..request(MODEL)
@@ -135,19 +135,31 @@ fn stop_sequences_and_output_schema_are_rejected() {
         invalid(&stop),
         ProviderError::InvalidRequest { .. }
     ));
-    let schema = ProviderRequest {
-        output_schema: Some(OutputSchema {
-            name: "s".into(),
-            schema: JsonObject::new(),
-            strict: true,
-            description: None,
-        }),
+}
+
+#[test]
+fn an_output_schema_is_the_native_text_format() {
+    let schema = json!({"type": "object", "properties": {"total": {"type": "number"}},
+                        "required": ["total"], "additionalProperties": false});
+    let output = OutputSchema {
+        name: "invoice".into(),
+        schema: schema.as_object().unwrap().clone(),
+        strict: true,
+        description: Some("the bill".into()),
+    };
+    let shaped = ProviderRequest {
+        output_schema: Some(output),
         ..request(MODEL)
     };
-    assert!(matches!(
-        invalid(&schema),
-        ProviderError::InvalidRequest { .. }
-    ));
+    let body = payload::build_payload(&shaped, &options()).unwrap();
+    assert_eq!(
+        body["text"],
+        json!({"format": {"type": "json_schema", "name": "invoice", "strict": true,
+                          "schema": schema, "description": "the bill"}})
+    );
+    assert!(body.get("tool_choice").is_none(), "no forced final tool");
+    let plain = payload::build_payload(&request(MODEL), &options()).unwrap();
+    assert!(plain.get("text").is_none());
 }
 
 fn call(id: &str) -> ContentBlock {

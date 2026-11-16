@@ -20,6 +20,12 @@
 //! - Usage: `promptTokenCount` includes cached tokens and
 //!   `candidatesTokenCount` excludes thoughts.
 //! - Caching is implicit on Gemini, so `cache_control` is ignored.
+//! - Structured output (checked 2026-11-17 against the generateContent
+//!   reference and the structured-output guide) is native:
+//!   `generationConfig.responseMimeType` `application/json` with
+//!   `responseJsonSchema` (JSON Schema; `responseSchema` is the older
+//!   OpenAPI subset). Gemini 3 and later combine it with function
+//!   calling; an older model refuses a request that has both.
 
 use std::time::Duration;
 

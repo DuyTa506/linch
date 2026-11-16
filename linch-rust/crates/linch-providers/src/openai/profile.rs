@@ -28,6 +28,10 @@ pub(crate) struct ChatProfile {
     pub tool_choice: ToolChoiceSupport,
     /// The field that carries [`ProviderRequest::max_output_tokens`].
     pub max_tokens_field: &'static str,
+    /// Whether [`ProviderRequest::output_schema`] is sent as a
+    /// `json_schema` `response_format`; a target without it refuses the
+    /// request.
+    pub json_schema: bool,
     /// Whether [`ProviderRequest::effort`] is sent as `reasoning_effort`.
     pub reasoning_effort: bool,
     /// Whether [`Thinking::Disabled`] sends the configured
@@ -59,6 +63,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
         named: true,
     },
     max_tokens_field: "max_completion_tokens",
+    json_schema: true,
     reasoning_effort: true,
     template_thinking_switch: false,
     usage: openai_usage,
@@ -113,9 +118,9 @@ pub(crate) fn build_payload(
     thinking_off: &JsonObject,
     request: &ProviderRequest,
 ) -> Result<JsonValue, ProviderError> {
-    if request.output_schema.is_some() {
+    if request.output_schema.is_some() && !profile.json_schema {
         return Err(invalid(format!(
-            "the {} adapter does not support output_schema yet",
+            "the {} adapter does not support output_schema",
             profile.id
         )));
     }
@@ -131,6 +136,14 @@ pub(crate) fn build_payload(
     if let Some(choice) = &request.tool_choice {
         check_tool_choice(profile, choice)?;
         body["tool_choice"] = payload::tool_choice(choice);
+    }
+    if let Some(output) = &request.output_schema {
+        let mut format = json!({"name": output.name, "strict": output.strict,
+                                "schema": output.schema});
+        if let Some(description) = &output.description {
+            format["description"] = description.clone().into();
+        }
+        body["response_format"] = json!({"type": "json_schema", "json_schema": format});
     }
     if let Some(max_tokens) = request.max_output_tokens {
         body[profile.max_tokens_field] = max_tokens.into();

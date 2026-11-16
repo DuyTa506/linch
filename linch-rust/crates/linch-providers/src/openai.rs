@@ -26,6 +26,14 @@
 //! - An error after the 200 arrives as a `data: {"error": {...}}` frame.
 //! - Auth is `Authorization: Bearer <key>`, and the key is required.
 //!   `Retry-After` is whole seconds.
+//! - Structured output (checked 2026-11-17) is the native
+//!   `response_format` `{"type": "json_schema", "json_schema": {name,
+//!   strict, schema, description?}}`. It shapes only the text answer, so
+//!   the model still calls tools freely. `strict: true` asks the API to
+//!   enforce the schema, which then needs `additionalProperties: false`
+//!   and every property required. The server profiles refuse a schema:
+//!   their guided decoding would bind tool-call text to it as well, which
+//!   was not checked against a live server.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

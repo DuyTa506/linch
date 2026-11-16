@@ -22,6 +22,9 @@
 //! - **Errors:** `{"error": {"message", "type", "param", "code"}}` with
 //!   the HTTP status as an integer `code`, also as a mid-stream frame
 //!   before `[DONE]`. `finish_reason` may be `abort` or `repetition`.
+//! - **`output_schema`** is refused: the profile sends no
+//!   `response_format`, since the server's guided decoding would bind the
+//!   tool-call text to the schema too, and that was not checked live.
 
 use linch_core::{JsonObject, Usage};
 use serde_json::json;
@@ -40,6 +43,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
         named: true,
     },
     max_tokens_field: "max_completion_tokens",
+    json_schema: false,
     reasoning_effort: true,
     template_thinking_switch: true,
     usage,

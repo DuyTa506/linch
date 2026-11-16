@@ -20,6 +20,9 @@
 //!   "type", "code"}`; mid-stream errors are `{"error": {...}}` with the
 //!   HTTP status in `code`. A graceful abort ends with `finish_reason`
 //!   `abort`.
+//! - **`output_schema`** is refused: the profile sends no
+//!   `response_format`, since the server's guided decoding would bind the
+//!   tool-call text to the schema too, and that was not checked live.
 
 use linch_core::JsonObject;
 use serde_json::json;
@@ -38,6 +41,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
         named: true,
     },
     max_tokens_field: "max_completion_tokens",
+    json_schema: false,
     reasoning_effort: true,
     template_thinking_switch: true,
     usage: prompt_minus_cached,

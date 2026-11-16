@@ -14,6 +14,10 @@
 //! - With [`ResponsesOptions::store`] off, `store: false` is sent and
 //!   reasoning comes back encrypted, so replay needs no server state.
 //! - There is no stop-sequence parameter, so stop sequences are rejected.
+//! - Structured output (checked 2026-11-17) is native: `text.format` =
+//!   `{"type": "json_schema", name, strict, schema, description?}`. It
+//!   shapes the text answer only, so tools stay free; `strict: true` needs
+//!   `additionalProperties: false` and every property required.
 //! - `input_tokens` includes cache reads and writes; usage splits them out.
 //! - The stream ends at `response.completed`, `response.incomplete` or
 //!   `response.failed`, with no `[DONE]`.

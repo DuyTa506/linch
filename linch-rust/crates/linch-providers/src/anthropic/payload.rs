@@ -14,11 +14,6 @@ use super::catalog::Native;
 /// The streaming request body for `request`; `native` renders its
 /// catalog changes as tool blocks (see [`super::catalog`]).
 pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue, ProviderError> {
-    if request.output_schema.is_some() {
-        return Err(invalid(
-            "the Anthropic adapter does not support output_schema yet",
-        ));
-    }
     let max_tokens = request.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let manual_thinking = matches!(
         request.thinking,
@@ -66,8 +61,18 @@ pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue
     if !request.stop_sequences.is_empty() {
         body["stop_sequences"] = request.stop_sequences.clone().into();
     }
+    let mut output_config = serde_json::Map::new();
     if let Some(effort) = request.effort {
-        body["output_config"] = json!({"effort": effort_value(effort)});
+        output_config.insert("effort".into(), effort_value(effort).into());
+    }
+    if let Some(output) = &request.output_schema {
+        // Native JSON outputs; `name`, `strict` and `description` have no
+        // place in this API.
+        let format = json!({"type": "json_schema", "schema": output.schema});
+        output_config.insert("format".into(), format);
+    }
+    if !output_config.is_empty() {
+        body["output_config"] = output_config.into();
     }
     if let Some(state) = &request.thinking {
         body["thinking"] = thinking(state, max_tokens)?;
