@@ -104,6 +104,61 @@ class ProviderRetry(TypedDict, total=False):
     jitter: float
 
 
+class Compaction(TypedDict, total=False):
+    """When a run folds the older part of its view into a summary, as `spec.compaction`.
+
+    Absent, a run never compacts, and a prompt the provider refuses as
+    longer than the model's context window ends the run. `{}` compacts near
+    the provider's context window with every default.
+
+    At a turn's start, a view that is due is first cleared of old tool
+    results when `micro` is on, then summarized if still due. When the
+    provider refuses a prompt as too long, the run clears old tool results
+    (with `micro`), else summarizes, forced, and calls again; that call is
+    not a provider retry. The model sees the shorter view; the session keeps
+    every message.
+
+    Attributes:
+        threshold_tokens: Compact a view estimated at this many tokens or
+            more (four characters per token). Absent: once the estimate plus
+            an output reserve reaches 80% of the context window.
+        keep_recent_turns: Assistant turns kept verbatim; 10 when absent.
+        prompt: Instructions for the summary call; a general default when
+            absent.
+        max_output_tokens: Most tokens a summary may use; 4096 when absent.
+        micro: Whether old tool results are cleared to a short placeholder
+            before a summary, with no model call (Python Linch's
+            micro-compaction). Off when absent.
+        max_forced: Most summaries one run makes because the provider
+            refused a prompt as too long; 3 when absent, 0 never.
+    """
+
+    threshold_tokens: int
+    keep_recent_turns: int
+    prompt: str
+    max_output_tokens: int
+    micro: bool
+    max_forced: int
+
+
+class TruncationRecovery(TypedDict, total=False):
+    """How a text answer the output limit cut off is continued, as `spec.truncation_recovery`.
+
+    Python Linch's `TruncationRecovery`. Absent, a cut answer is final.
+    With it, the cut part is logged and the model is asked to continue; the
+    run's final answer is every part in order, and that whole text is what
+    the output schema, the verifiers and `stop` callbacks see.
+
+    Attributes:
+        max_attempts: Most cut answers one run continues; 1 when absent.
+        feedback: What the model is told; "Your previous response was cut
+            off ..." when absent.
+    """
+
+    max_attempts: int
+    feedback: str
+
+
 class DeepAgentProfile(TypedDict):
     """A deep agent profile written out in full; every key is required.
 
