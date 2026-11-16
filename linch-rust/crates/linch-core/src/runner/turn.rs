@@ -283,7 +283,9 @@ impl Runner {
     }
 
     /// One provider call: the `ProviderPending` barrier, the call, and the
-    /// `AssistantReceived` write-through.
+    /// `AssistantReceived` write-through. With a hook between the stream and
+    /// that write, the paid receipt and its usage are written first, with
+    /// `ProviderPending` re-saved at the totals that count them.
     async fn dispatch(
         &mut self,
         attempt: u32,
@@ -358,19 +360,25 @@ impl Runner {
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);
         let served = receipt.actual_model.clone();
-        self.provider_call_stop(
-            self.turn,
-            served.as_deref().unwrap_or(&call_model),
-            receipt.disposition,
-            usage,
-            receipt.duration_ms,
-        )
-        .await;
+        let (disposition, duration_ms) = (receipt.disposition, receipt.duration_ms);
         let empty = matches!(&outcome.result, Ok(assembly) if cut_empty(assembly));
         if empty {
             receipt.disposition = CallDisposition::Rejected;
         }
         self.journal.stage(Event::ModelCallReceipt(receipt));
+        // A hook between the stream and the response may never return (a
+        // client callback with no timeout): the paid receipt and its usage
+        // are made durable before it runs, the response only after it.
+        let early = outcome.result.is_ok() && !empty && self.hooks_after_stream();
+        if early {
+            self.stage_usage(usage, cost, served.clone());
+            self.save(Phase::ProviderPending { attempt }).await?;
+            let ready = self.journal.flush().await?;
+            self.event_emit(&ready).await;
+            self.outbox.deliver(ready).await;
+        }
+        let model = served.as_deref().unwrap_or(&call_model);
+        (self.provider_call_stop(self.turn, model, disposition, usage, duration_ms)).await;
         let failure = match outcome.result {
             // One terminal write: the paid receipt, usage, error and result.
             Ok(_) if empty => {
@@ -378,7 +386,10 @@ impl Runner {
                 self.output_limit().await?;
                 return Ok(None);
             }
-            Ok(assembly) => return self.accept(assembly, cost, served).await,
+            Ok(assembly) => {
+                let unstaged = (!early).then_some((cost, served));
+                return self.accept(assembly, unstaged).await;
+            }
             Err(failure) => failure,
         };
         // A call that failed or was cancelled may still have been paid; one
@@ -402,16 +413,15 @@ impl Runner {
         Ok(None)
     }
 
-    /// Run `after_provider_call`, then stage the response and its `Usage`
-    /// (with the call's `cost` and the model that `served` it), and write
-    /// them through with `AssistantReceived`, which also records a hook's
-    /// retry: the paid response and what to do with it are durable in one
-    /// write.
+    /// Run `after_provider_call`, then stage the response, and its `Usage`
+    /// when `unstaged` holds the call's cost and the model that served it
+    /// (`None`: the receipt's write already carried it), and write them
+    /// through with `AssistantReceived`, which also records a hook's retry:
+    /// the response and what to do with it are durable in one write.
     async fn accept(
         &mut self,
         assembly: AssistantAssembly,
-        cost: Option<f64>,
-        served: Option<String>,
+        unstaged: Option<(Option<f64>, Option<String>)>,
     ) -> Result<Option<Step>, RunError> {
         let (assembly, retry_feedback) = match self.after_provider_call(assembly, self.turn).await {
             AfterCall::Send(assembly) => (*assembly, None),
@@ -438,7 +448,9 @@ impl Runner {
             message: message.clone(),
             stop_reason,
         }));
-        self.stage_usage(usage, cost, served);
+        if let Some((cost, served)) = unstaged {
+            self.stage_usage(usage, cost, served);
+        }
         let phase = Phase::AssistantReceived {
             message: message.clone(),
             stop_reason,
