@@ -128,6 +128,13 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - Eval results report each case's `run_id`, `total_cost_usd`, `usage` and
   `duration_ms` and the same totals for the whole eval; the Markdown report has
   a Cost USD column, as Python's does.
+- RPC `eval.run`: runs cases with built-in scorers on an open agent and
+  returns the per-case and total pass rate, cost, tokens and duration plus a
+  Markdown report; each case's `run_id` is a stored run. It takes a place among
+  a tenant's live runs and refuses `agent.close` while it runs.
+- RPC `run.report`: the run report (tool calls and timings, usage, context,
+  recovery, risk) of a stored run as JSON and Markdown, from `Agent::run_record`
+  and its events.
 
 ### Changed
 

@@ -29,7 +29,7 @@ use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
 use crate::runner::{self, Families, Releases, RunStream};
 use crate::skills::SkillSet;
-use crate::store::{RunStore, SessionStore};
+use crate::store::{RunRecord, RunStore, SessionStore};
 use crate::structured::OutputContract;
 use crate::subagents::{Registry, Roster, Workers};
 use crate::tool_search::ToolSearch;
@@ -471,6 +471,15 @@ impl Agent {
     pub async fn status(&self, run_id: &RunId) -> Result<RunStatus, RunError> {
         let record = self.inner.runs.load(&self.inner.namespace, run_id).await?;
         Ok(record.status)
+    }
+
+    /// The run's stored record: ids, status and checkpoint.
+    ///
+    /// Raises:
+    ///     RunError: `Store` (`NotFound` for an unknown run) if the read
+    ///         fails.
+    pub async fn run_record(&self, run_id: &RunId) -> Result<RunRecord, RunError> {
+        Ok(self.inner.runs.load(&self.inner.namespace, run_id).await?)
     }
 
     /// The run's durable envelopes with seq greater than `after_seq`,
