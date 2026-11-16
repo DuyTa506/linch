@@ -13,6 +13,7 @@ import pytest
 from scripted import MODEL, config, text_turn, tool_turn
 
 from linch_rust import (
+    DETAILED_COMPACTION_PROMPT,
     Compaction,
     CompactionEvent,
     ContextBuildEvent,
@@ -121,6 +122,45 @@ def test_the_typed_specs_name_every_field_the_server_reads() -> None:
         body = source.split(f"pub struct {name} {{", 1)[1].split("\n}", 1)[0]
         fields = set(re.findall(r"^\s*pub (\w+):", body, re.MULTILINE))
         assert fields == typed.__optional_keys__, name
+
+
+@pytest.mark.source
+def test_the_detailed_prompt_is_the_servers() -> None:
+    source = COMPACTION_RS.read_text(encoding="utf-8")
+    body = source.split('pub const DETAILED_PROMPT: &str = "', 1)[1].split('";', 1)[0]
+    # A Rust string: `\` at a line end drops the break and the next indent.
+    text = re.sub(r"\\\n\s*", "", body).replace("\\n", "\n")
+    assert text == DETAILED_COMPACTION_PROMPT
+
+
+async def test_a_detailed_compaction_folds_the_view() -> None:
+    compaction: Compaction = {
+        "threshold_tokens": 1,
+        "keep_recent_turns": 1,
+        "prompt": DETAILED_COMPACTION_PROMPT,
+        "max_output_tokens": 8192,
+    }
+    sent: list[dict[str, Any]] = []
+
+    @callback("before_provider_call", "spy", 1)
+    async def spy(request: dict[str, Any]) -> dict[str, Any]:
+        sent.append(request["request"])
+        return {"action": "continue"}
+
+    turns = [*tool_calls(2), text_turn("the summary"), text_turn("done")]
+    cfg = config(turns, mode="skip_dangerous")
+    cfg["spec"] = {"model": MODEL, "compaction": compaction}
+    async with Server() as server:
+        agent = await server.open_agent(cfg, callbacks=[spy])
+        envelopes = [e async for e in await agent.run("s1", "go")]
+
+    [compacted] = [e.event for e in envelopes if isinstance(e.event, CompactionEvent)]
+    assert (compacted.strategy, compacted.forced) == ("summary", False)
+    assert final(envelopes).final_text == "done"
+    # The summary call is not a primary call: no hook sees it, so the spy
+    # sees the three primary requests, the last built on the summary.
+    assert len(sent) == 3
+    assert any("the summary" in str(message) for message in sent[2]["messages"])
 
 
 def test_the_question_skips_tool_results_and_reminders() -> None:

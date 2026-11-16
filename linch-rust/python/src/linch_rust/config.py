@@ -141,6 +141,35 @@ class Compaction(TypedDict, total=False):
     max_forced: int
 
 
+DETAILED_COMPACTION_PROMPT = (
+    "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"
+    "\n"
+    "Create a continuation-safe summary of the earlier conversation. Capture enough detail for "
+    "another agent to continue the work without access to the compacted messages.\n"
+    "\n"
+    "Before the final summary, you may use an <analysis> block to organize details. The final "
+    "answer must include a <summary> block with these exact numbered sections:\n"
+    "\n"
+    "1. Primary Request and Intent: the user's explicit requests and intent.\n"
+    "2. Key Information and Artifacts: facts, decisions, data, documents, files, or other "
+    "artifacts read, produced, or discussed; include identifiers (paths, URLs, IDs, names) when "
+    "known.\n"
+    "3. Errors and Fixes: errors, failures, wrong assumptions, and how they were resolved.\n"
+    "4. Pending Tasks: outstanding tasks explicitly requested or discovered.\n"
+    "5. Current Work: what was being worked on immediately before compaction.\n"
+    "6. Next Step: the next concrete action aligned with the latest user request; write 'None' "
+    "if the prior task was complete.\n"
+    "\n"
+    "Be factual and dense. Preserve exact identifiers, values, parameters, and results, along "
+    "with any user corrections. Do not invent work that was not done."
+)
+"""Python Linch's `DetailedCompaction` prompt, for `Compaction.prompt`.
+
+A continuation-safe handoff in six numbered sections, for long runs where
+the work must go on from the summary alone; give it a larger
+`max_output_tokens` (Python Linch uses 8192)."""
+
+
 class TruncationRecovery(TypedDict, total=False):
     """How a text answer the output limit cut off is continued, as `spec.truncation_recovery`.
 
