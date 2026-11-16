@@ -31,7 +31,12 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   được nối vào từ trước khi `stop` chạy), block việc dừng lại, hoặc đòi trả lời lại
   một lần cho mỗi lần gọi run (`retry` của `before_final_answer` trong Python);
   `continue` của nó là `force_continue` của stop trong Python. `force_continue` của
-  Python tại `before_provider_call` không được port: point đó từ chối nó. `event_emit`, một trong các
+  Python tại `before_provider_call` bỏ qua lời gọi: feedback được ghi log như một
+  stop feedback và run chạy thêm một lượt, chỉ bị giới hạn bởi `max_turns`. Python
+  cũng chạy point đó trên một response được resume mà các lời gọi tool của nó chưa
+  có kết quả, và trả lời chúng bằng feedback (`src/linch/loop/runner.py:767-783`);
+  một lần resume response đó trong Rust đi tiếp tới các lời gọi tool của nó và không
+  bao giờ quay lại point này, nên trường hợp đó không xảy ra. `event_emit`, một trong các
   point chỉ quan sát, chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ
   với event vừa được stream vừa được ghi bền — không bao giờ cho record của chính một
   hook, cũng không cho một delta chỉ stream.
