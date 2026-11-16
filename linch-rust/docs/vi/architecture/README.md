@@ -25,7 +25,7 @@ sử dụng riêng.
 
 | Trang | Nội dung |
 |---|---|
-| [Providers](./providers.md) | Hợp đồng provider trong `linch-core`, tập event và quy tắc stream, lỗi và retry, các adapter trong `linch-providers` (DeepSeek, OpenAI Chat, OpenAI Responses, vLLM, SGLang, llama.cpp, Anthropic, Gemini), vòng lặp SSE duy nhất, bảng giá, cách thêm provider |
+| [Providers](./providers.md) | Hợp đồng provider trong `linch-core`, tập event và quy tắc stream, lỗi và retry, các lần từ chối vì độ dài ngữ cảnh, các adapter trong `linch-providers` (DeepSeek, OpenAI Chat, OpenAI Responses, vLLM, SGLang, llama.cpp, Anthropic, Gemini), vòng lặp SSE duy nhất, bảng giá, cách thêm provider |
 | [Tools](./tools.md) | Trait `Tool` và các scope, registry và việc đăng ký có thể hoàn tác, cách một batch chạy và phần nào chạy song song, các tool workspace và giới hạn truy cập, hệ thống tệp ảo và chuyển kết quả ra ngoài, các tool task của session, cách viết một tool |
 | [MCP client](./mcp.md) | `linch-mcp`: transport stdio và HTTP, ánh xạ tool, relist, kết nối lại, hủy, kill cả process group, đóng có giới hạn thời gian, các giới hạn và che dữ liệu nhạy cảm |
 | [Stores](./stores.md) | Hợp đồng của store run, session, task và file cùng các bộ kiểm tra tuân thủ; store trong bộ nhớ; store Postgres: schema, migration, một run đang chạy cho mỗi session, fencing, ghi bằng một câu lệnh, phân loại từ chối, kích thước pool; số lần ghi của group commit |
@@ -37,7 +37,7 @@ sử dụng riêng.
 | [Giao thức RPC và server](./rpc.md) | `linch-rpc` và `linch-server`: method và notification, mã lỗi, bên trong một kết nối, thứ tự và backpressure, transport stdio, socket và HTTP, tenant và allowlist, các giới hạn, cách thêm một method |
 | [Kernel](./kernel.md) | `Agent` là scope của từng agent, `AgentBuilder` và run contract digest, `Registration`, hai mươi hai chuỗi hook và cách mỗi chuỗi kết hợp các câu trả lời, đường plan và execute của một batch tool, không có biến toàn cục |
 | [Vòng đời của lượt](./turn-lifecycle.md) | Một run: các bước của lượt, vì sao vòng lặp tiếp tục, barrier và group commit, batch tool và việc chạy song song chỉ đọc, suspend, resume và reconcile, các terminal |
-| [Thu gọn ngữ cảnh](./compaction.md) | Điều kiện kích hoạt, lời gọi tóm tắt, phép chiếu có ghi log trên session log, khôi phục bản tóm tắt đã trả phí, những gì model nhìn thấy |
+| [Thu gọn ngữ cảnh](./compaction.md) | Điều kiện kích hoạt, micro-compaction, lời gọi tóm tắt, phép chiếu có ghi log trên session log, khôi phục theo độ dài ngữ cảnh, khôi phục từng bước, những gì model nhìn thấy, khôi phục câu trả lời bị cắt |
 
 Các trang Python chỉ mô tả các khái niệm dùng chung. Mỗi trang Rust nêu rõ chỗ
 Rust khác biệt. Điểm khác biệt chính của kernel nằm ở phần

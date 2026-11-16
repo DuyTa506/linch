@@ -43,8 +43,9 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 `runner.rs:1-39` liệt kê các bước của lượt. Theo thứ tự:
 
 1. **Compact** khi `spec.compaction` được đặt và provider view đến hạn
-   ([thu gọn ngữ cảnh](./compaction.md)). Khi tắt, một lượt bắt đầu ở bước dispatch
-   (`turn.rs:237-248`).
+   ([thu gọn ngữ cảnh](./compaction.md)): xóa các kết quả tool cũ khi `micro` được đặt
+   và như vậy là đủ, nếu không thì tóm tắt. Khi tắt, một lượt bắt đầu ở bước dispatch
+   (`turn.rs:313`).
 2. **Kiểm tra giới hạn.** Một token đã bị hủy sẽ abort run. `max_turns` và budget kết
    thúc run với trạng thái failed trước khi lời gọi được thực hiện (`turn.rs:271-284`).
 3. **Dựng request** từ provider view của session. Các hook `context_build` chỉ thêm
@@ -103,10 +104,23 @@ mang theo receipt, usage, `Error`, trạng thái và `Result` (`turn.rs:337-347`
 nhận một lỗi có thể thử lại: khi đó run quay lại bước 4 với `attempt` của delivery
 kế tiếp, sau một lần ghi `provider_retry` và một lúc chờ, hoặc chuyển ngay sang một
 model fallback cùng một event `model_fallback`
-([providers](./providers.md#retry-và-fallback-model), `runner/retry.rs`). Một
+([providers](./providers.md#retry-và-fallback-model), `runner/retry.rs`).
+Một lỗi `context_length`, tức provider từ chối prompt vì dài hơn cửa sổ ngữ cảnh của
+model, không bao giờ được retry; khi `spec.compaction` được đặt, `overflow` rút ngắn view
+(micro trước, rồi một bản tóm tắt bắt buộc, bị giới hạn bởi `max_forced`) và run quay lại
+bước 4 với `attempt` của delivery kế tiếp của lượt và không có event `provider_retry`;
+khi không còn gì để rút ngắn, run kết thúc ở trạng thái failed
+([khôi phục theo độ dài ngữ cảnh](./compaction.md#context-length-recovery),
+`turn.rs:464`, `runner/compact.rs:268-295`). Một
 response bị giới hạn đầu ra cắt trước khi có bất kỳ văn bản hay một lời gọi tool trọn vẹn
 nào thì không phải là một câu trả lời: session không nhận gì, và run kết thúc theo cách
 tương tự (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
+
+Với `spec.truncation_recovery`, một câu trả lời văn bản bị giới hạn đầu ra cắt (stop
+reason `max_tokens`, không có lời gọi tool) được nối vào và được đáp bằng một message
+phản hồi thay vì kết thúc run, chừng nào `max_attempts` còn; văn bản cuối cùng của run
+ghép các phần lại
+([câu trả lời bị cắt](./compaction.md#cut-off-answers), `turn.rs:532-601`).
 
 ### Vòng lặp tiếp tục khi response có lời gọi tool
 
