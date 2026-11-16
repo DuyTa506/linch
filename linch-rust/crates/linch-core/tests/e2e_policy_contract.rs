@@ -55,14 +55,15 @@ fn a_policy_that_allows_more_is_another_contract() {
         .push(PermissionLayer::new("app", [Rule::from(allow)]));
     wider.push(ruled);
     let mut fields = PermissionPolicy::new(PermissionMode::Default, "/");
-    fields
-        .command_fields
-        .insert("save".into(), "value".into());
+    fields.command_fields.insert("save".into(), "value".into());
     wider.push(fields);
     let mut seen = vec![base];
     for policy in wider {
         let contract = agent_under(policy.clone()).contract();
-        assert!(!seen.contains(&contract), "{policy:?} kept a known contract");
+        assert!(
+            !seen.contains(&contract),
+            "{policy:?} kept a known contract"
+        );
         seen.push(contract);
     }
     let here = agent_under(PermissionPolicy::new(PermissionMode::AcceptEdits, "/srv/a"));
@@ -96,7 +97,10 @@ async fn a_run_never_continues_under_a_wider_policy() {
     ));
     let mut auto = PermissionPolicy::new(PermissionMode::Default, "/");
     auto.auto_allow.insert("save".into());
-    for policy in [PermissionPolicy::new(PermissionMode::SkipDangerous, "/"), auto] {
+    for policy in [
+        PermissionPolicy::new(PermissionMode::SkipDangerous, "/"),
+        auto,
+    ] {
         let loose = build(policy);
         let (_, error) = drain(loose.resume(run_id.clone(), RunOptions::new(""))).await;
         assert!(
