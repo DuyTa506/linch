@@ -58,6 +58,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   connection ends, as Python's hooks do. Set `timeout` to bound it.
 - `@tool` and `@callback` accept plain functions as well as `async` ones, as Python's tools and
   hooks do; a plain function runs in a worker thread.
+- `Edit` accepts an empty `old_string`, as Python's does, instead of refusing it as invalid input: an empty file takes `new_string`; a non-empty file is refused as ambiguous unless `replace_all` is set, which inserts at every position and needs the whole file read.
 
 ## 0.1.1 - 2026-11-07
 

@@ -214,8 +214,39 @@ async fn edit_reports_missing_ambiguous_and_replace_all() {
         "Edited a.txt (2 replacements)"
     );
     assert_eq!(t.ws.get("a.txt"), "q y q\n");
-    let empty = json!({"file_path": "a.txt", "old_string": "", "new_string": "q"});
-    assert_eq!(code(call(&t.edit, empty).await), "invalid_input");
+}
+
+#[tokio::test]
+async fn edit_with_an_empty_old_string_follows_python() {
+    let t = tools();
+    // An empty file has exactly one empty match: the text goes in.
+    t.ws.put("new.txt", "");
+    let insert = json!({"file_path": "new.txt", "old_string": "", "new_string": "hello\n"});
+    assert_eq!(code(call(&t.edit, insert.clone()).await), "read_before_write");
+    call(&t.read, json!({"file_path": "new.txt"})).await.unwrap();
+    assert_eq!(text(call(&t.edit, insert).await), "Edited new.txt");
+    assert_eq!(t.ws.get("new.txt"), "hello\n");
+    // A non-empty file matches at every position, so it is ambiguous.
+    call(&t.read, json!({"file_path": "new.txt"})).await.unwrap();
+    let ambiguous = json!({"file_path": "new.txt", "old_string": "", "new_string": "x"});
+    assert_eq!(code(call(&t.edit, ambiguous).await), "ambiguous_match");
+    // replace_all inserts at every position and needs the whole file read.
+    t.ws.put("ab.txt", "ab");
+    let all = json!({"file_path": "ab.txt", "old_string": "", "new_string": "-", "replace_all": true});
+    call(&t.read, json!({"file_path": "ab.txt"})).await.unwrap();
+    assert_eq!(text(call(&t.edit, all).await), "Edited ab.txt (3 replacements)");
+    assert_eq!(t.ws.get("ab.txt"), "-a-b-");
+}
+
+#[tokio::test]
+async fn edit_with_an_empty_old_string_needs_line_one_read() {
+    let t = tools();
+    t.ws.put("a.txt", "l1\nl2\nl3\n");
+    call(&t.read, json!({"file_path": "a.txt", "offset": 2, "limit": 1}))
+        .await
+        .unwrap();
+    let edit = json!({"file_path": "a.txt", "old_string": "", "new_string": "x"});
+    assert_eq!(code(call(&t.edit, edit).await), "read_before_write");
 }
 
 #[tokio::test]

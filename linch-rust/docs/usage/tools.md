@@ -304,6 +304,11 @@ status: final
   and size; a change by anyone voids it. The record is in the server's memory:
   after a restart, or after `agent.close_session(session_id)`, the model must
   read again before it writes.
+- **Empty `old_string`.** `Edit` accepts it, as Python's does. It matches at
+  every position, so on an empty file the new text goes in, on a non-empty
+  file it is refused as ambiguous unless `replace_all` is set (which inserts
+  at every position and needs the whole file read), and the first line must
+  have been read.
 - **Confinement.** Paths are relative to the workspace. `..`, absolute paths
   outside it and symlinks that lead out are refused.
 - **`Bash` is not confined.** It starts in the workspace but can reach

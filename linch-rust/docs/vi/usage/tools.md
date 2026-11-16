@@ -306,6 +306,10 @@ status: final
   tại của nó; bất kỳ thay đổi nào của ai đó đều làm mất hiệu lực. Bản ghi nằm
   trong bộ nhớ của server: sau khi khởi động lại, hoặc sau
   `agent.close_session(session_id)`, model phải đọc lại trước khi ghi.
+- **`old_string` rỗng.** `Edit` chấp nhận nó, như `Edit` của Python. Nó khớp ở
+  mọi vị trí, nên với tệp rỗng thì văn bản mới được chèn vào, với tệp không rỗng
+  thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
+  đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
 - **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
   tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
 - **`Bash` không bị giới hạn phạm vi.** Nó bắt đầu trong workspace nhưng có thể

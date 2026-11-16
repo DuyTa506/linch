@@ -7,7 +7,7 @@ use linch_core::{JsonObject, Tool, ToolContext, ToolOutput, ToolResult, ToolScop
 use serde_json::json;
 
 use crate::fs::ExecutionFs;
-use crate::input::{coded, flag, invalid, schema, string};
+use crate::input::{coded, flag, schema, string};
 use crate::read::MAX_READ_BYTES;
 use crate::tracker::ReadTracker;
 
@@ -33,7 +33,6 @@ impl Edit {
                 },
                 "old_string": {
                     "type": "string",
-                    "minLength": 1,
                     "description": "Exact text to replace."
                 },
                 "new_string": {
@@ -83,17 +82,19 @@ impl Tool for Edit {
         let old = string(&input, "old_string")?;
         let new = string(&input, "new_string")?;
         let all = flag(&input, "replace_all")?;
-        if old.is_empty() {
-            return Err(invalid(
-                "old_string must not be empty; use Write to create or replace a whole file",
-            ));
-        }
         let file = self.fs.read(path, MAX_READ_BYTES).await?;
         let session = &ctx.session_id;
         self.reads
             .check(session, &file.path, file.stamp, Some(&[]))?;
         let text = String::from_utf8(file.bytes)
             .map_err(|_| coded(format!("{} is not UTF-8 text.", file.path), "not_text"))?;
+        if old.is_empty() {
+            // An empty `old` matches at every position, as in Python: the
+            // first line must be read, or the whole file for `replace_all`.
+            let last = if all { text.split('\n').count() as u64 } else { 1 };
+            self.reads
+                .check(session, &file.path, file.stamp, Some(&[(1, last)]))?;
+        }
         let starts: Vec<usize> = text.match_indices(old).map(|(at, _)| at).collect();
         match starts.len() {
             0 => {
