@@ -172,6 +172,7 @@ impl AgentConfig {
         deep::add_roster(deep.as_ref(), &mut project);
         let registry = Arc::clone(&tools);
         let forget = files.forget();
+        let unread = Arc::clone(&reads);
         let mut builder = AgentBuilder::new(files.teach(self.spec))
             .provider(provider)
             .tools(tools)
@@ -185,7 +186,10 @@ impl AgentConfig {
                 reads.forget(session);
                 processes.close_session(session);
                 forget(session);
-            });
+            })
+            // A compaction folds or clears what the model read: it reads a
+            // file again before changing it (Python's `reset_read_tracker`).
+            .on_compact(move |session| unread.forget(session));
         if let Some(skills) = project.skills {
             builder = builder.skills(skills);
         }

@@ -37,6 +37,7 @@ pub struct AgentBuilder {
     sessions: Option<Arc<dyn SessionStore>>,
     namespace: Option<String>,
     session_close: Vec<SessionClose>,
+    compact: Vec<SessionClose>,
     skills: Option<Vec<Skill>>,
     subagents: Option<Vec<SubagentDefinition>>,
     pricing: Option<Pricing>,
@@ -58,6 +59,7 @@ impl AgentBuilder {
             sessions: None,
             namespace: None,
             session_close: Vec::new(),
+            compact: Vec::new(),
             skills: None,
             subagents: None,
             pricing: None,
@@ -117,6 +119,18 @@ impl AgentBuilder {
         callback: impl Fn(&SessionId) + Send + Sync + 'static,
     ) -> Self {
         self.session_close.push(Arc::new(callback));
+        self
+    }
+
+    /// Run `callback` each time a run of `session` records a compaction
+    /// (a summary or a micro-compaction), after the callbacks added before
+    /// it. The model no longer sees what was folded or cleared, so a host
+    /// drops what depends on it there, such as the read evidence of
+    /// `linch_tools::ReadTracker::forget`: a file must be read again before
+    /// it is changed. A callback is not a hook: it is not part of the run
+    /// contract and leaves no record.
+    pub fn on_compact(mut self, callback: impl Fn(&SessionId) + Send + Sync + 'static) -> Self {
+        self.compact.push(Arc::new(callback));
         self
     }
 
@@ -351,6 +365,7 @@ impl AgentBuilder {
             families: Default::default(),
             releases: Default::default(),
             session_close: self.session_close,
+            compact: self.compact,
             registrations: built_ins.take(),
             reloads: Default::default(),
         });

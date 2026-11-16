@@ -91,6 +91,7 @@ impl Runner {
         });
         self.write_session(vec![entry]).await?;
         self.log.record_projection(replacement, reason);
+        self.agent.compacted(&self.run.session_id);
         Ok(())
     }
 

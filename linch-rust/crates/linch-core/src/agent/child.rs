@@ -158,6 +158,7 @@ impl AgentInner {
             families: Default::default(),
             releases: self.releases.clone(),
             session_close: self.session_close.clone(),
+            compact: self.compact.clone(),
             registrations: Vec::new(),
             reloads: Default::default(),
         })
