@@ -287,7 +287,7 @@
 //! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning |
 //! | `before_provider_call` | `turn, request` (the provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}` |
 //! | `after_provider_call` | `turn, assembly` (the response just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}` (or `"force_continue"`), `{"action": "block", "reason"}` |
-//! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |
+//! | `stop` | `text`, `structured_output` (only with an output schema: `text` parsed and checked) | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |
 //! | `post_turn` | `turn, stop_reason` | `{}` |
 //!
 //! An `after_provider_call` `retry` keeps the response, runs none of its
@@ -295,7 +295,9 @@
 //! `stop`, `continue` is bounded only by `max_turns`, and `retry` (Python's
 //! `before_final_answer` retry) is honoured once per run call, after which
 //! it counts as `allow`. Every other point refuses `retry` and
-//! `force_continue`.
+//! `force_continue`. With an output schema, `stop` runs only on an answer
+//! that satisfies it; a `rewrite` is checked again, and one that does not
+//! satisfy the schema fails the run.
 //!
 //! A `pre_tool_use` rewrite feeds the next callback and is validated
 //! against the tool's schema again; a block or resolve stops the chain,

@@ -240,6 +240,16 @@ fn stop_and_post_turn_read_their_answers() {
         Stop::encode(&request),
         json!({"session_id": "s1", "run_id": "r1", "text": "done"})
     );
+    let shaped = StopRequest {
+        text: "{\"total\": 1}".into(),
+        structured_output: json!({"total": 1}).as_object().cloned(),
+        ..request.clone()
+    };
+    assert_eq!(
+        Stop::encode(&shaped),
+        json!({"session_id": "s1", "run_id": "r1", "text": "{\"total\": 1}",
+               "structured_output": {"total": 1}})
+    );
     assert_eq!(
         Stop::decode(json!({"action": "allow"})).unwrap(),
         StopResponse::Allow
