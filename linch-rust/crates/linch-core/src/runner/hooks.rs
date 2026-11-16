@@ -335,7 +335,8 @@ impl Runner {
                 return Ok(Stopping::Ended);
             }
         };
-        let message = Message::user_text(feedback);
+        // Python's `_gate_retry_tail`: the feedback in a system reminder.
+        let message = Message::user_text(system_reminder(&feedback));
         Ok(Stopping::Continue(self.feedback(message).await?))
     }
 

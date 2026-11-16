@@ -58,10 +58,11 @@ async fn a_stop_hook_keeps_the_run_going_with_feedback() {
     let provider = answers();
     let agent = hooked(spec(), provider.clone(), stop_hooks(), stores.clone());
     let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    // What the model reads is Python's: the feedback in a system reminder.
     let want = [
         Message::user_text("go"),
         Message::assistant_text("first"),
-        Message::user_text("check again"),
+        Message::user_text("<system-reminder>\ncheck again\n</system-reminder>"),
         Message::assistant_text("second"),
     ];
     assert_eq!(messages(&*stores, "s1").await, want);

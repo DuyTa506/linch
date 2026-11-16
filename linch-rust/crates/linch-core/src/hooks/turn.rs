@@ -198,9 +198,11 @@ pub enum StopResponse {
     /// Let the run stop.
     Allow,
     /// Keep the run going. Stops the chain; the remaining hooks see the
-    /// next stop candidate instead.
+    /// next stop candidate instead. Python's `force_continue` at `stop`:
+    /// bounded only by `max_turns`.
     Continue {
-        /// Shown to the model as the reason to keep going.
+        /// Shown to the model, in a system reminder, as the reason to keep
+        /// going.
         feedback: String,
     },
     /// Use this text as the run's final answer instead; later hooks see it.
