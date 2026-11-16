@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, ToolSearch, Workers};
+pub use linch_tools::{DockerPolicy, ExecutionConfig, SandboxPolicy};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::profile::Profile;
@@ -50,11 +51,17 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
     /// Whether the workspace tools include `Bash` (which runs commands
-    /// unconfined, as the process's user) and `BashOutput` and `BashKill`,
-    /// which read and stop its background commands. On when absent; unused
-    /// without a workspace.
+    /// through `execution`) and `BashOutput` and `BashKill`, which read and
+    /// stop its background commands. On when absent; unused without a
+    /// workspace.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub bash: bool,
+    /// Where `Bash` runs its commands (see [`ExecutionConfig`]): `local`,
+    /// directly as the process's user, when absent; `sandbox` (Landlock,
+    /// seccomp and rlimits) or `docker`. A non-local backend is part of the
+    /// run contract, through `Bash`'s description. Unused without `bash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionConfig>,
     /// Permission rules. Absent: mode `default` (read tools run, write and
     /// exec tools ask) with the workspace root, or `/`, as project root.
     #[serde(default, skip_serializing_if = "Option::is_none")]

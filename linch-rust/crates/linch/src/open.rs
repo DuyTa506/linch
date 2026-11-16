@@ -23,7 +23,9 @@ use linch_tools::{
     ExecutionBackend, LocalFs, Processes, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools,
 };
 
-use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
+use crate::config::{
+    AgentConfig, ExecutionConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig,
+};
 use crate::deep;
 use crate::error::OpenError;
 use crate::files::Files;
@@ -117,12 +119,15 @@ impl AgentConfig {
         let window = provider.context_window(&self.spec.model);
         let reads = Arc::new(ReadTracker::new());
         let processes = Arc::new(Processes::new());
-        let root = match self.workspace {
+        let (root, backend) = match self.workspace {
             Some(root) => {
                 let (reads, processes) = (Arc::clone(&reads), Arc::clone(&processes));
-                Some(register_workspace(&tools, root, reads, processes, self.bash).await?)
+                let execution = self.bash.then(|| self.execution.unwrap_or_default());
+                let (root, backend) =
+                    register_workspace(&tools, root, reads, processes, execution).await?;
+                (Some(root), backend)
             }
-            None => None,
+            None => (None, None),
         };
         let mut policy = self.permissions.unwrap_or_else(|| {
             let project_root = root.as_deref().unwrap_or("/");
@@ -187,6 +192,9 @@ impl AgentConfig {
             .on_session_close(move |session| {
                 reads.forget(session);
                 processes.close_session(session);
+                if let Some(backend) = &backend {
+                    backend.close_session(session);
+                }
                 forget(session);
             })
             // A compaction folds or clears what the model read: it reads a
@@ -328,21 +336,28 @@ async fn disconnect(servers: Vec<McpServer>) {
 }
 
 /// Register the workspace tools over `root`, sharing `reads` and
-/// `processes`, with `Bash`, `BashOutput` and `BashKill`
-/// only when `bash` is on; returns the canonical root as a string.
+/// `processes`, with `Bash`, `BashOutput` and `BashKill` running through
+/// the `execution` backend only when it is given (`bash` is on); returns
+/// the canonical root as a string, and the backend.
 async fn register_workspace(
     tools: &ToolRegistry,
     root: PathBuf,
     reads: Arc<ReadTracker>,
     processes: Arc<Processes>,
-    bash: bool,
-) -> Result<String, OpenError> {
-    // `LocalFs::new` canonicalizes the root: blocking file system calls.
-    let fs = match tokio::task::spawn_blocking(move || LocalFs::new(root)).await {
-        Ok(fs) => fs.map_err(OpenError::Workspace)?,
+    execution: Option<ExecutionConfig>,
+) -> Result<(String, Option<ExecutionBackend>), OpenError> {
+    let bash = execution.is_some();
+    // `LocalFs::new` canonicalizes the root and a sandbox checks the
+    // kernel enforces it: blocking calls.
+    let opened = tokio::task::spawn_blocking(move || {
+        let fs = Arc::new(LocalFs::new(root).map_err(OpenError::Workspace)?);
+        let config = execution.unwrap_or_default();
+        ExecutionBackend::open(fs, &config).map_err(OpenError::Execution)
+    });
+    let backend = match opened.await {
+        Ok(backend) => backend?,
         Err(join) => std::panic::resume_unwind(join.into_panic()),
     };
-    let backend = ExecutionBackend::local(Arc::new(fs));
     let canonical = backend.root().display().to_string();
     let wanted = |tool: &Arc<dyn Tool>| bash || !BASH_TOOLS.contains(&tool.name());
     for tool in workspace_tools(&backend, reads, processes)
@@ -352,7 +367,7 @@ async fn register_workspace(
         // The registry lives as long as the agent; the handle is not needed.
         let _ = tools.register(tool)?;
     }
-    Ok(canonical)
+    Ok((canonical, bash.then_some(backend)))
 }
 
 /// The longest [`OpenedAgent::close`] waits for the lease releases of
