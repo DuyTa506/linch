@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use linch::hooks::ApprovalResponse;
-use linch::{Envelope, Principal, RunId, SessionId};
+use linch::{Envelope, OutputSchema, Principal, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorObject;
@@ -171,6 +171,12 @@ pub struct StartParams {
     /// and `result` events, its tool calls and its subagents' runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// The output schema of this run alone, in place of the agent's
+    /// `spec.output_schema`: `{name, schema, strict?, description?}`. It
+    /// is stored with the run, so a resume or approve uses it again. An
+    /// unusable one ends the run with `-32031` and writes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<OutputSchema>,
 }
 
 /// Params of `run.resume`.
@@ -278,7 +284,23 @@ mod tests {
     use linch::hooks::ApprovalResponse;
     use serde_json::json;
 
-    use super::ApproveParams;
+    use super::{ApproveParams, StartParams};
+
+    #[test]
+    fn start_params_carry_an_output_schema_only_when_given() {
+        let bare = json!({"agent": "a", "session_id": "s1", "prompt": "hi"});
+        let params: StartParams = serde_json::from_value(bare.clone()).unwrap();
+        assert_eq!(params.output_schema, None);
+        assert_eq!(serde_json::to_value(&params).unwrap(), bare);
+        let mut shaped = bare.clone();
+        shaped["output_schema"] = json!({"name": "invoice", "schema": {"type": "object"}});
+        let params: StartParams = serde_json::from_value(shaped).unwrap();
+        let schema = params.output_schema.unwrap();
+        assert_eq!((schema.name.as_str(), schema.strict), ("invoice", true));
+        let mut wrong = bare;
+        wrong["output_schema"] = json!({"name": "x", "schema": {}, "format": "json"});
+        assert!(serde_json::from_value::<StartParams>(wrong).is_err());
+    }
 
     #[test]
     fn approve_params_carry_core_approval_responses_strictly() {

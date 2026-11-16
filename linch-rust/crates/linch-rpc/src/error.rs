@@ -97,6 +97,10 @@ pub mod code {
     /// `{session_id, run_id}`, where `run_id` names that live run: resume,
     /// approve or cancel it first.
     pub const SESSION_BUSY: i64 = -32030;
+    /// `RunError::InvalidOutputSchema`: the `output_schema` of `run.start`
+    /// does not compile, or its root is not an object; `data.reason` says
+    /// why. Nothing was written.
+    pub const INVALID_OUTPUT_SCHEMA: i64 = -32031;
 }
 
 impl ErrorObject {
@@ -170,6 +174,10 @@ impl From<&RunError> for ErrorObject {
             RunError::Reconcile(_) => Self::new(code::RECONCILE, message),
             RunError::PromptBlocked { reason, .. } => {
                 Self::new(code::PROMPT_BLOCKED, message).with_data(json!({ "reason": reason }))
+            }
+            RunError::InvalidOutputSchema { reason, .. } => {
+                Self::new(code::INVALID_OUTPUT_SCHEMA, message)
+                    .with_data(json!({ "reason": reason }))
             }
         }
     }
