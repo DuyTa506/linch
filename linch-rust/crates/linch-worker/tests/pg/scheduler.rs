@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use linch_core::permissions::{Rule, RuleDecision, ToolRule};
-use linch_core::{PermissionLayer, Principal, RunStatus, SessionId, ToolScope};
+use linch_core::{PermissionLayer, Principal, RunOptions, RunStatus, SessionId, ToolScope};
 use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
@@ -95,6 +95,34 @@ async fn a_heartbeat_skips_a_fire_while_its_session_has_a_live_run() {
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
     assert_eq!((info.fires, info.skips), (0, 1));
+    // Still suspended at the next tick: still skipped.
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+
+    // Cancelled through the store, the run is terminal: the next fire runs.
+    let probe = Probe::new("Write", ToolScope::Write, Hold::None);
+    let canceller = agent(&db.pool, probe.clone());
+    let options = RunOptions::new(SessionId::new("sched"));
+    assert!(canceller.cancel(run_id.clone(), options).await.unwrap());
+    assert_eq!(db.status(&run_id).await, RunStatus::Aborted);
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    let worker = Running::spawn(&db.pool, config("w2"), agent(&db.pool, probe));
+    let runs = || async {
+        let runs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM linch_runs WHERE session_id = 'sched'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        runs
+    };
+    wait_until("the fire's run starts and its job ends", || async {
+        runs().await == 2 && db.jobs().await == 0
+    })
+    .await;
+    worker.stop().await;
+    let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
+    assert_eq!((info.fires, info.skips), (1, 2));
     db.finish().await;
 }
 

@@ -190,7 +190,7 @@ Bỏ qua, thay vì xếp hàng phía sau, là có chủ ý: một lần check-in
 chỉ lặp lại lần kế tiếp, và một run chờ một người sẽ khiến mỗi lần kích hoạt chồng thêm một
 job. Để tiếp tục một run heartbeat đang suspend, hãy đọc `run_id` của nó từ
 `agent.jobs(schedule_id=...)` và trả lời nó bằng `agent.approve` hoặc `agent.answer` trên
-một agent có cùng cấu hình; lần kích hoạt kế tiếp sau khi nó kết thúc sẽ chạy lại.
+một agent có cùng cấu hình, hoặc kết thúc nó bằng `agent.cancel(run_id)`; lần kích hoạt kế tiếp sau khi nó kết thúc sẽ chạy lại.
 
 Một run không người trông coi cần approval sẽ suspend như bất kỳ run nào khác: job là
 `done`, run đang chờ. Hãy dùng một permission mode hoặc rule cho phép những gì một run nền

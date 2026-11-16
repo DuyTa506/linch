@@ -197,8 +197,8 @@ Skipping, not queueing behind, is deliberate: a check-in that waited behind
 a long run would only repeat the next one, and a run that waits for a person
 would otherwise stack a job per fire. To continue a suspended heartbeat run,
 read its `run_id` from `agent.jobs(schedule_id=...)` and answer it with
-`agent.approve` or `agent.answer` on an agent of the same config; the next
-fire after it ends runs again.
+`agent.approve` or `agent.answer` on an agent of the same config, or end it
+with `agent.cancel(run_id)`; the next fire after it ends runs again.
 
 An unattended run that needs approval suspends like any other: the job is
 `done`, the run waits. Use a permission mode or rules that allow what a

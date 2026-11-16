@@ -641,6 +641,95 @@ async fn a_config_secret_is_stored_only_with_its_definition() {
     db.drop().await;
 }
 
+/// A heartbeat whose session holds a run waiting for an `AskUser` answer
+/// skips every fire; once `run.cancel` ends that run through the agent's
+/// stores, the next fire runs.
+#[tokio::test]
+async fn a_heartbeat_fires_again_once_its_suspended_run_is_cancelled() {
+    let Some(db) = TestDb::empty("sched_cancel").await else {
+        return;
+    };
+    let question = json!({"questions": [{
+        "id": "db", "header": "Database", "question": "Which database?",
+        "options": [{"label": "Postgres", "description": "durable"},
+                    {"label": "Memory", "description": "for tests"}]}]});
+    let turns = vec![
+        tool_turn("ask_1", "AskUser", question),
+        text_turn("Postgres it is."),
+    ];
+    let mut config = scripted(turns, None, "");
+    config["namespace"] = json!("rpc");
+    config["stores"] = json!({"type": "postgres", "dsn": db.dsn});
+    config["ask_user"] = json!(true);
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(config).await;
+    let run_id = rpc.start(&agent, "ops", "Set up storage").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+
+    let beat = json!({"agent": agent, "id": "beat", "prompt": "Check in.",
+                      "interval_ms": 3_600_000, "session_id": "ops"});
+    rpc.call(method::SCHEDULE_CREATE, beat).await.unwrap();
+    let pool = pool(&db).await;
+    let due = || async {
+        sqlx::query("UPDATE linch_worker_schedules SET next_fire = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+    };
+    for _ in 0..2 {
+        due().await;
+        assert_eq!(linch_worker::fire_due_schedules(&pool).await.unwrap(), 0);
+    }
+    let status = || async {
+        let status: String = sqlx::query_scalar("SELECT status FROM linch_runs WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        status
+    };
+    assert_eq!(status().await, "awaiting_input");
+
+    // This connection does not drive the suspended run: the agent's
+    // stores end it.
+    let cancel = json!({"run_id": run_id, "agent": agent});
+    let cancelled = rpc.call(method::RUN_CANCEL, cancel).await.unwrap();
+    assert_eq!(cancelled, json!({"cancelled": true}));
+    assert_eq!(status().await, "aborted");
+    due().await;
+    assert_eq!(linch_worker::fire_due_schedules(&pool).await.unwrap(), 1);
+
+    // A worker runs the fire: a new run in the session.
+    let factory = BackgroundAgents::new(db.dsn.clone()).local("rpc");
+    let worker = Worker::new(pool.clone(), worker_config("w1"))
+        .definitions(factory.roots(), Arc::new(factory));
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+    let by_beat = json!({"agent": agent, "schedule_id": "beat"});
+    let [fired] = <[JobInfo; 1]>::try_from(
+        serde_json::from_value::<Vec<JobInfo>>(
+            rpc.call(method::JOB_LIST, by_beat).await.unwrap()["jobs"].clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let done = wait_for(&rpc, &agent, fired.job_id, "done").await;
+    assert_ne!(done.run_id.as_ref(), Some(&run_id), "a new run");
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    assert_eq!(
+        (listed.schedules[0].fires, listed.schedules[0].skips),
+        (1, 2)
+    );
+    db.drop().await;
+}
+
 /// Two tenants on one database: neither reaches the other's schedules,
 /// jobs or stored definitions, by id or by listing.
 #[tokio::test]
