@@ -31,7 +31,12 @@ What differs in Rust:
   stop outright, or retry the answer once per run call (Python's
   `before_final_answer` `retry`); its `continue` is Python's stop
   `force_continue`. Python's `force_continue` at `before_provider_call`
-  is not ported: that point refuses it. `event_emit`, one of
+  skips the call: the feedback is logged as a stop feedback is and the
+  run takes another turn, bounded only by `max_turns`. Python also fires
+  that point on a resumed response whose tool calls have no results yet,
+  answering them with the feedback (`src/linch/loop/runner.py:767-783`); a
+  Rust resume of that response goes on to its tool calls and never comes
+  back to the point, so that case does not arise. `event_emit`, one of
   the observe-only points, fires once per event about to be delivered to the
   caller, but only for an event that is both streamed and durably logged —
   never for a hook's own record or a stream-only delta.

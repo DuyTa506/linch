@@ -25,7 +25,8 @@
 //! both streamed and durably logged: never for a hook's own record, and
 //! never for a stream-only delta or tool-progress event (see [`observe`]).
 //! [`BeforeProviderCall`] ([`call`]) lets a hook replace the provider
-//! request about to be sent, or block the call; [`AfterProviderCall`]
+//! request about to be sent, block the call, or skip it and take another
+//! turn with feedback (Python's `force_continue` there); [`AfterProviderCall`]
 //! ([`assembly`]) lets a hook replace the assembled response a provider call
 //! just produced, block it before it is staged and appended to the session,
 //! or accept it and take another turn instead of acting on it (Python's
