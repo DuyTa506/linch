@@ -269,7 +269,10 @@ cũng không bao giờ thấy chúng: nó chỉ chạy cho event vừa được 
 `Step::Batch` lập kế hoạch, rồi suspend hoặc chạy (`runner/batch.rs:29-118`).
 
 1. **Plan.** `scheduler::plan` quyết định mọi lời gọi mà không chạy gì, dưới cancel token
-   của run (`batch.rs:58-72`). Các hook record của từng lời gọi được chuyển cho bên gọi
+   của run (`batch.rs:58-72`). Một lần hủy ở bước này kết thúc run giống như
+   hủy qua store ([bên dưới](#cancel-a-suspended-run)): một kết quả aborted cho
+   mỗi lời gọi chưa có kết quả, `Aborting`, phần nối vào session, rồi terminal,
+   nên session vẫn ghép cặp đủ. Các hook record của từng lời gọi được chuyển cho bên gọi
    (`batch.rs:77-80`). Các quyết định được ghi lại cho checkpoint (`batch.rs:81-83`).
    Các bước của `plan` nằm ở
    [kernel](./kernel.md#các-seam-của-lời-gọi-tool).
