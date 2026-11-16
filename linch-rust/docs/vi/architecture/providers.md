@@ -190,6 +190,19 @@ và mọi token `Bearer`, kể cả với một server cục bộ không có kh�
 một khóa). Mỗi struct options có `from_env()`, đọc biến của adapter
 và trả về `None` khi nó chưa được đặt hoặc rỗng.
 
+### Cài đặt request
+
+`RequestOptions` (`request.rs`) mang `extra_body`, một `timeout` đọc và header
+mặc định cho mọi adapter; `ChatOptions` mang các công tắc Chat Completions
+(`parallel_tool_calls`, `include_stream_options`, `chat_template_kwargs`,
+`sampling_params`). Header mặc định nằm trên client `reqwest`, thứ không bao
+giờ thay một header đã đặt theo từng request, nên header khóa của caller
+(`authorization`, `x-api-key`, `x-goog-api-key`) khiến adapter bỏ qua header
+khóa của chính nó (`sets_key_header`) thay vì ghi đè nó. `merge_body` chạy sau
+cùng trên payload đã dựng và bỏ qua `model`, `stream`, `temperature` và các
+trường hội thoại. Giá trị header được đánh dấu nhạy cảm và không bao giờ xuất
+hiện trong lỗi hay `Debug`.
+
 <a id="the-adapters"></a>
 
 ## Các adapter
