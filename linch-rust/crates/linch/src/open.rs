@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use linch_core::ask_user::AskUser;
 use linch_core::{
@@ -361,10 +362,15 @@ async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenErro
         StoreConfig::Postgres {
             dsn,
             max_connections,
+            lease_ttl_ms,
         } => {
             let (shared, pool) = pools.get(&dsn, max_connections).await?;
             let sessions = Arc::new(PgSessionStore::new(pool.clone()));
-            let runs = Arc::new(PgRunStore::new(pool));
+            let runs = PgRunStore::new(pool);
+            let runs = Arc::new(match lease_ttl_ms {
+                Some(ms) => runs.with_lease_ttl(Duration::from_millis(ms)),
+                None => runs,
+            });
             Ok((runs, sessions.clone(), sessions, Some(shared)))
         }
     }

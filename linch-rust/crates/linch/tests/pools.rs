@@ -103,6 +103,29 @@ fn a_postgres_store_takes_a_pool_size() {
     let default = decode(json!({"type": "postgres", "dsn": "postgres://db/linch"})).unwrap();
     let shown = serde_json::to_value(&default).unwrap();
     assert!(shown.get("max_connections").is_none(), "{shown}");
+    assert!(shown.get("lease_ttl_ms").is_none(), "{shown}");
+}
+
+#[test]
+fn a_postgres_store_takes_a_run_lease_of_at_least_a_second() {
+    let decode = |stores: serde_json::Value| serde_json::from_value::<StoreConfig>(stores);
+    let leased = decode(json!({"type": "postgres", "dsn": "postgres://db/linch",
+                               "lease_ttl_ms": 10_000}))
+    .unwrap();
+    let StoreConfig::Postgres { lease_ttl_ms, .. } = &leased else {
+        panic!("{leased:?}");
+    };
+    assert_eq!(*lease_ttl_ms, Some(10_000));
+    assert_eq!(
+        serde_json::to_value(&leased).unwrap()["lease_ttl_ms"],
+        10_000
+    );
+    let short = decode(json!({"type": "postgres", "dsn": "d", "lease_ttl_ms": 999}));
+    let error = short.expect_err("below the floor").to_string();
+    assert!(
+        error.contains("lease_ttl_ms 999") && error.contains("1000"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

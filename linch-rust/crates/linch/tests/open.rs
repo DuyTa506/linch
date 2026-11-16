@@ -317,6 +317,7 @@ async fn a_postgres_failure_never_shows_the_password() {
         config.stores = StoreConfig::Postgres {
             dsn: dsn.into(),
             max_connections: None,
+            lease_ttl_ms: None,
         };
         assert!(!format!("{config:?}").contains("hunter2"));
         let error = config.open().await.expect_err("no database there");
