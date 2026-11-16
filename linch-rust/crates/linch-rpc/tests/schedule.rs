@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use common::pg::TestDb;
 use common::*;
 use linch::Event;
 use linch_rpc::protocol::{Events, JobInfo, ScheduleInfo, Schedules, method};
-use linch_rpc::{Access, Allowlists, BackgroundAgents, Tenant, code};
+use linch_rpc::{Access, Allowlists, BackgroundAgents, McpCommand, Tenant, code};
 use linch_worker::{Worker, WorkerConfig};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -485,5 +486,247 @@ async fn a_definition_the_tenant_no_longer_allows_fails_its_job() {
     assert!(failed.run_id.is_none(), "nothing ran");
     shutdown.cancel();
     running.await.unwrap().unwrap();
+    db.drop().await;
+}
+
+/// `cargo test` builds the examples next to the test binaries' `deps`
+/// directory.
+fn example(name: &str) -> PathBuf {
+    let mut dir = std::env::current_exe().expect("test binary path");
+    dir.pop();
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    let program = dir.join("examples").join(name);
+    assert!(
+        program.exists(),
+        "{} was not built: run `cargo test -p linch-rpc` without a target filter",
+        program.display()
+    );
+    program
+}
+
+/// The answer to a call, or its error with its data, as text.
+async fn said(rpc: &Rpc, name: &str, params: Value) -> String {
+    match rpc.call(name, params).await {
+        Ok(answer) => answer.to_string(),
+        Err(linch_rpc::ClientError::Rpc(error)) => format!("{error} {:?}", error.data),
+        Err(other) => panic!("{name}: {other:?}"),
+    }
+}
+
+/// Rows of `table` whose text holds `needle`.
+async fn rows_holding(pool: &linch::postgres::PgPool, table: &str, needle: &str) -> i64 {
+    let sql = format!("SELECT count(*) FROM {table} AS t WHERE strpos(t::text, $1) > 0");
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(needle)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A config secret (here an MCP `env` value) is stored with the agent
+/// definition and nowhere else: not in job, history or schedule rows, not
+/// in any `schedule.*` or `job.*` answer, and not in an error, whether the
+/// call or the background run failed.
+#[tokio::test]
+async fn a_config_secret_is_stored_only_with_its_definition() {
+    const SENTINEL: &str = "sentinel-7c4e-never-echoed";
+    let Some(db) = TestDb::empty("sched_secret").await else {
+        return;
+    };
+    let program = example("mcp_server").display().to_string();
+    let command = McpCommand {
+        command: program.clone(),
+        args: vec![],
+        env: vec!["LINCH_SENTINEL".into()],
+    };
+    let caps = |allow: Allowlists| {
+        allow
+            .max_schedules(Some(2))
+            .max_queued_jobs(Some(8))
+            .min_schedule_interval(Duration::from_millis(100))
+    };
+    let allowed = caps(allow(&db))
+        .mcp_commands(std::slice::from_ref(&command))
+        .unwrap();
+    let acme = Arc::new(Tenant::new("acme", allowed).unwrap());
+    let rpc = Rpc::remote(Access::Tenant(Arc::clone(&acme).connect().unwrap()));
+    let mut config = on_postgres(&db, "acme");
+    config["mcp_servers"] = json!([{"name": "stdio", "transport": {
+        "type": "stdio", "command": program, "env": {"LINCH_SENTINEL": SENTINEL}}}]);
+    let agent = rpc.open(config).await;
+
+    let mut answers = Vec::new();
+    let beat = json!({"agent": agent, "id": "beat", "prompt": "Check in.",
+                      "interval_ms": 100, "session_id": "ops"});
+    answers.push(said(&rpc, method::SCHEDULE_CREATE, beat.clone()).await);
+    answers.push(said(&rpc, method::SCHEDULE_CREATE, beat).await);
+    let first = json!({"agent": agent, "session_id": "s1", "prompt": "go"});
+    let first = job(rpc.call(method::JOB_ENQUEUE, first).await.unwrap());
+
+    // A worker that allows the agent runs the queued run and some fires.
+    let pool = pool(&db).await;
+    let worker_with = |tenant: Arc<Tenant>| {
+        let factory = BackgroundAgents::new(db.dsn.clone()).tenant(tenant);
+        Worker::new(pool.clone(), worker_config("w1"))
+            .definitions(factory.roots(), Arc::new(factory))
+    };
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(worker_with(Arc::clone(&acme)).run(shutdown.clone()));
+    wait_for(&rpc, &agent, first.job_id, "done").await;
+    let by_beat = json!({"agent": agent, "schedule_id": "beat"});
+    for _ in 0..400 {
+        let fired = rpc.call(method::JOB_LIST, by_beat.clone()).await.unwrap();
+        if fired.to_string().contains(r#""state":"done""#) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let id = json!({"agent": agent, "id": "beat"});
+    answers.push(said(&rpc, method::SCHEDULE_PAUSE, id.clone()).await);
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+
+    // A worker whose tenant no longer allows the MCP command fails the
+    // next run, and its fires, with the refusal as their error.
+    let stricter = Arc::new(Tenant::new("acme", caps(allow(&db))).unwrap());
+    let second = json!({"agent": agent, "session_id": "s2", "prompt": "go"});
+    let second = job(rpc.call(method::JOB_ENQUEUE, second).await.unwrap());
+    answers.push(said(&rpc, method::SCHEDULE_RESUME, id.clone()).await);
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(worker_with(stricter).run(shutdown.clone()));
+    let failed = wait_for(&rpc, &agent, second.job_id, "failed").await;
+    assert!(
+        failed.error.as_deref().unwrap_or("").contains("mcp"),
+        "{failed:?}"
+    );
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+
+    for (name, params) in [
+        (method::SCHEDULE_LIST, json!({"agent": agent})),
+        (method::JOB_LIST, json!({"agent": agent, "limit": 500})),
+        (
+            method::JOB_GET,
+            json!({"agent": agent, "job_id": first.job_id}),
+        ),
+        (
+            method::JOB_GET,
+            json!({"agent": agent, "job_id": second.job_id}),
+        ),
+        (method::JOB_GET, json!({"agent": agent, "job_id": 999_999})),
+        (method::SCHEDULE_DELETE, id.clone()),
+        (method::SCHEDULE_PAUSE, id),
+    ] {
+        answers.push(said(&rpc, name, params).await);
+    }
+    assert!(answers.iter().any(|answer| answer.contains("failed")));
+    for answer in &answers {
+        assert!(!answer.contains(SENTINEL), "{answer}");
+    }
+    for table in [
+        "linch_worker_jobs",
+        "linch_worker_history",
+        "linch_worker_schedules",
+    ] {
+        assert_eq!(rows_holding(&pool, table, SENTINEL).await, 0, "{table}");
+    }
+    let history = rows_holding(&pool, "linch_worker_history", "done").await;
+    assert!(history >= 2, "the runs that ended are in the history");
+    assert_eq!(
+        rows_holding(&pool, "linch_worker_agents", SENTINEL).await,
+        1
+    );
+    db.drop().await;
+}
+
+/// Two tenants on one database: neither reaches the other's schedules,
+/// jobs or stored definitions, by id or by listing.
+#[tokio::test]
+async fn a_tenant_never_reaches_another_tenants_schedules_or_jobs() {
+    let Some(db) = TestDb::empty("sched_tenants").await else {
+        return;
+    };
+    let caps = || allow(&db).max_schedules(Some(4)).max_queued_jobs(Some(4));
+    let a = Rpc::remote(tenant("acme", caps()));
+    let b = Rpc::remote(tenant("globex", caps()));
+    let a_agent = a.open(on_postgres(&db, "acme")).await;
+    let b_agent = b.open(on_postgres(&db, "globex")).await;
+    let digest = |agent: &str| {
+        json!({"agent": agent, "id": "digest", "prompt": "p",
+                                      "cron": "0 7 * * *"})
+    };
+    a.call(method::SCHEDULE_CREATE, digest(&a_agent))
+        .await
+        .unwrap();
+    let a_job = json!({"agent": a_agent, "session_id": "s", "prompt": "p"});
+    let a_job = job(a.call(method::JOB_ENQUEUE, a_job).await.unwrap());
+
+    // B names A's ids from its own agent: A's namespace is not B's.
+    let id = json!({"agent": b_agent, "id": "digest"});
+    for name in [method::SCHEDULE_PAUSE, method::SCHEDULE_RESUME] {
+        let refused = b.call(name, id.clone()).await.unwrap_err();
+        assert_eq!(code_of(refused), code::SCHEDULE_NOT_FOUND, "{name}");
+    }
+    let deleted = b.call(method::SCHEDULE_DELETE, id).await.unwrap();
+    assert_eq!(
+        deleted,
+        json!({"deleted": false}),
+        "as for an id never used"
+    );
+    let got = json!({"agent": b_agent, "job_id": a_job.job_id});
+    let refused = b.call(method::JOB_GET, got).await.unwrap_err();
+    assert_eq!(code_of(refused), code::JOB_NOT_FOUND);
+    // B's lists hold only its own, the same schedule id included.
+    b.call(method::SCHEDULE_CREATE, digest(&b_agent))
+        .await
+        .unwrap();
+    let listed = b
+        .call(method::SCHEDULE_LIST, json!({"agent": b_agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    let namespaces: Vec<&str> = listed
+        .schedules
+        .iter()
+        .map(|s| s.namespace.as_str())
+        .collect();
+    assert_eq!(namespaces, ["globex"]);
+    let jobs = b
+        .call(method::JOB_LIST, json!({"agent": b_agent}))
+        .await
+        .unwrap();
+    assert_eq!(jobs, json!({"jobs": []}));
+    // A's schedule is untouched.
+    let a_listed = a
+        .call(method::SCHEDULE_LIST, json!({"agent": a_agent}))
+        .await
+        .unwrap();
+    let a_listed: Schedules = serde_json::from_value(a_listed).unwrap();
+    assert_eq!(a_listed.schedules.len(), 1);
+    assert!(!a_listed.schedules[0].paused);
+
+    // B cannot open an agent in A's namespace, and no method takes a
+    // stored definition: an agent's own config is the only one it runs.
+    let mut in_a = on_postgres(&db, "acme");
+    in_a["namespace"] = json!("acme/support");
+    assert_eq!(
+        common::refused(&b, in_a).await.as_deref(),
+        Some("namespace")
+    );
+    for (name, params) in [
+        (
+            method::JOB_ENQUEUE,
+            json!({"agent": b_agent, "session_id": "s", "prompt": "p", "definition": "x"}),
+        ),
+        (
+            method::SCHEDULE_CREATE,
+            json!({"agent": b_agent, "prompt": "p", "cron": "0 7 * * *", "agent_digest": "x"}),
+        ),
+    ] {
+        let refused = b.call(name, params).await.unwrap_err();
+        assert_eq!(code_of(refused), code::INVALID_PARAMS, "{name}");
+    }
     db.drop().await;
 }
