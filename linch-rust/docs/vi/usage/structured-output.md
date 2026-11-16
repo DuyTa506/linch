@@ -138,7 +138,12 @@ Các vendor chỉ chấp nhận một phần của JSON Schema trong các dạng
 chế độ strict của Anthropic và OpenAI muốn `additionalProperties: false` trên mọi
 object). Schema được gửi đúng như bạn viết; run vẫn tự kiểm tra mọi câu trả lời,
 nên một provider lệch khỏi schema sẽ nhận retry ở trên. Gemini kết hợp phản hồi
-JSON với function calling từ Gemini 3 trở đi.
+JSON với function calling từ Gemini 3 trở đi. Các dạng request này theo tài liệu
+API của từng vendor; chúng chưa được chạy với một API thật.
+
+Một run chuyển sang một model trong `spec.fallback_models` sẽ gửi cho model đó
+cùng schema, kiểm tra câu trả lời của nó theo cùng cách, và tiếp tục đếm các lần
+retry schema mà run đã dùng.
 
 ## Khác với Linch bản Python thế nào
 

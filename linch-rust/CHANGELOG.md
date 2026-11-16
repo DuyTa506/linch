@@ -61,7 +61,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `Agent.run(output_schema=...)`, `run.start` `output_schema` and `RunOptions::output_schema` give one run its own schema; it is stored on the run's first `init` (`InitEvent.output_schema`) so a resume or approve keeps it.
 - `InvalidOutputSchema` (code -32031, `RunError::InvalidOutputSchema`): a run's own schema does not compile or its root is not an object; nothing is written.
 - `InitEvent.output_schema`: only the first `init` of a run started with its own schema has it; other events are unchanged, but a binary older than this one cannot read the events of a run whose `init` has one.
-- Anthropic, OpenAI Chat, OpenAI Responses and Gemini send the output schema in their native structured-output form (`output_config.format`, `response_format`, `text.format`, `responseMimeType` with `responseJsonSchema`); no forced final tool.
+- Anthropic, OpenAI Chat, OpenAI Responses and Gemini send the output schema in their native structured-output form (`output_config.format`, `response_format`, `text.format`, `responseMimeType` with `responseJsonSchema`); no forced final tool. The shapes follow each vendor's API docs and have not been run against a live API. A fallback model (`spec.fallback_models`) is sent the same schema and its answers are checked the same way.
 
 ### Changed
 

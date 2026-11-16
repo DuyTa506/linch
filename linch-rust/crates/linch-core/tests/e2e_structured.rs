@@ -7,6 +7,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
+use common::flaky::Flaky;
 use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::{ResultEvent, ResultSubtype, VerificationAction};
@@ -14,8 +15,8 @@ use linch_core::hooks::{Stop, StopResponse};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, BuildError, Envelope, Event, Hooks, JsonObject, OutputSchema,
-    PermissionMode, Provider, RunOptions, RunStatus, RunStore, ScriptedProvider, ScriptedTurn,
-    SessionStore, ToolScope,
+    PermissionMode, Provider, ProviderRetry, RunOptions, RunStatus, RunStore, ScriptedProvider,
+    ScriptedTurn, SessionStore, ToolScope,
 };
 use serde_json::json;
 
@@ -578,4 +579,42 @@ async fn a_resumed_run_keeps_its_own_schema() {
             assert_eq!(result(&envelopes).structured_output, Some(ada), "{context}");
         }
     }
+}
+
+/// The primary model spends its retries and the run fails over: the
+/// fallback is sent the same schema, its first answer breaks it and is
+/// retried on the fallback, and its second is the result.
+#[tokio::test]
+async fn a_fallback_model_gets_the_schema_and_its_answers_are_checked() {
+    const FALLBACK: &str = "fallback-a";
+    let provider =
+        Arc::new(Flaky::new(vec![text_turn("total: 1"), text_turn("{\"total\": 1}")]).down(MODEL));
+    let mut spec = shaped(1);
+    spec.fallback_models = vec![FALLBACK.into()];
+    spec.provider_retry = ProviderRetry {
+        max_attempts: 2,
+        base_delay_ms: 1,
+        max_delay_ms: 1_000,
+        jitter: 0.0,
+    };
+    let stores = Arc::new(Stores::default());
+    let agent = build(spec, provider.clone(), Hooks::default(), stores);
+    let envelopes = finish(agent.run("bill me", RunOptions::new("s1"))).await;
+
+    let calls = provider.calls();
+    let calls: Vec<(usize, &str)> = calls.iter().map(|(t, m)| (*t, m.as_str())).collect();
+    assert_eq!(
+        calls,
+        [(0, MODEL), (0, MODEL), (0, FALLBACK), (1, FALLBACK)]
+    );
+    for request in provider.requests() {
+        assert_eq!(request.output_schema, Some(schema()), "{}", request.model);
+    }
+    let kinds = kinds(&envelopes);
+    let at = |kind: &str| kinds.iter().position(|k| k == kind).unwrap();
+    assert!(at("model_fallback") < at("verification"), "{kinds:?}");
+    assert_eq!(verifications(&envelopes), [(VerificationAction::Retry, 1)]);
+    let result = result(&envelopes);
+    assert_eq!(result.subtype, ResultSubtype::Success);
+    assert_eq!(result.structured_output, Some(object(json!({"total": 1}))));
 }

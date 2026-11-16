@@ -139,7 +139,13 @@ Vendors accept only part of JSON Schema in these forms (Anthropic and OpenAI
 strict mode want `additionalProperties: false` on every object, for example).
 The schema is sent as you wrote it; the run still checks every answer itself,
 so a provider that drifts from the schema gets the retry above. Gemini
-combines a JSON response with function calling from Gemini 3 on.
+combines a JSON response with function calling from Gemini 3 on. These
+request shapes follow each vendor's API docs; they have not yet been run
+against a live API.
+
+A run that fails over to one of `spec.fallback_models` sends the fallback the
+same schema, checks its answers the same way, and keeps counting the schema
+retries the run already spent.
 
 ## How it differs from Python Linch
 
