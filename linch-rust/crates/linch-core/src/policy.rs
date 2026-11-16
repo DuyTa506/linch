@@ -128,6 +128,8 @@ pub enum HookPoint {
     AgentStop,
     /// A turn is about to start.
     TurnStart,
+    /// The provider request for a turn is about to be sent.
+    BeforeProviderCall,
     /// A provider call is about to be dispatched.
     ProviderCallStart,
     /// A provider call returned, however it ended.
@@ -174,6 +176,7 @@ impl HookPoint {
             | Self::AgentStart
             | Self::AgentStop
             | Self::TurnStart
+            | Self::BeforeProviderCall
             | Self::ProviderCallStart
             | Self::ProviderCallStop
             | Self::ToolUseStart
@@ -246,5 +249,9 @@ mod tests {
         );
         assert_eq!(HookPoint::ContextBuild.default_fail_mode(), FailMode::Open);
         assert_eq!(HookPoint::Stop.default_fail_mode(), FailMode::Open);
+        assert_eq!(
+            HookPoint::BeforeProviderCall.default_fail_mode(),
+            FailMode::Open
+        );
     }
 }

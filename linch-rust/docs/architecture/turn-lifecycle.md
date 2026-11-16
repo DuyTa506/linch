@@ -20,9 +20,10 @@ What differs in Rust:
   the run where it stands, like a crash (`runner.rs:83-87`).
 - Python's loop guard (repeated calls, repeated failures) is not in the
   runner. It emits `loop_guard` only for `max_turns` (`runner/end.rs:93-108`).
-- Hook points are the nineteen in the [kernel](./kernel.md#hook-chains),
-  twelve of which only observe. Python's `AfterProviderCall` is gone
-  (`hooks.rs:19-21`).
+- Hook points are the twenty in the [kernel](./kernel.md#hook-chains), twelve
+  of which only observe. `before_provider_call` can rewrite or block the
+  request about to be sent; Python's `AfterProviderCall` is still gone
+  (`hooks.rs`).
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -38,6 +39,9 @@ What differs in Rust:
 3. **Build the request** from the session's provider view. The
    `context_build` hooks add blocks to the tail of the request only
    (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged.
+   `before_provider_call` then runs on the built request: a rewrite replaces
+   it before anything downstream sees it; a block ends the run as failed and
+   the provider is never called (`hooks/call.rs`, `runner/hooks.rs`).
 4. **Stage and flush the delivery.** The `context_build` event and the
    model-call delivery are staged. The `ProviderPending` checkpoint is held,
    then `flush` writes the events and the checkpoint in one commit

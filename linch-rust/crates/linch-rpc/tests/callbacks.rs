@@ -333,6 +333,57 @@ async fn turn_point_callbacks_cross_the_connection() {
     assert_eq!(error.data.unwrap()["reason"], "no prompts today");
 }
 
+/// `before_provider_call` sees the exact request about to be sent and can
+/// replace it; the replacement is what the provider gets and what the run's
+/// `context_build` event records, not the original.
+#[tokio::test]
+async fn before_provider_call_rewrites_the_request() {
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let rpc = Rpc::with_handler(handler(move |_method, params, _cancel| {
+        let log = log.clone();
+        async move {
+            let params = Value::Object(params);
+            log.lock().unwrap().push(params.clone());
+            // `params["request"]` is the occurrence (`HookCallParams`); its
+            // own `request` field is the `ProviderRequest` to rewrite.
+            let mut request = params["request"]["request"].clone();
+            request["model"] = json!("cheaper-model");
+            Ok(json!({"action": "rewrite", "request": request}))
+        }
+    }));
+    let mut rpc = rpc;
+    let extra = json!({"callbacks": [
+        {"point": "before_provider_call", "policy_id": "downgrade", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("Done.")], extra).await;
+    assert!(finished(&ended));
+    assert_eq!(seen.lock().unwrap()[0]["request"]["request"]["model"], MODEL);
+    let build_model = (ended.envelopes.iter())
+        .find_map(|envelope| match &envelope.event {
+            Event::ContextBuild(build) => Some(build.model.clone()),
+            _ => None,
+        })
+        .expect("a context_build event");
+    assert_eq!(build_model, "cheaper-model");
+}
+
+/// A block ends the run with a failed result instead of sending the call.
+#[tokio::test]
+async fn before_provider_call_can_block_the_call() {
+    let (mut rpc, _log) = client(json!({
+        "before_provider_call": {"action": "block", "reason": "over budget"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "before_provider_call", "policy_id": "budget", "policy_version": 1},
+    ]});
+    let agent = rpc.open(hosted(vec![text_turn("Done.")], "default", extra)).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "a block is a failed result, not a protocol error");
+    assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
+}
+
 /// The observe-only points added for parity with Python's lifecycle hooks
 /// cross the connection like any other callback: `agent_start`/`agent_stop`
 /// bracket the run, `turn_start` fires before each turn's dispatch, and

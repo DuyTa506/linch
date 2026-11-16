@@ -169,6 +169,81 @@ fn prompt(text: &str) -> UserPromptRequest {
     }
 }
 
+fn minimal_request(model: &str) -> crate::provider::ProviderRequest {
+    crate::provider::ProviderRequest {
+        model: model.into(),
+        system: vec![],
+        tools: vec![],
+        appended_tools: vec![],
+        messages: vec![],
+        max_output_tokens: None,
+        temperature: None,
+        stop_sequences: vec![],
+        effort: None,
+        thinking: None,
+        cache_control: None,
+        output_schema: None,
+        tool_choice: None,
+    }
+}
+
+fn before_call(model: &str) -> BeforeProviderCallRequest {
+    BeforeProviderCallRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        request: minimal_request(model),
+    }
+}
+
+#[tokio::test]
+async fn before_provider_call_rewrites_chain_and_a_block_stops() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("downgrade", &log, |req: &BeforeProviderCallRequest| {
+            let mut request = req.request.clone();
+            request.model = "cheaper".into();
+            Act::Answer(BeforeProviderCallResponse::Rewrite {
+                request: Box::new(request),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let sent = hooks
+        .before_provider_call
+        .run_into(before_call("gpt"), &mut records)
+        .await;
+    assert_eq!(
+        sent,
+        BeforeProviderCallOutcome::Send {
+            request: Box::new(minimal_request("cheaper"))
+        }
+    );
+
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("budget", &log, |_| {
+            Act::Answer(BeforeProviderCallResponse::Block {
+                reason: "over budget".into(),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let blocked = hooks
+        .before_provider_call
+        .run_into(before_call("gpt"), &mut records)
+        .await;
+    assert_eq!(
+        blocked,
+        BeforeProviderCallOutcome::Blocked {
+            reason: "over budget".into()
+        }
+    );
+    assert_eq!(calls(&log), ["downgrade", "downgrade", "budget"]);
+}
+
 #[tokio::test]
 async fn user_prompt_rewrites_chain_and_a_block_stops() {
     let hooks = Hooks::default();

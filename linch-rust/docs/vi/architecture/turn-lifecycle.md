@@ -21,8 +21,9 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   đang đứng, giống như một sự cố (`runner.rs:83-87`).
 - Loop guard của Python (lời gọi lặp lại, lỗi lặp lại) không nằm trong runner. Runner
   chỉ phát `loop_guard` cho `max_turns` (`runner/end.rs:93-108`).
-- Các hook point là mười chín point trong [kernel](./kernel.md#chuỗi-hook), trong đó
-  mười hai point chỉ quan sát. `AfterProviderCall` của Python đã bị bỏ (`hooks.rs:19-21`).
+- Các hook point là hai mươi point trong [kernel](./kernel.md#chuỗi-hook), trong đó
+  mười hai point chỉ quan sát. `before_provider_call` có thể viết lại hoặc block
+  request sắp được gửi; `AfterProviderCall` của Python vẫn bị bỏ (`hooks.rs`).
 - Run của một subagent không thể suspend: một lời gọi cần phê duyệt sẽ bị từ chối
   (`runner/batch.rs:73-75`).
 
@@ -37,7 +38,10 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    thúc run với trạng thái failed trước khi lời gọi được thực hiện (`turn.rs:271-284`).
 3. **Dựng request** từ provider view của session. Các hook `context_build` chỉ thêm
    block vào phần đuôi của request (`turn.rs:285-295`, `runner/hooks.rs:117-129`).
-   Chúng không bao giờ được ghi log.
+   Chúng không bao giờ được ghi log. Sau đó `before_provider_call` chạy trên request
+   đã dựng: một rewrite thay thế nó trước khi bất cứ thứ gì phía sau thấy nó; một
+   block kết thúc run với trạng thái failed và provider không bao giờ được gọi
+   (`hooks/call.rs`, `runner/hooks.rs`).
 4. **Stage và flush delivery.** Event `context_build` và delivery của lời gọi model được
    stage. Checkpoint `ProviderPending` được giữ lại, rồi `flush` ghi các event và
    checkpoint trong một lần commit (`turn.rs:299-305`). Đây là barrier trước khi gọi provider.

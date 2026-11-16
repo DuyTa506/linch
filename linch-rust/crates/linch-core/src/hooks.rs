@@ -22,10 +22,13 @@
 //! `post_compact`, `subagent_start`, `subagent_stop`. A hook there answers
 //! `()` and cannot fail closed; Python's `AfterProviderCall` is gone
 //! (provider retries live in the reliability policy), and
-//! `before_provider_call`, `before_final_answer` and `event_emit` have no
-//! Rust hook point yet. Script hooks and RPC callbacks implement [`Hook`]
-//! later; they are not part of this module.
+//! `before_final_answer` and `event_emit` have no Rust hook point yet.
+//! [`BeforeProviderCall`] ([`call`]) lets a hook replace the provider
+//! request about to be sent, or block the call; unlike the observe-only
+//! points, its blocking verdict can fail closed. Script hooks and RPC
+//! callbacks implement [`Hook`] later; they are not part of this module.
 
+mod call;
 mod chain;
 mod hook;
 mod observe;
@@ -41,6 +44,10 @@ use crate::canonical::{Digest, digest_with_domain};
 use crate::json::JsonValue;
 use crate::policy::HookPoint;
 
+pub use call::{
+    BeforeProviderCall, BeforeProviderCallOutcome, BeforeProviderCallRequest,
+    BeforeProviderCallResponse,
+};
 pub use chain::{ChainResult, HookChain, HookRecord, HookStatus};
 pub use hook::{CallbackError, Hook, HookError, Point, ToolMatcher};
 pub use observe::{
@@ -86,6 +93,8 @@ pub struct Hooks {
     pub agent_stop: HookChain<AgentStop>,
     /// Hooks at [`HookPoint::TurnStart`].
     pub turn_start: HookChain<TurnStart>,
+    /// Hooks at [`HookPoint::BeforeProviderCall`].
+    pub before_provider_call: HookChain<BeforeProviderCall>,
     /// Hooks at [`HookPoint::ProviderCallStart`].
     pub provider_call_start: HookChain<ProviderCallStart>,
     /// Hooks at [`HookPoint::ProviderCallStop`].
@@ -113,9 +122,10 @@ impl Hooks {
     /// point in a fixed order (`user_prompt_submit`, `context_build`,
     /// `pre_tool_use`, `permission_request`, `post_tool_use`, `stop`,
     /// `post_turn`, `agent_start`, `agent_stop`, `turn_start`,
-    /// `provider_call_start`, `provider_call_stop`, `tool_use_start`,
-    /// `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
-    /// `post_compact`, `subagent_start`, `subagent_stop`) and in chain order
+    /// `before_provider_call`, `provider_call_start`, `provider_call_stop`,
+    /// `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`,
+    /// `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`) and
+    /// in chain order
     /// within a point, duplicates kept. The order of a point's hooks decides
     /// what its chain does (a rewrite feeds the next hook, a block stops
     /// it), so reordering them, or registering one twice, changes the
@@ -133,6 +143,7 @@ impl Hooks {
             self.agent_start.policies(),
             self.agent_stop.policies(),
             self.turn_start.policies(),
+            self.before_provider_call.policies(),
             self.provider_call_start.policies(),
             self.provider_call_stop.policies(),
             self.tool_use_start.policies(),

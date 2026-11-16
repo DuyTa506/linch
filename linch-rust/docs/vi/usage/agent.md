@@ -433,6 +433,7 @@ Hàm nhận dict request và trả về câu trả lời của điểm đó. M�
 | `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 | `user_prompt_submit` | `content` (các content block) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (cuộc hội thoại mà model sẽ thấy) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` dành cho observer và eval: nó nằm trên `ContextBuildEvent` của lời gọi, key của callback đến sau thắng, và model không bao giờ thấy nó |
+| `before_provider_call` | `turn`, `request` (toàn bộ provider request sắp được gửi) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; một rewrite là thứ được gửi đi và được `context_build` ghi lại, và một block kết thúc run trước khi provider được gọi |
 | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
@@ -466,7 +467,7 @@ không phải của agent con.
 
 | Đối số | Mặc định | Điều khiển gì |
 |---|---|---|
-| `point` | bắt buộc | Một trong mười chín điểm ở trên |
+| `point` | bắt buộc | Một trong hai mươi điểm ở trên |
 | `policy_id`, `policy_version` | bắt buộc | Đi vào hợp đồng của run. Hãy tăng version mỗi khi hành vi, matcher, timeout hoặc fail mode thay đổi |
 | `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở ba điểm tool; một lần không khớp không bao giờ đến process này |
 | `timeout` | không có | Server chờ câu trả lời bao lâu; vắng thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc |

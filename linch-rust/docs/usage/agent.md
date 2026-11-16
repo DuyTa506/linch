@@ -428,6 +428,7 @@ request has `session_id` and `run_id`:
 | `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
+| `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called |
 | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
@@ -459,7 +460,7 @@ fire on the parent's callbacks, not the child's.
 
 | Argument | Default | What it controls |
 |---|---|---|
-| `point` | required | One of the nineteen points above |
+| `point` | required | One of the twenty points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
 | `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |

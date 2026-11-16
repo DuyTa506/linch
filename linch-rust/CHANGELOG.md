@@ -16,6 +16,12 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   closed, and costs nothing when no hook is registered on it. Available to
   `@callback` in `linch_rust` and to `Hook<P>` implementations in
   `linch-core`.
+- `before_provider_call`: a hook point for the full provider request about to
+  be sent. A hook may rewrite it (the rewrite is what is sent and what
+  `context_build` records) or block the call, ending the run before the
+  provider is ever reached. Defaults open, but unlike the observe-only
+  points its blocking answer can fail closed. Available to `@callback` in
+  `linch_rust` and to `Hook<BeforeProviderCall>` in `linch-core`.
 
 ### Changed
 

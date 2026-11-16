@@ -127,6 +127,7 @@ Mỗi chuỗi tự quyết định cách kết hợp các câu trả lời. Mộ
 | `pre_tool_use` | Một lần viết lại được chuyển cho hook kế tiếp. Một block, một resolve hoặc một lỗi closed dừng chuỗi. Chỉ khi chuỗi đã chạy mọi hook khớp thì tool mới được chạy (`hooks/tool.rs:101-136`) | closed |
 | `permission_request` | Câu trả lời nghiêm ngặt nhất thắng. Một deny hoặc lỗi closed dừng chuỗi; một allow thì không (`hooks/tool.rs:226-258`) | closed |
 | `post_tool_use` | Một bản thay thế được chuyển cho hook kế tiếp. Một lỗi closed giữ lại kết quả và dừng chuỗi (`hooks/tool.rs:312-336`) | open |
+| `before_provider_call` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là bản được gửi đi và được `context_build` ghi lại. Một block hoặc một lỗi closed dừng chuỗi và làm run thất bại, trước khi provider được gọi (`hooks/call.rs`) | open, nhưng block của nó có thể fail closed |
 | `stop` | Hook đầu tiên giữ run tiếp tục sẽ dừng chuỗi. Một lỗi closed làm run thất bại (`hooks/turn.rs:246-250`) | open |
 | `post_turn` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/turn.rs:310-312`) | open |
 | `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/observe.rs`) | open |

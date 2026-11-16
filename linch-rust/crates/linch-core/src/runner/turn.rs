@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::end::cut_empty;
-use super::hooks::{Stopping, add_context};
+use super::hooks::{BeforeCall, Stopping, add_context};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::write::session_log;
@@ -298,6 +298,17 @@ impl Runner {
         if let Some(model) = model {
             request.model = skills::model_override(&model, &request.model);
         }
+        let request = match self.before_provider_call(request, self.turn).await {
+            BeforeCall::Send(request) => *request,
+            BeforeCall::Blocked(reason) => {
+                self.hook_failed(reason).await?;
+                return Ok(None);
+            }
+            BeforeCall::Ended => {
+                self.abort().await?;
+                return Ok(None);
+            }
+        };
         self.stage_context(&request, context.metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal

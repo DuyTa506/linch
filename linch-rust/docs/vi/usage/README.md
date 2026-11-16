@@ -83,7 +83,7 @@ Sẽ có sau:
 | `session = await agent.session()`; `session.run(prompt)` | `agent.run(session_id, prompt)` với session id do bạn chọn |
 | `ToolRegistry`, `@tool`, tool dạng class | host tool `@tool(scope=...)`; `scope` không có giá trị mặc định |
 | `permissions={"mode": "acceptEdits"}`, `can_use_tool` | `{"mode": "accept_edits", "project_root": ...}`; tạm dừng rồi `agent.approve`, hoặc một callback `permission_request` |
-| Hook chạy trong process | `@callback` ở mười chín điểm hook, khai báo khi mở agent |
+| Hook chạy trong process | `@callback` ở hai mươi điểm hook, khai báo khi mở agent |
 | `InMemorySessionStore`, kho Postgres | `{"type": "memory"}` hoặc `{"type": "postgres", "dsn": ...}` |
 | `ScriptedProvider` từ `linch.ext.evals` | `{"id": "scripted", "turns": [...]}` với `linch_rust.scripted` |
 | CLI `linch` | CLI `linch-rust` |

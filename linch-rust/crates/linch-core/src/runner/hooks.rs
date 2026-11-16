@@ -19,10 +19,10 @@ use crate::events::kinds::{
 use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
-    AgentStartRequest, AgentStopRequest, ContextBuildRequest, ContextBuildResponse, HookRecord,
-    HookStatus, PostCompactRequest, PostTurnRequest, PreCompactRequest, ProviderCallStartRequest,
-    ProviderCallStopRequest, StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome,
-    UserPromptRequest,
+    AgentStartRequest, AgentStopRequest, BeforeProviderCallOutcome, BeforeProviderCallRequest,
+    ContextBuildRequest, ContextBuildResponse, HookRecord, HookStatus, PostCompactRequest,
+    PostTurnRequest, PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest,
+    StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
@@ -30,6 +30,17 @@ use crate::message::{ContentBlock, Message, Role, TextBlock};
 use crate::provider::ProviderRequest;
 use crate::run::{Phase, RunStatus, StopReason};
 use crate::usage::Usage;
+
+/// What a `before_provider_call` hook decided for the request about to be
+/// sent.
+pub(super) enum BeforeCall {
+    /// Send this request: the original, or the last rewrite.
+    Send(Box<ProviderRequest>),
+    /// A hook blocked the call, or failed closed.
+    Blocked(String),
+    /// The run already ended: the run cancel interrupted the chain.
+    Ended,
+}
 
 /// What a text-only response leads to, after the `stop` chain.
 pub(super) enum Stopping {
@@ -303,6 +314,36 @@ impl Runner {
         let mut records = Vec::new();
         chain.run_into(&request, &mut records).await;
         self.push_records(records, None);
+    }
+
+    /// Run `before_provider_call` on the request about to be sent for
+    /// `turn`. The request `stage_context` and the delivery record is built
+    /// from is whatever this returns, so a rewrite is what the audit trail
+    /// and a resumed run both see.
+    pub(super) async fn before_provider_call(
+        &self,
+        request: ProviderRequest,
+        turn: u32,
+    ) -> BeforeCall {
+        let chain = &self.agent.hooks.before_provider_call;
+        if chain.is_empty() {
+            return BeforeCall::Send(Box::new(request));
+        }
+        let request = BeforeProviderCallRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            request,
+        };
+        let mut records = Vec::new();
+        let run = chain.run_into(request, &mut records);
+        let outcome = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        match outcome {
+            None => BeforeCall::Ended,
+            Some(BeforeProviderCallOutcome::Send { request }) => BeforeCall::Send(request),
+            Some(BeforeProviderCallOutcome::Blocked { reason }) => BeforeCall::Blocked(reason),
+        }
     }
 
     /// Run `provider_call_start` before dispatching one provider call.

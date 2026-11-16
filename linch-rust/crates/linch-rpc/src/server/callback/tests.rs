@@ -11,6 +11,55 @@ fn ids() -> (SessionId, RunId) {
     (SessionId::from("s1"), RunId::from("r1"))
 }
 
+fn minimal_request(model: &str) -> linch::ProviderRequest {
+    linch::ProviderRequest {
+        model: model.into(),
+        system: vec![],
+        tools: vec![],
+        appended_tools: vec![],
+        messages: vec![Message::user_text("hi")],
+        max_output_tokens: None,
+        temperature: None,
+        stop_sequences: vec![],
+        effort: None,
+        thinking: None,
+        cache_control: None,
+        output_schema: None,
+        tool_choice: None,
+    }
+}
+
+#[test]
+fn before_provider_call_carries_the_request_and_reads_each_action() {
+    let (session_id, run_id) = ids();
+    let request = BeforeProviderCallRequest {
+        session_id,
+        run_id,
+        turn: 2,
+        request: minimal_request("m"),
+    };
+    let wire = BeforeProviderCall::encode(&request);
+    assert_eq!(wire["turn"], 2);
+    assert_eq!(wire["request"]["model"], "m");
+    assert_eq!(
+        BeforeProviderCall::decode(json!({"action": "continue"})).unwrap(),
+        BeforeProviderCallResponse::Continue
+    );
+    let rewrite = json!({"action": "rewrite", "request": serde_json::to_value(minimal_request("m2")).unwrap()});
+    assert_eq!(
+        BeforeProviderCall::decode(rewrite).unwrap(),
+        BeforeProviderCallResponse::Rewrite {
+            request: Box::new(minimal_request("m2"))
+        }
+    );
+    let block = json!({"action": "block", "reason": "no budget"});
+    assert!(matches!(
+        BeforeProviderCall::decode(block).unwrap(),
+        BeforeProviderCallResponse::Block { reason } if reason == "no budget"
+    ));
+    assert!(BeforeProviderCall::decode(json!({"action": "continue", "x": 1})).is_err());
+}
+
 #[test]
 fn user_prompt_submit_carries_content_and_reads_each_action() {
     let (session_id, run_id) = ids();

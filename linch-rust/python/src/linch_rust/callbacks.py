@@ -22,6 +22,7 @@ Point = Literal[
     "agent_start",
     "agent_stop",
     "turn_start",
+    "before_provider_call",
     "provider_call_start",
     "provider_call_stop",
     "tool_use_start",

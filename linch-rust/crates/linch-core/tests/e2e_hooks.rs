@@ -9,8 +9,9 @@ use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::{HookEvent, HookOutcome};
 use linch_core::hooks::{
-    ContextBuild, PostToolUse, PostToolUseResponse, PreToolUse, PreToolUseResponse, ToolUseStart,
-    ToolUseStop, UserPromptResponse, UserPromptSubmit,
+    BeforeProviderCall, BeforeProviderCallResponse, ContextBuild, PostToolUse,
+    PostToolUseResponse, PreToolUse, PreToolUseResponse, ToolUseStart, ToolUseStop,
+    UserPromptResponse, UserPromptSubmit,
 };
 use linch_core::{
     Agent, AgentBuilder, ContentBlock, Envelope, Event, FailMode, HookPoint, Hooks, Message,
@@ -245,6 +246,70 @@ async fn context_metadata_of_every_hook_is_merged_on_the_context_build_event() {
         [json!({"rag": "p1", "hits": 2})],
         "a later hook wins"
     );
+}
+
+#[tokio::test]
+async fn a_rewritten_request_reaches_the_provider_and_the_context_build_event() {
+    let hooks = Hooks::default();
+    let rewrite = hook::<BeforeProviderCall>("downgrade", |request| {
+        let mut request = request.request.clone();
+        request.model = "cheaper-model".into();
+        Ok(BeforeProviderCallResponse::Rewrite {
+            request: Box::new(request),
+        })
+    });
+    let _ = hooks.before_provider_call.register(rewrite.arc()).unwrap();
+    let provider = Arc::new(ScriptedProvider::new([text_turn("ok")]));
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(provider.clone(), hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    assert_eq!(
+        provider.requests()[0].model, "cheaper-model",
+        "the provider sees the rewrite"
+    );
+    let build = (envelopes.iter())
+        .find_map(|e| match &e.event {
+            Event::ContextBuild(build) => Some(build),
+            _ => None,
+        })
+        .expect("a context_build event");
+    assert_eq!(
+        build.model, "cheaper-model",
+        "the audit event records what was actually sent"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_provider_call_ends_the_run_without_calling_the_provider() {
+    let hooks = Hooks::default();
+    let gate = hook::<BeforeProviderCall>("budget", |_| {
+        Ok(BeforeProviderCallResponse::Block {
+            reason: "over budget".into(),
+        })
+    });
+    let _ = hooks.before_provider_call.register(gate.arc()).unwrap();
+    let provider = Arc::new(ScriptedProvider::new([]));
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(provider.clone(), hooks, stores.clone());
+    let (envelopes, error) = drain(agent.run("go", RunOptions::new("s1"))).await;
+    assert!(
+        error.is_none(),
+        "a blocked call is a normal failed result, not a stream error: {error:?}"
+    );
+    assert!(provider.requests().is_empty(), "the provider is never called");
+    let Event::Error(err) = &(envelopes.iter())
+        .find(|e| matches!(e.event, Event::Error(_)))
+        .expect("an error event")
+        .event
+    else {
+        unreachable!()
+    };
+    assert_eq!(err.error["message"], "over budget");
+    let Event::Result(result) = &envelopes.last().unwrap().event else {
+        panic!("the run ends with a result: {envelopes:?}");
+    };
+    assert_eq!(result.subtype, linch_core::events::kinds::ResultSubtype::Error);
 }
 
 #[tokio::test]

@@ -4,8 +4,8 @@
 use std::num::NonZeroU64;
 
 use linch::{
-    ContentBlock, FailMode, HookPoint, JsonObject, JsonValue, TextBlock, ToolOutput,
-    ToolOutputError, ToolResult,
+    ContentBlock, FailMode, HookPoint, JsonObject, JsonValue, ProviderRequest, TextBlock,
+    ToolOutput, ToolOutputError, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +117,25 @@ pub enum UserPromptAnswer {
     /// Reject the prompt.
     Block {
         /// Why, for the host.
+        reason: String,
+    },
+}
+
+/// A `before_provider_call` answer, by `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BeforeProviderCallAnswer {
+    /// No change.
+    Continue {},
+    /// Send this request instead; later callbacks see it, and it is what
+    /// the run's `context_build` event records.
+    Rewrite {
+        /// The new request.
+        request: Box<ProviderRequest>,
+    },
+    /// Do not send the call; end the run with this reason.
+    Block {
+        /// Why the call was blocked.
         reason: String,
     },
 }
