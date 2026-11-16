@@ -23,7 +23,11 @@ fn overloaded() -> ScriptedTurn {
 #[tokio::test]
 async fn a_run_retries_then_fails_over_and_streams_both_events() {
     let mut rpc = Rpc::new();
-    let mut config = scripted(vec![overloaded(), overloaded(), text_turn("done")], None, "");
+    let mut config = scripted(
+        vec![overloaded(), overloaded(), text_turn("done")],
+        None,
+        "",
+    );
     config["spec"]["provider_retry"] = json!({"max_attempts": 2, "base_delay_ms": 1, "jitter": 0});
     config["spec"]["fallback_models"] = json!(["fallback-model"]);
     let agent = rpc.open(config).await;
@@ -38,7 +42,10 @@ async fn a_run_retries_then_fails_over_and_streams_both_events() {
         _ => None,
     });
     let retry = retry.expect("a provider_retry event");
-    assert_eq!((retry.model.as_str(), retry.retry, retry.delay_ms), (MODEL, 1, 1));
+    assert_eq!(
+        (retry.model.as_str(), retry.retry, retry.delay_ms),
+        (MODEL, 1, 1)
+    );
     assert_eq!(retry.error["status"], 529);
     let fallback = ended.envelopes.iter().find_map(|e| match &e.event {
         Event::ModelFallback(fallback) => Some(fallback.clone()),
@@ -69,5 +76,9 @@ async fn agent_open_refuses_reliability_settings_that_cannot_run() {
     let mut misspelt = scripted(vec![], None, "");
     misspelt["spec"]["provider_retry"] = json!({"retries": 3});
     let error = rpc.call(method::AGENT_OPEN, misspelt).await.unwrap_err();
-    assert_ne!(code_of(error), code::BUILD_INVALID, "a decode error, not a build one");
+    assert_ne!(
+        code_of(error),
+        code::BUILD_INVALID,
+        "a decode error, not a build one"
+    );
 }
