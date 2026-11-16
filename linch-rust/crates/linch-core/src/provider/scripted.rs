@@ -116,6 +116,14 @@ pub enum ScriptedError {
         /// Error message.
         message: String,
     },
+    /// [`ProviderError::ContextLength`].
+    ContextLength {
+        /// HTTP status code, when the refusal had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        /// Error message.
+        message: String,
+    },
 }
 
 impl From<ScriptedError> for ProviderError {
@@ -133,6 +141,9 @@ impl From<ScriptedError> for ProviderError {
                 message,
             },
             ScriptedError::InvalidRequest { message } => Self::InvalidRequest { message },
+            ScriptedError::ContextLength { status, message } => {
+                Self::ContextLength { status, message }
+            }
         }
     }
 }
