@@ -339,6 +339,16 @@ kết nối đã yêu cầu ([cách dùng](../usage/scheduler.md)).
   kích thước pool ở `max_pool_connections`, và mở nó bằng các pool của tenant, không có host
   tool hay hook. Một namespace có root không phải tenant cũng không thuộc `local_namespaces`
   bị từ chối, và worker thậm chí không dequeue nó.
+- **Principal.** `schedule.create` và `job.enqueue` nhận một `principal`, được
+  `Tenant::admit_principal` kiểm tra như với `run.start`, và được lưu cùng lịch hoặc job; worker
+  đưa nó cho mọi lần thử của run ([worker](./worker.md#principal)).
+- **Secret.** Định nghĩa đã lưu giữ các secret của cấu hình (`to_value_with_secrets`, DSN bị
+  làm trống); chỉ `linch_worker_agents` giữ chúng, các hàng khác gọi tên digest, và không câu
+  trả lời hay lỗi nào mang chúng (`tests/schedule.rs`, một giá trị sentinel trong một giá trị
+  env của MCP). Một định nghĩa không còn được gọi tên sẽ bị prune.
+- **Cơ sở dữ liệu nào.** Các hàng đi tới pool riêng của agent đã mở, nên một lịch nằm cùng các
+  run của agent của nó; một worker chỉ phục vụ DSN của phần của nó và mở các run của nó ở đó,
+  nên một lần kích hoạt không bao giờ chạy trên cơ sở dữ liệu khác với nơi nó được lưu.
 
 Worker nằm trong sidecar để một cấu hình duy nhất giữ các tenant, allowlist của họ và worker,
 và các run nền dùng chung giới hạn run và pool của các tenant với các run tương tác. Một cấu

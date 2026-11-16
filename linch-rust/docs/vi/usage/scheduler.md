@@ -60,6 +60,13 @@ Bạn có thể chạy bao nhiêu server như vậy trên một cơ sở dữ li
 được đưa vào hàng đợi một lần và mỗi job chạy trên một worker tại một thời điểm. Một server
 không có phần `worker` không chạy vòng lặp nào và không gửi truy vấn nào cho nó.
 
+Một lịch hoặc run trong hàng đợi được lưu trong cơ sở dữ liệu và schema của agent đã tạo
+ra nó, và một worker chỉ phục vụ những cái thuộc `dsn` của chính nó, nơi nó cũng chạy chúng.
+Một agent có DSN store trỏ tới cơ sở dữ liệu (hoặc schema) khác cần một worker ở đó: không
+worker nào khác từng kích hoạt các lịch của nó. Hãy trỏ `worker.dsn` tới cùng cơ sở dữ liệu
+và schema với DSN store của các agent. Khi chúng chỉ khác nhau ở user, các run nền kết nối
+bằng user của worker.
+
 Worker chạy các job của mọi tenant trong cấu hình. Agent của mỗi job được kiểm tra lại với
 các allowlist của tenant của nó ở mỗi lần thử, như `open_agent` sẽ làm, ngoại trừ DSN của
 store, vốn là của worker. Vì vậy một tenant bị siết allowlist sẽ ngừng chạy ở lần kích hoạt
@@ -83,10 +90,28 @@ không có client nào để gọi ngược lại. Nếu không, lời gọi né
 `memory_store`, `host_tools` hoặc `callbacks`. Hãy cho agent các tool workspace hoặc MCP
 thay vào đó.
 
-Cấu hình của agent, như lúc nó được mở (sau các kiểm tra của tenant), được lưu cùng mỗi lịch
-và mỗi run trong hàng đợi, không kèm DSN store của nó. Nó có kèm các giá trị `env` và header
-của MCP, thứ worker cần để kết nối lại, nên chúng được lưu trong cơ sở dữ liệu đó. Một lịch
-luôn chạy cấu hình mà nó được tạo cùng; muốn đổi thì mở lại agent và tạo một lịch mới.
+Một lịch luôn chạy cấu hình mà nó được tạo cùng; muốn đổi thì mở lại agent và tạo một lịch
+mới.
+
+### Những gì được lưu ở trạng thái nghỉ
+
+Cấu hình của agent, như lúc nó được mở (sau các kiểm tra của tenant), được lưu dưới dạng văn
+bản thuần trong bảng `linch_worker_agents` của cơ sở dữ liệu của agent, một lần cho mỗi cấu
+hình khác nhau, vì worker phải mở lại đúng agent đó. Mọi thứ trong nó đều được lưu **trừ DSN
+store** (worker kết nối bằng DSN của chính nó):
+
+- các giá trị `env` và đối số của MCP stdio, cùng URL và giá trị header của MCP HTTP, đúng
+  như được cung cấp;
+- các cài đặt provider, kể cả mọi header request và trường body bổ sung mà cấu hình đặt;
+- phần còn lại của cấu hình: `spec`, permission, workspace, profile.
+
+Không nơi nào khác giữ chúng: các hàng job, history và lịch gọi cấu hình bằng digest SHA-256
+của nó, và không câu trả lời `schedule.*` hay `job.*` nào, không lỗi nào, cũng không lỗi của
+một run nền, mang các giá trị của nó. Một cấu hình đã lưu bị xóa khi không lịch nào và không
+job chưa xong nào gọi tên nó: một worker kiểm tra từ lần poll đầu tiên và cứ 10 phút một lần
+sau đó (`prune_definitions`). Hãy giữ secret ra khỏi cấu hình được lập lịch khi có thể (một
+key mà server đọc từ môi trường của nó thì không bao giờ được lưu), và bảo vệ cơ sở dữ liệu
+như bạn bảo vệ các secret đó.
 
 ## Lập lịch một run
 
@@ -108,8 +133,8 @@ async with Server.connect("unix:/run/linch/linch.sock", token=token) as server:
 
 | Lời gọi | Làm gì |
 |---|---|
-| `await agent.create_schedule(prompt, *, cron=None, timezone=None, interval_ms=None, session_id=None, id=None, queue=None)` | Lưu một lịch; đưa `cron` (năm trường, hoặc sáu trường với giây ở đầu) hoặc `interval_ms`. `timezone` là một tên IANA, mặc định UTC. `id` mặc định là một uuid |
-| `await agent.heartbeat(session_id, *, interval_ms=None, cron=None, timezone=None, prompt=CHECK_IN, id=None, queue=None)` | Một lịch mà các lần kích hoạt tiếp tục một session (bên dưới) |
+| `await agent.create_schedule(prompt, *, cron=None, timezone=None, interval_ms=None, session_id=None, id=None, queue=None, principal=None)` | Lưu một lịch; đưa `cron` (năm trường, hoặc sáu trường với giây ở đầu) hoặc `interval_ms`. `timezone` là một tên IANA, mặc định UTC. `id` mặc định là một uuid |
+| `await agent.heartbeat(session_id, *, interval_ms=None, cron=None, timezone=None, prompt=CHECK_IN, id=None, queue=None, principal=None)` | Một lịch mà các lần kích hoạt tiếp tục một session (bên dưới) |
 | `await agent.schedules()` | Các lịch của namespace của agent, theo id |
 | `await agent.pause_schedule(id)` | Dừng các lần kích hoạt của nó; các run đã trong hàng đợi vẫn ở đó |
 | `await agent.resume_schedule(id)` | Kích hoạt lại từ tick kế tiếp sau bây giờ |
@@ -134,6 +159,17 @@ Không có `session_id`, mỗi lần kích hoạt bắt đầu session riêng c�
 và có thể chạy cùng lúc.
 
 Có `session_id`, mỗi lần kích hoạt là một run mới trong session đó: một heartbeat.
+
+### Một run nền hành động thay cho ai
+
+Truyền cùng `principal` mà bạn sẽ truyền cho `agent.run`
+([permission rule](./tools.md#permission-rules)). Nó được lưu cùng lịch hoặc run trong hàng
+đợi, và run của mọi lần kích hoạt (cùng việc worker resume hoặc approve nó) hành động thay
+cho nó, nên một permission rule có `role` hoặc `unless_role` có hiệu lực ở chế độ nền như với
+một run bắt đầu trực tiếp. Không có principal, run không giữ role nào: một rule có `role`
+không bao giờ khớp với nó còn rule có `unless_role` thì luôn khớp. Principal của một tenant
+phải nêu tên tenant (`NotAllowed`, `kind == "principal"`). Hãy lập lịch cho một caller bị hạn
+chế bằng principal của caller đó, đừng bao giờ không có principal.
 
 ## Heartbeat: một session, được kiểm tra liên tục
 
@@ -171,7 +207,7 @@ if done["state"] == "done":
 
 | Lời gọi | Làm gì |
 |---|---|
-| `await agent.enqueue(session_id, prompt, *, queue=None)` | Đưa một run vào hàng đợi; một worker bắt đầu nó. Một session có run đang sống khiến nó chờ (retrying) đến khi run đó kết thúc |
+| `await agent.enqueue(session_id, prompt, *, queue=None, principal=None)` | Đưa một run vào hàng đợi; một worker bắt đầu nó. Một session có run đang sống khiến nó chờ (retrying) đến khi run đó kết thúc |
 | `await agent.job(job_id)` | Một job của namespace của agent, còn sống hoặc đã kết thúc |
 | `await agent.jobs(*, schedule_id=None, limit=None)` | Các job, mới nhất trước (mặc định 50, tối đa 500); chỉ của một lịch khi có `schedule_id` |
 | `await agent.wait_job(job_id, *, poll=0.25, timeout=None)` | Poll cho đến khi job là `done`, `failed` hoặc `superseded` |
@@ -219,7 +255,7 @@ namespace. Các run nền không gửi stream trực tiếp tới client nào.
 | `ScheduleExists` (-32042) | `create_schedule` với một id mà namespace đã có |
 | `JobNotFound` (-32043) | `job` với một id mà namespace không có, hoặc lịch sử của nó đã bị dọn |
 | `InvalidSchedule` (-32044) | Một mẫu cron không parse được hoặc không bao giờ kích hoạt, một múi giờ không biết, một interval ngoài phạm vi, hoặc có cả hai hay không có cái nào trong `cron` và `interval_ms`; `.reason` |
-| `NotAllowed` (-32004) | Một tenant không có `max_schedules` hoặc `max_queued_jobs`, hoặc một lịch nhanh hơn `min_schedule_interval_ms`; `.kind` |
+| `NotAllowed` (-32004) | Một tenant không có `max_schedules` hoặc `max_queued_jobs`, hoặc một lịch nhanh hơn `min_schedule_interval_ms`, hoặc một principal của tenant khác; `.kind` |
 | `LimitReached` (-32005) | Tenant đang giữ đủ `max_schedules` (`kind == "schedules"`) hoặc `max_queued_jobs` (`kind == "jobs"`) |
 
 Tất cả đều là `SchedulerError` trừ hai cái cuối.
@@ -233,6 +269,7 @@ Tất cả đều là `SchedulerError` trừ hai cái cuối.
 | Các lần kích hoạt của một session xếp hàng sau nhau | Một heartbeat bỏ qua một lần kích hoạt khi session của nó đang bận |
 | `cancel_schedule` vô hiệu hóa các lần kích hoạt trong tương lai | `pause_schedule`, `resume_schedule` và `delete_schedule` |
 | Host truyền một `agent_factory` cho `Worker` của nó | Cấu hình của agent được lưu cùng lịch; worker của server mở nó |
+| `RunRequest.principal` được worker khôi phục | `principal=` trên `create_schedule` và `enqueue`, được đưa cho run của mọi lần kích hoạt |
 | `register_schedule_tools` cho phép model lập lịch | Chưa có |
 | Các lần kích hoạt bị lỡ được bù theo thứ tự | Giống nhau |
 

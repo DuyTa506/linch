@@ -30,6 +30,7 @@ thời điểm đều là đồng hồ của cơ sở dữ liệu (`now()`), kh�
 | `0003_job_failures.sql` | `failures`, được đếm tách biệt với `attempts` |
 | `0004_queue_limits.sql` | `linch_worker_queues` (`name`, `max_held`) |
 | `0005_scheduler.sql` | `linch_worker_agents` (định nghĩa agent đã lưu, theo digest); các cột interval, múi giờ và session cố định trên lịch, cùng `fires`, `skips` và `last_fire`; `agent`, `schedule_id`, `fire_at` và `created_at` trên job; `linch_worker_history` |
+| `0006_background_principal.sql` | `principal` (một `Principal` dạng JSON) trên lịch và job; các chỉ mục một phần trên cột `agent` của chúng |
 
 Một job bắt đầu một run (`session_id` và `prompt`), tiếp tục một run (`run_id`), hoặc
 approve một run (`run_id` và `approvals`); các check constraint giữ những hình dạng đó
@@ -263,6 +264,26 @@ chân một lịch. Một worker được cấp `Worker::definitions(roots, fact
 job được settle, như worker của Python đóng agent mà factory của nó trả về. `BackgroundAgents`
 của `linch-rpc` là factory mà `linch-server` dùng: định nghĩa là một cấu hình agent, được
 admit lại theo tenant của nó ở mỗi lần thử ([RPC](./rpc.md#run-nền)).
+
+Một định nghĩa giữ các secret của cấu hình dưới dạng văn bản thuần, nên
+`prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) xóa những định nghĩa mà
+không lịch nào và không job chưa xong nào gọi tên, sau khi đặt `agent` thành NULL trên các job
+đã thất bại (không bao giờ chạy lại). Một worker chạy nó cùng việc dọn history, từ lần poll
+đầu tiên và cứ 10 phút một lần sau đó, dù có giữ history hay không. Một writer lưu một định
+nghĩa khóa hàng của nó (`ON CONFLICT ... DO UPDATE`) đến khi commit, và prune khóa các ứng cử
+viên của nó bằng `FOR UPDATE SKIP LOCKED`, nên một định nghĩa sắp được gọi tên sẽ bị bỏ qua;
+một định nghĩa được gọi tên bởi một writer đã commit sau khi prune đọc các tham chiếu sẽ làm
+foreign key của lệnh xóa thất bại, và lần prune đó không xóa gì (nó chạy lại sau).
+
+## Principal
+
+Một lịch và một job có thể mang một principal (`Schedule::principal`,
+`RunRequest::principal`), được lưu dưới dạng JSON; một lần kích hoạt sao chép principal của
+lịch của nó sang job của nó. Worker giải mã nó ở mỗi lần thử và đặt nó vào `RunOptions` của
+lệnh start, resume hoặc approve (`execute.rs`), vì core không giữ principal nào cùng run (một
+resume lấy nó từ options của nó). Một hàng có principal không giải mã được làm job của nó thất
+bại. Worker của Python khôi phục `RunRequest.principal` theo cách tương tự
+(`linch/worker/runtime.py`).
 
 ## Ví dụ
 
