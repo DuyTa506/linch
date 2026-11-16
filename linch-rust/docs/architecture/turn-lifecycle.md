@@ -333,7 +333,12 @@ continues it, and `Agent::answer` answers its pending `AskUser` calls
    mistaken call does not fence a live owner, and again after it
    (`start.rs:189-207`, `414-439`).
 3. `claim` takes the lease and adds 1 to the epoch, which fences out the
-   previous owner ([stores](./stores.md#fencing)) (`start.rs:196-205`).
+   previous owner ([stores](./stores.md#fencing)); a child run is seized
+   instead (`start.rs:233-247`). On a store whose claims expire, a run
+   another holder keeps alive is refused with `RunLeased` before anything
+   is written, and from here on the run future renews the lease and
+   releases it if the run stops without settling
+   ([leases](./stores.md#leases), `runner/lease.rs`).
 4. `reconcile` reads the checkpoint, the events and the session log, and
    returns what to do next. It is pure (`journal/reconcile.rs:149-169`).
 5. A new `init` event with `resumed: true` is staged. It rides the first

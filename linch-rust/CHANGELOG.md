@@ -89,6 +89,9 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `Phase::AwaitingInput` and `InputRequestEvent.questions` are new in the journal; other checkpoints and events are unchanged, but a binary older than this one cannot resume a run waiting for input.
 - `Bash` takes `run_in_background`: the command runs on after the call returns its `process_id`; `BashOutput` (read scope) returns what it printed since the last read, waiting up to `wait_ms` for it to end, and `BashKill` (exec scope) kills its process group. At most 4 run at once per session; each is killed after `timeout_ms` (30 minutes by default), when its session closes, when its agent closes and when the server dies, even by SIGKILL.
 - A background process does not survive a server restart: `BashOutput` and `BashKill` on an id from before it fail with `no_such_process`, saying so.
+- Run leases on Postgres: one server drives a run at a time. Another agent's `resume`, `approve` or `answer` of a run that is driven elsewhere ends with `RunLeased` (code -32033, `StoreError::RunLeased`, `data: {run_id, owner, expires_in_ms}`) and writes nothing. A crashed server's runs are free once their lease runs out (30 s by default; `stores.lease_ttl_ms`, at least 1000, or `PgRunStore::with_lease_ttl`). The driver renews the lease on a timer, one small `UPDATE` per running run every third of the lease, so a long model call keeps it. Memory stores have no leases and are unchanged.
+- `RunStore::seize`, `lease_ttl`, `renew` and `release`, defaulted for a store whose claims never expire, and `store::conformance::run_lease_suite` for one whose claims do. A wrapper store must forward them.
+- `LeaseLost` (-32022) and `RunLeased` (-32033) in the Python client, both `RunError`s.
 
 ### Changed
 
@@ -101,6 +104,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A workspace agent now also has `BashOutput` and `BashKill` (`bash: false` leaves all three out), so its run contract changes: a run started under an older binary cannot be resumed.
 - `agent.close_session` and `session.close` also kill the session's background `Bash` commands.
 - DeepSeek and the vLLM, SGLang and llama.cpp profiles still refuse an output schema, now saying why: no native JSON-schema response format that carries the schema.
+- A Postgres resume of a run another server drives is refused (`RunLeased`) instead of taking the run over and paying for its in-flight model call again; it no longer fences the live driver out. `Agent::fail` and a parent resuming its subagents' runs still take a run over, and the driver they fence stops at its next heartbeat with `LeaseLost`.
+- A journal write fenced by another claim answers -32022 (`LeaseLost`) on the RPC, as a fenced claim does, instead of -32024.
+- A run whose stream ends with an error or is dropped releases its Postgres lease (one extra write), so another server can resume it at once; a run that ends or suspends writes nothing more.
+- A worker job whose run another process leases waits like a busy session (released with back-off, not counting a failure).
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
   after 30 seconds: it waits until the client answers, the run is cancelled or the
@@ -111,6 +118,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `Edit` and `Write` on a file changed since it was read now say `Read this file again before editing it.` / `Read this file again before writing it.` (were `<path> changed since it was last read; Read it again.`), and `Read` of a file that changed mid-read says `File changed while reading; Read this file again.`, the words Python's tools use. The error codes are unchanged.
 
 ### Upgrading
+
+- Postgres migration 6 adds `linch_runs.lease_holder` and `lease_until` (nullable, no rewrite). As with every migration, a server of an earlier version then refuses to start on that database, and a running one ignores leases: until every server is upgraded, an old one can still take over a run a new one drives (the epoch still fences the loser's writes).
 
 - Runs of workspace agents started before this release cannot be resumed: the workspace tool list gained `BashOutput` and `BashKill`, so the run contract changed and a resume ends with `ContractMismatch`. Let those runs finish on the old binary, or start new runs.
 

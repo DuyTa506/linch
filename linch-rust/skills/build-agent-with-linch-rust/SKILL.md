@@ -91,7 +91,8 @@ async with Server() as server:  # or Server.connect(address, token=...)
 - Pass `run_id=` to find a run again after a crash, then `agent.resume(run_id)`: on memory stores
   through the same `Agent`, on Postgres from any agent with the same `agent.contract`. The
   contract covers the spec, tools, callbacks, skills and subagents, so keep old configs until
-  their runs finish.
+  their runs finish. On Postgres a run another server still drives (or that crashed less than a
+  lease ago, 30 s by default) is refused with `RunLeased`; retry after `.expires_in` seconds.
 - Open each agent once and reuse it; `await agent.close()` at the end. Read each run to its end
   or `run.cancel()` it, because an unread run goes on and its events queue without a bound.
 - Start a project with `linch-rust new <name>` and add tools with `linch-rust add tool <name>`.

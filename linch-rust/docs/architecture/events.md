@@ -89,7 +89,7 @@ the run's stream, and so sent to clients. The two columns are the
 | `ignorable` | The producer's promise that an unknown `event.type` may be skipped. Absent on the wire when false |
 | `event` | The event |
 
-The run's journal makes every envelope (`crates/linch-core/src/journal.rs:297`):
+The run's journal makes every envelope (`crates/linch-core/src/journal.rs:315`):
 `v` is `WIRE_VERSION`, `ts_ms` is the time the event was staged, and
 `ignorable` is false. When an envelope becomes durable is the
 [group commit](./stores.md#group-commit-write-counts) rule: a durable event
@@ -104,8 +104,8 @@ is classified.
 
 | Class | Kinds | Where it goes |
 |---|---|---|
-| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:123-130`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
-| `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:310-316`) |
+| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:136-143`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
+| `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:328-334`) |
 | `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:380-396`), and so does the RPC method `run.events`, which calls it |
 
 The journal-only records are what resume reads to settle a model call it
