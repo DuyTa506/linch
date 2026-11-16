@@ -1,5 +1,6 @@
 //! The `before_provider_call` point: a hook sees the request about to be
-//! sent and may replace it or block the call.
+//! sent and may replace it, block the call, or skip it and take another
+//! turn.
 
 use crate::ids::{RunId, SessionId};
 use crate::policy::HookPoint;
@@ -37,6 +38,14 @@ pub enum BeforeProviderCallResponse {
         /// The new request.
         request: Box<ProviderRequest>,
     },
+    /// Do not send the call, and take another turn instead: `feedback`
+    /// goes to the model first, in a system reminder. Python's
+    /// `force_continue` at this point; any earlier rewrite is dropped with
+    /// the call. Stops the chain. Bounded only by `max_turns`.
+    ForceContinue {
+        /// What the model is told before the next turn's call.
+        feedback: String,
+    },
     /// Do not send the call; end the run with this reason.
     Block {
         /// Why the call was blocked.
@@ -51,6 +60,11 @@ pub enum BeforeProviderCallOutcome {
     Send {
         /// The request to send: the original, or the last rewrite.
         request: Box<ProviderRequest>,
+    },
+    /// Skip the call and take another turn with `feedback`.
+    ForceContinue {
+        /// What the model is told before the next turn's call.
+        feedback: String,
     },
     /// A hook blocked the call, or failed closed.
     Blocked {
@@ -74,14 +88,15 @@ impl Point for BeforeProviderCall {
         match response {
             BeforeProviderCallResponse::Continue => "continue",
             BeforeProviderCallResponse::Rewrite { .. } => "rewrite",
+            BeforeProviderCallResponse::ForceContinue { .. } => "force_continue",
             BeforeProviderCallResponse::Block { .. } => "block",
         }
     }
 }
 
 impl HookChain<BeforeProviderCall> {
-    /// Run the hooks in order. A rewrite feeds the next hook; a block or a
-    /// closed failure stops the chain.
+    /// Run the hooks in order. A rewrite feeds the next hook; a
+    /// `force_continue`, a block or a closed failure stops the chain.
     pub(crate) async fn run_into(
         &self,
         mut request: BeforeProviderCallRequest,
@@ -92,6 +107,9 @@ impl HookChain<BeforeProviderCall> {
                 Step::Skip | Step::Answer(BeforeProviderCallResponse::Continue) => {}
                 Step::Answer(BeforeProviderCallResponse::Rewrite { request: next }) => {
                     request.request = *next;
+                }
+                Step::Answer(BeforeProviderCallResponse::ForceContinue { feedback }) => {
+                    return BeforeProviderCallOutcome::ForceContinue { feedback };
                 }
                 Step::Answer(BeforeProviderCallResponse::Block { reason })
                 | Step::Closed(reason) => {

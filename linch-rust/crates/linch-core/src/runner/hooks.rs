@@ -46,6 +46,8 @@ const MAX_FINAL_ANSWER_RETRIES: u32 = 1;
 pub(super) enum BeforeCall {
     /// Send this request: the original, or the last rewrite.
     Send(Box<ProviderRequest>),
+    /// Send nothing: take another turn with this feedback first.
+    ForceContinue(String),
     /// A hook blocked the call, or failed closed.
     Blocked(String),
     /// The run already ended: the run cancel interrupted the chain.
@@ -500,6 +502,9 @@ impl Runner {
         match outcome {
             None => BeforeCall::Ended,
             Some(BeforeProviderCallOutcome::Send { request }) => BeforeCall::Send(request),
+            Some(BeforeProviderCallOutcome::ForceContinue { feedback }) => {
+                BeforeCall::ForceContinue(feedback)
+            }
             Some(BeforeProviderCallOutcome::Blocked { reason }) => BeforeCall::Blocked(reason),
         }
     }
