@@ -27,13 +27,14 @@
 //! [`BeforeProviderCall`] ([`call`]) lets a hook replace the provider
 //! request about to be sent, or block the call; [`AfterProviderCall`]
 //! ([`assembly`]) lets a hook replace the assembled response a provider call
-//! just produced, or block it, before it is staged and appended to the
-//! session — this is Rust's equivalent of Python's `AfterProviderCall`, as a
-//! mutate/block point only: Python's `retry` and `force_continue` actions
-//! there are not ported (see [`assembly`]). Unlike the observe-only points,
-//! both points' blocking verdicts can fail closed. `before_final_answer` has
-//! no Rust hook point of its own: [`Stop`] ([`turn`]) can rewrite the run's
-//! final-answer text or block the stop outright, folding that point in.
+//! just produced, block it before it is staged and appended to the session,
+//! or accept it and take another turn instead of acting on it (Python's
+//! `retry`/`force_continue` there). Unlike the observe-only points, both
+//! points' blocking verdicts can fail closed. `before_final_answer` has no
+//! Rust hook point of its own: [`Stop`] ([`turn`]) can rewrite the run's
+//! final-answer text, block the stop outright, or retry the answer once
+//! per run call, folding that point in; its `Continue` is Python's stop
+//! `force_continue`.
 //! Script hooks and RPC callbacks implement [`Hook`] later; they are not
 //! part of this module.
 

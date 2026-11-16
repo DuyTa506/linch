@@ -184,7 +184,7 @@ Một message vai trò user đã vào cuộc hội thoại.
 | Trường | Ý nghĩa |
 |---|---|
 | `message` | `{"role": "user", "content": [blocks]}` |
-| `subtype` | `prompt` (prompt của bạn), `tool_result` (kết quả của một batch tool), `notification` (thông báo của runtime, chẳng hạn một worker nền vừa xong) hoặc `alignment` |
+| `subtype` | `prompt` (prompt của bạn), `tool_result` (kết quả của một batch tool), `notification` (thông báo của runtime, chẳng hạn một worker nền vừa xong, hoặc phản hồi của một hook đòi thêm một lượt) hoặc `alignment` |
 
 ### `AssistantEvent` (`assistant`)
 

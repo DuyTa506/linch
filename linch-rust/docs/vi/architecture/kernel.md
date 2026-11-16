@@ -68,7 +68,11 @@ từ chối một run có digest khác với digest của agent bằng
 `RunError::ContractMismatch` (`runner/start.rs:425-431`). Digest chính sách hook
 bao gồm point, `policy_id` và `policy_version` của từng hook, theo thứ tự trong chuỗi
 (`hooks.rs:84-100`), nên đổi hành vi của một hook nghĩa là phải tăng
-`policy_version` của nó (`hooks/hook.rs:76-78`).
+`policy_version` của nó (`hooks/hook.rs:76-78`). Điều đó bao gồm cả thứ một hook
+trả lời, kể cả `retry`. Giới hạn riêng của kernel cho các lần retry ở `stop` (một
+lần cho mỗi lần gọi run) là một hằng số, không phải một thiết lập, nên nó không nằm
+trong digest; nó cũng không được checkpoint, và một lần resume bắt đầu lại từ đầu,
+như `_MAX_FINAL_ANSWER_REENTRIES` của Python.
 
 ## Đăng ký
 
@@ -128,8 +132,8 @@ Mỗi chuỗi tự quyết định cách kết hợp các câu trả lời. Mộ
 | `permission_request` | Câu trả lời nghiêm ngặt nhất thắng. Một deny hoặc lỗi closed dừng chuỗi; một allow thì không (`hooks/tool.rs:226-258`) | closed |
 | `post_tool_use` | Một bản thay thế được chuyển cho hook kế tiếp. Một lỗi closed giữ lại kết quả và dừng chuỗi (`hooks/tool.rs:312-336`) | open |
 | `before_provider_call` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là bản được gửi đi và được `context_build` ghi lại. Một block hoặc một lỗi closed dừng chuỗi và làm run thất bại, trước khi provider được gọi (`hooks/call.rs`) | open, nhưng block của nó có thể fail closed |
-| `after_provider_call` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là bản được stage và nối vào session. Một block hoặc một lỗi closed dừng chuỗi và làm run thất bại, trước khi response được stage (`hooks/assembly.rs`) | open, nhưng block của nó có thể fail closed |
-| `stop` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là văn bản trả lời cuối cùng của run, không phải tin nhắn assistant đã được nối vào session từ trước. Hook đầu tiên giữ run tiếp tục sẽ dừng chuỗi. Một block hoặc một lỗi closed làm run thất bại (`hooks/turn.rs:280-300`) | open |
+| `after_provider_call` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là bản được stage và nối vào session. Một retry dừng chuỗi: response (cùng mọi lần viết lại trước đó) được chấp nhận, các lời gọi tool của nó không chạy, và phản hồi của hook đến model trước một lượt khác. Một block hoặc một lỗi closed dừng chuỗi và làm run thất bại, trước khi response được stage (`hooks/assembly.rs`) | open, nhưng block của nó có thể fail closed |
+| `stop` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là văn bản trả lời cuối cùng của run, không phải tin nhắn assistant đã được nối vào session từ trước. Hook đầu tiên giữ run tiếp tục (`Continue`, chỉ bị giới hạn bởi `max_turns`) sẽ dừng chuỗi; một `Retry` cũng vậy khi lần gọi run còn lượt retry duy nhất của nó, sau đó một retry được tính như allow. Một block hoặc một lỗi closed làm run thất bại (`hooks/turn.rs`) | open |
 | `post_turn` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/turn.rs:310-312`) | open |
 | `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`, `event_emit` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/observe.rs`). `event_emit` chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ với event vừa được stream vừa được ghi bền: không bao giờ cho record của chính một hook, cũng không cho một delta hay tool-progress chỉ stream (`runner/hooks.rs`) | open |
 

@@ -429,8 +429,8 @@ request has `session_id` and `run_id`:
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
 | `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called |
-| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: what the provider call just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "block", "reason"}`; a rewrite is what gets staged and appended to the session, and a block ends the run before the response is staged. Python's `retry`/`force_continue` actions here are not available: use `{"action": "continue"}` to accept the response unchanged |
-| `stop` | `text` (the final-answer text so far, the model's or a prior rewrite) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; a rewrite replaces the run's final-answer text (not the assistant message, already appended to the session by the time `stop` runs), and a block ends the run failed. This is also where Python's `before_final_answer` lives: there is no separate point |
+| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: what the provider call just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}`, `{"action": "block", "reason"}`; a rewrite is what gets staged and appended to the session, and a block ends the run before the response is staged. A retry (`"force_continue"` is the same, as in Python) keeps the response, runs none of its tool calls, and sends `feedback` to the model before another turn: in a `<system-reminder>`, or, when the response called tools, as the error result of the first call (the others read "Tool not executed; revise and resubmit your final answer."). Only `max_turns` bounds it |
+| `stop` | `text` (the final-answer text so far, the model's or a prior rewrite) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; a rewrite replaces the run's final-answer text (not the assistant message, already appended to the session by the time `stop` runs), and a block ends the run failed. This is also where Python's `before_final_answer` lives: there is no separate point. `continue` (or `"force_continue"`, Python's name for it at `stop`) sends `feedback` in a `<system-reminder>` and takes another turn, bounded only by `max_turns`. `retry` is Python's `before_final_answer` retry: honoured once per run call, after which it counts as `allow` and the callbacks after it decide. Declare a retrying callback before the others, as Python runs `before_final_answer` before `stop` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
 A tool result in a request or an answer is `{"output": {"value",
@@ -477,7 +477,22 @@ feeds the next callback and is checked against the tool's schema again. At
 deny wins; with no answer the call asks the host as usual
 ([approvals](./tools.md#approvals)). A blocked `user_prompt_submit` ends the
 run with `PromptBlocked` before anything is written. Each call shows up as a
-stream-only `hook` [event](./events.md).
+stream-only `hook` [event](./events.md). Python's `retry` and
+`force_continue` are answers only at `after_provider_call` and `stop`; every
+other point refuses them as a bad answer, handled by the fail mode.
+
+The feedback of a `retry`, `continue` or `force_continue` is logged in the
+session as the next user message, and arrives as a `user` event with subtype
+`notification`. Python marks the same message `prompt`; here `prompt` stays
+the run's own prompt, which the OpenTelemetry observer relies on.
+
+```python
+@callback("stop", "cite-sources", 1)
+async def cite(request: dict[str, Any]) -> dict[str, Any]:
+    if "http" not in request["text"]:
+        return {"action": "retry", "feedback": "Cite a source for each claim."}
+    return {"action": "allow"}
+```
 
 ## Sessions
 

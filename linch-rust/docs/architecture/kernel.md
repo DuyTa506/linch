@@ -67,7 +67,11 @@ refuse a run whose digest differs from the agent's with
 `RunError::ContractMismatch` (`runner/start.rs:425-431`). The hook policy
 digest covers each hook's point, `policy_id` and `policy_version`, in chain
 order (`hooks.rs:84-100`), so changing a hook's behavior means bumping its
-`policy_version` (`hooks/hook.rs:76-78`).
+`policy_version` (`hooks/hook.rs:76-78`). That covers what a hook answers,
+`retry` included. The kernel's own limit on `stop` retries (one per run
+call) is a constant, not a setting, so it is not in the digest; it is not
+checkpointed either, and a resume starts it afresh, as Python's
+`_MAX_FINAL_ANSWER_REENTRIES` does.
 
 ## Registrations
 
@@ -129,8 +133,8 @@ where the table says so:
 | `permission_request` | The strictest answer wins. A deny or closed failure stops the chain; an allow does not (`hooks/tool.rs:226-258`) | closed |
 | `post_tool_use` | A replacement feeds the next hook. A closed failure withholds the result and stops the chain (`hooks/tool.rs:312-336`) | open |
 | `before_provider_call` | A rewrite feeds the next hook; the last rewrite is what is sent and what `context_build` records. A block or a closed failure stops the chain and ends the run as failed, before the provider is called (`hooks/call.rs`) | open, but its block can fail closed |
-| `after_provider_call` | A rewrite feeds the next hook; the last rewrite is what gets staged and appended to the session. A block or a closed failure stops the chain and ends the run as failed, before the response is staged (`hooks/assembly.rs`) | open, but its block can fail closed |
-| `stop` | A rewrite feeds the next hook; the last rewrite is the run's final-answer text, not the assistant message already appended to the session. The first hook that keeps the run going stops the chain. A block or a closed failure fails the run (`hooks/turn.rs:280-300`) | open |
+| `after_provider_call` | A rewrite feeds the next hook; the last rewrite is what gets staged and appended to the session. A retry stops the chain: the response (with any earlier rewrite) is accepted, its tool calls do not run, and the hook's feedback goes to the model before another turn. A block or a closed failure stops the chain and ends the run as failed, before the response is staged (`hooks/assembly.rs`) | open, but its block can fail closed |
+| `stop` | A rewrite feeds the next hook; the last rewrite is the run's final-answer text, not the assistant message already appended to the session. The first hook that keeps the run going (`Continue`, bounded only by `max_turns`) stops the chain; so does a `Retry` while the run call has its one retry left, after which a retry counts as an allow. A block or a closed failure fails the run (`hooks/turn.rs`) | open |
 | `post_turn` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/turn.rs:310-312`) | open |
 | `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`, `event_emit` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/observe.rs`). `event_emit` fires once per event about to be delivered to the caller, but only one that is both streamed and durably logged: never for a hook's own record, and never for a stream-only delta or tool-progress event (`runner/hooks.rs`) | open |
 
