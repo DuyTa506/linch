@@ -382,7 +382,7 @@
 //! | -32015 | MCP server unavailable | first connect failed; `data.server` names it |
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |
-//! | -32022 | lease lost | `StoreError::LeaseLost` |
+//! | -32022 | lease lost | `StoreError::LeaseLost`, from a claim or a journal write: another claim (another process's, or a `fail`) fenced the run out, and it stopped here without writing |
 //! | -32023 | conflict | `StoreError::Conflict`, such as a stored `run_id` |
 //! | -32024 | journal | `RunError::Journal` |
 //! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}`: the run's contract, then this agent's |
@@ -393,6 +393,7 @@
 //! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |
 //! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
 //! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
+//! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
