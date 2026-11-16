@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
 use crate::api_key::scrub;
+use crate::overflow::Overflow;
 
 /// Longest error-body summary kept in a [`ProviderError::Status`].
 const MAX_ERROR_CHARS: usize = 500;
@@ -16,12 +17,13 @@ const MAX_ERROR_CHARS: usize = 500;
 ///
 /// `key`, when given, is sent as a bearer token. A redirect is refused,
 /// never followed; any other non-2xx status reads the start of the body and
-/// maps it with [`status_error`].
+/// maps it with [`status_error`], under the target's `overflow`.
 pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
     key: Option<&ApiKey>,
     body: &JsonValue,
+    overflow: &Overflow,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, ProviderError> {
     let mut request = client
@@ -55,6 +57,7 @@ pub(crate) async fn post(
         retry_after.as_deref(),
         &text,
         key,
+        overflow,
     ))
 }
 
@@ -70,7 +73,11 @@ pub(crate) fn transport(key: Option<&ApiKey>, err: &reqwest::Error) -> ProviderE
     }
 }
 
-/// Map a non-2xx response to [`ProviderError::Status`].
+/// Map a non-2xx response to [`ProviderError::Status`], or to
+/// [`ProviderError::ContextLength`] when the target's `overflow` says the
+/// prompt was too long. That is judged on the error before it is cut: its
+/// `code` and `type`, and its whole message, nested under `error` or flat
+/// (older vLLM, SGLang).
 ///
 /// The summary prefers the OpenAI-style `error.message`; it is redacted
 /// before it is cut, so a cut never leaves part of a key behind.
@@ -80,7 +87,13 @@ pub(crate) fn status_error(
     retry_after: Option<&str>,
     body: &str,
     key: Option<&ApiKey>,
+    overflow: &Overflow,
 ) -> ProviderError {
+    let value = serde_json::from_str::<JsonValue>(body).ok();
+    let error = (value.as_ref()).map(|value| value.get("error").unwrap_or(value));
+    let text = |field: &str| error.and_then(|error| error.get(field)?.as_str());
+    let labels: Vec<&str> = [text("code"), text("type")].into_iter().flatten().collect();
+    let refused = overflow.matches(Some(status), &labels, text("message").unwrap_or(body));
     let summary = serde_json::from_str::<JsonValue>(body)
         .ok()
         .and_then(|value| {
@@ -93,6 +106,12 @@ pub(crate) fn status_error(
         })
         .unwrap_or_else(|| body.trim().to_string());
     let message: String = scrub(key, &summary).chars().take(MAX_ERROR_CHARS).collect();
+    if refused {
+        return ProviderError::ContextLength {
+            status: Some(status),
+            message,
+        };
+    }
     ProviderError::Status {
         status,
         retry_after: retry_after
@@ -148,6 +167,7 @@ fn known_status(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overflow::OPENAI_CHAT;
 
     const SECRET: &str = "sk-live-0123456789abcdef";
 
@@ -162,10 +182,49 @@ mod tests {
         }
     }
 
+    /// Each OpenAI-compatible target maps its own refusal of a prompt over
+    /// the context window, with the error nested or flat, and no other's.
+    #[test]
+    fn each_target_maps_its_own_context_length_refusal() {
+        use crate::overflow::{DEEPSEEK, LLAMACPP, SGLANG, VLLM};
+        let openai = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#;
+        let deepseek = r#"{"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 131329 tokens (123137 in the messages, 8192 in the completion).","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}"#;
+        let vllm_flat = r#"{"object":"error","message":"This model's maximum context length is 4096 tokens. However, you requested 5000 tokens (4000 in the messages, 1000 in the completion).","type":"BadRequestError","param":null,"code":400}"#;
+        let sglang = r#"{"object":"error","message":"Input length (9000 tokens) exceeds the maximum allowed length (8192 tokens).","type":"BadRequest","param":null,"code":400}"#;
+        let llama = r#"{"error":{"code":400,"message":"request (9000 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":9000,"n_ctx":8192}}"#;
+        let refused = |body: &str, overflow: &Overflow| {
+            matches!(
+                status_error(400, None, body, Some(&key()), overflow),
+                ProviderError::ContextLength {
+                    status: Some(400),
+                    ..
+                }
+            )
+        };
+        for (body, overflow) in [
+            (openai, &OPENAI_CHAT),
+            (deepseek, &DEEPSEEK),
+            (vllm_flat, &VLLM),
+            (sglang, &SGLANG),
+            (llama, &LLAMACPP),
+        ] {
+            assert!(refused(body, overflow), "{body}");
+        }
+        assert!(!refused(sglang, &OPENAI_CHAT), "not OpenAI's wording");
+        assert!(!refused(llama, &VLLM), "not vLLM's wording");
+        let other = r#"{"error":{"message":"bad tool","type":"invalid_request_error"}}"#;
+        assert!(!refused(other, &OPENAI_CHAT));
+        let throttled = status_error(429, None, openai, Some(&key()), &OPENAI_CHAT);
+        assert!(matches!(
+            throttled,
+            ProviderError::Status { status: 429, .. }
+        ));
+    }
+
     #[test]
     fn error_message_and_type_are_summarized() {
         let body = r#"{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}"#;
-        let err = status_error(402, None, body, Some(&key()));
+        let err = status_error(402, None, body, Some(&key()), &OPENAI_CHAT);
         assert!(
             matches!(&err, ProviderError::Status { status: 402, retry_after: None, message }
                 if message == "unknown_error: Insufficient Balance"),
@@ -176,14 +235,20 @@ mod tests {
 
     #[test]
     fn rate_limit_keeps_retry_after_seconds() {
-        let err = status_error(429, Some(" 7 "), "{}", Some(&key()));
+        let err = status_error(429, Some(" 7 "), "{}", Some(&key()), &OPENAI_CHAT);
         assert!(
             matches!(&err, ProviderError::Status { status: 429, retry_after: Some(delay), .. }
                 if *delay == Duration::from_secs(7)),
             "{err:?}"
         );
         assert!(err.retryable());
-        let dated = status_error(429, Some("Wed, 21 Oct 2015 07:28:00 GMT"), "", Some(&key()));
+        let dated = status_error(
+            429,
+            Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+            "",
+            Some(&key()),
+            &OPENAI_CHAT,
+        );
         assert!(matches!(
             dated,
             ProviderError::Status {
@@ -198,7 +263,7 @@ mod tests {
         let body = format!(
             r#"{{"error":{{"message":"Authentication Fails, header Authorization: Bearer {SECRET} is invalid","type":"authentication_error"}}}}"#
         );
-        let err = status_error(401, None, &body, Some(&key()));
+        let err = status_error(401, None, &body, Some(&key()), &OPENAI_CHAT);
         assert_clean(&err);
         assert!(err.to_string().contains("Bearer [redacted]"), "{err}");
     }
@@ -208,14 +273,14 @@ mod tests {
         let body = format!(
             "429 Too Many Requests\nrequest headers: authorization=Bearer {SECRET}; x-api-key={SECRET}"
         );
-        let err = status_error(429, Some("2"), &body, Some(&key()));
+        let err = status_error(429, Some("2"), &body, Some(&key()), &OPENAI_CHAT);
         assert_clean(&err);
     }
 
     #[test]
     fn a_long_body_is_redacted_before_it_is_cut() {
         let body = format!("{}{SECRET}", "x".repeat(MAX_ERROR_CHARS - 5));
-        let err = status_error(500, None, &body, Some(&key()));
+        let err = status_error(500, None, &body, Some(&key()), &OPENAI_CHAT);
         assert_clean(&err);
         assert!(
             matches!(&err, ProviderError::Status { message, .. } if message.chars().count() == MAX_ERROR_CHARS)

@@ -48,6 +48,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     template_thinking_switch: true,
     usage,
     context: ContextRule::Models,
+    overflow: &crate::overflow::VLLM,
 };
 
 pub(super) fn thinking_off_kwargs() -> JsonObject {

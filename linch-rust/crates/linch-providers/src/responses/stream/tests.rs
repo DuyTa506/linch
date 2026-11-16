@@ -205,7 +205,7 @@ async fn failures_retry_only_when_the_same_error_over_http_would() {
     }})]);
     let err = last_error(run(&nested, 64).await);
     assert!(
-        matches!(&err, ProviderError::Status { status: 400, message, .. }
+        matches!(&err, ProviderError::ContextLength { status: Some(400), message }
             if message == "stream error: context_length_exceeded: too long"),
         "{err:?}"
     );
@@ -213,6 +213,26 @@ async fn failures_retry_only_when_the_same_error_over_http_would() {
         "type": "invalid_request_error", "code": null, "message": "bad",
     }})]);
     assert!(!last_error(run(&typed, 64).await).retryable());
+}
+
+/// A response that failed because its input exceeds the model's context
+/// window (the shape OpenAI streams) is a context-length error, not
+/// retryable, as the same refusal over HTTP is.
+#[tokio::test]
+async fn a_response_failed_for_context_length_is_a_context_length_error() {
+    let message = "Your input exceeds the context window of this model. \
+                   Please adjust your input and try again.";
+    let failed = frames(&[terminal(
+        "response.failed",
+        json!({"status": "failed", "error": {"code": "context_length_exceeded", "message": message}}),
+    )]);
+    let err = last_error(run(&failed, 64).await);
+    assert!(
+        matches!(&err, ProviderError::ContextLength { status: Some(400), message: m }
+            if m.starts_with("response failed: context_length_exceeded: Your input")),
+        "{err:?}"
+    );
+    assert!(!err.retryable());
 }
 
 #[tokio::test]

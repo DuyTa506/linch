@@ -53,6 +53,34 @@ async fn an_error_frame_with_an_http_code_keeps_that_status() {
     assert!(!err.retryable());
 }
 
+/// A target that declares its refusal of a prompt over the context window
+/// gets it inside a stream as a context-length error, redacted like any
+/// other; a translator that declares none keeps the status error.
+#[tokio::test]
+async fn an_error_frame_refusing_a_long_prompt_is_a_context_length_error() {
+    let refusal = error_frame(json!({
+        "object": "error", "code": 400, "type": "BadRequest",
+        "message": "Requested token count exceeds the model's maximum context length of 8192 \
+                    tokens. Authorization: Bearer sk-test",
+    }));
+    let bytes = stream::iter([Ok::<_, Infallible>(refusal.as_bytes().to_vec())]);
+    let translator = Translator::new("m".into(), None, usage).refusing(&crate::overflow::SGLANG);
+    let results: Vec<_> = events(bytes, translator, CancellationToken::new(), key())
+        .collect()
+        .await;
+    let err = last_error(results);
+    assert!(
+        matches!(&err, ProviderError::ContextLength { status: Some(400), message }
+            if message.contains("maximum context length") && message.ends_with("Bearer [redacted]")),
+        "{err:?}"
+    );
+    let err = last_error(run_with(None, &refusal).await);
+    assert!(
+        matches!(err, ProviderError::Status { status: 400, .. }),
+        "{err:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_string_code_or_type_maps_to_the_status_openai_sends_for_it() {
     for (error, status, retryable) in [

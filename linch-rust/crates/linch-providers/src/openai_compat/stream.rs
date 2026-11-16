@@ -12,6 +12,7 @@ use linch_core::provider::{
 use linch_core::{JsonValue, ProviderError, ProviderEvent, StopReason, Usage};
 
 use super::http;
+use crate::overflow::Overflow;
 use crate::sse::Decoder;
 pub(crate) use crate::sse::events;
 
@@ -39,6 +40,9 @@ pub(crate) struct Translator {
     by_index: HashMap<u32, usize>,
     finish: Option<StopReason>,
     usage: Option<Usage>,
+    /// How the target refuses a prompt too long for it, for an error sent
+    /// inside the stream; `None` maps none (see [`Self::refusing`]).
+    overflow: Option<&'static Overflow>,
 }
 
 impl Translator {
@@ -58,7 +62,16 @@ impl Translator {
             by_index: HashMap::new(),
             finish: None,
             usage: None,
+            overflow: None,
         }
+    }
+
+    /// Map an error frame that is the target refusing a prompt longer
+    /// than its context window to [`ProviderError::ContextLength`], as
+    /// `overflow` declares it. Each adapter sets its own.
+    pub(crate) fn refusing(mut self, overflow: &'static Overflow) -> Self {
+        self.overflow = Some(overflow);
+        self
     }
 
     /// Translate one `data:` payload other than `[DONE]`.
@@ -70,7 +83,7 @@ impl Translator {
         let chunk: Chunk = serde_json::from_str(data)
             .map_err(|err| transport(&format!("malformed stream chunk: {err}")))?;
         if let Some(error) = chunk.error.filter(|error| !error.is_null()) {
-            return Err(stream_error(&error));
+            return Err(stream_error(&error, self.overflow));
         }
         if !self.started {
             self.started = true;
@@ -217,7 +230,7 @@ fn stop_reason(reason: &str) -> Result<StopReason, ProviderError> {
 /// `code` or `type` gives the HTTP status the same error has outside a
 /// stream (see [`http::stream_status`]), so retrying follows the server's
 /// own classification; an unknown error is a retryable transport error.
-fn stream_error(error: &JsonValue) -> ProviderError {
+fn stream_error(error: &JsonValue, overflow: Option<&Overflow>) -> ProviderError {
     let text = |key: &str| error.get(key).and_then(JsonValue::as_str);
     let detail = text("message")
         .or(error.as_str())
@@ -226,7 +239,12 @@ fn stream_error(error: &JsonValue) -> ProviderError {
         Some(kind) => format!("stream error: {kind}: {detail}"),
         None => format!("stream error: {detail}"),
     };
-    match http::stream_status(error.get("code"), text("type")) {
+    let status = http::stream_status(error.get("code"), text("type"));
+    let labels: Vec<&str> = [text("code"), text("type")].into_iter().flatten().collect();
+    if overflow.is_some_and(|overflow| overflow.matches(status, &labels, detail)) {
+        return ProviderError::ContextLength { status, message };
+    }
+    match status {
         Some(status) => ProviderError::Status {
             status,
             retry_after: None,
