@@ -372,7 +372,7 @@ cũ để resume chúng.
 
 ## Callback
 
-Callback là một hàm bất đồng bộ mà server hỏi tại một điểm hook của một run. Khai
+Callback là một hàm mà server hỏi tại một điểm hook của một run. Khai
 báo nó bằng `@callback(point, policy_id, policy_version, matcher=None,
 timeout=None, fail_mode=None)` và truyền vào `open_agent(callbacks=...)`.
 
@@ -444,7 +444,7 @@ Kết quả tool trong một request hoặc một câu trả lời có dạng `{
 | `point` | bắt buộc | Một trong bảy điểm ở trên |
 | `policy_id`, `policy_version` | bắt buộc | Đi vào hợp đồng của run. Hãy tăng version mỗi khi hành vi, matcher, timeout hoặc fail mode thay đổi |
 | `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở ba điểm tool; một lần không khớp không bao giờ đến process này |
-| `timeout` | `30` giây | Server chờ câu trả lời trong bao lâu |
+| `timeout` | không có | Server chờ câu trả lời bao lâu; vắng thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc |
 | `fail_mode` | `closed` ở `pre_tool_use` và `permission_request`, `open` ở các điểm còn lại | Điều xảy ra khi có exception, câu trả lời sai hoặc timeout: `closed` đưa ra câu trả lời chặn của điểm đó, `open` bỏ qua callback. `context_build` và `post_turn` không thể fail closed |
 
 Các callback ở cùng một điểm chạy theo thứ tự khai báo. Một lần rewrite ở

@@ -4,6 +4,16 @@ Notable changes to `linch-rust`: the Rust crates under `crates/` and the
 `linch-rust` Python client that ships the `linch-server` binary. The Python
 package `linch` has its own [changelog](../CHANGELOG.md).
 
+## Unreleased
+
+### Changed
+
+- An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
+  after 30 seconds: it waits until the client answers, the run is cancelled or the
+  connection ends, as Python's hooks do. Set `timeout` to bound it.
+- `@tool` and `@callback` accept plain functions as well as `async` ones, as Python's tools and
+  hooks do; a plain function runs in a worker thread.
+
 ## 0.1.1 - 2026-11-07
 
 ### Fixed

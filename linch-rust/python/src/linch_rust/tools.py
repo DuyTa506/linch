@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import inspect
 import types
 import typing
@@ -114,7 +116,7 @@ def tool(
     input_schema: Mapping[str, Any] | None = None,
     timeout: float | None = None,
 ) -> Callable[[ToolFn], HostTool]:
-    """Declare an async function as a host tool.
+    """Declare a function as a host tool; a plain function runs in a worker thread.
 
     The server calls it with the model's input, already checked against the
     schema, as keyword arguments; its return value (any JSON value) is what
@@ -141,16 +143,14 @@ def tool(
     Raises:
         ValueError: The scope is not one of the three, or the timeout is
             not positive.
-        TypeError: The function is not `async`, or a parameter has no
-            supported type hint and no `input_schema` was given.
+        TypeError: A parameter has no supported type hint and no
+            `input_schema` was given.
     """
     if scope not in _SCOPES:
         raise ValueError(f"scope must be one of {_SCOPES}, got {scope!r}")
     timeout_ms = None if timeout is None else to_millis(timeout, "timeout")
 
     def wrap(fn: ToolFn) -> HostTool:
-        if not inspect.iscoroutinefunction(fn):
-            raise TypeError(f"host tool {fn.__name__!r} must be an async function")
         schema = dict(input_schema) if input_schema is not None else schema_of(fn)
         return HostTool(
             name=name or fn.__name__,
@@ -158,13 +158,23 @@ def tool(
             input_schema=schema,
             scope=scope,
             timeout_ms=timeout_ms,
-            fn=fn,
+            fn=fn if inspect.iscoroutinefunction(fn) else _threaded(fn),
             context_param=next(
                 (param.name for param in _parameters(fn) if _takes_context(param)), None
             ),
         )
 
     return wrap
+
+
+def _threaded(fn: Callable[..., Any]) -> Any:
+    """Run a plain function in a worker thread, so it never blocks the loop."""
+
+    @functools.wraps(fn)
+    async def run(*args: Any, **kwargs: Any) -> Any:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    return run
 
 
 def schema_of(fn: Callable[..., Any]) -> dict[str, Any]:
