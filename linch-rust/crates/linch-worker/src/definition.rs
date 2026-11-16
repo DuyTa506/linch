@@ -2,12 +2,15 @@
 //! keyed by its digest, and the per-scope caps on what a namespace root
 //! may hold.
 
+use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
 
 use crate::error::WorkerError;
 
 /// Store `config` as a definition of `namespace` inside `tx`, unless it
 /// is stored already, and return its digest (SHA-256 of the text, hex).
+/// The row stays locked until `tx` ends, so [`prune_definitions`] skips a
+/// definition that is about to be named.
 pub(crate) async fn store(
     tx: &mut Transaction<'static, Postgres>,
     namespace: &str,
@@ -16,7 +19,8 @@ pub(crate) async fn store(
     let digest: String = sqlx::query_scalar(
         "WITH d AS (SELECT encode(sha256(convert_to($2, 'UTF8')), 'hex') AS digest), \
               i AS (INSERT INTO linch_worker_agents (namespace, digest, config) \
-                    SELECT $1, digest, $2 FROM d ON CONFLICT DO NOTHING) \
+                    SELECT $1, digest, $2 FROM d \
+                    ON CONFLICT (namespace, digest) DO UPDATE SET config = EXCLUDED.config) \
          SELECT digest FROM d",
     )
     .bind(namespace)
@@ -24,6 +28,57 @@ pub(crate) async fn store(
     .fetch_one(&mut **tx)
     .await?;
     Ok(digest)
+}
+
+/// Delete the stored definitions that no schedule and no unfinished job
+/// names, so the config secrets they hold (MCP env and header values) live
+/// no longer than their schedules and runs. A failed job is never run
+/// again, so it lets go of its definition first. A worker calls this with
+/// [`crate::prune_history`].
+///
+/// A definition a writer is storing right now is locked by that writer
+/// and skipped; one a writer stored after this call read the references
+/// makes the delete fail its foreign key, and this call then deletes
+/// nothing and returns 0, to try again on the next prune.
+///
+/// Returns:
+///     How many definitions were deleted.
+///
+/// Raises:
+///     WorkerError: If a query fails.
+pub async fn prune_definitions(pool: &PgPool) -> Result<u64, WorkerError> {
+    let mut tx = crate::begin(pool).await?;
+    sqlx::query(
+        "UPDATE linch_worker_jobs SET agent = NULL \
+         WHERE failed_at IS NOT NULL AND agent IS NOT NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query(
+        "DELETE FROM linch_worker_agents WHERE (namespace, digest) IN ( \
+             SELECT a.namespace, a.digest FROM linch_worker_agents AS a \
+             WHERE NOT EXISTS (SELECT 1 FROM linch_worker_schedules AS s \
+                               WHERE s.namespace = a.namespace AND s.agent = a.digest) \
+               AND NOT EXISTS (SELECT 1 FROM linch_worker_jobs AS j \
+                               WHERE j.namespace = a.namespace AND j.agent = a.digest) \
+             FOR UPDATE SKIP LOCKED)",
+    )
+    .execute(&mut *tx)
+    .await;
+    let deleted = match deleted {
+        Ok(deleted) => deleted.rows_affected(),
+        Err(error) if foreign_key_violation(&error) => {
+            tracing::debug!("a definition was named while pruning; pruning again later");
+            return Ok(0);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+fn foreign_key_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23503"))
 }
 
 /// A cap on what the namespaces under one root may hold: the root is a

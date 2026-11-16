@@ -71,7 +71,7 @@ mod status;
 mod timing;
 mod worker;
 
-pub use definition::Cap;
+pub use definition::{Cap, prune_definitions};
 pub use error::WorkerError;
 pub use factory::{AgentFactory, FactoryError, JobAgent};
 pub use job::{JobId, RunRequest, enqueue, enqueue_approve, enqueue_resume, enqueue_run};

@@ -13,8 +13,8 @@ use linch_core::{PermissionLayer, Principal, RunStatus, SessionId, ToolScope};
 use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
-    WorkerError, create_schedule, enqueue, enqueue_run, fire_due_schedules, get_schedule, job,
-    jobs,
+    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_run, fire_due_schedules,
+    get_schedule, job, jobs, prune_definitions,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -392,6 +392,82 @@ async fn concurrent_firers_make_each_fire_once() {
             .await
             .unwrap();
     assert_eq!(distinct, 60);
+    db.finish().await;
+}
+
+/// A stored definition holds config secrets, so pruning deletes it once no
+/// schedule and no unfinished job names it; a failed job lets go of it.
+#[tokio::test]
+async fn a_definition_no_one_names_is_pruned() {
+    let Some(db) = TestDb::new("prune_defs").await else {
+        return;
+    };
+    let token = "tok-sentinel-5b1f";
+    let held = |db: &TestDb| {
+        let pool = db.pool.clone();
+        async move {
+            let held: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM linch_worker_agents WHERE strpos(config, $1) > 0",
+            )
+            .bind(token)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            held
+        }
+    };
+    let mut beat = hourly("beat");
+    beat.timing = Timing::Every(Duration::from_secs(3600));
+    beat.agent = Some(format!(
+        r#"{{"mcp": {{"headers": {{"x-token": "{token}"}}}}}}"#
+    ));
+    create_schedule(&db.pool, &beat, None).await.unwrap();
+    let mut kept = hourly("kept");
+    kept.agent = Some(r#"{"kept": true}"#.into());
+    create_schedule(&db.pool, &kept, None).await.unwrap();
+    sqlx::query("UPDATE linch_worker_schedules SET next_fire = now() WHERE id = 'beat'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert!(delete_schedule(&db.pool, NS, "beat").await.unwrap());
+
+    // Its fire's job is unfinished: the definition stays.
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 0);
+    assert_eq!(held(&db).await, 1);
+    // The job fails for good: nothing can run it again.
+    sqlx::query("UPDATE linch_worker_jobs SET failed_at = now(), error = 'boom'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 1);
+    assert_eq!(held(&db).await, 0, "the token is gone");
+    let failed: Option<String> = sqlx::query_scalar("SELECT agent FROM linch_worker_jobs")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(failed, None);
+    // A schedule still names the other one.
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM linch_worker_agents")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 1);
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 0);
+
+    // A running worker prunes on its own, from its first poll.
+    assert!(delete_schedule(&db.pool, NS, "kept").await.unwrap());
+    let probe = Probe::new("Lookup", ToolScope::Read, Hold::None);
+    let worker = Running::spawn(&db.pool, config("w1"), agent(&db.pool, probe));
+    wait_until("the worker prunes the last definition", || async {
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM linch_worker_agents")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        left == 0
+    })
+    .await;
+    worker.stop().await;
     db.finish().await;
 }
 

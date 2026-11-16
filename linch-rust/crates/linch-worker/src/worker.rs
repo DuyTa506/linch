@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::CHANNEL;
+use crate::definition::prune_definitions;
 use crate::error::{WorkerError, chain, non_blank};
 use crate::execute::{Shared, execute};
 use crate::factory::AgentFactory;
@@ -189,12 +190,15 @@ impl Worker {
                     tracing::warn!(error = chain(&error), "firing schedules failed");
                 }
             }
-            if let Some(retention) = self.config.history_retention
-                && schedules_due(pruned, PRUNE_EVERY)
-            {
+            if schedules_due(pruned, PRUNE_EVERY) {
                 pruned = Some(Instant::now());
-                if let Err(error) = prune_history(&shared.pool, retention).await {
+                if let Some(retention) = self.config.history_retention
+                    && let Err(error) = prune_history(&shared.pool, retention).await
+                {
                     tracing::warn!(error = chain(&error), "pruning the job history failed");
+                }
+                if let Err(error) = prune_definitions(&shared.pool).await {
+                    tracing::warn!(error = chain(&error), "pruning agent definitions failed");
                 }
             }
             poll(&self.config, &shared, &served, &mut jobs).await;
