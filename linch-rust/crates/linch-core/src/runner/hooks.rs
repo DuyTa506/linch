@@ -27,9 +27,10 @@ use crate::hooks::{
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
-use crate::message::{ContentBlock, Message, Role, TextBlock};
+use crate::message::{ContentBlock, Message, Role, TextBlock, ToolResultBlock};
 use crate::provider::{AssistantAssembly, ProviderRequest};
 use crate::run::{Phase, RunStatus, StopReason};
+use crate::skills::system_reminder;
 use crate::usage::Usage;
 
 /// What a `before_provider_call` hook decided for the request about to be
@@ -48,6 +49,9 @@ pub(super) enum BeforeCall {
 pub(super) enum AfterCall {
     /// Accept this response: the provider's, or the last rewrite.
     Send(Box<AssistantAssembly>),
+    /// Accept this response, then send this feedback for another turn
+    /// instead of acting on it.
+    Retry(Box<AssistantAssembly>, String),
     /// A hook blocked the response, or failed closed.
     Blocked(String),
     /// The run already ended: the run cancel interrupted the chain.
@@ -200,6 +204,35 @@ pub(super) async fn event_emit(
     push_records(outbox, run_id, seq, records, None);
 }
 
+/// Result text of the first tool call of a retried response when the hook
+/// gave no feedback (Python's).
+const RETRY_TEXT: &str = "Provider hook requested another turn.";
+
+/// Result text of every later tool call of a retried response (Python's).
+const NOT_RUN_TEXT: &str = "Tool not executed; revise and resubmit your final answer.";
+
+/// The user message an `after_provider_call` retry sends back after
+/// `response`, as Python builds it: with no tool calls, `feedback` in a
+/// system reminder; otherwise an error result for every tool call, none of
+/// which ran, the first carrying `feedback`, so the provider history stays
+/// paired.
+pub(super) fn retry_message(response: &Message, feedback: &str) -> Message {
+    let calls: Vec<_> = response.tool_uses().collect();
+    if calls.is_empty() {
+        return Message::user_text(system_reminder(feedback));
+    }
+    let first = if feedback.is_empty() {
+        RETRY_TEXT
+    } else {
+        feedback
+    };
+    let results = (calls.iter().enumerate()).map(|(index, call)| {
+        let text = if index == 0 { first } else { NOT_RUN_TEXT };
+        ContentBlock::ToolResult(ToolResultBlock::text(&call.id, text, true))
+    });
+    Message::new(Role::User, results.collect())
+}
+
 /// Add request-only context to the tail of `messages`: after the blocks
 /// of the last user message, or as a new user message. The cached prefix
 /// (system, tools, every earlier message) stays byte-identical.
@@ -302,9 +335,15 @@ impl Runner {
                 return Ok(Stopping::Ended);
             }
         };
-        // The feedback is a user message to append before the next turn,
-        // which is what `ToolResults` already records and recovers.
-        let mut message = Message::user_text(feedback);
+        let message = Message::user_text(feedback);
+        Ok(Stopping::Continue(self.feedback(message).await?))
+    }
+
+    /// Hold `message`, a hook's feedback for the model, as the user message
+    /// that ends this turn, with any catalog notice: staged as a
+    /// notification and saved as `ToolResults`, which already records and
+    /// recovers the message to append before the next turn.
+    pub(super) async fn feedback(&mut self, mut message: Message) -> Result<Step, RunError> {
         message.content.extend(self.catalog_change());
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
@@ -314,10 +353,10 @@ impl Runner {
             message: message.clone(),
         })
         .await?;
-        Ok(Stopping::Continue(Step::Results {
+        Ok(Step::Results {
             message,
             appended: false,
-        }))
+        })
     }
 
     /// Run `post_turn` for the turn that just finished. Returns false when
@@ -477,6 +516,9 @@ impl Runner {
         match outcome {
             None => AfterCall::Ended,
             Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(assembly),
+            Some(AfterProviderCallOutcome::Retry { assembly, feedback }) => {
+                AfterCall::Retry(assembly, feedback)
+            }
             Some(AfterProviderCallOutcome::Blocked { reason }) => AfterCall::Blocked(reason),
         }
     }
@@ -536,7 +578,6 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::ToolResultBlock;
 
     fn block(text: &str) -> TextBlock {
         TextBlock { text: text.into() }

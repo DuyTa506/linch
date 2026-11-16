@@ -47,6 +47,7 @@ fn saved(kind: u8, i: u64) -> Checkpoint {
         4 => Phase::AssistantReceived {
             message,
             stop_reason: StopReason::EndTurn,
+            retry_feedback: None,
         },
         5 => Phase::Compacted {
             summary: message,

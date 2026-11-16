@@ -95,6 +95,14 @@ pub enum Phase {
         message: Message,
         /// Why the response stopped.
         stop_reason: StopReason,
+        /// The feedback of an `after_provider_call` hook that asked for
+        /// another turn instead of acting on this response: none of its
+        /// tool calls run, and the feedback goes back to the model next.
+        /// Durable with the response, so a resumed run never asks the hook
+        /// again. Absent when no hook asked, which keeps the checkpoint as
+        /// it was before hooks could.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_feedback: Option<String>,
     },
     /// The tool calls of the last response are being decided and run.
     ToolBatch {
@@ -219,5 +227,29 @@ mod tests {
         let mut extra = wire;
         extra["phase"]["x"] = 1.into();
         assert!(serde_json::from_value::<Checkpoint>(extra).is_err());
+    }
+
+    /// A response no hook retried keeps the checkpoint written before hooks
+    /// could retry, so those runs still resume and nothing else changes.
+    #[test]
+    fn a_received_response_without_a_retry_keeps_its_old_wire_shape() {
+        let phase = |retry_feedback| Phase::AssistantReceived {
+            message: Message::assistant_text("hi"),
+            stop_reason: StopReason::EndTurn,
+            retry_feedback,
+        };
+        let old = serde_json::json!({
+            "phase": "assistant_received",
+            "message": Message::assistant_text("hi"),
+            "stop_reason": "end_turn",
+        });
+        assert_eq!(serde_json::to_value(phase(None)).unwrap(), old);
+        assert_eq!(serde_json::from_value::<Phase>(old).unwrap(), phase(None));
+        let retried = serde_json::to_value(phase(Some("again".into()))).unwrap();
+        assert_eq!(retried["retry_feedback"], "again");
+        assert_eq!(
+            serde_json::from_value::<Phase>(retried).unwrap(),
+            phase(Some("again".into()))
+        );
     }
 }

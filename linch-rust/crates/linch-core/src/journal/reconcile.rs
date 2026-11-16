@@ -57,6 +57,10 @@ pub enum Recovery {
         stop_reason: StopReason,
         /// Whether the message is already in the session.
         appended: bool,
+        /// The feedback of an `after_provider_call` hook that asked for
+        /// another turn instead of acting on the message (see
+        /// [`Phase::AssistantReceived`]).
+        retry_feedback: Option<String>,
     },
     /// `ToolBatch`: every call of the last assistant message, in order.
     ToolBatch {
@@ -178,10 +182,12 @@ pub fn reconcile(
         Phase::AssistantReceived {
             message,
             stop_reason,
+            retry_feedback,
         } => Ok(Recovery::Received {
             appended: appended(checkpoint, session, message)?,
             message: message.clone(),
             stop_reason: *stop_reason,
+            retry_feedback: retry_feedback.clone(),
         }),
         Phase::ToolBatch {
             decisions,
@@ -262,6 +268,10 @@ fn provider_pending(
         appended: appended(checkpoint, session, &response.message)?,
         message: response.message.clone(),
         stop_reason: response.stop_reason,
+        // The run stages an `assistant` event only in the write that saves
+        // `AssistantReceived`, where a retry is recorded; there is none to
+        // carry here.
+        retry_feedback: None,
     })
 }
 

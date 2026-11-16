@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::end::cut_empty;
-use super::hooks::{AfterCall, BeforeCall, Stopping, add_context};
+use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::write::session_log;
@@ -59,11 +59,13 @@ pub(super) enum Step {
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
     },
-    /// Append the response unless `appended`, then end or plan its tools.
+    /// Append the response unless `appended`, then end or plan its tools;
+    /// or, with `retry_feedback`, send the feedback for another turn.
     Received {
         message: Message,
         stop_reason: StopReason,
         appended: bool,
+        retry_feedback: Option<String>,
     },
     /// Plan and run the tool calls of the last response.
     Batch(Batch),
@@ -212,7 +214,8 @@ impl Runner {
                     message,
                     stop_reason,
                     appended,
-                } => self.received(message, stop_reason, appended).await?,
+                    retry_feedback,
+                } => (self.received(message, stop_reason, appended, retry_feedback)).await?,
                 Step::Batch(batch) => self.batch(batch).await?,
                 Step::Results { message, appended } => {
                     if !appended {
@@ -373,15 +376,18 @@ impl Runner {
 
     /// Run `after_provider_call`, then stage the response and its `Usage`
     /// (with the call's `cost` and the model that `served` it), and write
-    /// them through with `AssistantReceived`.
+    /// them through with `AssistantReceived`, which also records a hook's
+    /// retry: the paid response and what to do with it are durable in one
+    /// write.
     async fn accept(
         &mut self,
         assembly: AssistantAssembly,
         cost: Option<f64>,
         served: Option<String>,
     ) -> Result<Option<Step>, RunError> {
-        let assembly = match self.after_provider_call(assembly, self.turn).await {
-            AfterCall::Send(assembly) => *assembly,
+        let (assembly, retry_feedback) = match self.after_provider_call(assembly, self.turn).await {
+            AfterCall::Send(assembly) => (*assembly, None),
+            AfterCall::Retry(assembly, feedback) => (*assembly, Some(feedback)),
             AfterCall::Blocked(reason) => {
                 self.hook_failed(reason).await?;
                 return Ok(None);
@@ -405,12 +411,14 @@ impl Runner {
         let phase = Phase::AssistantReceived {
             message: message.clone(),
             stop_reason,
+            retry_feedback: retry_feedback.clone(),
         };
         self.save(phase).await?;
         Ok(Some(Step::Received {
             message,
             stop_reason,
             appended: false,
+            retry_feedback,
         }))
     }
 
@@ -419,6 +427,7 @@ impl Runner {
         message: Message,
         stop_reason: StopReason,
         appended: bool,
+        retry_feedback: Option<String>,
     ) -> Result<Option<Step>, RunError> {
         let calls: Vec<ToolRecovery> = message
             .tool_uses()
@@ -427,8 +436,12 @@ impl Runner {
             .collect();
         let text = message.text();
         self.stop_reason = stop_reason;
+        let retry = retry_feedback.map(|feedback| retry_message(&message, &feedback));
         if !appended {
             self.append(message).await?;
+        }
+        if let Some(retry) = retry {
+            return Ok(Some(self.feedback(retry).await?));
         }
         if calls.is_empty() {
             if let Some(next) = self.hear_back().await? {

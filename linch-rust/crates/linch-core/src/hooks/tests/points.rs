@@ -310,6 +310,59 @@ async fn after_provider_call_rewrites_chain_and_a_block_stops() {
     assert_eq!(calls(&log), ["redact", "redact", "moderate"]);
 }
 
+/// A retry keeps the rewrite before it and stops the chain, as Python's
+/// dispatcher stops at its first `retry`.
+#[tokio::test]
+async fn after_provider_call_retry_keeps_the_last_rewrite_and_stops() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("redact", &log, |req: &AfterProviderCallRequest| {
+            let mut assembly = req.assembly.clone();
+            assembly.message = crate::message::Message::assistant_text("[redacted]");
+            Act::Answer(AfterProviderCallResponse::Rewrite {
+                assembly: Box::new(assembly),
+            })
+        }),
+    );
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("judge", &log, |_| {
+            Act::Answer(AfterProviderCallResponse::Retry {
+                feedback: "cite a source".into(),
+            })
+        }),
+    );
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("never", &log, |_| {
+            Act::Answer(AfterProviderCallResponse::Continue)
+        }),
+    );
+    let mut records = Vec::new();
+    let retried = hooks
+        .after_provider_call
+        .run_into(after_call("the secret is 42"), &mut records)
+        .await;
+    assert_eq!(
+        retried,
+        AfterProviderCallOutcome::Retry {
+            assembly: Box::new(minimal_assembly("[redacted]")),
+            feedback: "cite a source".into(),
+        }
+    );
+    assert_eq!(calls(&log), ["redact", "judge"]);
+    let verdicts: Vec<_> = (records.iter()).map(|r| r.status.clone()).collect();
+    assert_eq!(
+        verdicts,
+        [
+            HookStatus::Answered { verdict: "rewrite" },
+            HookStatus::Answered { verdict: "retry" }
+        ]
+    );
+}
+
 #[tokio::test]
 async fn user_prompt_rewrites_chain_and_a_block_stops() {
     let hooks = Hooks::default();
