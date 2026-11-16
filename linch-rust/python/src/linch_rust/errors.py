@@ -91,12 +91,21 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32032), or failed
+    """The run could not continue durably (-32020 to -32033), or failed
     inside the server (-32603 in `run.end`); it stays resumable."""
 
 
 class RunNotFound(RunError):
     """No such run or session in the agent's stores (-32021)."""
+
+
+class LeaseLost(RunError):
+    """Another process took the run over, or failed it, while this one
+    drove it (-32022).
+
+    The run stopped here without writing; its new holder drives it. A
+    resume from here is refused with `RunLeased` while that holder lives.
+    """
 
 
 class ContractMismatch(RunError):
@@ -186,6 +195,35 @@ class SessionBusy(RunError):
             return ""
 
 
+class RunLeased(RunError):
+    """Another process drives the run and keeps its lease alive (-32033).
+
+    `Agent.resume`, `Agent.approve` or `Agent.answer` wrote nothing. Try
+    again once that holder stops: at the latest after `expires_in`
+    seconds, when its lease runs out without a renewal. Only runs on
+    Postgres stores have leases.
+    """
+
+    @property
+    def run_id(self) -> str:
+        """The run that was asked for."""
+        return _field(self.data, "run_id")
+
+    @property
+    def owner(self) -> str:
+        """The owner name the holder claimed the run under."""
+        return _field(self.data, "owner")
+
+    @property
+    def expires_in(self) -> float | None:
+        """Seconds the holder's lease runs without a renewal, when the
+        server said."""
+        try:
+            return int(self.data["expires_in_ms"]) / 1000
+        except (TypeError, KeyError, ValueError):
+            return None
+
+
 _BY_CODE: dict[int, type[RpcError]] = {
     -32001: AgentNotFound,
     -32002: RunBusy,
@@ -193,6 +231,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32004: NotAllowed,
     -32005: LimitReached,
     -32021: RunNotFound,
+    -32022: LeaseLost,
     -32025: ContractMismatch,
     -32026: RunTerminal,
     -32027: NotSuspended,
@@ -200,6 +239,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32030: SessionBusy,
     -32031: InvalidOutputSchema,
     -32032: InvalidAnswer,
+    -32033: RunLeased,
 }
 
 
@@ -212,7 +252,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = ProtocolError
         elif -32015 <= code <= -32010:
             cls = OpenError
-        elif -32032 <= code <= -32020:
+        elif -32033 <= code <= -32020:
             cls = RunError
         else:
             cls = RpcError
