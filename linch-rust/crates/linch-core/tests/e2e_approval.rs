@@ -13,7 +13,8 @@ use linch_core::permissions::{Rule, RuleDecision, ToolRule};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, Envelope, Event, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy,
-    Phase, Principal, RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider, ToolScope,
+    Phase, Principal, RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider,
+    ToolScope,
 };
 
 struct Fixture {
