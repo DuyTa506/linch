@@ -135,6 +135,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - RPC `run.report`: the run report (tool calls and timings, usage, context,
   recovery, risk) of a stored run as JSON and Markdown, from `Agent::run_record`
   and its events.
+- Python client: `Agent.eval(cases, scorers, include_events=)` and
+  `Agent.report(run_id, timeline=)` with the `EvalCase`, `Scorer`, `CaseResult`,
+  `EvalReport`, `RunReport` and `RunReportResult` typed dicts; a scorer may also be
+  a Python callable, applied to each case result once the cases are done.
 
 ### Changed
 

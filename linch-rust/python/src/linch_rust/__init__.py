@@ -94,11 +94,33 @@ from .events import (
     VerificationEvent,
     WorkflowEvent,
 )
+from .monitor import (
+    CaseResult,
+    CustomScorer,
+    EvalCase,
+    EvalReport,
+    RunReport,
+    RunReportResult,
+    Score,
+    Scorer,
+    ToolCallRecord,
+    Usage,
+)
 from .run import Run
 from .server import Server
 from .tools import HostTool, Scope, ToolContext, ToolOutput, tool
 
 __all__ = [
+    "Usage",
+    "ToolCallRecord",
+    "Scorer",
+    "Score",
+    "RunReportResult",
+    "RunReport",
+    "EvalReport",
+    "EvalCase",
+    "CustomScorer",
+    "CaseResult",
     "Agent",
     "AgentConfig",
     "AgentNotFound",
