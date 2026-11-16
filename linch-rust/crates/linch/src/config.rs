@@ -103,6 +103,12 @@ pub struct AgentConfig {
     /// `auto_allow` gets their names. Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub tasks: bool,
+    /// Whether the agent has the `AskUser` tool (see
+    /// [`linch_core::ask_user`]): a call suspends the run with an
+    /// `input_request` until the host answers it. Scope `read`, so it runs
+    /// unasked in modes that allow reads. Off when absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ask_user: bool,
     /// The deep agent preset: planning, a subagent roster, kept workers and
     /// file memory (see [`DeepAgentConfig`] for what it turns on). Off
     /// when absent.

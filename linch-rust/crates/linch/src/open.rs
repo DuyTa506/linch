@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use linch_core::ask_user::AskUser;
 use linch_core::{
     Agent, AgentBuilder, Hooks, InMemoryMailbox, Mailbox, MemoryRunStore, MemorySessionStore,
     PermissionEngine, PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider,
@@ -59,7 +60,8 @@ impl AgentConfig {
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), registers
     /// the session task tools over the session store when `tasks` is on
-    /// (kept on a failed open, as the workspace tools are), registers the
+    /// (kept on a failed open, as the workspace tools are), and `AskUser`
+    /// when `ask_user` is on, registers the
     /// virtual filesystem tools and the offload hook when the config
     /// turns them on (see [`FilesystemConfig`](crate::FilesystemConfig); a
     /// failed open takes them back), connects
@@ -134,6 +136,10 @@ impl AgentConfig {
                 // The registry lives as long as the agent; the handle is not needed.
                 let _ = tools.register(tool)?;
             }
+        }
+        if self.ask_user {
+            // The registry lives as long as the agent; the handle is not needed.
+            let _ = tools.register(Arc::new(AskUser::new()))?;
         }
         let pg = pool.as_deref().and_then(Shared::pool);
         // Postgres stores keep the messages in a table too.
