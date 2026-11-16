@@ -107,12 +107,13 @@ Request không có tín hiệu hủy, ngân sách retry hay công tắc catalog 
 
 ## Lỗi và retry
 
-`ProviderError` (`client.rs:58`) có năm variant. Thông báo do adapter viết và không bao
+`ProviderError` (`client.rs:58`) có sáu variant. Thông báo do adapter viết và không bao
 giờ được chứa thông tin xác thực hay header của request.
 
 | Variant | Ý nghĩa | `retryable()` |
 |---|---|---|
-| `Transport { message }` | Không có response: kết nối, TLS, timeout, reset, hoặc một stream bị đứt | có |
+| `Connect { message }` | Kết nối chưa bao giờ được tạo (bị từ chối, DNS, TLS handshake, connect timeout), nên request chưa bao giờ được gửi đi. Mỗi adapter ánh xạ `is_connect()` của reqwest sang nó trong `transport` (`anthropic/http.rs:66`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | có |
+| `Transport { message }` | Request đã gửi đi nhưng không có response nào về (reset, read timeout), hoặc stream bị đứt sau khi đã bắt đầu | có |
 | `Status { status, retry_after, message }` | Mã trạng thái HTTP không thành công | chỉ 408, 429 và >= 500 |
 | `InvalidRequest { message }` | Adapter từ chối request như đã được dựng | không |
 | `Stream(StreamError)` | Event stream vi phạm hợp đồng stream | không |
@@ -120,28 +121,37 @@ giờ được chứa thông tin xác thực hay header của request.
 
 Các adapter không bao giờ retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
 và `retry_after` là lời khuyên cho bên gọi (`client.rs:1-5`). Runner chính là bên gọi
-đó. Khi không có chính sách retry hay model fallback, `dispatch` của nó
-(`crates/linch-core/src/runner/turn.rs:276`) kết thúc run với trạng thái `failed` cùng
-một event `Error` ở mọi lỗi trừ `Cancelled`, lỗi này abort run. Event lỗi mang
-`retryable` và `status` (`crates/linch-core/src/provider/call.rs:306`).
+đó. `dispatch` của nó (`crates/linch-core/src/runner/turn.rs:276`) kết thúc run với
+trạng thái `failed` cùng một event `Error` ở mọi lỗi mà nó không retry hay failover
+(bên dưới), và abort run ở `Cancelled`. Event lỗi mang `kind`, `retryable` và `status`
+(`crates/linch-core/src/provider/call.rs:320`).
 
 ### Retry và fallback model
 
 Hai trường của spec biến một lỗi có thể retry thành một lời gọi khác thay vì kết thúc
 run (`crates/linch-core/src/reliability.rs`, áp dụng trong
-`crates/linch-core/src/runner/retry.rs`). Cả hai đều tắt khi vắng mặt, là một phần của
+`crates/linch-core/src/runner/retry.rs`). Cả hai đều là một phần của
 hợp đồng của run, và được các run con của subagent kế thừa.
 
 | Trường | Mặc định | Tác dụng |
 |---|---|---|
-| `provider_retry` | không có: không retry | `ProviderRetry` (`reliability.rs:46`): `max_attempts` 5 (số lời gọi tới một model trong một turn, kể cả lời gọi đầu), `base_delay_ms` 1000, `max_delay_ms` 30000, `jitter` 0.2, là `RetryOptions` của Python. `{}` bật nó với các giá trị này |
-| `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự. Không để trống, không trùng `model` của spec, không lặp (`reliability.rs:188`) |
+| `provider_retry` | bật | `ProviderRetry` (`reliability.rs:46`): `max_attempts` 5 (số lời gọi tới một model trong một turn, kể cả lời gọi đầu), `base_delay_ms` 1000, `max_delay_ms` 30000, `jitter` 0.2, là `RetryOptions` của Python. `max_attempts: 1` tắt nó |
+| `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự. Không để trống, không trùng `model` của spec, không lặp (`reliability.rs:193`) |
+
+`AgentSpec::provider_retry` là một `ProviderRetry`, không phải `Option`: serde điền
+giá trị mặc định cho trường thiếu và không đưa giá trị mặc định vào wire
+(`ProviderRetry::is_default`, `reliability.rs:80`). Vì vậy một spec không đặt nó, `{}`,
+và các giá trị mặc định viết đầy đủ là cùng một spec, với dạng wire, và digest hợp
+đồng, của một spec viết trước khi có retry. Một run bắt đầu trước khi có retry được
+resume dưới cùng hợp đồng và retry từ đó trở đi; nó không có event `provider_retry`,
+nên bộ đếm của turn bắt đầu từ không. `{"max_attempts": 1}` là một hợp đồng khác. `null`
+là lỗi decode: tắt được viết là `{"max_attempts": 1}`.
 
 Sau một lời gọi thất bại, `Runner::recover` (`retry.rs:45`) quyết định, theo thứ tự:
 
 1. Một lỗi không `retryable()`, hoặc một budget từ chối lời gọi kế tiếp, kết thúc run
    như trước.
-2. **Retry cùng model.** `ProviderRetry::delay` (`reliability.rs:107`) cho thời gian
+2. **Retry cùng model.** `ProviderRetry::delay` (`reliability.rs:112`) cho thời gian
    chờ trước lần retry `n`: `base_delay_ms * 2^(n-1)`, bị chặn ở `max_delay_ms`, lệch
    đi tối đa `jitter` của chính nó (lấy từ id của delivery thất bại, để các run cùng
    lỗi tản ra), không bao giờ vượt mức chặn. `Retry-After` thay thế nó, không jitter;
@@ -150,9 +160,9 @@ Sau một lời gọi thất bại, `Runner::recover` (`retry.rs:45`) quyết đ
    đã có `max_attempts` lời gọi trong turn. Mỗi turn bắt đầu với đủ ngân sách của nó.
 3. **Failover.** Khi không còn retry, run lấy model kế tiếp trong `fallback_models` và
    gọi nó ngay, với ngân sách retry mới. Nó giữ model đó cho đến hết run, kể cả các
-   lời gọi tóm tắt compaction (`retry.rs:100`). Một turn đã failover sẽ gọi model
+   lời gọi tóm tắt compaction (`retry.rs:98`). Một turn đã failover sẽ gọi model
    fallback ngay cả khi một skill đã nạp chỉ định model; một turn skill sau đó lại
-   nhận model của skill, như trong Python (`retry.rs:107`).
+   nhận model của skill, như trong Python (`retry.rs:105`).
 4. Nếu không có cả hai, lỗi cuối cùng kết thúc run.
 
 Mỗi lần thử là một dispatch riêng: `Step::Dispatch` với `attempt` kế tiếp dựng lại
@@ -160,21 +170,42 @@ request, chạy lại `context_build` và `before_provider_call`, stage một de
 flush nó cùng `ProviderPending` trước lời gọi. Vì vậy `attempt` của delivery tăng theo
 mỗi lần retry hoặc failover, như khi một run được resume gửi lại một lời gọi chưa bao
 giờ kết thúc (`Recovery::Redispatch`, `runner/start.rs:227`). Mỗi lần thử kết thúc bằng
-một receipt; một lần thất bại thường không báo usage, nên `usage_complete` của result là
-false sau một lần retry.
+một receipt.
+
+Usage của một receipt thất bại là số không đã biết khi lời gọi không tốn gì, và không
+rõ (`None`) khi nó có thể đã bị tính tiền (`costs_nothing`, `provider/call.rs:254`, áp
+dụng ở `call.rs:169`):
+
+| Lỗi | Usage của receipt | `CallFailure::free` |
+|---|---|---|
+| `Connect`: request chưa bao giờ được gửi đi | `Some(zero)` | true |
+| `Status` trước bất kỳ event stream nào: provider từ chối nó | `Some(zero)` | true |
+| `Transport`: đã gửi, không có gì trả về | `None`, trừ khi một `message_end` báo usage | false |
+| Bất cứ gì sau event stream đầu tiên, kể cả `Status` | `None`, trừ khi một `message_end` báo usage | false |
+
+`Option<Usage>` đã phân biệt số không với không rõ, nên định dạng receipt không đổi, và
+một binary trước thay đổi này đọc `Some(zero)` như một lời gọi không tốn gì. Một lỗi
+free không gửi event `usage` (`runner/turn.rs:375`, và tương tự trong
+`runner/compact.rs`), như Python không gửi cho một lời gọi thất bại, và để
+`usage_complete` là true. Một `budget` có giới hạn chỉ từ chối lời gọi kế tiếp sau một
+usage không rõ (`budget.rs:110`), nên một lỗi free được retry dưới giới hạn; một lỗi có
+thể đã bị tính tiền vẫn kết thúc run với lỗi của provider. Python đánh dấu usage của
+mọi lời gọi thất bại là `unknown` (`src/linch/loop/streaming.py:412-415`) rồi từ chối
+mọi lời gọi dưới giới hạn (`src/linch/model_calls.py:643-650`), nên dưới giới hạn nó
+không bao giờ retry.
 
 Hai event, cả hai đều bền vững:
 
 | Event | Khi nào | Được ghi |
 |---|---|---|
-| `provider_retry` (`model`, `retry`, `delay_ms`, `error`) | Trước lúc chờ | Trong một lần ghi riêng cùng receipt thất bại, `Usage` của nó, và `ProviderPending` được lưu lại ở tổng đã tính chúng (`retry.rs:70`), để bên gọi thấy nó trước lúc chờ |
+| `provider_retry` (`model`, `retry`, `delay_ms`, `error`) | Trước lúc chờ | Trong một lần ghi riêng cùng receipt thất bại, `Usage` của nó (nếu có thể đã tốn gì), và `ProviderPending` được lưu lại ở tổng đã tính chúng (`retry.rs:69`), để bên gọi thấy nó trước lúc chờ |
 | `model_fallback` (`from_model`, `to_model`, `error`) | Trước lời gọi của model fallback | Cùng receipt thất bại, trên barrier của dispatch kế tiếp |
 
 `error` là lỗi theo hình dạng của event `error`. `model_fallback` của Python có một
 văn bản `reason` thay cho nó, và Python thử các model fallback trước các lần retry cùng
 model; Rust dùng hết các lần retry của một model trước.
 
-Resume đọc vị trí của một run từ các event này (`Standing::of`, `reliability.rs:156`,
+Resume đọc vị trí của một run từ các event này (`Standing::of`, `reliability.rs:161`,
 được gọi trong `runner/start.rs:289`): `model_fallback` cuối cùng cho biết model, và
 các event `provider_retry` kể từ `assistant` cuối cùng (hoặc lần failover cuối cùng) là
 các lần retry đã dùng của turn. Không có gì được thêm vào checkpoint. Một lần crash
@@ -182,16 +213,14 @@ trong lúc chờ resume với lần thử kế tiếp ngay, không chờ nốt p
 bại của nó đã bền vững, nên nó không bị mất cũng không bị kết thúc hai lần. Một lần
 crash trước barrier của một failover để model cũ với các lần retry đã dùng hết, nên run
 được resume failover lại; một lần crash sau nó resume trên model fallback. Một lần hủy
-trong lúc chờ abort run ngay (`retry.rs:74`).
+trong lúc chờ abort run ngay (`retry.rs:73`).
 
-Khi không có chính sách và không có model fallback, hoặc khi không có lỗi, request, các
-event và mọi checkpoint đều như của một run không có chúng (được ghim bởi
+Khi không có lỗi, một run bật retry và đặt model fallback ghi cùng các event và
+checkpoint, và gửi cùng các request, như một run tắt retry và không có fallback (được ghim bởi
 `reliability_costs_nothing_when_no_call_fails`,
 `crates/linch-core/tests/e2e_provider_retry.rs`).
 
-Một `budget` có giới hạn từ chối lời gọi kế tiếp khi usage của một lời gọi không rõ, và
-một lời gọi thất bại thường không báo usage, nên dưới một giới hạn run không được retry
-và kết thúc với lỗi của provider. Phần phục hồi độ dài ngữ cảnh của Python (compaction
+Phần phục hồi độ dài ngữ cảnh của Python (compaction
 bắt buộc và một lần retry khi provider báo prompt quá dài) không được port: các adapter
 Rust báo đó là một 400 không thể retry.
 

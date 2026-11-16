@@ -140,7 +140,7 @@ A run that fails inside, without an exception, ends with an `error` event and a
 | `error["message"]` | Cause | Fix |
 |---|---|---|
 | `max turns exceeded` (after a `loop_guard` event) | The run reached `spec.max_turns` | Raise the limit, or start a new run to continue |
-| fragment: `provider returned HTTP <status>:` | The provider refused the call; `error["retryable"]` says whether trying again can help | Check the key and model for 401, 403 or 404; retry later for 408, 429 and 5xx, or let the run retry them with [`spec.provider_retry`](./providers.md#failures-and-retries) |
+| fragment: `provider returned HTTP <status>:` | The provider refused the call; `error["retryable"]` says whether trying again can help | Check the key and model for 401, 403 or 404; for 408, 429 and 5xx the run already retried up to [`spec.provider_retry`](./providers.md#failures-and-retries)'s `max_attempts`; add `fallback_models` or retry later |
 | `invalid provider request: scripted provider ran out of turns after <n>` | A scripted test needs more turns than it has | Add the missing turns |
 
 ## Tools

@@ -334,7 +334,7 @@ One [callback](./agent.md#callbacks) call and how it ended.
 ### `ErrorEvent` (`error`)
 
 An error the run recorded. `error` is a dict with `name` and `message`, and
-`retryable`; a provider failure also has `kind` (`transport`, `status`,
+`retryable`; a provider failure also has `kind` (`connect`, `transport`, `status`,
 `invalid_request`, `stream`) and, for an HTTP failure, `status`:
 
 ```text

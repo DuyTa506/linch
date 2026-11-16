@@ -336,8 +336,8 @@ Một lời gọi [callback](./agent.md#callback) và cách nó kết thúc.
 ### `ErrorEvent` (`error`)
 
 Một lỗi mà run đã ghi lại. `error` là một dict có `name`, `message` và
-`retryable`; lỗi của provider còn có `kind` (`transport`, `status`,
-`invalid_request`, `stream`) và, với lỗi HTTP, cả `status`:
+`retryable`; lỗi của provider còn có `kind` (`connect`, `transport`,
+`status`, `invalid_request`, `stream`) và, với lỗi HTTP, cả `status`:
 
 ```text
 {'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503}

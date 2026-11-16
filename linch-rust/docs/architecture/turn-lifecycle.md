@@ -156,7 +156,7 @@ The caller places the barriers, and the run does it in these places:
 | Barrier | Call | Where |
 |---|---|---|
 | Before a provider dispatch | `Journal::flush` | `turn.rs:303-305` |
-| Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:70-73` |
+| Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:69-72` |
 | Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
 | After each tool that really ran | `tool_finished` flushes | `sink.rs:142-182` |
@@ -174,7 +174,7 @@ write past a barrier. Three kinds of write do not wait for the next barrier:
   `CompactionPending` and flushes at once, so a resume does not buy it again
   (`compact.rs:20-24, 114-120`). A failed call the run retries saves
   `ProviderPending` again, at the totals that count its receipt, and flushes
-  with its `provider_retry` event before the wait (`runner/retry.rs:70-73`).
+  with its `provider_retry` event before the wait (`runner/retry.rs:69-72`).
 - A tool end. It is flushed right after the tool returns, from
   `tool_finished`, so a resume finds the result and does not run the tool
   again (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).

@@ -152,7 +152,7 @@ Bên gọi đặt các barrier, và run làm điều đó ở những chỗ sau:
 | Barrier | Lời gọi | Vị trí |
 |---|---|---|
 | Trước khi gửi tới provider | `Journal::flush` | `turn.rs:303-305` |
-| Trước lúc chờ của một lần retry | `flush`, với `ProviderPending` được lưu lại | `runner/retry.rs:70-73` |
+| Trước lúc chờ của một lần retry | `flush`, với `ProviderPending` được lưu lại | `runner/retry.rs:69-72` |
 | Quanh lời gọi tóm tắt của compaction | `flush` trước lời gọi; `flush` hoặc write-through `Compacted` sau lời gọi | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Trước mỗi tool thực sự chạy | `ToolSink::tool_starting` flush | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
 | Sau mỗi tool thực sự đã chạy | `tool_finished` flush | `sink.rs:142-182` |
@@ -170,7 +170,7 @@ Ba loại ghi không chờ barrier kế tiếp:
   lưu `CompactionPending` và flush ngay, nên một lần resume không mua lại nó
   (`compact.rs:20-24, 114-120`). Một lời gọi thất bại mà run thử lại sẽ lưu lại
   `ProviderPending`, ở tổng đã tính receipt của nó, và flush cùng event
-  `provider_retry` của nó trước lúc chờ (`runner/retry.rs:70-73`).
+  `provider_retry` của nó trước lúc chờ (`runner/retry.rs:69-72`).
 - Phần kết thúc của một tool. Nó được flush ngay sau khi tool trả về, từ
   `tool_finished`, nên một lần resume tìm thấy kết quả và không chạy lại tool
   (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).

@@ -104,12 +104,13 @@ request; the cancel token is the second argument of `stream`.
 
 ## Errors and retries
 
-`ProviderError` (`client.rs:58`) has five variants. Messages are written by
+`ProviderError` (`client.rs:58`) has six variants. Messages are written by
 the adapter and must never hold credentials or request headers.
 
 | Variant | Meaning | `retryable()` |
 |---|---|---|
-| `Transport { message }` | No response: connect, TLS, timeout, reset, or a broken stream | yes |
+| `Connect { message }` | The connection was never made (refused, DNS, TLS handshake, connect timeout), so the request never went out. Each adapter's `transport` maps reqwest's `is_connect()` to it (`anthropic/http.rs:66`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | yes |
+| `Transport { message }` | The request went out but no response came back (reset, read timeout), or the stream broke after it began | yes |
 | `Status { status, retry_after, message }` | Non-success HTTP status | 408, 429 and >= 500 only |
 | `InvalidRequest { message }` | The adapter refused the request as built | no |
 | `Stream(StreamError)` | The event stream broke the stream contract | no |
@@ -117,29 +118,39 @@ the adapter and must never hold credentials or request headers.
 
 Adapters never retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
 and `retry_after` are advice for the caller (`client.rs:1-5`). The runner is
-that caller. Without a retry policy or fallback models, its `dispatch`
-(`crates/linch-core/src/runner/turn.rs:276`) ends the run `failed` with an
-`Error` event on any failure but `Cancelled`, which aborts the run. The error
-event carries `retryable` and `status`
-(`crates/linch-core/src/provider/call.rs:306`).
+that caller. Its `dispatch` (`crates/linch-core/src/runner/turn.rs:276`)
+ends the run `failed` with an `Error` event on any failure that it does not
+retry or fail over (below), and aborts the run on `Cancelled`. The error
+event carries `kind`, `retryable` and `status`
+(`crates/linch-core/src/provider/call.rs:320`).
 
 ### Retries and fallback models
 
 Two spec fields turn a retryable failure into another call instead of the
 end of the run (`crates/linch-core/src/reliability.rs`, applied in
-`crates/linch-core/src/runner/retry.rs`). Both are off when absent, part of
-the run contract, and inherited by a subagent's child runs.
+`crates/linch-core/src/runner/retry.rs`). Both are part of the run contract
+and inherited by a subagent's child runs.
 
 | Field | Default | Effect |
 |---|---|---|
-| `provider_retry` | none: no retry | `ProviderRetry` (`reliability.rs:46`): `max_attempts` 5 (calls to one model in one turn, the first included), `base_delay_ms` 1000, `max_delay_ms` 30000, `jitter` 0.2, Python's `RetryOptions`. `{}` turns it on with these |
-| `fallback_models` | `[]` | The models to fail over to, in order. Not blank, not the spec's `model`, no repeats (`reliability.rs:188`) |
+| `provider_retry` | on | `ProviderRetry` (`reliability.rs:46`): `max_attempts` 5 (calls to one model in one turn, the first included), `base_delay_ms` 1000, `max_delay_ms` 30000, `jitter` 0.2, Python's `RetryOptions`. `max_attempts: 1` turns it off |
+| `fallback_models` | `[]` | The models to fail over to, in order. Not blank, not the spec's `model`, no repeats (`reliability.rs:193`) |
+
+`AgentSpec::provider_retry` is a `ProviderRetry`, not an `Option`: serde
+fills a missing field with the default and leaves the default off the wire
+(`ProviderRetry::is_default`, `reliability.rs:80`). So a spec that does not
+set it, `{}`, and the defaults spelled out are one spec, with the wire form,
+and the contract digest, of a spec written before retries existed. A run
+started before retries existed resumes under the same contract and retries
+from then on; it has no `provider_retry` event, so its turn's count starts
+at zero. `{"max_attempts": 1}` is a different contract. `null` is a decode
+error: off is spelled `{"max_attempts": 1}`.
 
 After a failed call, `Runner::recover` (`retry.rs:45`) decides, in order:
 
 1. A failure that is not `retryable()`, or a budget that refuses the next
    call, ends the run as before.
-2. **Same-model retry.** `ProviderRetry::delay` (`reliability.rs:107`)
+2. **Same-model retry.** `ProviderRetry::delay` (`reliability.rs:112`)
    gives the wait before retry `n`: `base_delay_ms * 2^(n-1)`, capped at
    `max_delay_ms`, moved by up to `jitter` of itself (drawn from the failed
    delivery's id, so runs that failed together spread out), never past the
@@ -150,9 +161,9 @@ After a failed call, `Runner::recover` (`retry.rs:45`) decides, in order:
 3. **Failover.** With no retry left, the run takes the next of
    `fallback_models` and calls it at once, with a fresh retry budget. It
    keeps that model for the rest of the run, compaction summary calls
-   included (`retry.rs:100`). A turn that failed over calls the fallback
+   included (`retry.rs:98`). A turn that failed over calls the fallback
    even where a loaded skill names a model; a later skill turn gets the
-   skill's model again, as in Python (`retry.rs:107`).
+   skill's model again, as in Python (`retry.rs:105`).
 4. With neither, the last failure ends the run.
 
 Every attempt is a dispatch of its own: `Step::Dispatch` with the next
@@ -161,14 +172,35 @@ Every attempt is a dispatch of its own: `Step::Dispatch` with the next
 `ProviderPending` before the call. So the delivery `attempt` grows with each
 retry or failover, as it does when a resumed run redispatches a call that
 never settled (`Recovery::Redispatch`, `runner/start.rs:227`). Each attempt
-settles one receipt; a failed one usually reports no usage, so the result's
-`usage_complete` is false after a retry.
+settles one receipt.
+
+A failed receipt's usage is a known zero when the call cost nothing, and
+unknown (`None`) when it may have been billed (`costs_nothing`,
+`provider/call.rs:254`, applied at `call.rs:169`):
+
+| Failure | Receipt usage | `CallFailure::free` |
+|---|---|---|
+| `Connect`: the request never went out | `Some(zero)` | true |
+| `Status` before any stream event: the provider refused it | `Some(zero)` | true |
+| `Transport`: sent, nothing back | `None`, unless a `message_end` reported usage | false |
+| Anything after the first stream event, a `Status` included | `None`, unless a `message_end` reported usage | false |
+
+`Option<Usage>` already tells a zero from unknown, so the receipt format does
+not change, and a binary from before this reads `Some(zero)` as a call that
+cost nothing. A free failure sends no `usage` event (`runner/turn.rs:375`,
+and the same in `runner/compact.rs`), as Python sends none for a failed call,
+and leaves `usage_complete` true. A capped `budget` only refuses the next
+call after an unknown usage (`budget.rs:110`), so a free failure is retried
+under a cap; one that may have been billed still ends the run with the
+provider's error. Python marks every failed call's usage `unknown`
+(`src/linch/loop/streaming.py:412-415`) and then refuses any call under a cap
+(`src/linch/model_calls.py:643-650`), so under a cap it never retries.
 
 The two events, both durable:
 
 | Event | When | Written |
 |---|---|---|
-| `provider_retry` (`model`, `retry`, `delay_ms`, `error`) | Before the wait | In its own write with the failed receipt, its `Usage`, and `ProviderPending` re-saved at the totals that count them (`retry.rs:70`), so the caller sees it before the wait |
+| `provider_retry` (`model`, `retry`, `delay_ms`, `error`) | Before the wait | In its own write with the failed receipt, its `Usage` (if it may have cost something), and `ProviderPending` re-saved at the totals that count them (`retry.rs:69`), so the caller sees it before the wait |
 | `model_fallback` (`from_model`, `to_model`, `error`) | Before the fallback's call | With the failed receipt, on the next dispatch's barrier |
 
 `error` is the failure in the `error` event's shape. Python's
@@ -177,7 +209,7 @@ fallback models before its same-model retries; Rust spends a model's retries
 first.
 
 Resume reads where a run stands from these events (`Standing::of`,
-`reliability.rs:156`, called in `runner/start.rs:289`): the last
+`reliability.rs:161`, called in `runner/start.rs:289`): the last
 `model_fallback` names the model, and the `provider_retry` events since the
 last `assistant` (or the last failover) are the turn's spent retries. Nothing
 is added to the checkpoint. A crash during a wait resumes with the next
@@ -185,16 +217,15 @@ attempt at once, without waiting the rest; its failed receipt is durable, so
 it is neither lost nor settled twice. A crash before a failover's barrier
 leaves the old model with its retries spent, so the resumed run fails over
 again; a crash after it resumes on the fallback. A cancel during a wait
-aborts the run at once (`retry.rs:74`).
+aborts the run at once (`retry.rs:73`).
 
-With no policy and no fallback models, or with no failure, the request, the
-events and every checkpoint are those of a run without them (pinned by
+With no failure, a run with retries on and fallback models set writes the
+same events and checkpoints, and sends the same requests, as one with
+retries off and no fallbacks (pinned by
 `reliability_costs_nothing_when_no_call_fails`,
 `crates/linch-core/tests/e2e_provider_retry.rs`).
 
-A capped `budget` refuses the next call once a call's usage is unknown, and
-a failed call usually reports none, so under a cap the run is not retried
-and ends with the provider's error. Python's context-length recovery (a
+Python's context-length recovery (a
 forced compaction and one retry when a provider says the prompt is too
 long) is not ported: Rust adapters report that as a non-retryable 400.
 

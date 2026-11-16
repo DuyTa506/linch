@@ -74,8 +74,10 @@ checkpointed either, and a resume starts it afresh, as Python's
 `_MAX_FINAL_ANSWER_REENTRIES` does. The spec's `provider_retry` and
 `fallback_models` are in the digest with the rest of the spec, so a resumed
 run's fallback, read back from its `model_fallback` events by its place in
-the list, names the same model. Unset, they leave the spec's wire form, and
-so the digest, as it was before they existed.
+the list, names the same model. Retries are on by default, but the default
+policy is left off the wire, so an unset `provider_retry` (and an empty
+`fallback_models`) leave the spec's wire form, and so the digest, as it was
+before they existed; `{"max_attempts": 1}`, retries off, changes it.
 
 ## Registrations
 

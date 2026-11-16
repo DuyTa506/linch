@@ -256,9 +256,10 @@ Mỗi lượt là `{"events": [...]}`, tức stream event của provider cho m�
 `text_turn("Hi.", model="claude-sonnet-4-6")` thử được các trường chi phí.
 
 Một lượt cũng có thể kết thúc bằng một `error`, để kiểm thử cách host xử lý một
-lời gọi thất bại: `transport` (`message`), `status` (`status`, `message`,
-`retry_after_ms?`) hoặc `invalid_request` (`message`). Khi không có `events`, lời
-gọi thất bại trước khi có bất kỳ đầu ra nào:
+lời gọi thất bại: `connect` (`message`), `transport` (`message`), `status`
+(`status`, `message`, `retry_after_ms?`) hoặc `invalid_request` (`message`). Khi
+không có `events`, lời gọi thất bại trước khi có bất kỳ đầu ra nào. Mặc định run
+thử lại một lỗi có thể thử lại, nên ví dụ này tắt thử lại để thấy lỗi kết thúc run:
 
 ```python
 import asyncio
@@ -268,7 +269,7 @@ from linch_rust.scripted import MODEL
 
 config: AgentConfig = {
     "namespace": "test",
-    "spec": {"model": MODEL},
+    "spec": {"model": MODEL, "provider_retry": {"max_attempts": 1}},
     "provider": {
         "id": "scripted",
         "turns": [{"error": {"type": "status", "status": 503, "message": "busy"}}],
@@ -289,8 +290,11 @@ asyncio.run(main())
 
 ```text
 ErrorEvent(error={'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503})
-ResultEvent(subtype='error', stop_reason='error', total_usage={...}, usage_complete=False, ...)
+ResultEvent(subtype='error', stop_reason='error', total_usage={...}, usage_complete=True, ...)
 ```
+
+`usage_complete` là true: một lời gọi mà provider từ chối bằng status trước khi có
+bất kỳ đầu ra nào không tốn gì ([bên dưới](#lỗi-và-thử-lại)).
 
 Một run cần nhiều lượt hơn số lượt trong script sẽ kết thúc bằng một event `error`
 (`scripted provider ran out of turns after N`) và một `result` có subtype `error`.
@@ -341,22 +345,22 @@ asyncio.run(main())
 
 ## Lỗi và thử lại
 
-Mặc định không có gì thử lại một lời gọi provider: không phải adapter, cũng không
-phải run. Một lời gọi thất bại (lỗi kết nối, HTTP status, một stream vi phạm quy
-tắc của nó) kết thúc run bằng một event `error` và một `result` có subtype `error`.
-Dict `error` của event lỗi mang `retryable` và, với lỗi HTTP, cả `status`. Một lời
-gọi bị hủy kết thúc run ở trạng thái `aborted`. Mỗi adapter có timeout kết nối 30
-giây và timeout đọc giữa các lần đọc (300 giây hoặc 600 giây); không có hạn chót
-cho cả một lời gọi.
+Một run thử lại một lời gọi provider thất bại với lỗi mà một lời gọi khác có thể
+sửa được: không kết nối được hoặc không có response nào (bị từ chối, reset,
+timeout), HTTP 408, 429 hoặc 5xx (kể cả 529 quá tải của Anthropic), hoặc một lỗi
+mà provider gửi ngay trong stream với một trong các status đó. Adapter không bao
+giờ thử lại; run mới làm. Một lỗi mà run không thử lại kết thúc run bằng một event
+`error` và một `result` có subtype `error`; dict `error` của event lỗi mang `kind`
+(`connect`, `transport`, `status`, `invalid_request`, `stream`), `retryable` và, với
+lỗi HTTP, cả `status`. Một lời gọi bị hủy kết thúc run ở trạng thái `aborted`. Mỗi
+adapter có timeout kết nối 30 giây và timeout đọc giữa các lần đọc (300 giây hoặc
+600 giây); không có hạn chót cho cả một lời gọi.
 
-Hai trường của [`spec`](./agent.md#spec) giúp một run vượt qua lỗi mà một lời gọi
-khác có thể sửa được: không có response nào (lỗi kết nối, reset, timeout), HTTP 408,
-429 hoặc 5xx (kể cả 529 quá tải của Anthropic), hoặc một lỗi mà provider gửi ngay
-trong stream với một trong các status đó.
+Hai trường của [`spec`](./agent.md#spec) quyết định việc này:
 
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
-| `provider_retry` | không có: không thử lại | Gọi lại cùng model sau một lúc chờ: `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, kiểu `ProviderRetry`. `{}` bật nó với các mặc định bên dưới |
+| `provider_retry` | bật, với các mặc định bên dưới | Gọi lại cùng model sau một lúc chờ: `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, kiểu `ProviderRetry`. Chỉ đặt các trường cần đổi. `{"max_attempts": 1}` tắt thử lại |
 | `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự, khi một model hết lượt thử lại. Không để trống, không trùng `model`, không lặp |
 
 | Trường của `provider_retry` | Mặc định | Điều khiển gì |
@@ -379,8 +383,7 @@ Một run làm gì sau một lỗi có thể thử lại:
    `to_model`, `error`) và gọi ngay model fallback, với số lần thử lại riêng của nó.
    Run giữ model đó cho đến hết run, kể cả compaction. Một turn đã chuyển sang
    fallback sẽ gọi fallback ngay cả khi một skill đặt model.
-3. Nếu không thì run kết thúc với `error` của lỗi cuối cùng, như khi không có các
-   trường này.
+3. Nếu không thì run kết thúc với `error` của lỗi cuối cùng.
 
 Một lỗi không thể thử lại (400, 401, 403, 404, một request mà adapter từ chối) kết
 thúc run ngay, không thử lại và không chuyển model. Một lần hủy trong lúc chờ kết
@@ -450,15 +453,22 @@ mua một câu trả lời hai lần:
 - Một run được resume sau khi crash trong lúc chờ sẽ gọi lại ngay, không chờ nốt
   phần còn lại, và tiếp tục đếm các lần thử lại của turn.
 - Một run đã chuyển model sẽ resume trên model fallback.
-- Một lần thử thất bại thường không báo usage, nên `result` của một run đã thử lại
-  có `usage_complete` là false.
+- Một lần thử thất bại mà không tốn gì, một kết nối chưa bao giờ được tạo hoặc một
+  status lỗi trước khi có bất kỳ đầu ra nào, được tính là usage bằng không: nó không
+  gửi event `usage` và để `usage_complete` là true.
+- Một request đã gửi đi mà không có gì trả về (reset, timeout đọc), hoặc một lỗi sau
+  khi đầu ra đã bắt đầu, có thể đã bị tính tiền, nên usage của nó không rõ và
+  `result` của run có `usage_complete` là false.
 - Dưới một [`budget`](./agent.md#budget) có giới hạn, một lời gọi không rõ usage
-  nghĩa là không còn giữ được giới hạn, nên run không được thử lại: nó kết thúc với
-  lỗi của provider.
+  nghĩa là không còn giữ được giới hạn, nên run không được thử lại sau nó: nó kết
+  thúc với lỗi của provider. Một lời gọi không tốn gì vẫn được thử lại như thường.
+  Python Linch tính mọi lời gọi thất bại là không rõ, nên dưới giới hạn nó không bao
+  giờ thử lại.
 
 Cả hai trường là một phần của [hợp đồng của run](./agent.md#hợp-đồng-của-run), và
-các run của subagent cũng dùng chúng. Python Linch còn phục hồi khi prompt quá dài
-bằng cách compaction rồi gọi lại; server này không làm vậy.
+các run của subagent cũng dùng chúng. Các mặc định giữ hợp đồng như trước khi có
+thử lại, còn `{"max_attempts": 1}` làm nó đổi. Python Linch còn phục hồi khi prompt
+quá dài bằng cách compaction rồi gọi lại; server này không làm vậy.
 
 ## Chi phí
 

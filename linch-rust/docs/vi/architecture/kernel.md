@@ -75,8 +75,10 @@ trong digest; nó cũng không được checkpoint, và một lần resume bắt
 như `_MAX_FINAL_ANSWER_REENTRIES` của Python. `provider_retry` và
 `fallback_models` của spec nằm trong digest cùng phần còn lại của spec, nên model
 fallback của một run được resume, đọc lại từ các event `model_fallback` của nó theo
-vị trí trong danh sách, trỏ tới cùng một model. Khi không đặt, chúng không có trong
-dạng wire của spec, và do đó digest vẫn như trước khi chúng tồn tại.
+vị trí trong danh sách, trỏ tới cùng một model. Retry được bật mặc định, nhưng chính
+sách mặc định không được đưa vào wire, nên khi không đặt `provider_retry` (và
+`fallback_models` rỗng), chúng không có trong dạng wire của spec, và do đó digest
+vẫn như trước khi chúng tồn tại; `{"max_attempts": 1}`, tắt retry, làm digest đổi.
 
 ## Đăng ký
 
