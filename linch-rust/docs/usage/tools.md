@@ -356,8 +356,9 @@ its output.
   stream's unread output.
 - **Permissions.** `BashOutput` is read scope, so it runs in every mode and in
   parallel. `BashKill` is exec scope like `Bash`, so it asks in `default` and
-  `accept_edits` (Python Linch allows it without asking); allow it with
-  `auto_allow: ["BashKill"]` or a `tool` rule.
+  `accept_edits`; allow it with `auto_allow: ["BashKill"]` or a `tool` rule.
+  Python Linch has one exec-scope `BashProcess` tool (`wait`, `status`,
+  `kill`) instead, so there even reading output asks.
 
 ## Permissions
 

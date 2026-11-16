@@ -356,8 +356,9 @@ mã khác 0 hoặc hết timeout). `BashKill` kill process group của nó và t
   cuối của đầu ra chưa đọc của mỗi stream.
 - **Permission.** `BashOutput` có scope read, nên chạy ở mọi mode và chạy song
   song. `BashKill` có scope exec như `Bash`, nên nó hỏi ở `default` và
-  `accept_edits` (Linch Python cho phép nó mà không hỏi); hãy cho phép nó bằng
-  `auto_allow: ["BashKill"]` hoặc một rule `tool`.
+  `accept_edits`; hãy cho phép nó bằng `auto_allow: ["BashKill"]` hoặc một rule
+  `tool`. Linch Python thay vào đó có một tool `BashProcess` scope exec (`wait`,
+  `status`, `kill`), nên ở đó ngay cả việc đọc output cũng phải hỏi.
 
 <a id="permissions"></a>
 
