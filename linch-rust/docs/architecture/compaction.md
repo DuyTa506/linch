@@ -327,10 +327,12 @@ When a response with text, no tool call and stop reason `max_tokens` arrives,
 and fewer than `max_attempts` were continued in the run, `received` keeps its
 text as a part and stages the feedback (the spec's, or `DEFAULT_FEEDBACK`, in
 a `<system-reminder>`) as the next user message, the same path a `stop`
-callback's `continue` takes (`runner/turn.rs:532-601`). The cut answer is
+callback's `continue` takes (`runner/turn.rs:532-608`). The cut answer is
 appended to the session like any response. The run's final text is the
 parts, in order, then the last response's text; that whole text is what the
-output schema, the verifiers and `stop` see. A response that calls tools
+output schema, the verifiers and `stop` see. With redaction scrubbing
+responses, the joined text is scrubbed again, since a match the cut split
+across two parts is whole only there. A response that calls tools
 starts a new chain of parts.
 
 Nothing new is checkpointed. `Truncated::of` reads the attempts and the

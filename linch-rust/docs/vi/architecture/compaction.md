@@ -318,9 +318,11 @@ Khi một response có văn bản, không có lời gọi tool và stop reason `
 số lần đã tiếp tục trong run ít hơn `max_attempts`, `received` giữ văn bản của nó như một
 phần và stage phản hồi (của spec, hoặc `DEFAULT_FEEDBACK`, trong một `<system-reminder>`)
 làm message user kế tiếp, cùng đường đi mà `continue` của một callback `stop` dùng
-(`runner/turn.rs:532-601`). Câu trả lời bị cắt được nối vào session như mọi response.
+(`runner/turn.rs:532-608`). Câu trả lời bị cắt được nối vào session như mọi response.
 Văn bản cuối cùng của run là các phần, theo thứ tự, rồi đến văn bản của response cuối;
-toàn bộ văn bản đó là thứ mà output schema, các verifier và `stop` nhìn thấy. Một
+toàn bộ văn bản đó là thứ mà output schema, các verifier và `stop` nhìn thấy. Khi
+redaction scrub response, văn bản ghép được scrub lại, vì một match bị cắt đôi qua hai
+phần chỉ nguyên vẹn ở đó. Một
 response gọi tool bắt đầu một chuỗi phần mới.
 
 Không có gì mới được checkpoint. `Truncated::of` đọc lại số lần thử và các phần đang chờ

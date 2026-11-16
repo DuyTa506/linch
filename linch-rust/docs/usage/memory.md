@@ -272,7 +272,7 @@ def remember(title: str, text: str) -> str:
 A `write` tool asks for approval in the `default` permission mode; run the
 agent in `accept_edits`, or allow the tool by a permission rule.
 
-`python/examples/external_memory.py` puts both halves together on a folder
+`python/examples/external_memory.py`, in the repository (it does not ship in the wheel), puts both halves together on a folder
 of Markdown notes, like an Obsidian vault: a keyword `NoteStore`, `retrieval`
 over it, and a `remember` tool. It runs offline with the scripted provider,
 and `tests/test_memory.py` runs it, checking that a note saved in one run is

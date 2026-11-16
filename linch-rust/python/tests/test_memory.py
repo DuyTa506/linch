@@ -242,3 +242,7 @@ async def test_the_external_memory_example_remembers_and_recalls(tmp_path: Path)
     # so the history the second run sends holds no memory block.
     history = [text for message in recalled[:-1] for text in texts(message)]
     assert not [text for text in history if text.startswith("[doc:")], history
+    # Nor is it in any durable event: the logged messages are the session's.
+    logged = [repr(e.event) for run in (first, second) for e in run]
+    assert not [event for event in logged if "[doc:" in event]
+    assert any("Deploys happen on Tuesdays." in event for event in logged)

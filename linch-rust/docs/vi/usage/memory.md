@@ -275,7 +275,7 @@ def remember(title: str, text: str) -> str:
 Một tool `write` hỏi phê duyệt ở permission mode `default`; hãy chạy agent ở
 `accept_edits`, hoặc cho phép tool bằng một permission rule.
 
-`python/examples/external_memory.py` ghép cả hai nửa trên một thư mục ghi chú Markdown,
+`python/examples/external_memory.py`, trong repository (không có trong wheel), ghép cả hai nửa trên một thư mục ghi chú Markdown,
 như một vault Obsidian: một `NoteStore` tìm theo từ khóa, `retrieval` trên nó, và một tool
 `remember`. Nó chạy ngoại tuyến với provider scripted, và `tests/test_memory.py` chạy nó,
 kiểm tra rằng một ghi chú lưu ở một run được nhớ lại ở run sau và không có văn bản nào được

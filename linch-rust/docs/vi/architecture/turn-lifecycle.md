@@ -120,7 +120,7 @@ Với `spec.truncation_recovery`, một câu trả lời văn bản bị giới 
 reason `max_tokens`, không có lời gọi tool) được nối vào và được đáp bằng một message
 phản hồi thay vì kết thúc run, chừng nào `max_attempts` còn; văn bản cuối cùng của run
 ghép các phần lại
-([câu trả lời bị cắt](./compaction.md#cut-off-answers), `turn.rs:532-601`).
+([câu trả lời bị cắt](./compaction.md#cut-off-answers), `turn.rs:532-608`).
 
 ### Vòng lặp tiếp tục khi response có lời gọi tool
 

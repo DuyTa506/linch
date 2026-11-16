@@ -125,7 +125,7 @@ With `spec.truncation_recovery`, a text answer the output limit cut off
 (stop reason `max_tokens`, no tool call) is appended and answered with a
 feedback message instead of ending the run, while `max_attempts` lasts; the
 run's final text joins the parts
-([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:532-601`).
+([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:532-608`).
 
 ### The loop continues while a response has tool calls
 
