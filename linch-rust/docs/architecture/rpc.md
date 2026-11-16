@@ -276,6 +276,7 @@ config, refusing unknown fields and a cap of 0; `tokens`
 | `project_root` and `workspace` are existing directories under an allowed root, replaced by their canonical paths | `project_root`, `workspace` | `admit.rs:60-72`, `admit_dir` at `admit.rs:172-181` |
 | With skills or subagents on, the config directory is an existing directory under an allowed root, or the default `.linch` there or missing | `config_dir` | `admit.rs:73-77`, `admit.rs:183-209` |
 | `Bash` only when the tenant allows exec tools; otherwise it is turned off, not refused | none | `admit.rs:78` |
+| The execution backend equals one of the tenant's `execution` entries (default `[local]`); absent, it becomes the first entry, so a tenant can be held to a sandbox | `execution` | `admit_execution` in `admit.rs` |
 | A Postgres DSN only for an allowed target | `postgres` | `admit.rs:79-89` |
 | `stores.max_connections` at most the tenant's `max_pool_connections` (default: the server's default pool size); absent, it is set to the default or the cap, whichever is smaller | `pool_connections`, with `data.max` the cap | `admit.rs:90-105` |
 | An MCP stdio server only with an entry's `command` and `args`, setting only the `env` names it lists; an MCP URL only at an allowed origin | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |

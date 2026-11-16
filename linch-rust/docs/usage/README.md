@@ -55,6 +55,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Quickstart](./quickstart.md) | Install, an offline run, a live provider, a host tool, an approval, Postgres |
 | [Agent config](./agent.md) | Every `AgentConfig` field with its default, `spec`, the run contract, intercept callbacks, sessions |
 | [Providers](./providers.md) | Each provider id, keys from the server's environment, self-hosted server profiles, the scripted provider |
+| [Sandbox](./sandbox.md) | Where `Bash` runs: `local`, `sandbox` (Landlock, seccomp, rlimits) or `docker`; what each confines |
 | [Tools](./tools.md) | Host tools, the workspace tools, scopes, permission modes and rules, approvals, the virtual filesystem, MCP tools |
 | [Runs](./runs.md) | Start, stream, resume, approve, cancel; errors at the end of a stream; what is durable and when |
 | [Events](./events.md) | Every event type the client decodes, with its fields; sequence numbers and replay; usage and cost |
