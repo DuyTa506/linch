@@ -61,6 +61,15 @@ Mọi provider thật đều nhận `request`, dạng dữ liệu của `extra_b
 Trên server từ xa,
 `request` được duyệt cùng `base_url` mang nó và không mở rộng `provider_base_urls`.
 
+Ở nơi Python Linch có cùng công tắc (`deepseek`, `openai-chat`, `vllm`,
+`sglang`, `llamacpp`, qua `extra_body` của chính SDK OpenAI), có hai điều khác
+biệt ở đây. `extra_body` của Python thay bất kỳ trường nào, kể cả `model` và
+hội thoại, vì SDK gộp nó vào sau cùng mà không bảo vệ gì cả; `request.extra_body`
+ở đây thì giữ lại các trường mà bảng trên loại trừ. `timeout` của Python là một
+số áp dụng cho mọi giai đoạn của lời gọi (connect, read, write, pool);
+`request.timeout_ms` ở trên chỉ thay timeout đọc, còn timeout kết nối (30 giây)
+vẫn cố định.
+
 ### Context window
 
 Mỗi provider biết context window của model trong spec, tính bằng token. Nó quyết

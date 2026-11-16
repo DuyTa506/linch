@@ -59,6 +59,15 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 On a remote server, `request` is admitted with the `base_url` that carries it;
 it cannot widen `provider_base_urls`.
 
+Where Python Linch has the same knob (`deepseek`, `openai-chat`, `vllm`,
+`sglang`, `llamacpp`, through the OpenAI SDK's own `extra_body`), two things
+differ here. Python's `extra_body` replaces any field, `model` and the
+conversation included, because the SDK merges it in last with nothing
+protected; `request.extra_body` instead keeps the fields the table above
+excludes. Python's `timeout` is one number applied to every phase of the call
+(connect, read, write, the pool); `request.timeout_ms` only replaces the read
+timeout above, and the 30 s connect timeout stays fixed.
+
 ### Context window
 
 Each provider knows the context window of the spec's model, in tokens. It
