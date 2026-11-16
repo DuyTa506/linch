@@ -65,7 +65,10 @@ What differs in Rust:
    (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged.
    `before_provider_call` then runs on the built request: a rewrite replaces
    it before anything downstream sees it; a block ends the run as failed and
-   the provider is never called (`hooks/call.rs`, `runner/hooks.rs`).
+   the provider is never called (`hooks/call.rs`, `runner/hooks.rs`). A
+   `force_continue` skips steps 4-8: nothing is staged for the call, the
+   feedback is staged as a `notification` and held as `ToolResults`, and
+   step 9 appends it, as after a `stop` feedback.
 4. **Stage and flush the delivery.** The `context_build` event and the
    model-call delivery are staged. The `ProviderPending` checkpoint is held,
    then `flush` writes the events and the checkpoint in one commit

@@ -65,7 +65,10 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    Chúng không bao giờ được ghi log. Sau đó `before_provider_call` chạy trên request
    đã dựng: một rewrite thay thế nó trước khi bất cứ thứ gì phía sau thấy nó; một
    block kết thúc run với trạng thái failed và provider không bao giờ được gọi
-   (`hooks/call.rs`, `runner/hooks.rs`).
+   (`hooks/call.rs`, `runner/hooks.rs`). Một `force_continue` bỏ qua các bước
+   4-8: không có gì được stage cho lời gọi, feedback được stage như một
+   `notification` và được giữ dưới dạng `ToolResults`, rồi bước 9 nối nó vào
+   session, như sau một feedback của `stop`.
 4. **Stage và flush delivery.** Event `context_build` và delivery của lời gọi model được
    stage. Checkpoint `ProviderPending` được giữ lại, rồi `flush` ghi các event và
    checkpoint trong một lần commit (`turn.rs:299-305`). Đây là barrier trước khi gọi provider.
