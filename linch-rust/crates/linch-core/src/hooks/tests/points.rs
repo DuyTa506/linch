@@ -682,6 +682,19 @@ observe_point_test!(
     }
 );
 
+observe_point_test!(
+    event_emit_observes_every_hook_and_records_failures,
+    event_emit,
+    EventEmitRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        event: crate::events::Event::User(crate::events::kinds::UserEvent {
+            message: crate::message::Message::user_text("hi"),
+            subtype: crate::events::kinds::UserEventSubtype::Prompt,
+        }),
+    }
+);
+
 #[test]
 fn registration_rejects_bad_settings() {
     let hooks = Hooks::default();
@@ -711,7 +724,7 @@ fn registration_rejects_bad_settings() {
     assert!(hooks.context_build.is_empty() && hooks.post_turn.is_empty());
 }
 
-/// None of the twelve observe-only points has a blocking verdict, so a
+/// None of the thirteen observe-only points has a blocking verdict, so a
 /// closed fail mode is refused at every one of them, the same way it is at
 /// `post_turn`.
 #[test]
@@ -743,6 +756,7 @@ fn every_observe_only_point_rejects_a_closed_fail_mode() {
     assert_rejects_closed!(post_compact);
     assert_rejects_closed!(subagent_start);
     assert_rejects_closed!(subagent_stop);
+    assert_rejects_closed!(event_emit);
 }
 
 #[test]
@@ -790,9 +804,9 @@ fn the_digest_covers_each_points_chain_in_order_and_pins_its_encoding() {
     );
 }
 
-/// The digest's fixed point order was extended for the twelve observe-only
+/// The digest's fixed point order was extended for the thirteen observe-only
 /// points, each contributing its own `(point, id, version)` triples after
-/// `post_turn`.
+/// `post_turn`, `event_emit` last.
 #[test]
 fn the_digest_covers_the_observe_only_points_too() {
     let log = new_log();
@@ -813,16 +827,24 @@ fn the_digest_covers_the_observe_only_points_too() {
         &hooks.subagent_stop,
         Scripted::new("notify", &log, |_| Act::Answer(())),
     );
-    let with_both = hooks.policy_digest();
-    assert_ne!(with_both, with_agent_start);
-    let expected = json!([["agent_start", "audit", 1], ["subagent_stop", "notify", 1]]);
+    let _ = register(
+        &hooks.event_emit,
+        Scripted::new("mirror", &log, |_| Act::Answer(())),
+    );
+    let with_all = hooks.policy_digest();
+    assert_ne!(with_all, with_agent_start);
+    let expected = json!([
+        ["agent_start", "audit", 1],
+        ["subagent_stop", "notify", 1],
+        ["event_emit", "mirror", 1]
+    ]);
     assert_eq!(
-        with_both,
+        with_all,
         digest_with_domain(POLICY_DOMAIN, &expected).unwrap()
     );
 
     registration.dispose();
-    let expected = json!([["subagent_stop", "notify", 1]]);
+    let expected = json!([["subagent_stop", "notify", 1], ["event_emit", "mirror", 1]]);
     assert_eq!(
         hooks.policy_digest(),
         digest_with_domain(POLICY_DOMAIN, &expected).unwrap()

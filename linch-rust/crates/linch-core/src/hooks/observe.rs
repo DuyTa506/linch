@@ -1,7 +1,7 @@
 //! The observe-only points: `agent_start`, `agent_stop`, `turn_start`,
 //! `provider_call_start`, `provider_call_stop`, `tool_use_start`,
 //! `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`,
-//! `subagent_start`, `subagent_stop`.
+//! `subagent_start`, `subagent_stop`, `event_emit`.
 //!
 //! Each one answers `()` (`{}` on the wire): a hook here cannot change the
 //! run, only observe it. Registration refuses a closed fail mode
@@ -10,6 +10,7 @@
 //! [`observe_point!`] macro below carries this shared shape; each point adds
 //! only its marker, its `HookPoint` and its request type.
 
+use crate::events::Event;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::run::{RunStatus, StopReason};
@@ -367,4 +368,26 @@ observe_point! {
     marker: SubagentStop,
     point: SubagentStop,
     request: SubagentStopRequest,
+}
+
+/// An event is about to be delivered to the caller. Fired only for events
+/// that are both streamed and durably logged
+/// ([`crate::events::Persistence::Both`]): never for a hook's own
+/// [`Event::Hook`] record (it never reaches this point, so firing it cannot
+/// recurse), and never for a stream-only delta or tool-progress event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventEmitRequest {
+    /// Session the event belongs to.
+    pub session_id: SessionId,
+    /// Run the event belongs to.
+    pub run_id: RunId,
+    /// The event about to be delivered.
+    pub event: Event,
+}
+
+observe_point! {
+    /// Marker for [`HookPoint::EventEmit`].
+    marker: EventEmit,
+    point: EventEmit,
+    request: EventEmitRequest,
 }

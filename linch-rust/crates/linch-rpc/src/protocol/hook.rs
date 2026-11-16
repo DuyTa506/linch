@@ -205,8 +205,8 @@ pub struct PostTurnAnswer {}
 /// Python's lifecycle hooks (`agent_start`, `agent_stop`, `turn_start`,
 /// `provider_call_start`, `provider_call_stop`, `tool_use_start`,
 /// `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`,
-/// `subagent_start`, `subagent_stop`): `{}`. None of these can fail closed,
-/// so the shape never carries a verdict.
+/// `subagent_start`, `subagent_stop`, `event_emit`): `{}`. None of these can
+/// fail closed, so the shape never carries a verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveAnswer {}

@@ -38,6 +38,13 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   Available as `{"action": "rewrite", "text"}` / `{"action": "block",
   "reason"}` to `@callback` in `linch_rust` and as `StopResponse::Rewrite`/
   `StopResponse::Block` to `Hook<Stop>` in `linch-core`.
+- `event_emit`: a thirteenth observe-only hook point, for parity with
+  Python's `EVENT_EMIT`. It fires once per event, in delivery order, but
+  only for an event that is both streamed to the caller and durably logged:
+  never for a hook's own record (it would otherwise recurse into itself)
+  and never for a stream-only delta or tool-progress event. Answers `()`
+  (`{}` on the wire) and can never fail closed. Available to `@callback` in
+  `linch_rust` and to `Hook<EventEmit>` in `linch-core`.
 
 ### Changed
 

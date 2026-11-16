@@ -21,14 +21,17 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   đang đứng, giống như một sự cố (`runner.rs:83-87`).
 - Loop guard của Python (lời gọi lặp lại, lỗi lặp lại) không nằm trong runner. Runner
   chỉ phát `loop_guard` cho `max_turns` (`runner/end.rs:93-108`).
-- Các hook point là hai mươi mốt point trong [kernel](./kernel.md#chuỗi-hook), trong đó
-  mười hai point chỉ quan sát. `before_provider_call` có thể viết lại hoặc block
+- Các hook point là hai mươi hai point trong [kernel](./kernel.md#chuỗi-hook), trong đó
+  mười ba point chỉ quan sát. `before_provider_call` có thể viết lại hoặc block
   request sắp được gửi, và `after_provider_call` có thể viết lại hoặc block response
   mà một lời gọi vừa dựng xong, trước khi nó được stage; hành động `retry`/
   `force_continue` của Python tại điểm đó không được port (`hooks.rs`).
   `before_final_answer` của Python không phải một point riêng: `stop` có thể viết
   lại văn bản trả lời cuối cùng của run (không phải tin nhắn assistant, đã được nối
-  vào từ trước khi `stop` chạy) hoặc block việc dừng lại.
+  vào từ trước khi `stop` chạy) hoặc block việc dừng lại. `event_emit`, một trong các
+  point chỉ quan sát, chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ
+  với event vừa được stream vừa được ghi bền — không bao giờ cho record của chính một
+  hook, cũng không cho một delta chỉ stream.
 - Run của một subagent không thể suspend: một lời gọi cần phê duyệt sẽ bị từ chối
   (`runner/batch.rs:73-75`).
 
@@ -169,6 +172,12 @@ envelope mà một lần commit đã làm bền vững và yield một lần, đ
 trước khi run tiếp tục (`runner.rs:278-298`). Các delta và tiến độ của tool bỏ qua bước này:
 chúng đi ra ngay và mang theo seq bền vững gần nhất (`runner.rs:74-80`,
 `runner/sink.rs:184-199`).
+
+Hook point `event_emit` chạy ngay trước mỗi lần gọi `deliver` này, một lần cho mỗi
+envelope trong batch đó, theo thứ tự (`runner/hooks.rs`). Vì bên gọi không bao giờ thấy
+một delta, tiến độ của tool, hay record của chính một hook theo cách này, `event_emit`
+cũng không bao giờ thấy chúng: nó chỉ chạy cho event vừa được stage cho bên gọi vừa mới
+được ghi bền.
 
 ## Batch tool
 

@@ -315,6 +315,7 @@ impl Runner {
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
         let ready = self.journal.flush().await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         let call_model = request.model.clone();
         self.provider_call_start(self.turn, &call_model).await;

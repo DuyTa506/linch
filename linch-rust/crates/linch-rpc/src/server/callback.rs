@@ -12,14 +12,14 @@ use linch::hooks::{
     AfterProviderCall, AfterProviderCallRequest, AfterProviderCallResponse, AgentStart,
     AgentStartRequest, AgentStop, AgentStopRequest, ApprovalRequest, BeforeProviderCall,
     BeforeProviderCallRequest, BeforeProviderCallResponse, ContextBuild, ContextBuildRequest,
-    ContextBuildResponse, PermissionRequest, PostCompact, PostCompactRequest, PostToolUse,
-    PostToolUseFailure, PostToolUseFailureRequest, PostToolUseRequest, PostToolUseResponse,
-    PostTurn, PostTurnRequest, PreCompact, PreCompactRequest, PreToolUse, PreToolUseRequest,
-    PreToolUseResponse, ProviderCallStart, ProviderCallStartRequest, ProviderCallStop,
-    ProviderCallStopRequest, Stop, StopRequest, StopResponse, SubagentStart, SubagentStartRequest,
-    SubagentStop, SubagentStopRequest, ToolUseStart, ToolUseStartRequest, ToolUseStop,
-    ToolUseStopRequest, TurnStart, TurnStartRequest, UserPromptRequest, UserPromptResponse,
-    UserPromptSubmit,
+    ContextBuildResponse, EventEmit, EventEmitRequest, PermissionRequest, PostCompact,
+    PostCompactRequest, PostToolUse, PostToolUseFailure, PostToolUseFailureRequest,
+    PostToolUseRequest, PostToolUseResponse, PostTurn, PostTurnRequest, PreCompact,
+    PreCompactRequest, PreToolUse, PreToolUseRequest, PreToolUseResponse, ProviderCallStart,
+    ProviderCallStartRequest, ProviderCallStop, ProviderCallStopRequest, Stop, StopRequest,
+    StopResponse, SubagentStart, SubagentStartRequest, SubagentStop, SubagentStopRequest,
+    ToolUseStart, ToolUseStartRequest, ToolUseStop, ToolUseStopRequest, TurnStart,
+    TurnStartRequest, UserPromptRequest, UserPromptResponse, UserPromptSubmit,
 };
 use linch::{
     CallbackError, FailMode, Hook, HookChain, HookError, HookPoint, Hooks, JsonValue, Point,
@@ -90,6 +90,7 @@ fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Resu
         HookPoint::PostCompact => add(&hooks.post_compact, common),
         HookPoint::SubagentStart => add(&hooks.subagent_start, common),
         HookPoint::SubagentStop => add(&hooks.subagent_stop, common),
+        HookPoint::EventEmit => add(&hooks.event_emit, common),
     }
 }
 
@@ -455,6 +456,16 @@ impl Wire for SubagentStop {
                "child_session_id": r.child_session_id, "subagent_run_id": r.subagent_run_id,
                "subagent_type": r.subagent_type, "display_name": r.display_name,
                "subtype": r.subtype, "text": r.text, "error": r.error})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for EventEmit {
+    fn encode(r: &EventEmitRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "event": r.event})
     }
 
     fn decode(value: JsonValue) -> Result<(), serde_json::Error> {

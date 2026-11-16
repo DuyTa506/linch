@@ -436,7 +436,7 @@ request has `session_id` and `run_id`:
 A tool result in a request or an answer is `{"output": {"value",
 "metadata"?}}` or `{"error": {"message", "code"?, "details"?}}`.
 
-Twelve more points only observe: the callback cannot change anything they
+Thirteen more points only observe: the callback cannot change anything they
 report, so the answer is always `{}` and none of them can fail closed.
 
 | `point` | The request also has |
@@ -453,15 +453,19 @@ report, so the answer is always `{}` and none of them can fail closed.
 | `post_compact` | `turn`, `messages_before`, `messages_after`, `tokens_before`, `tokens_after`, `strategy` |
 | `subagent_start` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `prompt` |
 | `subagent_stop` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `subtype`, `text`, `error?` |
+| `event_emit` | `event` (the event about to be delivered to the caller) |
 
 `tool_use_start`/`tool_use_stop` bracket a call that actually runs (not one
 served or blocked by `pre_tool_use`); `post_tool_use_failure` fires beside
 `post_tool_use` when the result is an error. `subagent_start`/`subagent_stop`
-fire on the parent's callbacks, not the child's.
+fire on the parent's callbacks, not the child's. `event_emit` fires once per
+event, in delivery order, but only for an event that is both streamed and
+durably logged: never for a hook's own record (it would otherwise recurse)
+and never for a stream-only delta or tool-progress event.
 
 | Argument | Default | What it controls |
 |---|---|---|
-| `point` | required | One of the twenty-one points above |
+| `point` | required | One of the twenty-two points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
 | `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |

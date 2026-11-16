@@ -441,7 +441,7 @@ Hàm nhận dict request và trả về câu trả lời của điểm đó. M�
 Kết quả tool trong một request hoặc một câu trả lời có dạng `{"output":
 {"value", "metadata"?}}` hoặc `{"error": {"message", "code"?, "details"?}}`.
 
-Mười hai điểm nữa chỉ quan sát: callback không thể thay đổi những gì chúng
+Mười ba điểm nữa chỉ quan sát: callback không thể thay đổi những gì chúng
 báo cáo, nên câu trả lời luôn là `{}` và không điểm nào trong số đó có thể
 fail closed.
 
@@ -459,16 +459,20 @@ fail closed.
 | `post_compact` | `turn`, `messages_before`, `messages_after`, `tokens_before`, `tokens_after`, `strategy` |
 | `subagent_start` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `prompt` |
 | `subagent_stop` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `subtype`, `text`, `error?` |
+| `event_emit` | `event` (event sắp được gửi tới bên gọi) |
 
 `tool_use_start`/`tool_use_stop` bao quanh một lời gọi thực sự chạy (không
 phải lời gọi được phục vụ sẵn hoặc bị `pre_tool_use` chặn);
 `post_tool_use_failure` nổ ra cùng lúc với `post_tool_use` khi kết quả là
 lỗi. `subagent_start`/`subagent_stop` nổ ra trên callback của agent cha,
-không phải của agent con.
+không phải của agent con. `event_emit` nổ ra một lần cho mỗi event, theo
+đúng thứ tự gửi đi, nhưng chỉ với event vừa được stream vừa được ghi bền:
+không bao giờ cho record của chính một hook (vì sẽ tự đệ quy vào chính nó)
+và không bao giờ cho một delta hay tool-progress chỉ stream.
 
 | Đối số | Mặc định | Điều khiển gì |
 |---|---|---|
-| `point` | bắt buộc | Một trong hai mươi mốt điểm ở trên |
+| `point` | bắt buộc | Một trong hai mươi hai điểm ở trên |
 | `policy_id`, `policy_version` | bắt buộc | Đi vào hợp đồng của run. Hãy tăng version mỗi khi hành vi, matcher, timeout hoặc fail mode thay đổi |
 | `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở ba điểm tool; một lần không khớp không bao giờ đến process này |
 | `timeout` | không có | Server chờ câu trả lời bao lâu; vắng thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc |

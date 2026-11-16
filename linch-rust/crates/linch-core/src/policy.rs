@@ -151,6 +151,8 @@ pub enum HookPoint {
     SubagentStart,
     /// A subagent's child run reached a terminal result.
     SubagentStop,
+    /// An event is about to be delivered to the caller.
+    EventEmit,
 }
 
 /// What happens when a callback errors or times out.
@@ -189,7 +191,8 @@ impl HookPoint {
             | Self::PreCompact
             | Self::PostCompact
             | Self::SubagentStart
-            | Self::SubagentStop => FailMode::Open,
+            | Self::SubagentStop
+            | Self::EventEmit => FailMode::Open,
         }
     }
 }

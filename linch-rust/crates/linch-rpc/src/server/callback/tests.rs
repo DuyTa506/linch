@@ -215,3 +215,29 @@ fn stop_and_post_turn_read_their_answers() {
     PostTurn::decode(json!({})).unwrap();
     assert!(PostTurn::decode(json!({"verdict": "ok"})).is_err());
 }
+
+/// `event_emit` carries the event about to be delivered, under its own
+/// `type`-tagged wire shape, and answers like every other observe-only
+/// point.
+#[test]
+fn event_emit_carries_the_event_and_answers_like_an_observe_only_point() {
+    let (session_id, run_id) = ids();
+    let request = EventEmitRequest {
+        session_id,
+        run_id,
+        event: linch::Event::User(linch::events::kinds::UserEvent {
+            message: Message::user_text("hi"),
+            subtype: linch::events::kinds::UserEventSubtype::Prompt,
+        }),
+    };
+    assert_eq!(
+        EventEmit::encode(&request),
+        json!({"session_id": "s1", "run_id": "r1", "event": {
+            "type": "user",
+            "message": Message::user_text("hi"),
+            "subtype": "prompt",
+        }})
+    );
+    EventEmit::decode(json!({})).unwrap();
+    assert!(EventEmit::decode(json!({"verdict": "ok"})).is_err());
+}

@@ -21,9 +21,9 @@ use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
     AfterProviderCallOutcome, AfterProviderCallRequest, AgentStartRequest, AgentStopRequest,
     BeforeProviderCallOutcome, BeforeProviderCallRequest, ContextBuildRequest,
-    ContextBuildResponse, HookRecord, HookStatus, PostCompactRequest, PostTurnRequest,
-    PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest, StopOutcome,
-    StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
+    ContextBuildResponse, EventEmitRequest, HookRecord, HookStatus, Hooks, PostCompactRequest,
+    PostTurnRequest, PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest,
+    StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
@@ -169,6 +169,37 @@ pub(super) async fn agent_start(
     push_records(outbox, run_id, 0, records, None);
 }
 
+/// Run `event_emit` for each of `ready`'s envelopes, in that order, before
+/// they are delivered to the caller. `ready` only ever holds envelopes that
+/// are both streamed and durably logged ([`crate::events::Persistence::Both`]):
+/// a stream-only delta, tool-progress event or hook record never reaches
+/// here, so firing this point cannot recurse into itself. Every hook's
+/// records are pushed once, after the whole batch ran, as their own
+/// stream-only envelopes at `seq` — not fed back into the chain.
+pub(super) async fn event_emit(
+    hooks: &Hooks,
+    outbox: &Outbox,
+    session_id: &SessionId,
+    run_id: &RunId,
+    seq: u64,
+    ready: &[Envelope],
+) {
+    let chain = &hooks.event_emit;
+    if chain.is_empty() || ready.is_empty() {
+        return;
+    }
+    let mut records = Vec::new();
+    for envelope in ready {
+        let request = EventEmitRequest {
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            event: envelope.event.clone(),
+        };
+        chain.run_into(&request, &mut records).await;
+    }
+    push_records(outbox, run_id, seq, records, None);
+}
+
 /// Add request-only context to the tail of `messages`: after the blocks
 /// of the last user message, or as a new user message. The cached prefix
 /// (system, tools, every earlier message) stays byte-identical.
@@ -188,6 +219,20 @@ impl Runner {
     pub(super) fn push_records(&self, records: Vec<HookRecord>, tool_use_id: Option<&str>) {
         let seq = self.journal.durable_seq();
         push_records(&self.outbox, &self.run.run_id, seq, records, tool_use_id);
+    }
+
+    /// [`event_emit`] for `ready`, about to be delivered to the caller.
+    pub(super) async fn event_emit(&self, ready: &[Envelope]) {
+        let seq = self.journal.durable_seq();
+        event_emit(
+            &self.agent.hooks,
+            &self.outbox,
+            &self.run.session_id,
+            &self.run.run_id,
+            seq,
+            ready,
+        )
+        .await;
     }
 
     /// The `context_build` blocks for a request over `messages`; `None`

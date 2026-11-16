@@ -20,14 +20,17 @@ What differs in Rust:
   the run where it stands, like a crash (`runner.rs:83-87`).
 - Python's loop guard (repeated calls, repeated failures) is not in the
   runner. It emits `loop_guard` only for `max_turns` (`runner/end.rs:93-108`).
-- Hook points are the twenty-one in the [kernel](./kernel.md#hook-chains),
-  twelve of which only observe. `before_provider_call` can rewrite or block
-  the request about to be sent, and `after_provider_call` can rewrite or
-  block the response a call just assembled, before it is staged; Python's
+- Hook points are the twenty-two in the [kernel](./kernel.md#hook-chains),
+  thirteen of which only observe. `before_provider_call` can rewrite or
+  block the request about to be sent, and `after_provider_call` can rewrite
+  or block the response a call just assembled, before it is staged; Python's
   `retry`/`force_continue` actions at that point are not ported (`hooks.rs`).
   Python's `before_final_answer` is not a separate point: `stop` can rewrite
   the run's final-answer text (not the assistant message, already appended
-  by the time `stop` runs) or block the stop outright.
+  by the time `stop` runs) or block the stop outright. `event_emit`, one of
+  the observe-only points, fires once per event about to be delivered to the
+  caller, but only for an event that is both streamed and durably logged —
+  never for a hook's own record or a stream-only delta.
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -172,6 +175,12 @@ envelopes a commit made durable and yields once, so the stream hands them over
 before the run goes on (`runner.rs:278-298`). Deltas and tool progress skip
 this: they go out at once and carry the last durable seq (`runner.rs:74-80`,
 `runner/sink.rs:184-199`).
+
+The `event_emit` hook point fires right before each of these `deliver` calls,
+once per envelope in that batch, in order (`runner/hooks.rs`). Since the
+caller never sees a delta, tool progress, or a hook's own record this way
+either, `event_emit` never sees them: it fires only for an event that was
+both staged for the caller and just made durable.
 
 ## Tool batch
 

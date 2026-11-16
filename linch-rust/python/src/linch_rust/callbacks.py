@@ -33,6 +33,7 @@ Point = Literal[
     "post_compact",
     "subagent_start",
     "subagent_stop",
+    "event_emit",
 ]
 FailMode = Literal["open", "closed"]
 CallbackFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]

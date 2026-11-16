@@ -132,7 +132,7 @@ where the table says so:
 | `after_provider_call` | A rewrite feeds the next hook; the last rewrite is what gets staged and appended to the session. A block or a closed failure stops the chain and ends the run as failed, before the response is staged (`hooks/assembly.rs`) | open, but its block can fail closed |
 | `stop` | A rewrite feeds the next hook; the last rewrite is the run's final-answer text, not the assistant message already appended to the session. The first hook that keeps the run going stops the chain. A block or a closed failure fails the run (`hooks/turn.rs:280-300`) | open |
 | `post_turn` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/turn.rs:310-312`) | open |
-| `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/observe.rs`) | open |
+| `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`, `event_emit` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/observe.rs`). `event_emit` fires once per event about to be delivered to the caller, but only one that is both streamed and durably logged: never for a hook's own record, and never for a stream-only delta or tool-progress event (`runner/hooks.rs`) | open |
 
 The defaults are in `HookPoint::default_fail_mode` (`policy.rs:140-149`).
 Failure handling is in `Entry::invoke` and `failed` (`hooks/chain.rs:208-259`):

@@ -145,6 +145,8 @@ pub(super) async fn new_run(
         Some(Meter::new(limits, Spent::default()))
     });
     share(&family, &budget);
+    let seq = journal.durable_seq();
+    hooks::event_emit(&agent.hooks, &outbox, &session_id, &run_id, seq, &ready).await;
     outbox.deliver(ready).await;
     let progress = Progress::first(started);
     let run = identity(session_id, run_id, &options.principal, options.trace_id);

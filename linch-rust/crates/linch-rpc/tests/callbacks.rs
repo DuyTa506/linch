@@ -367,6 +367,32 @@ async fn stop_can_block_the_run() {
     assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
 }
 
+/// `event_emit` fires once per durable event delivered to the caller, in
+/// delivery order, carrying the event under its own `type` tag.
+#[tokio::test]
+async fn event_emit_fires_once_per_durable_event() {
+    let (mut rpc, log) = client(json!({
+        "event_emit": {},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "event_emit", "policy_id": "mirror", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("done")], extra).await;
+    assert!(finished(&ended));
+    let kinds: Vec<String> = (log.methods().iter().enumerate())
+        .filter(|(_, m)| m.as_str() == "hook.call:event_emit")
+        .map(|(i, _)| {
+            (log.params(i)["request"]["event"]["type"].as_str())
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["init", "user", "context_build", "assistant", "usage", "result"]
+    );
+}
+
 /// `before_provider_call` sees the exact request about to be sent and can
 /// replace it; the replacement is what the provider gets and what the run's
 /// `context_build` event records, not the original.

@@ -5,7 +5,8 @@
 //! is an error. `tool_use_start`/`tool_use_stop` are covered in
 //! `e2e_hooks.rs` (alongside `pre_tool_use`/`post_tool_use`, whose relative
 //! order matters); `pre_compact`/`post_compact` in `e2e_compaction.rs`;
-//! `subagent_start`/`subagent_stop` in `e2e_subagents.rs`.
+//! `subagent_start`/`subagent_stop` in `e2e_subagents.rs`; `event_emit`
+//! below.
 
 mod common;
 
@@ -16,7 +17,7 @@ use common::hooks::hook;
 use common::*;
 use linch_core::events::model_call::CallDisposition;
 use linch_core::hooks::{
-    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, PostToolUseFailure,
+    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, EventEmit, PostToolUseFailure,
     PostToolUseFailureRequest, ProviderCallStart, ProviderCallStartRequest, ProviderCallStop,
     ProviderCallStopRequest, TurnStart, TurnStartRequest,
 };
@@ -288,4 +289,41 @@ async fn post_tool_use_failure_fires_only_when_the_result_is_an_error() {
     assert_eq!(failure.run_id, run_id);
     assert_eq!(failure.tool_name, "Boom");
     assert_eq!(failure.error.message, "boom");
+}
+
+/// `event_emit` fires once per durable event, in delivery order, exactly
+/// the caller's durable envelopes: never for a hook's own record (it would
+/// otherwise recurse into itself) and never for a stream-only delta — both
+/// still reach the caller, just never the `ready` batch `event_emit` runs
+/// over.
+#[tokio::test]
+async fn event_emit_fires_for_every_durable_event_and_skips_stream_only_ones() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let hooks = Hooks::default();
+    let watch = hook::<EventEmit>("mirror", move |request| {
+        log.lock().unwrap().push(kind(&request.event));
+        Ok(())
+    });
+    let _ = hooks.event_emit.register(watch.arc()).unwrap();
+    // A second observe-only hook so the stream also carries a `hook` kind,
+    // to show event_emit never sees it.
+    let on_start = hook::<AgentStart>("audit", |_| Ok(()));
+    let _ = hooks.agent_start.register(on_start.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![text_turn("done")]));
+    let agent = hooked(provider, hooks, stores);
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let stream_only = ["hook", "partial_assistant"];
+    for kind in stream_only {
+        assert!(
+            kinds(&envelopes).contains(&kind.to_owned()),
+            "a {kind} envelope exists in the stream: {:?}",
+            kinds(&envelopes)
+        );
+    }
+    let durable: Vec<String> = (kinds(&envelopes).into_iter())
+        .filter(|kind| !stream_only.contains(&kind.as_str()))
+        .collect();
+    assert_eq!(*seen.lock().unwrap(), durable);
 }
