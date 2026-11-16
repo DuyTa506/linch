@@ -252,12 +252,13 @@ Một lượt tool với `k` tool đã bắt đầu tốn `3 + 2k` lần ghi run
 | `ToolResults` được giữ lại; `flush_checkpoint` ghi nó trước khi các kết quả được nối | 1 | |
 | Các kết quả được nối vào session | | 1 |
 
-Khi có một hook `provider_call_stop` hoặc `after_provider_call` được gắn, một lời gọi được
-chấp nhận thêm một lần ghi run: receipt và `Usage` của nó được flush cùng
-`ProviderPending` trước khi các hook đó chạy, rồi `AssistantReceived` ghi write-through
+Khi có một hook `after_provider_call` được gắn, một lời gọi được chấp nhận thêm một lần
+ghi run: receipt và `Usage` của nó được flush cùng `ProviderPending` trước khi các hook
+chạy, rồi `AssistantReceived` ghi write-through
 chỉ với event `Assistant`, nên lượt tốn `4 + 2k`
 ([vòng đời của lượt](./turn-lifecycle.md#một-lần-crash-giữa-receipt-và-response-của-nó)).
-Không có hook như vậy thì số lần ghi và mọi checkpoint đều như trên.
+Không có hook như vậy (kể cả khi chỉ có một observer `provider_call_stop`) thì số lần ghi
+và mọi checkpoint đều như trên.
 
 Một lời gọi không chạy gì (bị từ chối, được hook phục vụ, bị abort trước khi bắt đầu)
 không thêm barrier: phần bắt đầu và kết thúc của nó đi cùng lần ghi kế tiếp. Một lượt cuối

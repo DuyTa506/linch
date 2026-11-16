@@ -173,9 +173,9 @@ mỗi lần retry hoặc failover, như khi một run được resume gửi lạ
 giờ kết thúc (`Recovery::Redispatch`, `runner/start.rs:227`). Mỗi lần thử kết thúc bằng
 một receipt.
 
-Một receipt được chấp nhận bền vững trước khi bất kỳ hook `provider_call_stop` hay
-`after_provider_call` nào chạy trên lời gọi của nó. Một lần resume sau khi crash trong
-một hook như vậy tìm thấy receipt được chấp nhận mà không có response của nó (một
+Khi có một hook `after_provider_call` được gắn, một receipt được chấp nhận bền vững
+trước khi bất kỳ hook nào chạy trên lời gọi của nó. Một lần resume sau khi crash trong
+một hook tìm thấy receipt được chấp nhận mà không có response của nó (một
 orphan), giữ usage và chi phí của nó trong các tổng và trong budget, rồi dispatch lại
 lời gọi dưới attempt kế tiếp; đó không phải một lần retry, nên không có event
 `provider_retry` nào được ghi và các lần retry của lượt không bị đụng tới
@@ -196,7 +196,7 @@ dụng ở `call.rs:169`):
 
 `Option<Usage>` đã phân biệt số không với không rõ, nên định dạng receipt không đổi, và
 một binary trước thay đổi này đọc `Some(zero)` như một lời gọi không tốn gì. Một lỗi
-free không gửi event `usage` (`runner/turn.rs:397`, và tương tự trong
+free không gửi event `usage` (`runner/turn.rs:399`, và tương tự trong
 `runner/compact.rs`), như Python không gửi cho một lời gọi thất bại, và để
 `usage_complete` là true. Một `budget` có giới hạn chỉ từ chối lời gọi kế tiếp sau một
 usage không rõ (`budget.rs:110`), nên một lỗi free được retry dưới giới hạn; một lỗi có

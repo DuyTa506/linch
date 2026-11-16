@@ -453,8 +453,8 @@ mua một câu trả lời hai lần:
 - Một run được resume sau khi crash trong lúc chờ sẽ gọi lại ngay, không chờ nốt
   phần còn lại, và tiếp tục đếm các lần thử lại của turn.
 - Một run đã chuyển model sẽ resume trên model fallback.
-- Khi có một callback `provider_call_stop` hoặc `after_provider_call` được gắn, usage của
-  một câu trả lời đã trả phí được ghi trước khi các callback đó chạy. Nếu server crash
+- Khi có một callback `after_provider_call` được gắn, usage của một câu trả lời đã trả
+  phí được ghi trước khi các callback chạy (kể cả `provider_call_stop`). Nếu server crash
   trong lúc một callback chạy, run được resume giữ usage và chi phí đó trong các tổng của
   nó và gọi lại model; lời gọi đó không tốn lần thử lại nào của turn.
 - Một lần thử thất bại mà không tốn gì, một kết nối chưa bao giờ được tạo hoặc một lần

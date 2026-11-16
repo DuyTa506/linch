@@ -59,10 +59,10 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 5. **Điều khiển lời gọi.** Các delta của stream được chuyển ngay cho bên gọi dưới dạng
    event chỉ có trong stream (`turn.rs:306-317`). Lời gọi kết thúc với một receipt, dù nó
    được chấp nhận, thất bại hay bị hủy (`provider/call.rs:1-9`, `43-55`).
-   Khi có một hook `provider_call_stop` hoặc `after_provider_call` được gắn, một receipt
-   được chấp nhận và `Usage` của nó được ghi ngay, với `ProviderPending` được lưu lại ở
-   các tổng đã tính chúng, trước khi các hook đó chạy (`turn.rs:369-378`,
-   `runner/hooks.rs`, `hooks_after_stream`). Một hook có thể là callback của client không
+   Khi có một hook `after_provider_call` được gắn, một receipt được chấp nhận và `Usage`
+   của nó được ghi ngay, với `ProviderPending` được lưu lại ở các tổng đã tính chúng,
+   trước khi các hook chạy, kể cả `provider_call_stop` (`turn.rs:369-380`,
+   `runner/hooks.rs`, `checks_responses`). Một hook có thể là callback của client không
    có timeout; một lần crash trong lúc nó chạy vẫn giữ usage đã trả phí
    ([bên dưới](#một-lần-crash-giữa-receipt-và-response-của-nó)). Bản thân response chưa được ghi: một rewrite của
    `after_provider_call` (chẳng hạn một lần redact) phải là phiên bản duy nhất đến được log.
@@ -71,7 +71,7 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    trạng thái failed và không gì được stage (`hooks/assembly.rs`, `runner/hooks.rs`).
    Khi thành công, run sau đó stage event `Assistant`, và event `Usage` trừ khi bước 5 đã
    ghi nó, rồi lưu `AssistantReceived`, thứ được ghi write-through cùng receipt khi bước 5
-   chưa làm vậy (`turn.rs:421-465`, `journal.rs:192-193`). Một lần retry của hook đi cùng lần ghi đó dưới dạng
+   chưa làm vậy (`turn.rs:422-466`, `journal.rs:192-193`). Một lần retry của hook đi cùng lần ghi đó dưới dạng
    `retry_feedback` của checkpoint, nên response đã trả tiền và việc phải làm với
    nó bền vững cùng nhau. Bên gọi chỉ thấy các event đó sau lần commit này
    (`journal.rs:25-28`).
@@ -176,7 +176,7 @@ Bên gọi đặt các barrier, và run làm điều đó ở những chỗ sau:
 | Barrier | Lời gọi | Vị trí |
 |---|---|---|
 | Trước khi gửi tới provider | `Journal::flush` | `turn.rs:303-305` |
-| Sau một lời gọi được chấp nhận, trước các hook theo sau nó (chỉ khi có hook `provider_call_stop` hoặc `after_provider_call`) | `flush`, với `ProviderPending` được lưu lại | `turn.rs:372-378` |
+| Sau một lời gọi được chấp nhận, trước các hook theo sau nó (chỉ khi có hook `after_provider_call`) | `flush`, với `ProviderPending` được lưu lại | `turn.rs:373-380` |
 | Trước lúc chờ của một lần retry | `flush`, với `ProviderPending` được lưu lại | `runner/retry.rs:69-72` |
 | Quanh lời gọi tóm tắt của compaction | `flush` trước lời gọi; `flush` hoặc write-through `Compacted` sau lời gọi | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Trước mỗi tool thực sự chạy | `ToolSink::tool_starting` flush | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
@@ -190,9 +190,9 @@ event và checkpoint đang chờ đã bền vững. Đừng bao giờ hoãn mộ
 Ba loại ghi không chờ barrier kế tiếp:
 
 - Một receipt đã trả phí. Một lời gọi được chấp nhận ghi write-through cùng
-  `AssistantReceived` (`turn.rs:459`), hoặc, khi có hook chạy giữa stream và lần ghi đó, tự
-  ghi riêng với `ProviderPending` được lưu lại ở các tổng đã tính nó, trước các hook đó
-  (`turn.rs:372-378`). Một bản tóm tắt compaction ghi write-through
+  `AssistantReceived` (`turn.rs:460`), hoặc, khi có một hook `after_provider_call` được gắn, tự
+  ghi riêng với `ProviderPending` được lưu lại ở các tổng đã tính nó, trước các hook
+  (`turn.rs:373-380`). Một bản tóm tắt compaction ghi write-through
   cùng `Compacted` (`compact.rs:134-147`). Một lời gọi tóm tắt không trả về văn bản sẽ
   lưu `CompactionPending` và flush ngay, nên một lần resume không mua lại nó
   (`compact.rs:20-24, 114-120`). Một lời gọi thất bại mà run thử lại sẽ lưu lại
@@ -359,8 +359,8 @@ Một approve hoặc answer được thử lại nhận `NotSuspended`: khi nó 
 
 ### Một lần crash giữa receipt và response của nó
 
-Khi có một hook `provider_call_stop` hoặc `after_provider_call` được gắn, một receipt được
-chấp nhận bền vững trước khi các hook đó chạy, còn response chỉ sau chúng. Một lần crash
+Khi có một hook `after_provider_call` được gắn, một receipt được chấp nhận bền vững
+trước khi các hook chạy (kể cả `provider_call_stop`), còn response chỉ sau chúng. Một lần crash
 ở giữa để lại `ProviderPending` (ở các tổng đã tính receipt), một receipt `accepted` cùng
 event `usage` của nó, và không có event `assistant`. Receipt đó là một orphan:
 
@@ -379,11 +379,14 @@ event `usage` của nó, và không có event `assistant`. Receipt đó là mộ
   resume khi đó kết thúc vì budget, điều này đúng, vì tiền đã được tiêu.
 
 Response không được giữ, nên `after_provider_call` chạy lại trên response mới. Python làm
-giống vậy: nó kết thúc một receipt chỉ có usage ngay khi stream kết thúc, trước các hook
-của nó (`src/linch/loop/streaming.py:498`), và khi resume một receipt không có projection
-`primary_append` không khôi phục prefix nào và dispatch lại lời gọi, với receipt vẫn ở
-trong ledger và các tổng (`src/linch/loop/resume.py:243-300`,
-`src/linch/model_calls.py:711-745`). Không có hook như vậy thì không có gì đổi: receipt đi
+giống vậy: nó kết thúc một receipt chỉ có usage ngay khi stream kết thúc
+(`src/linch/loop/streaming.py:498`), trước khi các hook `after_provider_call` của nó chạy
+(`src/linch/loop/provider_turn.py:370`, `453`) và trước projection `primary_append` ghi
+lại response (`provider_turn.py:466`). Khi resume, một receipt không có projection như vậy
+không khôi phục prefix nào và lời gọi được dispatch lại (`src/linch/loop/resume.py:243-300`),
+với receipt được khôi phục vào ledger cùng các tổng của nó
+(`src/linch/model_calls.py:870`). Không có hook `after_provider_call` thì không có gì đổi,
+có observer `provider_call_stop` hay không: receipt đi
 cùng `AssistantReceived` như trước, từng byte một (được cố định bởi
 `without_hooks_the_receipt_rides_the_response_write`,
 `crates/linch-core/tests/e2e_durable_receipt.rs`).
@@ -423,7 +426,7 @@ lần ghi session (`runner.rs:36-37`):
 
 Bảng này là hình dạng được cố định bởi
 `a_tool_turn_costs_three_plus_two_k_run_writes_and_two_session_writes`
-(`journal/tests/turn.rs:116`). Khi có một hook `provider_call_stop` hoặc
-`after_provider_call` được gắn, bước response là hai lần ghi: receipt và `Usage` với
+(`journal/tests/turn.rs:116`). Khi có một hook `after_provider_call`
+được gắn, bước response là hai lần ghi: receipt và `Usage` với
 `ProviderPending` trước các hook, rồi `Assistant` với `AssistantReceived` sau chúng, nên
 lượt tốn `4 + 2k`.

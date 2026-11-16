@@ -470,7 +470,7 @@ ngoài run xảy ra trước khi trạng thái dẫn tới nó được ghi:
 |---|---|
 | Trước mỗi lời gọi model | Run cho đến lúc này và một bản ghi rằng lời gọi đã được gửi |
 | Sau mỗi phản hồi của model | Message của assistant, usage và chi phí của nó |
-| Sau mỗi phản hồi của model, trước các callback `provider_call_stop` và `after_provider_call` (chỉ khi có một callback được gắn) | Usage và chi phí của phản hồi, không kèm message |
+| Sau mỗi phản hồi của model, trước các callback của nó (chỉ khi có một callback `after_provider_call` được gắn) | Usage và chi phí của phản hồi, không kèm message |
 | Trước khi mỗi tool chạy | `tool_call_start` của nó, để một lần resume không bao giờ chạy nó lần thứ hai |
 | Sau khi mỗi tool trả về | `tool_call_end` của nó |
 | Trước khi cuộc hội thoại được nối thêm | Checkpoint khớp với nó |
@@ -485,8 +485,8 @@ ngoài run xảy ra trước khi trạng thái dẫn tới nó được ghi:
   ngay và không bao giờ được lưu hay replay.
 - Một lời gọi model đã được gửi nhưng phản hồi chưa được ghi sẽ được gửi lại khi
   resume, nên một lần crash vào đúng lúc đó có thể khiến một lời gọi tốn hai lần.
-- Khi có một callback `provider_call_stop` hoặc `after_provider_call` được gắn, một lần
-  crash trong lúc nó chạy vẫn giữ usage và chi phí của lời gọi đã trả phí: run được
+- Khi có một callback `after_provider_call` được gắn, một lần crash trong lúc một callback
+  trên phản hồi chạy (kể cả `provider_call_stop`) vẫn giữ usage và chi phí của lời gọi đã trả phí: run được
   resume tính chúng vào các tổng của `result` và budget, hiện chúng trong một event
   `usage`, và gọi lại model (một `model_call_receipt` mới của cùng turn, không phải một
   lần thử lại). Bản thân message chỉ được ghi sau các callback, nên một callback redact
