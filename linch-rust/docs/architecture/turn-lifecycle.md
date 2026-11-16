@@ -278,7 +278,10 @@ both staged for the caller and just made durable.
 `Step::Batch` plans, then suspends or runs (`runner/batch.rs:29-118`).
 
 1. **Plan.** `scheduler::plan` decides every call without running anything,
-   under the run's cancel token (`batch.rs:58-72`). The hook records of each
+   under the run's cancel token (`batch.rs:58-72`). A cancel there ends the
+   run as a store cancel does ([below](#cancel-a-suspended-run)): an aborted
+   result for each call without one, `Aborting`, the session append, then
+   the terminal, so the session stays paired. The hook records of each
    call go to the caller (`batch.rs:77-80`). The decisions are recorded for
    the checkpoint (`batch.rs:81-83`). The steps of `plan` are in the
    [kernel](./kernel.md#tool-call-seams).

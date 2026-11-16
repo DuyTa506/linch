@@ -145,6 +145,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 ### Changed
 
 - The permission policy joins the run contract when it is not the default (a mode other than `default`, or any layers, `auto_allow`, path or command fields; the facade's `tasks` and a profile's denied tools add to it), so a run is never resumed or approved under a policy that allows more, or less, than the one it started with (`ContractMismatch`).
+- A run cancelled while it plans its tool calls (a hook holding it, or an approve or answer in flight) answers each call with `Tool call aborted` before it ends, instead of leaving the calls unanswered in the session.
 - A binary older than this one cannot resume a run a cancel left half done (the `aborting` checkpoint phase); finish such a run with `cancel` or `resume` before rolling back.
 - A provider's refusal of a prompt longer than the context window ends a run without `spec.compaction` as `kind` `context_length` with the message `prompt exceeds the model's context window: ...`, where it was `kind` `status` with `provider returned HTTP 400: ...`; `retryable` stays false.
 - A binary older than this one cannot resume a run of an agent with `spec.compaction.micro` that crashed during a micro-compaction (the `cleared` checkpoint phase), nor read the events of a run that made a forced compaction (`forced: true`; events refuse unknown fields). Roll back only once those runs have ended.
