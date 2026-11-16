@@ -11,7 +11,8 @@ các workspace tool tích hợp sẵn, hệ thống tệp ảo và MCP server, �
 | Tool | Chạy ở đâu | Được bật bởi |
 |---|---|---|
 | Host tool | Trong process Python của bạn, được server gọi ngược | `open_agent(config, tools=[...])` |
-| Workspace tool: `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash` | Trong server, trên một thư mục | `workspace` (và `bash`) |
+| Workspace tool: `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput`, `BashKill` | Trong server, trên một thư mục | `workspace` (và `bash`) |
+| `AskUser` | Tạm dừng run cho đến khi bạn [trả lời](#hỏi-người-dùng) | `ask_user` |
 | Hệ thống tệp ảo: `ls`, `read_file`, `write_file`, `edit_file` | Trong server, trên các tệp văn bản lưu trong kho | `filesystem` |
 | MCP tool: `mcp__<server>__<tool>` | Trong MCP server | `mcp_servers` |
 | Task của session: `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate` | Trong server | `tasks` ([Task](./tasks.md)) |
@@ -237,7 +238,7 @@ lời gọi khác.
 ## Workspace tool
 
 `workspace` nêu tên một thư mục đã tồn tại. Khi đó agent có các tool này trên nó
-(`bash: False` loại `Bash` ra):
+(`bash: False` loại `Bash`, `BashOutput` và `BashKill` ra):
 
 | Tool | Scope | Làm gì |
 |---|---|---|
@@ -246,7 +247,9 @@ lời gọi khác.
 | `Edit` | write | Thay thế đoạn văn bản khớp chính xác, một lần trừ khi có `replace_all` |
 | `Grep` | read | Engine của ripgrep; các mode `files_with_matches`, `count`, `content` |
 | `Glob` | read | Quy tắc glob của ripgrep, mới nhất trước, tối đa 1000 đường dẫn |
-| `Bash` | exec | `/bin/sh -c` tại gốc của workspace |
+| `Bash` | exec | `/bin/sh -c` tại gốc của workspace; với `run_in_background` nó trả về ngay ([bên dưới](#lệnh-chạy-nền)) |
+| `BashOutput` | read | Những gì một lệnh chạy nền đã in kể từ lần đọc trước, và nó đã kết thúc chưa |
+| `BashKill` | exec | Kill process group của một lệnh chạy nền |
 
 ```python
 import asyncio
@@ -321,6 +324,40 @@ status: final
 
 Các giới hạn, việc kill cả process group và mức trần của đầu ra nằm ở
 [trang tool của kiến trúc](../architecture/tools.md#workspace-tools).
+
+### Lệnh chạy nền
+
+`Bash` với `"run_in_background": true` khởi động lệnh và trả về ngay với
+`process_id` của nó (cũng nằm trong `metadata` của lời gọi, cùng với `pid`):
+
+```text
+[started background process bash_add697562a64; read its output with BashOutput, stop it with BashKill; it is killed after 1800000 ms, when the session closes, or when the server stops]
+```
+
+Sau đó model gọi `BashOutput` với `process_id` đó, và nhận những gì lệnh đã in
+kể từ lần đọc trước. Với `wait_ms` (tối đa 600000), nó chờ chừng đó thời gian cho
+lệnh kết thúc trước. Một lệnh còn đang chạy được đọc như một kết quả thành công
+kết thúc bằng `[bash_... still running; ...]`; một lệnh đã kết thúc được đọc như
+kết quả của `Bash` chạy ở foreground (`[exit code 0]`, hoặc một lỗi nếu thoát với
+mã khác 0 hoặc hết timeout). `BashKill` kill process group của nó và trả về phần
+đầu ra còn lại.
+
+- **Vòng đời.** Một lệnh chạy nền thuộc về session của nó trong agent handle này
+  và sống lâu hơn run đã khởi động nó. Nó bị kill sau `timeout_ms` (mặc định 30
+  phút, tối đa 30 phút), bởi `BashKill`, bởi `agent.close_session(session_id)`,
+  bởi `agent.close()`, và khi server dừng, kể cả bằng SIGKILL: một watchdog
+  trong process group của nó kill cả group khi đầu pipe phía server đóng lại.
+- **Không sống sót qua restart.** Sau khi server khởi động lại, hoặc từ một agent
+  handle khác, id của nó không chỉ tới gì: `BashOutput` và `BashKill` thất bại
+  với `no_such_process` và nói điều đó cho model. Một run được resume mà đã khởi
+  động một lệnh thì phải khởi động lại nó.
+- **Tối đa 4 lệnh cùng lúc** cho mỗi session; lệnh thứ năm thất bại với
+  `too_many_processes`. Mỗi lần đọc trả về tối đa 4000 byte đầu và 26000 byte
+  cuối của đầu ra chưa đọc của mỗi stream.
+- **Permission.** `BashOutput` có scope read, nên chạy ở mọi mode và chạy song
+  song. `BashKill` có scope exec như `Bash`, nên nó hỏi ở `default` và
+  `accept_edits` (Linch Python cho phép nó mà không hỏi); hãy cho phép nó bằng
+  `auto_allow: ["BashKill"]` hoặc một rule `tool`.
 
 <a id="permissions"></a>
 
@@ -542,6 +579,94 @@ One refund done, one needs a manager.
 [callback](./agent.md#callback) `permission_request`: nó trả lời `allow` hoặc
 `deny` trước khi run tạm dừng, và khi nó không đưa ra câu trả lời, lời gọi hỏi như
 thường lệ.
+
+## Hỏi người dùng
+
+`ask_user: True` cho model `AskUser`: từ một đến bốn câu hỏi, mỗi câu có một
+`header` ngắn (tối đa 12 ký tự), hai đến bốn lựa chọn (`label`, `description`) và
+`multi_select`. Một lời gọi không chạy: nó kết thúc stream bằng một event
+`input_request` (`kind` là `ask_user`, `request_id` là `tool_use_id` của lời gọi,
+cùng các `questions`) và một event `suspended` với status `awaiting_input`. Không
+có gì chờ trong bộ nhớ: hãy trả lời khi bạn sẵn sàng bằng
+`agent.answer(run_id, answers)`, lệnh này tiếp tục run và trả về stream mới của nó.
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, Answer, InputRequestEvent, ResultEvent, Server
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+QUESTIONS = {
+    "questions": [
+        {
+            "id": "db",
+            "header": "Database",
+            "question": "Which database should the service use?",
+            "options": [
+                {"label": "Postgres", "description": "Durable, shared by every server"},
+                {"label": "Memory", "description": "For tests; gone on restart"},
+            ],
+        }
+    ]
+}
+
+config: AgentConfig = {
+    "namespace": "ask-demo",
+    "spec": {"model": MODEL},
+    "provider": {
+        "id": "scripted",
+        "turns": [tool_turn("ask_1", "AskUser", QUESTIONS), text_turn("Postgres it is.")],
+    },
+    "ask_user": True,
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config)
+        run = await agent.run("s1", "Set up storage")
+        answers: dict[str, Answer] = {}
+        async for envelope in run:
+            event = envelope.event
+            if isinstance(event, InputRequestEvent):
+                for question in event.questions:
+                    labels = [option["label"] for option in question["options"]]
+                    print(question["question"], labels)
+                # A UI would show the options and wait for the user.
+                answers[event.request_id] = Answer({"db": "Postgres"})
+        # The stream ended with `suspended` (status `awaiting_input`).
+        result = await (await agent.answer(run.id, answers)).result()
+        assert isinstance(result, ResultEvent)
+        print(result.final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+Which database should the service use? ['Postgres', 'Memory']
+Postgres it is.
+```
+
+- `Answer({question_id: choice})` trả lời mọi câu hỏi: một chuỗi, hoặc một danh
+  sách chuỗi với câu hỏi `multi_select`. Một lựa chọn thường là label của một
+  option, nhưng người dùng có thể tự viết. `note=` thêm một ghi chú tự do.
+- `Answer.declined(note)` từ chối: model được báo là tiếp tục với các giả định đã
+  nêu.
+- Model đọc câu trả lời như kết quả của lời gọi, dưới dạng JSON:
+  `{"answers": {"db": "Postgres"}}`, kèm `"note"` khi có.
+- Một request đang chờ mà chưa có câu trả lời sẽ được hỏi lại: run tạm dừng thêm
+  một lần nữa. Một câu trả lời nêu tên request không đang chờ, bỏ sót một câu hỏi
+  hoặc đưa danh sách cho câu hỏi chọn một sẽ gây ra `InvalidAnswer` (code -32032)
+  và không ghi gì; run vẫn chờ.
+- Câu trả lời được ghi trước khi run tiếp tục, nên sau một crash
+  `agent.resume(run_id)` tiếp tục với nó, và cùng câu trả lời đó gửi lại sẽ là
+  `NotSuspended` ([Run](./runs.md#answer)).
+- Một [callback](./agent.md#callback) `pre_tool_use` xử lý lời gọi sẽ trả lời thay
+  người dùng, và run không tạm dừng. Một subagent không thể hỏi: lời gọi của nó
+  nhận một lỗi nói rằng run không thể chờ người dùng.
+- Một response vừa hỏi vừa cần phê duyệt sẽ tạm dừng để chờ phê duyệt trước, rồi
+  mới chờ câu trả lời.
 
 ## Hệ thống tệp ảo
 

@@ -14,7 +14,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 |---|---|---|
 | `ProtocolError` | -32700 đến -32600 | Một cấu hình hoặc khai báo mà server không đọc được |
 | `OpenError` | -32010 đến -32015 | `open_agent`: cấu hình, provider, kho lưu trữ hoặc một MCP server bị lỗi |
-| `RunError` và các lớp con | -32020 đến -32031 | Cuối stream của một run, hoặc `agent.events` |
+| `RunError` và các lớp con | -32020 đến -32032 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
 | `ConnectionClosed` | không có | Mọi lệnh gọi hoặc stream, khi server đã biến mất |
 | `LinchError` | không có | Lớp cơ sở của tất cả các lớp trên, và việc dùng sai `Server` |
@@ -125,14 +125,15 @@ raise chúng.
 
 | Exception | Thông báo | Nguyên nhân | Cách khắc phục |
 |---|---|---|---|
-| `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | Session có một run đang chạy hoặc đang chờ phê duyệt | Resume, phê duyệt hoặc hủy `busy.run_id` trước, hoặc xếp prompt vào hàng đợi ([Run](./runs.md#one-live-run-per-session)) |
+| `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | Session có một run đang chạy hoặc đang chờ phê duyệt hay câu trả lời | Resume, phê duyệt, trả lời hoặc hủy `busy.run_id` trước, hoặc xếp prompt vào hàng đợi ([Run](./runs.md#one-live-run-per-session)) |
 | `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` dùng lại một id | Dùng id mới, hoặc `resume` run hiện có |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | Không có run đó trong kho lưu trữ của agent; với kho trong bộ nhớ, một handle `Agent` khác đã bắt đầu nó, hoặc server đã khởi động lại | Với kho trong bộ nhớ, dùng handle đã bắt đầu run; với Postgres, kiểm tra namespace và DSN |
-| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume` hoặc `approve` một run đã kết thúc; `data["status"]` là trạng thái của nó | Bắt đầu một run mới trong session |
+| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` hoặc `answer` một run đã kết thúc; `data["status"]` là trạng thái của nó | Bắt đầu một run mới trong session |
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (tên các khóa của `data`) | Spec, tool hoặc callback của agent khác với những gì run đã bắt đầu | Mở lại với cấu hình gốc, hoặc để run kết thúc trước ([Hợp đồng của run](./agent.md#the-run-contract)) |
-| `NotSuspended` (-32027) | `run <id> is not awaiting approval; if an approve already committed its answers, continue the run with resume` | Một approve được gửi lại sau khi các câu trả lời của nó đã được commit (tiến trình hoặc kết nối của bạn đã chết) | Gọi `agent.resume(run_id)` ([Run](./runs.md#approve)) |
+| `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | Một approve hoặc answer được gửi lại sau khi nó đã được commit (tiến trình hoặc kết nối của bạn đã chết), hoặc một câu trả lời cho run đang chờ phê duyệt | Gọi `agent.resume(run_id)` ([Run](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | lý do của callback, trong `.reason` | Một callback `user_prompt_submit` đã chặn prompt | Không có gì được ghi; đổi prompt hoặc callback |
 | `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` nhận một schema không compile được, hoặc root của nó không phải `{"type": "object"}` | Không có gì được ghi; sửa schema ([Structured output](./structured-output.md)) |
+| `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (lý do nằm trong `.reason`) | `agent.answer` nêu tên một request không đang chờ, bỏ sót một câu hỏi chưa trả lời, hoặc đưa danh sách cho câu hỏi chọn một | Không có gì được ghi và run vẫn chờ; hãy trả lời lại ([Tool](./tools.md#hỏi-người-dùng)) |
 
 Do chính lệnh gọi raise:
 
@@ -168,6 +169,9 @@ vẫn tiếp tục.
 | `Read <path> before changing it.` | `Write` lên một tệp có sẵn hoặc `Edit` mà chưa có `Read` trong session này, hoặc sau `close_session` hay khi khởi động lại | Đúng như dự kiến; mô hình đọc, rồi mới ghi |
 | `Read this file again before editing it.` / `... before writing it.` | Tệp thay đổi trên đĩa sau khi model đọc | Đúng như dự kiến; mô hình đọc lại rồi thử lại |
 | `Tool execution was interrupted before a result was recorded; not re-running automatically on resume.` | Tiến trình đã chết trong khi lệnh gọi đang chạy | Kiểm tra xem tác động đã xảy ra chưa trước khi hành động tiếp |
+| `Background process <id> no longer exists in this session: ...` (code `no_such_process`) | `BashOutput` hoặc `BashKill` nêu tên một id mà agent handle này không biết: session đã đóng, server đã khởi động lại, hoặc một handle khác đã khởi động nó | Đúng như dự kiến sau khi khởi động lại; model khởi động lại lệnh ([Tool](./tools.md#lệnh-chạy-nền)) |
+| `4 background processes already run in this session; ...` (code `too_many_processes`) | Một lệnh `Bash` chạy nền thứ năm trong một session | Model đọc hoặc kill một lệnh trước |
+| `AskUser is not available here: this run cannot wait for the user...` | Một subagent gọi `AskUser` | Đúng như dự kiến; chỉ run cấp cao nhất mới hỏi được |
 
 Bản thân `@tool` raise khi import: `ValueError` với scope không phải `read`,
 `write` hoặc `exec` hoặc timeout không dương, và `TypeError` với hàm không phải

@@ -143,6 +143,10 @@ claim và commit của nó để lại trạng thái `running`
 (`execute.rs:116-118`). Một run suspend để chờ phê duyệt kết thúc job của nó;
 `enqueue_approve` đưa phần tiếp tục vào hàng đợi.
 
+Không có job answer: một run suspend để chờ câu trả lời `AskUser` kết thúc job của nó,
+một job resume trên nó chỉ suspend nó lại, và câu trả lời đến từ một host qua
+`Agent::answer` (hoặc `run.answer`).
+
 ## Kết quả, back-off và dead letter
 
 Mỗi lần thử kết thúc bằng một `Outcome` (`crates/linch-worker/src/outcome.rs:9-32`),

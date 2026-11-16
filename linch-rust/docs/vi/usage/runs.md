@@ -2,13 +2,13 @@
 
 [Bản gốc tiếng Anh](../../usage/runs.md)
 
-Dùng trang này để bắt đầu, stream, resume, phê duyệt và hủy run, và để biết điều
+Dùng trang này để bắt đầu, stream, resume, phê duyệt, trả lời và hủy run, và để biết điều
 gì còn lại sau một lần crash.
 
 [<- Hướng dẫn sử dụng](./README.md)
 
-Một run là một prompt trong một session. `agent.run`, `agent.resume` và
-`agent.approve` đều trả về một `Run` ngay khi server chấp nhận lời gọi; các event
+Một run là một prompt trong một session. `agent.run`, `agent.resume`,
+`agent.approve` và `agent.answer` đều trả về một `Run` ngay khi server chấp nhận lời gọi; các event
 của run sau đó được stream về dưới dạng `Envelope`.
 
 | Lời gọi | Làm gì |
@@ -16,6 +16,7 @@ của run sau đó được stream về dưới dạng `Envelope`.
 | `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None)` | Bắt đầu một run; session được tạo nếu chưa có. `trace_id` là của bạn, được lặp lại trên các event `init` và `result` của run ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` thay thế schema của agent cho run này ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
 | `await agent.resume(run_id, *, principal=None)` | Tiếp tục một run sau crash hoặc sau khi stream bị rớt |
 | `await agent.approve(run_id, decisions, *, principal=None)` | Trả lời các lời gọi đang chờ của một run bị tạm dừng và tiếp tục nó |
+| `await agent.answer(run_id, answers, *, principal=None)` | Trả lời các câu hỏi `AskUser` của một run bị tạm dừng và tiếp tục nó |
 | `async for envelope in run` | Mọi envelope của lời gọi này, theo thứ tự, kết thúc sau `result` hoặc `suspended` |
 | `await run.result()` | Đọc phần còn lại và trả về `ResultEvent` hoặc `SuspendedEvent` |
 | `await run.cancel()` | Hủy run; `True` khi server đang điều khiển nó |
@@ -83,7 +84,8 @@ busy with True
 ```
 
 - Một stream kết thúc bằng `result` khi run đã xong, hoặc `suspended` khi nó chờ
-  một lần phê duyệt. `result.subtype` là `success`, `error`, `aborted` hoặc
+  một lần phê duyệt (status `awaiting_approval`) hoặc một câu trả lời (status
+  `awaiting_input`). `result.subtype` là `success`, `error`, `aborted` hoặc
   `interrupted`.
 - Bạn có thể lặp qua một phần của run rồi gọi `result()` cho phần còn lại. Ngừng
   lặp không dừng run: server vẫn tiếp tục điều khiển nó và các envelope của nó chờ
@@ -100,14 +102,14 @@ busy with True
 ### Một run đang chạy cho mỗi session
 
 Một session có nhiều nhất một run chưa kết thúc: một run đang chạy hoặc đang chờ
-phê duyệt. Bắt đầu một run khác sẽ kết thúc run mới bằng `SessionBusy` (code
+phê duyệt hay câu trả lời. Bắt đầu một run khác sẽ kết thúc run mới bằng `SessionBusy` (code
 -32030) trước khi bất kỳ thứ gì được ghi; `busy.session_id` và `busy.run_id` nêu
-tên run đang chạy. Hãy resume, phê duyệt hoặc hủy run đó trước, hoặc xếp hàng
+tên run đang chạy. Hãy resume, phê duyệt, trả lời hoặc hủy run đó trước, hoặc xếp hàng
 prompt. Với Postgres, quy tắc này đúng trên mọi server dùng chung database.
 
 ## Lỗi đến ở cuối stream
 
-`run()`, `resume()` và `approve()` trả về trước khi server làm gì ngoài việc chấp
+`run()`, `resume()`, `approve()` và `answer()` trả về trước khi server làm gì ngoài việc chấp
 nhận lời gọi. Một sự từ chối (session đang bận, run không xác định, contract khác
 nhau) và một lỗi khi tiếp tục bền vững sẽ đến dưới dạng phần cuối của stream: lặp
 hoặc gọi `result()` sẽ raise một subclass của `RunError`.
@@ -118,10 +120,11 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | `RunError` | -32023 | `run_id` đã được lưu |
 | `ContractMismatch` | -32025 | Run đã bắt đầu dưới một contract khác ([Config của agent](./agent.md#hợp-đồng-của-run)); `data["expected"]` là contract của run và `data["found"]` là của agent này, như thông báo nêu |
 | `RunTerminal` | -32026 | Run đã kết thúc; `data.status` là trạng thái của nó |
-| `NotSuspended` | -32027 | `approve` trên một run không đang chờ phê duyệt ([bên dưới](#approve)) |
+| `NotSuspended` | -32027 | `approve` trên một run không đang chờ phê duyệt, hoặc `answer` trên một run không đang chờ câu trả lời ([bên dưới](#approve)) |
 | `PromptBlocked` | -32029 | Một callback `user_prompt_submit` đã từ chối prompt; `.reason` cho biết lý do. Không có run hay session nào được tạo |
 | `SessionBusy` | -32030 | Session có một run đang chạy |
 | `InvalidOutputSchema` | -32031 | `output_schema` của run không compile được hoặc root của nó không phải object; `.reason` nêu lý do. Không có run hay session nào được tạo |
+| `InvalidAnswer` | -32032 | Các câu trả lời không khớp với các câu hỏi `AskUser` đang chờ; `.reason` nêu lý do. Không có gì được ghi: run vẫn chờ ([bên dưới](#answer)) |
 | `RunError` | -32020 đến -32028 | Việc ghi vào kho hoặc journal thất bại, hoặc trạng thái đã lưu không khớp với nhau; run giữ nguyên ở trạng thái bền vững cuối cùng của nó |
 | `ConnectionClosed` | không có | Server biến mất giữa chừng stream |
 
@@ -210,14 +213,14 @@ trong lúc chờ, nên nó không bao giờ tự chờ chính mình.
 
 `resume(run_id)` tiếp tục một run từ trạng thái bền vững cuối cùng của nó. Dùng nó
 sau khi process của bạn hoặc server bị crash, sau khi stream bị rớt, hoặc để nhận
-một run mà process khác đã bắt đầu. Một run đang chờ phê duyệt sẽ tạm dừng lại
+một run mà process khác đã bắt đầu. Một run đang chờ phê duyệt hoặc câu trả lời sẽ tạm dừng lại
 ngay. Chỉ resume sau khi stream trước đó đã kết thúc (việc lặp của nó đã xong hoặc
 đã raise); trong khi một server còn đang điều khiển run, `resume` sẽ là `RunBusy`.
 
 Handle nào resume được phụ thuộc vào các kho lưu trữ:
 
 - **Kho memory**: run nằm trong agent handle đã bắt đầu nó. Hãy resume và phê duyệt
-  nó qua chính `Agent` đó; nó mất khi server dừng.
+  hoặc trả lời nó qua chính `Agent` đó; nó mất khi server dừng.
 - **Kho Postgres**: bất kỳ agent nào được mở với cùng config và tool (nên cùng
   contract), trên bất kỳ server nào, đều resume được.
 
@@ -382,6 +385,20 @@ lost the server; did the approve land?
 Deploy was interrupted.
 ```
 
+## Answer
+
+`answer(run_id, answers)` nhận một `Answer(...)` hoặc `Answer.declined(note)`
+cho mỗi `request_id` của các event `input_request` (`pending_request_ids` của event
+`suspended`); một request bị bỏ sót sẽ được hỏi lại. Cách hỏi và những gì model đọc
+nằm ở [Tool](./tools.md#hỏi-người-dùng).
+
+Nó theo các quy tắc của approve: chỉ một run đang chờ câu trả lời mới nhận một câu
+trả lời; câu trả lời được ghi thành kết quả của lời gọi trước khi run tiếp tục, nên
+cùng câu trả lời đó gửi lại sau một crash sẽ kết thúc bằng `NotSuspended` và không
+ghi gì, và `resume` tiếp tục run với câu trả lời đã commit. Một câu trả lời cho run
+đã kết thúc là `RunTerminal`. Với kho Postgres, câu trả lời có thể đến từ một
+process khác hoặc một ngày sau.
+
 ## Hành động thay cho một principal
 
 `principal` cho biết một run hành động thay cho ai: `{"tenant", "user", "roles"?}`
@@ -480,5 +497,6 @@ server. Một lượt tốn bao nhiêu lần ghi và chúng được gom nhóm r
 
 - [Event](./events.md): mọi event trong stream.
 - [Tool](./tools.md#phê-duyệt): vòng lặp phê duyệt và permission rule.
+- [Tool](./tools.md#hỏi-người-dùng): `AskUser` và các câu trả lời của nó.
 - [Kho lưu trữ](./stores.md): memory và Postgres.
 - [Khắc phục sự cố](./troubleshooting.md#runs): lỗi của run và cách khắc phục.

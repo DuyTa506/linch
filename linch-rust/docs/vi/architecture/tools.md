@@ -172,9 +172,10 @@ phần bắt đầu và kết thúc được stage và ghi cùng barrier kế ti
 
 ## Tool workspace
 
-`workspace_tools(fs, reads)` (`crates/linch-tools/src/lib.rs:51`) trả về
-`Read`, `Write`, `Edit`, `Grep`, `Glob` và `Bash` trên một `LocalFs`, dùng chung
-một `ReadTracker`. Crate này chỉ dành cho Unix vì Bash dùng process group.
+`workspace_tools(fs, reads, processes)` (`crates/linch-tools/src/lib.rs:55`)
+trả về `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` và
+`BashKill` trên một `LocalFs`, dùng chung một `ReadTracker` và một registry
+`Processes`. Crate này chỉ dành cho Unix vì Bash dùng process group.
 
 | Tool | Scope | Hành vi |
 |---|---|---|
@@ -184,6 +185,8 @@ một `ReadTracker`. Crate này chỉ dành cho Unix vì Bash dùng process grou
 | `Grep` | read | Engine của ripgrep trong process; các chế độ `files_with_matches`, `count`, `content`; mặc định 250 mục, đầu ra giới hạn 30 000 byte (`crates/linch-tools/src/grep.rs:15-25`) |
 | `Glob` | read | Quy tắc glob của ripgrep, mới nhất trước, tối đa 1000 đường dẫn (`crates/linch-tools/src/glob.rs:13`) |
 | `Bash` | exec | `/bin/sh -c` trong thư mục gốc; xem bên dưới |
+| `BashOutput` | read | Đầu ra chưa đọc của một lệnh chạy nền; xem [bên dưới](#bash-chạy-nền) |
+| `BashKill` | exec | Kill group của một lệnh chạy nền |
 
 Grep và Glob bỏ qua các tệp bị ignore và không đi theo symlink; Grep cũng bỏ qua
 các tệp ẩn và nhị phân, và Glob chỉ liệt kê tệp ẩn khi mẫu
@@ -221,20 +224,56 @@ cập được. Hãy dùng permission engine (mặc định nó hỏi cho `exec`
 thi được sandbox khi điều đó quan trọng. Những gì nó bảo đảm:
 
 - stdin bị đóng và lệnh dẫn đầu một process group mới
-  (`crates/linch-tools/src/bash/process.rs:66`);
+  (`crates/linch-tools/src/bash/process.rs:91-117`);
 - cả group nhận `SIGKILL` khi timeout, khi hủy, khi future của lời gọi
   bị drop, và khi shell thoát, nên các job nền không bao giờ sống lâu hơn
-  lời gọi (`process.rs:135-148`);
+  lời gọi (`process.rs:122-170`);
 - chỉ chín biến của host được truyền qua (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), nên thông tin xác thực của host
   nằm ngoài môi trường (`bash.rs:33`); `with_env` thêm các biến khác (`bash.rs:82`);
-- timeout mặc định là 120 s và bị chặn ở 30 phút (`bash.rs:22-25`);
+- timeout mặc định là 120 s (30 phút khi chạy nền) và bị chặn ở 30 phút
+  (`bash.rs:29-32`);
   khi có deadline của lời gọi, nó kết thúc 100 ms trước deadline đó, để đầu ra cho đến lúc
   đó đến được model thay vì một timeout chung chung (`bash.rs:140`);
 - mỗi stream giữ 4000 byte đầu và 26 000 byte cuối
   (`bash/capture.rs:5-8`);
 - mọi exit status khác 0 là một kết quả lỗi mang cùng văn bản, với mã
-  `exit_status`, `timeout` hoặc `aborted` (`bash.rs:151`).
+  `exit_status`, `timeout` hoặc `aborted` (`bash.rs:240-244`).
+
+### Bash chạy nền
+
+`run_in_background: true` giao lệnh cho registry `Processes` của agent
+(`crates/linch-tools/src/bash/background.rs:48`) và trả về id của nó ngay lập tức.
+Registry thuộc về một agent đã mở (không có process global), khóa các process theo
+session, và cho mỗi session chạy nhiều nhất `MAX_RUNNING` (4) process cùng lúc, giữ
+tới 16 process đã kết thúc để đọc lần cuối (`background.rs:28-32`). Id có dạng `bash_`
+cộng 12 chữ số hex ngẫu nhiên, nên một id từ trước khi khởi động lại không bao giờ chỉ
+tới một process mới.
+
+- Một supervisor task cho mỗi process sở hữu `Child`: nó chạy cùng `supervise` như một
+  lời gọi foreground, bơm từng stream vào một capture có giới hạn mà một lần đọc lấy
+  dữ liệu từ đó (4000 byte đầu và 26 000 byte cuối của phần chưa đọc), và reap shell dù
+  điều gì kết thúc nó.
+- Nó kết thúc khi thoát, khi hết timeout, bởi `BashKill`, `Processes::close_session`
+  (nối với `Agent::close_session`), `Processes::close` và `Drop` của registry
+  (agent đóng). Mỗi cách đều kill cả group và chờ reap.
+- **Lifeline.** Một lệnh chạy nền chạy dưới một wrapper `/bin/sh` nhỏ
+  (`process.rs:34`) có stdin là một pipe do server giữ. Một watchdog trong group của
+  lệnh chặn trên pipe đó bằng builtin `read` và kill group khi nó đóng, việc kernel làm
+  khi server chết, kể cả bằng `SIGKILL`. Nó không cần gì trên `PATH` của lệnh. Một lệnh
+  foreground không có lifeline: nó chết cùng lời gọi của nó, nhưng một server bị kill
+  giữa lời gọi để lệnh đó chạy tiếp.
+- `BashOutput` (scope read, chạy song song) chờ tối đa `wait_ms` (nhiều nhất
+  600 000, bị cắt theo deadline của lời gọi) cho tới khi kết thúc, rồi trả về đầu ra
+  chưa đọc; một process đang chạy là một kết quả thành công kết thúc bằng
+  `still running`, một process đã kết thúc được hiển thị như kết quả foreground.
+  `BashKill` có scope exec như `Bash`. Cả hai nằm trong
+  `crates/linch-tools/src/bash/control.rs`.
+- **Restart.** Process chỉ sống trong bộ nhớ và chết cùng server, nên `BashOutput`
+  hoặc `BashKill` của một run được resume trên một id cũ thất bại với mã
+  `no_such_process` (`control.rs:22`) và một thông báo nói rằng background process không
+  sống sót qua restart. Không có gì về chúng được journal: kết quả bền vững của lời gọi
+  khởi động giữ id của nó, và model khởi động lại lệnh.
 
 ## Hệ thống tệp ảo và chuyển kết quả ra ngoài
 
@@ -294,6 +333,28 @@ bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài,
 
 Với `MemorySessions`, một run được resume trong process khác sẽ thấy con trỏ nhưng
 không thấy tệp.
+
+## AskUser
+
+`AskUser` (`crates/linch-core/src/ask_user.rs`) nằm trong `linch-core`, vì runner phải
+biết về nó: nó là tool duy nhất có `asks_user()` (một method `Tool` có giá trị mặc định,
+`false` ở mọi nơi khác) là `true`. `AgentConfig` đăng ký nó khi `ask_user` bật; mặc định
+nó tắt, cũng như `AskUserPlugin` của Python là opt-in.
+
+- Input của nó là 1 đến 4 câu hỏi (`id`, `header` tối đa 12 ký tự, `question`, 2 đến 4
+  option gồm `label` và `description`, `multi_select`); id và label phải là duy nhất.
+  Scope `read`, không bao giờ chạy song song.
+- Planner biến một lời gọi `AskUser` được phép thành `PlannedAction::AwaitingInput`
+  thay vì chạy nó; một hook `pre_tool_use` xử lý lời gọi thì giữ câu trả lời của nó. Sau
+  đó run suspend để chờ input ([vòng đời của lượt](./turn-lifecycle.md#suspend)). Bản
+  thân `execute` chỉ trả về lỗi "cannot wait", là thứ mà lời gọi của một run con nhận
+  được.
+- `AskUserAnswer::check` đối chiếu một câu trả lời với các câu hỏi của nó: được chấp
+  nhận, mọi câu hỏi đều được trả lời (một chuỗi không rỗng, hoặc một danh sách không rỗng
+  cho `multi_select`); bị từ chối, không có câu trả lời. Một lựa chọn không bị kiểm tra
+  với các label, nên người dùng có thể tự viết, như trong Python.
+- `AskUserAnswer::render` là kết quả của lời gọi: `{"answers": {...}}` (và `note`)
+  dưới dạng văn bản JSON, hoặc văn bản từ chối của Python.
 
 <a id="session-task-tools"></a>
 
@@ -421,16 +482,17 @@ use std::sync::Arc;
 
 use linch_core::{Hooks, Registration, ToolRegistry};
 use linch_tools::vfs::{MemorySessions, OffloadConfig, ResultOffload, SessionFiles, vfs_tools};
-use linch_tools::{LocalFs, ReadTracker, workspace_tools};
+use linch_tools::{LocalFs, Processes, ReadTracker, workspace_tools};
 
 /// Register the workspace tools over `root`, the virtual filesystem tools,
 /// and the offload hook. Keep the handles to undo every registration.
 fn wire(root: &Path, tools: &ToolRegistry, hooks: &Hooks) -> Vec<Registration> {
     let fs = Arc::new(LocalFs::new(root).expect("an existing directory"));
     let reads = Arc::new(ReadTracker::new());
+    let processes = Arc::new(Processes::new());
     let files: Arc<dyn SessionFiles> = Arc::new(MemorySessions::new());
     let mut registrations = Vec::new();
-    for tool in workspace_tools(fs, reads).into_iter().chain(vfs_tools(Arc::clone(&files))) {
+    for tool in workspace_tools(fs, reads, processes).into_iter().chain(vfs_tools(Arc::clone(&files))) {
         registrations.push(tools.register(tool).expect("names are free"));
     }
     let offload = ResultOffload::new(files, OffloadConfig::new(8_000)).expect("a valid prefix");
@@ -441,7 +503,7 @@ fn wire(root: &Path, tools: &ToolRegistry, hooks: &Hooks) -> Vec<Registration> {
 fn main() {
     let (tools, hooks) = (ToolRegistry::new(), Hooks::default());
     let registrations = wire(&std::env::temp_dir(), &tools, &hooks);
-    assert_eq!(tools.snapshot().definitions().len(), 10);
+    assert_eq!(tools.snapshot().definitions().len(), 12);
     for registration in &registrations {
         registration.dispose();
     }
