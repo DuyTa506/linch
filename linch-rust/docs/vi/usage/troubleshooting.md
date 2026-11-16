@@ -146,7 +146,7 @@ một `result` có subtype `error`:
 | `error["message"]` | Nguyên nhân | Cách khắc phục |
 |---|---|---|
 | `max turns exceeded` (sau một event `loop_guard`) | Run đã đạt `spec.max_turns` | Tăng giới hạn, hoặc bắt đầu một run mới để tiếp tục |
-| fragment: `provider returned HTTP <status>:` | Provider từ chối lệnh gọi; `error["retryable"]` cho biết thử lại có thể giúp hay không | Kiểm tra khóa và model với 401, 403 hoặc 404; thử lại sau với 429 và 5xx |
+| fragment: `provider returned HTTP <status>:` | Provider từ chối lệnh gọi; `error["retryable"]` cho biết thử lại có thể giúp hay không | Kiểm tra khóa và model với 401, 403 hoặc 404; thử lại sau với 408, 429 và 5xx, hoặc để run tự thử lại chúng bằng [`spec.provider_retry`](./providers.md#lỗi-và-thử-lại) |
 | `invalid provider request: scripted provider ran out of turns after <n>` | Một bài kiểm thử scripted cần nhiều lượt hơn số lượt đã có | Thêm các lượt còn thiếu |
 
 ## Tool

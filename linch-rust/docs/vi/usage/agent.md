@@ -200,6 +200,8 @@ có, trừ `bash`.
 | `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây; quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
 | `compaction` | không có: không bao giờ nén | Khi nào tóm tắt phần cũ của cuộc hội thoại ([bên dưới](#compaction)) |
 | `budget` | không có: không giới hạn | Giới hạn token và USD cho mỗi run và các subagent của nó, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([bên dưới](#budget)) |
+| `provider_retry` | không có: không thử lại | Gọi lại cùng model sau một lỗi có thể thử lại, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`; `{}` bật nó với các mặc định của Python ([providers](./providers.md#lỗi-và-thử-lại)) |
+| `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự, khi một model hết lượt thử lại; run giữ model mà nó đã chuyển sang ([providers](./providers.md#lỗi-và-thử-lại)) |
 
 ### System block
 

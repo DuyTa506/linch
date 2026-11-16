@@ -43,7 +43,7 @@ binding (`agent.rs:101-105`). `AgentInner` giữ những gì một run đọc t�
 
 | Trường | Là gì |
 |---|---|
-| `spec` | `AgentSpec` serde: model, prompt, giới hạn, compaction, budget (`agent/spec.rs:29-68`) |
+| `spec` | `AgentSpec` serde: model, prompt, giới hạn, compaction, budget, provider retry và fallback model (`agent/spec.rs:30-78`) |
 | `provider`, `permissions`, `runs`, `sessions` | Các binding mà builder yêu cầu |
 | `tools` | `ToolRegistry` của agent này |
 | `hooks` | Các chuỗi `Hooks` của agent này |
@@ -72,7 +72,11 @@ bao gồm point, `policy_id` và `policy_version` của từng hook, theo thứ 
 trả lời, kể cả `retry`. Giới hạn riêng của kernel cho các lần retry ở `stop` (một
 lần cho mỗi lần gọi run) là một hằng số, không phải một thiết lập, nên nó không nằm
 trong digest; nó cũng không được checkpoint, và một lần resume bắt đầu lại từ đầu,
-như `_MAX_FINAL_ANSWER_REENTRIES` của Python.
+như `_MAX_FINAL_ANSWER_REENTRIES` của Python. `provider_retry` và
+`fallback_models` của spec nằm trong digest cùng phần còn lại của spec, nên model
+fallback của một run được resume, đọc lại từ các event `model_fallback` của nó theo
+vị trí trong danh sách, trỏ tới cùng một model. Khi không đặt, chúng không có trong
+dạng wire của spec, và do đó digest vẫn như trước khi chúng tồn tại.
 
 ## Đăng ký
 
@@ -180,7 +184,7 @@ tool chỉ bắt đầu sau khi `tool_starting` trả về, và mỗi kết qu�
 - Một wrapper `Tool` được đăng ký bằng `ToolRegistry::replace`, thứ ẩn tool được bọc
   và được hoàn tác bằng `Registration` của nó.
 - `call_timeout_ms` và `max_tool_concurrency` trong spec cho timeout và
-  giới hạn song song (`agent/spec.rs:53-59`).
+  giới hạn song song (`agent/spec.rs:54-60`).
 
 Đừng sửa `scheduler/` hay `runner/` cho một cổng kiểm soát mới.
 

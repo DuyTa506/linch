@@ -341,13 +341,124 @@ asyncio.run(main())
 
 ## Lỗi và thử lại
 
-Không có gì thử lại một lời gọi provider: không phải adapter, cũng không phải run.
-Một lời gọi thất bại (lỗi kết nối, HTTP status, một stream vi phạm quy tắc của
-nó) kết thúc run bằng một event `error` và một `result` có subtype `error`. Dict
-`error` của event lỗi mang `retryable` và, với lỗi HTTP, cả `status`, để bạn quyết
-định có bắt đầu một run mới hay không. Một lời gọi bị hủy kết thúc run ở trạng thái
-`aborted`. Mỗi adapter có timeout kết nối 30 giây và timeout đọc giữa các lần đọc
-(300 giây hoặc 600 giây); không có hạn chót cho cả một lời gọi.
+Mặc định không có gì thử lại một lời gọi provider: không phải adapter, cũng không
+phải run. Một lời gọi thất bại (lỗi kết nối, HTTP status, một stream vi phạm quy
+tắc của nó) kết thúc run bằng một event `error` và một `result` có subtype `error`.
+Dict `error` của event lỗi mang `retryable` và, với lỗi HTTP, cả `status`. Một lời
+gọi bị hủy kết thúc run ở trạng thái `aborted`. Mỗi adapter có timeout kết nối 30
+giây và timeout đọc giữa các lần đọc (300 giây hoặc 600 giây); không có hạn chót
+cho cả một lời gọi.
+
+Hai trường của [`spec`](./agent.md#spec) giúp một run vượt qua lỗi mà một lời gọi
+khác có thể sửa được: không có response nào (lỗi kết nối, reset, timeout), HTTP 408,
+429 hoặc 5xx (kể cả 529 quá tải của Anthropic), hoặc một lỗi mà provider gửi ngay
+trong stream với một trong các status đó.
+
+| Trường | Mặc định | Điều khiển gì |
+|---|---|---|
+| `provider_retry` | không có: không thử lại | Gọi lại cùng model sau một lúc chờ: `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, kiểu `ProviderRetry`. `{}` bật nó với các mặc định bên dưới |
+| `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự, khi một model hết lượt thử lại. Không để trống, không trùng `model`, không lặp |
+
+| Trường của `provider_retry` | Mặc định | Điều khiển gì |
+|---|---|---|
+| `max_attempts` | `5` | Số lời gọi tối đa tới một model trong một turn, kể cả lời gọi đầu; `1` là không bao giờ thử lại |
+| `base_delay_ms` | `1000` | Thời gian chờ trước lần thử lại đầu; mỗi lần sau chờ gấp đôi |
+| `max_delay_ms` | `30000` | Thời gian chờ dài nhất. `Retry-After` của server được chờ đúng như vậy, không jitter; nếu dài hơn mức này thì việc thử lại trên model đó kết thúc thay vì giữ run lại |
+| `jitter` | `0.2` | Tỷ lệ của mỗi lần chờ được cộng thêm hoặc bớt đi, từ 0 đến 1, để các run cùng lỗi không gọi lại cùng lúc |
+
+Các mặc định là `RetryOptions` của Python Linch: chờ tối đa 1 + 2 + 4 + 8 = 15 giây
+(±20%) trước khi bỏ một model, trừ khi server yêu cầu lâu hơn.
+
+Một run làm gì sau một lỗi có thể thử lại:
+
+1. Khi model còn lời gọi trong turn này, run gửi một `ProviderRetryEvent`
+   (`model`, `retry` từ 1, `delay_ms`, `error`), chờ, rồi gọi lại model. Text mà
+   lời gọi lỗi đã stream là vô hiệu: lời gọi kế tiếp trả lời lại từ đầu, nên hãy bỏ
+   phần bạn đã hiển thị của nó.
+2. Sau đó, nếu còn fallback, nó gửi một `ModelFallbackEvent` (`from_model`,
+   `to_model`, `error`) và gọi ngay model fallback, với số lần thử lại riêng của nó.
+   Run giữ model đó cho đến hết run, kể cả compaction. Một turn đã chuyển sang
+   fallback sẽ gọi fallback ngay cả khi một skill đặt model.
+3. Nếu không thì run kết thúc với `error` của lỗi cuối cùng, như khi không có các
+   trường này.
+
+Một lỗi không thể thử lại (400, 401, 403, 404, một request mà adapter từ chối) kết
+thúc run ngay, không thử lại và không chuyển model. Một lần hủy trong lúc chờ kết
+thúc run ở trạng thái `aborted` ngay.
+
+```python
+import asyncio
+
+from linch_rust import (
+    AgentConfig,
+    ModelFallbackEvent,
+    ProviderRetryEvent,
+    ResultEvent,
+    Server,
+    UsageEvent,
+)
+from linch_rust.scripted import MODEL, text_turn
+
+overloaded = {"error": {"type": "status", "status": 529, "message": "overloaded"}}
+config: AgentConfig = {
+    "namespace": "test",
+    "spec": {
+        "model": MODEL,
+        # Two calls per model, 0.5 s apart; jitter 0 waits exactly.
+        "provider_retry": {"max_attempts": 2, "base_delay_ms": 500, "jitter": 0},
+        "fallback_models": ["backup-model"],
+    },
+    "provider": {
+        "id": "scripted",
+        "turns": [overloaded, overloaded, text_turn("Done.", model="backup-model")],
+    },
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config)
+        async for envelope in await agent.run("s1", "Hi"):
+            event = envelope.event
+            if isinstance(event, ProviderRetryEvent):
+                print(f"retry {event.retry} of {event.model} in {event.delay_ms} ms")
+            elif isinstance(event, ModelFallbackEvent):
+                print(f"{event.from_model} -> {event.to_model}: {event.error['message']}")
+            elif isinstance(event, UsageEvent):
+                print(f"answered by {event.actual_model}")
+            elif isinstance(event, ResultEvent):
+                print(event.subtype, event.final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+retry 1 of scripted-model in 500 ms
+scripted-model -> backup-model: provider returned HTTP 529: overloaded
+answered by backup-model
+success Done.
+```
+
+`actual_model` và các trường chi phí của event `usage` cho biết model đã trả lời.
+Các model fallback chạy trên một provider duy nhất của agent, nên hãy liệt kê các
+model mà provider đó phục vụ.
+
+Mỗi lần thử là một lời gọi bền riêng, nên một lần crash không bao giờ khiến phải
+mua một câu trả lời hai lần:
+
+- Một run được resume sau khi crash trong lúc chờ sẽ gọi lại ngay, không chờ nốt
+  phần còn lại, và tiếp tục đếm các lần thử lại của turn.
+- Một run đã chuyển model sẽ resume trên model fallback.
+- Một lần thử thất bại thường không báo usage, nên `result` của một run đã thử lại
+  có `usage_complete` là false.
+- Dưới một [`budget`](./agent.md#budget) có giới hạn, một lời gọi không rõ usage
+  nghĩa là không còn giữ được giới hạn, nên run không được thử lại: nó kết thúc với
+  lỗi của provider.
+
+Cả hai trường là một phần của [hợp đồng của run](./agent.md#hợp-đồng-của-run), và
+các run của subagent cũng dùng chúng. Python Linch còn phục hồi khi prompt quá dài
+bằng cách compaction rồi gọi lại; server này không làm vậy.
 
 ## Chi phí
 

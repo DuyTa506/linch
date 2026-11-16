@@ -87,7 +87,11 @@ run con của subagent (`subagents/run.rs`, `subagents/background.rs`). Không p
 trong số này có thể thay đổi thứ nó quan sát.
 
 Một lời gọi thất bại kết thúc run với trạng thái failed bằng một lần ghi terminal duy nhất
-mang theo receipt, usage, `Error`, trạng thái và `Result` (`turn.rs:337-347`). Một
+mang theo receipt, usage, `Error`, trạng thái và `Result` (`turn.rs:337-347`), trừ khi `provider_retry` hoặc `fallback_models` của spec
+nhận một lỗi có thể thử lại: khi đó run quay lại bước 4 với `attempt` của delivery
+kế tiếp, sau một lần ghi `provider_retry` và một lúc chờ, hoặc chuyển ngay sang một
+model fallback cùng một event `model_fallback`
+([providers](./providers.md#retry-và-fallback-model), `runner/retry.rs`). Một
 response bị giới hạn đầu ra cắt trước khi có bất kỳ văn bản hay một lời gọi tool trọn vẹn
 nào thì không phải là một câu trả lời: session không nhận gì, và run kết thúc theo cách
 tương tự (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
@@ -148,6 +152,7 @@ Bên gọi đặt các barrier, và run làm điều đó ở những chỗ sau:
 | Barrier | Lời gọi | Vị trí |
 |---|---|---|
 | Trước khi gửi tới provider | `Journal::flush` | `turn.rs:303-305` |
+| Trước lúc chờ của một lần retry | `flush`, với `ProviderPending` được lưu lại | `runner/retry.rs:70-73` |
 | Quanh lời gọi tóm tắt của compaction | `flush` trước lời gọi; `flush` hoặc write-through `Compacted` sau lời gọi | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Trước mỗi tool thực sự chạy | `ToolSink::tool_starting` flush | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
 | Sau mỗi tool thực sự đã chạy | `tool_finished` flush | `sink.rs:142-182` |
@@ -163,7 +168,9 @@ Ba loại ghi không chờ barrier kế tiếp:
   `AssistantReceived` (`turn.rs:370-374`). Một bản tóm tắt compaction ghi write-through
   cùng `Compacted` (`compact.rs:134-147`). Một lời gọi tóm tắt không trả về văn bản sẽ
   lưu `CompactionPending` và flush ngay, nên một lần resume không mua lại nó
-  (`compact.rs:20-24, 114-120`).
+  (`compact.rs:20-24, 114-120`). Một lời gọi thất bại mà run thử lại sẽ lưu lại
+  `ProviderPending`, ở tổng đã tính receipt của nó, và flush cùng event
+  `provider_retry` của nó trước lúc chờ (`runner/retry.rs:70-73`).
 - Phần kết thúc của một tool. Nó được flush ngay sau khi tool trả về, từ
   `tool_finished`, nên một lần resume tìm thấy kết quả và không chạy lại tool
   (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).
@@ -228,7 +235,7 @@ scope `Read` (`crates/linch-core/src/tool.rs:34-36, 250-257`). Tool `Subagent` c
 liệt kê các tool của nó và mọi tool trong đó đều là tool `Read` đã đăng ký. Mọi thứ không
 xác định đều fail closed
 (`crates/linch-core/src/subagents/tool.rs:124-146`). Giới hạn mặc định là 4,
-và 0 được tính là 1 (`agent/spec.rs:54-56`, `execute.rs:137`).
+và 0 được tính là 1 (`agent/spec.rs:55-57`, `execute.rs:137`).
 
 Các lời gọi trong cùng một nhóm chồng lấn nhau, nên `ToolSink` phải chấp nhận các lời gọi
 đồng thời (`execute.rs:33`). Sink của journal lần lượt từng lượt qua một mutex được giữ
@@ -278,7 +285,7 @@ Những gì `reconcile` làm với từng phase (`journal/reconcile.rs:170-231`)
 | Phase của checkpoint | Khôi phục | Run tiếp tục với |
 |---|---|---|
 | `Started` | `Started` | Nối prompt trừ khi nó đã có trong session, rồi đến lượt |
-| `ProviderPending` | `Redispatch`, hoặc `Received` với một receipt đã được chấp nhận | Một receipt bị hủy cho delivery không có receipt, rồi attempt + 1; hoặc response bền vững |
+| `ProviderPending` | `Redispatch`, hoặc `Received` với một receipt đã được chấp nhận | Một receipt bị hủy cho delivery không có receipt, rồi attempt + 1; attempt + 1 ngay sau một receipt thất bại (lúc chờ của một lần retry bị cắt ngắn, hoặc một lần chuyển model), trên model và với các lần retry mà event `provider_retry` và `model_fallback` của nó cho biết; hoặc response bền vững |
 | `AssistantReceived` | `Received` | Nối response trừ khi nó đã có trong session, rồi rẽ nhánh theo các lời gọi tool của nó; khi có `retry_feedback`, gửi phản hồi đó thay vào, không hỏi lại hook |
 | `ToolBatch` | `ToolBatch` | Với mỗi lời gọi: kết quả bền vững của nó, một placeholder, hoặc một lần plan lại |
 | `AwaitingApproval` | `AwaitingApproval` | Plan lại với các quyết định đã ghi; suspend lần nữa nếu còn lời gọi cần câu trả lời |
@@ -319,7 +326,7 @@ thái cuối của chúng, dựng `Result` và gọi `Journal::finish` (`runner/
 | Giới hạn đầu ra | `failed` | Response không có văn bản hoặc lời gọi tool trọn vẹn (`end.rs:76-90`) |
 | Giới hạn lượt | `failed` | Đạt `max_turns`, kèm một event `loop_guard` (`end.rs:92-108`) |
 | Budget | `failed` | Budget không cho phép thêm lời gọi nào (`end.rs:110-122`) |
-| Lỗi provider | `failed` | Lời gọi thất bại (`turn.rs:343-346`) |
+| Lỗi provider | `failed` | Lời gọi thất bại, và không có retry hay model fallback nào nhận nó (`turn.rs:343-346`, `runner/retry.rs`) |
 
 Một trạng thái terminal là cuối cùng trong store ([stores](./stores.md#run-store)).
 `Agent::fail` đánh dấu một run không bao giờ có thể tiếp tục (contract không khớp, một
