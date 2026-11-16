@@ -372,7 +372,7 @@ event `usage` của nó, và không có event `assistant`. Receipt đó là mộ
   lại từ mọi receipt bền vững (`Spent::of`), và event `usage` của nó nằm trong log, nên
   `total_usage` và `total_cost_usd` của kết quả là tổng của mọi receipt, kể cả orphan.
 - Lời gọi được gửi lại. `reconcile` trả về `Redispatch` với attempt kế tiếp và không có
-  receipt bị bỏ dở (`journal/reconcile.rs:237-255`), nên lời gọi nhận một id attempt
+  receipt bị bỏ dở (`journal/reconcile.rs:251-268`), nên lời gọi nhận một id attempt
   delivery mới dưới cùng id lời gọi logic. Không có event `provider_retry` nào được ghi,
   nên nó không tốn lần retry nào của lượt (`Standing::of` chỉ đếm những event đó). Dưới
   một budget có giới hạn, chi phí của orphan có thể không còn chỗ cho lời gọi: run được

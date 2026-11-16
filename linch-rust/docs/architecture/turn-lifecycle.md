@@ -387,7 +387,7 @@ count the receipt), an `accepted` receipt and its `usage` event, and no
   `usage` event is in the log, so the result's `total_usage` and
   `total_cost_usd` are the sum of every receipt, the orphan's included.
 - The call goes again. `reconcile` returns `Redispatch` with the next
-  attempt and no abandoned receipt (`journal/reconcile.rs:237-255`), so the
+  attempt and no abandoned receipt (`journal/reconcile.rs:251-268`), so the
   call gets a new delivery attempt id under the same logical call id. No
   `provider_retry` event is written, so it spends none of the turn's
   retries (`Standing::of` counts only those). Under a capped budget the
