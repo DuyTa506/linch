@@ -10,7 +10,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use super::{Driven, Parked, Reply, Server, Tables, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
-    ApproveParams, CancelParams, Cancelled, ResumeParams, RunEnd, StartParams, method,
+    AnswerParams, ApproveParams, CancelParams, Cancelled, ResumeParams, RunEnd, StartParams, method,
 };
 
 /// Lease owner written with each claim this server makes.
@@ -55,6 +55,14 @@ impl Server {
         let run_id = params.run_id;
         self.claim(params.agent, &run_id, params.principal, |agent, options| {
             agent.approve(run_id.clone(), decisions, options)
+        })
+    }
+
+    pub(super) fn answer_run(&self, params: AnswerParams) -> Result<Reply, ErrorObject> {
+        let answers = params.answers.into_iter().collect();
+        let run_id = params.run_id;
+        self.claim(params.agent, &run_id, params.principal, |agent, options| {
+            agent.answer(run_id.clone(), answers, options)
         })
     }
 

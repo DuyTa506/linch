@@ -240,7 +240,7 @@ impl Allowlists {
     }
 
     /// How many runs the tenant's connections may drive at once, all
-    /// together: a `run.start`, `run.resume` or `run.approve` past it is
+    /// together: a `run.start`, `run.resume`, `run.approve` or `run.answer` past it is
     /// refused with `-32005`. A run holds its place until its `run.end`; a
     /// run that suspends with background subagents running keeps it until
     /// they end, or until its approve or resume takes it over.

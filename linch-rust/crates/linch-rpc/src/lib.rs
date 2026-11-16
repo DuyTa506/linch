@@ -43,7 +43,7 @@
 //! - `agent.open`: the `namespace` is the tenant's name or starts with
 //!   `<tenant>/`. Stores are scoped by namespace, so on a shared Postgres
 //!   another tenant's runs and sessions look missing (`-32021`).
-//! - `run.start`, `run.resume`, `run.approve`: a `principal`, if given, has
+//! - `run.start`, `run.resume`, `run.approve`, `run.answer`: a `principal`, if given, has
 //!   the tenant's name as its `tenant`. The server does not fill one in.
 //! - `agent.open`: the config passes the tenant's [`Allowlists`]:
 //!   - the scripted provider only if allowed, and a client-chosen provider
@@ -233,7 +233,20 @@
 //! crash) ends with `-32027` in `run.end` and writes nothing. Continue
 //! that run with `run.resume`, which keeps the committed decisions.
 //!
-//! These three answer [`RunAccepted`](protocol::RunAccepted)
+//! **`run.answer`** `{agent, run_id, answers, principal?}`
+//! ([`AnswerParams`](protocol::AnswerParams)) answers a run suspended for
+//! input (an `AskUser` call; `suspended` with status `awaiting_input`) and
+//! continues it. `answers` maps each pending `request_id` (the
+//! `input_request`'s, which is the call's `tool_use_id`) to
+//! `{"accepted"?: bool, "answers": {question_id: "label" | ["label", ...]},
+//! "note"?: "..."}`; `accepted: false` declines. Each answer must fit its
+//! request's questions (every question answered, a list for a multi-select
+//! one), or the run ends with `-32032` and stays suspended. As with
+//! `run.approve`, only a run awaiting input takes it, and once an answer
+//! has committed, the same answer sent again ends with `-32027`; continue
+//! that run with `run.resume`.
+//!
+//! These four answer [`RunAccepted`](protocol::RunAccepted)
 //! `{"run_id": "..."}` at once, before any notification of that run; the
 //! run's outcome, errors included, then arrives as notifications. A
 //! `run_id` the connection already drives is refused with `-32002`.
@@ -333,6 +346,7 @@
 //! Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) arrive
 //! at once, carry the last durable seq, and are never replayed. A run's
 //! envelopes end with `result` (finished) or `suspended` (waiting for
+//! `run.answer` when its status is `awaiting_input`, otherwise for
 //! `run.approve`).
 //!
 //! **`run.end`** `{run_id, error?}` ([`RunEnd`](protocol::RunEnd)): the
@@ -371,11 +385,12 @@
 //! | -32024 | journal | `RunError::Journal` |
 //! | -32025 | contract mismatch | `RunError::ContractMismatch`; `data: {expected, found}`: the run's contract, then this agent's |
 //! | -32026 | terminal | `RunError::Terminal`; `data: {status}` |
-//! | -32027 | not suspended | `RunError::NotSuspended`: `run.approve` on a run not awaiting approval; after a retried approve, `run.resume` it |
+//! | -32027 | not suspended | `RunError::NotSuspended`: `run.approve` on a run not awaiting approval, or `run.answer` on one not awaiting input; after a retried approve or answer, `run.resume` it |
 //! | -32028 | reconcile | `RunError::Reconcile` |
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |
 //! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
+//! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
