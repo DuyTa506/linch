@@ -45,18 +45,31 @@ pub(super) enum Step {
     },
     /// Compact the provider view if it passed the threshold, with summary
     /// delivery `attempt`, after staging the `abandoned` receipt of an
-    /// unsettled earlier attempt; then dispatch.
+    /// unsettled earlier attempt; then dispatch. With `redispatch`, the
+    /// provider refused the turn's primary call as too long: compact
+    /// whether due or not, then dispatch that attempt of the call.
     Compact {
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
+        redispatch: Option<u32>,
     },
     /// Append the projection of a durable summary unless `appended`, then
-    /// dispatch.
+    /// dispatch `attempt`.
     Compacted {
         summary: Message,
         keep_from: u64,
         appended: bool,
+        attempt: u32,
     },
+    /// Append the projection of a durable micro-compaction unless
+    /// `appended`, then dispatch `attempt`.
+    Cleared {
+        before: u64,
+        attempt: u32,
+        appended: bool,
+    },
+    /// A forced summary settled without a summary: end the run failed.
+    Unshortened,
     /// Dispatch delivery `attempt` of the current turn, after staging the
     /// `abandoned` receipt of an unsettled earlier attempt.
     Dispatch {
@@ -138,6 +151,13 @@ pub(super) struct Runner {
     /// Verification retries the run spent (see `runner/structured.rs`),
     /// counted from its durable log on a resume.
     pub(super) verify_retries: u32,
+    /// Summaries the run began because the provider refused a prompt as
+    /// too long (see `runner/compact.rs`), counted from its durable
+    /// deliveries on a resume.
+    pub(super) forced: u32,
+    /// Summary deliveries of the current turn, so the next one takes the
+    /// next attempt id.
+    pub(super) summary_calls: u32,
 }
 
 impl Runner {
@@ -179,6 +199,8 @@ impl Runner {
             output,
             schema_retries: 0,
             verify_retries: 0,
+            forced: 0,
+            summary_calls: 0,
         };
         runner.narrow();
         runner
@@ -227,12 +249,26 @@ impl Runner {
                     }
                     Some(self.turn_start().await)
                 }
-                Step::Compact { attempt, abandoned } => self.compact(attempt, abandoned).await?,
+                Step::Compact {
+                    attempt,
+                    abandoned,
+                    redispatch,
+                } => self.compact(attempt, abandoned, redispatch).await?,
                 Step::Compacted {
                     summary,
                     keep_from,
                     appended,
-                } => self.compacted(summary, keep_from, appended).await?,
+                    attempt,
+                } => (self.compacted(summary, keep_from, appended, attempt)).await?,
+                Step::Cleared {
+                    before,
+                    attempt,
+                    appended,
+                } => self.cleared(before, attempt, appended).await?,
+                Step::Unshortened => {
+                    self.unshortened().await?;
+                    None
+                }
                 Step::Dispatch { attempt, abandoned } => self.dispatch(attempt, abandoned).await?,
                 Step::Received {
                     message,
@@ -249,6 +285,7 @@ impl Runner {
                     // start.
                     self.post_turn(self.stop_reason).await;
                     self.turn += 1;
+                    self.summary_calls = 0;
                     Some(self.turn_start().await)
                 }
             };
@@ -268,6 +305,7 @@ impl Runner {
             Some(_) => Step::Compact {
                 attempt: 1,
                 abandoned: None,
+                redispatch: None,
             },
             None => Step::Dispatch {
                 attempt: 1,
@@ -411,6 +449,13 @@ impl Runner {
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);
+        }
+        // A prompt too long for the model: shorten the view and call again,
+        // which is not a provider retry.
+        if matches!(failure.error, ProviderError::ContextLength { .. })
+            && let Some(next) = self.overflow(attempt).await?
+        {
+            return Ok(Some(next));
         }
         match self.recover(&failure, attempt, &call_model).await? {
             Recovered::Call(next) => return Ok(Some(next)),

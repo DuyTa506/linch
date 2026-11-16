@@ -72,6 +72,30 @@ pub(super) fn prompt_appended(
     })
 }
 
+/// Whether a micro-compaction's projection was already appended: like
+/// [`appended()`], for a trailing projection recorded as one.
+pub(super) fn cleared(
+    checkpoint: &Checkpoint,
+    session: &[LogEntry],
+) -> Result<bool, ReconcileError> {
+    let found = session.len() as u64;
+    if found == checkpoint.session_len {
+        return Ok(false);
+    }
+    match session.last() {
+        Some(LogEntry::Projection(entry))
+            if found == checkpoint.session_len + 1
+                && entry.reason == crate::compaction::MICRO_REASON =>
+        {
+            Ok(true)
+        }
+        _ => Err(ReconcileError::SessionConflict {
+            expected: checkpoint.session_len,
+            found,
+        }),
+    }
+}
+
 /// Whether the compaction projection was already appended: like
 /// [`appended()`], for a trailing projection whose summary is `summary`.
 pub(super) fn projected(

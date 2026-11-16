@@ -79,9 +79,12 @@ impl Runner {
     }
 
     /// Session write: flush the held checkpoint, then append the
-    /// compaction projection `replacement`.
-    pub(super) async fn project(&mut self, replacement: Vec<Arc<Message>>) -> Result<(), RunError> {
-        let reason = crate::compaction::PROJECTION_REASON;
+    /// compaction projection `replacement`, recorded for `reason`.
+    pub(super) async fn project(
+        &mut self,
+        replacement: Vec<Arc<Message>>,
+        reason: &str,
+    ) -> Result<(), RunError> {
         let entry = LogEntry::Projection(crate::session_log::ProjectionEntry {
             replacement: replacement.clone(),
             reason: reason.into(),

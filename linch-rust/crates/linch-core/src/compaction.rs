@@ -9,6 +9,15 @@
 //! message, then the kept turns. The system prompt and the first message
 //! stay byte-identical, so a provider's cached prefix survives.
 //!
+//! Before the summary, a spec with [`CompactionSpec::micro`] tries the
+//! cheaper step Python calls micro-compaction: tool results older than the
+//! kept turns are cleared to a short placeholder, with no model call. When
+//! the provider refuses a prompt as longer than its context window
+//! ([`ProviderError::ContextLength`](crate::ProviderError::ContextLength)),
+//! the run takes the same steps out of turn, forced: it clears old tool
+//! results, else summarizes (at most [`CompactionSpec::max_forced`] times a
+//! run), then calls again.
+//!
 //! This module holds the pure parts; the runner places the barriers.
 
 use std::sync::Arc;
@@ -16,7 +25,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentSpec;
-use crate::message::{ContentBlock, Message, Role, SystemBlock, ToolResultPart};
+use crate::events::model_call::ModelCallKind;
+use crate::events::{Envelope, Event};
+use crate::message::{ContentBlock, Message, Role, SystemBlock, TextBlock, ToolResultPart};
 use crate::provider::{ProviderRequest, ToolChoice, ToolDefinition};
 
 /// Instructions for the summary call when the spec sets none.
@@ -32,6 +43,15 @@ pub(crate) const PROJECTION_REASON: &str = "compaction";
 
 /// Strategy name in the `compaction` event.
 pub(crate) const STRATEGY: &str = "summary";
+
+/// Strategy name of a micro-compaction in the `compaction` event.
+pub(crate) const MICRO_STRATEGY: &str = "micro";
+
+/// Reason stored with a micro-compaction's projection entry.
+pub(crate) const MICRO_REASON: &str = "micro-compaction";
+
+/// What a cleared tool result says instead, as in Python.
+pub const CLEARED_RESULT: &str = "[tool result elided to save context]";
 
 /// Leads the summary message, so the model reads it as a recap.
 const SUMMARY_HEADER: &str = "<summary of earlier conversation>\n\n";
@@ -49,6 +69,14 @@ fn default_keep_recent_turns() -> u32 {
 
 fn default_max_output_tokens() -> u32 {
     4096
+}
+
+fn default_max_forced() -> u32 {
+    3
+}
+
+fn is_default_max_forced(value: &u32) -> bool {
+    *value == default_max_forced()
 }
 
 /// When and how a run compacts its provider view. Off unless an
@@ -74,6 +102,23 @@ pub struct CompactionSpec {
     /// Most tokens the summary may use (default 4096).
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
+    /// Micro-compaction (Python's `CompactionLadder.micro`): before a
+    /// summary, clear the tool results older than the kept turns to a short
+    /// placeholder, with no model call, and skip the summary when that
+    /// brings the view back under the trigger. Off by default; it changes
+    /// messages in the middle of the view, so it costs the cached prefix
+    /// from the first cleared result on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub micro: bool,
+    /// Most summaries one run makes because the provider refused a prompt
+    /// as longer than its context window (Python's
+    /// `CompactionLadder.max_forced_compactions`, default 3); past it the
+    /// refusal ends the run. 0 never summarizes for it.
+    #[serde(
+        default = "default_max_forced",
+        skip_serializing_if = "is_default_max_forced"
+    )]
+    pub max_forced: u32,
 }
 
 impl Default for CompactionSpec {
@@ -85,6 +130,8 @@ impl Default for CompactionSpec {
             keep_recent_turns: default_keep_recent_turns(),
             prompt: None,
             max_output_tokens: default_max_output_tokens(),
+            micro: false,
+            max_forced: default_max_forced(),
         }
     }
 }
@@ -169,21 +216,144 @@ pub(crate) fn due(
     projected * 5 >= u128::from(window) * 4
 }
 
-/// Where the kept turns start: the `keep_recent_turns`-th assistant message
-/// from the end, so no tool result is cut off from its call. `None` when
-/// the part between the first message and that point holds no assistant
-/// turn, so a summary would fold nothing.
-pub(crate) fn keep_from(view: &[Arc<Message>], keep_recent_turns: u32) -> Option<usize> {
+/// The `keep_recent_turns`-th assistant message from the end; `None` when
+/// the view has fewer.
+fn boundary(view: &[Arc<Message>], keep_recent_turns: u32) -> Option<usize> {
     let keep = usize::try_from(keep_recent_turns.max(1)).unwrap_or(usize::MAX);
     let (at, _) = (view.iter().enumerate())
         .rev()
         .filter(|(_, message)| message.role == Role::Assistant)
         .nth(keep - 1)?;
+    Some(at)
+}
+
+/// Where the kept turns start: the `keep_recent_turns`-th assistant message
+/// from the end, so no tool result is cut off from its call. `None` when
+/// the part between the first message and that point holds no assistant
+/// turn, so a summary would fold nothing.
+pub(crate) fn keep_from(view: &[Arc<Message>], keep_recent_turns: u32) -> Option<usize> {
+    let at = boundary(view, keep_recent_turns)?;
     let older = view.get(1..at)?;
     older
         .iter()
         .any(|message| message.role == Role::Assistant)
         .then_some(at)
+}
+
+/// Where a summary forced by a context-length refusal keeps from: the
+/// spec's `keep_recent_turns`, or only the last turn when that folds
+/// nothing, since the kept turns alone may be what does not fit.
+pub(crate) fn forced_keep_from(view: &[Arc<Message>], keep_recent_turns: u32) -> Option<usize> {
+    keep_from(view, keep_recent_turns).or_else(|| keep_from(view, 1))
+}
+
+/// Micro-compaction: where the kept turns start (the
+/// `keep_recent_turns`-th assistant message from the end) and `view` with
+/// every tool result before it cleared (see [`cleared_before`]). `None`
+/// when there is nothing worth clearing.
+pub(crate) fn clear_tool_results(
+    view: &[Arc<Message>],
+    keep_recent_turns: u32,
+) -> Option<(usize, Vec<Arc<Message>>)> {
+    let before = boundary(view, keep_recent_turns)?;
+    let cleared = cleared_before(view, before)?;
+    Some((before, cleared))
+}
+
+/// `view` with every tool result before index `before` cleared to
+/// [`CLEARED_RESULT`]. `None` when no result there is worth clearing: each
+/// is the placeholder already, or no longer than it and with no image.
+/// Every `tool_use_id` stays paired; messages that change are new copies,
+/// the others are shared.
+pub(crate) fn cleared_before(view: &[Arc<Message>], before: usize) -> Option<Vec<Arc<Message>>> {
+    let mut changed = false;
+    let mut messages = Vec::with_capacity(view.len());
+    for (at, message) in view.iter().enumerate() {
+        if at >= before || !message.content.iter().any(worth_clearing) {
+            messages.push(Arc::clone(message));
+            continue;
+        }
+        changed = true;
+        let mut cleared = Message::clone(message);
+        for block in &mut cleared.content {
+            if let ContentBlock::ToolResult(result) = block
+                && worth_clearing_result(&result.content)
+            {
+                result.content = vec![ToolResultPart::Text(TextBlock {
+                    text: CLEARED_RESULT.into(),
+                })];
+            }
+        }
+        messages.push(Arc::new(cleared));
+    }
+    changed.then_some(messages)
+}
+
+fn worth_clearing(block: &ContentBlock) -> bool {
+    matches!(block, ContentBlock::ToolResult(result) if worth_clearing_result(&result.content))
+}
+
+/// Python's test: text longer than the placeholder, or any image.
+fn worth_clearing_result(content: &[ToolResultPart]) -> bool {
+    let mut chars = 0;
+    for part in content {
+        match part {
+            ToolResultPart::Image(_) => return true,
+            ToolResultPart::Text(text) => chars += text.text.len(),
+        }
+    }
+    chars > CLEARED_RESULT.len()
+}
+
+/// Where a run stands on forced summaries, read from its durable
+/// deliveries. A summary at a turn's start comes before the turn's primary
+/// call; one forced by a context-length refusal comes after it. Nothing
+/// else is recorded, so a resumed run neither forgets a forced summary nor
+/// reuses a delivery id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Forced {
+    /// Forced summaries the run began: summary deliveries right after a
+    /// primary delivery of the same turn. Later attempts of one summary
+    /// count once.
+    pub(crate) spent: u32,
+    /// Summary deliveries of turn `turn`.
+    pub(crate) summary_calls: u32,
+    /// Primary deliveries of turn `turn`.
+    pub(crate) primary_calls: u32,
+    /// Whether the latest summary of turn `turn` is a forced one.
+    pub(crate) latest_forced: bool,
+}
+
+impl Forced {
+    /// What `events` say for turn `turn`, and the run's forced summaries.
+    pub(crate) fn of(events: &[Envelope], turn: u32) -> Self {
+        let mut forced = Self::default();
+        let mut previous: Option<(ModelCallKind, Option<u64>)> = None;
+        for envelope in events {
+            let Event::ModelCallDelivery(delivery) = &envelope.event else {
+                continue;
+            };
+            let this_turn = delivery.turn_index == Some(u64::from(turn));
+            match delivery.kind {
+                ModelCallKind::Primary => forced.primary_calls += u32::from(this_turn),
+                ModelCallKind::Compaction => {
+                    let after = previous.filter(|(_, at)| *at == delivery.turn_index);
+                    let begins = after.is_none_or(|(kind, _)| kind == ModelCallKind::Primary);
+                    let is_forced = matches!(after, Some((ModelCallKind::Primary, _)));
+                    forced.spent += u32::from(is_forced);
+                    if this_turn {
+                        forced.summary_calls += 1;
+                        // A later attempt of the same summary keeps its kind.
+                        if begins {
+                            forced.latest_forced = is_forced;
+                        }
+                    }
+                }
+            }
+            previous = Some((delivery.kind, delivery.turn_index));
+        }
+        forced
+    }
 }
 
 /// The summary call: the view before `keep_from` under the summary prompt.

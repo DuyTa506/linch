@@ -150,6 +150,18 @@ pub enum Phase {
         /// Index in the provider view where the kept turns start.
         keep_from: u64,
     },
+    /// Micro-compaction cleared the tool results before index `before` of
+    /// the provider view (see [`crate::compaction`]); its projection may
+    /// not be in the session yet. Delivery `attempt` of the turn's primary
+    /// call follows: 1 at a turn's start, the next one after a prompt the
+    /// provider refused as too long. Written only by an agent whose
+    /// compaction sets `micro`.
+    Cleared {
+        /// Index in the provider view where the kept turns start.
+        before: u64,
+        /// Delivery attempt of the primary call that follows, from 1.
+        attempt: u32,
+    },
 }
 
 /// Durable progress of a running run.
@@ -212,6 +224,29 @@ mod tests {
         }
         assert!(Completed.is_terminal() && AwaitingInput.is_awaiting() && !Running.is_terminal());
     }
+    /// Micro-compaction adds a phase; every phase written before it keeps
+    /// its wire shape.
+    #[test]
+    fn a_cleared_view_is_a_phase_of_its_own() {
+        let phase = Phase::Cleared {
+            before: 5,
+            attempt: 2,
+        };
+        let wire = serde_json::json!({"phase": "cleared", "before": 5, "attempt": 2});
+        assert_eq!(serde_json::to_value(&phase).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<Phase>(wire).unwrap(), phase);
+        let compacted = serde_json::json!({
+            "phase": "compacted",
+            "summary": Message::user_text("s"),
+            "keep_from": 3,
+        });
+        let decoded = serde_json::from_value::<Phase>(compacted.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), compacted);
+        let pending = serde_json::json!({"phase": "compaction_pending", "attempt": 1});
+        let decoded = serde_json::from_value::<Phase>(pending.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), pending);
+    }
+
     #[test]
     fn checkpoint_round_trips_strictly() {
         let cp = Checkpoint {

@@ -15,7 +15,8 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use session::{appended, projected, prompt_appended, unchanged};
+use crate::compaction::Forced;
+use session::{appended, cleared, projected, prompt_appended, unchanged};
 
 /// Result text for a tool that started but has no durable end.
 pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a result was \
@@ -100,6 +101,10 @@ pub enum Recovery {
         attempt: u32,
         /// A cancelled receipt for the unsettled delivery.
         abandoned: Option<ModelCallReceiptEvent>,
+        /// Set when the provider refused the turn's primary call as too
+        /// long, which forced this summary: the primary call's delivery
+        /// attempt that follows it. `None` at a turn's start.
+        redispatch: Option<u32>,
     },
     /// `Compacted`: append the projection unless `appended`, then dispatch
     /// the turn's primary call.
@@ -110,7 +115,24 @@ pub enum Recovery {
         keep_from: u64,
         /// Whether the projection is already in the session.
         appended: bool,
+        /// Delivery attempt of the primary call that follows: 1 at a
+        /// turn's start, the next one after a forced summary.
+        attempt: u32,
     },
+    /// `Cleared`: append the micro-compaction projection unless
+    /// `appended`, then dispatch the turn's primary call `attempt`.
+    Cleared {
+        /// Index in the provider view where the kept turns start.
+        before: u64,
+        /// Delivery attempt of the primary call that follows.
+        attempt: u32,
+        /// Whether the projection is already in the session.
+        appended: bool,
+    },
+    /// `CompactionPending` for a summary the provider's context-length
+    /// refusal forced, and that settled without a summary: the prompt still
+    /// does not fit, so the run ends failed.
+    Unshortened,
 }
 
 /// How one call of a tool batch recovers.
@@ -160,9 +182,11 @@ pub enum ReconcileError {
 /// Args:
 ///     checkpoint: The run's committed checkpoint.
 ///     events: Durable events of the run. `ProviderPending` and
-///         `CompactionPending` need the current turn's delivery among them;
-///         `ToolBatch` reads only events after its `after_seq`. Passing
-///         every event is always enough.
+///         `CompactionPending` need the current turn's delivery among them,
+///         and the compaction phases read the run's deliveries to tell a
+///         forced summary from a turn-start one; `ToolBatch` reads only
+///         events after its `after_seq`. Passing every event is always
+///         enough.
 ///     session: Every entry of the run's session log.
 ///
 /// Returns:
@@ -227,9 +251,15 @@ pub fn reconcile(
         Phase::CompactionPending { attempt } => {
             let (delivery, receipt) = delivery(checkpoint, ModelCallKind::Compaction, events)?;
             unchanged(checkpoint, session)?;
+            let forced = Forced::of(events, checkpoint.turn);
             // A summary lands with its `Compacted` checkpoint, so a receipt
             // here settled a call that gave none: it is not bought again.
+            // A turn-start summary lets the turn go on uncompacted; a forced
+            // one leaves a prompt the provider already refused.
             if receipt {
+                if forced.latest_forced {
+                    return Ok(Recovery::Unshortened);
+                }
                 return Ok(Recovery::Redispatch {
                     attempt: 1,
                     abandoned: None,
@@ -238,12 +268,19 @@ pub fn reconcile(
             Ok(Recovery::Recompact {
                 attempt: attempt + 1,
                 abandoned: Some(abandoned(delivery)),
+                redispatch: (forced.latest_forced).then_some(forced.primary_calls + 1),
             })
         }
         Phase::Compacted { summary, keep_from } => Ok(Recovery::Compacted {
             appended: projected(checkpoint, session, summary)?,
             summary: summary.clone(),
             keep_from: *keep_from,
+            attempt: Forced::of(events, checkpoint.turn).primary_calls + 1,
+        }),
+        Phase::Cleared { before, attempt } => Ok(Recovery::Cleared {
+            appended: cleared(checkpoint, session)?,
+            before: *before,
+            attempt: *attempt,
         }),
     }
 }

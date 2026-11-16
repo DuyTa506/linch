@@ -118,6 +118,23 @@ impl Runner {
         self.end(RunStatus::Failed, subtype, stop, None).await
     }
 
+    /// The terminal for a prompt the provider refused as longer than the
+    /// model's context window, when the summary that refusal forced gave
+    /// none: calling again would send the refused prompt.
+    pub(super) async fn unshortened(&mut self) -> Result<(), RunError> {
+        let error = json!({
+            "name": "ProviderError",
+            "kind": "context_length",
+            "message": "the prompt exceeds the model's context window, and the compaction \
+                        it forced could not shorten it",
+            "retryable": false,
+        });
+        let error = error.as_object().cloned().unwrap_or_default();
+        self.journal.stage(Event::Error(ErrorEvent { error }));
+        let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
+        self.end(RunStatus::Failed, subtype, stop, None).await
+    }
+
     /// The `max_turns` terminal, as Python's `_max_turns_tail` emits it.
     pub(super) async fn max_turns(&mut self, max: u32) -> Result<(), RunError> {
         self.journal.stage(Event::LoopGuard(LoopGuardEvent {

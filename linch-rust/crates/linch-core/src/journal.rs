@@ -209,6 +209,7 @@ impl Journal {
             Phase::AwaitingInput { .. } => Some(RunStatus::AwaitingInput),
             Phase::ProviderPending { .. }
             | Phase::CompactionPending { .. }
+            | Phase::Cleared { .. }
             | Phase::ToolBatch { .. }
             | Phase::ToolResults { .. } => {
                 self.check()?;

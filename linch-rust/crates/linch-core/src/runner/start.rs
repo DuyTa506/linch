@@ -375,16 +375,36 @@ pub(super) async fn continue_run(
             })
         }
         Recovery::ToolResults { message, appended } => Step::Results { message, appended },
-        Recovery::Recompact { attempt, abandoned } => Step::Compact { attempt, abandoned },
+        Recovery::Recompact {
+            attempt,
+            abandoned,
+            redispatch,
+        } => Step::Compact {
+            attempt,
+            abandoned,
+            redispatch,
+        },
         Recovery::Compacted {
             summary,
             keep_from,
             appended,
+            attempt,
         } => Step::Compacted {
             summary,
             keep_from,
             appended,
+            attempt,
         },
+        Recovery::Cleared {
+            before,
+            attempt,
+            appended,
+        } => Step::Cleared {
+            before,
+            attempt,
+            appended,
+        },
+        Recovery::Unshortened => Step::Unshortened,
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     held.watch(&journal);
@@ -443,6 +463,8 @@ pub(super) async fn continue_run(
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
     runner.verify_retries = crate::verification::retries_spent(&events);
+    let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
+    (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }
