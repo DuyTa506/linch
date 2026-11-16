@@ -111,9 +111,12 @@ connects with its own):
   fields the config sets;
 - the rest of the config: `spec`, permissions, workspace, profiles.
 
-Nothing else holds them: job, history and schedule rows name the config by
-its SHA-256 digest, and no `schedule.*` or `job.*` answer or error, nor a
-background run's error, carries its values. A stored config is deleted once
+Job, history and schedule rows name the config by its SHA-256 digest, and
+no `schedule.*` or `job.*` answer or error carries its values, nor does the
+error of a background run the worker could not open. A run's own error
+is another matter: it holds what the provider, a tool or an MCP server
+said, and an endpoint that quotes back a credential it was sent puts it
+there, as in a run started directly. A stored config is deleted once
 no schedule and no unfinished job names it: a worker checks from its first
 poll and every 10 minutes after (`prune_definitions`). Keep secrets out of
 a scheduled config where you can (a key the server reads from its

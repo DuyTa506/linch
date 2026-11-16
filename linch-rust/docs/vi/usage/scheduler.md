@@ -105,9 +105,11 @@ store** (worker kết nối bằng DSN của chính nó):
 - các cài đặt provider, kể cả mọi header request và trường body bổ sung mà cấu hình đặt;
 - phần còn lại của cấu hình: `spec`, permission, workspace, profile.
 
-Không nơi nào khác giữ chúng: các hàng job, history và lịch gọi cấu hình bằng digest SHA-256
-của nó, và không câu trả lời `schedule.*` hay `job.*` nào, không lỗi nào, cũng không lỗi của
-một run nền, mang các giá trị của nó. Một cấu hình đã lưu bị xóa khi không lịch nào và không
+Các hàng job, history và lịch gọi cấu hình bằng digest SHA-256 của nó, và không câu trả
+lời `schedule.*` hay `job.*` nào, không lỗi nào mang các giá trị của nó, kể cả lỗi của một
+run nền mà worker không mở được. Lỗi của chính một run thì khác: nó chứa những gì provider,
+một tool hay một MCP server đã nói, và một endpoint lặp lại một credential nó nhận được sẽ
+đưa credential đó vào đó, như với một run được khởi động trực tiếp. Một cấu hình đã lưu bị xóa khi không lịch nào và không
 job chưa xong nào gọi tên nó: một worker kiểm tra từ lần poll đầu tiên và cứ 10 phút một lần
 sau đó (`prune_definitions`). Hãy giữ secret ra khỏi cấu hình được lập lịch khi có thể (một
 key mà server đọc từ môi trường của nó thì không bao giờ được lưu), và bảo vệ cơ sở dữ liệu
