@@ -232,8 +232,10 @@ async fn a_fenced_worker_drops_its_job_and_leaves_the_run_alone() {
     .await;
     let run_id = db.run_of("s1").await;
 
-    // While the worker pauses, the host resumes the run itself: its claim
-    // takes epoch 2, and its model call waits at the gate.
+    // While the worker pauses, its run lease runs out (nothing renews it),
+    // and the host resumes the run itself: its claim takes epoch 2, and its
+    // model call waits at the gate.
+    tokio::time::sleep(RUN_LEASE + Duration::from_millis(300)).await;
     let gate = Arc::new(Gate::default());
     let host = gated_agent(&db.pool, probe.with_hold(Hold::None), Arc::clone(&gate));
     let mut options = RunOptions::new("s1");

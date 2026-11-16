@@ -38,6 +38,9 @@ pub const TIMEOUT: Duration = Duration::from_secs(3);
 /// Visibility timeout of every other test worker, so that no slow
 /// heartbeat ever makes it drop and claim its run again.
 pub const HOLD: Duration = Duration::from_secs(30);
+/// Run lease of every test agent: shorter than [`TIMEOUT`], so a stalled
+/// worker's run is free by the time its job is visible again.
+pub const RUN_LEASE: Duration = Duration::from_millis(1500);
 
 pub struct TestDb {
     /// Pool whose `search_path` is the test schema.
