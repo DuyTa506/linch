@@ -272,6 +272,9 @@ class AgentConfig(TypedDict, total=False):
         tasks: Whether the agent has the session task tools (`TaskCreate`,
             `TaskList`, `TaskGet`, `TaskUpdate`), kept in the session store.
             They run without approval in every permission mode.
+        ask_user: Whether the agent has the `AskUser` tool: a call suspends
+            the run with an `input_request` until `Agent.answer`. Off when
+            absent.
         deep_agent: The deep agent preset; see `DeepAgent`.
         profile: The domain profile its runs take; see `Profile`.
     """
@@ -292,5 +295,6 @@ class AgentConfig(TypedDict, total=False):
     config_dir: str
     filesystem: Filesystem
     tasks: bool
+    ask_user: bool
     deep_agent: DeepAgent
     profile: Profile

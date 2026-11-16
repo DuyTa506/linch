@@ -1,11 +1,11 @@
-"""`Agent`: an opened agent handle, and the approval decisions."""
+"""`Agent`: an opened agent handle, the approval decisions and the answers."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ._rpc import Connection, RunQueue
@@ -28,6 +28,32 @@ class Deny:
 
 
 Decision = Allow | Deny
+
+
+@dataclass(frozen=True)
+class Answer:
+    """The user's answer to one `input_request` of an `AskUser` call.
+
+    Attributes:
+        answers: The answer per question id: one choice (normally an
+            option's label; the user may write their own), or a list of
+            choices for a `multi_select` question. Every question needs
+            one unless the answer declines.
+        note: A free note from the user, passed on to the model.
+        accepted: `False` declines: the model is told to go on with stated
+            assumptions. Use `Answer.declined`.
+    """
+
+    answers: Mapping[str, str | Sequence[str]] = field(
+        default_factory=dict[str, "str | Sequence[str]"]
+    )
+    note: str = ""
+    accepted: bool = True
+
+    @classmethod
+    def declined(cls, note: str = "") -> Answer:
+        """An answer that declines the questions, with an optional note."""
+        return cls(note=note, accepted=False)
 
 
 @dataclass(frozen=True)
@@ -168,6 +194,36 @@ class Agent:
         params: dict[str, Any] = {"agent": self.handle, "run_id": run_id, "decisions": wire}
         return await self._start("run.approve", params, principal)
 
+    async def answer(
+        self,
+        run_id: str,
+        answers: Mapping[str, Answer],
+        *,
+        principal: Principal | None = None,
+    ) -> Run:
+        """Answer a run's pending `AskUser` questions and continue it.
+
+        Only a run waiting for input (a `suspended` event with status
+        `awaiting_input`) takes it. An answer that does not fit its
+        questions ends the returned run with `InvalidAnswer` and nothing is
+        written: the run still waits. Sent again after its answers were
+        committed, it ends with `NotSuspended`; continue that run with
+        `resume`.
+
+        Args:
+            run_id: The suspended run.
+            answers: An `Answer` per `request_id` from the `input_request`
+                events (the `suspended` event's `pending_request_ids`); a
+                pending request with no answer is asked again.
+            principal: Who the rest of the run acts for, as in `run`.
+
+        Returns:
+            The continued run.
+        """
+        wire = {request: _answer(answer) for request, answer in answers.items()}
+        params: dict[str, Any] = {"agent": self.handle, "run_id": run_id, "answers": wire}
+        return await self._start("run.answer", params, principal)
+
     async def close(self) -> None:
         """Free the agent on the server: its stores and its MCP servers.
 
@@ -240,6 +296,17 @@ class Agent:
         with contextlib.suppress(LinchError):
             async for _ in run:
                 pass
+
+
+def _answer(answer: Answer) -> dict[str, Any]:
+    answers = {
+        question: choice if isinstance(choice, str) else list(choice)
+        for question, choice in answer.answers.items()
+    }
+    wire: dict[str, Any] = {"accepted": answer.accepted, "answers": answers}
+    if answer.note:
+        wire["note"] = answer.note
+    return wire
 
 
 def _decision(decision: Decision) -> dict[str, str]:

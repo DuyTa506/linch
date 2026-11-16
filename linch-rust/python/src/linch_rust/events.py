@@ -9,7 +9,7 @@ Decoding is tolerant: members this client does not know are ignored.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar
 
 from .errors import LinchError
@@ -145,17 +145,25 @@ class PermissionRequestEvent:
 
 @dataclass(frozen=True)
 class InputRequestEvent:
-    """The run asks for input (`ask_user` or `workflow_interrupt`); `request_id` names it."""
+    """The run asks for input (`ask_user` or `workflow_interrupt`); `request_id` names it.
+
+    For `ask_user`, `request_id` is the `AskUser` call's `tool_use_id`,
+    `prompt` holds the questions one per line, and `questions` the
+    questions with their options (`{id, header, question, options:
+    [{label, description}], multi_select}`). Answer with `Agent.answer`.
+    """
 
     type: ClassVar[str] = "input_request"
     request_id: str
     kind: str
     prompt: str
+    questions: list[JsonObject] = field(default_factory=list[JsonObject])
 
 
 @dataclass(frozen=True)
 class SuspendedEvent:
-    """The run stopped to wait; answer `pending_request_ids` with `Agent.approve`."""
+    """The run stopped to wait; answer `pending_request_ids` with `Agent.approve`,
+    or with `Agent.answer` when `status` is `awaiting_input`."""
 
     type: ClassVar[str] = "suspended"
     status: str
