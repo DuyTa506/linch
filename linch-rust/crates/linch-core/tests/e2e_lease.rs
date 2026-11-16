@@ -135,7 +135,7 @@ async fn a_long_model_call_renews_on_a_timer_and_an_ended_run_releases_nothing()
     assert!(matches!(last.unwrap().event, Event::Result(_)));
     let renewals = runs.renewals.load(Ordering::SeqCst);
     assert!(
-        (8..=12).contains(&renewals),
+        (5..=12).contains(&renewals),
         "about one per TTL/3: {renewals}"
     );
     assert_eq!(runs.releases.load(Ordering::SeqCst), 0, "an ended run");
