@@ -46,6 +46,7 @@ fn provider(base_url: String) -> Gemini {
     Gemini::new(GeminiOptions {
         api_key: ApiKey::new(SECRET).unwrap(),
         base_url,
+        request: crate::RequestOptions::default(),
     })
     .unwrap()
 }

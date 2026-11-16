@@ -68,6 +68,10 @@ pub struct ServerOptions {
     /// SGLang: `max_model_len` on `/v1/models`; llama.cpp: `n_ctx` on
     /// `/props`), else 128000.
     pub context_window: Option<u64>,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
+    /// Chat Completions settings (`parallel_tool_calls`, usage option).
+    pub chat: crate::ChatOptions,
 }
 
 impl ServerOptions {
@@ -80,6 +84,8 @@ impl ServerOptions {
             api_key: None,
             thinking_off_kwargs: server.thinking_off_kwargs(),
             context_window: None,
+            request: crate::RequestOptions::default(),
+            chat: crate::ChatOptions::default(),
         }
     }
 }

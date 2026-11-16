@@ -476,3 +476,20 @@ async fn a_task_ledger_needs_the_tenants_allowlist() {
     }));
     assert!(allowed.call(method::AGENT_OPEN, ledger).await.is_ok());
 }
+
+#[tokio::test]
+async fn request_settings_ride_with_an_allowed_endpoint_only() {
+    let urls = strings(&["http://127.0.0.1:9/v1"]);
+    let rpc = Rpc::remote(acme(|allow| allow.provider_base_urls(&urls).unwrap()));
+    let request = json!({"default_headers": {"x-gateway-token": "t"},
+                         "extra_body": {"top_k": 5}, "timeout_ms": 1000});
+    let vllm = |url: &str| {
+        config(json!({"provider": {"id": "vllm", "base_url": url, "request": request}}))
+    };
+    assert_eq!(refused(&rpc, vllm("http://127.0.0.1:9/v1")).await, None);
+    assert!(
+        refused(&rpc, vllm("http://127.0.0.1:10/v1"))
+            .await
+            .is_some()
+    );
+}

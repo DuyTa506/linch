@@ -362,6 +362,17 @@ key and any `Bearer` token, even for a keyless local server (a proxy may add
 one). Each options struct has `from_env()`, which reads the adapter's
 variable and returns `None` when it is unset or empty.
 
+### Request options
+
+`RequestOptions` (`request.rs`) carries `extra_body`, a read `timeout` and
+default headers for every adapter; `ChatOptions` carries the Chat Completions
+knobs (`parallel_tool_calls`, `include_stream_options`, `chat_template_kwargs`,
+`sampling_params`). Default headers go on the `reqwest` client, which never
+replaces a header set per request, so key headers are refused at construction
+and the key can only come from the environment. `merge_body` runs last on the built
+payload and skips `model`, `stream`, `temperature` and the conversation fields.
+Header values are marked sensitive and never appear in errors or `Debug`.
+
 ## The adapters
 
 Every adapter takes the model from each request, not from its options.

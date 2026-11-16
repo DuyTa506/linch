@@ -30,6 +30,37 @@ the [architecture providers page](../architecture/providers.md).
 with a `ProtocolError` (code -32602), so a config can never carry an
 `api_key`.
 
+### Request settings
+
+Every live provider takes `request`, the data form of Python's `extra_body`,
+`default_headers` and `timeout`:
+
+```json
+{"id": "vllm", "base_url": "http://gw.internal/v1",
+ "request": {"extra_body": {"top_k": 40, "cache_salt": "t1"},
+             "default_headers": {"x-gateway-token": "..."},
+             "timeout_ms": 60000},
+ "chat": {"parallel_tool_calls": false, "include_stream_options": false,
+          "chat_template_kwargs": {"preserve_thinking": true},
+          "sampling_params": {"min_p": 0.1}}}
+```
+
+| Field | Meaning |
+|---|---|
+| `request.extra_body` | Fields merged into every request body. They replace what the adapter set, except `model`, `stream`, `temperature` and the conversation (`messages`, `tools`, `input`, `contents`, `system`, `instructions`), which the session owns. `chat_template_kwargs` merges per field |
+| `request.default_headers` | Headers sent with every request, for gateways. The key headers (`authorization`, `x-api-key`, `x-goog-api-key`) and `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer` are refused at open. Values are hidden when a config is printed or logged |
+| `request.timeout_ms` | Longest silence between two chunks of a response before the call fails; absent: the adapter's own limit |
+| `chat.parallel_tool_calls` | Sent when the request has tools; absent: the server's default |
+| `chat.include_stream_options` | `false` drops `stream_options`, for servers that reject it. On when absent |
+| `chat.chat_template_kwargs` | Fields for servers that apply a chat template; with thinking off, the server's thinking switch is merged over them |
+| `chat.sampling_params` | Native sampling fields (`top_k`, `min_p`, ...), under `extra_body` |
+
+`chat` applies to `deepseek`, `openai-chat`, `vllm`, `sglang` and `llamacpp`.
+The key still comes from the server's environment, so a gateway that needs
+only a header token still needs the provider's key variable set to some value.
+On a remote server, `request` is admitted with the `base_url` that carries it;
+it cannot widen `provider_base_urls`.
+
 ### Context window
 
 Each provider knows the context window of the spec's model, in tokens. It

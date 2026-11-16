@@ -86,6 +86,8 @@ pub struct AnthropicOptions {
     /// `api.anthropic.com` with the models that take it; off by default
     /// and not verified against the live API.
     pub native_catalog_changes: bool,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
 }
 
 impl AnthropicOptions {
@@ -95,6 +97,7 @@ impl AnthropicOptions {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
             native_catalog_changes: false,
+            request: crate::RequestOptions::default(),
         }
     }
 
@@ -129,7 +132,9 @@ impl Anthropic {
     /// for example when no TLS roots are available.
     pub fn new(options: AnthropicOptions) -> Result<Self, ProviderError> {
         crate::base_url::require(&options.base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
     }
@@ -223,7 +228,8 @@ impl Provider for Anthropic {
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         let native = catalog::enabled(&self.options, &request.model);
-        let body = payload::build(&request, native)?;
+        let mut body = payload::build(&request, native)?;
+        self.options.request.merge_body(&mut body);
         let url = format!(
             "{}/v1/messages",
             self.options.base_url.trim_end_matches('/')

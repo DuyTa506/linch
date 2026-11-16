@@ -26,8 +26,8 @@ use linch_tools::{
 
 use crate::agent_memory::Memory;
 use crate::config::{
-    AgentConfig, ExecutionConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig,
-    TaskLedger,
+    AgentConfig, ChatConfig, ExecutionConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig,
+    RequestConfig, StoreConfig, TaskLedger,
 };
 use crate::deep;
 use crate::error::OpenError;
@@ -547,20 +547,28 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
         ProviderConfig::DeepSeek {
             base_url,
             context_window,
+            request,
+            chat,
         } => {
             let mut options = DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV, keyed)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
+            options.request = request.options().map_err(OpenError::Provider)?;
+            options.chat = chat.options();
             Arc::new(DeepSeek::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::OpenAiChat {
             base_url,
             context_window,
+            request,
+            chat,
         } => {
             let mut options =
                 OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV, keyed)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
+            options.request = request.options().map_err(OpenError::Provider)?;
+            options.chat = chat.options();
             Arc::new(OpenAiChat::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::OpenAiResponses {
@@ -568,6 +576,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             reasoning_summary,
             store,
             native_catalog_changes,
+            request,
         } => {
             let api_key = key("openai-responses", openai::API_KEY_ENV, keyed)?;
             let mut options = ResponsesOptions::new(api_key);
@@ -575,11 +584,13 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             options.reasoning_summary = reasoning_summary.map(summary);
             options.store = store;
             options.native_catalog_changes = native_catalog_changes;
+            options.request = request.options().map_err(OpenError::Provider)?;
             Arc::new(OpenAiResponses::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Anthropic {
             base_url,
             native_catalog_changes,
+            request,
         } => {
             let from_env = AnthropicOptions::from_env().filter(|_| keyed);
             let mut options = match from_env {
@@ -588,40 +599,54 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             };
             override_url(&mut options.base_url, base_url);
             options.native_catalog_changes = native_catalog_changes;
+            options.request = request.options().map_err(OpenError::Provider)?;
             Arc::new(Anthropic::new(options).map_err(OpenError::Provider)?)
         }
-        ProviderConfig::Gemini { base_url } => {
+        ProviderConfig::Gemini { base_url, request } => {
             let mut options = GeminiOptions::new(key("gemini", gemini::API_KEY_ENV, keyed)?);
             override_url(&mut options.base_url, base_url);
+            options.request = request.options().map_err(OpenError::Provider)?;
             Arc::new(Gemini::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Vllm {
             base_url,
             context_window,
+            request,
+            chat,
         } => server(
             Server::Vllm,
             base_url,
             context_window,
+            &request,
+            &chat,
             "VLLM_API_KEY",
             keyed,
         )?,
         ProviderConfig::SgLang {
             base_url,
             context_window,
+            request,
+            chat,
         } => server(
             Server::SgLang,
             base_url,
             context_window,
+            &request,
+            &chat,
             "SGLANG_API_KEY",
             keyed,
         )?,
         ProviderConfig::LlamaCpp {
             base_url,
             context_window,
+            request,
+            chat,
         } => server(
             Server::LlamaCpp,
             base_url,
             context_window,
+            &request,
+            &chat,
             "LLAMA_API_KEY",
             keyed,
         )?,
@@ -654,7 +679,7 @@ fn base_url(config: &ProviderConfig) -> Option<&str> {
         | ProviderConfig::OpenAiChat { base_url, .. }
         | ProviderConfig::OpenAiResponses { base_url, .. }
         | ProviderConfig::Anthropic { base_url, .. }
-        | ProviderConfig::Gemini { base_url } => base_url.as_deref(),
+        | ProviderConfig::Gemini { base_url, .. } => base_url.as_deref(),
         ProviderConfig::Vllm { base_url, .. }
         | ProviderConfig::SgLang { base_url, .. }
         | ProviderConfig::LlamaCpp { base_url, .. } => Some(base_url),
@@ -684,12 +709,16 @@ fn server(
     server: Server,
     base_url: String,
     context_window: Option<u64>,
+    request: &RequestConfig,
+    chat: &ChatConfig,
     env: &'static str,
     keyed: bool,
 ) -> Result<Arc<dyn Provider>, OpenError> {
     let mut options = ServerOptions::new(server, base_url);
     options.api_key = ApiKey::from_env(env).filter(|_| keyed);
     options.context_window = context_window;
+    options.request = request.options().map_err(OpenError::Provider)?;
+    options.chat = chat.options();
     Ok(Arc::new(
         OpenAiChat::server(options).map_err(OpenError::Provider)?,
     ))

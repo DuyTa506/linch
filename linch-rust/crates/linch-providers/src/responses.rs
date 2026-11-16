@@ -98,6 +98,8 @@ pub struct ResponsesOptions {
     /// prompt cache, instead of in `tools`. Used only with gpt-5.4 and
     /// later; off by default and not verified against the live API.
     pub native_catalog_changes: bool,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
 }
 
 impl ResponsesOptions {
@@ -110,6 +112,7 @@ impl ResponsesOptions {
             reasoning_summary: None,
             store: true,
             native_catalog_changes: false,
+            request: crate::RequestOptions::default(),
         }
     }
 
@@ -135,7 +138,9 @@ impl OpenAiResponses {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built.
     pub fn new(options: ResponsesOptions) -> Result<Self, ProviderError> {
         crate::base_url::require(&options.base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
     }
@@ -204,7 +209,8 @@ impl Provider for OpenAiResponses {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = payload::build_payload(&request, &self.options)?;
+        let mut body = payload::build_payload(&request, &self.options)?;
+        self.options.request.merge_body(&mut body);
         let url = format!("{}/responses", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
         let overflow = &crate::overflow::RESPONSES;
