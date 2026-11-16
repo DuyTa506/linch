@@ -90,7 +90,11 @@ None of them can change what they observe.
 
 A call that fails ends the run as failed with one terminal write that carries
 the receipt, the usage, the `Error`, the status and the `Result`
-(`turn.rs:337-347`). A response the output limit cut off before it held any
+(`turn.rs:337-347`), unless the spec's `provider_retry` or `fallback_models`
+take a retryable failure: then the run goes back to step 4 with the next
+delivery `attempt`, after a `provider_retry` write and a wait, or at once to
+a fallback model with a `model_fallback` event
+([providers](./providers.md#retries-and-fallback-models), `runner/retry.rs`). A response the output limit cut off before it held any
 text or a whole tool call is not an answer: the session gets nothing, and the
 run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
 
@@ -152,6 +156,7 @@ The caller places the barriers, and the run does it in these places:
 | Barrier | Call | Where |
 |---|---|---|
 | Before a provider dispatch | `Journal::flush` | `turn.rs:303-305` |
+| Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:70-73` |
 | Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
 | After each tool that really ran | `tool_finished` flushes | `sink.rs:142-182` |
@@ -167,7 +172,9 @@ write past a barrier. Three kinds of write do not wait for the next barrier:
   (`turn.rs:370-374`). A compaction summary writes through with `Compacted`
   (`compact.rs:134-147`). A summary call that gave no text saves
   `CompactionPending` and flushes at once, so a resume does not buy it again
-  (`compact.rs:20-24, 114-120`).
+  (`compact.rs:20-24, 114-120`). A failed call the run retries saves
+  `ProviderPending` again, at the totals that count its receipt, and flushes
+  with its `provider_retry` event before the wait (`runner/retry.rs:70-73`).
 - A tool end. It is flushed right after the tool returns, from
   `tool_finished`, so a resume finds the result and does not run the tool
   again (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).
@@ -232,7 +239,7 @@ only for `Read` scope (`crates/linch-core/src/tool.rs:34-36, 250-257`). The
 named type whose definition lists its tools and every one of them is a
 registered `Read` tool. Anything unknown fails closed
 (`crates/linch-core/src/subagents/tool.rs:124-146`). The default limit is 4,
-and 0 counts as 1 (`agent/spec.rs:54-56`, `execute.rs:137`).
+and 0 counts as 1 (`agent/spec.rs:55-57`, `execute.rs:137`).
 
 Calls in one group overlap, so the `ToolSink` must accept concurrent calls
 (`execute.rs:33`). The journal sink takes turns on a mutex held across each
@@ -283,7 +290,7 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 | Checkpoint phase | Recovery | The run continues with |
 |---|---|---|
 | `Started` | `Started` | Append the prompt unless it is in the session, then the turn |
-| `ProviderPending` | `Redispatch`, or `Received` with an accepted receipt | A cancelled receipt for a delivery with no receipt, then attempt + 1; or the durable response |
+| `ProviderPending` | `Redispatch`, or `Received` with an accepted receipt | A cancelled receipt for a delivery with no receipt, then attempt + 1; attempt + 1 at once after a failed receipt (a retry's wait cut short, or a failover), on the model and with the retries its `provider_retry` and `model_fallback` events say; or the durable response |
 | `AssistantReceived` | `Received` | Append the response unless it is in the session, then branch on its tool calls; with `retry_feedback`, send that feedback instead, without asking the hook again |
 | `ToolBatch` | `ToolBatch` | Each call: its durable result, a placeholder, or a re-plan |
 | `AwaitingApproval` | `AwaitingApproval` | Re-plan with the recorded decisions; suspend again if one still needs an answer |
@@ -326,7 +333,7 @@ child runs, stages their final status, builds the `Result` and calls
 | Output limit | `failed` | The response held no text or whole tool call (`end.rs:76-90`) |
 | Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:92-108`) |
 | Budget | `failed` | The budget admits no more calls (`end.rs:110-122`) |
-| Provider error | `failed` | The call failed (`turn.rs:343-346`) |
+| Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:343-346`, `runner/retry.rs`) |
 
 A terminal status is final in the store ([stores](./stores.md#run-store)).
 `Agent::fail` marks a run that can never continue (a contract mismatch, a

@@ -196,6 +196,8 @@ absent, except `bash`.
 | `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |
 | `budget` | none: no cap | A token and USD cap for each run and its subagents, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([below](#budget)) |
+| `provider_retry` | none: no retry | Call the same model again after a retryable failure, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`; `{}` turns it on with Python's defaults ([providers](./providers.md#failures-and-retries)) |
+| `fallback_models` | `[]` | Models to fail over to, in order, once a model has no retry left; the run keeps the one it fails over to ([providers](./providers.md#failures-and-retries)) |
 
 ### System blocks
 

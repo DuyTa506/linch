@@ -48,8 +48,13 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `stop` can retry the final answer once per run call, as Python's `before_final_answer` `retry` (`_MAX_FINAL_ANSWER_REENTRIES`); a spent retry counts as `allow`. `{"action": "retry", "feedback"}` on the wire, `StopResponse::Retry` in `linch-core`.
 - `stop` accepts `{"action": "force_continue", "feedback"}`, Python's name for its `continue`.
 - `Phase::AssistantReceived` records an `after_provider_call` retry in an optional `retry_feedback`, durable with the paid response; checkpoints without one are unchanged, but a binary older than this one cannot resume a run whose checkpoint has one.
+- `spec.provider_retry` retries a provider call that failed with a retryable error (no response, 408, 429, 5xx) on the same model, after an exponential, jittered wait that honours `Retry-After`: `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, `{}` for Python's `RetryOptions` defaults (5, 1000, 30000, 0.2). Off when absent. Each attempt is its own durable delivery; a crash during the wait resumes with the next attempt and keeps the turn's count. `ProviderRetry` in `linch-core` and the Python client.
+- `spec.fallback_models` fails a run over to the next model, in order, once a model has no retry left; the run keeps that model, a resumed run included, and its usage and cost name it. Empty by default.
+- `provider_retry` and `model_fallback` events report each retry (`model`, `retry`, `delay_ms`, `error`) and each failover (`from_model`, `to_model`, `error`); the Python client decodes them as `ProviderRetryEvent` and `ModelFallbackEvent`.
 
 ### Changed
+
+- `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
 
 - `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.
 
