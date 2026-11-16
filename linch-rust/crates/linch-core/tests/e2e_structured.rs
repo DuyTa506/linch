@@ -461,3 +461,102 @@ async fn a_crash_at_any_write_of_a_retried_answer_replays_the_retry_once() {
         }
     }
 }
+
+fn named() -> OutputSchema {
+    OutputSchema {
+        name: "person".into(),
+        schema: object(json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        })),
+        strict: false,
+        description: None,
+    }
+}
+
+fn with_schema(schema: OutputSchema) -> RunOptions {
+    let mut options = RunOptions::new("s1");
+    options.output_schema = Some(schema);
+    options
+}
+
+#[tokio::test]
+async fn a_run_can_bring_its_own_schema_in_place_of_the_agents() {
+    let provider = Arc::new(ScriptedProvider::new([
+        text_turn("{\"total\": 1}"),
+        text_turn("{\"name\": \"Ada\"}"),
+    ]));
+    let stores = Arc::new(Stores::default());
+    let agent = build(shaped(1), provider.clone(), Hooks::default(), stores);
+    let envelopes = finish(agent.run("who", with_schema(named()))).await;
+    let result = result(&envelopes);
+    let ada = object(json!({"name": "Ada"}));
+    assert_eq!(result.structured_output, Some(ada));
+    assert_eq!(verifications(&envelopes), [(VerificationAction::Retry, 1)]);
+    for request in provider.requests() {
+        assert_eq!(request.output_schema, Some(named()));
+    }
+    let Event::Init(init) = &envelopes[0].event else {
+        panic!("starts with init")
+    };
+    assert_eq!(init.output_schema, Some(named()));
+}
+
+#[tokio::test]
+async fn an_unusable_run_schema_writes_nothing() {
+    let provider = Arc::new(ScriptedProvider::new([text_turn("{}")]));
+    let stores = Arc::new(Stores::default());
+    let agent = build(spec(), provider.clone(), Hooks::default(), stores.clone());
+    let mut array = named();
+    array.schema = object(json!({"type": "array"}));
+    let stream = agent.run("who", with_schema(array));
+    let run_id = stream.run_id().clone();
+    let (envelopes, error) = drain(stream).await;
+    assert!(
+        matches!(
+            error,
+            Some(linch_core::RunError::InvalidOutputSchema { .. })
+        ),
+        "{error:?}"
+    );
+    assert!(envelopes.is_empty());
+    assert!(stores.runs.load(NS, &run_id).await.is_err(), "no run");
+    assert!(stores.log.lock().unwrap().is_empty(), "nothing written");
+    assert!(provider.requests().is_empty());
+}
+
+/// A resumed run takes its own schema back from its `init` event, at
+/// whatever write it crashed, though the agent that resumes it has none.
+#[tokio::test]
+async fn a_resumed_run_keeps_its_own_schema() {
+    let turns = || vec![tool_turn(0, 1, "Read"), text_turn("{\"name\": \"Ada\"}")];
+    let clean = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(turns()));
+    let agent = build(spec(), provider, Hooks::default(), clean.clone());
+    finish(agent.run("who", with_schema(named()))).await;
+    let writes = clean.log.lock().unwrap().len() as u64;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let stores = Arc::new(Stores::default());
+            let provider = Arc::new(Replay::new(turns()));
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let stream = build(spec(), provider.clone(), Hooks::default(), faulty)
+                .run("who", with_schema(named()));
+            let run_id = stream.run_id().clone();
+            assert!(drain(stream).await.1.is_some(), "{context}");
+            let agent = build(spec(), provider.clone(), Hooks::default(), stores.clone());
+            let envelopes = match stores.runs.load(NS, &run_id).await {
+                Ok(record) if record.status.is_terminal() => {
+                    stores.runs.events(NS, &run_id, 0).await.unwrap()
+                }
+                Ok(_) => finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await,
+                // The run was never created: the host starts it again.
+                Err(_) => finish(agent.run("who", with_schema(named()))).await,
+            };
+            let ada = object(json!({"name": "Ada"}));
+            assert_eq!(result(&envelopes).structured_output, Some(ada), "{context}");
+        }
+    }
+}

@@ -21,7 +21,7 @@ use crate::json::JsonObject;
 use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
-use crate::provider::{CacheControl, Provider, ProviderRequest, ToolDefinition};
+use crate::provider::{CacheControl, OutputSchema, Provider, ProviderRequest, ToolDefinition};
 use crate::registration::Registration;
 use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
@@ -76,11 +76,20 @@ pub struct RunOptions {
     /// it. `None` sets none. Resume and approve ignore this field and keep
     /// the run's own.
     pub trace_id: Option<String>,
+    /// The output schema of this run alone, in place of the agent's
+    /// `spec.output_schema` (Python's `RunOptions.output_schema`); the
+    /// agent's `structured_output_retries` still bound it. `None` keeps
+    /// the agent's. It is checked before anything is written and stored in
+    /// the run's `init` event, so a resume or approve uses it again; they
+    /// ignore this field. It is not part of the contract, which stays the
+    /// agent's.
+    pub output_schema: Option<OutputSchema>,
 }
 
 impl RunOptions {
     /// Options for `session_id`, with no run id, no principal, owner
-    /// `linch`, a fresh cancel token and no trace id.
+    /// `linch`, a fresh cancel token, no trace id and the agent's output
+    /// schema.
     pub fn new(session_id: impl Into<SessionId>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -89,6 +98,7 @@ impl RunOptions {
             owner: "linch".into(),
             cancel: CancellationToken::new(),
             trace_id: None,
+            output_schema: None,
         }
     }
 }

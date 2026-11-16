@@ -17,12 +17,13 @@ use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, reconcile};
 use crate::message::ContentBlock;
+use crate::provider::OutputSchema;
 use crate::reliability::Standing;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::skills::SKILL_TOOL;
 use crate::store::{Lease, RunRecord, StoreError};
-use crate::structured;
+use crate::structured::{self, OutputContract};
 use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
 use crate::usage::Usage;
@@ -42,6 +43,11 @@ pub(super) async fn new_run(
     let Shared { outbox, driving } = shared;
     let started = Instant::now();
     let namespace = agent.namespace.clone();
+    // The run's own schema is checked before anything is written.
+    let output = match options.output_schema.clone() {
+        Some(schema) => Some(compile(&run_id, schema)?),
+        None => None,
+    };
     if options.run_id.is_some() {
         // A caller-chosen id may be taken: refuse it before any write.
         match agent.runs.load(&namespace, &run_id).await {
@@ -96,6 +102,7 @@ pub(super) async fn new_run(
         trace_id: options.trace_id.clone(),
         resumed: false,
         turn: 0,
+        output_schema: options.output_schema.clone(),
     }));
     // A session's first run lists the agent's skills, as
     // Python does once per session, when the run offers `Skill` (a child
@@ -164,6 +171,9 @@ pub(super) async fn new_run(
     runner.family = family;
     runner.budget = budget;
     runner.seen = seen;
+    if output.is_some() {
+        runner.output = output;
+    }
     let prompt = Step::Prompt {
         prompt,
         appended: false,
@@ -302,6 +312,7 @@ pub(super) async fn continue_run(
         trace_id: trace_id.clone(),
         resumed: true,
         turn: u64::from(checkpoint.turn),
+        output_schema: None,
     }));
     let run = identity(
         record.session_id.clone(),
@@ -336,6 +347,9 @@ pub(super) async fn continue_run(
     runner.family = family;
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
+    if let Some(schema) = schema_of(&events) {
+        runner.output = Some(compile(&runner.run.run_id, schema)?);
+    }
     if let Some(decisions) = commit {
         runner.commit_decisions(decisions, assistant_seq).await?;
     }
@@ -394,6 +408,26 @@ async fn spent(agent: &AgentInner, run_id: &RunId, events: &[Envelope]) -> Resul
 fn duplicate(run_id: &RunId, namespace: &str) -> StoreError {
     let message = format!("run {run_id} already exists in {namespace}");
     StoreError::Conflict { message }
+}
+
+/// The run's own output schema, from the `init` event that created it;
+/// `None` when it took the agent's.
+fn schema_of(events: &[Envelope]) -> Option<OutputSchema> {
+    events.iter().find_map(|envelope| match &envelope.event {
+        Event::Init(init) => Some(init.output_schema.clone()),
+        _ => None,
+    })?
+}
+
+/// `schema`, compiled for run `run_id`.
+fn compile(run_id: &RunId, schema: OutputSchema) -> Result<Arc<OutputContract>, RunError> {
+    match OutputContract::compile(schema) {
+        Ok(output) => Ok(Arc::new(output)),
+        Err(reason) => Err(RunError::InvalidOutputSchema {
+            run_id: run_id.clone(),
+            reason,
+        }),
+    }
 }
 
 /// The trace id the run's `init` event stored; `None` when it has none.

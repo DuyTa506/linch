@@ -32,6 +32,7 @@ pub(super) fn init_event() -> impl Strategy<Value = InitEvent> {
                 trace_id,
                 resumed: at.0,
                 turn: at.1,
+                output_schema: None,
             },
         )
 }
