@@ -224,7 +224,50 @@ class RunLeased(RunError):
             return None
 
 
+class SchedulerError(RpcError):
+    """A schedule or background-run call was refused (-32040 to -32044)."""
+
+
+class NotBackground(SchedulerError):
+    """The agent cannot run in the background (-32040): `reason` is
+    `memory_store`, `host_tools` or `callbacks`."""
+
+    @property
+    def reason(self) -> str:
+        """Why the agent cannot run without this connection."""
+        return _field(self.data, "reason")
+
+
+class ScheduleNotFound(SchedulerError):
+    """The agent's namespace has no schedule with that id (-32041)."""
+
+
+class ScheduleExists(SchedulerError):
+    """The agent's namespace already has a schedule with that id (-32042)."""
+
+
+class JobNotFound(SchedulerError):
+    """The agent's namespace has no job with that id, or its history was
+    pruned (-32043)."""
+
+
+class InvalidSchedule(SchedulerError):
+    """The schedule's timing is unusable (-32044): a cron pattern that does
+    not parse, an unknown time zone, an interval out of range, or both or
+    neither of `cron` and `interval_ms`."""
+
+    @property
+    def reason(self) -> str:
+        """What is wrong with the timing."""
+        return _field(self.data, "reason")
+
+
 _BY_CODE: dict[int, type[RpcError]] = {
+    -32040: NotBackground,
+    -32041: ScheduleNotFound,
+    -32042: ScheduleExists,
+    -32043: JobNotFound,
+    -32044: InvalidSchedule,
     -32001: AgentNotFound,
     -32002: RunBusy,
     -32003: Unauthenticated,

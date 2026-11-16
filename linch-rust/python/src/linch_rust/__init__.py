@@ -44,10 +44,13 @@ from .errors import (
     ContractMismatch,
     InvalidAnswer,
     InvalidOutputSchema,
+    InvalidSchedule,
+    JobNotFound,
     LeaseLost,
     LimitReached,
     LinchError,
     NotAllowed,
+    NotBackground,
     NotSuspended,
     OpenError,
     PromptBlocked,
@@ -58,6 +61,9 @@ from .errors import (
     RunLeased,
     RunNotFound,
     RunTerminal,
+    ScheduleExists,
+    ScheduleNotFound,
+    SchedulerError,
     SessionBusy,
     Unauthenticated,
 )
@@ -107,6 +113,7 @@ from .monitor import (
     Usage,
 )
 from .run import Run
+from .schedule import CHECK_IN, Job, JobState, Schedule
 from .server import Server
 from .tools import HostTool, Scope, ToolContext, ToolOutput, tool
 
@@ -121,6 +128,7 @@ __all__ = [
     "EvalCase",
     "CustomScorer",
     "CaseResult",
+    "CHECK_IN",
     "Agent",
     "AgentConfig",
     "AgentNotFound",
@@ -151,12 +159,17 @@ __all__ = [
     "InputRequestEvent",
     "InvalidAnswer",
     "InvalidOutputSchema",
+    "InvalidSchedule",
+    "Job",
+    "JobNotFound",
+    "JobState",
     "LeaseLost",
     "LimitReached",
     "LinchError",
     "LoopGuardEvent",
     "ModelFallbackEvent",
     "NotAllowed",
+    "NotBackground",
     "NotSuspended",
     "OpenError",
     "OutputSchema",
@@ -181,6 +194,10 @@ __all__ = [
     "RunLeased",
     "RunNotFound",
     "RunTerminal",
+    "Schedule",
+    "ScheduleExists",
+    "ScheduleNotFound",
+    "SchedulerError",
     "Scope",
     "Server",
     "SessionBusy",
