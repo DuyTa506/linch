@@ -12,8 +12,8 @@ use linch_core::events::kinds::{HookOutcome, ResultSubtype, UserEventSubtype};
 use linch_core::hooks::{PostTurn, Stop, StopResponse};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Event, FailMode, Hooks, Message, PermissionMode, RunOptions,
-    RunStatus, RunStore, SessionStore, StopReason, ToolScope,
+    Agent, AgentBuilder, AgentSpec, Envelope, Event, FailMode, HookPoint, Hooks, Message,
+    PermissionMode, RunOptions, RunStatus, RunStore, SessionStore, StopReason, ToolScope,
 };
 
 /// Keeps the run going once, after the first answer.
@@ -242,6 +242,124 @@ async fn post_turn_sees_every_finished_turn() {
         .filter(|e| matches!(&e.event, Event::Hook(r) if r.policy_id == "watch"))
         .count();
     assert_eq!(records, 3);
+}
+
+/// `n` text answers, `answer 1` to `answer n`.
+fn texts(n: usize) -> Arc<Replay> {
+    let turns = (1..=n).map(|i| text_turn(&format!("answer {i}")));
+    Arc::new(Replay::new(turns.collect()))
+}
+
+fn stop_verdicts(envelopes: &[Envelope]) -> Vec<String> {
+    (envelopes.iter())
+        .filter_map(|envelope| match &envelope.event {
+            Event::Hook(record) if record.point == HookPoint::Stop => match &record.outcome {
+                HookOutcome::Answered { verdict } => Some(verdict.clone()),
+                other => Some(format!("{other:?}")),
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn limited(max_turns: u32) -> AgentSpec {
+    let mut spec = spec();
+    spec.max_turns = Some(max_turns);
+    spec
+}
+
+/// Python's `before_final_answer` `retry` is honoured once per run
+/// (`_MAX_FINAL_ANSWER_REENTRIES`): a hook that always asks again gets one
+/// more answer, which then stops the run.
+#[tokio::test]
+async fn a_final_answer_retry_is_honoured_once_per_run() {
+    let hooks = Hooks::default();
+    let judge = hook::<Stop>("judge", |_| {
+        Ok(StopResponse::Retry {
+            feedback: "be precise".into(),
+        })
+    });
+    let _ = hooks.stop.register(judge.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let provider = texts(4);
+    let agent = hooked(limited(4), provider.clone(), hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let feedback = Message::user_text("<system-reminder>\nbe precise\n</system-reminder>");
+    let want = [
+        Message::user_text("go"),
+        Message::assistant_text("answer 1"),
+        feedback.clone(),
+        Message::assistant_text("answer 2"),
+    ];
+    assert_eq!(messages(&*stores, "s1").await, want);
+    assert_eq!(provider.calls().values().sum::<u32>(), 2);
+    assert_eq!(stop_verdicts(&envelopes), ["retry", "retry"]);
+    let notified = envelopes.iter().any(|e| {
+        matches!(&e.event, Event::User(user)
+            if user.subtype == UserEventSubtype::Notification && user.message == feedback)
+    });
+    assert!(notified, "the feedback is a durable notification");
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert_eq!(result.subtype, ResultSubtype::Success);
+    assert_eq!(result.final_text.as_deref(), Some("answer 2"));
+}
+
+/// A spent retry counts as an allow, so the hooks after it decide, as
+/// Python's stop hooks do once `before_final_answer` let the answer
+/// through. While the retry is honoured they are not asked.
+#[tokio::test]
+async fn a_spent_retry_lets_the_later_stop_hooks_decide() {
+    let hooks = Hooks::default();
+    let judge = hook::<Stop>("judge", |_| {
+        Ok(StopResponse::Retry {
+            feedback: "be precise".into(),
+        })
+    });
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&asked);
+    let polish = hook::<Stop>("polish", move |request| {
+        seen.lock().unwrap().push(request.text.clone());
+        Ok(StopResponse::Rewrite {
+            text: "Done!".into(),
+        })
+    });
+    let _ = hooks.stop.register(judge.arc()).unwrap();
+    let _ = hooks.stop.register(polish.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(limited(4), texts(4), hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    assert_eq!(*asked.lock().unwrap(), ["answer 2"]);
+    assert_eq!(stop_verdicts(&envelopes), ["retry", "retry", "rewrite"]);
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert_eq!(result.final_text.as_deref(), Some("Done!"));
+}
+
+/// `continue` is Python's stop `force_continue`: no retry budget bounds it,
+/// only `max_turns`.
+#[tokio::test]
+async fn a_stop_continue_is_bounded_only_by_max_turns() {
+    let hooks = Hooks::default();
+    let more = hook::<Stop>("more", |_| {
+        Ok(StopResponse::Continue {
+            feedback: "keep going".into(),
+        })
+    });
+    let _ = hooks.stop.register(more.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let provider = texts(4);
+    let agent = hooked(limited(3), provider.clone(), hooks, stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+    assert_eq!(provider.calls().values().sum::<u32>(), 3);
+    assert_eq!(stop_verdicts(&envelopes), ["continue"; 3]);
+    assert!(kinds(&envelopes).contains(&"loop_guard".to_owned()));
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
 }
 
 #[tokio::test]

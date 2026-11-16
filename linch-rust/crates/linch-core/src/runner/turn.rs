@@ -120,6 +120,8 @@ pub(super) struct Runner {
     pub(super) budget: Option<Meter>,
     /// Peer messages logged in an event that is not durable yet.
     pub(super) peers: Option<HeldPeers>,
+    /// `stop` retries honoured in this run call (see `runner/hooks.rs`).
+    pub(super) final_answer_retries: u32,
 }
 
 impl Runner {
@@ -155,6 +157,7 @@ impl Runner {
             family: None,
             budget: None,
             peers: None,
+            final_answer_retries: 0,
         };
         runner.narrow();
         runner

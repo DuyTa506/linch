@@ -494,6 +494,51 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
     );
 }
 
+/// A retry stops the chain while the run may still retry; once it may not,
+/// it counts as an allow and the later hooks decide.
+#[tokio::test]
+async fn stop_retry_stops_the_chain_until_the_run_spent_it() {
+    let request = StopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        text: "done".into(),
+    };
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.stop,
+        Scripted::new("judge", &log, |_| {
+            Act::Answer(StopResponse::Retry {
+                feedback: "be precise".into(),
+            })
+        }),
+    );
+    let _ = register(
+        &hooks.stop,
+        Scripted::new("polish", &log, |_| {
+            Act::Answer(StopResponse::Rewrite {
+                text: "Done!".into(),
+            })
+        }),
+    );
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Retry {
+            feedback: "be precise".into()
+        }
+    );
+    assert_eq!(calls(&log), ["judge"]);
+    let mut records = Vec::new();
+    let spent = hooks.stop.run_into(request, false, &mut records).await;
+    assert_eq!(
+        spent,
+        StopOutcome::Stop {
+            text: "Done!".into()
+        }
+    );
+    assert_eq!(calls(&log), ["judge", "judge", "polish"]);
+}
+
 #[tokio::test]
 async fn stop_rewrites_the_final_text_and_a_block_fails_the_run() {
     let request = StopRequest {

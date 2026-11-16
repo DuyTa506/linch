@@ -33,6 +33,13 @@ use crate::run::{Phase, RunStatus, StopReason};
 use crate::skills::system_reminder;
 use crate::usage::Usage;
 
+/// How many times one run call honours a `stop` hook's
+/// [`StopResponse::Retry`](crate::hooks::StopResponse::Retry); a later
+/// retry counts as an allow. Python's `_MAX_FINAL_ANSWER_REENTRIES`, which
+/// bounds `before_final_answer` retries the same way and is not
+/// checkpointed either: a resume starts afresh.
+const MAX_FINAL_ANSWER_RETRIES: u32 = 1;
+
 /// What a `before_provider_call` hook decided for the request about to be
 /// sent.
 pub(super) enum BeforeCall {
@@ -320,7 +327,8 @@ impl Runner {
             text: text.to_owned(),
         };
         let mut records = Vec::new();
-        let run = chain.run_into(request, &mut records);
+        let retry = self.final_answer_retries < MAX_FINAL_ANSWER_RETRIES;
+        let run = chain.run_into(request, retry, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
         let Some(outcome) = outcome else {
@@ -330,6 +338,10 @@ impl Runner {
         let feedback = match outcome {
             StopOutcome::Stop { text } => return Ok(Stopping::Stop { text }),
             StopOutcome::Continue { feedback } => feedback,
+            StopOutcome::Retry { feedback } => {
+                self.final_answer_retries += 1;
+                feedback
+            }
             StopOutcome::Failed { reason } => {
                 self.hook_failed(reason).await?;
                 return Ok(Stopping::Ended);
