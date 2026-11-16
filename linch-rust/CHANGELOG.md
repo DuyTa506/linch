@@ -72,6 +72,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 ### Changed
 
 - `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
+- A call that failed with a 500, 502 or 504 before any stream event now settles with an unknown usage instead of a zero one: a gateway can send those after the upstream model already ran and billed. Only a connection never made, a 4xx (408 and 429 included), a 503 or a 529 before any event counts as costing nothing; any other status is unknown too. Under a capped `budget` such a failure is no longer retried, and `usage_complete` is false.
 
 - `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.
 - A workspace agent now also has `BashOutput` and `BashKill` (`bash: false` leaves all three out), so its run contract changes: a run started under an older binary cannot be resumed.

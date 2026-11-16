@@ -282,6 +282,39 @@ async fn every_failure_path_settles_one_receipt() {
     }
 }
 
+/// An error status before any event costs nothing only when no upstream
+/// can have billed it: a client error (4xx, 408 and 429 included), 503 and
+/// 529. A 500, 502 or 504 may come from a gateway after the upstream model
+/// already ran, and any other status is not known either: usage unknown.
+#[tokio::test]
+async fn an_error_status_is_free_only_when_nothing_was_billed() {
+    for (status, free) in [
+        (400, true),
+        (401, true),
+        (404, true),
+        (408, true),
+        (413, true),
+        (429, true),
+        (503, true),
+        (529, true),
+        (500, false),
+        (502, false),
+        (504, false),
+        (501, false),
+        (520, false),
+    ] {
+        let outcome = drive_turn(ScriptedTurn::failing(ScriptedError::Status {
+            status,
+            retry_after_ms: None,
+            message: "error".into(),
+        }))
+        .await;
+        let usage = free.then(Usage::default);
+        assert_eq!(outcome.receipt.usage, usage, "{status}");
+        assert_eq!(outcome.result.unwrap_err().free, free, "{status}");
+    }
+}
+
 #[tokio::test]
 async fn a_failure_carries_its_error_event_payload() {
     let outcome = drive_turn(ScriptedTurn::failing(ScriptedError::Status {

@@ -46,8 +46,8 @@ pub struct ModelCall {
 /// `result` is `Ok`, `cancelled` for [`ProviderError::Cancelled`], and
 /// `failed` otherwise. Its usage is the usage the provider reported, even on
 /// a failed call; a zero usage when the call failed before costing anything
-/// (no connection, or an error status before any event); and `None` when
-/// it is unknown.
+/// (no connection, or a refusing status before any event: see
+/// `costs_nothing`); and `None` when it is unknown.
 #[derive(Debug)]
 pub struct CallOutcome {
     /// The one receipt for this delivery.
@@ -65,8 +65,8 @@ pub struct CallFailure {
     /// `retryable`, and `status` for an HTTP status error.
     pub event: ErrorEvent,
     /// Whether the call is known to have cost nothing: the connection was
-    /// never made, or the provider answered with an error status before any
-    /// event. Its receipt's usage is then a zero.
+    /// never made, or the provider refused it before any event with a 4xx,
+    /// 503 or 529 status. Its receipt's usage is then a zero.
     pub free: bool,
 }
 
@@ -248,13 +248,18 @@ async fn consume(
 }
 
 /// Whether a failed call is known to have cost nothing: the connection was
-/// never made, or the provider answered with an error status before any
-/// event. A request that got no answer, or a stream that broke after it
-/// began, may have been billed, so its usage stays unknown.
+/// never made, or the provider refused the request with an error status
+/// before any event: a client error (4xx, 408 and 429 included), 503 or
+/// 529. A 500, 502 or 504 can come from a gateway after the upstream model
+/// already ran and billed, and any other status is not known either. A
+/// request that got no answer, or a stream that broke after it began, may
+/// have been billed too, so its usage stays unknown.
 fn costs_nothing(error: &ProviderError, seen: &Observed) -> bool {
     match error {
         ProviderError::Connect { .. } => true,
-        ProviderError::Status { .. } => !seen.began,
+        ProviderError::Status { status, .. } => {
+            !seen.began && matches!(status, 400..=499 | 503 | 529)
+        }
         _ => false,
     }
 }
