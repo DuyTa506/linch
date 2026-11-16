@@ -51,6 +51,10 @@ pub struct DeepSeekOptions {
     /// The context window of every model; `None` gives 128000, Python's
     /// conservative fallback.
     pub context_window: Option<u64>,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
+    /// Chat Completions settings (`parallel_tool_calls`, usage option).
+    pub chat: crate::ChatOptions,
 }
 
 impl DeepSeekOptions {
@@ -60,6 +64,8 @@ impl DeepSeekOptions {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
             context_window: None,
+            request: crate::RequestOptions::default(),
+            chat: crate::ChatOptions::default(),
         }
     }
 
@@ -85,7 +91,9 @@ impl DeepSeek {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built,
     /// for example when no TLS roots are available.
     pub fn new(options: DeepSeekOptions) -> Result<Self, ProviderError> {
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
     }
@@ -106,7 +114,9 @@ impl Provider for DeepSeek {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = build_payload(&request)?;
+        let mut body = build_payload(&request)?;
+        self.options.chat.apply(&mut body);
+        self.options.request.merge_body(&mut body);
         let url = format!(
             "{}/chat/completions",
             self.options.base_url.trim_end_matches('/')

@@ -4,6 +4,17 @@ Notable changes to `linch-rust`: the Rust crates under `crates/` and the
 `linch-rust` Python client that ships the `linch-server` binary. The Python
 package `linch` has its own [changelog](../CHANGELOG.md).
 
+## Unreleased
+
+### Added
+
+- Provider request settings: `request.extra_body`, `request.default_headers` and
+  `request.timeout_ms` on every live provider, and `chat.parallel_tool_calls`,
+  `chat.include_stream_options`, `chat.chat_template_kwargs` and
+  `chat.sampling_params` on the Chat Completions providers (`deepseek`,
+  `openai-chat`, `vllm`, `sglang`, `llamacpp`). Header values are hidden when a
+  config is printed; key headers and the conversation fields are refused or kept.
+
 ## 0.1.1 - 2026-11-07
 
 ### Fixed

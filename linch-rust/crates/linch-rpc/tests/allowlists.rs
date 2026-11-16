@@ -456,3 +456,20 @@ async fn a_store_pool_may_not_exceed_the_tenants_max_pool_connections() {
     let error = rpc.call(method::AGENT_OPEN, store(Some(default))).await;
     assert_eq!(refusal(error.unwrap_err()), (code::STORE_UNAVAILABLE, None));
 }
+
+#[tokio::test]
+async fn request_settings_ride_with_an_allowed_endpoint_only() {
+    let urls = strings(&["http://127.0.0.1:9/v1"]);
+    let rpc = Rpc::remote(acme(|allow| allow.provider_base_urls(&urls).unwrap()));
+    let request = json!({"default_headers": {"x-gateway-token": "t"},
+                         "extra_body": {"top_k": 5}, "timeout_ms": 1000});
+    let vllm = |url: &str| {
+        config(json!({"provider": {"id": "vllm", "base_url": url, "request": request}}))
+    };
+    assert_eq!(refused(&rpc, vllm("http://127.0.0.1:9/v1")).await, None);
+    assert!(
+        refused(&rpc, vllm("http://127.0.0.1:10/v1"))
+            .await
+            .is_some()
+    );
+}

@@ -177,7 +177,17 @@ class AgentConfig(TypedDict, total=False):
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),
-            with an optional `base_url`.
+            with an optional `base_url`. Every live provider also takes
+            `request`: `{"extra_body": {...}, "default_headers": {...},
+            "timeout_ms": 60000}`: extra fields merged into the request
+            body (not `model`, `stream`, `temperature` or the conversation),
+            headers sent with every request (not the key headers), and the
+            longest silence in milliseconds before a call fails. The
+            `deepseek`, `openai-chat`, `vllm`, `sglang` and `llamacpp`
+            providers also take `chat`: `{"parallel_tool_calls": false,
+            "include_stream_options": false, "chat_template_kwargs": {...},
+            "sampling_params": {"top_k": 20}}`. Header values are hidden
+            when a config is printed.
         stores: `{"type": "memory"}` (the default: runs live in the agent
             handle) or `{"type": "postgres", "dsn": ...}`, with an optional
             `max_connections`: the pool size, by default the server's number

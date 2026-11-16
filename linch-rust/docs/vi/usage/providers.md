@@ -32,6 +32,36 @@ server; cách mỗi adapter ánh xạ request, thinking và usage nằm ở
 bằng một `ProtocolError` (code -32602), nên một config không bao giờ có thể chứa
 `api_key`.
 
+### Cài đặt request
+
+Mọi provider thật đều nhận `request`, dạng dữ liệu của `extra_body`,
+`default_headers` và `timeout` bên Python:
+
+```json
+{"id": "vllm", "base_url": "http://gw.internal/v1",
+ "request": {"extra_body": {"top_k": 40, "cache_salt": "t1"},
+             "default_headers": {"x-gateway-token": "..."},
+             "timeout_ms": 60000},
+ "chat": {"parallel_tool_calls": false, "include_stream_options": false,
+          "chat_template_kwargs": {"preserve_thinking": true},
+          "sampling_params": {"min_p": 0.1}}}
+```
+
+| Trường | Ý nghĩa |
+|---|---|
+| `request.extra_body` | Trường gộp vào mọi body. Chúng thay trường adapter đã đặt, trừ `model`, `stream`, `temperature` và hội thoại (`messages`, `tools`, `input`, `contents`, `system`, `instructions`) do session sở hữu. `chat_template_kwargs` gộp từng trường |
+| `request.default_headers` | Header gửi kèm mọi request, cho gateway. Header khóa (`authorization`, `x-api-key`, `x-goog-api-key`) cùng `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer` bị từ chối khi mở. Giá trị được ẩn khi in hoặc ghi log config |
+| `request.timeout_ms` | Khoảng lặng dài nhất giữa hai chunk của phản hồi trước khi call lỗi; vắng: giới hạn của adapter |
+| `chat.parallel_tool_calls` | Gửi khi request có tool; vắng: mặc định của server |
+| `chat.include_stream_options` | `false` bỏ `stream_options`, cho server từ chối nó. Mặc định bật |
+| `chat.chat_template_kwargs` | Trường cho server áp chat template; khi tắt thinking, công tắc thinking của server được gộp đè lên |
+| `chat.sampling_params` | Trường sampling gốc (`top_k`, `min_p`, ...), nằm dưới `extra_body` |
+
+`chat` áp dụng cho `deepseek`, `openai-chat`, `vllm`, `sglang` và `llamacpp`.
+Khóa vẫn đọc từ môi trường của server, nên gateway chỉ cần token header vẫn phải
+đặt biến khóa của provider thành một giá trị nào đó. Trên server từ xa,
+`request` được duyệt cùng `base_url` mang nó và không mở rộng `provider_base_urls`.
+
 ### Context window
 
 Mỗi provider biết context window của model trong spec, tính bằng token. Nó quyết

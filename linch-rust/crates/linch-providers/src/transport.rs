@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use linch_core::ProviderError;
+use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
 use tokio_util::sync::CancellationToken;
 
@@ -19,9 +20,15 @@ const MAX_ERROR_BODY: usize = 8 * 1024;
 pub(crate) const REDIRECT_REFUSED: &str =
     "redirects are not followed, so credentials never leave the configured base URL";
 
-/// An HTTP client with these timeouts that never follows a redirect.
-pub(crate) fn client(connect: Duration, read: Duration) -> reqwest::Result<reqwest::Client> {
+/// An HTTP client with these timeouts and default headers that never
+/// follows a redirect.
+pub(crate) fn client(
+    connect: Duration,
+    read: Duration,
+    headers: &HeaderMap,
+) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
+        .default_headers(headers.clone())
         .connect_timeout(connect)
         .read_timeout(read)
         .redirect(Policy::none())

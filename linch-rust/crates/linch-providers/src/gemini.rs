@@ -71,6 +71,8 @@ pub struct GeminiOptions {
     pub api_key: ApiKey,
     /// API root without the `/v1beta/models/...` path.
     pub base_url: String,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
 }
 
 impl GeminiOptions {
@@ -79,6 +81,7 @@ impl GeminiOptions {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
+            request: crate::RequestOptions::default(),
         }
     }
 
@@ -104,7 +107,9 @@ impl Gemini {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built,
     /// for example when no TLS roots are available.
     pub fn new(options: GeminiOptions) -> Result<Self, ProviderError> {
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
     }
@@ -126,7 +131,8 @@ impl Provider for Gemini {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = payload::build(&request)?;
+        let mut body = payload::build(&request)?;
+        self.options.request.merge_body(&mut body);
         let model = request.model.trim_start_matches("models/");
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse",

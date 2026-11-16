@@ -109,6 +109,12 @@ impl AgentConfig {
                 }
             }
         }
+        if let Some(request) = self.provider.request()
+            && !request.default_headers.is_empty()
+        {
+            value["provider"]["request"]["default_headers"] =
+                serde_json::to_value(&request.default_headers)?;
+        }
         Ok(value)
     }
 }
