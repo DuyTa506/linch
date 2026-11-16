@@ -13,6 +13,7 @@ from linch_rust import (
     Allow,
     Deny,
     ResultEvent,
+    RunTerminal,
     Server,
     SuspendedEvent,
     ToolCallEndEvent,
@@ -73,3 +74,35 @@ async def test_resuming_a_suspended_run_suspends_it_again(suspended: Suspended) 
 
     assert isinstance(again, SuspendedEvent) and again.pending_request_ids == ["call_1"]
     assert suspended.saved == []
+
+
+async def test_cancelling_a_suspended_run_ends_it(suspended: Suspended) -> None:
+    assert await suspended.agent.cancel(suspended.run_id)
+
+    events = [e.event for e in await suspended.agent.events(suspended.run_id)]
+    [end] = [e for e in events if isinstance(e, ToolCallEndEvent)]
+    assert end.is_error and "aborted" in str(end.result)
+    result = events[-1]
+    assert isinstance(result, ResultEvent) and result.subtype == "aborted"
+    assert suspended.saved == []
+    late = await suspended.agent.approve(suspended.run_id, {"call_1": Allow()})
+    with pytest.raises(RunTerminal):
+        await late.result()
+    assert not await suspended.agent.cancel(suspended.run_id)
+
+
+async def test_run_cancel_reaches_a_suspended_run() -> None:
+    @tool(scope="write")
+    async def save(text: str) -> str:
+        return "saved"
+
+    turns = [tool_turn("call_1", "save", {"text": "x"}), text_turn("Next.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns, mode="default"), tools=[save])
+        run = await agent.run("s1", "Save x")
+        assert isinstance(await run.result(), SuspendedEvent)
+        assert await run.cancel()
+        assert not await run.cancel()
+        # The session stays usable: the next run reads the call answered.
+        result = await (await agent.run("s1", "Go on")).result()
+        assert isinstance(result, ResultEvent) and result.final_text == "Next."

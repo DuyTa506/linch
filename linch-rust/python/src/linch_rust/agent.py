@@ -233,6 +233,35 @@ class Agent:
         params: dict[str, Any] = {"agent": self.handle, "run_id": run_id, "answers": wire}
         return await self._start("run.answer", params, principal)
 
+    async def cancel(self, run_id: str) -> bool:
+        """Abort a run of this agent, live or suspended.
+
+        A run this connection drives is aborted where it stands, as
+        `Run.cancel` does. A run that waits for an approval or an answer,
+        started here, by another process or before a restart (Postgres
+        stores), is ended through the agent's stores: each pending call gets
+        an aborted result, so the session stays usable, and the run ends
+        with a `result` of subtype `aborted`, readable with `events`. A
+        later `approve` or `answer` of it ends with `RunTerminal`.
+
+        Args:
+            run_id: The run to cancel.
+
+        Returns:
+            Whether the run was cancelled; `False` when there was nothing to
+            cancel: the run is finished, or it is not suspended and this
+            connection does not drive it.
+
+        Raises:
+            RunNotFound: No such run in the agent's stores.
+            RunLeased: Another server drives the run.
+            LeaseLost: An approve or answer took the run over while it was
+                being cancelled; it goes on under that call.
+            AgentNotFound: The agent is closed.
+        """
+        params = {"agent": self.handle, "run_id": run_id}
+        return bool((await self._conn.request("run.cancel", params))["cancelled"])
+
     async def close(self) -> None:
         """Free the agent on the server: its stores and its MCP servers.
 
@@ -340,7 +369,7 @@ class Agent:
             self._abandoned.add(abandoned)
             abandoned.add_done_callback(self._abandoned.discard)
             raise
-        return Run(self._conn, run_id, queue, observer)
+        return Run(self._conn, run_id, queue, observer, self.handle)
 
     async def _abandon(self, call: asyncio.Future[tuple[str, RunQueue]]) -> None:
         # Cancel the run a cancelled call started, and read it to its end,
