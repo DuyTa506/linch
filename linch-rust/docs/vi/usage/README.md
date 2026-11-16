@@ -72,6 +72,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Observability](./observability.md) | Span và metric OpenTelemetry từ client |
 | [Monitoring](./monitoring.md) | Cái gì được trace, cách tính và đặt giá chi phí, chạy eval, đọc run report |
 | [Server](./server.md) | Chạy `linch-server` cho các tenant từ xa, và `Server.connect`: token, allowlist, giới hạn |
+| [Scheduler](./scheduler.md) | Lịch cron và interval theo múi giờ, heartbeat trên một session, run nền một lần, trạng thái job, worker chạy chúng |
 
 Sẽ có sau:
 

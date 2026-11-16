@@ -39,10 +39,13 @@ process của chính mình, nên không có wire protocol, tenant hay allowlist.
 | `crates/linch-rpc/src/server/outgoing.rs` | Cách các envelope của một run được gộp thành một `run.event` |
 | `crates/linch-rpc/src/server/login.rs` | `connection.auth` của socket |
 | `crates/linch-rpc/src/server/agents.rs`, `server/run.rs` | Các handler của method |
+| `crates/linch-rpc/src/protocol/schedule.rs`, `crates/linch-rpc/src/server/schedule.rs` | Các method của scheduler: params, kết quả và handler |
+| `crates/linch-rpc/src/background.rs` | `BackgroundAgents`, `AgentFactory` của worker |
 | `crates/linch-rpc/src/server/peer.rs`, `server/host.rs`, `server/callback.rs` | Các request từ server: host tool (`tool.call`) và callback (`hook.call`) |
 | `crates/linch-rpc/src/client.rs` | `Client` Rust |
 | `crates/linch-server/src/main.rs` | Binary: stdio, hoặc các listener với `--config FILE` |
 | `crates/linch-server/src/{config,listen,http}.rs` | Cấu hình, Unix socket và transport HTTP |
+| `crates/linch-server/src/worker.rs` | `BackgroundWorker`: phần `worker` của cấu hình chạy trong tiến trình |
 | `crates/linch/src/pools.rs` | `PgPools`: các pool Postgres theo đích; mỗi tenant có một bộ riêng, và một kết nối cục bộ mang một bộ trong `Access::Local` |
 
 ## Method và message
@@ -67,6 +70,13 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, các envelope bền vững sau `after_seq` |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` trên agent; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown}`; run không tồn tại là `-32021` |
+| `schedule.create` | `ScheduleCreateParams` (`protocol/schedule.rs`) | `Server::create_schedule` (`server/schedule.rs`) | `ScheduleInfo` |
+| `schedule.list` | `ScheduleListParams` | `server/schedule.rs` | `{schedules}` |
+| `schedule.pause`, `schedule.resume` | `ScheduleIdParams` | `server/schedule.rs`; `-32041` cho một id không biết | `ScheduleInfo` |
+| `schedule.delete` | `ScheduleIdParams` | `server/schedule.rs` | `{deleted}` |
+| `job.enqueue` | `JobEnqueueParams` | `server/schedule.rs` | `JobInfo` |
+| `job.get` | `JobGetParams` | `server/schedule.rs`; `-32043` cho một id không biết | `JobInfo` |
+| `job.list` | `JobListParams` | `server/schedule.rs` | `{jobs}` |
 
 Server gửi hai notification. `run.event` `{run_id, envelopes}`
 (`RunEvent`, `protocol.rs:256`) mang một hoặc nhiều envelope liên tiếp
@@ -94,6 +104,7 @@ docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32005 | Đạt một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 đến -32015 | `agent.open`: `BuildError`, provider, store và MCP server không khả dụng |
 | -32020 đến -32033 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` không dùng được, một câu trả lời không khớp (`-32032`, `data.reason`), một lease đã mất (`-32022`, từ một claim hoặc một lần ghi journal bị fence), một run mà process khác đang giữ lease (`-32033`, `data: {run_id, owner, expires_in_ms}`) |
+| -32040 đến -32044 | Các method của scheduler: một agent không thể chạy nền (`-32040`, `data.reason` là `memory_store`, `host_tools` hoặc `callbacks`), một lịch không biết (`-32041`), một id lịch đã dùng (`-32042`), một job không biết (`-32043`), một timing không dùng được (`-32044`, `data.reason`) |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
@@ -297,6 +308,42 @@ lần open đã kết nối nó (`pools.rs:94-112`); việc kết nối bỏ cu�
 `PATH`, `HOME` hay các biến được biết là chọn mã nào mà một chương trình nạp
 (`CODE_LOADING_ENV` và các tiền tố của nó, `allowlists.rs:76-113`). Danh sách này là
 nỗ lực tối đa (best effort).
+
+## Run nền
+
+Các method của scheduler đưa vào hàng đợi công việc mà một worker chạy, không bao giờ là
+kết nối đã yêu cầu ([cách dùng](../usage/scheduler.md)).
+
+- **Agent nào.** `agent.open` tính một `Background` cho mỗi agent (`server/schedule.rs`):
+  định nghĩa đã lưu của nó, tức cấu hình đã được admit, được serialize kèm các secret của nó
+  (giá trị env và header của MCP) và với DSN của store bị xóa trắng; hoặc lý do nó không có
+  định nghĩa: kho lưu trữ trong bộ nhớ, host tool hoặc callback, những thứ cần kết nối này.
+  Mọi method của scheduler nêu tên một agent đang mở; pool Postgres của nó
+  (`OpenedAgent::pool`) giữ các hàng, namespace của nó phân vùng chúng, và các bảng hàng đợi
+  được migrate trên cơ sở dữ liệu của nó ở lần gọi scheduler đầu tiên (một lần cho mỗi
+  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng.
+- **Kiểm tra tenant.** Trước mọi truy vấn: `max_schedules` và `max_queued_jobs` phải được đặt
+  (`-32004`, kind `schedules` và `background_runs`), và `Timing::shortest_gap` của một lịch
+  phải ít nhất bằng `min_schedule_interval` (`kind: schedule_interval`). Bản thân các số đếm
+  là các `linch_worker::Cap` trên tên của tenant làm namespace root, được lấy trong
+  transaction của lần insert dưới một advisory lock, nên chúng đúng trên nhiều server dùng
+  chung một cơ sở dữ liệu (`-32005`, kind `schedules`, `jobs`).
+- **Ai chạy chúng.** `linch-server --config` có phần `worker` chạy một `BackgroundWorker`
+  (`crates/linch-server/src/worker.rs`) cạnh các listener của nó, trên DSN của phần đó, dùng
+  chung các `Arc<Tenant>` của listener; không có phần này thì nó không chạy gì. stdio thì
+  không bao giờ.
+- **Ở mỗi lần thử.** `BackgroundAgents::open_job` (`crates/linch-rpc/src/background.rs`) giải
+  mã định nghĩa, kiểm tra namespace của nó, chạy `Tenant::admit` trên đó với store được để
+  riêng (store là DSN của worker, lựa chọn của operator, không phải của client), lấy một
+  trong các chỗ `max_runs` của tenant cho lần thử (không còn chỗ: job chờ, `Busy`), giới hạn
+  kích thước pool ở `max_pool_connections`, và mở nó bằng các pool của tenant, không có host
+  tool hay hook. Một namespace có root không phải tenant cũng không thuộc `local_namespaces`
+  bị từ chối, và worker thậm chí không dequeue nó.
+
+Worker nằm trong sidecar để một cấu hình duy nhất giữ các tenant, allowlist của họ và worker,
+và các run nền dùng chung giới hạn run và pool của các tenant với các run tương tác. Một cấu
+hình chỉ có phần `worker` là dạng tiến trình riêng: một server không lắng nghe gì và chỉ chạy
+job, được mở rộng tách biệt với các server lắng nghe.
 
 ## Các giới hạn
 
