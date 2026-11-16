@@ -638,6 +638,38 @@ async fn a_stop_force_continue_keeps_the_run_going() {
     );
 }
 
+/// `force_continue` at `before_provider_call` skips the call: the feedback
+/// goes to the model in a system reminder and the run takes another turn,
+/// whose call goes out with the feedback in its request.
+#[tokio::test]
+async fn before_provider_call_force_continue_skips_the_call() {
+    let (mut rpc, asked) =
+        answering(
+            |_, request| match request["request"]["messages"].as_array().map(Vec::len) {
+                Some(1) => json!({"action": "force_continue", "feedback": "plan first"}),
+                _ => json!({"action": "continue"}),
+            },
+        );
+    let extra = json!({"callbacks": [
+        {"point": "before_provider_call", "policy_id": "plan", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("Planned.")], extra).await;
+    assert!(finished(&ended), "{:?}", ended.kinds());
+    assert_eq!(final_text(&ended).as_deref(), Some("Planned."));
+    assert_eq!(
+        feedback(&ended),
+        ["<system-reminder>\nplan first\n</system-reminder>"]
+    );
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["before_provider_call", "before_provider_call"]
+    );
+    let calls = (ended.kinds().iter())
+        .filter(|kind| *kind == "context_build")
+        .count();
+    assert_eq!(calls, 1, "the skipped turn makes no call");
+}
+
 /// The observe-only points added for parity with Python's lifecycle hooks
 /// cross the connection like any other callback: `agent_start`/`agent_stop`
 /// bracket the run, `turn_start` fires before each turn's dispatch, and
