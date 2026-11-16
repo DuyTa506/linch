@@ -17,7 +17,8 @@ the run's events then stream in as `Envelope`s.
 | `await agent.answer(run_id, answers, *, principal=None)` | Answer a suspended run's `AskUser` questions and continue it |
 | `async for envelope in run` | Every envelope of this call, in order, ending after `result` or `suspended` |
 | `await run.result()` | Read the rest and return the `ResultEvent` or `SuspendedEvent` |
-| `await run.cancel()` | Abort the run; `True` when the server was driving it |
+| `await run.cancel()` | Abort the run, driven or suspended; `True` when it was cancelled |
+| `await agent.cancel(run_id)` | Abort a run by id, a suspended one included, from any process ([below](#cancel-a-suspended-run)) |
 | `await agent.events(run_id, after_seq=0)` | The run's durable envelopes after `after_seq`, from the stores |
 | `run.id` | The run id, for `resume`, `approve` and `events` |
 | `run.trace_id` | The trace id of the call's spans when it is traced ([Observability](./observability.md#correlate-logs-and-traces)) |
@@ -191,9 +192,10 @@ cancel again: False
 
 `cancel()` aborts the model call or tool in flight (a host tool's task is
 cancelled) and ends the run with a `result` of subtype `aborted`; keep reading
-the stream to see it. It returns `False`, not an error, when the server no
-longer drives the run. An aborted run is finished: its session takes a new run.
-Only the server that drives a run can cancel it.
+the stream to see it. It returns `False`, not an error, when there is nothing
+to cancel: the run already finished. An aborted run is finished: its session
+takes a new run. Only the server that drives a running run can cancel it; a
+suspended run can be cancelled from anywhere ([below](#cancel-a-suspended-run)).
 
 Cancelling the `run`, `resume` or `approve` call itself (with
 `asyncio.wait_for`, say) before it returns raises `CancelledError` as usual.
@@ -207,6 +209,90 @@ server pauses its runs instead of the client's memory growing. Answers wait
 behind those batches too: a run left unread while it still produces events
 stalls the other calls on its connection. `cancel()` keeps reading its run
 while it waits, so it never waits on itself.
+
+### Cancel a suspended run
+
+A run waiting for an approval or an answer has no stream: the server does
+not drive it. `agent.cancel(run_id)`, or `cancel()` on the `Run` whose stream
+ended with `suspended`, ends it through the agent's stores instead of
+approving, denying or answering it:
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, ResultEvent, RunTerminal, Server, SuspendedEvent, tool
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+
+@tool(scope="write")
+async def deploy(service: str) -> str:
+    """Deploy a service."""
+    return "deployed"
+
+
+config: AgentConfig = {
+    "namespace": "runs-demo",
+    "spec": {"model": MODEL},
+    "provider": {
+        "id": "scripted",
+        "turns": [tool_turn("c1", "deploy", {"service": "api"}), text_turn("Nothing deployed.")],
+    },
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config, tools=[deploy])
+        run = await agent.run("s1", "Deploy api")
+        assert isinstance(await run.result(), SuspendedEvent)
+
+        print("cancelled:", await agent.cancel(run.id))
+        events = [e.event for e in await agent.events(run.id)]
+        print(events[-3].result["content"][0]["text"], "/", events[-1].subtype)
+        try:
+            await (await agent.approve(run.id, {})).result()
+        except RunTerminal as late:
+            print("late approve:", late.data["status"])
+        print("cancel again:", await agent.cancel(run.id))
+
+        # The session goes on: the next run sees the call answered.
+        result = await (await agent.run("s1", "What happened?")).result()
+        assert isinstance(result, ResultEvent)
+        print(result.final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+cancelled: True
+Tool call aborted / aborted
+late approve: aborted
+cancel again: False
+Nothing deployed.
+```
+
+- Every call of the response that has no result gets an error result,
+  `Tool call aborted` (an `AskUser` question too; a call that started before
+  a crash keeps its interrupted placeholder), then the run ends with a
+  `result` of subtype `aborted` and status `aborted`. The results go into
+  the session, so the model of a later run there sees each call answered.
+- A later `approve` or `answer` ends with `RunTerminal`; another cancel
+  returns `False`.
+- **Postgres**: the cancel can come from another process, or after the
+  server that suspended the run restarted. A run another server drives
+  right now (an approve that got there first) is not taken from it: the
+  cancel returns `False` once that approve committed its decisions, or
+  raises `RunLeased` while the approve has only claimed the run.
+- A cancel and an approve (or an answer) that race leave one winner: the one
+  that claims the run last fences the other out. A cancel that loses
+  returns `False` or raises `LeaseLost`; an approve that loses ends with
+  `RunTerminal` or `LeaseLost`.
+- The cancel is durable from its first write: if the server dies part way,
+  `resume` or another `cancel` finishes it, and an `approve` gets
+  `NotSuspended`.
+- The run's contract is not checked, so a run of an older config can still
+  be cancelled.
 
 ## Resume
 

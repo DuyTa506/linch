@@ -35,6 +35,13 @@ What differs in Rust:
   the observe-only points, fires once per event about to be delivered to the
   caller, but only for an event that is both streamed and durably logged —
   never for a hook's own record or a stream-only delta.
+- A suspended run waits in the store, so it can be cancelled there
+  (`Agent::cancel`, [below](#cancel-a-suspended-run)). Python's permission
+  and `AskUser` waits run inside the live run (status `waiting_permission`):
+  `session.abort()` ends them with `AbortError` (`src/linch/scheduler.py:1335`,
+  `src/linch/tools/ask_user.py:323-326`) and the abort terminal
+  (`src/linch/loop/runtime.py:968-1006`); another process can only mark such
+  a run failed through the store (`mark_failed`, `src/linch/run_store.py:709`).
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -197,7 +204,7 @@ write happens.
 
 | Phase | Write | Status |
 |---|---|---|
-| `Started`, `AssistantReceived`, `Compacted` | Through, at once | unchanged |
+| `Started`, `AssistantReceived`, `Compacted`, `Aborting` | Through, at once | unchanged |
 | `AwaitingApproval` | Through, at once | `awaiting_approval` |
 | `AwaitingInput` | Through, at once | `awaiting_input` |
 | `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` | Held | unchanged |
@@ -380,6 +387,7 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 | `ToolResults` | `ToolResults` | Append the message unless it is in the session, then the next turn |
 | `CompactionPending` | `Recompact` or `Redispatch` | Another summary attempt, or the primary call when the summary call already settled without a summary |
 | `Compacted` | `Compacted` | Append the projection unless it is in the session, then dispatch |
+| `Aborting` | `Aborting` | Append the cancel's results unless they are in the session, then the `aborted` terminal ([below](#cancel-a-suspended-run)) |
 
 Each tool call of a recovered batch recovers on its own
 (`reconcile.rs:309-332`):
@@ -401,6 +409,60 @@ does not fit the checkpoint (`journal/reconcile/session.rs:9-22`).
 A retried approve or answer gets `NotSuspended`: once it has committed the
 run is in `ToolBatch`, and the host continues it with `resume`
 (`agent.rs:262-273`, `start.rs:432-437`).
+
+### Cancel a suspended run
+
+A suspended run has no stream, so no cancel token reaches it.
+`Agent::cancel` (`agent.rs`) ends it through the store: it enters
+`continue_run` with `Reply::Cancel` (`runner/start.rs`), and the steps
+differ from an approve's:
+
+1. `check` takes a run whose phase is `AwaitingApproval`, `AwaitingInput`
+   or `Aborting` (a cancel cut short), under any contract: the cancel runs
+   nothing of the agent's. Any other run is `NotSuspended` and a terminal
+   one `Terminal`; `Agent::cancel` turns both into `false`.
+2. `claim`, as for an approve. After the claim the cancel does not check
+   the phase again: the claim fenced out whoever drove the run since the
+   check, so the cancel ends the run from wherever it stands. Only a run
+   that ended since is `Terminal`.
+3. `reconcile`, then `cancel::step` (`runner/cancel.rs`) picks what the
+   session still owes. The runner gets a token already cancelled, so a
+   `Dispatch` or `Compact` step stages its abandoned receipt and aborts
+   before any call.
+4. `Step::Abort` pairs the session, then ends the run. For the calls of the
+   last response without a durable end (every call of a suspended batch,
+   read from the events after the response) it stages a `tool_call_start`
+   and a `tool_call_end` with `ABORTED` ("Tool call aborted",
+   `scheduler/execute.rs`), or the end of the interrupted placeholder for a
+   call that started, then the `user` event of the results, and saves
+   `Aborting` with that message: one write-through. It then appends the
+   message to the session (the barrier finds nothing held) and calls
+   `abort`, whose `end_with` stops the run's background children and
+   commits the `Result` (subtype `aborted`) with status `aborted`.
+
+A cancel of an `AwaitingApproval` run so costs four writes: the claim,
+the `Aborting` commit, the session append, the terminal commit. A crash
+before the second leaves the run suspended (a `running` status with the
+suspended phase, which a cancel or an approve still takes); after it, the
+cancel is durable: `reconcile` turns `Aborting` into `Recovery::Aborting`,
+and a resume or another cancel appends the message unless it is there and
+ends the run, while an approve or an answer gets `NotSuspended`. A results
+message held in `ToolResults` is saved as `Aborting` first too; a session
+already paired (the claim found the run past its batch) is ended at once.
+
+Two continuations racing on one suspended run both pass `check`; the later
+claim moves the epoch and fences out the earlier one. A cancel that claims
+last wins: the approve's next write fails with `LeaseLost`, or its check
+after the claim finds the run `aborted`. An approve that claims last wins:
+the cancel's first write fails with `LeaseLost`, or, once the approve ended
+the run, the cancel's check after the claim returns `Terminal`. On
+Postgres a claim is refused while another holder's lease lives
+(`RunLeased`), so a cancel never takes a run an approve elsewhere drives;
+once that approve committed its decisions, the run is no longer suspended
+and the cancel returns `false` without claiming. The tests are
+`crates/linch-core/tests/e2e_cancel_suspended.rs` (both interleavings, and
+a crash before and after each of the four writes) and
+`crates/linch-postgres/tests/pg/cancel.rs`.
 
 ### A crash between a receipt and its response
 
@@ -451,7 +513,7 @@ child runs, stages their final status, builds the `Result` and calls
 | Terminal | Status | When |
 |---|---|---|
 | `Result` success | `completed` | A text-only response, after `stop` and `post_turn` (`turn.rs:407-414`) |
-| Abort | `aborted` | The cancel token fired (`end.rs:61-64`) |
+| Abort | `aborted` | The cancel token fired (`end.rs:61-64`), or `Agent::cancel` ended a suspended run (`runner/cancel.rs`) |
 | Hook failed closed | `failed` | A `stop` hook failed closed (`end.rs:66-74`) |
 | Output limit | `failed` | The response held no text or whole tool call (`end.rs:76-90`) |
 | Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:92-108`) |

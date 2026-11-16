@@ -374,7 +374,14 @@ starts, and `resume` and `approve` refuse an agent whose contract differs
   scope;
 - each callback's `point`, `policy_id` and `policy_version`, in declaration
   order;
-- the skills and subagent definitions loaded at open.
+- the skills and subagent definitions loaded at open;
+- the `permissions` policy, when it is not the default one: a `mode` other
+  than `default`, or any `layers`, `auto_allow`, `path_fields` or
+  `command_fields`, and then its `project_root` too. A run therefore never
+  continues under a policy that allows more (or less) than the one it
+  started with. The default policy adds nothing, whatever its
+  `project_root`, so it leaves the contract as it was before the policy
+  counted.
 
 It does not cover the namespace, the stores, the provider config, a host
 tool's `timeout`, the scripted turns, or a profile's id, version and denied
@@ -516,6 +523,10 @@ async def cite(request: dict[str, Any]) -> dict[str, Any]:
 A session is any string id. The first run on an id creates it; later runs on
 the same id continue the conversation with its full history. A session has at
 most one run that is not finished ([Runs](./runs.md#one-live-run-per-session)).
+A run left waiting for an approval or an answer holds the session until it
+is approved, answered, or ended with `await agent.cancel(run_id)`
+([Runs](./runs.md#cancel-a-suspended-run)), which answers its pending calls
+as aborted so the next run of the session can start.
 
 `await agent.close_session(session_id)` tells the agent you are done with a
 session for now: the workspace tools forget what it read (so a later write

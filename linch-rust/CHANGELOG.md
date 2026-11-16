@@ -8,6 +8,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Added
 
+- Cancel a suspended run: `Agent::cancel`, `run.cancel` with an `agent` handle, and `Agent.cancel(run_id)` / `Run.cancel()` in Python end a run waiting for an approval or an answer, from any process and across restarts on Postgres; each pending call gets a `Tool call aborted` result so the session stays paired, the run ends `aborted`, and a late approve or answer gets `RunTerminal`.
+
 - Context-length recovery: each adapter maps its provider's refusal of a
   prompt longer than the context window to `ProviderError::ContextLength`
   (error kind `context_length`, never retried); with `spec.compaction` set,
@@ -142,6 +144,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Changed
 
+- The permission policy joins the run contract when it is not the default (a mode other than `default`, or any layers, `auto_allow`, path or command fields; the facade's `tasks` and a profile's denied tools add to it), so a run is never resumed or approved under a policy that allows more, or less, than the one it started with (`ContractMismatch`).
+- A binary older than this one cannot resume a run a cancel left half done (the `aborting` checkpoint phase); finish such a run with `cancel` or `resume` before rolling back.
 - A provider's refusal of a prompt longer than the context window ends a run without `spec.compaction` as `kind` `context_length` with the message `prompt exceeds the model's context window: ...`, where it was `kind` `status` with `provider returned HTTP 400: ...`; `retryable` stays false.
 - A binary older than this one cannot resume a run of an agent with `spec.compaction.micro` that crashed during a micro-compaction (the `cleared` checkpoint phase), nor read the events of a run that made a forced compaction (`forced: true`; events refuse unknown fields). Roll back only once those runs have ended.
 - `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
@@ -167,6 +171,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `Edit` and `Write` on a file changed since it was read now say `Read this file again before editing it.` / `Read this file again before writing it.` (were `<path> changed since it was last read; Read it again.`), and `Read` of a file that changed mid-read says `File changed while reading; Read this file again.`, the words Python's tools use. The error codes are unchanged.
 
 ### Upgrading
+
+- Runs started before this release by an agent whose permission policy is not the default (including an agent with `tasks` or a profile that denies tools) can no longer be resumed or approved under the new binary: the policy is now in the run contract, so they end with `ContractMismatch`. Let them finish on the old binary, or end them with `cancel`, which does not check the contract. Runs of agents with the default policy keep their contracts.
 
 - Postgres migration 6 adds `linch_runs.lease_holder` and `lease_until` (nullable, no rewrite). As with every migration, a server of an earlier version then refuses to start on that database, and a running one ignores leases: until every server is upgraded, an old one can still take over a run a new one drives (the epoch still fences the loser's writes).
 
