@@ -9,16 +9,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linch::hooks::{
-    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, ApprovalRequest,
-    BeforeProviderCall, BeforeProviderCallRequest, BeforeProviderCallResponse, ContextBuild,
-    ContextBuildRequest, ContextBuildResponse, PermissionRequest, PostCompact, PostCompactRequest,
-    PostToolUse, PostToolUseFailure, PostToolUseFailureRequest, PostToolUseRequest,
-    PostToolUseResponse, PostTurn, PostTurnRequest, PreCompact, PreCompactRequest, PreToolUse,
-    PreToolUseRequest, PreToolUseResponse, ProviderCallStart, ProviderCallStartRequest,
-    ProviderCallStop, ProviderCallStopRequest, Stop, StopRequest, StopResponse, SubagentStart,
-    SubagentStartRequest, SubagentStop, SubagentStopRequest, ToolUseStart, ToolUseStartRequest,
-    ToolUseStop, ToolUseStopRequest, TurnStart, TurnStartRequest, UserPromptRequest,
-    UserPromptResponse, UserPromptSubmit,
+    AfterProviderCall, AfterProviderCallRequest, AfterProviderCallResponse, AgentStart,
+    AgentStartRequest, AgentStop, AgentStopRequest, ApprovalRequest, BeforeProviderCall,
+    BeforeProviderCallRequest, BeforeProviderCallResponse, ContextBuild, ContextBuildRequest,
+    ContextBuildResponse, PermissionRequest, PostCompact, PostCompactRequest, PostToolUse,
+    PostToolUseFailure, PostToolUseFailureRequest, PostToolUseRequest, PostToolUseResponse,
+    PostTurn, PostTurnRequest, PreCompact, PreCompactRequest, PreToolUse, PreToolUseRequest,
+    PreToolUseResponse, ProviderCallStart, ProviderCallStartRequest, ProviderCallStop,
+    ProviderCallStopRequest, Stop, StopRequest, StopResponse, SubagentStart, SubagentStartRequest,
+    SubagentStop, SubagentStopRequest, ToolUseStart, ToolUseStartRequest, ToolUseStop,
+    ToolUseStopRequest, TurnStart, TurnStartRequest, UserPromptRequest, UserPromptResponse,
+    UserPromptSubmit,
 };
 use linch::{
     CallbackError, FailMode, Hook, HookChain, HookError, HookPoint, Hooks, JsonValue, Point,
@@ -30,9 +31,9 @@ use serde_json::json;
 use super::peer::Peer;
 use crate::error::{ErrorObject, invalid_params};
 use crate::protocol::{
-    BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer, HookCallParams, ObserveAnswer,
-    PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer, UserPromptAnswer,
-    WireToolResult, method,
+    AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
+    HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer,
+    StopAnswer, UserPromptAnswer, WireToolResult, method,
 };
 
 /// The hook chains holding one [`RpcHook`] per declaration, in order.
@@ -81,6 +82,7 @@ fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Resu
         HookPoint::BeforeProviderCall => add(&hooks.before_provider_call, common),
         HookPoint::ProviderCallStart => add(&hooks.provider_call_start, common),
         HookPoint::ProviderCallStop => add(&hooks.provider_call_stop, common),
+        HookPoint::AfterProviderCall => add(&hooks.after_provider_call, common),
         HookPoint::ToolUseStart => add(&hooks.tool_use_start, common),
         HookPoint::ToolUseStop => add(&hooks.tool_use_stop, common),
         HookPoint::PostToolUseFailure => add(&hooks.post_tool_use_failure, common),
@@ -280,6 +282,23 @@ impl Wire for BeforeProviderCall {
             BeforeProviderCallAnswer::Block { reason } => {
                 BeforeProviderCallResponse::Block { reason }
             }
+        })
+    }
+}
+
+impl Wire for AfterProviderCall {
+    fn encode(r: &AfterProviderCallRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "turn": r.turn,
+               "assembly": r.assembly})
+    }
+
+    fn decode(value: JsonValue) -> Result<AfterProviderCallResponse, serde_json::Error> {
+        Ok(match answer(value)? {
+            AfterProviderCallAnswer::Continue {} => AfterProviderCallResponse::Continue,
+            AfterProviderCallAnswer::Rewrite { assembly } => {
+                AfterProviderCallResponse::Rewrite { assembly }
+            }
+            AfterProviderCallAnswer::Block { reason } => AfterProviderCallResponse::Block { reason },
         })
     }
 }

@@ -4,8 +4,8 @@
 use std::num::NonZeroU64;
 
 use linch::{
-    ContentBlock, FailMode, HookPoint, JsonObject, JsonValue, ProviderRequest, TextBlock,
-    ToolOutput, ToolOutputError, ToolResult,
+    AssistantAssembly, ContentBlock, FailMode, HookPoint, JsonObject, JsonValue, ProviderRequest,
+    TextBlock, ToolOutput, ToolOutputError, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +136,25 @@ pub enum BeforeProviderCallAnswer {
     /// Do not send the call; end the run with this reason.
     Block {
         /// Why the call was blocked.
+        reason: String,
+    },
+}
+
+/// An `after_provider_call` answer, by `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AfterProviderCallAnswer {
+    /// No change.
+    Continue {},
+    /// Use this response instead; it is what gets staged and appended to
+    /// the session.
+    Rewrite {
+        /// The new response.
+        assembly: Box<AssistantAssembly>,
+    },
+    /// Do not accept the response; end the run with this reason.
+    Block {
+        /// Why the response was blocked.
         reason: String,
     },
 }

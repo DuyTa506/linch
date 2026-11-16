@@ -134,6 +134,9 @@ pub enum HookPoint {
     ProviderCallStart,
     /// A provider call returned, however it ended.
     ProviderCallStop,
+    /// A provider call succeeded; the assembled response is about to be
+    /// staged and appended to the session.
+    AfterProviderCall,
     /// A tool call is about to run.
     ToolUseStart,
     /// A tool call finished running.
@@ -179,6 +182,7 @@ impl HookPoint {
             | Self::BeforeProviderCall
             | Self::ProviderCallStart
             | Self::ProviderCallStop
+            | Self::AfterProviderCall
             | Self::ToolUseStart
             | Self::ToolUseStop
             | Self::PostToolUseFailure
@@ -251,6 +255,10 @@ mod tests {
         assert_eq!(HookPoint::Stop.default_fail_mode(), FailMode::Open);
         assert_eq!(
             HookPoint::BeforeProviderCall.default_fail_mode(),
+            FailMode::Open
+        );
+        assert_eq!(
+            HookPoint::AfterProviderCall.default_fail_mode(),
             FailMode::Open
         );
     }

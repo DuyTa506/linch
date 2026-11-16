@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::end::cut_empty;
-use super::hooks::{BeforeCall, Stopping, add_context};
+use super::hooks::{AfterCall, BeforeCall, Stopping, add_context};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::write::session_log;
@@ -354,7 +354,7 @@ impl Runner {
                 self.output_limit().await?;
                 return Ok(None);
             }
-            Ok(assembly) => return self.accept(assembly, cost, served).await.map(Some),
+            Ok(assembly) => return self.accept(assembly, cost, served).await,
             Err(failure) => failure,
         };
         // A call that failed or was cancelled may still have been paid.
@@ -370,15 +370,26 @@ impl Runner {
         Ok(None)
     }
 
-    /// Stage the response and its `Usage` (with the call's `cost` and the
-    /// model that `served` it), and write them through with
-    /// `AssistantReceived`.
+    /// Run `after_provider_call`, then stage the response and its `Usage`
+    /// (with the call's `cost` and the model that `served` it), and write
+    /// them through with `AssistantReceived`.
     async fn accept(
         &mut self,
         assembly: AssistantAssembly,
         cost: Option<f64>,
         served: Option<String>,
-    ) -> Result<Step, RunError> {
+    ) -> Result<Option<Step>, RunError> {
+        let assembly = match self.after_provider_call(assembly, self.turn).await {
+            AfterCall::Send(assembly) => *assembly,
+            AfterCall::Blocked(reason) => {
+                self.hook_failed(reason).await?;
+                return Ok(None);
+            }
+            AfterCall::Ended => {
+                self.abort().await?;
+                return Ok(None);
+            }
+        };
         let AssistantAssembly {
             message,
             stop_reason,
@@ -395,11 +406,11 @@ impl Runner {
             stop_reason,
         };
         self.save(phase).await?;
-        Ok(Step::Received {
+        Ok(Some(Step::Received {
             message,
             stop_reason,
             appended: false,
-        })
+        }))
     }
 
     async fn received(

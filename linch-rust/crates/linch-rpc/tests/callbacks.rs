@@ -384,6 +384,57 @@ async fn before_provider_call_can_block_the_call() {
     assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
 }
 
+/// `after_provider_call` sees the assembled response and can replace it;
+/// the replacement is what gets staged and appended to the session.
+#[tokio::test]
+async fn after_provider_call_rewrites_the_response() {
+    let rpc = Rpc::with_handler(handler(move |_method, params, _cancel| async move {
+        let params = Value::Object(params);
+        let mut assembly = params["request"]["assembly"].clone();
+        assembly["message"]["content"][0]["text"] = json!("Redacted.");
+        Ok(json!({"action": "rewrite", "assembly": assembly}))
+    }));
+    let mut rpc = rpc;
+    let extra = json!({"callbacks": [
+        {"point": "after_provider_call", "policy_id": "redact", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("The secret is 42.")], extra).await;
+    assert!(finished(&ended));
+    let text = (ended.envelopes.iter())
+        .find_map(|envelope| match &envelope.event {
+            Event::Assistant(assistant) => {
+                Some(serde_json::to_string(&assistant.message).unwrap())
+            }
+            _ => None,
+        })
+        .expect("an assistant event");
+    assert!(text.contains("Redacted."), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+}
+
+/// A block ends the run with a failed result; the response is never staged.
+#[tokio::test]
+async fn after_provider_call_can_block_the_response() {
+    let (mut rpc, _log) = client(json!({
+        "after_provider_call": {"action": "block", "reason": "unsafe content"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "after_provider_call", "policy_id": "moderate", "policy_version": 1},
+    ]});
+    let agent = rpc
+        .open(hosted(vec![text_turn("The secret is 42.")], "default", extra))
+        .await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "a block is a failed result, not a protocol error");
+    assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
+    assert!(
+        !ended.kinds().contains(&"assistant".to_owned()),
+        "{:?}",
+        ended.kinds()
+    );
+}
+
 /// The observe-only points added for parity with Python's lifecycle hooks
 /// cross the connection like any other callback: `agent_start`/`agent_stop`
 /// bracket the run, `turn_start` fires before each turn's dispatch, and

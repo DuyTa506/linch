@@ -83,7 +83,7 @@ Coming later:
 | `session = await agent.session()`; `session.run(prompt)` | `agent.run(session_id, prompt)` with a session id you choose |
 | `ToolRegistry`, `@tool`, class tools | `@tool(scope=...)` host tools; `scope` has no default |
 | `permissions={"mode": "acceptEdits"}`, `can_use_tool` | `{"mode": "accept_edits", "project_root": ...}`; suspend and `agent.approve`, or a `permission_request` callback |
-| Hooks in-process | `@callback` at twenty hook points, declared at open |
+| Hooks in-process | `@callback` at twenty-one hook points, declared at open |
 | `InMemorySessionStore`, Postgres stores | `{"type": "memory"}` or `{"type": "postgres", "dsn": ...}` |
 | `ScriptedProvider` from `linch.ext.evals` | `{"id": "scripted", "turns": [...]}` with `linch_rust.scripted` |
 | `linch` CLI | `linch-rust` CLI |

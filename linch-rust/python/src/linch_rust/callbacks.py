@@ -25,6 +25,7 @@ Point = Literal[
     "before_provider_call",
     "provider_call_start",
     "provider_call_stop",
+    "after_provider_call",
     "tool_use_start",
     "tool_use_stop",
     "post_tool_use_failure",

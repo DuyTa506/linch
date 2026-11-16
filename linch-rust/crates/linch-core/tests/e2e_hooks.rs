@@ -9,9 +9,9 @@ use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::{HookEvent, HookOutcome};
 use linch_core::hooks::{
-    BeforeProviderCall, BeforeProviderCallResponse, ContextBuild, PostToolUse,
-    PostToolUseResponse, PreToolUse, PreToolUseResponse, ToolUseStart, ToolUseStop,
-    UserPromptResponse, UserPromptSubmit,
+    AfterProviderCall, AfterProviderCallResponse, BeforeProviderCall, BeforeProviderCallResponse,
+    ContextBuild, PostToolUse, PostToolUseResponse, PreToolUse, PreToolUseResponse, ToolUseStart,
+    ToolUseStop, UserPromptResponse, UserPromptSubmit,
 };
 use linch_core::{
     Agent, AgentBuilder, ContentBlock, Envelope, Event, FailMode, HookPoint, Hooks, Message,
@@ -306,6 +306,71 @@ async fn a_blocked_provider_call_ends_the_run_without_calling_the_provider() {
         unreachable!()
     };
     assert_eq!(err.error["message"], "over budget");
+    let Event::Result(result) = &envelopes.last().unwrap().event else {
+        panic!("the run ends with a result: {envelopes:?}");
+    };
+    assert_eq!(result.subtype, linch_core::events::kinds::ResultSubtype::Error);
+}
+
+#[tokio::test]
+async fn a_rewritten_response_is_what_gets_staged_and_appended() {
+    let hooks = Hooks::default();
+    let redact = hook::<AfterProviderCall>("redact", |request| {
+        let mut assembly = request.assembly.clone();
+        assembly.message = Message::assistant_text("[redacted]");
+        Ok(AfterProviderCallResponse::Rewrite {
+            assembly: Box::new(assembly),
+        })
+    });
+    let _ = hooks.after_provider_call.register(redact.arc()).unwrap();
+    let provider = Arc::new(ScriptedProvider::new([text_turn("the secret is 42")]));
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(provider.clone(), hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    let Event::Assistant(assistant) = &(envelopes.iter())
+        .find(|e| matches!(e.event, Event::Assistant(_)))
+        .expect("an assistant event")
+        .event
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        assistant.message.content,
+        Message::assistant_text("[redacted]").content,
+        "the rewrite is what the log records"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_response_ends_the_run_before_it_is_staged() {
+    let hooks = Hooks::default();
+    let moderate = hook::<AfterProviderCall>("moderate", |_| {
+        Ok(AfterProviderCallResponse::Block {
+            reason: "unsafe content".into(),
+        })
+    });
+    let _ = hooks.after_provider_call.register(moderate.arc()).unwrap();
+    let provider = Arc::new(ScriptedProvider::new([text_turn("the secret is 42")]));
+    let stores = Arc::new(Stores::default());
+    let agent = hooked(provider.clone(), hooks, stores.clone());
+    let (envelopes, error) = drain(agent.run("go", RunOptions::new("s1"))).await;
+    assert!(
+        error.is_none(),
+        "a blocked response is a normal failed result, not a stream error: {error:?}"
+    );
+    assert!(
+        !envelopes.iter().any(|e| matches!(e.event, Event::Assistant(_))),
+        "the blocked response is never staged: {envelopes:?}"
+    );
+    let Event::Error(err) = &(envelopes.iter())
+        .find(|e| matches!(e.event, Event::Error(_)))
+        .expect("an error event")
+        .event
+    else {
+        unreachable!()
+    };
+    assert_eq!(err.error["message"], "unsafe content");
     let Event::Result(result) = &envelopes.last().unwrap().event else {
         panic!("the run ends with a result: {envelopes:?}");
     };

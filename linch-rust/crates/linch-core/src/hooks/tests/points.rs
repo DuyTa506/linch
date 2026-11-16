@@ -244,6 +244,72 @@ async fn before_provider_call_rewrites_chain_and_a_block_stops() {
     assert_eq!(calls(&log), ["downgrade", "downgrade", "budget"]);
 }
 
+fn minimal_assembly(text: &str) -> crate::provider::AssistantAssembly {
+    crate::provider::AssistantAssembly {
+        message: crate::message::Message::assistant_text(text),
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+        model: "m".into(),
+    }
+}
+
+fn after_call(text: &str) -> AfterProviderCallRequest {
+    AfterProviderCallRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        assembly: minimal_assembly(text),
+    }
+}
+
+#[tokio::test]
+async fn after_provider_call_rewrites_chain_and_a_block_stops() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("redact", &log, |req: &AfterProviderCallRequest| {
+            let mut assembly = req.assembly.clone();
+            assembly.message = crate::message::Message::assistant_text("[redacted]");
+            Act::Answer(AfterProviderCallResponse::Rewrite {
+                assembly: Box::new(assembly),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let sent = hooks
+        .after_provider_call
+        .run_into(after_call("the secret is 42"), &mut records)
+        .await;
+    assert_eq!(
+        sent,
+        AfterProviderCallOutcome::Send {
+            assembly: Box::new(minimal_assembly("[redacted]"))
+        }
+    );
+
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("moderate", &log, |_| {
+            Act::Answer(AfterProviderCallResponse::Block {
+                reason: "unsafe content".into(),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let blocked = hooks
+        .after_provider_call
+        .run_into(after_call("the secret is 42"), &mut records)
+        .await;
+    assert_eq!(
+        blocked,
+        AfterProviderCallOutcome::Blocked {
+            reason: "unsafe content".into()
+        }
+    );
+    assert_eq!(calls(&log), ["redact", "redact", "moderate"]);
+}
+
 #[tokio::test]
 async fn user_prompt_rewrites_chain_and_a_block_stops() {
     let hooks = Hooks::default();

@@ -129,6 +129,7 @@ where the table says so:
 | `permission_request` | The strictest answer wins. A deny or closed failure stops the chain; an allow does not (`hooks/tool.rs:226-258`) | closed |
 | `post_tool_use` | A replacement feeds the next hook. A closed failure withholds the result and stops the chain (`hooks/tool.rs:312-336`) | open |
 | `before_provider_call` | A rewrite feeds the next hook; the last rewrite is what is sent and what `context_build` records. A block or a closed failure stops the chain and ends the run as failed, before the provider is called (`hooks/call.rs`) | open, but its block can fail closed |
+| `after_provider_call` | A rewrite feeds the next hook; the last rewrite is what gets staged and appended to the session. A block or a closed failure stops the chain and ends the run as failed, before the response is staged (`hooks/assembly.rs`) | open, but its block can fail closed |
 | `stop` | The first hook that keeps the run going stops the chain. A closed failure fails the run (`hooks/turn.rs:246-250`) | open |
 | `post_turn` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/turn.rs:310-312`) | open |
 | `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/observe.rs`) | open |

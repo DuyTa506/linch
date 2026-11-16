@@ -429,6 +429,7 @@ request has `session_id` and `run_id`:
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
 | `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called |
+| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: what the provider call just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "block", "reason"}`; a rewrite is what gets staged and appended to the session, and a block ends the run before the response is staged. Python's `retry`/`force_continue` actions here are not available: use `{"action": "continue"}` to accept the response unchanged |
 | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
@@ -460,7 +461,7 @@ fire on the parent's callbacks, not the child's.
 
 | Argument | Default | What it controls |
 |---|---|---|
-| `point` | required | One of the twenty points above |
+| `point` | required | One of the twenty-one points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
 | `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |

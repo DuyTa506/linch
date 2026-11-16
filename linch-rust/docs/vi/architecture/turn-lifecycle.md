@@ -21,9 +21,11 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   đang đứng, giống như một sự cố (`runner.rs:83-87`).
 - Loop guard của Python (lời gọi lặp lại, lỗi lặp lại) không nằm trong runner. Runner
   chỉ phát `loop_guard` cho `max_turns` (`runner/end.rs:93-108`).
-- Các hook point là hai mươi point trong [kernel](./kernel.md#chuỗi-hook), trong đó
+- Các hook point là hai mươi mốt point trong [kernel](./kernel.md#chuỗi-hook), trong đó
   mười hai point chỉ quan sát. `before_provider_call` có thể viết lại hoặc block
-  request sắp được gửi; `AfterProviderCall` của Python vẫn bị bỏ (`hooks.rs`).
+  request sắp được gửi, và `after_provider_call` có thể viết lại hoặc block response
+  mà một lời gọi vừa dựng xong, trước khi nó được stage; hành động `retry`/
+  `force_continue` của Python tại điểm đó không được port (`hooks.rs`).
 - Run của một subagent không thể suspend: một lời gọi cần phê duyệt sẽ bị từ chối
   (`runner/batch.rs:73-75`).
 
@@ -48,10 +50,13 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 5. **Điều khiển lời gọi.** Các delta của stream được chuyển ngay cho bên gọi dưới dạng
    event chỉ có trong stream (`turn.rs:306-317`). Lời gọi kết thúc với một receipt, dù nó
    được chấp nhận, thất bại hay bị hủy (`provider/call.rs:1-9`, `43-55`).
-6. **Ghi write-through response.** Khi thành công, run stage các event `Assistant` và
-   `Usage` rồi lưu `AssistantReceived`, thứ được ghi write-through cùng receipt
-   (`turn.rs:353-380`, `journal.rs:192-193`). Bên gọi chỉ thấy các event đó sau lần commit
-   này (`journal.rs:25-28`).
+6. **Ghi write-through response.** `after_provider_call` chạy trên response đã dựng
+   trước: một rewrite thay thế nó trước khi được stage; một block kết thúc run với
+   trạng thái failed và không gì được stage (`hooks/assembly.rs`, `runner/hooks.rs`).
+   Khi thành công, run sau đó stage các event `Assistant` và `Usage` rồi lưu
+   `AssistantReceived`, thứ được ghi write-through cùng receipt (`turn.rs:353-380`,
+   `journal.rs:192-193`). Bên gọi chỉ thấy các event đó sau lần commit này
+   (`journal.rs:25-28`).
 7. **Nối response vào session** (`turn.rs:395-397`).
 8. **Rẽ nhánh theo các lời gọi tool** của response (bên dưới).
 9. **Nối các kết quả tool**, chạy `post_turn`, và bắt đầu lượt kế tiếp

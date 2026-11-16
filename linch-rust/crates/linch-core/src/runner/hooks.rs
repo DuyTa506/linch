@@ -19,15 +19,16 @@ use crate::events::kinds::{
 use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
-    AgentStartRequest, AgentStopRequest, BeforeProviderCallOutcome, BeforeProviderCallRequest,
-    ContextBuildRequest, ContextBuildResponse, HookRecord, HookStatus, PostCompactRequest,
-    PostTurnRequest, PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest,
-    StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
+    AfterProviderCallOutcome, AfterProviderCallRequest, AgentStartRequest, AgentStopRequest,
+    BeforeProviderCallOutcome, BeforeProviderCallRequest, ContextBuildRequest,
+    ContextBuildResponse, HookRecord, HookStatus, PostCompactRequest, PostTurnRequest,
+    PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest, StopOutcome,
+    StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, TextBlock};
-use crate::provider::ProviderRequest;
+use crate::provider::{AssistantAssembly, ProviderRequest};
 use crate::run::{Phase, RunStatus, StopReason};
 use crate::usage::Usage;
 
@@ -37,6 +38,17 @@ pub(super) enum BeforeCall {
     /// Send this request: the original, or the last rewrite.
     Send(Box<ProviderRequest>),
     /// A hook blocked the call, or failed closed.
+    Blocked(String),
+    /// The run already ended: the run cancel interrupted the chain.
+    Ended,
+}
+
+/// What an `after_provider_call` hook decided for the response a provider
+/// call just assembled.
+pub(super) enum AfterCall {
+    /// Accept this response: the provider's, or the last rewrite.
+    Send(Box<AssistantAssembly>),
+    /// A hook blocked the response, or failed closed.
     Blocked(String),
     /// The run already ended: the run cancel interrupted the chain.
     Ended,
@@ -389,6 +401,36 @@ impl Runner {
         let mut records = Vec::new();
         chain.run_into(&request, &mut records).await;
         self.push_records(records, None);
+    }
+
+    /// Run `after_provider_call` on the response a provider call just
+    /// assembled for `turn`. Whatever this returns is what `accept` stages
+    /// as the `Assistant` event and appends to the session, so a rewrite is
+    /// what the audit trail and a resumed run both see.
+    pub(super) async fn after_provider_call(
+        &self,
+        assembly: AssistantAssembly,
+        turn: u32,
+    ) -> AfterCall {
+        let chain = &self.agent.hooks.after_provider_call;
+        if chain.is_empty() {
+            return AfterCall::Send(Box::new(assembly));
+        }
+        let request = AfterProviderCallRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            assembly,
+        };
+        let mut records = Vec::new();
+        let run = chain.run_into(request, &mut records);
+        let outcome = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        match outcome {
+            None => AfterCall::Ended,
+            Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(assembly),
+            Some(AfterProviderCallOutcome::Blocked { reason }) => AfterCall::Blocked(reason),
+        }
     }
 
     /// Run `pre_compact` once compaction's due checks passed, before the

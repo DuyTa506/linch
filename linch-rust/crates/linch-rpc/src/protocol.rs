@@ -16,9 +16,9 @@ mod open;
 
 pub use call::{CancelRequestParams, ToolCallParams, tool_code};
 pub use hook::{
-    BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer, HookCallParams, ObserveAnswer,
-    PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer, UserPromptAnswer,
-    WireToolResult,
+    AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
+    HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer,
+    StopAnswer, UserPromptAnswer, WireToolResult,
 };
 pub use open::{HostToolSpec, OpenParams};
 

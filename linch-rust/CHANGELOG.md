@@ -22,6 +22,14 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   provider is ever reached. Defaults open, but unlike the observe-only
   points its blocking answer can fail closed. Available to `@callback` in
   `linch_rust` and to `Hook<BeforeProviderCall>` in `linch-core`.
+- `after_provider_call`: a hook point for the response a provider call just
+  assembled, before it is staged and appended to the session. A hook may
+  rewrite it (the rewrite is what gets staged and appended) or block it,
+  ending the run before anything is staged. Defaults open, but like
+  `before_provider_call` its blocking answer can fail closed. Available to
+  `@callback` in `linch_rust` and to `Hook<AfterProviderCall>` in
+  `linch-core`. Python's `retry`/`force_continue` actions at this point are
+  not ported: Rust has only `Continue`/`Rewrite`/`Block`.
 
 ### Changed
 

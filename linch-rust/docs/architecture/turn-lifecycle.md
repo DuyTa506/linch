@@ -20,10 +20,11 @@ What differs in Rust:
   the run where it stands, like a crash (`runner.rs:83-87`).
 - Python's loop guard (repeated calls, repeated failures) is not in the
   runner. It emits `loop_guard` only for `max_turns` (`runner/end.rs:93-108`).
-- Hook points are the twenty in the [kernel](./kernel.md#hook-chains), twelve
-  of which only observe. `before_provider_call` can rewrite or block the
-  request about to be sent; Python's `AfterProviderCall` is still gone
-  (`hooks.rs`).
+- Hook points are the twenty-one in the [kernel](./kernel.md#hook-chains),
+  twelve of which only observe. `before_provider_call` can rewrite or block
+  the request about to be sent, and `after_provider_call` can rewrite or
+  block the response a call just assembled, before it is staged; Python's
+  `retry`/`force_continue` actions at that point are not ported (`hooks.rs`).
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -49,9 +50,12 @@ What differs in Rust:
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
    events (`turn.rs:306-317`). The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
-6. **Write the response through.** On success the run stages the `Assistant`
-   and `Usage` events and saves `AssistantReceived`, which writes through
-   with the receipt (`turn.rs:353-380`, `journal.rs:192-193`). The caller sees
+6. **Write the response through.** `after_provider_call` runs on the
+   assembled response first: a rewrite replaces it before it is staged; a
+   block ends the run as failed and nothing is staged (`hooks/assembly.rs`,
+   `runner/hooks.rs`). On success the run then stages the `Assistant` and
+   `Usage` events and saves `AssistantReceived`, which writes through with
+   the receipt (`turn.rs:353-380`, `journal.rs:192-193`). The caller sees
    those events only after this commit (`journal.rs:25-28`).
 7. **Append the response to the session** (`turn.rs:395-397`).
 8. **Branch on the tool calls** of the response (below).

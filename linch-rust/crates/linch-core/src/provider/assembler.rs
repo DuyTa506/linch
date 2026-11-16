@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolUseBlock};
 use crate::run::StopReason;
@@ -17,7 +19,11 @@ mod tests;
 pub use error::StreamError;
 
 /// The assembled assistant turn: one message plus provider accounting.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializable so a hook (`after_provider_call`) can carry it as the
+/// payload of a cross-process callback; nothing durable encodes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssistantAssembly {
     /// The assistant message built from the stream's content blocks.
     pub message: Message,

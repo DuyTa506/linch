@@ -434,6 +434,7 @@ Hàm nhận dict request và trả về câu trả lời của điểm đó. M�
 | `user_prompt_submit` | `content` (các content block) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (cuộc hội thoại mà model sẽ thấy) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` dành cho observer và eval: nó nằm trên `ContextBuildEvent` của lời gọi, key của callback đến sau thắng, và model không bao giờ thấy nó |
 | `before_provider_call` | `turn`, `request` (toàn bộ provider request sắp được gửi) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; một rewrite là thứ được gửi đi và được `context_build` ghi lại, và một block kết thúc run trước khi provider được gọi |
+| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: thứ lời gọi provider vừa dựng xong) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "block", "reason"}`; một rewrite là thứ được stage và nối vào session, và một block kết thúc run trước khi response được stage. Hành động `retry`/`force_continue` của Python tại đây không có sẵn: dùng `{"action": "continue"}` để chấp nhận response không đổi |
 | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
@@ -467,7 +468,7 @@ không phải của agent con.
 
 | Đối số | Mặc định | Điều khiển gì |
 |---|---|---|
-| `point` | bắt buộc | Một trong hai mươi điểm ở trên |
+| `point` | bắt buộc | Một trong hai mươi mốt điểm ở trên |
 | `policy_id`, `policy_version` | bắt buộc | Đi vào hợp đồng của run. Hãy tăng version mỗi khi hành vi, matcher, timeout hoặc fail mode thay đổi |
 | `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở ba điểm tool; một lần không khớp không bao giờ đến process này |
 | `timeout` | không có | Server chờ câu trả lời bao lâu; vắng thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc |

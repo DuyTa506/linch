@@ -60,6 +60,46 @@ fn before_provider_call_carries_the_request_and_reads_each_action() {
     assert!(BeforeProviderCall::decode(json!({"action": "continue", "x": 1})).is_err());
 }
 
+fn minimal_assembly(text: &str) -> linch::AssistantAssembly {
+    linch::AssistantAssembly {
+        message: Message::assistant_text(text),
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+        model: "m".into(),
+    }
+}
+
+#[test]
+fn after_provider_call_carries_the_assembly_and_reads_each_action() {
+    let (session_id, run_id) = ids();
+    let request = AfterProviderCallRequest {
+        session_id,
+        run_id,
+        turn: 2,
+        assembly: minimal_assembly("hi"),
+    };
+    let wire = AfterProviderCall::encode(&request);
+    assert_eq!(wire["turn"], 2);
+    assert_eq!(wire["assembly"]["model"], "m");
+    assert_eq!(
+        AfterProviderCall::decode(json!({"action": "continue"})).unwrap(),
+        AfterProviderCallResponse::Continue
+    );
+    let rewrite = json!({"action": "rewrite", "assembly": serde_json::to_value(minimal_assembly("bye")).unwrap()});
+    assert_eq!(
+        AfterProviderCall::decode(rewrite).unwrap(),
+        AfterProviderCallResponse::Rewrite {
+            assembly: Box::new(minimal_assembly("bye"))
+        }
+    );
+    let block = json!({"action": "block", "reason": "unsafe content"});
+    assert!(matches!(
+        AfterProviderCall::decode(block).unwrap(),
+        AfterProviderCallResponse::Block { reason } if reason == "unsafe content"
+    ));
+    assert!(AfterProviderCall::decode(json!({"action": "continue", "x": 1})).is_err());
+}
+
 #[test]
 fn user_prompt_submit_carries_content_and_reads_each_action() {
     let (session_id, run_id) = ids();
