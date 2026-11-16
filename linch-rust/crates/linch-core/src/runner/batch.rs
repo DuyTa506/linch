@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::cancel::Unpaired;
 use super::sink::JournalSink;
 use super::turn::{Batch, Runner, Step};
 use crate::agent::RunError;
@@ -66,9 +67,14 @@ impl Runner {
             &approvals,
         );
         // A cancel, even one that came before approve or resume, aborts
-        // without asking the hooks (again).
+        // without asking the hooks (again), each call answered so the
+        // session stays paired. The placeholders are staged above.
         let Some(mut plan) = self.cancel.run_until_cancelled(plan).await else {
-            self.abort().await?;
+            let calls = calls.into_iter().map(|call| match call {
+                ToolRecovery::Interrupted { result, .. } => ToolRecovery::Done(result),
+                call => call,
+            });
+            self.cancelled(Unpaired::Calls(calls.collect())).await?;
             return Ok(None);
         };
         if self.agent.child {

@@ -13,13 +13,14 @@ use async_trait::async_trait;
 use common::*;
 use linch_core::ask_user::{AnswerValue, AskUser, AskUserAnswer};
 use linch_core::events::kinds::ResultSubtype;
-use linch_core::hooks::ApprovalResponse;
+use linch_core::hooks::{ApprovalResponse, PreToolUse, PreToolUseRequest, PreToolUseResponse};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, Commit, Envelope, Event, Lease, LogEntry, NewRun, PermissionMode, Phase, RunError,
-    RunId, RunOptions, RunRecord, RunStatus, RunStore, ScriptedProvider, ScriptedTurn, SessionId,
-    SessionStore, StoreError, Tool, ToolRegistry, ToolScope,
+    Agent, AgentBuilder, CallbackError, Commit, Envelope, Event, Hook, Hooks, Lease, LogEntry,
+    NewRun, PermissionMode, Phase, RunError, RunId, RunOptions, RunRecord, RunStatus, RunStore,
+    ScriptedProvider, ScriptedTurn, SessionId, SessionStore, StoreError, Tool, ToolRegistry,
+    ToolScope,
 };
 use serde_json::json;
 use tokio::sync::Notify;
@@ -260,6 +261,8 @@ async fn a_cancel_ignores_the_contract() {
 struct Gated {
     inner: Arc<Stores>,
     owner: &'static str,
+    /// Hold the claim before it lands instead of after.
+    before: bool,
     landed: Notify,
     release: Notify,
 }
@@ -269,9 +272,27 @@ impl Gated {
         Arc::new(Self {
             inner,
             owner,
+            before: false,
             landed: Notify::new(),
             release: Notify::new(),
         })
+    }
+
+    fn before(inner: Arc<Stores>, owner: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            owner,
+            before: true,
+            landed: Notify::new(),
+            release: Notify::new(),
+        })
+    }
+
+    async fn hold(&self, owner: &str) {
+        if owner == self.owner {
+            self.landed.notify_one();
+            self.release.notified().await;
+        }
     }
 }
 
@@ -281,10 +302,12 @@ impl RunStore for Gated {
         RunStore::create(&*self.inner, run).await
     }
     async fn claim(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
+        if self.before {
+            self.hold(owner).await;
+        }
         let lease = self.inner.claim(ns, run_id, owner).await?;
-        if owner == self.owner {
-            self.landed.notify_one();
-            self.release.notified().await;
+        if !self.before {
+            self.hold(owner).await;
         }
         Ok(lease)
     }
@@ -483,4 +506,100 @@ async fn a_crash_at_any_write_of_a_cancel_finishes_the_abort_once() {
             }
         }
     }
+}
+
+/// The cancel's check passed, then an approve claimed the run and started
+/// its first tool before the cancel claimed. The cancel's claim fences the
+/// approve out and the cancel ends the run from the batch the approve left:
+/// the started call gets its interrupted placeholder, the other an aborted
+/// result. The approve's next write fails with `LeaseLost`.
+#[tokio::test]
+async fn a_cancel_that_claims_after_a_tool_started_ends_the_run() {
+    let (stores, runs) = (Arc::new(Stores::default()), Runs::default());
+    let run_id = suspend(&build(approvals(), &runs, stores.clone())).await;
+    let gated = Gated::before(stores.clone(), "canceller");
+    let agent = build(vec![text_turn("done")], &runs, gated.clone());
+
+    let cancelling = {
+        let (agent, run_id) = (agent.clone(), run_id.clone());
+        tokio::spawn(async move { agent.cancel(run_id, owner("canceller")).await })
+    };
+    gated.landed.notified().await;
+    // The approve's tool start is durable; its run waits while unpolled.
+    let mut approve = agent.approve(run_id.clone(), allow_all(), owner("approver"));
+    loop {
+        let next = futures::StreamExt::next(&mut approve).await.unwrap();
+        if matches!(next.unwrap().event, Event::ToolCallStart(_)) {
+            break;
+        }
+    }
+    gated.release.notify_one();
+    assert!(cancelling.await.unwrap().unwrap(), "the cancel won");
+    let (_, error) = drain(approve).await;
+    assert!(error.as_ref().is_some_and(lease_lost), "{error:?}");
+
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Aborted);
+    let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    assert_eq!(results(&events), [ResultSubtype::Aborted]);
+    let session = messages(&*stores, "s1").await;
+    assert_eq!(session.len(), 3, "{session:?}");
+    assert_eq!(
+        result_texts(&session[2]),
+        [linch_core::journal::INTERRUPTED_TOOL_TEXT, ABORTED]
+    );
+}
+
+/// A `pre_tool_use` hook that never answers; it says when it was called.
+struct Waits(Arc<Notify>);
+
+#[async_trait]
+impl Hook<PreToolUse> for Waits {
+    fn policy_id(&self) -> &str {
+        "waits"
+    }
+    fn policy_version(&self) -> u32 {
+        1
+    }
+    async fn call(&self, _: &PreToolUseRequest) -> Result<PreToolUseResponse, CallbackError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// A run cancelled while it plans its tool calls (a hook keeps it there)
+/// answers each call with an aborted result before it ends, so the next
+/// run of the session is paired.
+#[tokio::test]
+async fn a_cancel_while_planning_pairs_the_session() {
+    let entered = Arc::new(Notify::new());
+    let hooks = Hooks::default();
+    let waits = Arc::new(Waits(Arc::clone(&entered)));
+    let _ = hooks.pre_tool_use.register(waits).unwrap();
+    let (stores, runs) = (Arc::new(Stores::default()), Runs::default());
+    let agent = AgentBuilder::new(spec())
+        .provider(Arc::new(ScriptedProvider::new(approvals())))
+        .tools(registry(vec![Echo::new("Write", ToolScope::Write, &runs)]))
+        .permissions(policy(PermissionMode::Default))
+        .hooks(Arc::new(hooks))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .build()
+        .unwrap();
+    let mut options = RunOptions::new("s1");
+    options.run_id = Some(RunId::new("r1"));
+    let token = options.cancel.clone();
+    let canceller = tokio::spawn(async move {
+        entered.notified().await;
+        token.cancel();
+    });
+    let envelopes = finish(agent.run("go", options)).await;
+    canceller.await.unwrap();
+    assert_eq!(results(&envelopes), [ResultSubtype::Aborted]);
+    let calls = ["call_0_0", "call_0_1"];
+    assert_aborted(&stores, &RunId::new("r1"), &calls, "plan").await;
+
+    let next = finish(agent.run("again", RunOptions::new("s1"))).await;
+    assert_eq!(results(&next), [ResultSubtype::Success]);
 }
