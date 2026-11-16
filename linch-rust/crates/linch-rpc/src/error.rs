@@ -101,6 +101,10 @@ pub mod code {
     /// does not compile, or its root is not an object; `data.reason` says
     /// why. Nothing was written.
     pub const INVALID_OUTPUT_SCHEMA: i64 = -32031;
+    /// `RunError::InvalidAnswer`: a `run.answer` that does not fit the
+    /// run's pending input requests; `data.reason` says why. Nothing was
+    /// written: the run still awaits input.
+    pub const INVALID_ANSWER: i64 = -32032;
 }
 
 impl ErrorObject {
@@ -178,6 +182,9 @@ impl From<&RunError> for ErrorObject {
             RunError::InvalidOutputSchema { reason, .. } => {
                 Self::new(code::INVALID_OUTPUT_SCHEMA, message)
                     .with_data(json!({ "reason": reason }))
+            }
+            RunError::InvalidAnswer { reason, .. } => {
+                Self::new(code::INVALID_ANSWER, message).with_data(json!({ "reason": reason }))
             }
         }
     }

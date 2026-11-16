@@ -118,6 +118,16 @@ pub enum Phase {
         /// Tool use ids that wait for a decision.
         pending: Vec<String>,
     },
+    /// Suspended until the host answers the pending `AskUser` calls
+    /// (status `awaiting_input`). Same shape as `AwaitingApproval`: the
+    /// answers are committed as the calls' results, not here.
+    AwaitingInput {
+        /// Decisions recorded so far.
+        decisions: Vec<ToolDecisionRecord>,
+        /// Tool use ids of the `AskUser` calls that wait for an answer;
+        /// each is its `input_request`'s `request_id`.
+        pending: Vec<String>,
+    },
     /// A user message is ready for the next turn: the tool results, or the
     /// feedback of a `stop` hook that kept the run going. It may not be in
     /// the session yet.

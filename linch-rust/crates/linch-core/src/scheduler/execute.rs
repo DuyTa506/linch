@@ -115,8 +115,8 @@ pub struct ExecuteOptions {
 ///
 /// # Panics
 ///
-/// When a call of `plan` is awaiting approval: the run must suspend
-/// instead.
+/// When a call of `plan` is awaiting approval or input: the run must
+/// suspend instead.
 pub async fn execute<S: ToolSink>(
     plan: BatchPlan,
     sink: &S,
@@ -125,8 +125,8 @@ pub async fn execute<S: ToolSink>(
     options: &ExecuteOptions,
 ) -> Result<Vec<ToolResultBlock>, S::Error> {
     assert!(
-        !plan.is_awaiting_approval(),
-        "execute got a plan with calls awaiting approval; suspend the run instead"
+        !plan.is_awaiting_approval() && !plan.is_awaiting_input(),
+        "execute got a plan with calls awaiting approval or input; suspend the run instead"
     );
     let runner = Runner {
         sink,
@@ -206,8 +206,8 @@ impl<S: ToolSink> Runner<'_, S> {
             PlannedAction::Error { error } => Finished::from(Err(error.clone())),
             PlannedAction::Blocked { reason } => error(reason),
             PlannedAction::Denied { reason } => error(format!("Tool call denied: {reason}")),
-            PlannedAction::AwaitingApproval { .. } => {
-                unreachable!("execute rejects plans awaiting approval")
+            PlannedAction::AwaitingApproval { .. } | PlannedAction::AwaitingInput => {
+                unreachable!("execute rejects plans awaiting approval or input")
             }
         };
         let (result, block) = render(&call.tool_use_id, finished.result);

@@ -68,16 +68,27 @@ pub enum RunError {
         /// Its terminal status.
         status: RunStatus,
     },
-    /// Approve on a run that is not waiting for an approval, such as a
-    /// retried approve whose answers were already committed: the host
-    /// continues that run with a resume.
+    /// Approve on a run that is not waiting for an approval, or answer on
+    /// one not waiting for input, such as a retry whose answers were
+    /// already committed: the host continues that run with a resume.
     #[error(
-        "run {run_id} is not awaiting approval; if an approve already committed \
-         its answers, continue the run with resume"
+        "run {run_id} is not awaiting this approval or answer; if an approve or answer \
+         already committed, continue the run with resume"
     )]
     NotSuspended {
         /// The run.
         run_id: RunId,
+    },
+    /// An answer that does not fit the run's pending input requests: no
+    /// answers, a request that is not pending, or an answer that does not
+    /// fit its questions. Nothing was claimed or written; the run is still
+    /// awaiting input.
+    #[error("run {run_id} cannot take this answer: {reason}")]
+    InvalidAnswer {
+        /// The run.
+        run_id: RunId,
+        /// What is wrong with the answer.
+        reason: String,
     },
     /// The run's own output schema ([`super::RunOptions::output_schema`])
     /// does not compile, or its root is not an object. Nothing was

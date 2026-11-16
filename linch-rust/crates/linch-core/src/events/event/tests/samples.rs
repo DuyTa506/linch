@@ -76,6 +76,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             request_id: "req1".into(),
             kind: InputRequestKind::AskUser,
             prompt: "continue?".into(),
+            questions: vec![],
         }),
         Event::Suspended(SuspendedEvent {
             status: SuspendStatus::AwaitingApproval,

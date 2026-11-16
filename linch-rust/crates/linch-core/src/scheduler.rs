@@ -9,7 +9,9 @@
 //!    permission (and the `permission_request` chain on `Ask`), then apply any
 //!    [`RecordedApproval`] from an earlier suspend. When a call still needs
 //!    approval, [`BatchPlan::is_awaiting_approval`] says so and the loop
-//!    suspends the run.
+//!    suspends the run. An allowed `AskUser` call awaits input instead
+//!    ([`BatchPlan::is_awaiting_input`]); with no approval pending, the loop
+//!    suspends the run for the user's answer.
 //! 2. [`execute`] runs a decided plan and returns one [`ToolResultBlock`] per
 //!    call, in call order. A contiguous run of read calls (a read-scope tool,
 //!    or one whose [`crate::Tool::parallel`] says so) executes concurrently, up

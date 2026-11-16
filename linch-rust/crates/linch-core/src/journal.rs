@@ -9,8 +9,8 @@
 //!   last durable seq.
 //! - [`Journal::save`] applies the phase rule:
 //!   `Started`, `AssistantReceived` and `Compacted` (a paid summary) write
-//!   through, `AwaitingApproval` writes through with status
-//!   `awaiting_approval`, and `ProviderPending`, `CompactionPending`,
+//!   through, `AwaitingApproval` and `AwaitingInput` write through with
+//!   status `awaiting_approval` and `awaiting_input`, and `ProviderPending`, `CompactionPending`,
 //!   `ToolBatch` and `ToolResults` are held. A held checkpoint is a snapshot:
 //!   it covers only the events pending when it was saved.
 //! - The caller places the barriers: [`Journal::flush`] before a provider
@@ -193,6 +193,7 @@ impl Journal {
                 None
             }
             Phase::AwaitingApproval { .. } => Some(RunStatus::AwaitingApproval),
+            Phase::AwaitingInput { .. } => Some(RunStatus::AwaitingInput),
             Phase::ProviderPending { .. }
             | Phase::CompactionPending { .. }
             | Phase::ToolBatch { .. }

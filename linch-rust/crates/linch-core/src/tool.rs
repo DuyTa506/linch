@@ -262,6 +262,15 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether a call asks the user instead of running: an allowed call
+    /// suspends the run with an `input_request` built from its input, which
+    /// must be [`crate::ask_user::AskUser`]'s, and the host's answer becomes
+    /// its result (see [`crate::ask_user`]). Only `AskUser` says yes; the
+    /// default is no.
+    fn asks_user(&self) -> bool {
+        false
+    }
+
     /// One-line summary of a call for events and approval prompts.
     fn summarize(&self, input: &JsonObject) -> String {
         let _ = input;

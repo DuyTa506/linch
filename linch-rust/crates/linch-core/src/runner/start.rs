@@ -9,13 +9,16 @@ use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
 use super::{Driving, Family, Shared, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
+use crate::ask_user::{self, AskUserAnswer};
 use crate::budget::{Meter, Spent};
 use crate::catalog::{self, Catalog};
-use crate::events::kinds::{InitEvent, SkillsLoadedEvent, UserEvent, UserEventSubtype};
+use crate::events::kinds::{
+    InitEvent, SkillsLoadedEvent, ToolCallEndEvent, ToolCallStartEvent, UserEvent, UserEventSubtype,
+};
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
-use crate::journal::{Journal, JournalError, Recovery, reconcile};
+use crate::journal::{Journal, JournalError, Recovery, ToolRecovery, reconcile};
 use crate::message::ContentBlock;
 use crate::provider::OutputSchema;
 use crate::reliability::Standing;
@@ -182,15 +185,24 @@ pub(super) async fn new_run(
     runner.drive(prompt).await
 }
 
+/// What an approve or an answer brings to a suspended run.
+pub(crate) enum Reply {
+    /// The host's approval answer per pending `tool_use_id`.
+    Approvals(HashMap<String, ApprovalResponse>),
+    /// The user's answer per pending input `request_id`.
+    Answers(HashMap<String, AskUserAnswer>),
+}
+
 /// Claim an existing run, check it may continue, reconcile its durable
-/// state, and go on from there. `answers` is set for an approve, which is
-/// accepted only on a run awaiting approval. With a token that is already
-/// cancelled, nothing is claimed or written and the stream ends empty.
-/// `inherited` is the budget of a child run's tree.
+/// state, and go on from there. `reply` is set for an approve, accepted
+/// only on a run awaiting approval, or an answer, accepted only on a run
+/// awaiting input and only when it fits the questions. With a token that is
+/// already cancelled, nothing is claimed or written and the stream ends
+/// empty. `inherited` is the budget of a child run's tree.
 pub(super) async fn continue_run(
     agent: Arc<AgentInner>,
     run_id: RunId,
-    answers: Option<HashMap<String, ApprovalResponse>>,
+    reply: Option<Reply>,
     options: RunOptions,
     shared: Shared,
     inherited: Option<Meter>,
@@ -201,13 +213,17 @@ pub(super) async fn continue_run(
         return Ok(());
     }
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
-    // Check before claiming, so a mistaken call does not fence a live owner;
-    // check again after, against the state the claim fixed.
-    check(
-        &runs.load(namespace, &run_id).await?,
-        &agent,
-        answers.as_ref(),
-    )?;
+    // Check before claiming, so a mistaken call does not fence a live owner
+    // (and a wrong answer leaves the run suspended); check again after,
+    // against the state the claim fixed.
+    let record = runs.load(namespace, &run_id).await?;
+    check(&record, &agent, reply.as_ref())?;
+    if let (Some(Reply::Answers(answers)), Phase::AwaitingInput { pending, .. }) =
+        (&reply, &record.checkpoint.phase)
+    {
+        let events = runs.events(namespace, &run_id, 0).await?;
+        check_answers(&run_id, &events, pending, answers)?;
+    }
     let lease = match runs.claim(namespace, &run_id, &options.owner).await {
         Ok(lease) => lease,
         Err(StoreError::InvalidTransition { from, .. }) if from.is_terminal() => {
@@ -219,7 +235,7 @@ pub(super) async fn continue_run(
         Err(error) => return Err(error.into()),
     };
     let record = runs.load(namespace, &run_id).await?;
-    check(&record, &agent, answers.as_ref())?;
+    check(&record, &agent, reply.as_ref())?;
     // A family this process still holds (the run suspended here) is taken
     // over as it is; its children never went through a crash.
     let family = drive_family(&agent, &driving, &run_id, &record.session_id);
@@ -228,6 +244,7 @@ pub(super) async fn continue_run(
     let checkpoint = &record.checkpoint;
     let (assistant_seq, turn) = turn_events(&events);
     let mut commit = None;
+    let mut answered = Vec::new();
     let step = match reconcile(checkpoint, &events, &entries)? {
         Recovery::Started { prompt, appended } => Step::Prompt {
             prompt,
@@ -259,7 +276,11 @@ pub(super) async fn continue_run(
             })
         }
         Recovery::AwaitingApproval { decisions, pending } => {
-            let (decisions, changed) = answered(decisions, &pending, answers.unwrap_or_default());
+            let given = match reply {
+                Some(Reply::Approvals(given)) => given,
+                _ => HashMap::new(),
+            };
+            let (decisions, changed) = decided(decisions, &pending, given);
             // A batch can suspend after some of its calls ran (a re-plan on
             // resume): read every call's state from the events after the
             // response, so nothing runs twice.
@@ -274,6 +295,61 @@ pub(super) async fn continue_run(
                 unreachable!("a tool batch checkpoint reconciles to a tool batch");
             };
             if changed {
+                commit = Some(decisions.clone());
+            }
+            Step::Batch(Batch {
+                approvals: approvals(&decisions, turn),
+                calls,
+                decisions,
+                after_seq: Some(assistant_seq),
+            })
+        }
+        Recovery::AwaitingInput { decisions, pending } => {
+            let answers = match reply {
+                Some(Reply::Answers(answers)) => {
+                    check_answers(&run_id, &events, &pending, &answers)?;
+                    answers
+                }
+                _ => HashMap::new(),
+            };
+            let batch = Checkpoint {
+                phase: Phase::ToolBatch {
+                    decisions: decisions.clone(),
+                    after_seq: assistant_seq,
+                },
+                ..checkpoint.clone()
+            };
+            let Recovery::ToolBatch { mut calls, .. } = reconcile(&batch, &events, &entries)?
+            else {
+                unreachable!("a tool batch checkpoint reconciles to a tool batch");
+            };
+            // Each answer is its call's start and end, committed before the
+            // run goes on: the model reads the durable result.
+            for call in &mut calls {
+                let ToolRecovery::Replan(block) = call else {
+                    continue;
+                };
+                let Some(answer) = answers.get(&block.id) else {
+                    continue;
+                };
+                let result = answer.render(&block.id);
+                answered.push(Event::ToolCallStart(ToolCallStartEvent {
+                    tool_use_id: block.id.clone(),
+                    tool_name: block.name.clone(),
+                    input: block.input.clone(),
+                    summary: ask_user::summary(&block.input),
+                }));
+                answered.push(Event::ToolCallEnd(ToolCallEndEvent {
+                    tool_name: block.name.clone(),
+                    result: result.clone(),
+                    duration_ms: 0,
+                    canonical_output: None,
+                    metadata: None,
+                    error_code: None,
+                }));
+                *call = ToolRecovery::Done(result);
+            }
+            if !answered.is_empty() {
                 commit = Some(decisions.clone());
             }
             Step::Batch(Batch {
@@ -314,6 +390,9 @@ pub(super) async fn continue_run(
         turn: u64::from(checkpoint.turn),
         output_schema: None,
     }));
+    for event in answered {
+        journal.stage(event);
+    }
     let run = identity(
         record.session_id.clone(),
         run_id,
@@ -450,16 +529,12 @@ fn last_stop(events: &[Envelope]) -> StopReason {
     last.unwrap_or(StopReason::EndTurn)
 }
 
-/// Refuse a terminal run, a run of another contract, and an approve on a
-/// run that is not awaiting approval. A run whose approve committed its
-/// answers is in its tool batch and may still have a live owner, so an
-/// approve of it (a retry, or a second click) is refused too: the host
-/// resumes it.
-fn check(
-    record: &RunRecord,
-    agent: &AgentInner,
-    answers: Option<&HashMap<String, ApprovalResponse>>,
-) -> Result<(), RunError> {
+/// Refuse a terminal run, a run of another contract, an approve on a run
+/// that is not awaiting approval, and an answer on one not awaiting input.
+/// A run whose approve or answer committed is in its tool batch and may
+/// still have a live owner, so a second one (a retry, or a second click) is
+/// refused too: the host resumes it.
+fn check(record: &RunRecord, agent: &AgentInner, reply: Option<&Reply>) -> Result<(), RunError> {
     if record.status.is_terminal() {
         return Err(RunError::Terminal {
             run_id: record.run_id.clone(),
@@ -473,8 +548,13 @@ fn check(
             found: record.contract,
         });
     }
-    let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
-    if answers.is_some() && !suspended {
+    let phase = &record.checkpoint.phase;
+    let suspended = match reply {
+        None => true,
+        Some(Reply::Approvals(_)) => matches!(phase, Phase::AwaitingApproval { .. }),
+        Some(Reply::Answers(_)) => matches!(phase, Phase::AwaitingInput { .. }),
+    };
+    if !suspended {
         return Err(RunError::NotSuspended {
             run_id: record.run_id.clone(),
         });
@@ -482,9 +562,48 @@ fn check(
     Ok(())
 }
 
+/// Refuse `answers` unless each one answers a `pending` request and fits
+/// the questions its latest `input_request` among `events` asked. There
+/// must be at least one; a pending request left out is asked again.
+fn check_answers(
+    run_id: &RunId,
+    events: &[Envelope],
+    pending: &[String],
+    answers: &HashMap<String, AskUserAnswer>,
+) -> Result<(), RunError> {
+    let invalid = |reason: String| RunError::InvalidAnswer {
+        run_id: run_id.clone(),
+        reason,
+    };
+    if answers.is_empty() {
+        return Err(invalid("no answers given".into()));
+    }
+    for (request_id, answer) in answers {
+        if !pending.contains(request_id) {
+            return Err(invalid(format!("request {request_id:?} is not pending")));
+        }
+        let asked = events
+            .iter()
+            .rev()
+            .find_map(|envelope| match &envelope.event {
+                Event::InputRequest(request) if &request.request_id == request_id => {
+                    Some(&request.questions)
+                }
+                _ => None,
+            });
+        let Some(questions) = asked else {
+            return Err(invalid(format!("request {request_id:?} was never asked")));
+        };
+        answer
+            .check(questions)
+            .map_err(|reason| invalid(format!("request {request_id:?}: {reason}")))?;
+    }
+    Ok(())
+}
+
 /// Record the host's answers for the pending calls; also says whether any
 /// answer applied.
-fn answered(
+fn decided(
     mut decisions: Vec<ToolDecisionRecord>,
     pending: &[String],
     answers: HashMap<String, ApprovalResponse>,

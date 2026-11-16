@@ -76,6 +76,13 @@ pub enum Recovery {
         /// Tool use ids that wait for a decision.
         pending: Vec<String>,
     },
+    /// `AwaitingInput`: still waiting for the user's answers.
+    AwaitingInput {
+        /// Decisions recorded so far.
+        decisions: Vec<ToolDecisionRecord>,
+        /// Tool use ids of the `AskUser` calls that wait for an answer.
+        pending: Vec<String>,
+    },
     /// `ToolResults`: append the message unless `appended`, then go on.
     ToolResults {
         /// The user message to append (tool results or stop feedback).
@@ -205,6 +212,13 @@ pub fn reconcile(
         Phase::AwaitingApproval { decisions, pending } => {
             let _calls = tool_calls(checkpoint, session)?;
             Ok(Recovery::AwaitingApproval {
+                decisions: decisions.clone(),
+                pending: pending.clone(),
+            })
+        }
+        Phase::AwaitingInput { decisions, pending } => {
+            let _calls = tool_calls(checkpoint, session)?;
+            Ok(Recovery::AwaitingInput {
                 decisions: decisions.clone(),
                 pending: pending.clone(),
             })

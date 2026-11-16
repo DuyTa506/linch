@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio_util::sync::CancellationToken;
 
+use crate::ask_user::AskUserAnswer;
 use crate::canonical::Digest;
 use crate::coordination::Mailbox;
 use crate::events::{Envelope, Persistence};
@@ -297,7 +298,37 @@ impl Agent {
         decisions: HashMap<String, ApprovalResponse>,
         options: RunOptions,
     ) -> RunStream {
-        runner::resume(Arc::clone(&self.inner), run_id, Some(decisions), options)
+        let reply = runner::Reply::Approvals(decisions);
+        runner::resume(Arc::clone(&self.inner), run_id, Some(reply), options)
+    }
+
+    /// Answer the pending `AskUser` calls of a run suspended for input,
+    /// and continue it.
+    ///
+    /// Only a run awaiting input takes an answer, and only when every
+    /// answer fits its request's questions (see
+    /// [`AskUserAnswer::check`]): otherwise the stream ends with
+    /// `RunError::NotSuspended` or `RunError::InvalidAnswer` before
+    /// anything is claimed or written, and the run stays suspended. The
+    /// answers are committed as the calls' results before the run goes
+    /// on; from then on a retried answer gets `NotSuspended` and the host
+    /// continues the run with [`Agent::resume`]. Two answers that race can
+    /// both pass the check, as two approves can.
+    ///
+    /// Args:
+    ///     run_id: A run whose checkpoint is awaiting input.
+    ///     answers: The user's answer per pending `request_id` (the
+    ///         `AskUser` call's `tool_use_id`), at least one. A pending
+    ///         request left out is asked again.
+    ///     options: Principal, owner and cancel token for the continuation.
+    pub fn answer(
+        &self,
+        run_id: RunId,
+        answers: HashMap<String, AskUserAnswer>,
+        options: RunOptions,
+    ) -> RunStream {
+        let reply = runner::Reply::Answers(answers);
+        runner::resume(Arc::clone(&self.inner), run_id, Some(reply), options)
     }
 
     /// Mark `run_id` failed for good, when it can never continue (its

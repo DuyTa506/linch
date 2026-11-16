@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use super::sink::JournalSink;
 use super::turn::{Batch, Runner, Step};
 use crate::agent::RunError;
+use crate::ask_user::{self, CANNOT_WAIT};
 use crate::events::kinds::{
-    PermissionRequestEvent, PermissionRequestItem, SuspendStatus, SuspendedEvent, ToolCallEndEvent,
-    UserEvent, UserEventSubtype,
+    InputRequestEvent, InputRequestKind, PermissionRequestEvent, PermissionRequestItem,
+    SuspendStatus, SuspendedEvent, ToolCallEndEvent, UserEvent, UserEventSubtype,
 };
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
@@ -72,6 +73,7 @@ impl Runner {
         };
         if self.agent.child {
             plan.refuse_asks(CANNOT_ASK);
+            plan.refuse_inputs(CANNOT_WAIT);
         }
         self.refuse_unoffered(&mut plan);
         for call in plan.calls() {
@@ -81,8 +83,14 @@ impl Runner {
         for record in plan_decisions(&plan) {
             upsert(&mut decisions, record);
         }
+        // Approvals first: an `AskUser` call waits until no call of its
+        // batch needs one, so the user is asked once.
         if plan.is_awaiting_approval() {
             self.suspend(&plan, decisions).await?;
+            return Ok(None);
+        }
+        if plan.is_awaiting_input() {
+            self.suspend_for_input(&plan, decisions).await?;
             return Ok(None);
         }
         let after_seq = after_seq.unwrap_or_else(|| self.journal.last_seq());
@@ -170,12 +178,50 @@ impl Runner {
             status: SuspendStatus::AwaitingApproval,
             pending_request_ids: pending.clone(),
         }));
+        self.park_and_save(Phase::AwaitingApproval { decisions, pending })
+            .await
+    }
+
+    /// Write through `AwaitingInput` with one `input_request` per `AskUser`
+    /// call waiting for the user, parking the family as [`Self::suspend`]
+    /// does.
+    async fn suspend_for_input(
+        &mut self,
+        plan: &BatchPlan,
+        decisions: Vec<ToolDecisionRecord>,
+    ) -> Result<(), RunError> {
+        let waiting = plan
+            .calls()
+            .iter()
+            .filter(|call| matches!(call.action, PlannedAction::AwaitingInput));
+        let mut pending = Vec::new();
+        for call in waiting {
+            // The plan validated the input with the tool.
+            let questions = ask_user::questions(&call.input).unwrap_or_default();
+            self.journal.stage(Event::InputRequest(InputRequestEvent {
+                request_id: call.tool_use_id.clone(),
+                kind: InputRequestKind::AskUser,
+                prompt: ask_user::prompt(&questions),
+                questions,
+            }));
+            pending.push(call.tool_use_id.clone());
+        }
+        self.journal.stage(Event::Suspended(SuspendedEvent {
+            status: SuspendStatus::AwaitingInput,
+            pending_request_ids: pending.clone(),
+        }));
+        self.park_and_save(Phase::AwaitingInput { decisions, pending })
+            .await
+    }
+
+    /// Park the family, so its children outlive the stream, and write the
+    /// suspend `phase` through; a failed write takes the park back.
+    async fn park_and_save(&mut self, phase: Phase) -> Result<(), RunError> {
         let family = self.family.clone();
         if let Some(family) = &family {
             family.park(true);
         }
-        let saved = self.save(Phase::AwaitingApproval { decisions, pending });
-        let saved = saved.await;
+        let saved = self.save(phase).await;
         if let (Err(_), Some(family)) = (&saved, &family) {
             family.park(false);
         }
@@ -227,7 +273,9 @@ impl Runner {
 fn plan_decisions(plan: &BatchPlan) -> impl Iterator<Item = ToolDecisionRecord> + '_ {
     plan.calls().iter().filter_map(|call| {
         let decision = match &call.action {
-            PlannedAction::Run | PlannedAction::Serve { .. } => PermissionDecision::Allow {},
+            PlannedAction::Run | PlannedAction::Serve { .. } | PlannedAction::AwaitingInput => {
+                PermissionDecision::Allow {}
+            }
             PlannedAction::Denied { reason } => PermissionDecision::Deny {
                 reason: reason.clone(),
             },
