@@ -119,16 +119,18 @@ async fn the_binary_serves_runs_over_stdio_and_never_echoes_keys() {
     let refused = server.call("agent.open", rejected).await;
     assert_eq!(refused["error"]["code"], linch_rpc::code::INVALID_PARAMS);
 
-    let deepseek = json!({"namespace": "stdio", "spec": {"model": "deepseek-flash"},
+    // Retries off, so the one failed call ends the run.
+    let deepseek = json!({"namespace": "stdio",
+                          "spec": {"model": "deepseek-flash", "provider_retry": {"max_attempts": 1}},
                           "provider": {"id": "deepseek", "base_url": "http://127.0.0.1:1"}});
     let events = server.run(deepseek).await;
     let result = events.last().unwrap();
     assert_eq!(result["type"], "result");
     assert_eq!(result["subtype"], "error", "{result}");
-    // The request was really sent, with the key, and failed.
+    // The call really went out, with the key, and found nothing listening.
     let error = &events[events.len() - 2];
     assert_eq!(error["type"], "error", "{error}");
-    assert_eq!(error["error"]["kind"], "transport", "{error}");
+    assert_eq!(error["error"]["kind"], "connect", "{error}");
 
     drop(server.stdin.take());
     let status = timeout(Duration::from_secs(20), server.child.wait())
