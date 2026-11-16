@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use linch::{Agent, JsonObject, JsonValue};
 
+use super::schedule::Background;
 use super::{Opened, Server, Tables, callback, host, lock, to_value};
 use crate::error::{ErrorObject, code};
 use crate::protocol::{
@@ -27,6 +28,11 @@ impl Server {
         // The handle is named first: tools and callbacks carry it per call.
         let number = self.0.next_agent.fetch_add(1, Ordering::Relaxed) + 1;
         let handle = format!("agent-{number}");
+        let background = Background::new(
+            &params.config,
+            !params.tools.is_empty(),
+            !params.callbacks.is_empty(),
+        );
         let tools = host::registry(params.tools, &handle, &self.0.peer)?;
         let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
         let opened = params
@@ -39,6 +45,7 @@ impl Server {
         let opened = Opened {
             agent: opened,
             place,
+            background,
         };
         lock(&self.0.tables).agents.insert(handle.clone(), opened);
         to_value(&AgentOpened {
@@ -98,11 +105,15 @@ impl Server {
 }
 
 impl Tables {
+    /// The open agent named by `handle`, or "agent not found".
+    pub(super) fn opened(&self, handle: &str) -> Result<&Opened, ErrorObject> {
+        self.agents.get(handle).ok_or_else(|| {
+            ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
+        })
+    }
+
     /// The agent named by `handle`, or "agent not found".
     pub(super) fn agent(&self, handle: &str) -> Result<Agent, ErrorObject> {
-        let opened = self.agents.get(handle).ok_or_else(|| {
-            ErrorObject::new(code::AGENT_NOT_FOUND, format!("no open agent {handle:?}"))
-        })?;
-        Ok(opened.agent.agent().clone())
+        Ok(self.opened(handle)?.agent.agent().clone())
     }
 }

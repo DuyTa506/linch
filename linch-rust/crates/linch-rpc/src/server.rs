@@ -39,6 +39,7 @@ mod monitor;
 mod outgoing;
 mod peer;
 mod run;
+mod schedule;
 
 use crate::lines::Head;
 use connection::Outbox;
@@ -102,6 +103,9 @@ struct Opened {
     /// Its place among the tenant's open agents, freed once the agent is
     /// closed (its MCP servers gone), not when it leaves the table.
     place: Option<OwnedSemaphorePermit>,
+    /// What scheduling it needs: its stored definition, or why it cannot
+    /// run in the background.
+    background: schedule::Background,
 }
 
 impl Opened {
@@ -311,6 +315,14 @@ impl Server {
             crate::protocol::monitor::RUN_REPORT => {
                 self.run_report(parse(params)?).await.map(Reply::Value)
             }
+            method::SCHEDULE_CREATE => self.create_schedule(parse(params)?).await.map(Reply::Value),
+            method::SCHEDULE_LIST => self.list_schedules(parse(params)?).await.map(Reply::Value),
+            method::SCHEDULE_PAUSE => self.pause_schedule(parse(params)?).await.map(Reply::Value),
+            method::SCHEDULE_RESUME => self.resume_schedule(parse(params)?).await.map(Reply::Value),
+            method::SCHEDULE_DELETE => self.delete_schedule(parse(params)?).await.map(Reply::Value),
+            method::JOB_ENQUEUE => self.enqueue_job(parse(params)?).await.map(Reply::Value),
+            method::JOB_GET => self.get_job(parse(params)?).await.map(Reply::Value),
+            method::JOB_LIST => self.list_jobs(parse(params)?).await.map(Reply::Value),
             method::CONNECTION_AUTH => Err(invalid_request(
                 "connection.auth is only accepted as the first message of a socket connection",
             )),

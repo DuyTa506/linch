@@ -14,8 +14,12 @@ workspace = true
 async-trait = "0.1.92"
 # The line decoder that keeps the head of an oversized line.
 bytes = "1.12.1"
+# Schedule and job times on the wire (the version linch-worker uses).
+chrono = { version = "0.4.42", default-features = false, features = ["std"] }
 futures = "0.3.34"
 linch = { path = "../linch" }
+# The scheduler methods and the background agents a worker opens.
+linch-worker = { path = "../linch-worker" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 # Reads a store DSN the way the store connects with it, for the Postgres
@@ -29,6 +33,8 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7.20", features = ["codec", "rt"] }
 url = "2.5.8"
+# A fresh schedule id (the version linch-core uses for run ids).
+uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
 # The `mcp_server` example serves linch-mcp's test server on stdio.

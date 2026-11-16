@@ -70,6 +70,14 @@ impl Timing {
         }
     }
 
+    /// Check the pattern and zone, or the interval.
+    ///
+    /// Raises:
+    ///     WorkerError: If one is invalid.
+    pub fn check(&self) -> Result<(), WorkerError> {
+        self.parse().map(|_| ())
+    }
+
     /// The first fire strictly after `after`.
     ///
     /// Raises:
