@@ -22,6 +22,7 @@ use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::skills::SKILL_TOOL;
 use crate::store::{Lease, RunRecord, StoreError};
+use crate::structured;
 use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
 use crate::usage::Usage;
@@ -334,6 +335,7 @@ pub(super) async fn continue_run(
     );
     runner.family = family;
     runner.budget = budget;
+    runner.schema_retries = structured::retries_spent(&events);
     if let Some(decisions) = commit {
         runner.commit_decisions(decisions, assistant_seq).await?;
     }

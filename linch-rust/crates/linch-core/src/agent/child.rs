@@ -94,7 +94,7 @@ impl AgentInner {
     }
 
     /// The agent of a `definition` subagent of this agent: the same
-    /// bindings and spec, the child's tools, the spec's system blocks (the
+    /// bindings and spec (less its output schema), the child's tools, the spec's system blocks (the
     /// host's, then the system prompt) with the skill listing when the
     /// child has the `Skill` tool, then the definition's body, and a contract that also covers the definition.
     /// It offers no subagents, so its runs cannot spawn.
@@ -120,9 +120,15 @@ impl AgentInner {
             serde_json::to_value(definition).map_err(|e| BuildError::Invalid(e.to_string()))?;
         features.insert("subagent".into(), value);
         let hooks = self.built_hooks;
-        let contract = contract_digest(&self.spec, &tools.contract_tools(), hooks, &features)?;
+        // The parent's final-answer schema is not the child's: a subagent
+        // answers its parent in text.
+        let mut spec = self.spec.clone();
+        spec.output_schema = None;
+        spec.structured_output_retries = 0;
+        let contract = contract_digest(&spec, &tools.contract_tools(), hooks, &features)?;
         Ok(Self {
-            spec: self.spec.clone(),
+            spec,
+            output: None,
             provider: Arc::clone(&self.provider),
             tools: Arc::clone(&self.tools),
             filter: Some(filter),

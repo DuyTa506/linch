@@ -234,6 +234,7 @@ fn stop_and_post_turn_read_their_answers() {
         session_id: session_id.clone(),
         run_id: run_id.clone(),
         text: "done".into(),
+        structured_output: None,
     };
     assert_eq!(
         Stop::encode(&request),

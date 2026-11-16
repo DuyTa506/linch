@@ -143,19 +143,7 @@ impl RegisteredTool {
             "Input for tool {:?} does not match its schema:",
             self.name()
         );
-        let mut total = 0;
-        for error in self.input.iter_errors(value) {
-            total += 1;
-            if total <= MAX_LISTED_VIOLATIONS {
-                let line = format!("{}: {error}", location(&error));
-                message.push_str("\n- ");
-                message.push_str(&truncate(&line, MAX_LINE_CHARS));
-            }
-        }
-        if total > MAX_LISTED_VIOLATIONS {
-            let hidden = total - MAX_LISTED_VIOLATIONS;
-            message.push_str(&format!("\n({hidden} more not shown)"));
-        }
+        message.push_str(&violations(&self.input, value));
         ToolOutputError {
             message,
             code: Some(INVALID_INPUT_CODE.to_owned()),
@@ -187,6 +175,27 @@ fn compile(name: &str, kind: SchemaKind, schema: &JsonObject) -> Result<Validato
     })
 }
 
+/// Each way `value` breaks `validator`, one `\n- path: reason` line per
+/// violation, at most [`MAX_LISTED_VIOLATIONS`] of them and each bounded,
+/// with a count of the rest: a message the model can act on.
+pub(crate) fn violations(validator: &Validator, value: &JsonValue) -> String {
+    let mut message = String::new();
+    let mut total = 0;
+    for error in validator.iter_errors(value) {
+        total += 1;
+        if total <= MAX_LISTED_VIOLATIONS {
+            let line = format!("{}: {error}", location(&error));
+            message.push_str("\n- ");
+            message.push_str(&truncate(&line, MAX_LINE_CHARS));
+        }
+    }
+    if total > MAX_LISTED_VIOLATIONS {
+        let hidden = total - MAX_LISTED_VIOLATIONS;
+        message.push_str(&format!("\n({hidden} more not shown)"));
+    }
+    message
+}
+
 fn location(error: &ValidationError<'_>) -> String {
     match error.instance_path().as_str() {
         "" => "(root)".to_owned(),
@@ -195,7 +204,7 @@ fn location(error: &ValidationError<'_>) -> String {
 }
 
 /// `text` cut to `max` characters, with `...` marking a cut.
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((end, _)) => format!("{}...", &text[..end]),
         None => text.to_owned(),

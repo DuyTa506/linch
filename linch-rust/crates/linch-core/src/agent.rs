@@ -28,6 +28,7 @@ use crate::run::RunStatus;
 use crate::runner::{self, Families, RunStream};
 use crate::skills::SkillSet;
 use crate::store::{RunStore, SessionStore};
+use crate::structured::OutputContract;
 use crate::subagents::{Registry, Roster, Workers};
 use crate::tool_search::ToolSearch;
 use crate::usage::Usage;
@@ -107,6 +108,8 @@ pub struct Agent {
 /// Everything a run reads from its agent.
 pub(crate) struct AgentInner {
     pub(crate) spec: AgentSpec,
+    /// The spec's `output_schema`, compiled; `None` without one.
+    pub(crate) output: Option<Arc<OutputContract>>,
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) tools: Arc<ToolRegistry>,
     /// The tools a subagent's run sees of `tools`; `None` for all.

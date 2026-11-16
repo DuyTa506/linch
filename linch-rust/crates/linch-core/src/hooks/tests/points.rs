@@ -438,6 +438,7 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
         session_id: SessionId::from("s"),
         run_id: RunId::from("r"),
         text: "done".into(),
+        structured_output: None,
     };
     let hooks = Hooks::default();
     let log = new_log();
@@ -502,6 +503,7 @@ async fn stop_retry_stops_the_chain_until_the_run_spent_it() {
         session_id: SessionId::from("s"),
         run_id: RunId::from("r"),
         text: "done".into(),
+        structured_output: None,
     };
     let hooks = Hooks::default();
     let log = new_log();
@@ -529,7 +531,10 @@ async fn stop_retry_stops_the_chain_until_the_run_spent_it() {
     );
     assert_eq!(calls(&log), ["judge"]);
     let mut records = Vec::new();
-    let spent = hooks.stop.run_into(request, false, &mut records).await;
+    let spent = hooks
+        .stop
+        .run_into(request, false, &|_| None, &mut records)
+        .await;
     assert_eq!(
         spent,
         StopOutcome::Stop {
@@ -545,6 +550,7 @@ async fn stop_rewrites_the_final_text_and_a_block_fails_the_run() {
         session_id: SessionId::from("s"),
         run_id: RunId::from("r"),
         text: "done".into(),
+        structured_output: None,
     };
     let hooks = Hooks::default();
     let log = new_log();

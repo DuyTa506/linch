@@ -14,6 +14,7 @@ mod schema;
 mod tests;
 
 pub use schema::{INVALID_INPUT_CODE, OutputContractError, RegisteredTool, SchemaKind};
+pub(crate) use schema::{truncate, violations};
 
 use std::collections::HashMap;
 use std::fmt;

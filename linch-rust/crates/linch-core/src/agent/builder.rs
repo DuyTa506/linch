@@ -15,6 +15,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
+use crate::structured::OutputContract;
 use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
 use crate::tool_search::{SearchTool, ToolSearch};
 use crate::usage::Usage;
@@ -201,10 +202,11 @@ impl AgentBuilder {
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
-    ///         namespace is blank, the compaction, budget or provider retry
-    ///         settings cannot run, a fallback model is blank or repeats a
-    ///         model, a built-in tool's name is taken, or the tool schemas
-    ///         cannot be digested.
+    ///         namespace is blank, the output schema does not compile (or
+    ///         its root is not an object), the compaction, budget or
+    ///         provider retry settings cannot run, a fallback model is blank
+    ///         or repeats a model, a built-in tool's name is taken, or the
+    ///         tool schemas cannot be digested.
     pub fn build(self) -> Result<Agent, BuildError> {
         if self.spec.model.trim().is_empty() {
             return Err(BuildError::Invalid("the model must not be blank".into()));
@@ -227,6 +229,17 @@ impl AgentBuilder {
         if let Some(problem) = crate::reliability::fallback_problem(model, fallbacks) {
             return Err(BuildError::Invalid(problem.into()));
         }
+        let output = match self.spec.output_schema.clone() {
+            Some(schema) => Some(Arc::new(
+                OutputContract::compile(schema).map_err(BuildError::Invalid)?,
+            )),
+            None if self.spec.structured_output_retries > 0 => {
+                return Err(BuildError::Invalid(
+                    "structured_output_retries needs an output_schema".into(),
+                ));
+            }
+            None => None,
+        };
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;
         if namespace.trim().is_empty() {
             return Err(BuildError::Invalid(
@@ -302,6 +315,7 @@ impl AgentBuilder {
             runs,
             sessions,
             spec: self.spec,
+            output,
             tools: self.tools,
             filter: None,
             hooks: self.hooks,

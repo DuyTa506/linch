@@ -13,20 +13,47 @@ use crate::events::kinds::{
     ChildRunStatusEvent, ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent,
     ResultSubtype,
 };
+use crate::json::JsonObject;
 use crate::provider::AssistantAssembly;
 use crate::run::{RunStatus, StopReason};
 
+/// What the `Result` of a run reports as its answer.
+#[derive(Default)]
+pub(super) struct Answer {
+    /// The final-answer text.
+    pub(super) text: Option<String>,
+    /// The answer parsed and checked against the run's output schema.
+    pub(super) structured_output: Option<JsonObject>,
+    /// Why the answer did not satisfy the output schema.
+    pub(super) structured_error: Option<String>,
+}
+
 impl Runner {
-    /// End the run with `status` and its `Result`, once every child run
-    /// still running was cancelled and ended. The `child_run_status` end
-    /// of each background child not heard of yet goes into the same write,
-    /// with no notification.
+    /// [`Self::end_with`] an answer of `final_text` alone.
     pub(super) async fn end(
         &mut self,
         status: RunStatus,
         subtype: ResultSubtype,
         stop_reason: StopReason,
         final_text: Option<String>,
+    ) -> Result<(), RunError> {
+        let answer = Answer {
+            text: final_text,
+            ..Answer::default()
+        };
+        self.end_with(status, subtype, stop_reason, answer).await
+    }
+
+    /// End the run with `status` and its `Result`, reporting `answer`,
+    /// once every child run still running was cancelled and ended. The
+    /// `child_run_status` end of each background child not heard of yet
+    /// goes into the same write, with no notification.
+    pub(super) async fn end_with(
+        &mut self,
+        status: RunStatus,
+        subtype: ResultSubtype,
+        stop_reason: StopReason,
+        answer: Answer,
     ) -> Result<(), RunError> {
         if let Some(family) = &self.family {
             family.cancel_all();
@@ -47,9 +74,9 @@ impl Runner {
             usage_complete: self.usage_complete,
             duration_ms: millis(self.started.elapsed()),
             total_cost_usd: self.cost,
-            final_text,
-            structured_output: None,
-            structured_error: None,
+            final_text: answer.text,
+            structured_output: answer.structured_output,
+            structured_error: answer.structured_error,
             trace_id: self.run.trace_id.clone(),
         };
         let ready = self.journal.finish(status, result).await?;

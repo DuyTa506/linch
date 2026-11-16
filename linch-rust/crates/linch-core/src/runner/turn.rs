@@ -11,6 +11,7 @@ use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::retry::Recovered;
+use super::structured::Checked;
 use super::write::session_log;
 use super::{Family, Outbox};
 use crate::agent::{AgentInner, RunError};
@@ -29,6 +30,7 @@ use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
 use crate::skills;
+use crate::structured::OutputContract;
 use crate::usage::Usage;
 
 /// What the run does next.
@@ -127,6 +129,12 @@ pub(super) struct Runner {
     /// Where the run stands on its fallback models and in this turn's
     /// provider retries (see `runner/retry.rs`).
     pub(super) standing: Standing,
+    /// The schema the run's final answer must satisfy; `None` takes any
+    /// text (see `runner/structured.rs`).
+    pub(super) output: Option<Arc<OutputContract>>,
+    /// Schema retries the run spent, counted from its durable log on a
+    /// resume.
+    pub(super) schema_retries: u32,
 }
 
 impl Runner {
@@ -141,6 +149,7 @@ impl Runner {
     ) -> Self {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
+        let output = agent.output.clone();
         let mut runner = Self {
             snapshot: agent.snapshot(),
             narrowed: false,
@@ -164,6 +173,8 @@ impl Runner {
             peers: None,
             final_answer_retries: 0,
             standing: progress.standing,
+            output,
+            schema_retries: 0,
         };
         runner.narrow();
         runner
@@ -467,18 +478,26 @@ impl Runner {
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);
             }
-            let text = match self.stop(&text).await? {
+            let value = match self.check_answer(&text).await? {
+                Checked::Valid(value) => value,
+                Checked::Retry(feedback) => return Ok(Some(feedback)),
+                Checked::Ended => return Ok(None),
+            };
+            let answer = match self.stop(&text, value.as_ref()).await? {
                 Stopping::Stop { text } => text,
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),
                 Stopping::Ended => return Ok(None),
+            };
+            let value = match self.check_rewrite(&text, &answer, value).await? {
+                Checked::Valid(value) => value,
+                Checked::Retry(feedback) => return Ok(Some(feedback)),
+                Checked::Ended => return Ok(None),
             };
             if !self.post_turn(stop_reason).await {
                 self.abort().await?;
                 return Ok(None);
             }
-            let final_text = (!text.is_empty()).then_some(text);
-            let status = RunStatus::Completed;
-            (self.end(status, ResultSubtype::Success, stop_reason, final_text)).await?;
+            self.complete(answer, stop_reason, value).await?;
             return Ok(None);
         }
         Ok(Some(Step::Batch(Batch {
