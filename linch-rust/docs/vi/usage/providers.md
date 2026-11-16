@@ -70,6 +70,11 @@ số áp dụng cho mọi giai đoạn của lời gọi (connect, read, write, 
 `request.timeout_ms` ở trên chỉ thay timeout đọc, còn timeout kết nối (30 giây)
 vẫn cố định.
 
+Giá trị của `default_headers` chỉ được ẩn khi một config được echo lại hoặc ghi
+log (ở trên); nó không bị xóa khỏi nội dung lỗi của provider. Một gateway lặp
+lại header bị từ chối trong response body của nó sẽ gửi thẳng giá trị đó vào
+`message` của event `error` của run thất bại.
+
 ### Context window
 
 Mỗi provider biết context window của model trong spec, tính bằng token. Nó quyết
