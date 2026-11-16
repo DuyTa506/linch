@@ -94,6 +94,10 @@ impl Runner {
         };
         let mut request = compaction::summary_request(&agent.spec, spec, tools, older);
         request.appended_tools = appended;
+        if self.standing.fallbacks > 0 {
+            // A run that failed over summarizes on the model it now calls.
+            request.model = self.model().to_owned();
+        }
         let call =
             ModelCall::prepare_compaction(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal

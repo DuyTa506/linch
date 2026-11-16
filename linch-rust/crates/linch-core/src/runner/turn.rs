@@ -307,8 +307,8 @@ impl Runner {
         };
         add_context(&mut messages, context.blocks);
         let mut request = self.request(messages);
-        if let Some(model) = model {
-            request.model = skills::model_override(&model, &request.model);
+        if model.is_some() || self.standing.fallbacks > 0 {
+            request.model = self.call_model(model);
         }
         let request = match self.before_provider_call(request, self.turn).await {
             BeforeCall::Send(request) => *request,

@@ -196,6 +196,7 @@ fn a_run_stands_where_its_durable_events_left_it() {
     let turn = [retried("a"), retried("a")];
     let standing = Standing::of(&turn, &chain);
     assert_eq!((standing.fallbacks, standing.retries), (0, 2));
+    assert_eq!(standing.model("a", &chain), "a");
 
     let over = [retried("a"), fell_back("a", "b"), retried("b")];
     let standing = Standing::of(&over, &chain);
@@ -204,6 +205,7 @@ fn a_run_stands_where_its_durable_events_left_it() {
         (1, 1, true),
         "the fallback's own retries count afresh"
     );
+    assert_eq!(standing.model("a", &chain), "b");
 
     let later = [retried("a"), fell_back("a", "b"), answered(), retried("b")];
     let standing = Standing::of(&later, &chain);
@@ -213,5 +215,5 @@ fn a_run_stands_where_its_durable_events_left_it() {
         "a new turn keeps the fallback but not the turn's failover"
     );
     let last = [fell_back("a", "b"), fell_back("b", "c")];
-    assert_eq!(Standing::of(&last, &chain).fallbacks, 2);
+    assert_eq!(Standing::of(&last, &chain).model("a", &chain), "c");
 }

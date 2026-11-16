@@ -122,16 +122,17 @@ impl Runner {
 
     /// Count a settled receipt: known usage adds up, unknown usage makes
     /// the total incomplete (never a zero fill). A receipt with usage is
-    /// priced first, by the model that served it (the agent's model when
-    /// the provider named none), and a known cost adds up too. The budget
-    /// is charged with it either way.
+    /// priced first, by the model that served it (the run's model, the
+    /// fallback it failed over to included, when the provider named none),
+    /// and a known cost adds up too. The budget is charged with it either
+    /// way.
     pub(super) fn settle(&mut self, receipt: &mut ModelCallReceiptEvent) {
         match receipt.usage {
             Some(usage) => {
                 self.usage += usage;
                 if receipt.cost_usd.is_none() {
                     let model = receipt.actual_model.as_deref();
-                    let model = model.unwrap_or(&self.agent.spec.model);
+                    let model = model.unwrap_or(self.model());
                     receipt.cost_usd = self.agent.price(model, &usage);
                 }
                 if let Some(cost) = receipt.cost_usd {

@@ -23,8 +23,9 @@
 use super::turn::{Runner, Step};
 use crate::agent::RunError;
 use crate::events::Event;
-use crate::events::kinds::ProviderRetryEvent;
+use crate::events::kinds::{ModelFallbackEvent, ProviderRetryEvent};
 use crate::provider::call::CallFailure;
+use crate::reliability::Standing;
 use crate::run::Phase;
 
 /// What [`Runner::recover`] made of a failed call.
@@ -78,6 +79,37 @@ impl Runner {
                 return Ok(Recovered::Call(next));
             }
         }
-        Ok(Recovered::Failed)
+        let Some(to_model) = agent.spec.fallback_models.get(self.standing.fallbacks) else {
+            return Ok(Recovered::Failed);
+        };
+        self.standing = Standing {
+            fallbacks: self.standing.fallbacks + 1,
+            retries: 0,
+            failed_over: true,
+        };
+        self.journal.stage(Event::ModelFallback(ModelFallbackEvent {
+            from_model: model.to_owned(),
+            to_model: to_model.clone(),
+            error: failure.event.error.clone(),
+        }));
+        Ok(Recovered::Call(next))
+    }
+
+    /// The model the run calls now: the spec's, or the fallback it failed
+    /// over to.
+    pub(super) fn model(&self) -> &str {
+        let spec = &self.agent.spec;
+        self.standing.model(&spec.model, &spec.fallback_models)
+    }
+
+    /// The model of this turn's call: a loaded skill's (see
+    /// [`crate::skills`]) unless the turn failed over, else the run's.
+    pub(super) fn call_model(&self, skill_model: Option<String>) -> String {
+        match skill_model {
+            Some(skill) if !self.standing.failed_over => {
+                crate::skills::model_override(&skill, self.model())
+            }
+            _ => self.model().to_owned(),
+        }
     }
 }

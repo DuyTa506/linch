@@ -173,6 +173,15 @@ impl Standing {
         }
         standing
     }
+
+    /// The model the run calls now: the spec's `model` until it fails
+    /// over, then the fallback it chose.
+    pub(crate) fn model<'a>(&self, model: &'a str, fallback_models: &'a [String]) -> &'a str {
+        match self.fallbacks.checked_sub(1) {
+            None => model,
+            Some(at) => fallback_models.get(at).map_or(model, String::as_str),
+        }
+    }
 }
 
 /// Why `fallback_models` cannot run with `model`, if it cannot.
