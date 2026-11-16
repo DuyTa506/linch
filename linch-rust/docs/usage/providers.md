@@ -68,6 +68,11 @@ excludes. Python's `timeout` is one number applied to every phase of the call
 (connect, read, write, the pool); `request.timeout_ms` only replaces the read
 timeout above, and the 30 s connect timeout stays fixed.
 
+A `default_headers` value is hidden only when a config is echoed or logged
+(above); it is not scrubbed from a provider's own error text. A gateway that
+quotes a rejected header back in its response body sends that value straight
+into the failed run's `error` event.
+
 ### Context window
 
 Each provider knows the context window of the spec's model, in tokens. It
