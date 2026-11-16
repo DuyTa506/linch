@@ -235,6 +235,7 @@ impl Runner {
             max_concurrency: usize::try_from(spec.max_tool_concurrency).unwrap_or(usize::MAX),
             call_timeout: spec.call_timeout(),
             cancel: self.cancel.clone(),
+            redactor: self.agent.result_redactor().cloned(),
         };
         let run_id = self.run.run_id.clone();
         let hooks = &self.agent.hooks;

@@ -126,6 +126,11 @@ impl Runner {
             }
             Err(_) => String::new(),
         };
+        // A summary is model output the model reads back: redact it too.
+        let text = match agent.response_redactor() {
+            Some(redactor) => redactor.text(&text).into_owned(),
+            None => text,
+        };
         let text = text.trim();
         if text.is_empty() {
             self.save(Phase::CompactionPending { attempt }).await?;

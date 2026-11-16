@@ -133,6 +133,11 @@ pub(super) async fn submit(
     run_id: &RunId,
     prompt: String,
 ) -> Result<Message, RunError> {
+    let redactor = agent.prompt_redactor();
+    let prompt = match redactor {
+        Some(redactor) => redactor.text(&prompt).into_owned(),
+        None => prompt,
+    };
     let chain = &agent.hooks.user_prompt_submit;
     if chain.is_empty() {
         return Ok(Message::user_text(prompt));
@@ -145,7 +150,13 @@ pub(super) async fn submit(
     let result = chain.run(request).await;
     push_records(outbox, run_id, 0, result.records, None);
     match result.outcome {
-        UserPromptOutcome::Submit { content } => Ok(Message::new(Role::User, content)),
+        UserPromptOutcome::Submit { content } => {
+            let mut prompt = Message::new(Role::User, content);
+            if let Some(redactor) = redactor {
+                redactor.message(&mut prompt);
+            }
+            Ok(prompt)
+        }
         UserPromptOutcome::Blocked { reason } => Err(RunError::PromptBlocked {
             run_id: run_id.clone(),
             reason,
@@ -344,7 +355,14 @@ impl Runner {
             return Ok(Stopping::Ended);
         };
         let feedback = match outcome {
-            StopOutcome::Stop { text } => return Ok(Stopping::Stop { text }),
+            // The model's text is redacted already; a rewrite may not be.
+            StopOutcome::Stop { text } => {
+                let text = match self.agent.response_redactor() {
+                    Some(redactor) => redactor.text(&text).into_owned(),
+                    None => text,
+                };
+                return Ok(Stopping::Stop { text });
+            }
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Retry { feedback } => {
                 self.final_answer_retries += 1;
@@ -523,15 +541,24 @@ impl Runner {
     /// assembled for `turn`. Whatever this returns is what `accept` stages
     /// as the `Assistant` event and appends to the session, so a rewrite is
     /// what the audit trail and a resumed run both see.
+    ///
+    /// With response redaction on, the chain sees the response already
+    /// redacted, and a rewrite it makes is redacted again, so neither a
+    /// hook nor the log ever holds the raw text.
     pub(super) async fn after_provider_call(
         &self,
-        assembly: AssistantAssembly,
+        mut assembly: AssistantAssembly,
         turn: u32,
     ) -> AfterCall {
+        let redactor = self.agent.response_redactor();
+        if let Some(redactor) = redactor {
+            redactor.message(&mut assembly.message);
+        }
         let chain = &self.agent.hooks.after_provider_call;
         if chain.is_empty() {
             return AfterCall::Send(Box::new(assembly));
         }
+        let redacted = redactor.map(|_| assembly.message.clone());
         let request = AfterProviderCallRequest {
             session_id: self.run.session_id.clone(),
             run_id: self.run.run_id.clone(),
@@ -542,11 +569,19 @@ impl Runner {
         let run = chain.run_into(request, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
+        let again = |mut assembly: Box<AssistantAssembly>| {
+            if let (Some(redactor), Some(redacted)) = (redactor, &redacted)
+                && assembly.message != *redacted
+            {
+                redactor.message(&mut assembly.message);
+            }
+            assembly
+        };
         match outcome {
             None => AfterCall::Ended,
-            Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(assembly),
+            Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(again(assembly)),
             Some(AfterProviderCallOutcome::Retry { assembly, feedback }) => {
-                AfterCall::Retry(assembly, feedback)
+                AfterCall::Retry(again(assembly), feedback)
             }
             Some(AfterProviderCallOutcome::Blocked { reason }) => AfterCall::Blocked(reason),
         }

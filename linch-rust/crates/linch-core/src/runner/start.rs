@@ -332,7 +332,10 @@ pub(super) async fn continue_run(
                 let Some(answer) = answers.get(&block.id) else {
                     continue;
                 };
-                let result = answer.render(&block.id);
+                let mut result = answer.render(&block.id);
+                if let Some(redactor) = agent.result_redactor() {
+                    redactor.result_block(&mut result);
+                }
                 answered.push(Event::ToolCallStart(ToolCallStartEvent {
                     tool_use_id: block.id.clone(),
                     tool_name: block.name.clone(),

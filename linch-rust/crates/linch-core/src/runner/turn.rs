@@ -353,8 +353,14 @@ impl Runner {
                 }
             };
             let provider = &*self.agent.provider;
-            call.drive(provider, request, &self.cancel, Some(&mut on_delta))
-                .await
+            // Redaction sees whole responses: a match can span two deltas.
+            let deltas = self.agent.response_redactor().is_none();
+            let on_delta = if deltas {
+                Some(&mut on_delta as _)
+            } else {
+                None
+            };
+            call.drive(provider, request, &self.cancel, on_delta).await
         };
         let mut receipt = outcome.receipt;
         self.settle(&mut receipt);

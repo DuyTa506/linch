@@ -32,6 +32,7 @@ pub mod message;
 pub mod permissions;
 pub mod policy;
 pub mod provider;
+pub mod redaction;
 pub mod registration;
 pub mod registry;
 pub mod reliability;

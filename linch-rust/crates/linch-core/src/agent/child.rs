@@ -129,6 +129,7 @@ impl AgentInner {
         Ok(Self {
             spec,
             output: None,
+            redactor: self.redactor.clone(),
             provider: Arc::clone(&self.provider),
             tools: Arc::clone(&self.tools),
             filter: Some(filter),

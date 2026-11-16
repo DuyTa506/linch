@@ -12,6 +12,7 @@ use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
 use crate::message::SystemBlock;
 use crate::provider::{OutputSchema, ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
+use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
 use crate::tool::ToolScope;
 
@@ -94,6 +95,12 @@ pub struct AgentSpec {
     /// may be set without `output_schema`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub structured_output_retries: u32,
+    /// Regex rules that scrub assistant responses, tool results and
+    /// optionally the prompt before they are logged, streamed or shown to
+    /// a hook (Python's `RedactionHook`; see [`crate::redaction`]).
+    /// `None` (the default) scrubs nothing. A subagent's runs take it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<RedactionSpec>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -119,6 +126,7 @@ impl AgentSpec {
             fallback_models: Vec::new(),
             output_schema: None,
             structured_output_retries: 0,
+            redaction: None,
         }
     }
 
