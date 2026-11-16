@@ -275,29 +275,29 @@ never names a new process.
 
 ### Execution backends
 
-`ExecutionBackend` (`crates/linch-tools/src/exec.rs:116`) is one execution
+`ExecutionBackend` (`crates/linch-tools/src/exec.rs:120`) is one execution
 world, Python's `ExecutionBackend`: the `LocalFs` the file tools use and a
 shell `Bash` starts commands with. One belongs to one opened agent, which
 calls its `close_session` from `Agent::close_session`. `ExecutionBackend::open`
-(`exec.rs:145`) builds it from an `ExecutionConfig` (`exec.rs:50`), tagged by
+(`exec.rs:149`) builds it from an `ExecutionConfig` (`exec.rs:49`), tagged by
 `backend`; it is blocking and fails with `ExecutionError` when the backend
 cannot confine what its policy says, so the facade opens it on a blocking
 task and refuses the agent rather than run `Bash` unconfined.
 
-The shell seam is the crate-private `Shell` trait (`exec.rs:233`): `spawn`
+The shell seam is the crate-private `Shell` trait (`exec.rs:248`): `spawn`
 starts a `Launch` (command, root, `Bash`'s environment, session, whether it
 needs the lifeline) as the leader of a new process group with stdout and
 stderr piped, and returns the `Child` with an optional `Cleanup` to run after
 a kill. Everything after the spawn, `supervise` with its group kill, drain,
 reap, caps and lifeline pipe, is shared, so every backend keeps the
-guarantees above and `Processes::start` (`bash/background.rs:124`) runs
+guarantees above and `Processes::start` (`bash/background.rs:139`) runs
 background commands through the same shell.
 
 | Backend | Shell | What changes |
 |---|---|---|
-| `local` | `LocalShell` (`exec.rs:249`) | Nothing: `process::spawn`, byte for byte the old `Bash` (golden tests in `crates/linch-tools/tests/execution_golden.rs` and `crates/linch/tests/execution_golden.rs`) |
-| `sandbox` | `SandboxShell` (`exec/sandbox.rs:225`) | Landlock, seccomp and `prlimit` around the shell; a private `HOME`/`TMPDIR` per session |
-| `docker` | `DockerShell` (`exec/docker.rs:169`) | `docker run --rm` per command; `docker rm -f` as the cleanup |
+| `local` | `LocalShell` (`exec.rs:264`) | Nothing: `process::spawn`, byte for byte the old `Bash` (golden tests in `crates/linch-tools/tests/execution_golden.rs` and `crates/linch/tests/execution_golden.rs`) |
+| `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp and `prlimit` around the shell; a private `HOME`/`TMPDIR` per session |
+| `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` per command; `docker rm -f` as the cleanup |
 
 A non-local backend ends `Bash`'s description with
 `ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): the model
@@ -307,12 +307,12 @@ The local backend adds nothing, so its definitions and contract are the ones
 before backends existed.
 
 **The sandbox.** Landlock and seccomp restrict the calling *thread*, and a
-process forked from it inherits both. `SandboxShell::spawn` (`sandbox.rs:318`)
+process forked from it inherits both. `SandboxShell::spawn` (`sandbox/shell.rs:198`)
 hands each command to a fresh `std::thread` that creates the session's home,
-counts the user's tasks in `/proc` (`user_tasks`, `sandbox.rs:406`), restricts
-itself (`Rules::confine`, `sandbox.rs:184`), enters the Tokio runtime and
+counts the user's tasks in `/proc` (`user_tasks`, `shell.rs:288`), restricts
+itself (`Rules::confine`, `shell.rs:61`), enters the Tokio runtime and
 spawns `prlimit --as --cpu --fsize --nproc -- /bin/sh ...`
-(`limits`, `sandbox.rs:299`); `prlimit` sets the limits and execs the shell,
+(`limits`, `shell.rs:179`); `prlimit` sets the limits and execs the shell,
 so the pid, the group and the lifeline's stdin stay. The server's own threads
 are never restricted, and no code runs between fork and exec, so the crate
 keeps `forbid(unsafe_code)`. If the call went away meanwhile, the thread
@@ -322,10 +322,11 @@ kills the new group.
   TCP bind and connect when the network is off, and the signal and abstract
   Unix socket scopes. `open` runs `confine` once on a throwaway thread, and
   every spawn checks the status is `FullyEnforced` with `no_new_privs`.
-- Read and execute: `SYSTEM_READ_PATHS` (`sandbox.rs:104`), `read_paths`,
+- Read and execute: `SYSTEM_READ_PATHS` (`exec/sandbox.rs:87`), `read_paths`,
   and with the network on `/etc/resolv.conf`'s target. Everything: the root
-  and the session's home. File rights: six devices (`sandbox.rs:109`).
-- The seccomp filter (`crates/linch-tools/src/exec/seccomp.rs`) kills a
+  and the session's home. File rights: five devices (`sandbox/shell.rs:35`), not `/dev/tty`, the
+  server's terminal.
+- The seccomp filter (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kills a
   syscall of a foreign architecture, refuses x32 syscalls, `io_uring_setup`
   and `socket(AF_UNIX)`, and with the network off every `socket`. Landlock
   restricts pathname Unix sockets only from ABI 9, and a socket of the
@@ -336,7 +337,7 @@ kills the new group.
 - Homes are `s<n>` under a `TempDir` the shell owns; `close_session` removes
   one on the blocking pool, and the agent dropping removes them all.
 
-**Docker.** `DockerShell::run_args` (`docker.rs:215`) builds Python's
+**Docker.** `DockerShell::run_args` (`docker.rs:224`) builds Python's
 `docker run` (`--memory`, `--cpus`, `--pids-limit`, `--cap-drop ALL`,
 `--security-opt no-new-privileges`, `--network`, `--user`, the root mounted
 at its own path) with the environment passed by name. A background command

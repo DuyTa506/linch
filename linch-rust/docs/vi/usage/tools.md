@@ -316,8 +316,10 @@ status: final
   đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
 - **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
   tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
-- **`Bash` không bị giới hạn phạm vi.** Nó bắt đầu trong workspace nhưng có thể
-  chạm tới mọi thứ mà user của server chạm được. Nó hỏi ở các mode `default` và
+- **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
+  bắt đầu trong workspace nhưng có thể chạm tới mọi thứ mà user của server chạm
+  được; `execution` chạy nó trong một sandbox hoặc container thay vào đó
+  ([Sandbox](./sandbox.md)). Nó hỏi ở các mode `default` và
   `accept_edits`; chỉ chín biến trong môi trường của server (`PATH`, `HOME`,
   `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`) đến được lệnh,
   nên key của provider thì không. Timeout của nó mặc định là 120 giây.

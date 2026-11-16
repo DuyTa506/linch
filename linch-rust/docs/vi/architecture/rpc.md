@@ -275,6 +275,7 @@ cấu hình, từ chối các trường không biết và giới hạn bằng 0;
 | `project_root` và `workspace` là thư mục đã tồn tại dưới một gốc được phép, được thay bằng đường dẫn canonical của chúng | `project_root`, `workspace` | `admit.rs:60-72`, `admit_dir` ở `admit.rs:172-181` |
 | Khi skill hoặc subagent bật, thư mục cấu hình là thư mục đã tồn tại dưới một gốc được phép, hoặc `.linch` mặc định ở đó hoặc bị thiếu | `config_dir` | `admit.rs:73-77`, `admit.rs:183-209` |
 | `Bash` chỉ khi tenant cho phép các exec tool; nếu không thì nó bị tắt, không bị từ chối | không có | `admit.rs:78` |
+| Execution backend bằng một trong các mục `execution` của tenant (mặc định `[local]`); khi không có, nó thành mục đầu tiên, nên một tenant có thể bị giữ trong sandbox | `execution` | `admit_execution` trong `admit.rs` |
 | Một DSN Postgres chỉ cho một đích được phép | `postgres` | `admit.rs:79-89` |
 | `stores.max_connections` tối đa bằng `max_pool_connections` của tenant (mặc định: kích thước pool mặc định của server); khi không có, nó được đặt thành mặc định hoặc mức trần, tùy giá trị nào nhỏ hơn | `pool_connections`, với `data.max` là mức trần | `admit.rs:90-105` |
 | Một MCP stdio server chỉ với `command` và `args` của một mục, chỉ đặt các tên `env` mà mục đó liệt kê; một MCP URL chỉ ở một origin được phép | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |

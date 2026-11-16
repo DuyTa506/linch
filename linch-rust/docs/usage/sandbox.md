@@ -67,9 +67,10 @@ execs `/bin/sh`, keeping the process group and the background lifeline.
 - **Files.** A command reads only the workspace, its private home, the
   system directories `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt`,
   `/proc` and `/sys`, the devices `/dev/null`, `/dev/zero`, `/dev/full`,
-  `/dev/random`, `/dev/urandom` and `/dev/tty`, and `read_paths`. It
+  `/dev/random` and `/dev/urandom`, and `read_paths`. It
   writes only the workspace and its home. The server user's home (keys,
-  `~/.ssh`, cloud config), the rest of `/tmp` and other sessions' homes are
+  `~/.ssh`, cloud config), the server's terminal, the rest of `/tmp` and
+  other sessions' homes are
   closed.
 - **A private home per session.** `HOME` and `TMPDIR` name a directory of
   the session under a scratch directory of the agent. It lasts across the
@@ -107,6 +108,15 @@ execs `/bin/sh`, keeping the process group and the background lifeline.
 - Limits are per process, not per command: there is no cgroup, so no total
   memory, no CPU share, and `max_processes` is headroom over the user's
   current count, which other work of the same user shares.
+- Landlock gates opening files, not looking them up: `stat`, `ls -d` and a
+  path's existence stay visible outside the allowed directories.
+- `memory_bytes` limits address space, not resident memory: runtimes that
+  reserve large ranges up front (the JVM, Go, Node) may fail under a small
+  value.
+- 32-bit programs are killed: the seccomp filter allows only the server's
+  own architecture.
+- A server running as root ignores `RLIMIT_NPROC`; run it as an
+  unprivileged user.
 - With `network: true` a command reaches anything the host can over TCP or
   UDP, including services on `localhost`.
 - The file tools, MCP stdio servers and the virtual filesystem's disk

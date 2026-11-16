@@ -55,6 +55,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Bắt đầu nhanh](./quickstart.md) | Cài đặt, một run ngoại tuyến, provider trực tuyến, một host tool, một lần phê duyệt, Postgres |
 | [Config của agent](./agent.md) | Mọi trường của `AgentConfig` cùng giá trị mặc định, `spec`, hợp đồng của run, intercept callback, session |
 | [Provider](./providers.md) | Từng provider id, key lấy từ môi trường của server, profile cho server tự triển khai, provider scripted |
+| [Sandbox](./sandbox.md) | Nơi `Bash` chạy: `local`, `sandbox` (Landlock, seccomp, rlimit) hoặc `docker`; mỗi loại giới hạn những gì |
 | [Tool](./tools.md) | Host tool, workspace tool, scope, permission mode và rule, phê duyệt, hệ thống tệp ảo, MCP tool |
 | [Run](./runs.md) | Bắt đầu, stream, resume, phê duyệt, hủy; lỗi ở cuối stream; cái gì được lưu bền vững và khi nào |
 | [Event](./events.md) | Mọi loại event mà client giải mã, cùng các trường của chúng; số thứ tự và replay; mức sử dụng và chi phí |
