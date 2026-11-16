@@ -52,15 +52,16 @@ async with Server() as server:
 | `description` | none | What the answer is, sent to providers that take one |
 
 `agent.open` refuses a schema that does not compile, one whose root `type`
-is not `object`, a blank `name`, and `structured_output_retries` without a
-schema (`OpenError`, code -32011). The schema and the retries are part of the
-[run contract](./agent.md#the-run-contract); an agent without them keeps the
-contract it had.
+is not `object`, and a blank `name` (`OpenError`, code -32011). The schema and
+the retries are part of the [run contract](./agent.md#the-run-contract); an
+agent without them keeps the contract it had.
 
 ## Give one run its own schema
 
 `agent.run(..., output_schema=...)` replaces the agent's schema for that run
-only. The agent's `structured_output_retries` still bound it.
+only. The agent's `structured_output_retries` still bound it, so an agent
+whose runs bring their own schema may set the retries without a schema of
+its own.
 
 ```python
 person: OutputSchema = {"name": "person", "schema": {"type": "object", "required": ["name"]}}
@@ -129,7 +130,7 @@ turn:
 | Provider | Sent as |
 |---|---|
 | `anthropic` | `output_config.format` = `{"type": "json_schema", "schema": ...}` |
-| `openai` | `response_format` = `{"type": "json_schema", "json_schema": {name, strict, schema, description?}}` |
+| `openai-chat` | `response_format` = `{"type": "json_schema", "json_schema": {name, strict, schema, description?}}` |
 | `openai-responses` | `text.format` = `{"type": "json_schema", name, strict, schema, description?}` |
 | `gemini` | `generationConfig.responseMimeType` `application/json` and `responseJsonSchema` |
 | `deepseek`, `vllm`, `sglang`, `llamacpp` | Refused before the call: the request fails with an `error` event naming the adapter |

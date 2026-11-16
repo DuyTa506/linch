@@ -203,7 +203,7 @@ có, trừ `bash`.
 | `provider_retry` | bật: 5 lần thử, từ 1 giây gấp đôi đến 30 giây, jitter 0.2 | Gọi lại cùng model sau một lỗi có thể thử lại, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, là các mặc định của Python; `{"max_attempts": 1}` tắt nó ([providers](./providers.md#lỗi-và-thử-lại)) |
 | `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự, khi một model hết lượt thử lại; run giữ model mà nó đã chuyển sang ([providers](./providers.md#lỗi-và-thử-lại)) |
 | `output_schema` | không có | Một JSON Schema mà câu trả lời cuối cùng phải thỏa, `{"name", "schema", "strict"?, "description"?}`; câu trả lời đã parse là `result.structured_output` ([Structured output](./structured-output.md)) |
-| `structured_output_retries` | `0` | Bao nhiêu câu trả lời không thỏa `output_schema` được gửi lại cho model trước khi run thất bại; cần `output_schema` |
+| `structured_output_retries` | `0` | Bao nhiêu câu trả lời không thỏa `output_schema` được gửi lại cho model trước khi run thất bại; cũng giới hạn schema riêng của một run, nên có thể đặt mà không cần `output_schema` |
 
 ### System block
 

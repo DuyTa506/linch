@@ -52,15 +52,16 @@ async with Server() as server:
 | `description` | không có | Câu trả lời là gì, gửi cho các provider nhận trường này |
 
 `agent.open` từ chối một schema không compile được, một schema có `type` ở root
-không phải `object`, một `name` trống, và `structured_output_retries` khi không có
-schema (`OpenError`, code -32011). Schema và số lần retry là một phần của
+không phải `object`, và một `name` trống (`OpenError`, code -32011). Schema và
+số lần retry là một phần của
 [hợp đồng của run](./agent.md#the-run-contract); một agent không có chúng giữ
 nguyên hợp đồng nó đã có.
 
 ## Cho một run schema riêng
 
 `agent.run(..., output_schema=...)` thay thế schema của agent chỉ cho run đó.
-`structured_output_retries` của agent vẫn giới hạn nó.
+`structured_output_retries` của agent vẫn giới hạn nó, nên một agent mà các run
+tự mang schema riêng có thể đặt số lần retry dù chính nó không có schema.
 
 ```python
 person: OutputSchema = {"name": "person", "schema": {"type": "object", "required": ["name"]}}
@@ -128,7 +129,7 @@ trả lời dạng text, nên model vẫn có thể gọi tool ở bất kỳ l�
 | Provider | Được gửi dưới dạng |
 |---|---|
 | `anthropic` | `output_config.format` = `{"type": "json_schema", "schema": ...}` |
-| `openai` | `response_format` = `{"type": "json_schema", "json_schema": {name, strict, schema, description?}}` |
+| `openai-chat` | `response_format` = `{"type": "json_schema", "json_schema": {name, strict, schema, description?}}` |
 | `openai-responses` | `text.format` = `{"type": "json_schema", name, strict, schema, description?}` |
 | `gemini` | `generationConfig.responseMimeType` `application/json` và `responseJsonSchema` |
 | `deepseek`, `vllm`, `sglang`, `llamacpp` | Bị từ chối trước lời gọi: request thất bại với một event `error` nêu tên adapter |

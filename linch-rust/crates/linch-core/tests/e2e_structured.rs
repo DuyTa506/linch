@@ -220,7 +220,7 @@ async fn the_retries_count_toward_max_turns() {
 }
 
 #[tokio::test]
-async fn a_bad_schema_or_retries_without_one_does_not_build() {
+async fn a_bad_schema_does_not_build() {
     let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new([]));
     let stores = Arc::new(Stores::default());
     let attempt = |spec: AgentSpec| {
@@ -235,9 +235,28 @@ async fn a_bad_schema_or_retries_without_one_does_not_build() {
     let mut array = shaped(0);
     array.output_schema.as_mut().unwrap().schema = object(json!({"type": "array"}));
     assert!(matches!(attempt(array), Err(BuildError::Invalid(_))));
+    // Retries without a schema bound the runs that bring their own.
     let mut retrying = spec();
     retrying.structured_output_retries = 1;
-    assert!(matches!(attempt(retrying), Err(BuildError::Invalid(_))));
+    assert!(attempt(retrying).is_ok());
+}
+
+/// An agent without a schema still retries a run's own schema, by its
+/// `structured_output_retries`.
+#[tokio::test]
+async fn a_run_schema_on_an_agent_without_one_retries() {
+    let provider = Arc::new(ScriptedProvider::new([
+        text_turn("Ada"),
+        text_turn("{\"name\": \"Ada\"}"),
+    ]));
+    let mut retrying = spec();
+    retrying.structured_output_retries = 1;
+    let stores = Arc::new(Stores::default());
+    let agent = build(retrying, provider, Hooks::default(), stores);
+    let envelopes = finish(agent.run("who", with_schema(named()))).await;
+    let ada = object(json!({"name": "Ada"}));
+    assert_eq!(result(&envelopes).structured_output, Some(ada));
+    assert_eq!(verifications(&envelopes), [(VerificationAction::Retry, 1)]);
 }
 
 /// A `stop` hook that records the value each request carried and

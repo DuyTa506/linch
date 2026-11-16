@@ -229,15 +229,11 @@ impl AgentBuilder {
         if let Some(problem) = crate::reliability::fallback_problem(model, fallbacks) {
             return Err(BuildError::Invalid(problem.into()));
         }
+        // Retries without a schema bound the runs that bring their own.
         let output = match self.spec.output_schema.clone() {
             Some(schema) => Some(Arc::new(
                 OutputContract::compile(schema).map_err(BuildError::Invalid)?,
             )),
-            None if self.spec.structured_output_retries > 0 => {
-                return Err(BuildError::Invalid(
-                    "structured_output_retries needs an output_schema".into(),
-                ));
-            }
             None => None,
         };
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;

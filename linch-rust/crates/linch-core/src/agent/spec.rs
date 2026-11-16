@@ -89,7 +89,9 @@ pub struct AgentSpec {
     /// How many times an answer that breaks `output_schema` goes back to
     /// the model with the error before the run fails (Python's
     /// `structured_output_retries`, default 0: the first such answer fails
-    /// the run). Each retry is a turn, so `max_turns` bounds them too.
+    /// the run). Each retry is a turn, so `max_turns` bounds them too. It
+    /// also bounds a run's own schema (`RunOptions::output_schema`), so it
+    /// may be set without `output_schema`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub structured_output_retries: u32,
 }
