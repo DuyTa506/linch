@@ -6,9 +6,10 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use linch::permissions::RuleDecision;
+use linch::verification::Check;
 use linch::{
-    AgentConfig, McpTransportConfig, PermissionMode, PermissionPolicy, Principal, ProviderConfig,
-    StoreConfig,
+    AgentConfig, AgentSpec, McpTransportConfig, PermissionMode, PermissionPolicy, Principal,
+    ProviderConfig, StoreConfig,
 };
 use serde_json::json;
 
@@ -38,6 +39,7 @@ impl Tenant {
         }
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
+        admit_guardrails(&config.spec)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
         if !allow.permission_modes.contains(&mode) {
             // The config's spelling (`skip_dangerous`), not the variant's.
@@ -252,6 +254,49 @@ fn base_url(provider: &ProviderConfig) -> Option<&str> {
         | ProviderConfig::LlamaCpp { base_url, .. } => Some(base_url),
         ProviderConfig::Scripted { .. } => None,
     }
+}
+
+/// Most redaction rules, verifiers, or keywords of one verifier, a tenant's
+/// spec may hold: the server compiles and runs each on every response.
+pub const MAX_GUARDRAILS: usize = 32;
+
+/// Longest redaction or verifier pattern a tenant may give, in bytes; the
+/// core bounds what one compiles to as well.
+pub const MAX_PATTERN_BYTES: usize = 1024;
+
+/// Refuse redaction rules and verifiers past [`MAX_GUARDRAILS`] or
+/// [`MAX_PATTERN_BYTES`]. What they match is the tenant's own business.
+fn admit_guardrails(spec: &AgentSpec) -> Result<(), ErrorObject> {
+    let too_long = |pattern: &str| pattern.len() > MAX_PATTERN_BYTES;
+    if let Some(redaction) = &spec.redaction
+        && (redaction.rules.len() > MAX_GUARDRAILS
+            || (redaction.rules.iter()).any(|rule| too_long(&rule.pattern)))
+    {
+        let message = format!(
+            "redaction allows at most {MAX_GUARDRAILS} rules of at most \
+             {MAX_PATTERN_BYTES} bytes each"
+        );
+        return Err(refused("redaction", message));
+    }
+    if let Some(verification) = &spec.verification {
+        let oversized = |check: &Check| match check {
+            Check::Matches { pattern } | Check::Forbids { pattern } => too_long(pattern),
+            Check::Keywords { keywords, .. } => {
+                keywords.len() > MAX_GUARDRAILS || keywords.iter().any(|k| too_long(k))
+            }
+        };
+        if verification.verifiers.len() > MAX_GUARDRAILS
+            || (verification.verifiers.iter()).any(|verifier| oversized(&verifier.check))
+        {
+            let message = format!(
+                "verification allows at most {MAX_GUARDRAILS} verifiers, each with a \
+                 pattern of at most {MAX_PATTERN_BYTES} bytes or at most {MAX_GUARDRAILS} \
+                 keywords"
+            );
+            return Err(refused("verification", message));
+        }
+    }
+    Ok(())
 }
 
 fn refused(kind: &str, message: String) -> ErrorObject {
