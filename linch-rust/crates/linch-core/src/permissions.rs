@@ -304,6 +304,17 @@ impl PermissionPolicy {
             command_fields: BTreeMap::new(),
         }
     }
+
+    /// Whether this is the default policy: mode `default` and nothing
+    /// else, under any project root. With no rules or path fields the root
+    /// changes no decision, so it does not count.
+    pub(crate) fn is_default(&self) -> bool {
+        self.mode == PermissionMode::Default
+            && self.layers.is_empty()
+            && self.auto_allow.is_empty()
+            && self.path_fields.is_empty()
+            && self.command_fields.is_empty()
+    }
 }
 
 /// A [`PermissionPolicy`] that cannot be evaluated as written.

@@ -329,6 +329,15 @@ impl AgentBuilder {
             let tool = SearchTool::new(Arc::clone(&handle));
             built_ins.register(&self.tools, Arc::new(tool))?;
         }
+        // A policy that allows more than the default must not continue a
+        // run started under a stricter one; the default adds nothing, so
+        // the runs of default-policy agents keep their contracts.
+        let policy = permissions.policy();
+        if !policy.is_default() {
+            let value =
+                serde_json::to_value(policy).map_err(|e| BuildError::Invalid(e.to_string()))?;
+            features.insert("permissions".into(), value);
+        }
         let built_tools = self.tools.snapshot();
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
