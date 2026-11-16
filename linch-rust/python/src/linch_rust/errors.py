@@ -91,7 +91,7 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32030), or failed
+    """The run could not continue durably (-32020 to -32031), or failed
     inside the server (-32603 in `run.end`); it stays resumable."""
 
 
@@ -125,6 +125,20 @@ class PromptBlocked(RunError):
     @property
     def reason(self) -> str:
         """The reason the callback gave."""
+        try:
+            return str(self.data["reason"])
+        except (TypeError, KeyError):
+            return ""
+
+
+class InvalidOutputSchema(RunError):
+    """The `output_schema` given to `Agent.run` is unusable (-32031): it does
+    not compile, or its root is not an object. No run was created.
+    """
+
+    @property
+    def reason(self) -> str:
+        """What is wrong with the schema."""
         try:
             return str(self.data["reason"])
         except (TypeError, KeyError):
@@ -167,6 +181,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32027: NotSuspended,
     -32029: PromptBlocked,
     -32030: SessionBusy,
+    -32031: InvalidOutputSchema,
 }
 
 
@@ -179,7 +194,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = ProtocolError
         elif -32015 <= code <= -32010:
             cls = OpenError
-        elif -32030 <= code <= -32020:
+        elif -32031 <= code <= -32020:
             cls = RunError
         else:
             cls = RpcError

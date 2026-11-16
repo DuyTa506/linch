@@ -24,7 +24,8 @@ class InitEvent:
     """A call of the run started: its session, model, provider id and tools.
 
     A new run starts with one; each resume or approve starts with another,
-    `resumed` and naming the `turn` it continues in.
+    `resumed` and naming the `turn` it continues in. A run started with its
+    own `output_schema` has it on its first `init`.
     """
 
     type: ClassVar[str] = "init"
@@ -37,6 +38,7 @@ class InitEvent:
     trace_id: str | None = None
     resumed: bool = False
     turn: int = 0
+    output_schema: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -353,7 +355,9 @@ class ResultEvent:
 
     `duration_ms` is the wall time of the start, resume or approve call that
     ended the run. `total_cost_usd` is what its priced calls cost in USD,
-    `None` when none was priced.
+    `None` when none was priced. With an output schema, `structured_output`
+    is the answer parsed and checked against it; when the answer failed
+    the schema the run ends `error` with `structured_error` saying why.
     """
 
     type: ClassVar[str] = "result"

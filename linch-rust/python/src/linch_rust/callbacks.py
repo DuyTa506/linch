@@ -94,6 +94,11 @@ def callback(
     `before_final_answer` hook that answered `force_continue` answers
     `"retry"` here. Every other point refuses both as a bad answer.
 
+    With an output schema, `stop` runs only on an answer that satisfies it,
+    and its request has `structured_output`, the parsed answer. A
+    `"rewrite"` is checked against the schema again; one that fails it
+    fails the run.
+
     Args:
         point: The hook point it intercepts.
         policy_id: Stable id of the policy; with the version it enters the

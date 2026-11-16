@@ -192,6 +192,31 @@ class Principal(TypedDict, total=False):
     roles: Sequence[str]
 
 
+class OutputSchema(TypedDict, total=False):
+    """A JSON Schema the final answer of a run must satisfy.
+
+    Set it as the agent's `spec.output_schema` (with an optional
+    `spec.structured_output_retries`, 0 by default), or per run with
+    `Agent.run(output_schema=...)`. The answer must be a JSON object
+    (a fenced ```json block is read too) that satisfies `schema`; the
+    parsed object is `ResultEvent.structured_output`. A failing answer goes
+    back to the model with the error while retries last, then the run fails
+    with `structured_error` set.
+
+    Attributes:
+        name: Identifier sent to the provider; required.
+        schema: The JSON Schema (draft 2020-12) of an object; required.
+        strict: Whether a provider that can enforce the schema should
+            (OpenAI); true when absent.
+        description: What the answer is, for the provider.
+    """
+
+    name: Required[str]
+    schema: Required[Mapping[str, Any]]
+    strict: bool
+    description: str
+
+
 class AgentConfig(TypedDict, total=False):
     """An agent as data: what `Server.open_agent` opens.
 
@@ -204,8 +229,9 @@ class AgentConfig(TypedDict, total=False):
         spec: The model, instructions and loop limits, such as
             `{"model": "deepseek-flash", "system_prompt": "Be brief."}`;
             `system_blocks`, a token or USD `budget`, a `provider_retry`
-            policy (see `ProviderRetry`) and `fallback_models`, the models
-            to fail over to in order, go here too.
+            policy (see `ProviderRetry`), `fallback_models`, the models to
+            fail over to in order, and an `output_schema` (see
+            `OutputSchema`) with its `structured_output_retries` go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),
