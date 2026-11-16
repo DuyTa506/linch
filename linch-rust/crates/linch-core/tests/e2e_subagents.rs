@@ -5,13 +5,15 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use common::hooks::hook;
 use common::subagents::*;
 use common::*;
+use linch_core::hooks::{SubagentStart, SubagentStartRequest, SubagentStop, SubagentStopRequest};
 use linch_core::{
-    AgentBuilder, ContentBlock, Envelope, Event, JsonObject, PermissionMode, RunId, RunOptions,
-    RunStatus, RunStore, SubagentDefinition, ToolRegistry, ToolScope,
+    AgentBuilder, ContentBlock, Envelope, Event, Hooks, JsonObject, PermissionMode, RunId,
+    RunOptions, RunStatus, RunStore, SubagentDefinition, ToolRegistry, ToolScope,
 };
 use serde_json::json;
 use tokio::sync::Barrier;
@@ -97,6 +99,79 @@ async fn the_parents_total_usage_counts_its_own_calls_only() {
         })
         .collect();
     assert_eq!(child_usage, [(100, 50)], "the child's, wrapped");
+}
+
+/// `subagent_start` fires once, on the parent's hooks, before the child
+/// starts; `subagent_stop` fires once, after the child's result is known,
+/// with its text and how it ended.
+#[tokio::test]
+async fn subagent_start_and_subagent_stop_fire_on_the_parents_hooks() {
+    let parent = vec![
+        spawn_turn(Some("scout"), &["look around"]),
+        text_turn("done"),
+    ];
+    let child = vec![text_turn("seen")];
+    let family = Arc::new(Family::new(parent, child));
+    let runs = Runs::default();
+
+    let starts: Arc<Mutex<Vec<SubagentStartRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let stops: Arc<Mutex<Vec<SubagentStopRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let hooks = Hooks::default();
+    let log_start = Arc::clone(&starts);
+    let on_start = hook::<SubagentStart>("watch", move |request| {
+        log_start.lock().unwrap().push(request.clone());
+        Ok(())
+    });
+    let _ = hooks.subagent_start.register(on_start.arc()).unwrap();
+    let log_stop = Arc::clone(&stops);
+    let on_stop = hook::<SubagentStop>("watch", move |request| {
+        log_stop.lock().unwrap().push(request.clone());
+        Ok(())
+    });
+    let _ = hooks.subagent_stop.register(on_stop.arc()).unwrap();
+
+    let stores = Arc::new(Stores::default());
+    let agent = AgentBuilder::new(spec())
+        .provider(family)
+        .tools(tools(&runs))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .hooks(Arc::new(hooks))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .subagents(vec![scout()])
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let _ = finish(stream).await;
+
+    let child_id = RunId::new(format!("{run_id}:sub_0"));
+    let starts = starts.lock().unwrap();
+    assert_eq!(starts.len(), 1, "fires once, not on every parent turn");
+    let start = &starts[0];
+    assert_eq!(start.run_id, run_id);
+    assert_eq!(start.subagent_run_id, child_id);
+    assert_eq!(start.subagent_type, "scout");
+    assert_eq!(start.display_name, "scout");
+    assert_eq!(start.prompt, "look around");
+
+    let stops = stops.lock().unwrap();
+    assert_eq!(
+        stops.len(),
+        1,
+        "fires once, when the child's result is seen"
+    );
+    let stop = &stops[0];
+    assert_eq!(stop.run_id, run_id);
+    assert_eq!(stop.subagent_run_id, child_id);
+    assert_eq!(stop.child_session_id, start.child_session_id);
+    assert_eq!(stop.text, "seen");
+    assert_eq!(stop.error, None);
+    assert_eq!(
+        stop.subtype,
+        linch_core::events::kinds::ResultSubtype::Success
+    );
 }
 
 #[tokio::test]

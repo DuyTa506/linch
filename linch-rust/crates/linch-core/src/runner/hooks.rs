@@ -16,16 +16,20 @@ use crate::agent::{AgentInner, RunError};
 use crate::events::kinds::{
     ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype,
 };
+use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
-    ContextBuildRequest, ContextBuildResponse, HookRecord, HookStatus, PostTurnRequest,
-    StopOutcome, StopRequest, UserPromptOutcome, UserPromptRequest,
+    AgentStartRequest, AgentStopRequest, ContextBuildRequest, ContextBuildResponse, HookRecord,
+    HookStatus, PostCompactRequest, PostTurnRequest, PreCompactRequest, ProviderCallStartRequest,
+    ProviderCallStopRequest, StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome,
+    UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, TextBlock};
 use crate::provider::ProviderRequest;
-use crate::run::{Phase, StopReason};
+use crate::run::{Phase, RunStatus, StopReason};
+use crate::usage::Usage;
 
 /// What a text-only response leads to, after the `stop` chain.
 pub(super) enum Stopping {
@@ -112,6 +116,33 @@ pub(super) async fn submit(
             reason,
         }),
     }
+}
+
+/// Run `agent_start` for a new run, after `submit` succeeds. Not fired on a
+/// resume, and not fired when `submit` blocked the prompt: the run is never
+/// created then, so there is nothing to report on.
+pub(super) async fn agent_start(
+    agent: &AgentInner,
+    outbox: &Outbox,
+    session_id: &SessionId,
+    run_id: &RunId,
+    prompt: &Message,
+) {
+    let chain = &agent.hooks.agent_start;
+    if chain.is_empty() {
+        return;
+    }
+    let tools = agent.snapshot().definitions();
+    let request = AgentStartRequest {
+        session_id: session_id.clone(),
+        run_id: run_id.clone(),
+        model: agent.spec.model.clone(),
+        prompt: prompt.text(),
+        tools: tools.into_iter().map(|tool| tool.name).collect(),
+    };
+    let mut records = Vec::new();
+    chain.run_into(&request, &mut records).await;
+    push_records(outbox, run_id, 0, records, None);
 }
 
 /// Add request-only context to the tail of `messages`: after the blocks
@@ -237,6 +268,137 @@ impl Runner {
         // The hooks that answered before a cancel keep their records.
         self.push_records(records, None);
         ran
+    }
+
+    /// Run `agent_stop` for the run's terminal result. `end` is the single
+    /// terminal writer for every end path, so this fires exactly once.
+    pub(super) async fn agent_stop(&self, status: RunStatus, stop_reason: StopReason) {
+        let chain = &self.agent.hooks.agent_stop;
+        if chain.is_empty() {
+            return;
+        }
+        let request = AgentStopRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            status,
+            stop_reason,
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        self.push_records(records, None);
+    }
+
+    /// Run `turn_start` for the turn about to start, before the
+    /// compaction/dispatch decision.
+    pub(super) async fn turn_start_hook(&self, turn: u32) {
+        let chain = &self.agent.hooks.turn_start;
+        if chain.is_empty() {
+            return;
+        }
+        let request = TurnStartRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        self.push_records(records, None);
+    }
+
+    /// Run `provider_call_start` before dispatching one provider call.
+    pub(super) async fn provider_call_start(&self, turn: u32, model: &str) {
+        let chain = &self.agent.hooks.provider_call_start;
+        if chain.is_empty() {
+            return;
+        }
+        let request = ProviderCallStartRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            model: model.to_owned(),
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        self.push_records(records, None);
+    }
+
+    /// Run `provider_call_stop` once the call returns, on every exit path:
+    /// accepted, empty, failed or cancelled.
+    pub(super) async fn provider_call_stop(
+        &self,
+        turn: u32,
+        model: &str,
+        disposition: CallDisposition,
+        usage: Option<Usage>,
+        duration_ms: u64,
+    ) {
+        let chain = &self.agent.hooks.provider_call_stop;
+        if chain.is_empty() {
+            return;
+        }
+        let request = ProviderCallStopRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            model: model.to_owned(),
+            disposition,
+            usage,
+            duration_ms,
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        self.push_records(records, None);
+    }
+
+    /// Run `pre_compact` once compaction's due checks passed, before the
+    /// summary call.
+    pub(super) async fn pre_compact(&self, turn: u32, messages: u64, tokens: u64, strategy: &str) {
+        let chain = &self.agent.hooks.pre_compact;
+        if chain.is_empty() {
+            return;
+        }
+        let request = PreCompactRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            messages,
+            tokens,
+            strategy: strategy.to_owned(),
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        self.push_records(records, None);
+    }
+
+    /// Run `post_compact` once compaction replaced the view with a summary.
+    /// Not fired when the summary call failed or gave no text.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn post_compact(
+        &self,
+        turn: u32,
+        messages_before: u64,
+        messages_after: u64,
+        tokens_before: u64,
+        tokens_after: u64,
+        strategy: &str,
+    ) {
+        let chain = &self.agent.hooks.post_compact;
+        if chain.is_empty() {
+            return;
+        }
+        let request = PostCompactRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            messages_before,
+            messages_after,
+            tokens_before,
+            tokens_after,
+            strategy: strategy.to_owned(),
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        self.push_records(records, None);
     }
 }
 

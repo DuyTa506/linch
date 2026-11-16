@@ -167,9 +167,26 @@ pub(super) fn is_tool_point(point: HookPoint) -> bool {
 }
 
 /// Points with a verdict that blocks, which a closed failure turns into.
-/// `context_build` only adds context and `post_turn` only observes.
+/// `context_build` only adds context, and every point from `post_turn` on
+/// is observe-only: none of them has a blocking verdict to fail closed into.
 pub(super) fn can_fail_closed(point: HookPoint) -> bool {
-    !matches!(point, HookPoint::ContextBuild | HookPoint::PostTurn)
+    !matches!(
+        point,
+        HookPoint::ContextBuild
+            | HookPoint::PostTurn
+            | HookPoint::AgentStart
+            | HookPoint::AgentStop
+            | HookPoint::TurnStart
+            | HookPoint::ProviderCallStart
+            | HookPoint::ProviderCallStop
+            | HookPoint::ToolUseStart
+            | HookPoint::ToolUseStop
+            | HookPoint::PostToolUseFailure
+            | HookPoint::PreCompact
+            | HookPoint::PostCompact
+            | HookPoint::SubagentStart
+            | HookPoint::SubagentStop
+    )
 }
 
 #[cfg(test)]

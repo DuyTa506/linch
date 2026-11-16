@@ -9,9 +9,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linch::hooks::{
-    ApprovalRequest, ContextBuild, ContextBuildRequest, ContextBuildResponse, PermissionRequest,
-    PostToolUse, PostToolUseRequest, PostToolUseResponse, PostTurn, PostTurnRequest, PreToolUse,
-    PreToolUseRequest, PreToolUseResponse, Stop, StopRequest, StopResponse, UserPromptRequest,
+    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, ApprovalRequest, ContextBuild,
+    ContextBuildRequest, ContextBuildResponse, PermissionRequest, PostCompact, PostCompactRequest,
+    PostToolUse, PostToolUseFailure, PostToolUseFailureRequest, PostToolUseRequest,
+    PostToolUseResponse, PostTurn, PostTurnRequest, PreCompact, PreCompactRequest, PreToolUse,
+    PreToolUseRequest, PreToolUseResponse, ProviderCallStart, ProviderCallStartRequest,
+    ProviderCallStop, ProviderCallStopRequest, Stop, StopRequest, StopResponse, SubagentStart,
+    SubagentStartRequest, SubagentStop, SubagentStopRequest, ToolUseStart, ToolUseStartRequest,
+    ToolUseStop, ToolUseStopRequest, TurnStart, TurnStartRequest, UserPromptRequest,
     UserPromptResponse, UserPromptSubmit,
 };
 use linch::{
@@ -24,8 +29,8 @@ use serde_json::json;
 use super::peer::Peer;
 use crate::error::{ErrorObject, invalid_params};
 use crate::protocol::{
-    CallbackSpec, ContextBuildAnswer, HookCallParams, PostToolUseAnswer, PostTurnAnswer,
-    PreToolUseAnswer, StopAnswer, UserPromptAnswer, WireToolResult, method,
+    CallbackSpec, ContextBuildAnswer, HookCallParams, ObserveAnswer, PostToolUseAnswer,
+    PostTurnAnswer, PreToolUseAnswer, StopAnswer, UserPromptAnswer, WireToolResult, method,
 };
 
 /// The hook chains holding one [`RpcHook`] per declaration, in order.
@@ -68,6 +73,18 @@ fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Resu
         HookPoint::PostToolUse => add(&hooks.post_tool_use, common),
         HookPoint::Stop => add(&hooks.stop, common),
         HookPoint::PostTurn => add(&hooks.post_turn, common),
+        HookPoint::AgentStart => add(&hooks.agent_start, common),
+        HookPoint::AgentStop => add(&hooks.agent_stop, common),
+        HookPoint::TurnStart => add(&hooks.turn_start, common),
+        HookPoint::ProviderCallStart => add(&hooks.provider_call_start, common),
+        HookPoint::ProviderCallStop => add(&hooks.provider_call_stop, common),
+        HookPoint::ToolUseStart => add(&hooks.tool_use_start, common),
+        HookPoint::ToolUseStop => add(&hooks.tool_use_stop, common),
+        HookPoint::PostToolUseFailure => add(&hooks.post_tool_use_failure, common),
+        HookPoint::PreCompact => add(&hooks.pre_compact, common),
+        HookPoint::PostCompact => add(&hooks.post_compact, common),
+        HookPoint::SubagentStart => add(&hooks.subagent_start, common),
+        HookPoint::SubagentStop => add(&hooks.subagent_stop, common),
     }
 }
 
@@ -253,6 +270,152 @@ impl Wire for PostTurn {
 
     fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
         answer::<PostTurnAnswer>(value).map(|_| ())
+    }
+}
+
+/// Decode an observe-only point's `{}` answer. Every point below shares it:
+/// none can fail closed, so there is nothing for the client to decide.
+fn observed(value: JsonValue) -> Result<(), serde_json::Error> {
+    answer::<ObserveAnswer>(value).map(|_| ())
+}
+
+impl Wire for AgentStart {
+    fn encode(r: &AgentStartRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "model": r.model,
+               "prompt": r.prompt, "tools": r.tools})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for AgentStop {
+    fn encode(r: &AgentStopRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "status": r.status,
+               "stop_reason": r.stop_reason})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for TurnStart {
+    fn encode(r: &TurnStartRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "turn": r.turn})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for ProviderCallStart {
+    fn encode(r: &ProviderCallStartRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "turn": r.turn,
+               "model": r.model})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for ProviderCallStop {
+    fn encode(r: &ProviderCallStopRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "turn": r.turn,
+               "model": r.model, "disposition": r.disposition,
+               "usage": r.usage, "duration_ms": r.duration_ms})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for ToolUseStart {
+    fn encode(r: &ToolUseStartRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id,
+               "tool_use_id": r.tool_use_id, "tool_name": r.tool_name, "input": r.input})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for ToolUseStop {
+    fn encode(r: &ToolUseStopRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id,
+               "tool_use_id": r.tool_use_id, "tool_name": r.tool_name,
+               "is_error": r.is_error, "duration_ms": r.duration_ms})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for PostToolUseFailure {
+    fn encode(r: &PostToolUseFailureRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id,
+               "tool_use_id": r.tool_use_id, "tool_name": r.tool_name, "input": r.input,
+               "error": r.error})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for PreCompact {
+    fn encode(r: &PreCompactRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "turn": r.turn,
+               "messages": r.messages, "tokens": r.tokens, "strategy": r.strategy})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for PostCompact {
+    fn encode(r: &PostCompactRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id, "turn": r.turn,
+               "messages_before": r.messages_before, "messages_after": r.messages_after,
+               "tokens_before": r.tokens_before, "tokens_after": r.tokens_after,
+               "strategy": r.strategy})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for SubagentStart {
+    fn encode(r: &SubagentStartRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id,
+               "child_session_id": r.child_session_id, "subagent_run_id": r.subagent_run_id,
+               "subagent_type": r.subagent_type, "display_name": r.display_name,
+               "prompt": r.prompt})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
+    }
+}
+
+impl Wire for SubagentStop {
+    fn encode(r: &SubagentStopRequest) -> JsonValue {
+        json!({"session_id": r.session_id, "run_id": r.run_id,
+               "child_session_id": r.child_session_id, "subagent_run_id": r.subagent_run_id,
+               "subagent_type": r.subagent_type, "display_name": r.display_name,
+               "subtype": r.subtype, "text": r.text, "error": r.error})
+    }
+
+    fn decode(value: JsonValue) -> Result<(), serde_json::Error> {
+        observed(value)
     }
 }
 

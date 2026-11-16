@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::canonical::to_canonical_string;
 use crate::events::Event;
-use crate::hooks::{HookRecord, Hooks, PostToolUseRequest};
+use crate::hooks::{HookRecord, Hooks, PostToolUseFailureRequest, PostToolUseRequest};
 use crate::json::JsonValue;
 use crate::message::ToolResultBlock;
 use crate::registry::OutputContractError;
@@ -333,6 +333,23 @@ impl<S: ToolSink> Runner<'_, S> {
                 .await;
             finished.result = chain.outcome;
             finished.hook_records = chain.records;
+        }
+        if let Err(error) = &finished.result
+            && !self.hooks.post_tool_use_failure.is_empty()
+        {
+            let chain = self
+                .hooks
+                .post_tool_use_failure
+                .run(&PostToolUseFailureRequest {
+                    session_id: self.run.session_id.clone(),
+                    run_id: self.run.run_id.clone(),
+                    tool_use_id: call.tool_use_id.clone(),
+                    tool_name: call.tool_name.clone(),
+                    input: call.input.clone(),
+                    error: error.clone(),
+                })
+                .await;
+            finished.hook_records.extend(chain.records);
         }
         finished
     }

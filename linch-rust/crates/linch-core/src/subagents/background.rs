@@ -6,12 +6,13 @@ use std::sync::{Arc, Weak};
 use futures::StreamExt;
 
 use super::SUBAGENT_TOOL;
-use super::run::{Outcome, failed, finished, first_use, mismatched};
+use super::run::{Outcome, failed, finished, first_use, mismatched, subagent_start, subagent_stop};
 use super::tool::in_background;
 use super::workers::Worker;
 use crate::agent::{AgentInner, RunOptions};
 use crate::events::kinds::{ChildRunStatusEvent, ResultSubtype};
 use crate::events::{Envelope, Event, Persistence, SubagentEvent};
+use crate::hooks::Hooks;
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::run::RunStatus;
@@ -145,6 +146,7 @@ async fn pick_up(
     if let (Ok(_), Some(ctx)) = (&loaded, call) {
         first_use(parent, ctx, &id).await?;
     }
+    let child_session_id = options.session_id.clone();
     let stream = match loaded {
         Err(StoreError::NotFound { .. }) => {
             // Only a call starts a new child, so only a call can pass the
@@ -157,15 +159,52 @@ async fn pick_up(
                      one with TaskStop, then call again."
                 )));
             }
+            subagent_start(
+                &parent.hooks,
+                &worker.definition,
+                &run.session_id,
+                &run.run_id,
+                &child_session_id,
+                &id,
+                &worker.display_name,
+                &prompt,
+            )
+            .await;
             runner::start_child(child, prompt, options, run.run_id.clone(), family.budget())
         }
         Ok(record) if record.status.is_terminal() => {
             let outcome = finished(&child, &id).await?;
+            if outcome.ended.is_some() {
+                subagent_stop(
+                    &parent.hooks,
+                    &worker.definition,
+                    &run.session_id,
+                    &run.run_id,
+                    &child_session_id,
+                    &id,
+                    &worker.display_name,
+                    &outcome,
+                )
+                .await;
+            }
             family.complete(Completion::of(id, worker.display_name, outcome));
             return Ok(());
         }
         Ok(record) if record.contract != child.contract => {
             let outcome = mismatched(&child, &record, options).await?;
+            if outcome.ended.is_some() {
+                subagent_stop(
+                    &parent.hooks,
+                    &worker.definition,
+                    &run.session_id,
+                    &run.run_id,
+                    &child_session_id,
+                    &id,
+                    &worker.display_name,
+                    &outcome,
+                )
+                .await;
+            }
             family.complete(Completion::of(id, worker.display_name, outcome));
             return Ok(());
         }
@@ -176,7 +215,15 @@ async fn pick_up(
     // call that spawned it.
     let spawned_by = id.as_str().strip_prefix(&format!("{}:", run.run_id));
     let spawned_by = spawned_by.unwrap_or_default().to_owned();
-    let drive = drive(stream, worker, spawned_by, Arc::downgrade(family));
+    let drive = drive(
+        stream,
+        worker,
+        spawned_by,
+        Arc::downgrade(family),
+        run.session_id.clone(),
+        run.run_id.clone(),
+        Arc::clone(&parent.hooks),
+    );
     family.adopt(id, cancel, true, drive);
     Ok(())
 }
@@ -275,8 +322,19 @@ fn started(ctx: &ToolContext, id: &RunId) -> ToolOutput {
 
 /// Drive the child's stream to its end: its durable events go into the
 /// parent's log, wrapped, at the parent's next turn; its end becomes a
-/// completion in the family's inbox.
-async fn drive(mut stream: RunStream, worker: Worker, tool_use_id: String, family: Weak<Family>) {
+/// completion in the family's inbox. `parent_session_id`/`parent_run_id`
+/// and `hooks` are the parent's own, cloned out since this future outlives
+/// the call that adopted it; `subagent_stop` fires on `hooks` once the
+/// child's stream ends with a terminal result.
+async fn drive(
+    mut stream: RunStream,
+    worker: Worker,
+    tool_use_id: String,
+    family: Weak<Family>,
+    parent_session_id: SessionId,
+    parent_run_id: RunId,
+    hooks: Arc<Hooks>,
+) {
     let mut outcome = Outcome::default();
     while let Some(item) = stream.next().await {
         let envelope = match item {
@@ -298,6 +356,20 @@ async fn drive(mut stream: RunStream, worker: Worker, tool_use_id: String, famil
                 event: Box::new(envelope.event),
             }));
         }
+    }
+    if outcome.ended.is_some() {
+        let child_session_id = SessionId::new(worker.id.as_str());
+        subagent_stop(
+            &hooks,
+            &worker.definition,
+            &parent_session_id,
+            &parent_run_id,
+            &child_session_id,
+            &worker.id,
+            &worker.display_name,
+            &outcome,
+        )
+        .await;
     }
     if let Some(family) = family.upgrade() {
         family.complete(Completion::of(worker.id, worker.display_name, outcome));

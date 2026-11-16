@@ -75,6 +75,13 @@ impl Runner {
         if !compaction::due(spec, agent.spec.max_output_tokens, window, tokens_before) {
             return Ok(Some(DISPATCH));
         }
+        self.pre_compact(
+            self.turn,
+            view.len() as u64,
+            tokens_before,
+            compaction::STRATEGY,
+        )
+        .await;
         let started = std::time::Instant::now();
         self.snapshot = agent.snapshot();
         let older = view[..keep_from]
@@ -131,11 +138,13 @@ impl Runner {
                 .extend(restated.map(ContentBlock::CatalogChange));
         }
         let compacted = compaction::replacement(&view, summary.clone(), keep_from);
+        let (messages_before, messages_after) = (view.len() as u64, compacted.len() as u64);
+        let tokens_after = estimate_tokens(&compacted);
         self.journal.stage(Event::Compaction(CompactionEvent {
-            messages_before: view.len() as u64,
-            messages_after: compacted.len() as u64,
+            messages_before,
+            messages_after,
             tokens_before,
-            tokens_after: estimate_tokens(&compacted),
+            tokens_after,
             strategy: compaction::STRATEGY.into(),
             duration_ms: super::end::millis(started.elapsed()),
         }));
@@ -145,6 +154,15 @@ impl Runner {
             keep_from,
         })
         .await?;
+        self.post_compact(
+            self.turn,
+            messages_before,
+            messages_after,
+            tokens_before,
+            tokens_after,
+            compaction::STRATEGY,
+        )
+        .await;
         Ok(Some(Step::Compacted {
             summary,
             keep_from,

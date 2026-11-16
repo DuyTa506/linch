@@ -20,9 +20,11 @@ Python Linch builds the same guarantees on a scoped IoC container
 - `Disposable` is `Registration`. Its `dispose` is synchronous and runs its
   undo once; a failed undo is not retried (`crates/linch-core/src/registration.rs:38-48`).
 - Python's `emit`, `serial` and `waterfall` dispatchers have no Rust
-  counterpart. The extension points are seven typed hook chains, one per
+  counterpart. The extension points are nineteen typed hook chains, one per
   `HookPoint`, each with its own rule for how answers combine
-  ([hook chains](#hook-chains)).
+  ([hook chains](#hook-chains)). Twelve of them only observe: added for
+  parity with Python's lifecycle hooks, they answer `()`/`{}` and cannot fail
+  closed (`hooks/observe.rs`).
 - There is no `ToolPipeline` with `tools/pre-execute`, `tools/execute` and
   `tools/post-execute` seams. A batch runs through `plan` and `execute`
   (`crates/linch-core/src/scheduler.rs:1-22`); the `pre_tool_use` and
@@ -128,6 +130,7 @@ where the table says so:
 | `post_tool_use` | A replacement feeds the next hook. A closed failure withholds the result and stops the chain (`hooks/tool.rs:312-336`) | open |
 | `stop` | The first hook that keeps the run going stops the chain. A closed failure fails the run (`hooks/turn.rs:246-250`) | open |
 | `post_turn` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/turn.rs:310-312`) | open |
+| `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/observe.rs`) | open |
 
 The defaults are in `HookPoint::default_fail_mode` (`policy.rs:140-149`).
 Failure handling is in `Entry::invoke` and `failed` (`hooks/chain.rs:208-259`):

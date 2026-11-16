@@ -54,6 +54,7 @@ impl Runner {
         };
         let ready = self.journal.finish(status, result).await?;
         self.outbox.deliver(ready).await;
+        self.agent_stop(status, stop_reason).await;
         Ok(())
     }
 

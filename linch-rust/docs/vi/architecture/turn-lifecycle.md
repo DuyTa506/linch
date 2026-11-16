@@ -21,8 +21,8 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   đang đứng, giống như một sự cố (`runner.rs:83-87`).
 - Loop guard của Python (lời gọi lặp lại, lỗi lặp lại) không nằm trong runner. Runner
   chỉ phát `loop_guard` cho `max_turns` (`runner/end.rs:93-108`).
-- Các hook point là bảy point trong [kernel](./kernel.md#chuỗi-hook). `AfterProviderCall`
-  của Python đã bị bỏ (`hooks.rs:19-21`).
+- Các hook point là mười chín point trong [kernel](./kernel.md#chuỗi-hook), trong đó
+  mười hai point chỉ quan sát. `AfterProviderCall` của Python đã bị bỏ (`hooks.rs:19-21`).
 - Run của một subagent không thể suspend: một lời gọi cần phê duyệt sẽ bị từ chối
   (`runner/batch.rs:73-75`).
 
@@ -52,6 +52,19 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 8. **Rẽ nhánh theo các lời gọi tool** của response (bên dưới).
 9. **Nối các kết quả tool**, chạy `post_turn`, và bắt đầu lượt kế tiếp
    (`turn.rs:217-226`).
+
+Các point chỉ quan sát chạy xuyên suốt các bước này: `agent_start` chạy một lần,
+ngay sau khi prompt được chấp nhận và trước lượt đầu tiên (`runner/start.rs`);
+`turn_start` mở đầu bước 1 của mọi lượt (`runner/turn.rs`);
+`provider_call_start`/`provider_call_stop` bao quanh bước 5 (`runner/turn.rs`);
+`pre_compact`/`post_compact` bao quanh một lần thu gọn ngữ cảnh thực sự chạy, trước
+bước 1 (`runner/compact.rs`); `tool_use_start`/`tool_use_stop` bao quanh một lời gọi
+tool thực sự chạy, và `post_tool_use_failure` chạy cùng lúc với `post_tool_use` khi
+kết quả là lỗi (`runner/sink.rs`, `scheduler/execute.rs`); `agent_stop` chạy một lần,
+ở cuối cùng của mọi run, dù thành công hay thất bại (`runner/end.rs`).
+`subagent_start`/`subagent_stop` chạy tương tự trên hook của agent cha, quanh một
+run con của subagent (`subagents/run.rs`, `subagents/background.rs`). Không point nào
+trong số này có thể thay đổi thứ nó quan sát.
 
 Một lời gọi thất bại kết thúc run với trạng thái failed bằng một lần ghi terminal duy nhất
 mang theo receipt, usage, `Error`, trạng thái và `Result` (`turn.rs:337-347`). Một

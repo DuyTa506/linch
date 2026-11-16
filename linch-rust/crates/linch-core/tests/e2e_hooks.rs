@@ -9,8 +9,8 @@ use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::{HookEvent, HookOutcome};
 use linch_core::hooks::{
-    ContextBuild, PostToolUse, PostToolUseResponse, PreToolUse, PreToolUseResponse,
-    UserPromptResponse, UserPromptSubmit,
+    ContextBuild, PostToolUse, PostToolUseResponse, PreToolUse, PreToolUseResponse, ToolUseStart,
+    ToolUseStop, UserPromptResponse, UserPromptSubmit,
 };
 use linch_core::{
     Agent, AgentBuilder, ContentBlock, Envelope, Event, FailMode, HookPoint, Hooks, Message,
@@ -252,8 +252,12 @@ async fn tool_hook_records_are_streamed_and_never_stored() {
     let hooks = Hooks::default();
     let pre = hook::<PreToolUse>("audit", |_| Ok(PreToolUseResponse::Continue));
     let _ = hooks.pre_tool_use.register(pre.arc()).unwrap();
+    let starting = hook::<ToolUseStart>("starting", |_| Ok(()));
+    let _ = hooks.tool_use_start.register(starting.arc()).unwrap();
     let post = hook::<PostToolUse>("scan", |_| Ok(PostToolUseResponse::Continue));
     let _ = hooks.post_tool_use.register(post.arc()).unwrap();
+    let finished = hook::<ToolUseStop>("finished", |_| Ok(()));
+    let _ = hooks.tool_use_stop.register(finished.arc()).unwrap();
     let provider = Arc::new(ScriptedProvider::new([
         tool_turn(0, 1, "Read"),
         text_turn("done"),
@@ -272,8 +276,13 @@ async fn tool_hook_records_are_streamed_and_never_stored() {
         seen,
         [
             (HookPoint::PreToolUse, call),
-            (HookPoint::PostToolUse, call)
-        ]
+            (HookPoint::ToolUseStart, call),
+            (HookPoint::PostToolUse, call),
+            (HookPoint::ToolUseStop, call),
+        ],
+        "tool_use_start brackets the running tool from the outside: before \
+         pre_tool_use's verdict takes effect and after post_tool_use settles \
+         the result"
     );
     let stored = stores.runs.events(NS, &run_id, 0).await.unwrap();
     assert!(!kinds(&stored).contains(&"hook".to_owned()));

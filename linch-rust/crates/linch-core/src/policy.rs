@@ -122,6 +122,30 @@ pub enum HookPoint {
     Stop,
     /// A turn finished.
     PostTurn,
+    /// A new run is about to start (not a resume).
+    AgentStart,
+    /// A run reached its terminal result.
+    AgentStop,
+    /// A turn is about to start.
+    TurnStart,
+    /// A provider call is about to be dispatched.
+    ProviderCallStart,
+    /// A provider call returned, however it ended.
+    ProviderCallStop,
+    /// A tool call is about to run.
+    ToolUseStart,
+    /// A tool call finished running.
+    ToolUseStop,
+    /// A tool call's result is an error, after `post_tool_use`.
+    PostToolUseFailure,
+    /// Compaction is about to run, after its due checks passed.
+    PreCompact,
+    /// Compaction ran and replaced the view with a summary.
+    PostCompact,
+    /// A subagent's child run is about to start (not a resume).
+    SubagentStart,
+    /// A subagent's child run reached a terminal result.
+    SubagentStop,
 }
 
 /// What happens when a callback errors or times out.
@@ -136,7 +160,9 @@ pub enum FailMode {
 
 impl HookPoint {
     /// Default failure handling: tool gates fail closed, the rest fail open,
-    /// so a dead context source cannot stall every turn.
+    /// so a dead context source cannot stall every turn. The observe-only
+    /// points (everything from `AgentStart` on) can only fail open: there is
+    /// no blocking verdict to fail closed into.
     pub fn default_fail_mode(self) -> FailMode {
         match self {
             Self::PreToolUse | Self::PermissionRequest => FailMode::Closed,
@@ -144,7 +170,19 @@ impl HookPoint {
             | Self::ContextBuild
             | Self::PostToolUse
             | Self::Stop
-            | Self::PostTurn => FailMode::Open,
+            | Self::PostTurn
+            | Self::AgentStart
+            | Self::AgentStop
+            | Self::TurnStart
+            | Self::ProviderCallStart
+            | Self::ProviderCallStop
+            | Self::ToolUseStart
+            | Self::ToolUseStop
+            | Self::PostToolUseFailure
+            | Self::PreCompact
+            | Self::PostCompact
+            | Self::SubagentStart
+            | Self::SubagentStop => FailMode::Open,
         }
     }
 }

@@ -4,14 +4,16 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::SubagentDefinition;
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::events::kinds::ResultSubtype;
 use crate::events::{Event, SubagentEvent};
+use crate::hooks::{Hooks, SubagentStartRequest, SubagentStopRequest};
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
-use crate::runner::{self, RunStream};
+use crate::runner::{self, Family, RunStream};
 use crate::store::{RunRecord, StoreError};
 use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 
@@ -21,13 +23,23 @@ use crate::tool::{ToolContext, ToolOutput, ToolOutputError, ToolResult};
 /// unfinished, or read the end of one that finished. Each event of the
 /// child goes into the parent's log wrapped in a `subagent` event.
 ///
-/// The parent run's [`Family`](crate::runner::Family) drives the child, so
-/// a call cut short (by its timeout or the run's cancel, which cancel the
-/// call's token and so the child's) leaves the child to write its abort.
+/// `display_name` is the worker's human-readable name, for `subagent_start`
+/// and `subagent_stop` (fired on the parent's hooks, not the child's).
+/// `subagent_start` fires only when the child run does not exist yet (not on
+/// a resume or a continuation); `subagent_stop` fires once, only when a
+/// terminal result was actually observed (`Outcome::ended.is_some()`), on
+/// every path that observes one: a fresh or resumed run driven directly, one
+/// adopted by the parent's [`Family`], and a terminal record read back
+/// without driving anything.
+///
+/// The parent run's [`Family`] drives the child, so a call cut short (by its
+/// timeout or the run's cancel, which cancel the call's token and so the
+/// child's) leaves the child to write its abort.
 pub(super) async fn run(
     parent: &AgentInner,
     definition: &SubagentDefinition,
     session: SessionId,
+    display_name: &str,
     prompt: String,
     ctx: &ToolContext,
 ) -> Result<Outcome, ToolOutputError> {
@@ -36,6 +48,7 @@ pub(super) async fn run(
         Err(error) => return Err(failed("could not be built", error)),
     };
     let child_id = RunId::new(ctx.idempotency_key());
+    let child_session_id = session.clone();
     let cancel = ctx.cancel.child_token();
     let options = RunOptions {
         session_id: session,
@@ -52,17 +65,60 @@ pub(super) async fn run(
     // The child charges the parent's budget.
     let family = parent.family(&ctx.run_id);
     let budget = family.as_ref().and_then(|family| family.budget());
-    let stream = match loaded {
+    let result = match loaded {
         Err(StoreError::NotFound { .. }) => {
-            runner::start_child(child, prompt, options, ctx.run_id.clone(), budget)
+            subagent_start(
+                &parent.hooks,
+                definition,
+                &ctx.session_id,
+                &ctx.run_id,
+                &child_session_id,
+                &child_id,
+                display_name,
+                &prompt,
+            )
+            .await;
+            let stream = runner::start_child(child, prompt, options, ctx.run_id.clone(), budget);
+            drive_or_adopt(stream, child_id.clone(), cancel, ctx, family).await
         }
-        Ok(record) if record.status.is_terminal() => return finished(&child, &child_id).await,
+        Ok(record) if record.status.is_terminal() => finished(&child, &child_id).await,
         Ok(record) if record.contract != child.contract => {
-            return mismatched(&child, &record, options).await;
+            mismatched(&child, &record, options).await
         }
-        Ok(_) => runner::resume_child(child, child_id.clone(), options, budget),
-        Err(error) => return Err(failed("could not be read", error)),
+        Ok(_) => {
+            let stream = runner::resume_child(child, child_id.clone(), options, budget);
+            drive_or_adopt(stream, child_id.clone(), cancel, ctx, family).await
+        }
+        Err(error) => Err(failed("could not be read", error)),
     };
+    if let Ok(outcome) = &result
+        && outcome.ended.is_some()
+    {
+        subagent_stop(
+            &parent.hooks,
+            definition,
+            &ctx.session_id,
+            &ctx.run_id,
+            &child_session_id,
+            &child_id,
+            display_name,
+            outcome,
+        )
+        .await;
+    }
+    result
+}
+
+/// Drive `stream` directly when the parent run has no [`Family`] (it is not
+/// a batch that tracks children); otherwise adopt it so a run cancel or
+/// timeout can cut it short, and wait for its result.
+async fn drive_or_adopt(
+    stream: RunStream,
+    child_id: RunId,
+    cancel: CancellationToken,
+    ctx: &ToolContext,
+    family: Option<Arc<Family>>,
+) -> Result<Outcome, ToolOutputError> {
     let Some(family) = family else {
         return drive(stream, child_id, ctx).await;
     };
@@ -73,6 +129,70 @@ pub(super) async fn run(
     });
     let result = result.await;
     result.unwrap_or_else(|_| Err(failed("stopped", "its parent run went away")))
+}
+
+/// Run `subagent_start` on `hooks` (the parent's) for a child about to
+/// start. `session_id`/`run_id` are the parent's; `child_session_id`/
+/// `child_id` the new child's. Shared by [`run`] and the background path
+/// (`super::background`), which holds an owned [`Hooks`] handle rather than
+/// the parent itself.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn subagent_start(
+    hooks: &Hooks,
+    definition: &SubagentDefinition,
+    session_id: &SessionId,
+    run_id: &RunId,
+    child_session_id: &SessionId,
+    child_id: &RunId,
+    display_name: &str,
+    prompt: &str,
+) {
+    let chain = &hooks.subagent_start;
+    if chain.is_empty() {
+        return;
+    }
+    let request = SubagentStartRequest {
+        session_id: session_id.clone(),
+        run_id: run_id.clone(),
+        child_session_id: child_session_id.clone(),
+        subagent_run_id: child_id.clone(),
+        subagent_type: definition.name.clone(),
+        display_name: display_name.to_owned(),
+        prompt: prompt.to_owned(),
+    };
+    chain.run(&request).await;
+}
+
+/// Run `subagent_stop` on `hooks` (the parent's) for a child that reached a
+/// terminal result. Same parameter shape as [`subagent_start`]; the caller
+/// checks `outcome.ended.is_some()` first.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn subagent_stop(
+    hooks: &Hooks,
+    definition: &SubagentDefinition,
+    session_id: &SessionId,
+    run_id: &RunId,
+    child_session_id: &SessionId,
+    child_id: &RunId,
+    display_name: &str,
+    outcome: &Outcome,
+) {
+    let chain = &hooks.subagent_stop;
+    if chain.is_empty() {
+        return;
+    }
+    let request = SubagentStopRequest {
+        session_id: session_id.clone(),
+        run_id: run_id.clone(),
+        child_session_id: child_session_id.clone(),
+        subagent_run_id: child_id.clone(),
+        subagent_type: definition.name.clone(),
+        display_name: display_name.to_owned(),
+        subtype: outcome.ended.expect("checked by the caller"),
+        text: outcome.text.clone(),
+        error: outcome.error.clone(),
+    };
+    chain.run(&request).await;
 }
 
 /// Refuse the call in `ctx` when its child run `child_id`, which exists,
