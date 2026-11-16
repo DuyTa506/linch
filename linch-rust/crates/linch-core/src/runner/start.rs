@@ -429,6 +429,7 @@ pub(super) async fn continue_run(
     runner.family = family;
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
+    runner.verify_retries = crate::verification::retries_spent(&events);
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }

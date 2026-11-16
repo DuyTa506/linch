@@ -135,6 +135,9 @@ pub(super) struct Runner {
     /// Schema retries the run spent, counted from its durable log on a
     /// resume.
     pub(super) schema_retries: u32,
+    /// Verification retries the run spent (see `runner/structured.rs`),
+    /// counted from its durable log on a resume.
+    pub(super) verify_retries: u32,
 }
 
 impl Runner {
@@ -175,6 +178,7 @@ impl Runner {
             standing: progress.standing,
             output,
             schema_retries: 0,
+            verify_retries: 0,
         };
         runner.narrow();
         runner

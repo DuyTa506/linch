@@ -47,6 +47,7 @@ pub mod subagents;
 pub mod tool;
 pub mod tool_search;
 pub mod usage;
+pub mod verification;
 pub mod vfs;
 
 pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, ForkError, RunError, RunOptions};

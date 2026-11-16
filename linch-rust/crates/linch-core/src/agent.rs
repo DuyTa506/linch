@@ -34,6 +34,7 @@ use crate::structured::OutputContract;
 use crate::subagents::{Registry, Roster, Workers};
 use crate::tool_search::ToolSearch;
 use crate::usage::Usage;
+use crate::verification::Verifiers;
 
 mod builder;
 mod child;
@@ -124,6 +125,8 @@ pub(crate) struct AgentInner {
     pub(crate) output: Option<Arc<OutputContract>>,
     /// The spec's `redaction`, compiled; `None` without one.
     pub(crate) redactor: Option<Arc<Redactor>>,
+    /// The spec's `verification`, compiled; `None` without one.
+    pub(crate) verifiers: Option<Arc<Verifiers>>,
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) tools: Arc<ToolRegistry>,
     /// The tools a subagent's run sees of `tools`; `None` for all.

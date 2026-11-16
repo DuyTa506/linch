@@ -14,7 +14,7 @@ use super::Outbox;
 use super::turn::{Runner, Step};
 use crate::agent::{AgentInner, RunError};
 use crate::events::kinds::{
-    ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype,
+    ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype, VerificationAction,
 };
 use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
@@ -37,7 +37,8 @@ use crate::usage::Usage;
 /// [`StopResponse::Retry`](crate::hooks::StopResponse::Retry); a later
 /// retry counts as an allow. Python's `_MAX_FINAL_ANSWER_REENTRIES`, which
 /// bounds `before_final_answer` retries the same way and is not
-/// checkpointed either: a resume starts afresh.
+/// checkpointed either: a resume starts afresh. An agent with a
+/// `verification` spec bounds them with its `max_retries` instead.
 const MAX_FINAL_ANSWER_RETRIES: u32 = 1;
 
 /// What a `before_provider_call` hook decided for the request about to be
@@ -344,16 +345,29 @@ impl Runner {
             structured_output: structured_output.cloned(),
         };
         let mut records = Vec::new();
-        let retry = self.final_answer_retries < MAX_FINAL_ANSWER_RETRIES;
+        // With verifiers, a hook's retry draws on their durable budget and
+        // is reported as a `verification` event under its policy id.
+        let verifiers = self.agent.verifiers.clone();
+        let retry = match &verifiers {
+            Some(verifiers) => self.verify_retries < verifiers.max_retries,
+            None => self.final_answer_retries < MAX_FINAL_ANSWER_RETRIES,
+        };
         let output = self.output.clone();
         let check = move |text: &str| output.as_ref()?.check(text).ok();
         let run = chain.run_into(request, retry, &check, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
+        let retried = (records.iter())
+            .find(|record| matches!(record.status, HookStatus::Answered { verdict: "retry" }))
+            .map(|record| record.policy_id.to_string());
         self.push_records(records, None);
         let Some(outcome) = outcome else {
             self.abort().await?;
             return Ok(Stopping::Ended);
         };
+        if let (Some(_), false, Some(hook)) = (&verifiers, retry, &retried) {
+            // The hook's retry counted as an allow.
+            self.stage_verification(hook, VerificationAction::Exhausted, "");
+        }
         let feedback = match outcome {
             // The model's text is redacted already; a rewrite may not be.
             StopOutcome::Stop { text } => {
@@ -365,7 +379,13 @@ impl Runner {
             }
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Retry { feedback } => {
-                self.final_answer_retries += 1;
+                match (&verifiers, &retried) {
+                    (Some(_), Some(hook)) => {
+                        self.verify_retries += 1;
+                        self.stage_verification(hook, VerificationAction::Retry, &feedback);
+                    }
+                    _ => self.final_answer_retries += 1,
+                }
                 feedback
             }
             StopOutcome::Failed { reason } => {

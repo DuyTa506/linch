@@ -120,16 +120,19 @@ impl AgentInner {
             serde_json::to_value(definition).map_err(|e| BuildError::Invalid(e.to_string()))?;
         features.insert("subagent".into(), value);
         let hooks = self.built_hooks;
-        // The parent's final-answer schema is not the child's: a subagent
-        // answers its parent in text.
+        // The parent's final-answer schema and verifiers are not the
+        // child's: a subagent answers its parent in text. Its redaction is:
+        // the child's output reaches the same logs.
         let mut spec = self.spec.clone();
         spec.output_schema = None;
         spec.structured_output_retries = 0;
+        spec.verification = None;
         let contract = contract_digest(&spec, &tools.contract_tools(), hooks, &features)?;
         Ok(Self {
             spec,
             output: None,
             redactor: self.redactor.clone(),
+            verifiers: None,
             provider: Arc::clone(&self.provider),
             tools: Arc::clone(&self.tools),
             filter: Some(filter),
