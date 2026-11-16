@@ -265,7 +265,8 @@ async fn a_rewritten_request_reaches_the_provider_and_the_context_build_event() 
     let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
 
     assert_eq!(
-        provider.requests()[0].model, "cheaper-model",
+        provider.requests()[0].model,
+        "cheaper-model",
         "the provider sees the rewrite"
     );
     let build = (envelopes.iter())
@@ -297,7 +298,10 @@ async fn a_blocked_provider_call_ends_the_run_without_calling_the_provider() {
         error.is_none(),
         "a blocked call is a normal failed result, not a stream error: {error:?}"
     );
-    assert!(provider.requests().is_empty(), "the provider is never called");
+    assert!(
+        provider.requests().is_empty(),
+        "the provider is never called"
+    );
     let Event::Error(err) = &(envelopes.iter())
         .find(|e| matches!(e.event, Event::Error(_)))
         .expect("an error event")
@@ -309,7 +313,10 @@ async fn a_blocked_provider_call_ends_the_run_without_calling_the_provider() {
     let Event::Result(result) = &envelopes.last().unwrap().event else {
         panic!("the run ends with a result: {envelopes:?}");
     };
-    assert_eq!(result.subtype, linch_core::events::kinds::ResultSubtype::Error);
+    assert_eq!(
+        result.subtype,
+        linch_core::events::kinds::ResultSubtype::Error
+    );
 }
 
 #[tokio::test]
@@ -360,7 +367,9 @@ async fn a_blocked_response_ends_the_run_before_it_is_staged() {
         "a blocked response is a normal failed result, not a stream error: {error:?}"
     );
     assert!(
-        !envelopes.iter().any(|e| matches!(e.event, Event::Assistant(_))),
+        !envelopes
+            .iter()
+            .any(|e| matches!(e.event, Event::Assistant(_))),
         "the blocked response is never staged: {envelopes:?}"
     );
     let Event::Error(err) = &(envelopes.iter())
@@ -374,7 +383,10 @@ async fn a_blocked_response_ends_the_run_before_it_is_staged() {
     let Event::Result(result) = &envelopes.last().unwrap().event else {
         panic!("the run ends with a result: {envelopes:?}");
     };
-    assert_eq!(result.subtype, linch_core::events::kinds::ResultSubtype::Error);
+    assert_eq!(
+        result.subtype,
+        linch_core::events::kinds::ResultSubtype::Error
+    );
 }
 
 #[tokio::test]

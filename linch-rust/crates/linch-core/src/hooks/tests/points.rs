@@ -394,7 +394,9 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
     );
     assert_eq!(
         hooks.stop.run(request.clone()).await.outcome,
-        StopOutcome::Stop { text: "done".into() }
+        StopOutcome::Stop {
+            text: "done".into()
+        }
     );
     let _ = register(
         &hooks.stop,
@@ -422,7 +424,9 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
     let _ = register(&hooks.stop, Scripted::new("v", &log, |_| Act::Fail));
     assert_eq!(
         hooks.stop.run(request.clone()).await.outcome,
-        StopOutcome::Stop { text: "done".into() }
+        StopOutcome::Stop {
+            text: "done".into()
+        }
     );
     let hooks = Hooks::default();
     let _ = register(

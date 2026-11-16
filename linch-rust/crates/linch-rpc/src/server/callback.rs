@@ -32,8 +32,8 @@ use super::peer::Peer;
 use crate::error::{ErrorObject, invalid_params};
 use crate::protocol::{
     AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
-    HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer,
-    StopAnswer, UserPromptAnswer, WireToolResult, method,
+    HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer,
+    UserPromptAnswer, WireToolResult, method,
 };
 
 /// The hook chains holding one [`RpcHook`] per declaration, in order.
@@ -301,7 +301,9 @@ impl Wire for AfterProviderCall {
             AfterProviderCallAnswer::Rewrite { assembly } => {
                 AfterProviderCallResponse::Rewrite { assembly }
             }
-            AfterProviderCallAnswer::Block { reason } => AfterProviderCallResponse::Block { reason },
+            AfterProviderCallAnswer::Block { reason } => {
+                AfterProviderCallResponse::Block { reason }
+            }
         })
     }
 }

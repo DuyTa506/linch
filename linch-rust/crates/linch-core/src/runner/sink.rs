@@ -145,7 +145,15 @@ impl<'a> JournalSink<'a> {
             ready
         };
         let seq = self.durable.load(Ordering::SeqCst);
-        event_emit(self.hooks, self.outbox, &self.session_id, &self.run_id, seq, &ready).await;
+        event_emit(
+            self.hooks,
+            self.outbox,
+            &self.session_id,
+            &self.run_id,
+            seq,
+            &ready,
+        )
+        .await;
         self.outbox.deliver(ready).await;
         Ok(())
     }

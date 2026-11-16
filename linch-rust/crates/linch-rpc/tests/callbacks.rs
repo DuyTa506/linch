@@ -360,10 +360,15 @@ async fn stop_can_block_the_run() {
     let extra = json!({"callbacks": [
         {"point": "stop", "policy_id": "moderate", "policy_version": 1},
     ]});
-    let agent = rpc.open(hosted(vec![text_turn("done")], "default", extra)).await;
+    let agent = rpc
+        .open(hosted(vec![text_turn("done")], "default", extra))
+        .await;
     let run_id = rpc.start(&agent, "s1", "Go.").await;
     let ended = rpc.until_end(&run_id).await;
-    assert!(ended.error.is_none(), "a block is a failed result, not a protocol error");
+    assert!(
+        ended.error.is_none(),
+        "a block is a failed result, not a protocol error"
+    );
     assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
 }
 
@@ -389,7 +394,14 @@ async fn event_emit_fires_once_per_durable_event() {
         .collect();
     assert_eq!(
         kinds,
-        ["init", "user", "context_build", "assistant", "usage", "result"]
+        [
+            "init",
+            "user",
+            "context_build",
+            "assistant",
+            "usage",
+            "result"
+        ]
     );
 }
 
@@ -418,7 +430,10 @@ async fn before_provider_call_rewrites_the_request() {
     ]});
     let ended = run(&mut rpc, vec![text_turn("Done.")], extra).await;
     assert!(finished(&ended));
-    assert_eq!(seen.lock().unwrap()[0]["request"]["request"]["model"], MODEL);
+    assert_eq!(
+        seen.lock().unwrap()[0]["request"]["request"]["model"],
+        MODEL
+    );
     let build_model = (ended.envelopes.iter())
         .find_map(|envelope| match &envelope.event {
             Event::ContextBuild(build) => Some(build.model.clone()),
@@ -437,10 +452,15 @@ async fn before_provider_call_can_block_the_call() {
     let extra = json!({"callbacks": [
         {"point": "before_provider_call", "policy_id": "budget", "policy_version": 1},
     ]});
-    let agent = rpc.open(hosted(vec![text_turn("Done.")], "default", extra)).await;
+    let agent = rpc
+        .open(hosted(vec![text_turn("Done.")], "default", extra))
+        .await;
     let run_id = rpc.start(&agent, "s1", "Go.").await;
     let ended = rpc.until_end(&run_id).await;
-    assert!(ended.error.is_none(), "a block is a failed result, not a protocol error");
+    assert!(
+        ended.error.is_none(),
+        "a block is a failed result, not a protocol error"
+    );
     assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
 }
 
@@ -462,9 +482,7 @@ async fn after_provider_call_rewrites_the_response() {
     assert!(finished(&ended));
     let text = (ended.envelopes.iter())
         .find_map(|envelope| match &envelope.event {
-            Event::Assistant(assistant) => {
-                Some(serde_json::to_string(&assistant.message).unwrap())
-            }
+            Event::Assistant(assistant) => Some(serde_json::to_string(&assistant.message).unwrap()),
             _ => None,
         })
         .expect("an assistant event");
@@ -482,11 +500,18 @@ async fn after_provider_call_can_block_the_response() {
         {"point": "after_provider_call", "policy_id": "moderate", "policy_version": 1},
     ]});
     let agent = rpc
-        .open(hosted(vec![text_turn("The secret is 42.")], "default", extra))
+        .open(hosted(
+            vec![text_turn("The secret is 42.")],
+            "default",
+            extra,
+        ))
         .await;
     let run_id = rpc.start(&agent, "s1", "Go.").await;
     let ended = rpc.until_end(&run_id).await;
-    assert!(ended.error.is_none(), "a block is a failed result, not a protocol error");
+    assert!(
+        ended.error.is_none(),
+        "a block is a failed result, not a protocol error"
+    );
     assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
     assert!(
         !ended.kinds().contains(&"assistant".to_owned()),
