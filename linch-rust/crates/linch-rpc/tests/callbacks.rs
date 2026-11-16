@@ -333,6 +333,40 @@ async fn turn_point_callbacks_cross_the_connection() {
     assert_eq!(error.data.unwrap()["reason"], "no prompts today");
 }
 
+/// `stop` can replace the run's final-answer text; the replacement is what
+/// the result reports, not the model's original text.
+#[tokio::test]
+async fn stop_rewrites_the_final_text() {
+    let (mut rpc, _log) = client(json!({
+        "stop": {"action": "rewrite", "text": "Done!"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "polish", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("done")], extra).await;
+    assert!(finished(&ended));
+    assert!(matches!(
+        ended.last(),
+        Event::Result(r) if r.final_text.as_deref() == Some("Done!")
+    ));
+}
+
+/// A block ends the run with a failed result instead of letting it stop.
+#[tokio::test]
+async fn stop_can_block_the_run() {
+    let (mut rpc, _log) = client(json!({
+        "stop": {"action": "block", "reason": "unsafe content"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "moderate", "policy_version": 1},
+    ]});
+    let agent = rpc.open(hosted(vec![text_turn("done")], "default", extra)).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "a block is a failed result, not a protocol error");
+    assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
+}
+
 /// `before_provider_call` sees the exact request about to be sent and can
 /// replace it; the replacement is what the provider gets and what the run's
 /// `context_build` event records, not the original.

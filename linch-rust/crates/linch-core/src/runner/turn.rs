@@ -433,11 +433,11 @@ impl Runner {
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);
             }
-            match self.stop(&text).await? {
-                Stopping::Stop => {}
+            let text = match self.stop(&text).await? {
+                Stopping::Stop { text } => text,
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),
                 Stopping::Ended => return Ok(None),
-            }
+            };
             if !self.post_turn(stop_reason).await {
                 self.abort().await?;
                 return Ok(None);

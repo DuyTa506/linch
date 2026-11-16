@@ -56,12 +56,13 @@ pub(super) enum AfterCall {
 
 /// What a text-only response leads to, after the `stop` chain.
 pub(super) enum Stopping {
-    /// Every hook let the run stop.
-    Stop,
+    /// Every hook let the run stop; this is the final-answer text, the
+    /// original or the last rewrite.
+    Stop { text: String },
     /// A hook kept the run going: this feedback step is next.
     Continue(Step),
-    /// The run already ended: a hook failed closed, or the run cancel
-    /// interrupted the chain.
+    /// The run already ended: a hook blocked the stop, failed closed, or
+    /// the run cancel interrupted the chain.
     Ended,
 }
 
@@ -231,7 +232,9 @@ impl Runner {
     pub(super) async fn stop(&mut self, text: &str) -> Result<Stopping, RunError> {
         let chain = &self.agent.hooks.stop;
         if chain.is_empty() {
-            return Ok(Stopping::Stop);
+            return Ok(Stopping::Stop {
+                text: text.to_owned(),
+            });
         }
         let request = StopRequest {
             session_id: self.run.session_id.clone(),
@@ -239,7 +242,7 @@ impl Runner {
             text: text.to_owned(),
         };
         let mut records = Vec::new();
-        let run = chain.run_into(&request, &mut records);
+        let run = chain.run_into(request, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
         let Some(outcome) = outcome else {
@@ -247,7 +250,7 @@ impl Runner {
             return Ok(Stopping::Ended);
         };
         let feedback = match outcome {
-            StopOutcome::Stop => return Ok(Stopping::Stop),
+            StopOutcome::Stop { text } => return Ok(Stopping::Stop { text }),
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Failed { reason } => {
                 self.hook_failed(reason).await?;

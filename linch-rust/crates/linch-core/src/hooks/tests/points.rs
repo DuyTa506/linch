@@ -392,7 +392,10 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
         &hooks.stop,
         Scripted::new("ok", &log, |_| Act::Answer(StopResponse::Allow)),
     );
-    assert_eq!(hooks.stop.run(&request).await.outcome, StopOutcome::Stop);
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Stop { text: "done".into() }
+    );
     let _ = register(
         &hooks.stop,
         Scripted::new("cite", &log, |_| {
@@ -405,7 +408,7 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
         &hooks.stop,
         Scripted::new("never", &log, |_| Act::Answer(StopResponse::Allow)),
     );
-    let done = hooks.stop.run(&request).await;
+    let done = hooks.stop.run(request.clone()).await;
     assert_eq!(
         done.outcome,
         StopOutcome::Continue {
@@ -417,18 +420,62 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
     // Open by default; closed fails the run.
     let hooks = Hooks::default();
     let _ = register(&hooks.stop, Scripted::new("v", &log, |_| Act::Fail));
-    assert_eq!(hooks.stop.run(&request).await.outcome, StopOutcome::Stop);
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Stop { text: "done".into() }
+    );
     let hooks = Hooks::default();
     let _ = register(
         &hooks.stop,
         Scripted::new("v", &log, |_| Act::Fail).fail_mode(FailMode::Closed),
     );
     assert_eq!(
-        hooks.stop.run(&request).await.outcome,
+        hooks.stop.run(request.clone()).await.outcome,
         StopOutcome::Failed {
             reason: "hook `v` failed".into()
         }
     );
+}
+
+#[tokio::test]
+async fn stop_rewrites_the_final_text_and_a_block_fails_the_run() {
+    let request = StopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        text: "done".into(),
+    };
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.stop,
+        Scripted::new("polish", &log, |_| {
+            Act::Answer(StopResponse::Rewrite {
+                text: "Done!".into(),
+            })
+        }),
+    );
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Stop {
+            text: "Done!".into()
+        }
+    );
+
+    let _ = register(
+        &hooks.stop,
+        Scripted::new("moderate", &log, |_| {
+            Act::Answer(StopResponse::Block {
+                reason: "unsafe content".into(),
+            })
+        }),
+    );
+    assert_eq!(
+        hooks.stop.run(request).await.outcome,
+        StopOutcome::Failed {
+            reason: "unsafe content".into()
+        }
+    );
+    assert_eq!(calls(&log), ["polish", "polish", "moderate"]);
 }
 
 #[tokio::test]

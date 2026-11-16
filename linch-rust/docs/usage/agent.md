@@ -430,7 +430,7 @@ request has `session_id` and `run_id`:
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
 | `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called |
 | `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: what the provider call just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "block", "reason"}`; a rewrite is what gets staged and appended to the session, and a block ends the run before the response is staged. Python's `retry`/`force_continue` actions here are not available: use `{"action": "continue"}` to accept the response unchanged |
-| `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
+| `stop` | `text` (the final-answer text so far, the model's or a prior rewrite) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; a rewrite replaces the run's final-answer text (not the assistant message, already appended to the session by the time `stop` runs), and a block ends the run failed. This is also where Python's `before_final_answer` lives: there is no separate point |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
 A tool result in a request or an answer is `{"output": {"value",

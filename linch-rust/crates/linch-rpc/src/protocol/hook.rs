@@ -183,6 +183,17 @@ pub enum StopAnswer {
         /// Why to keep going.
         feedback: String,
     },
+    /// Use this text as the run's final answer instead; later callbacks
+    /// see it.
+    Rewrite {
+        /// The new final-answer text.
+        text: String,
+    },
+    /// Do not let the run stop like this; end it with this reason.
+    Block {
+        /// Why the stop was blocked.
+        reason: String,
+    },
 }
 
 /// A `post_turn` answer: `{}`. The point only observes.

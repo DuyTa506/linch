@@ -25,6 +25,9 @@ What differs in Rust:
   the request about to be sent, and `after_provider_call` can rewrite or
   block the response a call just assembled, before it is staged; Python's
   `retry`/`force_continue` actions at that point are not ported (`hooks.rs`).
+  Python's `before_final_answer` is not a separate point: `stop` can rewrite
+  the run's final-answer text (not the assistant message, already appended
+  by the time `stop` runs) or block the stop outright.
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -90,12 +93,14 @@ run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   Then `Step::Results` appends the results and starts the next turn. The
   provider's `stop_reason` does not decide this; the blocks do.
 - **Without**, the run first waits for any background subagent it has, which
-  can add a notification and another turn (`turn.rs:398-401`,
+  can add a notification and another turn (`turn.rs:433-435`,
   `runner/inbox.rs:137-168`). Then the `stop` hook chain runs: a hook can keep
   the run going with feedback, which is appended as a user message and starts
-  another turn (`turn.rs:402-406`, `runner/hooks.rs:176-219`). When every hook
-  lets it stop, `post_turn` runs and the run ends `completed`
-  (`turn.rs:407-414`).
+  another turn, or rewrite the final-answer text (the value `post_turn` and
+  the terminal `Result` see next), or block the stop outright, ending the run
+  failed (`turn.rs:436-440`, `runner/hooks.rs`). When every hook lets it stop,
+  `post_turn` runs and the run ends `completed` with that text
+  (`turn.rs:441-448`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
 is not made and the run fails with `TurnLimitError` (`runner/end.rs:93-108`).

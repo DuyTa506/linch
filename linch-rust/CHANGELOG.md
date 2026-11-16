@@ -30,6 +30,14 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   `@callback` in `linch_rust` and to `Hook<AfterProviderCall>` in
   `linch-core`. Python's `retry`/`force_continue` actions at this point are
   not ported: Rust has only `Continue`/`Rewrite`/`Block`.
+- `stop` can now rewrite the run's final-answer text, or block the stop
+  outright. This is Python's `before_final_answer` hook point, folded into
+  `stop` rather than added as a separate point: the rewrite replaces only the
+  text the run reports as its result, not the assistant message already
+  appended to the session (that message is logged before `stop` ever runs).
+  Available as `{"action": "rewrite", "text"}` / `{"action": "block",
+  "reason"}` to `@callback` in `linch_rust` and as `StopResponse::Rewrite`/
+  `StopResponse::Block` to `Hook<Stop>` in `linch-core`.
 
 ### Changed
 

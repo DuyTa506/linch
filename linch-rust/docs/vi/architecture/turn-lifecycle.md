@@ -26,6 +26,9 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   request sắp được gửi, và `after_provider_call` có thể viết lại hoặc block response
   mà một lời gọi vừa dựng xong, trước khi nó được stage; hành động `retry`/
   `force_continue` của Python tại điểm đó không được port (`hooks.rs`).
+  `before_final_answer` của Python không phải một point riêng: `stop` có thể viết
+  lại văn bản trả lời cuối cùng của run (không phải tin nhắn assistant, đã được nối
+  vào từ trước khi `stop` chạy) hoặc block việc dừng lại.
 - Run của một subagent không thể suspend: một lời gọi cần phê duyệt sẽ bị từ chối
   (`runner/batch.rs:73-75`).
 
@@ -89,11 +92,13 @@ tương tự (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   Sau đó `Step::Results` nối các kết quả và bắt đầu lượt kế tiếp. `stop_reason` của
   provider không quyết định điều này; các block mới quyết định.
 - **Không có**, trước hết run chờ mọi subagent chạy nền mà nó có, việc này có thể thêm
-  một thông báo và một lượt nữa (`turn.rs:398-401`, `runner/inbox.rs:137-168`). Sau đó
+  một thông báo và một lượt nữa (`turn.rs:433-435`, `runner/inbox.rs:137-168`). Sau đó
   chuỗi hook `stop` chạy: một hook có thể giữ run tiếp tục bằng một phản hồi, được nối vào
-  như một message của user và bắt đầu một lượt khác (`turn.rs:402-406`,
-  `runner/hooks.rs:176-219`). Khi mọi hook cho phép dừng, `post_turn` chạy và run kết
-  thúc với trạng thái `completed` (`turn.rs:407-414`).
+  như một message của user và bắt đầu một lượt khác, hoặc viết lại văn bản trả lời cuối
+  cùng (giá trị mà `post_turn` và `Result` cuối cùng sẽ thấy), hoặc block việc dừng lại,
+  khiến run thất bại (`turn.rs:436-440`, `runner/hooks.rs`). Khi mọi hook cho phép dừng,
+  `post_turn` chạy và run kết thúc với trạng thái `completed` cùng văn bản đó
+  (`turn.rs:441-448`).
 
 `max_turns` là điều kiện dừng của vòng lặp: lời gọi sẽ vượt quá giới hạn này không được
 thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:93-108`).

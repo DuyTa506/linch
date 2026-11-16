@@ -187,6 +187,20 @@ fn stop_and_post_turn_read_their_answers() {
             feedback: "check the tests".into()
         }
     );
+    let rewrite = json!({"action": "rewrite", "text": "Done!"});
+    assert_eq!(
+        Stop::decode(rewrite).unwrap(),
+        StopResponse::Rewrite {
+            text: "Done!".into()
+        }
+    );
+    let block = json!({"action": "block", "reason": "unsafe content"});
+    assert_eq!(
+        Stop::decode(block).unwrap(),
+        StopResponse::Block {
+            reason: "unsafe content".into()
+        }
+    );
 
     let turn = PostTurnRequest {
         session_id,

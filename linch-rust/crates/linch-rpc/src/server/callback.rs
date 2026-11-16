@@ -263,6 +263,8 @@ impl Wire for Stop {
         Ok(match answer(value)? {
             StopAnswer::Allow {} => StopResponse::Allow,
             StopAnswer::Continue { feedback } => StopResponse::Continue { feedback },
+            StopAnswer::Rewrite { text } => StopResponse::Rewrite { text },
+            StopAnswer::Block { reason } => StopResponse::Block { reason },
         })
     }
 }
