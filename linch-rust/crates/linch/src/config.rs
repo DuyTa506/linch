@@ -12,11 +12,14 @@ use crate::profile::Profile;
 mod deep_agent;
 mod filesystem;
 mod mcp;
+mod pricing;
 mod redact;
 
 pub use deep_agent::{DeepAgentConfig, DeepAgentProfileChoice};
 pub use filesystem::FilesystemConfig;
 pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
+pub(crate) use pricing::pricing;
+pub use pricing::{ModelRates, PricingOverrides};
 
 /// Everything needed to open an [`Agent`](linch_core::Agent), as data.
 ///
@@ -122,6 +125,16 @@ pub struct AgentConfig {
     /// when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
+    /// Rates, by exact model id, that this agent prices a model with
+    /// instead of the published table, or in addition to it: a local model
+    /// the table does not list has no cost until priced here (see
+    /// [`ModelRates`]). Empty when absent.
+    #[serde(
+        default,
+        deserialize_with = "pricing::check",
+        skip_serializing_if = "PricingOverrides::is_empty"
+    )]
+    pub pricing: PricingOverrides,
 }
 
 fn is_false(value: &bool) -> bool {

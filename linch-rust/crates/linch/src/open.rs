@@ -181,7 +181,7 @@ impl AgentConfig {
             .run_store(runs)
             .session_store(sessions)
             .namespace(self.namespace)
-            .pricing(linch_providers::cost)
+            .pricing(crate::config::pricing(self.pricing))
             .on_session_close(move |session| {
                 reads.forget(session);
                 processes.close_session(session);

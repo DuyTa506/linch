@@ -118,6 +118,11 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   `cached_tokens` without `prompt_tokens_details`, llama.cpp's
   `cache_read_tokens` and `prompt_cache_hit_tokens` (details or `usage`) and
   `timings.cache_n` when usage reports no cache hit.
+- `pricing` in the agent config: rates per model id (`input`, `output`, and
+  `cache_read` and `cache_creation`, which default to `input`) that this agent
+  prices a model with, replacing the published table for it or adding a model
+  the table lacks, such as one a local server serves. Without it a model the
+  table does not list costs `None`, as in Python.
 
 ### Changed
 
