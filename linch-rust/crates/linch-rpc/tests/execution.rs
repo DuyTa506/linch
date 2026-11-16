@@ -57,7 +57,7 @@ async fn bash(rpc: &mut Rpc, config: Value) -> String {
 #[tokio::test]
 async fn a_tenant_may_name_only_its_listed_backends() {
     let dir = workspace();
-    let rpc = Rpc::remote(acme(dir.path(), &[ExecutionConfig::Local]));
+    let rpc = Rpc::remote(acme(dir.path(), &[ExecutionConfig::Local {}]));
     let sandbox = json!({"backend": "sandbox"});
     let kind = refused(&rpc, config(dir.path(), "true", sandbox)).await;
     assert_eq!(kind.as_deref(), Some("execution"));
@@ -101,7 +101,7 @@ async fn a_tenant_held_to_the_sandbox_runs_bash_in_it() {
     }
     let result = bash(&mut rpc, config).await;
     assert!(result.contains("Permission denied"), "{result}");
-    let mut local = Rpc::remote(acme(dir.path(), &[ExecutionConfig::Local]));
+    let mut local = Rpc::remote(acme(dir.path(), &[ExecutionConfig::Local {}]));
     let config = self::config(dir.path(), "cat ../secret", Value::Null);
     let result = bash(&mut local, config).await;
     assert!(result.contains("hidden"), "{result}");

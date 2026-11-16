@@ -127,20 +127,29 @@ impl DockerPolicy {
             "none" => "no network".to_owned(),
             other => format!("network {other}"),
         };
+        let memory = match self.memory_bytes % MIB {
+            0 => format!("{} MiB", self.memory_bytes / MIB),
+            _ => format!("{} bytes", self.memory_bytes),
+        };
+        // Every field shows, so every change of policy changes the contract.
+        let mut extra = String::new();
+        if self.read_only_root {
+            extra.push_str(", read-only root");
+        }
+        for entry in &self.tmpfs {
+            extra.push_str(&format!(", tmpfs {entry}"));
+        }
+        if let Some(path) = &self.docker_path {
+            extra.push_str(&format!(", client {}", path.display()));
+        }
         format!(
-            "Commands run in a fresh Docker container each (image {}, {network}, {} MiB of \
-             memory, {} CPUs, {} processes, no capabilities{}) as {user}, with the workspace \
-             mounted at its own path; nothing outside the workspace persists between \
-             commands, and no host credentials are in the environment.",
+            "Commands run in a fresh Docker container each (image {}, {network}, {memory} of \
+             memory, {} CPUs, {} processes, no capabilities{extra}) as {user}, with the \
+             workspace mounted at its own path; nothing outside the workspace persists \
+             between commands, and no host credentials are in the environment.",
             self.image,
-            self.memory_bytes / MIB,
             cpus(self.cpu_millis),
             self.pids_limit,
-            if self.read_only_root {
-                ", read-only root"
-            } else {
-                ""
-            },
         )
     }
 
@@ -381,5 +390,53 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("2.000 CPUs, 512 processes"), "{text}");
+    }
+
+    /// The description is how the policy enters the run contract: a change
+    /// of any field must change it.
+    #[test]
+    fn every_field_changes_the_description() {
+        let base = DockerPolicy::default();
+        let changed = [
+            DockerPolicy {
+                image: "alpine:3.20".into(),
+                ..base.clone()
+            },
+            DockerPolicy {
+                docker_path: Some("/opt/docker".into()),
+                ..base.clone()
+            },
+            DockerPolicy {
+                network: "bridge".into(),
+                ..base.clone()
+            },
+            DockerPolicy {
+                memory_bytes: base.memory_bytes + 1,
+                ..base.clone()
+            },
+            DockerPolicy {
+                cpu_millis: 1999,
+                ..base.clone()
+            },
+            DockerPolicy {
+                pids_limit: 511,
+                ..base.clone()
+            },
+            DockerPolicy {
+                read_only_root: true,
+                ..base.clone()
+            },
+            DockerPolicy {
+                tmpfs: vec!["/tmp".into()],
+                ..base.clone()
+            },
+            DockerPolicy {
+                user: Some("0:0".into()),
+                ..base.clone()
+            },
+        ];
+        for policy in changed {
+            assert_ne!(policy.describe(), base.describe(), "{policy:?}");
+        }
     }
 }

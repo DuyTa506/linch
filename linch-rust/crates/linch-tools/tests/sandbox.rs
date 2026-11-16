@@ -95,6 +95,9 @@ async fn a_command_reads_and_writes_only_the_workspace_and_its_home() {
     // `/tmp` outside the private one is closed too.
     let tmp = any(run(&tool, "ls /tmp").await);
     assert!(tmp.contains("Permission denied"), "{tmp}");
+    // The server's controlling terminal is closed too.
+    let tty = any(run(&tool, ": > /dev/tty").await);
+    assert!(tty.contains("Permission denied"), "{tty}");
 }
 
 #[tokio::test]
@@ -357,6 +360,8 @@ fn a_policy_reads_strictly_with_defaults() {
     assert_eq!(config, ExecutionConfig::Sandbox(SandboxPolicy::default()));
     let local: ExecutionConfig = serde_json::from_value(json!({"backend": "local"})).unwrap();
     assert!(local.is_local());
+    let extra = json!({"backend": "local", "network": false});
+    assert!(serde_json::from_value::<ExecutionConfig>(extra).is_err());
     let typo = json!({"backend": "sandbox", "netwrok": true});
     assert!(serde_json::from_value::<ExecutionConfig>(typo).is_err());
     let docker: ExecutionConfig =

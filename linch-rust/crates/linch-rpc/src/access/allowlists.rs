@@ -233,7 +233,7 @@ impl Allowlists {
             postgres: Vec::new(),
             mcp_commands: Vec::new(),
             mcp_origins: Vec::new(),
-            execution: vec![ExecutionConfig::Local],
+            execution: vec![ExecutionConfig::Local {}],
         }
     }
 

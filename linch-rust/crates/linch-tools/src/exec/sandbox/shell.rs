@@ -1,0 +1,389 @@
+//! The sandbox shell (Linux).
+//!
+//! Landlock and seccomp restrict the calling *thread*, and a process forked
+//! from it inherits both. So each command is forked from a short-lived
+//! thread that first restricts itself; the server's other threads stay
+//! unrestricted, and no code runs between fork and exec. Rlimits are
+//! per process, so `prlimit` sets them and then execs the shell, keeping
+//! its pid, its process group and the lifeline's stdin.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs::DirBuilder;
+use std::io;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use async_trait::async_trait;
+use landlock::{
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, Scope, path_beneath_rules,
+};
+use linch_core::SessionId;
+use rustix::process::{Pid, Signal, kill_process_group};
+use tempfile::TempDir;
+use tokio::process::{Child, Command};
+use tokio::runtime::Handle;
+use tokio::sync::oneshot;
+
+use super::{SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
+use crate::bash::process::{self, Spawned};
+use crate::exec::{ExecutionError, Launch, Shell};
+
+/// Devices a command may read and write.
+const DEVICES: [&str; 5] = [
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+];
+
+/// Where `prlimit` may be.
+const PRLIMIT: [&str; 2] = ["/usr/bin/prlimit", "/bin/prlimit"];
+
+/// The Landlock ABI the sandbox requires in full: file access, TCP, and
+/// the scoping of signals and abstract Unix sockets.
+const LANDLOCK: ABI = ABI::V6;
+
+/// What a command is confined to, shared by every spawn of one backend.
+#[derive(Debug)]
+struct Rules {
+    network: bool,
+    root: PathBuf,
+    read: Vec<PathBuf>,
+}
+
+impl Rules {
+    /// Restrict the calling thread to these rules plus `home`, and apply
+    /// the seccomp filter. Fails unless Landlock enforces all of it.
+    fn confine(&self, home: &Path) -> Result<(), String> {
+        let error = |error: landlock::RulesetError| error.to_string();
+        let mut ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(LANDLOCK))
+            .map_err(error)?;
+        if !self.network {
+            ruleset = ruleset
+                .handle_access(AccessNet::from_all(LANDLOCK))
+                .map_err(error)?;
+        }
+        let status = ruleset
+            .scope(Scope::from_all(LANDLOCK))
+            .map_err(error)?
+            .create()
+            .map_err(error)?
+            .add_rules(path_beneath_rules(
+                &self.read,
+                AccessFs::from_read(LANDLOCK),
+            ))
+            .map_err(error)?
+            .add_rules(path_beneath_rules(DEVICES, AccessFs::from_file(LANDLOCK)))
+            .map_err(error)?
+            .add_rules(path_beneath_rules(
+                [self.root.as_path(), home],
+                AccessFs::from_all(LANDLOCK),
+            ))
+            .map_err(error)?
+            .restrict_self()
+            .map_err(error)?;
+        if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
+            return Err(format!("Landlock status {status:?}"));
+        }
+        seccomp::apply(self.network)
+    }
+}
+
+/// Commands run under Landlock, seccomp and `prlimit`. One per agent: it
+/// owns the private homes of its sessions under a scratch directory that
+/// goes with it.
+#[derive(Debug)]
+pub(in crate::exec) struct SandboxShell {
+    policy: SandboxPolicy,
+    prlimit: PathBuf,
+    rules: Arc<Rules>,
+    scratch: TempDir,
+    homes: Mutex<HashMap<SessionId, PathBuf>>,
+    next: AtomicU64,
+}
+
+impl SandboxShell {
+    /// A sandbox for the workspace at `root`, after checking on a throwaway
+    /// thread that the kernel enforces the whole policy.
+    pub(in crate::exec) fn open(
+        root: &Path,
+        policy: SandboxPolicy,
+    ) -> Result<Self, ExecutionError> {
+        if !seccomp::SUPPORTED {
+            return Err(ExecutionError::Unsupported("sandbox"));
+        }
+        policy.validate()?;
+        let prlimit = (PRLIMIT.iter().map(PathBuf::from))
+            .find(|path| path.is_file())
+            .ok_or_else(|| ExecutionError::Missing {
+                backend: "sandbox",
+                program: "prlimit (util-linux)".into(),
+            })?;
+        let io = |source| ExecutionError::Io {
+            backend: "sandbox",
+            source,
+        };
+        let mut read: Vec<PathBuf> = SYSTEM_READ_PATHS.iter().map(PathBuf::from).collect();
+        read.extend(policy.read_paths.iter().cloned());
+        if policy.network {
+            // `/etc/resolv.conf` is often a link into `/run`.
+            read.extend(std::fs::canonicalize("/etc/resolv.conf").ok());
+        }
+        let rules = Arc::new(Rules {
+            network: policy.network,
+            root: root.to_path_buf(),
+            read,
+        });
+        let scratch = tempfile::Builder::new()
+            .prefix("linch-sandbox-")
+            .tempdir()
+            .map_err(io)?;
+        let probe = Arc::clone(&rules);
+        let home = scratch.path().to_path_buf();
+        let checked = std::thread::Builder::new()
+            .name("linch-sandbox-probe".into())
+            .spawn(move || probe.confine(&home))
+            .map_err(io)?
+            .join()
+            .unwrap_or_else(|_| Err("the probe thread panicked".into()));
+        checked.map_err(ExecutionError::Landlock)?;
+        Ok(Self {
+            policy,
+            prlimit,
+            rules,
+            scratch,
+            homes: Mutex::default(),
+            next: AtomicU64::new(0),
+        })
+    }
+
+    /// The private home of `session`, named now and created by the spawn.
+    fn home(&self, session: &SessionId) -> PathBuf {
+        let mut homes = self.homes.lock().unwrap_or_else(PoisonError::into_inner);
+        let home = homes.entry(session.clone()).or_insert_with(|| {
+            let n = self.next.fetch_add(1, Ordering::Relaxed);
+            self.scratch.path().join(format!("s{n}"))
+        });
+        home.clone()
+    }
+}
+
+/// `prlimit`'s arguments for `policy`, `nproc` counted from the `tasks`
+/// the server's user runs now, then the shell.
+fn limits(policy: &SandboxPolicy, tasks: u64) -> Vec<String> {
+    vec![
+        format!("--as={}", policy.memory_bytes),
+        // `SIGXCPU` at the soft limit; `SIGKILL` a second later for a
+        // process that ignores it.
+        format!(
+            "--cpu={}:{}",
+            policy.cpu_seconds,
+            policy.cpu_seconds.saturating_add(1)
+        ),
+        format!("--fsize={}", policy.file_size_bytes),
+        format!("--nproc={}", tasks.saturating_add(policy.max_processes)),
+        "--".into(),
+        "/bin/sh".into(),
+    ]
+}
+
+#[async_trait]
+impl Shell for SandboxShell {
+    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned> {
+        let home = self.home(launch.session);
+        let mut env = launch.env.clone();
+        for key in ["HOME", "TMPDIR"] {
+            env.insert(key.into(), home.display().to_string());
+        }
+        let shell: Vec<String> = (process::shell_args(launch.command, launch.lifeline).iter())
+            .map(|arg| (*arg).to_owned())
+            .collect();
+        let job = Job {
+            rules: Arc::clone(&self.rules),
+            prlimit: self.prlimit.clone(),
+            policy: self.policy.clone(),
+            shell,
+            cwd: launch.cwd.to_path_buf(),
+            env,
+            home,
+            lifeline: launch.lifeline,
+        };
+        let handle = Handle::current();
+        let (sent, received) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("linch-sandbox".into())
+            .spawn(move || {
+                if let Err(Ok(child)) = sent.send(job.run(&handle)) {
+                    // The call went away while the command started.
+                    kill(&child);
+                }
+            })?;
+        let child = received
+            .await
+            .map_err(|_| io::Error::other("the sandbox spawner thread ended early"))??;
+        Ok(Spawned {
+            child,
+            cleanup: None,
+        })
+    }
+
+    fn close_session(&self, session: &SessionId) {
+        let home = self
+            .homes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(session);
+        let Some(home) = home else {
+            return;
+        };
+        let remove = move || {
+            let _ = std::fs::remove_dir_all(home);
+        };
+        match Handle::try_current() {
+            Ok(handle) => drop(handle.spawn_blocking(remove)),
+            Err(_) => remove(),
+        }
+    }
+}
+
+/// One command to start on a spawner thread.
+struct Job {
+    rules: Arc<Rules>,
+    prlimit: PathBuf,
+    policy: SandboxPolicy,
+    shell: Vec<String>,
+    cwd: PathBuf,
+    env: BTreeMap<String, String>,
+    home: PathBuf,
+    lifeline: bool,
+}
+
+impl Job {
+    /// On a fresh thread: make the home, count the user's tasks, restrict
+    /// this thread, and start `prlimit` (which execs the shell).
+    fn run(self, handle: &Handle) -> io::Result<Child> {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.home)?;
+        let limits = limits(&self.policy, user_tasks());
+        self.rules.confine(&self.home).map_err(io::Error::other)?;
+        let _runtime = handle.enter();
+        let mut command = Command::new(&self.prlimit);
+        command.args(&limits).args(&self.shell);
+        process::start(command, &self.cwd, &self.env, self.lifeline)
+    }
+}
+
+/// Tasks (threads) the server's user runs now, which `RLIMIT_NPROC` counts:
+/// the `Threads` of every process whose real uid is the user's. Read from
+/// `status`, not the `/proc` entry's owner, which is root for a process
+/// that is not dumpable (as `linch-server` makes itself).
+fn user_tasks() -> u64 {
+    let uid = rustix::process::getuid().as_raw().to_string();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut tasks = 0u64;
+    for entry in entries.flatten() {
+        let numeric = (entry.file_name().to_str())
+            .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()));
+        if !numeric {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let field = |name: &str| {
+            let line = status.lines().find(|line| line.starts_with(name))?;
+            line[name.len()..].split_whitespace().next()
+        };
+        if field("Uid:") == Some(uid.as_str()) {
+            let threads = field("Threads:").and_then(|n| n.parse().ok()).unwrap_or(1);
+            tasks = tasks.saturating_add(threads);
+        }
+    }
+    tasks
+}
+
+/// Kill the group a started command leads.
+fn kill(child: &Child) {
+    let pid = (child.id())
+        .and_then(|id| i32::try_from(id).ok())
+        .filter(|&id| id > 1)
+        .and_then(Pid::from_raw);
+    if let Some(pid) = pid {
+        let _ = kill_process_group(pid, Signal::KILL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// The lifeline works inside the sandbox: the server dying (its end
+    /// of the pipe closing) kills the sandboxed command's whole group.
+    #[tokio::test]
+    async fn closing_the_lifeline_kills_a_sandboxed_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let shell = match SandboxShell::open(&root, SandboxPolicy::default()) {
+            Ok(shell) => shell,
+            Err(error) => return eprintln!("skipped: {error}"),
+        };
+        let env = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+        let session = SessionId::from("s1");
+        let launch = Launch {
+            command: "sleep 30",
+            cwd: &root,
+            env: &env,
+            session: &session,
+            lifeline: true,
+        };
+        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap();
+        let mut held = child.stdin.take();
+        let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
+        assert!(
+            alive.is_err(),
+            "the command runs while the lifeline is held"
+        );
+        held.take();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("the watchdog killed the group")
+            .unwrap();
+        assert_eq!(status.signal(), Some(9));
+    }
+
+    #[test]
+    fn prlimit_gets_every_limit_then_the_shell() {
+        let policy = SandboxPolicy::default();
+        assert_eq!(
+            limits(&policy, 100),
+            [
+                "--as=2147483648",
+                "--cpu=1800:1801",
+                "--fsize=1073741824",
+                "--nproc=612",
+                "--",
+                "/bin/sh"
+            ]
+        );
+    }
+
+    /// The count covers at least this process's own threads.
+    #[test]
+    fn the_user_task_count_includes_this_process() {
+        let own = std::fs::read_dir("/proc/self/task").unwrap().count() as u64;
+        assert!(user_tasks() >= own);
+    }
+}

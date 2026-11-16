@@ -19,7 +19,6 @@
 
 mod docker;
 mod sandbox;
-mod seccomp;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -45,28 +44,33 @@ use crate::bash::process::{self, Spawned};
 /// `{"backend": "local"}` is the default. The others carry their policy:
 /// `{"backend": "sandbox", "network": false, ...}` (see [`SandboxPolicy`])
 /// and `{"backend": "docker", "image": "...", ...}` (see [`DockerPolicy`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "backend", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionConfig {
     /// Commands run directly as the process's user.
-    #[default]
-    Local,
+    Local {},
     /// Commands run under Landlock, a seccomp filter and rlimits.
     Sandbox(SandboxPolicy),
     /// Commands run in a Docker container.
     Docker(DockerPolicy),
 }
 
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self::Local {}
+    }
+}
+
 impl ExecutionConfig {
     /// Whether this is the default `local` backend.
     pub fn is_local(&self) -> bool {
-        matches!(self, Self::Local)
+        matches!(self, Self::Local {})
     }
 
     /// The backend's name: `local`, `sandbox` or `docker`.
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Local => "local",
+            Self::Local {} => "local",
             Self::Sandbox(_) => "sandbox",
             Self::Docker(_) => "docker",
         }
@@ -128,7 +132,7 @@ impl ExecutionBackend {
             fs,
             shell: Arc::new(LocalShell),
             describe: None,
-            config: ExecutionConfig::Local,
+            config: ExecutionConfig::Local {},
         }
     }
 
@@ -144,10 +148,9 @@ impl ExecutionBackend {
     ///         `docker`), or its policy is invalid.
     pub fn open(fs: Arc<LocalFs>, config: &ExecutionConfig) -> Result<Self, ExecutionError> {
         let (shell, describe): (Arc<dyn Shell>, _) = match config {
-            ExecutionConfig::Local => return Ok(Self::local(fs)),
+            ExecutionConfig::Local {} => return Ok(Self::local(fs)),
             ExecutionConfig::Sandbox(policy) => {
-                let shell = sandbox::SandboxShell::open(fs.root(), policy.clone())?;
-                (Arc::new(shell), policy.describe())
+                (sandbox_shell(fs.root(), policy)?, policy.describe())
             }
             ExecutionConfig::Docker(policy) => {
                 let shell = docker::DockerShell::open(policy.clone())?;
@@ -199,6 +202,17 @@ impl ExecutionBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn sandbox_shell(root: &Path, policy: &SandboxPolicy) -> Result<Arc<dyn Shell>, ExecutionError> {
+    Ok(Arc::new(sandbox::SandboxShell::open(root, policy.clone())?))
+}
+
+/// Landlock and seccomp are Linux's.
+#[cfg(not(target_os = "linux"))]
+fn sandbox_shell(_root: &Path, _policy: &SandboxPolicy) -> Result<Arc<dyn Shell>, ExecutionError> {
+    Err(ExecutionError::Unsupported("sandbox"))
+}
+
 impl fmt::Debug for ExecutionBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExecutionBackend")
@@ -218,7 +232,8 @@ pub(crate) struct Launch<'a> {
     /// The environment `Bash` built: its allowlisted host variables and
     /// what the host added.
     pub env: &'a BTreeMap<String, String>,
-    /// The session the call belongs to.
+    /// The session the call belongs to (the sandbox keys its homes on it).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub session: &'a SessionId,
     /// Whether the command runs under the lifeline wrapper (background).
     pub lifeline: bool,
