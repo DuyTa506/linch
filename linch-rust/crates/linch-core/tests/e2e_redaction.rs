@@ -17,6 +17,7 @@ use linch_core::hooks::{
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::redaction::{RedactionRule, RedactionSpec};
 use linch_core::store::faulty::{FaultTiming, Faulty};
+use linch_core::verification::VerificationSpec;
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, BuildError, Commit, ContentBlock, Event, Hooks, JsonObject,
     Lease, LogEntry, Message, NewRun, PermissionMode, Provider, RunId, RunOptions, RunRecord,
@@ -386,4 +387,38 @@ async fn a_crash_at_any_write_never_stores_the_raw_text() {
             assert!(!stores.leaked(), "{context}: a write held the raw text");
         }
     }
+}
+
+/// A subagent's runs reach the same logs, so they take the agent's
+/// redaction; they answer the parent, so not its verifiers.
+#[tokio::test]
+async fn a_subagent_takes_the_redaction_but_not_the_verifiers() {
+    let mut spec = redacting();
+    spec.verification = Some(VerificationSpec {
+        max_retries: 2,
+        verifiers: Vec::new(),
+    });
+    let answer = text_turn(&format!("child says {SECRET}"));
+    let provider = Arc::new(ScriptedProvider::new(vec![answer]));
+    let stores = Arc::new(Stores::default());
+    let parent = AgentBuilder::new(spec)
+        .provider(provider)
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .subagents(Vec::new())
+        .build()
+        .unwrap();
+    let child = parent.subagent(None).unwrap();
+    assert_eq!(child.spec().redaction, Some(redaction()));
+    assert_eq!(child.spec().verification, None);
+    let stream = child.run_child("go", RunOptions::new("child"), RunId::new("parent"));
+    let envelopes = finish(stream).await;
+    assert!(!leaks(&envelopes));
+    let log = messages(&*stores, "child").await;
+    assert_eq!(
+        log[1],
+        Message::assistant_text(format!("child says {MASK}"))
+    );
 }
