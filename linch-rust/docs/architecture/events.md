@@ -63,7 +63,7 @@ encoding.
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | as wrapped | as wrapped | See [subagent wrapping](#subagent-wrapping) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Never in a run's log: `linch-ext` workflows hand it to their event sink ([extensions](./ext.md)) |
-| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | The output-schema check (`runner/structured.rs`), `verifier` `output_schema`: `retry` with the feedback staged beside it, or `stop` in the terminal write. A resume counts the retries spent from these |
+| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | The answer gates (`runner/structured.rs`): the output-schema check, `verifier` `output_schema`; a built-in verifier, its `name`; a `stop` hook's retry under `spec.verification`, its `policy_id` (`runner/hooks.rs`). `retry` is staged with the feedback beside it, `stop` in the terminal write, `exhausted` with the accepted answer. A resume counts the retries spent from these, the schema's apart from the rest |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | The terminal outcome |

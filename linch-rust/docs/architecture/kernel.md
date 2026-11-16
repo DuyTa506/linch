@@ -71,7 +71,14 @@ order (`hooks.rs:84-100`), so changing a hook's behavior means bumping its
 `retry` included. The kernel's own limit on `stop` retries (one per run
 call) is a constant, not a setting, so it is not in the digest; it is not
 checkpointed either, and a resume starts it afresh, as Python's
-`_MAX_FINAL_ANSWER_REENTRIES` does. The spec's `provider_retry` and
+`_MAX_FINAL_ANSWER_REENTRIES` does. An agent with a `verification` spec
+bounds them with its `max_retries` instead, a setting in the digest with the
+rest of the spec, counted from durable `verification` events so a resume
+keeps it. The spec's `redaction` and `verification` are left off the wire
+when unset, so an agent without them keeps its digest
+(`tests/e2e_guardrails_off.rs` pins it). The permission policy is not in the
+digest, unlike Python's run contract: `resume` and `approve` take the
+policy the agent has now. The spec's `provider_retry` and
 `fallback_models` are in the digest with the rest of the spec, so a resumed
 run's fallback, read back from its `model_fallback` events by its place in
 the list, names the same model. Retries are on by default, but the default
@@ -177,8 +184,11 @@ call, in order (`plan.rs:168-206`):
 result per call, in call order. Around each tool it asks the `ToolSink`: the
 tool starts only after `tool_starting` returns, and each result goes to
 `tool_finished` as soon as it exists (`execute.rs:34-55`, `189-223`). A success
-value is checked against the tool's `output_schema`, then the `post_tool_use`
-chain runs (`execute.rs:310-338`). A tool that panics gets an error result
+value is checked against the tool's `output_schema`, then, when the spec's
+redaction covers tool results, `ExecuteOptions::redactor` scrubs every string
+of the result, then the `post_tool_use` chain runs on the scrubbed result,
+and a replacement it makes is scrubbed again (`execute.rs`, `finish`). With
+that redactor set, progress reports are dropped. A tool that panics gets an error result
 (`execute.rs:341-353`).
 
 To add behavior to tool execution, use one of these:
@@ -190,7 +200,12 @@ To add behavior to tool execution, use one of these:
 - `call_timeout_ms` and `max_tool_concurrency` in the spec for timeouts and
   the parallel limit (`agent/spec.rs:54-60`).
 
-Do not edit `scheduler/` or `runner/` for a new gate.
+Do not edit `scheduler/` or `runner/` for a new gate. The spec's redaction
+is the exception that proves the rule: it is not a hook because it must run
+after every hook, even with no hook attached, and before the log, so it sits
+at fixed places in the existing seams (`after_provider_call` and `stop` in
+`runner/hooks.rs`, `finish` in `scheduler/execute.rs`, the prompt in
+`submit`) rather than in a chain whose order the host controls.
 
 ## No globals, many agents
 

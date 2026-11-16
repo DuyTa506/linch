@@ -266,6 +266,7 @@ config, refusing unknown fields and a cap of 0; `tokens`
 | A Postgres DSN only for an allowed target | `postgres` | `admit.rs:79-89` |
 | `stores.max_connections` at most the tenant's `max_pool_connections` (default: the server's default pool size); absent, it is set to the default or the cap, whichever is smaller | `pool_connections`, with `data.max` the cap | `admit.rs:90-105` |
 | An MCP stdio server only with an entry's `command` and `args`, setting only the `env` names it lists; an MCP URL only at an allowed origin | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |
+| At most `MAX_GUARDRAILS` (32) redaction rules and verifiers, and keywords per verifier, each pattern at most `MAX_PATTERN_BYTES` (1024) bytes: the server compiles and runs them on every response | `redaction`, `verification` | `admit_guardrails` in `admit.rs` |
 
 A run method's `principal`, when given, must name the tenant
 (`admit_principal`, `admit.rs:138-152`); the server does not fill one in.
