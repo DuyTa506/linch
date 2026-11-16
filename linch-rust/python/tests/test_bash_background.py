@@ -7,10 +7,11 @@ import os
 import signal
 import time
 from pathlib import Path
+from typing import Any
 
 from scripted import config, text_turn, tool_turn
 
-from linch_rust import Agent, Server, ToolCallEndEvent
+from linch_rust import Agent, AgentConfig, Server, ToolCallEndEvent
 
 START = {"command": "sleep 300", "run_in_background": True}
 
@@ -35,7 +36,7 @@ async def gone(pid: int) -> None:
         await asyncio.sleep(0.05)
 
 
-def agent_config(root: Path, turns: list[dict[str, object]]) -> object:
+def agent_config(root: Path, turns: list[dict[str, Any]]) -> AgentConfig:
     return config(turns, mode="skip_dangerous", workspace=str(root))
 
 

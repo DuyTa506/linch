@@ -7,16 +7,18 @@ mod common;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common::hooks::hook;
 use common::subagents::*;
 use common::*;
 use linch_core::ask_user::{AnswerValue, AskUser, AskUserAnswer};
 use linch_core::events::kinds::{InputRequestKind, SuspendStatus};
-use linch_core::hooks::ApprovalResponse;
+use linch_core::hooks::{ApprovalResponse, PreToolUse, PreToolUseResponse};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, AgentBuilder, Envelope, Event, Message, PermissionMode, Phase, RunError, RunId,
-    RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, Tool, ToolRegistry, ToolScope,
+    Agent, AgentBuilder, Envelope, Event, Hooks, Message, PermissionMode, Phase, RunError, RunId,
+    RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, Tool, ToolOutput, ToolRegistry,
+    ToolScope,
 };
 use serde_json::{Value, json};
 
@@ -264,6 +266,72 @@ async fn approval_comes_before_the_question_and_nothing_runs_twice() {
     assert_eq!(runs.lock().unwrap()["call_0_0"], 1);
     let results = result_texts(&messages(&*stores, "s1").await[2]);
     assert_eq!(results, ["v0.0", ANSWERED]);
+}
+
+/// Two `AskUser` calls in one response: an answer to one leaves the run
+/// waiting for the other only, then the second answer completes it.
+#[tokio::test]
+async fn a_request_left_out_of_an_answer_is_asked_again() {
+    let stores = Arc::new(Stores::default());
+    let two = TurnBuilder::new(MODEL)
+        .tool_call("ask_a", "AskUser", &question())
+        .tool_call("ask_b", "AskUser", &question())
+        .usage(usage(10, 5))
+        .build();
+    let provider = Arc::new(Replay::new(vec![two, text_turn("done")]));
+    let agent = build(provider, &Runs::default(), stores.clone());
+    let (run_id, envelopes) = start(&agent).await;
+    let both = vec!["ask_a".to_owned(), "ask_b".to_owned()];
+    assert_eq!(suspended(&envelopes), (SuspendStatus::AwaitingInput, both));
+
+    let memory = AskUserAnswer::new([("db".to_owned(), AnswerValue::One("Memory".into()))]);
+    let first = HashMap::from([("ask_a".to_owned(), memory)]);
+    let again = finish(agent.answer(run_id.clone(), first, RunOptions::new("s1"))).await;
+    let only_b = (SuspendStatus::AwaitingInput, vec!["ask_b".to_owned()]);
+    assert_eq!(suspended(&again), only_b);
+    let asked: Vec<&str> = (again.iter())
+        .filter_map(|e| match &e.event {
+            Event::InputRequest(request) => Some(request.request_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["ask_b"]);
+
+    let second = HashMap::from([("ask_b".to_owned(), postgres()["ask_0"].clone())]);
+    finish(agent.answer(run_id, second, RunOptions::new("s1"))).await;
+    let results = result_texts(&messages(&*stores, "s1").await[2]);
+    assert_eq!(results, [r#"{"answers":{"db":"Memory"}}"#, ANSWERED]);
+}
+
+/// A `pre_tool_use` hook that resolves an `AskUser` call answers it: the
+/// run does not suspend.
+#[tokio::test]
+async fn a_hook_can_answer_for_the_user() {
+    let hooks = Hooks::default();
+    let answer = hook::<PreToolUse>("auto_answer", |request| {
+        Ok(match request.tool_name.as_str() {
+            "AskUser" => PreToolUseResponse::Resolve {
+                result: Ok(ToolOutput::new(ANSWERED)),
+            },
+            _ => PreToolUseResponse::Continue,
+        })
+    });
+    let _ = hooks.pre_tool_use.register(answer.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![ask_turn(0, 0, ""), text_turn("done")]));
+    let agent = AgentBuilder::new(spec())
+        .provider(provider)
+        .tools(tools(&Runs::default()))
+        .permissions(policy(PermissionMode::Default))
+        .hooks(Arc::new(hooks))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .build()
+        .unwrap();
+    let (_, envelopes) = start(&agent).await;
+    assert_eq!(kinds(&envelopes).last().unwrap(), "result");
+    assert_eq!(result_texts(&messages(&*stores, "s1").await[2]), [ANSWERED]);
 }
 
 #[tokio::test]
