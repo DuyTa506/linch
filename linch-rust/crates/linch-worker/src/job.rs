@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use linch_core::hooks::ApprovalResponse;
-use linch_core::{RunId, SessionId};
+use linch_core::{Principal, RunId, SessionId};
 use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
 
@@ -36,6 +36,8 @@ pub(crate) struct NewJob<'a> {
     /// The schedule and fire time that made the job.
     pub(crate) schedule_id: Option<&'a str>,
     pub(crate) fire_at: Option<DateTime<Utc>>,
+    /// The principal the run acts for, as JSON.
+    pub(crate) principal: Option<String>,
 }
 
 /// Most inserts of a job that names its run, when the run's active job
@@ -65,13 +67,13 @@ pub(crate) async fn insert(
     // job to an earlier job with its dedupe key.
     let sql = if job.run_id.is_some() {
         "INSERT INTO linch_worker_jobs (queue, namespace, session_id, prompt, run_id, \
-         approvals, dedupe_key, agent, schedule_id, fire_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+         approvals, dedupe_key, agent, schedule_id, fire_at, principal) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (namespace, run_id) WHERE failed_at IS NULL DO NOTHING RETURNING id"
     } else {
         "INSERT INTO linch_worker_jobs (queue, namespace, session_id, prompt, run_id, \
-         approvals, dedupe_key, agent, schedule_id, fire_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+         approvals, dedupe_key, agent, schedule_id, fire_at, principal) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (namespace, dedupe_key) DO NOTHING RETURNING id"
     };
     for _ in 0..ENQUEUE_TRIES {
@@ -86,6 +88,7 @@ pub(crate) async fn insert(
             .bind(job.agent)
             .bind(job.schedule_id)
             .bind(job.fire_at)
+            .bind(&job.principal)
             .fetch_optional(&mut **tx)
             .await?;
         if let Some(id) = id {
@@ -116,6 +119,14 @@ pub(crate) async fn insert(
     Err(WorkerError::Invalid(format!(
         "the active job of run {run_id} kept changing; enqueue again"
     )))
+}
+
+/// The stored form of a principal: its JSON.
+pub(crate) fn principal_json(principal: Option<&Principal>) -> Result<Option<String>, WorkerError> {
+    principal
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| WorkerError::Invalid(format!("the principal does not encode: {error}")))
 }
 
 async fn enqueue_one(pool: &PgPool, job: NewJob<'_>) -> Result<Inserted, WorkerError> {
@@ -187,6 +198,9 @@ pub struct RunRequest {
     /// [`crate::AgentFactory`]). `None`: the worker's agent for the
     /// namespace.
     pub agent: Option<String>,
+    /// Who the run acts for: permission rules match on its roles, as for a
+    /// run started directly. Stored with the job.
+    pub principal: Option<Principal>,
 }
 
 /// Queue a new run, as [`enqueue_run`] does, with an optional agent
@@ -224,6 +238,7 @@ pub async fn enqueue(
         session_id: Some(request.session_id.as_str()),
         prompt: Some(&request.prompt),
         agent: agent.as_deref(),
+        principal: principal_json(request.principal.as_ref())?,
         ..NewJob::default()
     };
     let inserted = insert(&mut tx, job).await?;

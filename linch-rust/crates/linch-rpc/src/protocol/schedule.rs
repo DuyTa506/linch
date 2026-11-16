@@ -1,6 +1,6 @@
 //! Params and results of the scheduler methods: `schedule.*` and `job.*`.
 
-use linch::{RunId, SessionId};
+use linch::{Principal, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 
 /// Params of `schedule.create`.
@@ -40,6 +40,10 @@ pub struct ScheduleCreateParams {
     /// The worker queue the fires go to; `default` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+    /// Who every fire's run acts for, as for `run.start`: permission rules
+    /// match on its roles. A tenant's must name the tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
 }
 
 /// Params of `schedule.list`.
@@ -129,6 +133,9 @@ pub struct JobEnqueueParams {
     /// The worker queue; `default` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+    /// Who the run acts for; as for `schedule.create`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
 }
 
 /// Params of `job.get`.

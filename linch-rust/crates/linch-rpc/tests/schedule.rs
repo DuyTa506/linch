@@ -30,6 +30,12 @@ fn allow(db: &TestDb) -> Allowlists {
         .unwrap()
 }
 
+async fn pool(db: &TestDb) -> linch::postgres::PgPool {
+    let timeout = linch::postgres::CONNECT_TIMEOUT;
+    let pool = linch::postgres::connect(&db.dsn, timeout, 4.try_into().unwrap()).await;
+    pool.unwrap()
+}
+
 fn info(value: Value) -> ScheduleInfo {
     serde_json::from_value(value).unwrap()
 }
@@ -268,6 +274,60 @@ async fn a_tenant_schedules_only_what_its_allowlists_give() {
         refusal(refused.unwrap_err()),
         (code::LIMIT_REACHED, Some("jobs".into()))
     );
+    db.drop().await;
+}
+
+/// A schedule's fires and a queued run act for the principal the call
+/// named, which must be the tenant's own, as for `run.start`: scheduling
+/// never drops the roles a permission rule matches on.
+#[tokio::test]
+async fn a_background_run_keeps_the_principal_it_was_made_for() {
+    let Some(db) = TestDb::empty("sched_principal").await else {
+        return;
+    };
+    let allowed = allow(&db)
+        .max_schedules(Some(2))
+        .max_queued_jobs(Some(4))
+        .min_schedule_interval(Duration::from_millis(100));
+    let rpc = Rpc::remote(tenant("acme", allowed));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let intern = json!({"tenant": "acme", "user": "ada", "roles": ["intern"]});
+    let foreign = json!({"tenant": "globex", "user": "eve", "roles": ["admin"]});
+    for (name, params) in [
+        (
+            method::SCHEDULE_CREATE,
+            json!({"agent": agent, "prompt": "p", "interval_ms": 100, "principal": foreign}),
+        ),
+        (
+            method::JOB_ENQUEUE,
+            json!({"agent": agent, "session_id": "s", "prompt": "p", "principal": foreign}),
+        ),
+    ] {
+        let refused = rpc.call(name, params).await.unwrap_err();
+        let expected = (code::NOT_ALLOWED, Some("principal".into()));
+        assert_eq!(refusal(refused), expected, "{name}");
+    }
+
+    let beat = json!({"agent": agent, "id": "beat", "prompt": "p", "interval_ms": 100,
+                      "session_id": "ops", "principal": intern});
+    rpc.call(method::SCHEDULE_CREATE, beat).await.unwrap();
+    let queued = json!({"agent": agent, "session_id": "s", "prompt": "p", "principal": intern});
+    rpc.call(method::JOB_ENQUEUE, queued).await.unwrap();
+    let pool = pool(&db).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(linch_worker::fire_due_schedules(&pool).await.unwrap(), 1);
+    let stored: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT principal FROM linch_worker_schedules \
+         UNION ALL SELECT principal FROM linch_worker_jobs",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.len(), 3, "the schedule, its fire and the queued run");
+    for principal in stored {
+        let principal: Value = serde_json::from_str(&principal.expect("stored")).unwrap();
+        assert_eq!(principal, intern);
+    }
     db.drop().await;
 }
 

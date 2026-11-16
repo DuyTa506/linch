@@ -125,6 +125,7 @@ impl Server {
         params: ScheduleCreateParams,
     ) -> Result<JsonValue, ErrorObject> {
         let timing = timing(&params)?;
+        self.admit_principal(params.principal.as_ref())?;
         let cap = match &self.0.tenant {
             Some(tenant) => Some(admit_schedule(tenant, &timing)?),
             None => None,
@@ -139,6 +140,7 @@ impl Server {
             prompt: params.prompt,
             timing,
             agent: Some(agent.definition),
+            principal: params.principal,
         };
         let created = linch_worker::create_schedule(&agent.pool, &schedule, cap.as_ref()).await;
         to_value(&schedule_info(
@@ -192,6 +194,7 @@ impl Server {
         &self,
         params: JobEnqueueParams,
     ) -> Result<JsonValue, ErrorObject> {
+        self.admit_principal(params.principal.as_ref())?;
         let cap = match &self.0.tenant {
             Some(tenant) => Some(admit_job(tenant)?),
             None => None,
@@ -203,6 +206,7 @@ impl Server {
             session_id: params.session_id,
             prompt: params.prompt,
             agent: Some(agent.definition),
+            principal: params.principal,
         };
         let id = linch_worker::enqueue(&agent.pool, &request, cap.as_ref()).await;
         let id = id.map_err(|error| worker_error(&error))?;

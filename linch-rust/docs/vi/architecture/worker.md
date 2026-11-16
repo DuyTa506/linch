@@ -320,6 +320,8 @@ async fn serve(
         },
         // No stored definition: the worker's agent for the namespace runs it.
         agent: None,
+        // Fires act for no principal: no role-gated rule applies.
+        principal: None,
     };
     let stored = create_schedule(&pool, &digest, None).await?;
     println!("first digest at {}", stored.next_fire);

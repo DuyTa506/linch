@@ -170,6 +170,7 @@ async fn a_server_without_a_worker_runs_no_scheduler() {
         prompt: "go".into(),
         timing: linch_worker::Timing::Every(Duration::from_millis(100)),
         agent: Some(definition),
+        principal: None,
     };
     linch_worker::create_schedule(&pool, &schedule, None)
         .await

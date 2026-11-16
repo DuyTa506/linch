@@ -13,6 +13,7 @@ import time
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from ._rpc import Connection
+from .config import Principal
 
 CHECK_IN = "Check in: review what changed since your last run and act on it."
 """The default prompt of `Agent.heartbeat`."""
@@ -113,6 +114,7 @@ async def create(
     session_id: str | None,
     id: str | None,
     queue: str | None,
+    principal: Principal | None,
 ) -> Schedule:
     params = _params(
         handle,
@@ -123,6 +125,7 @@ async def create(
         session_id=session_id,
         id=id,
         queue=queue,
+        principal=None if principal is None else dict(principal),
     )
     return cast(Schedule, await conn.request("schedule.create", params))
 
@@ -137,9 +140,20 @@ async def by_id(conn: Connection, method: str, handle: str, id: str) -> Any:
 
 
 async def enqueue(
-    conn: Connection, handle: str, session_id: str, prompt: str, queue: str | None
+    conn: Connection,
+    handle: str,
+    session_id: str,
+    prompt: str,
+    queue: str | None,
+    principal: Principal | None,
 ) -> Job:
-    params = _params(handle, session_id=session_id, prompt=prompt, queue=queue)
+    params = _params(
+        handle,
+        session_id=session_id,
+        prompt=prompt,
+        queue=queue,
+        principal=None if principal is None else dict(principal),
+    )
     return cast(Job, await conn.request("job.enqueue", params))
 
 

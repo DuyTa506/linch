@@ -28,6 +28,7 @@ from linch_rust import (
     LimitReached,
     NotAllowed,
     NotBackground,
+    Principal,
     ResultEvent,
     ScheduleExists,
     ScheduleNotFound,
@@ -159,7 +160,16 @@ async def test_the_scheduler_refusals_are_typed(pg_dsn: str) -> None:
             assert daily.get("timezone") == "Europe/Berlin" and "session_id" not in daily
             with pytest.raises(ScheduleExists):
                 await agent.create_schedule("p", cron="0 8 * * *", id="digest")
-            await agent.create_schedule("p", cron="0 8 * * *", id="other")
+            # A principal of another tenant is refused, as for `run`.
+            eve: Principal = {"tenant": "globex", "user": "eve", "roles": ["admin"]}
+            with pytest.raises(NotAllowed) as foreign:
+                await agent.create_schedule("p", cron="0 8 * * *", principal=eve)
+            assert foreign.value.kind == "principal"
+            with pytest.raises(NotAllowed) as foreign:
+                await agent.enqueue("s", "p", principal=eve)
+            assert foreign.value.kind == "principal"
+            ada: Principal = {"tenant": "acme", "user": "ada", "roles": ["intern"]}
+            await agent.create_schedule("p", cron="0 8 * * *", id="other", principal=ada)
             with pytest.raises(LimitReached) as capped:
                 await agent.create_schedule("p", cron="0 9 * * *", id="third")
             assert (capped.value.kind, capped.value.max) == ("schedules", 2)

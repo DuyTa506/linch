@@ -22,6 +22,7 @@ pub fn hourly(id: &str) -> Schedule {
         prompt: "tick".into(),
         timing: Timing::cron_utc("0 * * * *"),
         agent: None,
+        principal: None,
     }
 }
 

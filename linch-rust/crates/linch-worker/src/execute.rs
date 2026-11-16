@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use linch_core::{Agent, Phase, RunOptions, RunRecord, RunStore, RunStream};
+use linch_core::{Agent, Phase, Principal, RunOptions, RunRecord, RunStore, RunStream};
 use linch_core::{SessionId, StoreError};
 use linch_postgres::{PgPool, PgRunStore};
 use tokio::time::Instant;
@@ -37,9 +37,14 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn options(&self, session_id: SessionId) -> RunOptions {
+    pub(crate) fn options(
+        &self,
+        session_id: SessionId,
+        principal: Option<Principal>,
+    ) -> RunOptions {
         let mut options = RunOptions::new(session_id);
         options.owner = self.owner.clone();
+        options.principal = principal;
         options
     }
 }
@@ -114,9 +119,20 @@ async fn open(
     agent: &Agent,
 ) -> Result<Option<RunStream>, Outcome> {
     let job = &lease.job;
+    // Every start, resume and approve acts for the job's principal: core
+    // does not keep it with the run.
+    let principal = match &job.principal {
+        None => None,
+        Some(Ok(principal)) => Some(principal.clone()),
+        Some(Err(error)) => {
+            return Err(Outcome::Fail(format!(
+                "the principal does not decode: {error}"
+            )));
+        }
+    };
     if let Some(run_id) = &job.run_id {
         match shared.runs.load(&job.namespace, run_id).await {
-            Ok(record) => return continue_run(shared, agent, lease, record),
+            Ok(record) => return continue_run(shared, agent, lease, record, principal),
             // A start job recorded this id, but the run's create never landed.
             Err(StoreError::NotFound { .. }) if job.start.is_some() => {}
             Err(StoreError::NotFound { .. }) => {
@@ -130,7 +146,10 @@ async fn open(
             "the job names neither a run nor a prompt".into(),
         ));
     };
-    let stream = agent.run(prompt.clone(), shared.options(session_id.clone()));
+    let stream = agent.run(
+        prompt.clone(),
+        shared.options(session_id.clone(), principal),
+    );
     // Nothing is written until the stream is polled, so the job knows its
     // run before the run exists.
     match lease.record_run(&shared.pool, stream.run_id()).await {
@@ -146,6 +165,7 @@ fn continue_run(
     agent: &Agent,
     lease: &JobLease,
     record: RunRecord,
+    principal: Option<Principal>,
 ) -> Result<Option<RunStream>, Outcome> {
     if record.status.is_terminal() {
         return Ok(None);
@@ -153,7 +173,7 @@ fn continue_run(
     // "Suspended" is the checkpoint phase, not the status: an approve that
     // crashed between its claim and its commit leaves the status `running`.
     let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
-    let options = shared.options(record.session_id);
+    let options = shared.options(record.session_id, principal);
     let (job, run_id) = (&lease.job, record.run_id);
     match (&job.approvals, suspended) {
         (Some(Err(error)), _) => Err(Outcome::Fail(format!("approvals do not decode: {error}"))),

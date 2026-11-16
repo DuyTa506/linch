@@ -367,6 +367,7 @@ class Agent:
         session_id: str | None = None,
         id: str | None = None,
         queue: str | None = None,
+        principal: Principal | None = None,
     ) -> Schedule:
         """Store a schedule whose fires run this agent in the background.
 
@@ -389,6 +390,9 @@ class Agent:
                 starts its own session.
             id: The schedule id; a fresh uuid when absent.
             queue: The worker queue; `default` when absent.
+            principal: Who every fire's run acts for, as in `run`: rules
+                with `role` or `unless_role` match its roles. Stored with
+                the schedule.
 
         Returns:
             The stored schedule, with its `next_fire`.
@@ -411,6 +415,7 @@ class Agent:
             session_id=session_id,
             id=id,
             queue=queue,
+            principal=principal,
         )
 
     async def heartbeat(
@@ -423,6 +428,7 @@ class Agent:
         prompt: str = CHECK_IN,
         id: str | None = None,
         queue: str | None = None,
+        principal: Principal | None = None,
     ) -> Schedule:
         """Schedule periodic check-ins that continue one session.
 
@@ -440,6 +446,7 @@ class Agent:
             session_id=session_id,
             id=id,
             queue=queue,
+            principal=principal,
         )
 
     async def schedules(self) -> list[Schedule]:
@@ -469,15 +476,26 @@ class Agent:
         answer = await _schedule.by_id(self._conn, "schedule.delete", self.handle, id)
         return bool(answer["deleted"])
 
-    async def enqueue(self, session_id: str, prompt: str, *, queue: str | None = None) -> Job:
+    async def enqueue(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        queue: str | None = None,
+        principal: Principal | None = None,
+    ) -> Job:
         """Queue a one-off run of `prompt` in a session, run by a worker.
+
+        `principal` is who the run acts for, as in `run`.
 
         Raises:
             NotBackground: The agent cannot run in the background.
             NotAllowed: A tenant without `max_queued_jobs`.
             LimitReached: The tenant has that many unfinished jobs.
         """
-        return await _schedule.enqueue(self._conn, self.handle, session_id, prompt, queue)
+        return await _schedule.enqueue(
+            self._conn, self.handle, session_id, prompt, queue, principal
+        )
 
     async def job(self, job_id: int) -> Job:
         """Return a job of the agent's namespace, live or ended.

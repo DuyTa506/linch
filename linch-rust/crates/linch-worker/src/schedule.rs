@@ -18,13 +18,13 @@
 //! starts from now: the fires it missed while paused are not made.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use linch_core::SessionId;
+use linch_core::{Principal, SessionId};
 use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
 
 use crate::definition::{self, Cap, Counted};
 use crate::error::{WorkerError, chain, non_blank};
-use crate::job::{Inserted, NewJob, insert};
+use crate::job::{Inserted, NewJob, insert, principal_json};
 use crate::timing::Timing;
 
 /// Most due schedules one [`fire_due_schedules`] call fires.
@@ -51,6 +51,9 @@ pub struct Schedule {
     /// schedule (see [`crate::AgentFactory`]). `None`: the worker's agent
     /// for the namespace.
     pub agent: Option<String>,
+    /// Who every fire's run acts for: permission rules match on its
+    /// roles, as for a run started directly. Stored with the schedule.
+    pub principal: Option<Principal>,
 }
 
 /// A stored schedule and what it did so far.
@@ -189,6 +192,7 @@ pub async fn create_schedule(
     }
     let parsed = schedule.timing.parse()?;
     let (cron, interval_ms, timezone) = columns(&schedule.timing)?;
+    let principal = principal_json(schedule.principal.as_ref())?;
     let mut tx = crate::begin(pool).await?;
     definition::check(&mut tx, cap, Counted::Schedules).await?;
     let first = parsed.next_after(&schedule.timing, now(&mut tx).await?)?;
@@ -198,8 +202,9 @@ pub async fn create_schedule(
     };
     let row: Result<Row, sqlx::Error> = sqlx::query_as(concat!(
         "INSERT INTO linch_worker_schedules \
-         (namespace, id, queue, session_id, prompt, cron, interval_ms, timezone, agent, next_fire) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ",
+         (namespace, id, queue, session_id, prompt, cron, interval_ms, timezone, agent, next_fire, \
+          principal) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING ",
         columns!(),
         ""
     ))
@@ -213,6 +218,7 @@ pub async fn create_schedule(
     .bind(timezone)
     .bind(agent)
     .bind(first)
+    .bind(principal)
     .fetch_one(&mut *tx)
     .await;
     let row = match row {
@@ -440,6 +446,14 @@ async fn fire(
             Some(session) => session.as_str().to_owned(),
             None => key.clone(),
         };
+        // Copied as stored: the job acts for whom the schedule was made for.
+        let principal: Option<String> = sqlx::query_scalar(
+            "SELECT principal FROM linch_worker_schedules WHERE namespace = $1 AND id = $2",
+        )
+        .bind(namespace)
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await?;
         let job = NewJob {
             queue: &schedule.queue,
             namespace,
@@ -449,6 +463,7 @@ async fn fire(
             agent: schedule.agent.as_deref(),
             schedule_id: Some(id),
             fire_at: Some(fire_at),
+            principal,
             ..NewJob::default()
         };
         matches!(insert(tx, job).await?, Inserted::New(_))

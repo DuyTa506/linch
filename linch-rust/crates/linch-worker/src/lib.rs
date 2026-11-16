@@ -137,6 +137,11 @@ fn migrator() -> Migrator {
             "scheduler",
             include_str!("../migrations/0005_scheduler.sql"),
         ),
+        simple(
+            6,
+            "background principal",
+            include_str!("../migrations/0006_background_principal.sql"),
+        ),
     ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),

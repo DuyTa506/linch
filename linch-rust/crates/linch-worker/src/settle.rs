@@ -120,7 +120,7 @@ async fn fail_run(
     let Some(agent) = agent else {
         return Err(format!("no agent for namespace {namespace}"));
     };
-    let options = shared.options(SessionId::new(""));
+    let options = shared.options(SessionId::new(""), None);
     match agent.fail(run_id.clone(), error, options).await {
         Ok(_) | Err(RunError::Terminal { .. }) => Ok(()),
         Err(RunError::Store(StoreError::NotFound { .. })) => Ok(()),

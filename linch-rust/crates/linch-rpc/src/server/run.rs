@@ -182,7 +182,7 @@ impl Server {
         });
     }
 
-    fn admit_principal(&self, principal: Option<&Principal>) -> Result<(), ErrorObject> {
+    pub(super) fn admit_principal(&self, principal: Option<&Principal>) -> Result<(), ErrorObject> {
         match &self.0.tenant {
             Some(tenant) => tenant.admit_principal(principal),
             None => Ok(()),

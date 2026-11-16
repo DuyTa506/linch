@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use linch_core::{RunStatus, SessionId, ToolScope};
+use linch_core::permissions::{Rule, RuleDecision, ToolRule};
+use linch_core::{PermissionLayer, Principal, RunStatus, SessionId, ToolScope};
 use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
@@ -135,6 +136,7 @@ fn request(session: &str, definition: &str) -> RunRequest {
         session_id: SessionId::new(session),
         prompt: "go".into(),
         agent: Some(definition.into()),
+        principal: None,
     }
 }
 
@@ -390,5 +392,46 @@ async fn concurrent_firers_make_each_fire_once() {
             .await
             .unwrap();
     assert_eq!(distinct, 60);
+    db.finish().await;
+}
+
+/// A queued run and a schedule's fire act for the principal they were made
+/// for, so a rule that denies a tool to its role holds in the background:
+/// without the principal the write tool would ask and the run suspend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_run_acts_for_its_principal() {
+    let Some(db) = TestDb::new("principal").await else {
+        return;
+    };
+    let probe = Probe::new("Write", ToolScope::Write, Hold::None);
+    let mut deny = ToolRule::new("Write", RuleDecision::Deny);
+    deny.role = Some("intern".into());
+    let layer = PermissionLayer::new("roles", [Rule::Tool(deny)]);
+    let worker = Running::spawn(
+        &db.pool,
+        config("w1"),
+        ruled_agent(&db.pool, probe.clone(), layer),
+    );
+    let intern = Principal::new("acme", "ada", ["intern"]).unwrap();
+    let mut queued = request("queued", "unused");
+    (queued.agent, queued.principal) = (None, Some(intern.clone()));
+    enqueue(&db.pool, &queued, None).await.unwrap();
+    let mut beat = hourly("beat");
+    beat.session_id = Some(SessionId::new("fired"));
+    beat.timing = Timing::Every(Duration::from_secs(3600));
+    beat.principal = Some(intern);
+    create_schedule(&db.pool, &beat, None).await.unwrap();
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    for session in ["queued", "fired"] {
+        let run_id = db.run_of(session).await;
+        wait_until("the run ends", || async {
+            db.status(&run_id).await.is_terminal()
+        })
+        .await;
+        assert_eq!(db.status(&run_id).await, RunStatus::Completed, "{session}");
+    }
+    assert_eq!(probe.started(), 0, "the rule denied the intern's write");
+    worker.stop().await;
     db.finish().await;
 }

@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use linch_core::{RunId, SessionId};
+use linch_core::{Principal, RunId, SessionId};
 use linch_postgres::PgPool;
 use tokio::time::Instant;
 
@@ -33,6 +33,8 @@ pub(crate) struct Job {
     /// The stored agent definition the job runs with; `None`: the
     /// worker's agent for the namespace.
     pub(crate) agent: Option<String>,
+    /// Who the run acts for; `Err` keeps a row that does not decode.
+    pub(crate) principal: Option<Result<Principal, String>>,
 }
 
 /// Which jobs a worker takes: those without an agent definition in the
@@ -64,6 +66,7 @@ type JobRow = (
     Option<String>,
     i32,
     i32,
+    Option<String>,
     Option<String>,
 );
 
@@ -182,7 +185,8 @@ pub(crate) async fn dequeue(
          RETURNING j.id, j.namespace, j.session_id, j.prompt, j.run_id, j.approvals, \
                    j.attempts, j.failures, \
                    (SELECT a.config FROM linch_worker_agents AS a \
-                    WHERE a.namespace = j.namespace AND a.digest = j.agent)",
+                    WHERE a.namespace = j.namespace AND a.digest = j.agent), \
+                   j.principal",
     )
     .bind(queue)
     .bind(&served.namespaces)
@@ -196,7 +200,18 @@ pub(crate) async fn dequeue(
 }
 
 fn decode(row: JobRow, since: Instant) -> JobLease {
-    let (id, namespace, session_id, prompt, run_id, approvals, attempts, failures, agent) = row;
+    let (
+        id,
+        namespace,
+        session_id,
+        prompt,
+        run_id,
+        approvals,
+        attempts,
+        failures,
+        agent,
+        principal,
+    ) = row;
     let start = session_id.zip(prompt).map(|(s, p)| (SessionId::new(s), p));
     let approvals = approvals
         .map(|text| serde_json::from_str::<Approvals>(&text).map_err(|error| error.to_string()));
@@ -207,6 +222,9 @@ fn decode(row: JobRow, since: Instant) -> JobLease {
         run_id: run_id.map(RunId::new),
         approvals,
         agent,
+        principal: principal.map(|text| {
+            serde_json::from_str::<Principal>(&text).map_err(|error| error.to_string())
+        }),
     };
     JobLease {
         job,
