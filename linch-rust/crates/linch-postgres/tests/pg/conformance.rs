@@ -1,6 +1,10 @@
 //! linch-core's store conformance suites, plus exact round trips.
 
-use linch_core::store::conformance::{run_admission_suite, run_store_suite, session_store_suite};
+use std::time::Duration;
+
+use linch_core::store::conformance::{
+    run_admission_suite, run_lease_suite, run_store_suite, session_store_suite,
+};
 use linch_core::{JsonValue, RunId, RunStore};
 use linch_postgres::{PgRunStore, PgSessionStore};
 
@@ -21,6 +25,19 @@ async fn run_store_passes_the_admission_suite() {
         return;
     };
     run_admission_suite(&PgRunStore::new(db.pool.clone())).await;
+    db.finish().await;
+}
+
+/// Two stores on one pool are two lease holders, as two processes are.
+#[tokio::test]
+async fn run_store_passes_the_lease_suite() {
+    let Some(db) = TestDb::migrated("conformance_lease").await else {
+        return;
+    };
+    let ttl = Duration::from_millis(600);
+    let a = PgRunStore::new(db.pool.clone()).with_lease_ttl(ttl);
+    let b = PgRunStore::new(db.pool.clone()).with_lease_ttl(ttl);
+    run_lease_suite(&a, &b).await;
     db.finish().await;
 }
 

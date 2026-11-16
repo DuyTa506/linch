@@ -1,16 +1,18 @@
 //! Two agent handles on one database stand for two server processes: one
-//! drives a run, the other tries to resume it.
+//! drives a run, the other tries to resume it. Each handle has its own
+//! pool and its own `PgRunStore`, so each is its own lease holder.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Envelope, Event, PermissionEngine, PermissionMode,
-    PermissionPolicy, Provider, RunError, RunOptions, RunStore, ScriptedProvider,
+    Agent, AgentBuilder, AgentSpec, Envelope, Event, JournalError, PermissionEngine,
+    PermissionMode, PermissionPolicy, Provider, RunError, RunId, RunOptions, RunStatus, RunStore,
+    RunStream, ScriptedProvider, StoreError,
 };
-use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
+use linch_postgres::{PgRunStore, PgSessionStore};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{Notify, Semaphore};
 
@@ -19,39 +21,90 @@ use crate::idle::Gated;
 
 const MODEL: &str = "scripted-model";
 
-/// A pool of its own, as another process would have.
-async fn process_pool(db: &TestDb) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(3)
-        .connect_with(db.options.clone())
-        .await
-        .expect("connect")
+/// A short lease, so the tests that wait one out stay quick.
+const TTL: Duration = Duration::from_millis(600);
+
+/// One process: its provider (held at a gate) and its agent, on a pool of
+/// its own.
+struct Process {
+    provider: Arc<Gated>,
+    agent: Agent,
 }
 
-fn agent(provider: Arc<dyn Provider>, runs: Arc<dyn RunStore>, pool: &PgPool) -> Agent {
-    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
-    AgentBuilder::new(AgentSpec::new(MODEL))
-        .provider(provider)
-        .permissions(PermissionEngine::new(policy).unwrap())
-        .run_store(runs)
-        .session_store(Arc::new(PgSessionStore::new(pool.clone())))
-        .namespace("ns")
-        .build()
-        .unwrap()
+impl Process {
+    /// A process whose model calls answer `text`, `turns` times, once let
+    /// through the gate; `ttl` sets its run leases (the default when
+    /// `None`).
+    async fn new(db: &TestDb, text: &str, turns: usize, ttl: Option<Duration>) -> Self {
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect_with(db.options.clone())
+            .await
+            .expect("connect");
+        let turn = || TurnBuilder::new(MODEL).text(text).build();
+        let provider = Arc::new(Gated {
+            inner: ScriptedProvider::new((0..turns).map(|_| turn())),
+            entered: Notify::new(),
+            open: Semaphore::new(0),
+        });
+        let runs = PgRunStore::new(pool.clone());
+        let runs = match ttl {
+            Some(ttl) => runs.with_lease_ttl(ttl),
+            None => runs,
+        };
+        let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+        let agent = AgentBuilder::new(AgentSpec::new(MODEL))
+            .provider(Arc::clone(&provider) as Arc<dyn Provider>)
+            .permissions(PermissionEngine::new(policy).unwrap())
+            .run_store(Arc::new(runs))
+            .session_store(Arc::new(PgSessionStore::new(pool)))
+            .namespace("ns")
+            .build()
+            .unwrap();
+        Self { provider, agent }
+    }
+
+    /// Let every model call through.
+    fn open(&self) {
+        self.provider.open.add_permits(Semaphore::MAX_PERMITS);
+    }
+
+    fn calls(&self) -> usize {
+        self.provider.inner.requests().len()
+    }
+
+    /// Resume `run_id` and collect the whole stream.
+    async fn resume(&self, run_id: &RunId) -> Vec<Result<Envelope, RunError>> {
+        let options = RunOptions::new("s1");
+        self.agent.resume(run_id.clone(), options).collect().await
+    }
 }
 
-fn gated(text: &str) -> Arc<Gated> {
-    Arc::new(Gated {
-        inner: ScriptedProvider::new([TurnBuilder::new(MODEL).text(text).build()]),
-        entered: Notify::new(),
-        open: Semaphore::new(0),
-    })
+/// Start a run on `process` and poll it until its model call waits at the
+/// gate; the stream is handed back unpolled.
+async fn at_the_gate(process: &Process) -> RunStream {
+    let mut stream = process.agent.run("hi", RunOptions::new("s1"));
+    let polled = async {
+        while let Some(item) = stream.next().await {
+            item.expect("the run goes on until the gate");
+        }
+    };
+    tokio::select! {
+        () = polled => panic!("the gate holds the run"),
+        () = process.provider.entered.notified() => {}
+    }
+    stream
 }
 
-fn scripted(text: &str) -> Arc<ScriptedProvider> {
-    Arc::new(ScriptedProvider::new([TurnBuilder::new(MODEL)
-        .text(text)
-        .build()]))
+/// Poll `stream` for `long` while its model call stays at the gate.
+async fn poll_for(stream: &mut RunStream, long: Duration) {
+    let polled = async {
+        while let Some(item) = stream.next().await {
+            item.expect("the run waits at the gate");
+        }
+        panic!("the gate holds the run");
+    };
+    let _ = tokio::time::timeout(long, polled).await;
 }
 
 fn outcome(items: &[Result<Envelope, RunError>]) -> String {
@@ -65,6 +118,57 @@ fn outcome(items: &[Result<Envelope, RunError>]) -> String {
     }
 }
 
+/// Whether `items` is a resume refused with `RunLeased`.
+fn refused(items: &[Result<Envelope, RunError>]) -> bool {
+    matches!(items, [Err(RunError::Store(StoreError::RunLeased { .. }))])
+}
+
+/// The one item of a refused resume: `RunLeased`, naming the run and the
+/// holder's owner. Returns how long the lease has left.
+fn leased(items: &[Result<Envelope, RunError>], run_id: &RunId) -> Duration {
+    match items {
+        [
+            Err(RunError::Store(StoreError::RunLeased {
+                run_id: leased,
+                owner,
+                expires_in,
+            })),
+        ] => {
+            assert_eq!((leased, owner.as_str()), (run_id, "linch"));
+            *expires_in
+        }
+        _ => panic!("a resume of a live run is RunLeased: {}", outcome(items)),
+    }
+}
+
+fn lease_lost(items: &[Result<Envelope, RunError>]) -> bool {
+    matches!(
+        items.last(),
+        Some(Err(RunError::Journal(JournalError::Store(
+            StoreError::LeaseLost { .. }
+        ))))
+    )
+}
+
+/// The texts of the run's durable `assistant` events.
+async fn answers(db: &TestDb, run_id: &RunId) -> Vec<String> {
+    let store = PgRunStore::new(db.pool.clone());
+    let events = store.events("ns", run_id, 0).await.unwrap();
+    let texts = events
+        .into_iter()
+        .filter_map(|envelope| match envelope.event {
+            Event::Assistant(assistant) => Some(assistant.message.text()),
+            _ => None,
+        });
+    texts.collect()
+}
+
+async fn record(db: &TestDb, run_id: &RunId) -> (RunStatus, u64) {
+    let store = PgRunStore::new(db.pool.clone());
+    let record = store.load("ns", run_id).await.unwrap();
+    (record.status, record.epoch)
+}
+
 /// B resumes while A's model call is in flight. B is refused and writes
 /// nothing, so the call is paid once and A's run completes.
 #[tokio::test]
@@ -72,86 +176,172 @@ async fn a_live_holder_keeps_its_run() {
     let Some(db) = TestDb::migrated("lease_live").await else {
         return;
     };
-    let (pool_a, pool_b) = (process_pool(&db).await, process_pool(&db).await);
-    let provider_a = gated("from a");
-    let provider_b = scripted("from b");
-    let agent_a = agent(
-        provider_a.clone(),
-        Arc::new(PgRunStore::new(pool_a.clone())),
-        &pool_a,
-    );
-    let agent_b = agent(
-        provider_b.clone(),
-        Arc::new(PgRunStore::new(pool_b.clone())),
-        &pool_b,
-    );
-    let stream_a = agent_a.run("hi", RunOptions::new("s1"));
+    let a = Process::new(&db, "from a", 1, None).await;
+    let b = Process::new(&db, "from b", 1, None).await;
+    b.open();
+    let stream_a = at_the_gate(&a).await;
     let run_id = stream_a.run_id().clone();
     let task_a = tokio::spawn(stream_a.collect::<Vec<_>>());
-    provider_a.entered.notified().await;
-    let items_b: Vec<_> = agent_b
-        .resume(run_id.clone(), RunOptions::new("s1"))
-        .collect()
-        .await;
-    assert_eq!(items_b.len(), 1, "B gets one error: {}", outcome(&items_b));
-    assert!(
-        outcome(&items_b).contains("held by"),
-        "B is refused: {}",
-        outcome(&items_b)
-    );
-    let store = PgRunStore::new(db.pool.clone());
-    assert_eq!(store.load("ns", &run_id).await.unwrap().epoch, 1, "B wrote nothing");
-    provider_a.open.add_permits(1);
-    let items_a = task_a.await.unwrap();
-    assert_eq!(outcome(&items_a), "result Success");
-    assert_eq!(provider_a.inner.requests().len(), 1);
-    assert_eq!(provider_b.requests().len(), 0, "the call is paid once");
-    pool_a.close().await;
-    pool_b.close().await;
+    let left = leased(&b.resume(&run_id).await, &run_id);
+    assert!(left > Duration::from_secs(25), "the default TTL: {left:?}");
+    assert_eq!(record(&db, &run_id).await.1, 1, "B wrote nothing");
+    a.open();
+    assert_eq!(outcome(&task_a.await.unwrap()), "result Success");
+    assert_eq!((a.calls(), b.calls()), (1, 0), "the call is paid once");
+    assert_eq!(answers(&db, &run_id).await, ["from a"]);
     db.finish().await;
 }
 
-/// STEP 1 observation: A's process is gone (its stream is leaked, never
-/// polled or dropped); how soon can B take the run over?
+/// A's process is gone (its stream is leaked: never polled or dropped, so
+/// nothing renews or releases its lease). B is refused until the lease
+/// runs out, then takes the run over.
 #[tokio::test]
-async fn observe_a_second_handle_resuming_a_dead_holders_run() {
-    let Some(db) = TestDb::migrated("lease_observe_dead").await else {
+async fn a_dead_holders_run_is_taken_over_after_its_lease_runs_out() {
+    let Some(db) = TestDb::migrated("lease_dead").await else {
         return;
     };
-    let (pool_a, pool_b) = (process_pool(&db).await, process_pool(&db).await);
-    let provider_a = gated("from a");
-    let provider_b = scripted("from b");
-    let agent_a = agent(
-        provider_a.clone(),
-        Arc::new(PgRunStore::new(pool_a.clone())),
-        &pool_a,
-    );
-    let agent_b = agent(
-        provider_b.clone(),
-        Arc::new(PgRunStore::new(pool_b.clone())),
-        &pool_b,
-    );
-    let mut stream_a = agent_a.run("hi", RunOptions::new("s1"));
+    let a = Process::new(&db, "from a", 1, Some(TTL)).await;
+    let b = Process::new(&db, "from b", 1, Some(TTL)).await;
+    b.open();
+    let stream_a = at_the_gate(&a).await;
     let run_id = stream_a.run_id().clone();
-    let polled = async {
-        while stream_a.next().await.is_some() {}
-    };
-    tokio::select! {
-        () = polled => panic!("the gate holds the run"),
-        () = provider_a.entered.notified() => {}
-    }
-    // A crash: nothing of A runs again, nothing is cleaned up.
+    let stopped = Instant::now();
     std::mem::forget(stream_a);
-    let started = Instant::now();
-    let items_b: Vec<_> = agent_b
-        .resume(run_id.clone(), RunOptions::new("s1"))
-        .collect()
-        .await;
-    eprintln!(
-        "B after {:?}: {}",
-        started.elapsed(),
-        outcome(&items_b)
+    leased(&b.resume(&run_id).await, &run_id);
+    let items = loop {
+        let items = b.resume(&run_id).await;
+        if !refused(&items) {
+            break items;
+        }
+        assert!(stopped.elapsed() < TTL * 5, "the lease never ran out");
+        tokio::time::sleep(TTL / 10).await;
+    };
+    assert!(stopped.elapsed() >= TTL / 2, "{:?}", stopped.elapsed());
+    assert_eq!(outcome(&items), "result Success");
+    assert_eq!(record(&db, &run_id).await, (RunStatus::Completed, 2));
+    assert_eq!(answers(&db, &run_id).await, ["from b"]);
+    db.finish().await;
+}
+
+/// The heartbeat beats on a timer: a model call three leases long, with no
+/// write in between, keeps the run A's.
+#[tokio::test]
+async fn a_long_model_call_keeps_its_lease() {
+    let Some(db) = TestDb::migrated("lease_long_call").await else {
+        return;
+    };
+    let a = Process::new(&db, "from a", 1, Some(TTL)).await;
+    let b = Process::new(&db, "from b", 1, Some(TTL)).await;
+    b.open();
+    let mut stream_a = at_the_gate(&a).await;
+    let run_id = stream_a.run_id().clone();
+    poll_for(&mut stream_a, TTL * 3).await;
+    leased(&b.resume(&run_id).await, &run_id);
+    a.open();
+    let items: Vec<_> = stream_a.collect().await;
+    assert_eq!(outcome(&items), "result Success");
+    assert_eq!((a.calls(), b.calls()), (1, 0));
+    db.finish().await;
+}
+
+/// A stalls past its lease (a long pause: its stream is not polled), and B
+/// takes the run over and finishes it. When A wakes, its receipt write is
+/// fenced: the run stops in A and B's state stands.
+#[tokio::test]
+async fn a_holder_that_lost_its_lease_cannot_write() {
+    let Some(db) = TestDb::migrated("lease_fenced").await else {
+        return;
+    };
+    let a = Process::new(&db, "from a", 1, Some(TTL)).await;
+    let b = Process::new(&db, "from b", 1, Some(TTL)).await;
+    b.open();
+    let stream_a = at_the_gate(&a).await;
+    let run_id = stream_a.run_id().clone();
+    tokio::time::sleep(TTL + Duration::from_millis(200)).await;
+    assert_eq!(outcome(&b.resume(&run_id).await), "result Success");
+    a.open();
+    let items: Vec<_> = stream_a.collect().await;
+    assert!(lease_lost(&items), "A is fenced: {}", outcome(&items));
+    assert_eq!(record(&db, &run_id).await, (RunStatus::Completed, 2));
+    assert_eq!(
+        answers(&db, &run_id).await,
+        ["from b"],
+        "nothing of A landed"
     );
-    pool_b.close().await;
+    db.finish().await;
+}
+
+/// `Agent::fail` from another process takes a live run over: the holder's
+/// next heartbeat finds the lease gone and stops the run at once, with its
+/// model call still in flight.
+#[tokio::test]
+async fn failing_a_run_elsewhere_stops_its_live_holder() {
+    let Some(db) = TestDb::migrated("lease_failed").await else {
+        return;
+    };
+    let a = Process::new(&db, "from a", 1, Some(TTL)).await;
+    let b = Process::new(&db, "from b", 1, Some(TTL)).await;
+    let mut stream_a = at_the_gate(&a).await;
+    let run_id = stream_a.run_id().clone();
+    let options = RunOptions::new("s1");
+    b.agent
+        .fail(run_id.clone(), "stopped", options)
+        .await
+        .unwrap();
+    let mut items = Vec::new();
+    let drained = async {
+        while let Some(item) = stream_a.next().await {
+            items.push(item);
+        }
+    };
+    tokio::time::timeout(TTL * 2, drained)
+        .await
+        .expect("the heartbeat stops the run without the gate opening");
+    assert!(lease_lost(&items), "{}", outcome(&items));
+    assert_eq!(record(&db, &run_id).await, (RunStatus::Failed, 2));
+    db.finish().await;
+}
+
+/// A dropped stream releases its lease, so another process need not wait
+/// out the default 30 s.
+#[tokio::test]
+async fn a_dropped_run_is_free_at_once() {
+    let Some(db) = TestDb::migrated("lease_dropped").await else {
+        return;
+    };
+    let a = Process::new(&db, "from a", 1, None).await;
+    let b = Process::new(&db, "from b", 1, None).await;
+    b.open();
+    let stream_a = at_the_gate(&a).await;
+    let run_id = stream_a.run_id().clone();
+    let dropped = Instant::now();
+    drop(stream_a);
+    let items = loop {
+        let items = b.resume(&run_id).await;
+        if !refused(&items) {
+            break items;
+        }
+        assert!(dropped.elapsed() < Duration::from_secs(5), "never released");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(outcome(&items), "result Success");
+    db.finish().await;
+}
+
+/// The holder itself resumes a run it dropped at once: its claim never
+/// waits on its own lease.
+#[tokio::test]
+async fn the_holder_resumes_its_own_dropped_run_at_once() {
+    let Some(db) = TestDb::migrated("lease_own").await else {
+        return;
+    };
+    let a = Process::new(&db, "from a", 2, None).await;
+    let stream_a = at_the_gate(&a).await;
+    let run_id = stream_a.run_id().clone();
+    drop(stream_a);
+    a.open();
+    let items = a.resume(&run_id).await;
+    assert_eq!(outcome(&items), "result Success");
+    assert_eq!(record(&db, &run_id).await, (RunStatus::Completed, 2));
     db.finish().await;
 }
