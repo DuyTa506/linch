@@ -3,8 +3,8 @@
 //! A host enqueues work with [`enqueue_run`], [`enqueue_resume`] or
 //! [`enqueue_approve`]; any number of [`Worker`]s, in any number of
 //! processes, take jobs off the queue and drive the runs through the public
-//! [`linch_core::Agent`] API. [`create_schedule`] adds a cron schedule whose
-//! fires enqueue new runs.
+//! [`linch_core::Agent`] API. [`create_schedule`] adds a schedule (a cron pattern in
+//! a time zone, or an interval) whose fires enqueue new runs.
 //!
 //! - **Queue.** A plain table, dequeued with `FOR UPDATE SKIP LOCKED` and
 //!   woken by `LISTEN/NOTIFY` (with polling as the fallback). A dequeued job
@@ -27,7 +27,13 @@
 //!   and is never given up on.
 //! - **Schedules.** A due schedule enqueues one start job and moves its next
 //!   fire forward in one transaction, so a fire happens once however many
-//!   workers poll.
+//!   workers poll. Missed fires are caught up; a schedule with a fixed
+//!   session (a heartbeat) skips a fire while that session is busy.
+//! - **Definitions.** A job or schedule may carry a stored agent definition,
+//!   which an [`AgentFactory`] opens for every attempt
+//!   ([`Worker::definitions`]), so the worker needs no agent built ahead.
+//! - **History.** A job that ends moves to `linch_worker_history` in the
+//!   statement that deletes it; [`job`] and [`jobs`] read both.
 //!
 //! The worker reads run records through [`linch_postgres::PgRunStore`] on
 //! its own pool, so every agent it drives must store its runs in the same

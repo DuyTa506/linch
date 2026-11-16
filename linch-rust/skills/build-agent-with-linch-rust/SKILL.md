@@ -60,6 +60,7 @@ Most tasks need more than one row. Paths are relative to `$DOCS`.
 | Versioned roles on one setup | `usage/profiles.md` |
 | Traces and metrics | `usage/observability.md` |
 | One server for many processes or tenants | `usage/server.md` |
+| Cron or interval schedules, heartbeats, background runs | `usage/scheduler.md` |
 
 ## 3. Build it the way linch-rust expects
 

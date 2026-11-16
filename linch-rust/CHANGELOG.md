@@ -141,6 +141,13 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   `Agent.report(run_id, timeline=)` with the `EvalCase`, `Scorer`, `CaseResult`,
   `EvalReport`, `RunReport` and `RunReportResult` typed dicts; a scorer may also be
   a Python callable, applied to each case result once the cases are done.
+- Scheduler: `schedule.create`, `schedule.list`, `schedule.pause`, `schedule.resume` and `schedule.delete` store schedules on an open agent's Postgres database: a cron pattern (five or six fields) in an IANA time zone, daylight saving included, or an interval. Each fire is queued exactly once across any number of workers, and missed fires are caught up in order, as Python Linch's are. Python: `Agent.create_schedule`, `schedules`, `pause_schedule`, `resume_schedule`, `delete_schedule`.
+- Heartbeats: a schedule with a `session_id` runs each fire as a new run in that session and skips a fire (counted in `skips`) while its previous fire's job is unfinished or the session has a live run, one suspended for approval or input included. Python: `Agent.heartbeat`, prompted with `CHECK_IN` by default.
+- Background runs: `job.enqueue` queues a one-off run; `job.get` and `job.list` report each job's state (`queued`, `running`, `retrying`, `failed`, `done`, `superseded`), attempts, error and run id, for running and ended jobs. Python: `Agent.enqueue`, `job`, `jobs`, `wait_job`, and the `Schedule` and `Job` dicts.
+- An agent with memory stores, host tools or callbacks cannot be scheduled or queued: -32040 (`NotBackground`, `data.reason`). Also -32041 `ScheduleNotFound`, -32042 `ScheduleExists`, -32043 `JobNotFound`, -32044 `InvalidSchedule`, all `SchedulerError`s in Python.
+- `linch-server --config` takes a `worker` section: the server fires schedules and runs queued jobs on that database, opening each job's stored agent config and checking it against its tenant's allowlists again at every attempt; each background run takes one of the tenant's `max_runs` places. A config may have only a worker, whose tenants need no token. Without the section nothing polls.
+- Tenant allowlists take `max_schedules` and `max_queued_jobs` (absent: none allowed, `NotAllowed` kinds `schedules` and `background_runs`; at the cap `LimitReached` kinds `schedules` and `jobs`, counted across servers) and `min_schedule_interval_ms` (60000 unless set; `NotAllowed` kind `schedule_interval`).
+- `linch-worker`: `Timing` (cron in a time zone, or an interval), `create_schedule` with an optional `Cap`, `get_schedule`, `pause_schedule`, `resume_schedule`, `delete_schedule`, `enqueue` with a stored agent definition, `AgentFactory` and `Worker::definitions`, `job`, `jobs` and `prune_history`, and `WorkerConfig::history_retention` (7 days). A job that ends moves to `linch_worker_history` instead of being deleted.
 
 ### Changed
 
@@ -162,6 +169,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A journal write fenced by another claim answers -32022 (`LeaseLost`) on the RPC, as a fenced claim does, instead of -32024.
 - A run whose stream ends with an error or is dropped releases its Postgres lease (one extra write), so another server can resume it at once; a run that ends or suspends writes nothing more.
 - A worker job whose run another process leases waits like a busy session (released with back-off, not counting a failure).
+- `linch_worker::cancel_schedule` is gone: use `pause_schedule` or `delete_schedule`. `Schedule` has `timing` (`Timing::Cron { pattern, timezone }` or `Timing::Every`) instead of `cron`, `session_id: Option<SessionId>` and `agent`; `create_schedule` takes a cap and returns the stored `ScheduleInfo`.
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
   after 30 seconds: it waits until the client answers, the run is cancelled or the
@@ -176,6 +184,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - Runs started before this release by an agent whose permission policy is not the default (including an agent with `tasks` or a profile that denies tools) can no longer be resumed or approved under the new binary: the policy is now in the run contract, so they end with `ContractMismatch`. Let them finish on the old binary, or end them with `cancel`, which does not check the contract. Runs of agents with the default policy keep their contracts.
 
 - Postgres migration 6 adds `linch_runs.lease_holder` and `lease_until` (nullable, no rewrite). As with every migration, a server of an earlier version then refuses to start on that database, and a running one ignores leases: until every server is upgraded, an old one can still take over a run a new one drives (the epoch still fences the loser's writes).
+
+- Worker migration 5 (`linch-worker/migrations/0005_scheduler.sql`) adds `linch_worker_agents` and `linch_worker_history` and new nullable or defaulted columns on schedules and jobs. Existing schedules keep their cron pattern, read in UTC.
 
 - Runs of workspace agents started before this release cannot be resumed: the workspace tool list gained `BashOutput` and `BashKill`, so the run contract changed and a resume ends with `ContractMismatch`. Let those runs finish on the old binary, or start new runs.
 

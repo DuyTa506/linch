@@ -41,8 +41,8 @@
 //!        "mcp_urls": ["https://mcp.internal"]}}}}
 //! ```
 //!
-//! At least one of `socket` and `http` is required, and at least one
-//! token. Each token names its tenant: a token is given inline or as the
+//! At least one of `socket`, `http` and `worker` is required, and with a
+//! listener at least one token. Each token names its tenant: a token is given inline or as the
 //! name of an environment variable read at startup. Every `allow` list
 //! is empty when absent (it allows nothing), except `permission_modes`,
 //! which defaults to `default` and `accept_edits`; `scripted_provider`
@@ -52,9 +52,28 @@
 //! across all its connections, default to 16, 16 and 8;
 //! `max_pool_connections`, the largest `stores.max_connections` it may
 //! ask for, defaults to the server's default pool size (the machine's
-//! cores, at least 10 and at most 32). A 0 is refused when the config
+//! cores, at least 10 and at most 32). `max_schedules` and
+//! `max_queued_jobs` give the tenant schedules and background runs (none
+//! when absent), and `min_schedule_interval_ms` (60000 when absent) is the
+//! shortest time between two fires. A 0 is refused when the config
 //! loads. See [`linch_rpc::Allowlists`] for how
 //! each entry matches.
+//!
+//! # Worker
+//!
+//! A `worker` section runs [`BackgroundWorker`] in the process: it fires
+//! the schedules and runs the queued jobs of every tenant's namespaces
+//! (and of its `local_namespaces`) in the database its `dsn` names, opening
+//! each job's stored agent config with [`linch_rpc::BackgroundAgents`].
+//! Any number of servers may run one on the same database; each fire and
+//! each job runs once. Without the section the server polls nothing.
+//!
+//! ```json
+//! {"worker": {"dsn": {"env": "LINCH_WORKER_DSN"}, "max_jobs": 8,
+//!             "queues": ["default"], "poll_interval_ms": 1000,
+//!             "visibility_timeout_ms": 30000, "local_namespaces": ["dev"]},
+//!  "tenants": {"acme": {"allow": {"max_schedules": 10, "max_queued_jobs": 100}}}}
+//! ```
 //!
 //! # Transports
 //!

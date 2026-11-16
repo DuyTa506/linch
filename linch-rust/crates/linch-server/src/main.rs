@@ -5,8 +5,10 @@
 //!   thread (file tools still use tokio's blocking threads). It exits
 //!   when stdin closes.
 //! - `linch-server --config FILE` serves the Unix socket and HTTP
-//!   listeners FILE names (see the `linch_server` crate docs) until
-//!   SIGINT or SIGTERM, then ends every connection and exits.
+//!   listeners FILE names (see the `linch_server` crate docs), and runs a
+//!   worker when FILE has a `worker` section, until SIGINT or SIGTERM,
+//!   then ends every connection, waits for the worker's jobs in flight,
+//!   and exits. A stdio server never runs a worker.
 //!
 //! Provider keys come from its environment and are not passed to the
 //! processes it starts (MCP servers, Bash), but they stay in its own
