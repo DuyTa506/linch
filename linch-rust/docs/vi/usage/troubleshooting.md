@@ -163,6 +163,7 @@ vẫn tiếp tục.
 | `Tool call denied: <reason>` | `Deny(reason)` khi phê duyệt | Đúng như dự kiến |
 | `Tool call denied: <tool> denied by <kind> rule in layer "<layer>"` | Một quy tắc quyền đã từ chối lệnh gọi | Đổi quy tắc nếu lệnh gọi nên chạy ([Tool](./tools.md#permission-rules)) |
 | `Read <path> before changing it.` | `Write` lên một tệp có sẵn hoặc `Edit` mà chưa có `Read` trong session này, hoặc sau `close_session` hay khi khởi động lại | Đúng như dự kiến; mô hình đọc, rồi mới ghi |
+| `Read this file again before editing it.` / `... before writing it.` | Tệp thay đổi trên đĩa sau khi model đọc | Đúng như dự kiến; mô hình đọc lại rồi thử lại |
 | `Tool execution was interrupted before a result was recorded; not re-running automatically on resume.` | Tiến trình đã chết trong khi lệnh gọi đang chạy | Kiểm tra xem tác động đã xảy ra chưa trước khi hành động tiếp |
 
 Bản thân `@tool` raise khi import: `ValueError` với scope không phải `read`,

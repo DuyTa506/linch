@@ -73,7 +73,8 @@ impl Tool for Write {
         let target = self.fs.stat(path).await?;
         if let Some(stamp) = target.stamp {
             self.reads
-                .check(&ctx.session_id, &target.path, stamp, None)?;
+                .check(&ctx.session_id, &target.path, stamp, None)
+                .map_err(|error| error.doing("writing"))?;
         }
         let stamp = self
             .fs

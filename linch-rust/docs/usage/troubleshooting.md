@@ -157,6 +157,7 @@ the run goes on.
 | `Tool call denied: <reason>` | `Deny(reason)` on approval | Expected |
 | `Tool call denied: <tool> denied by <kind> rule in layer "<layer>"` | A permission rule denied the call | Change the rule if the call should run ([Tools](./tools.md#permission-rules)) |
 | `Read <path> before changing it.` | `Write` over an existing file or `Edit` without a `Read` in this session, or after `close_session` or a restart | Expected; the model reads, then writes |
+| `Read this file again before editing it.` / `... before writing it.` | The file changed on disk after the model read it | Expected; the model reads again, then retries |
 | `Tool execution was interrupted before a result was recorded; not re-running automatically on resume.` | The process died while the call ran | Check whether the effect happened before acting again |
 
 `@tool` itself raises at import time: `ValueError` for a scope that is not

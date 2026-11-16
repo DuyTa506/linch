@@ -304,6 +304,7 @@ status: final
   and size; a change by anyone voids it. The record is in the server's memory:
   after a restart, or after `agent.close_session(session_id)`, the model must
   read again before it writes.
+- **A changed file.** If the file changed since the model read it, `Write` and `Edit` answer `Read this file again before writing it.` or `... before editing it.`; a `Read` that sees the file change mid-read answers `File changed while reading; Read this file again.`
 - **Empty `old_string`.** `Edit` accepts it, as Python's does. It matches at
   every position, so on an empty file the new text goes in, on a non-empty
   file it is refused as ambiguous unless `replace_all` is set (which inserts

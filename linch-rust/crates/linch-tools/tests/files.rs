@@ -127,11 +127,7 @@ async fn write_over_an_existing_file_needs_a_whole_current_read() {
     let stale = call(&t.write, json!({"file_path": "a.txt", "content": "x"})).await;
     let error = stale.unwrap_err();
     assert_eq!(error.code.as_deref(), Some("read_before_write"));
-    assert!(
-        error.message.contains("changed since it was last read"),
-        "{}",
-        error.message
-    );
+    assert_eq!(error.message, "Read this file again before writing it.");
     call(&t.read, json!({"file_path": "a.txt"})).await.unwrap();
     call(&t.write, json!({"file_path": "a.txt", "content": "x"}))
         .await
@@ -222,19 +218,30 @@ async fn edit_with_an_empty_old_string_follows_python() {
     // An empty file has exactly one empty match: the text goes in.
     t.ws.put("new.txt", "");
     let insert = json!({"file_path": "new.txt", "old_string": "", "new_string": "hello\n"});
-    assert_eq!(code(call(&t.edit, insert.clone()).await), "read_before_write");
-    call(&t.read, json!({"file_path": "new.txt"})).await.unwrap();
+    assert_eq!(
+        code(call(&t.edit, insert.clone()).await),
+        "read_before_write"
+    );
+    call(&t.read, json!({"file_path": "new.txt"}))
+        .await
+        .unwrap();
     assert_eq!(text(call(&t.edit, insert).await), "Edited new.txt");
     assert_eq!(t.ws.get("new.txt"), "hello\n");
     // A non-empty file matches at every position, so it is ambiguous.
-    call(&t.read, json!({"file_path": "new.txt"})).await.unwrap();
+    call(&t.read, json!({"file_path": "new.txt"}))
+        .await
+        .unwrap();
     let ambiguous = json!({"file_path": "new.txt", "old_string": "", "new_string": "x"});
     assert_eq!(code(call(&t.edit, ambiguous).await), "ambiguous_match");
     // replace_all inserts at every position and needs the whole file read.
     t.ws.put("ab.txt", "ab");
-    let all = json!({"file_path": "ab.txt", "old_string": "", "new_string": "-", "replace_all": true});
+    let all =
+        json!({"file_path": "ab.txt", "old_string": "", "new_string": "-", "replace_all": true});
     call(&t.read, json!({"file_path": "ab.txt"})).await.unwrap();
-    assert_eq!(text(call(&t.edit, all).await), "Edited ab.txt (3 replacements)");
+    assert_eq!(
+        text(call(&t.edit, all).await),
+        "Edited ab.txt (3 replacements)"
+    );
     assert_eq!(t.ws.get("ab.txt"), "-a-b-");
 }
 
@@ -242,11 +249,28 @@ async fn edit_with_an_empty_old_string_follows_python() {
 async fn edit_with_an_empty_old_string_needs_line_one_read() {
     let t = tools();
     t.ws.put("a.txt", "l1\nl2\nl3\n");
-    call(&t.read, json!({"file_path": "a.txt", "offset": 2, "limit": 1}))
-        .await
-        .unwrap();
+    call(
+        &t.read,
+        json!({"file_path": "a.txt", "offset": 2, "limit": 1}),
+    )
+    .await
+    .unwrap();
     let edit = json!({"file_path": "a.txt", "old_string": "", "new_string": "x"});
     assert_eq!(code(call(&t.edit, edit).await), "read_before_write");
+}
+
+#[tokio::test]
+async fn stale_and_mid_read_changes_use_python_texts() {
+    let t = tools();
+    t.ws.put("a.txt", "before\n");
+    call(&t.read, json!({"file_path": "a.txt"})).await.unwrap();
+    t.ws.put("a.txt", "before, then more\n");
+    let edit = json!({"file_path": "a.txt", "old_string": "before", "new_string": "after"});
+    let error = call(&t.edit, edit).await.unwrap_err();
+    assert_eq!(error.message, "Read this file again before editing it.");
+    let write = json!({"file_path": "a.txt", "content": "x"});
+    let error = call(&t.write, write).await.unwrap_err();
+    assert_eq!(error.message, "Read this file again before writing it.");
 }
 
 #[tokio::test]

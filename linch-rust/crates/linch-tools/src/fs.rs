@@ -177,9 +177,15 @@ pub enum FsError {
         /// The limit in bytes.
         limit: u64,
     },
-    /// The file changed while it was read, or before a guarded write.
+    /// The file changed before a guarded write.
     #[error("{path}: file changed on disk; Read it again")]
     Changed {
+        /// Workspace path of the file.
+        path: String,
+    },
+    /// The file changed while it was being read.
+    #[error("File changed while reading; Read this file again.")]
+    ChangedWhileReading {
         /// Workspace path of the file.
         path: String,
     },

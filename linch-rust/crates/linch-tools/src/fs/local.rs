@@ -164,7 +164,7 @@ impl LocalFs {
         }
         let after = fs::metadata(&real).map_err(|error| io_error(&shown, error))?;
         if stamp_of(&after)? != stamp || bytes.len() as u64 != stamp.len {
-            return Err(FsError::Changed { path: shown });
+            return Err(FsError::ChangedWhileReading { path: shown });
         }
         Ok(FileContent {
             path: shown,

@@ -306,6 +306,7 @@ status: final
   tại của nó; bất kỳ thay đổi nào của ai đó đều làm mất hiệu lực. Bản ghi nằm
   trong bộ nhớ của server: sau khi khởi động lại, hoặc sau
   `agent.close_session(session_id)`, model phải đọc lại trước khi ghi.
+- **Tệp đã thay đổi.** Nếu tệp thay đổi sau lần model đọc, `Write` và `Edit` trả lời `Read this file again before writing it.` hoặc `... before editing it.`; `Read` thấy tệp đổi giữa chừng trả lời `File changed while reading; Read this file again.`
 - **`old_string` rỗng.** `Edit` chấp nhận nó, như `Edit` của Python. Nó khớp ở
   mọi vị trí, nên với tệp rỗng thì văn bản mới được chèn vào, với tệp không rỗng
   thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
