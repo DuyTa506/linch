@@ -183,6 +183,58 @@ async fn a_server_without_a_worker_runs_no_scheduler() {
     db.drop().await;
 }
 
+/// A schedule is stored in the database of the agent that made it, and a
+/// worker polls only its own: one on another database never fires it, and
+/// one on the agent's fires it there, so a fire never runs against a
+/// database the agent did not name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schedule_runs_only_where_its_agent_stores() {
+    let Some(theirs) = TestDb::empty("wdsn_worker").await else {
+        return;
+    };
+    let Some(ours) = TestDb::empty("wdsn_agent").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // A worker on `theirs`; the tenant may also store in `ours`.
+    let allow = json!({"postgres_dsns": [theirs.dsn, ours.dsn]});
+    let config = server_config(&theirs, true, allow.clone());
+    let (child, socket) = server(dir.path(), "a", &config).await;
+    let client = client(&socket).await;
+    let turns = vec![TurnBuilder::new(MODEL).text("tick").build()];
+    let agent = open(&client, &agent_config(&ours, turns, json!({}))).await;
+    let create = json!({"agent": agent, "id": "tick", "prompt": "Tick.", "interval_ms": 100});
+    let _: ScheduleInfo = client.call(method::SCHEDULE_CREATE, &create).await.unwrap();
+    sleep(Duration::from_millis(1500)).await;
+    let (our_pool, their_pool) = (pool(&ours).await, pool(&theirs).await);
+    let schedules = "SELECT count(*) FROM linch_worker_schedules";
+    assert_eq!(
+        scalar(&their_pool, schedules).await,
+        0,
+        "stored with the agent"
+    );
+    let fires = "SELECT coalesce(sum(fires), 0)::bigint FROM linch_worker_schedules";
+    assert_eq!(scalar(&our_pool, fires).await, 0, "the worker never saw it");
+    terminate(child).await;
+
+    // A worker on the agent's database fires it, and the run is there.
+    let config = server_config(&ours, true, allow);
+    let (child, _socket) = server(dir.path(), "b", &config).await;
+    let completed = "SELECT count(*) FROM linch_runs WHERE status = 'completed'";
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while scalar(&our_pool, completed).await == 0 {
+        assert!(Instant::now() < deadline, "no fire ran");
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        scalar(&their_pool, "SELECT count(*) FROM linch_runs").await,
+        0
+    );
+    terminate(child).await;
+    ours.drop().await;
+    theirs.drop().await;
+}
+
 /// Wait until every job of the schema has ended, and none failed.
 async fn all_ended(pool: &PgPool) {
     let deadline = Instant::now() + Duration::from_secs(60);
