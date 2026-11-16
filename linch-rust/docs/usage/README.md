@@ -59,6 +59,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Runs](./runs.md) | Start, stream, resume, approve, cancel; errors at the end of a stream; what is durable and when |
 | [Events](./events.md) | Every event type the client decodes, with its fields; sequence numbers and replay; usage and cost |
 | [Structured output](./structured-output.md) | A JSON Schema the final answer must satisfy: on the agent or one run, retries, callbacks, what each provider receives |
+| [Memory](./memory.md) | Compaction and micro-compaction, a prompt longer than the context window, cut-off answers, external memory through `context_build` |
 | [Security](./security.md) | Permission modes and auto-allow, redaction of responses, tool results and prompts, final-answer verifiers and their budget |
 | [Stores](./stores.md) | Memory and Postgres stores, DSNs, schemas, migrations, namespaces, pools |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
@@ -89,6 +90,7 @@ Coming later:
 | `InMemorySessionStore`, Postgres stores | `{"type": "memory"}` or `{"type": "postgres", "dsn": ...}` |
 | `ScriptedProvider` from `linch.ext.evals` | `{"id": "scripted", "turns": [...]}` with `linch_rust.scripted` |
 | `linch` CLI | `linch-rust` CLI |
+| `CompactionLadder`, `TruncationRecovery`, `RagConnector` | `spec.compaction`, `spec.truncation_recovery`, a `context_build` callback ([Memory](./memory.md)) |
 
 ## Related
 

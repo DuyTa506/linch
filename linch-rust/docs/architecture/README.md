@@ -25,7 +25,7 @@ has its own usage docs.
 
 | Page | What it covers |
 |---|---|
-| [Providers](./providers.md) | The provider contract in `linch-core`, the event vocabulary and stream rules, errors and retries, the adapters in `linch-providers` (DeepSeek, OpenAI Chat, OpenAI Responses, vLLM, SGLang, llama.cpp, Anthropic, Gemini), the single SSE loop, pricing, adding a provider |
+| [Providers](./providers.md) | The provider contract in `linch-core`, the event vocabulary and stream rules, errors and retries, context-length refusals, the adapters in `linch-providers` (DeepSeek, OpenAI Chat, OpenAI Responses, vLLM, SGLang, llama.cpp, Anthropic, Gemini), the single SSE loop, pricing, adding a provider |
 | [Tools](./tools.md) | The `Tool` trait and scopes, the registry and reversible registration, how a batch runs and what runs in parallel, the workspace tools and confinement, the virtual filesystem and result offload, the session task tools, writing a tool |
 | [MCP client](./mcp.md) | `linch-mcp`: stdio and HTTP transports, tool mapping, relist, reconnect, cancel, process-group kill, bounded close, limits and redaction |
 | [Stores](./stores.md) | Run, session, task and file store contracts and their conformance suites; memory stores; the Postgres stores: schema, migrations, one live run per session, fencing, single-statement writes, refusal classification, pool sizing; group-commit write counts |
@@ -37,7 +37,7 @@ has its own usage docs.
 | [RPC protocol and server](./rpc.md) | `linch-rpc` and `linch-server`: methods and notifications, error codes, inside a connection, ordering and backpressure, the stdio, socket and HTTP transports, tenants and allowlists, limits, adding a method |
 | [Kernel](./kernel.md) | `Agent` as the per-agent scope, `AgentBuilder` and the run contract digest, `Registration`, the twenty-two hook chains and how each combines answers, the plan and execute path of a tool batch, no globals |
 | [Turn lifecycle](./turn-lifecycle.md) | One run: the turn steps, why the loop continues, barriers and group commit, the tool batch and read-only parallelism, suspend, resume and reconcile, terminals |
-| [Compaction](./compaction.md) | The trigger, the summary call, the logged projection on the session log, recovery of a paid summary, what the model sees |
+| [Compaction](./compaction.md) | The trigger, micro-compaction, the summary call, the logged projection on the session log, context-length recovery, recovery of each step, what the model sees, truncation recovery |
 
 The Python pages describe the shared concepts only. Each Rust page says where
 Rust differs. The main difference in the kernel is under

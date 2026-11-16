@@ -297,11 +297,14 @@ event of status `awaiting_input`. See [Tools](./tools.md#ask-the-user).
 
 ### `CompactionEvent` (`compaction`)
 
-The older part of the conversation was summarized
+The view the model sees was shortened
 ([`spec.compaction`](./agent.md#compaction)): `messages_before`,
-`messages_after`, `tokens_before`, `tokens_after` (estimates), `strategy`,
-and `duration_ms`, the time from the decision to compact to this event (the
-summary call and the projection).
+`messages_after`, `tokens_before`, `tokens_after` (estimates), `strategy`
+(`summary`, or `micro` when old tool results were cleared with no model
+call), `duration_ms`, the time from the decision to compact to this event
+(the summary call and the projection), and `forced`, true when the
+provider's refusal of a prompt as too long caused it
+([Memory](./memory.md#when-the-prompt-does-not-fit)).
 
 ### `LoopGuardEvent` (`loop_guard`)
 
@@ -348,7 +351,7 @@ One [callback](./agent.md#callbacks) call and how it ended.
 
 An error the run recorded. `error` is a dict with `name` and `message`, and
 `retryable`; a provider failure also has `kind` (`connect`, `transport`, `status`,
-`invalid_request`, `stream`) and, for an HTTP failure, `status`:
+`context_length`, `invalid_request`, `stream`) and, for an HTTP failure, `status`:
 
 ```text
 {'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503}

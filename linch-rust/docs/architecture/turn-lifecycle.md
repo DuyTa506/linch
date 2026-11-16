@@ -43,8 +43,9 @@ What differs in Rust:
 `runner.rs:1-39` lists the turn. In order:
 
 1. **Compact** when `spec.compaction` is set and the provider view is due
-   ([compaction](./compaction.md)). With it off, a turn starts at dispatch
-   (`turn.rs:237-248`).
+   ([compaction](./compaction.md)): clear old tool results when `micro` is
+   set and that is enough, else summarize. With it off, a turn starts at
+   dispatch (`turn.rs:313`).
 2. **Check limits.** A cancelled token aborts the run. `max_turns` and the
    budget end it as failed before the call is made (`turn.rs:271-284`).
 3. **Build the request** from the session's provider view. The
@@ -109,9 +110,22 @@ the receipt, the usage, the `Error`, the status and the `Result`
 take a retryable failure: then the run goes back to step 4 with the next
 delivery `attempt`, after a `provider_retry` write and a wait, or at once to
 a fallback model with a `model_fallback` event
-([providers](./providers.md#retries-and-fallback-models), `runner/retry.rs`). A response the output limit cut off before it held any
+([providers](./providers.md#retries-and-fallback-models), `runner/retry.rs`).
+A `context_length` failure, the provider refusing the prompt as longer than
+the model's context window, is never retried; with `spec.compaction` set,
+`overflow` shortens the view (micro first, then a forced summary, bounded by
+`max_forced`) and the run goes back to step 4 with the turn's next delivery
+`attempt` and no `provider_retry` event; when nothing can shorten it, the run
+ends failed ([context-length recovery](./compaction.md#context-length-recovery),
+`turn.rs:464`, `runner/compact.rs:268-295`). A response the output limit cut off before it held any
 text or a whole tool call is not an answer: the session gets nothing, and the
 run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
+
+With `spec.truncation_recovery`, a text answer the output limit cut off
+(stop reason `max_tokens`, no tool call) is appended and answered with a
+feedback message instead of ending the run, while `max_attempts` lasts; the
+run's final text joins the parts
+([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:532-601`).
 
 ### The loop continues while a response has tool calls
 

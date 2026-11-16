@@ -257,7 +257,9 @@ The `model` of a turn's `message_start` is the model that served the call, so
 
 A turn may also end with an `error`, to test how your host handles a failed
 call: `connect` (`message`), `transport` (`message`), `status` (`status`,
-`message`, `retry_after_ms?`) or `invalid_request` (`message`). With no
+`message`, `retry_after_ms?`), `context_length` (`status?`, `message`: the
+prompt does not fit, see [Memory](./memory.md#when-the-prompt-does-not-fit))
+or `invalid_request` (`message`). With no
 `events`, the call fails before any output. Runs retry a retryable failure by
 default, so this one turns retries off to see the failure end the run:
 
@@ -351,8 +353,11 @@ fix: no connection or no response at all (refused, reset, timeout), an HTTP
 sent inside its stream with one of those statuses. Adapters never retry; the
 run does. A failure it does not retry ends the run with an `error` event and
 a `result` of subtype `error`; the error event's `error` dict carries `kind`
-(`connect`, `transport`, `status`, `invalid_request`, `stream`),
-`retryable` and, for HTTP failures, `status`. A cancelled call ends the run
+(`connect`, `transport`, `status`, `context_length`, `invalid_request`,
+`stream`), `retryable` and, for HTTP failures, `status`. A prompt the
+provider refuses as longer than the model's context window (`context_length`)
+is never retried: with `spec.compaction` the run shortens it and calls again
+([Memory](./memory.md#when-the-prompt-does-not-fit)). A cancelled call ends the run
 `aborted`. Each adapter has a 30 s connect timeout and a read timeout between
 reads (300 s or 600 s); there is no deadline on a whole call.
 

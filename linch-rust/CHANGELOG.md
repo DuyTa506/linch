@@ -8,6 +8,26 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Added
 
+- Context-length recovery: each adapter maps its provider's refusal of a
+  prompt longer than the context window to `ProviderError::ContextLength`
+  (error kind `context_length`, never retried); with `spec.compaction` set,
+  the run shortens its view and calls again, and without it the run ends.
+- Forced compaction: `spec.compaction.max_forced` (3) bounds the summaries a
+  run makes for context-length refusals; the `compaction` event has `forced`.
+- Micro-compaction: `spec.compaction.micro` clears old tool results with no
+  model call, before a summary (strategy `micro`). Python's
+  `CompactionLadder` micro rung.
+- `DETAILED_PROMPT` (`DETAILED_COMPACTION_PROMPT` in the Python client), for
+  `spec.compaction.prompt`. Python's `DetailedCompaction`.
+- Truncation recovery: `spec.truncation_recovery` continues a text answer
+  the output limit cut off and joins the parts into the final answer.
+  Python's `TruncationRecovery`.
+- A workspace agent must read a file again after a compaction before it
+  edits it (`AgentBuilder::on_compact`). Python's `reset_read_tracker`.
+- `linch_rust.memory`: `retrieval` turns any `Retriever` into a
+  `context_build` callback for external memory, with
+  `examples/external_memory.py` on a folder of Markdown notes.
+- `Compaction` and `TruncationRecovery` TypedDicts in the Python client.
 - Redaction: `spec.redaction` holds regex rules that scrub assistant
   responses (text and unsigned reasoning, before `after_provider_call` and
   before they are logged), tool results (before `post_tool_use`, and
