@@ -105,6 +105,30 @@ async fn a_cut_answer_is_continued_and_stitched() {
     assert_eq!(notes, 2);
 }
 
+/// Each part is scrubbed as a response; a secret the cut split across two
+/// parts is whole only in the stitched answer, so that is scrubbed too.
+#[tokio::test]
+async fn a_secret_split_by_the_cut_is_scrubbed_from_the_answer() {
+    use linch_core::redaction::{RedactionRule, RedactionSpec};
+
+    let mut spec = recovering(1);
+    spec.redaction = Some(RedactionSpec {
+        rules: vec![RedactionRule::new("hunter2")],
+        response: true,
+        tool_results: true,
+        prompt: false,
+    });
+    let turns = vec![
+        part("the password is hun", StopReason::MaxTokens),
+        part("ter2, keep it safe", StopReason::EndTurn),
+    ];
+    let (_, envelopes) = run(spec, turns).await;
+    assert_eq!(
+        result(&envelopes).final_text.as_deref(),
+        Some("the password is [REDACTED], keep it safe")
+    );
+}
+
 #[tokio::test]
 async fn past_the_bound_a_cut_answer_is_final() {
     let (_, envelopes) = run(recovering(1), cut_twice()).await;

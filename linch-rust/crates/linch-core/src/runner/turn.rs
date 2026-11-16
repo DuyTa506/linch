@@ -558,7 +558,13 @@ impl Runner {
                 self.truncations += 1;
                 return Ok(Some(self.feedback(Message::user_text(reminder)).await?));
             }
-            let text = parts + &text;
+            let stitched = !parts.is_empty();
+            let mut text = parts + &text;
+            // Each part was scrubbed as a response; a match the cut split
+            // across two parts is whole only here.
+            if stitched && let Some(redactor) = self.agent.response_redactor() {
+                text = redactor.text(&text).into_owned();
+            }
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);
             }
