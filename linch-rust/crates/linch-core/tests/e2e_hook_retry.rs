@@ -174,6 +174,50 @@ async fn a_retried_response_runs_none_of_its_tool_calls() {
     assert_eq!(log[3], Message::assistant_text("done"));
 }
 
+/// No retry budget bounds an `after_provider_call` retry, as in Python:
+/// only `max_turns` does, and every retried answer is paid and logged.
+#[tokio::test]
+async fn an_after_provider_call_retry_is_bounded_only_by_max_turns() {
+    let hooks = Hooks::default();
+    let judge = hook::<AfterProviderCall>("judge", |_| {
+        Ok(AfterProviderCallResponse::Retry {
+            feedback: "again".into(),
+        })
+    });
+    let _ = hooks.after_provider_call.register(judge.arc()).unwrap();
+    let mut spec = spec();
+    spec.max_turns = Some(3);
+    let stores = Arc::new(Stores::default());
+    let turns = (1..=4).map(|i| text_turn(&format!("answer {i}")));
+    let provider = Arc::new(Replay::new(turns.collect()));
+    let agent = AgentBuilder::new(spec)
+        .provider(provider.clone())
+        .tools(registry(vec![]))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .hooks(Arc::new(hooks))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+    assert_eq!(provider.calls().values().sum::<u32>(), 3);
+    assert_eq!(
+        verdicts(&envelopes, HookPoint::AfterProviderCall),
+        ["retry"; 3]
+    );
+    assert_eq!(
+        messages(&*stores, "s1").await.len(),
+        7,
+        "go, then 3 answers and 3 feedbacks"
+    );
+    assert!(kinds(&envelopes).contains(&"loop_guard".to_owned()));
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+}
+
 fn accepted_receipts(envelopes: &[Envelope]) -> usize {
     (envelopes.iter())
         .filter(|e| {
