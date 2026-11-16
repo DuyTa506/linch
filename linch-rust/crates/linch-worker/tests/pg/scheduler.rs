@@ -53,9 +53,12 @@ async fn a_heartbeats_missed_fires_collapse_into_one() {
     let Some(db) = TestDb::new("beat_catchup").await else {
         return;
     };
-    create_schedule(&db.pool, &hourly("beat"), None)
-        .await
-        .unwrap();
+    // An interval, not an hourly cron: how many cron ticks fit in the last
+    // 150 minutes depends on the minute the test runs at.
+    let mut beat = hourly("beat");
+    beat.timing = Timing::Every(Duration::from_secs(3600));
+    create_schedule(&db.pool, &beat, None).await.unwrap();
+    // Due 150, 90 and 30 minutes ago: the first fires, the other two skip.
     make_due(&db, "150 minutes").await;
     assert_eq!(fire_all(&db).await, 1);
     let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
