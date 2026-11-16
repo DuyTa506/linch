@@ -8,6 +8,7 @@ mod crash;
 mod files;
 mod idle;
 mod isolation;
+mod lease;
 mod mailbox;
 mod migrations;
 mod pool;
