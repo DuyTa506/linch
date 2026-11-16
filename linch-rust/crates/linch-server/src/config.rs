@@ -69,7 +69,8 @@ pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub scripted_provider: bool,
     /// Whether a workspace agent gets `Bash`, which runs commands
-    /// unconfined, as the server's user; off when absent.
+    /// unconfined, as the server's user, with `BashOutput` and `BashKill`;
+    /// off when absent.
     pub exec_tools: bool,
     /// Runs the tenant's connections may drive at once, together, at
     /// least 1; [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.

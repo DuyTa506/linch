@@ -278,8 +278,9 @@ impl Allowlists {
     }
 
     /// Whether a workspace agent gets `Bash`, which runs commands
-    /// unconfined, as the server's user. Off by default: the agent then
-    /// has no `Bash`, whatever its config's `bash` says.
+    /// unconfined, as the server's user, with `BashOutput` and `BashKill`
+    /// for its background commands. Off by default: the agent then has
+    /// none of the three, whatever its config's `bash` says.
     pub fn exec_tools(mut self, allowed: bool) -> Self {
         self.exec_tools = allowed;
         self

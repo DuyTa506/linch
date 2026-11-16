@@ -1,5 +1,6 @@
 //! What a remote tenant's agents may run without its server's consent:
-//! `Bash` only when the server allows exec tools, `auto_allow` and allow
+//! `Bash`, `BashOutput` and `BashKill` only when the server allows exec
+//! tools (`AskUser` needs no consent), `auto_allow` and allow
 //! rules only with `skip_dangerous`, and a project root only under an
 //! allowed root. A local connection keeps every choice of its config.
 
@@ -45,6 +46,16 @@ fn has(tools: &[String], name: &str) -> bool {
     tools.iter().any(|tool| tool == name)
 }
 
+const BASH_TOOLS: [&str; 3] = ["Bash", "BashOutput", "BashKill"];
+
+fn has_bash(tools: &[String]) -> bool {
+    BASH_TOOLS.iter().all(|name| has(tools, name))
+}
+
+fn has_none_of_bash(tools: &[String]) -> bool {
+    !BASH_TOOLS.iter().any(|name| has(tools, name))
+}
+
 #[tokio::test]
 async fn a_remote_tenant_gets_bash_only_when_the_server_allows_exec_tools() {
     let dir = tempfile::tempdir().unwrap();
@@ -58,16 +69,31 @@ async fn a_remote_tenant_gets_bash_only_when_the_server_allows_exec_tools() {
     let mut refusing = Rpc::remote(acme(dir.path(), |allow| allow));
     for bash in [Value::Null, json!(true)] {
         let listed = tools(&mut refusing, workspace(bash)).await;
-        assert!(has(&listed, "Read") && !has(&listed, "Bash"), "{listed:?}");
+        assert!(
+            has(&listed, "Read") && has_none_of_bash(&listed),
+            "{listed:?}"
+        );
     }
     let mut allowing = Rpc::remote(acme(dir.path(), |allow| allow.exec_tools(true)));
     let listed = tools(&mut allowing, workspace(Value::Null)).await;
-    assert!(has(&listed, "Bash"), "{listed:?}");
+    assert!(has_bash(&listed), "{listed:?}");
     let listed = tools(&mut allowing, workspace(json!(false))).await;
-    assert!(!has(&listed, "Bash"), "{listed:?}");
+    assert!(has_none_of_bash(&listed), "{listed:?}");
     let mut local = Rpc::new();
     let listed = tools(&mut local, workspace(Value::Null)).await;
-    assert!(has(&listed, "Bash"), "{listed:?}");
+    assert!(has_bash(&listed), "{listed:?}");
+}
+
+/// `AskUser` only suspends the tenant's own run, as an approval does, so
+/// any tenant may turn it on, and only a config that asks for it has it.
+#[tokio::test]
+async fn any_tenant_may_turn_ask_user_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rpc = Rpc::remote(acme(dir.path(), |allow| allow));
+    let listed = tools(&mut rpc, config(json!({"ask_user": true}))).await;
+    assert!(has(&listed, "AskUser"), "{listed:?}");
+    let listed = tools(&mut rpc, config(json!({}))).await;
+    assert!(!has(&listed, "AskUser"), "{listed:?}");
 }
 
 #[tokio::test]
