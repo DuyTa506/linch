@@ -29,7 +29,9 @@ const REAP: Duration = Duration::from_secs(2);
 /// this process dies, even by `SIGKILL`, the pipe reaches end of file and
 /// the watchdog kills the whole group, so a background command never
 /// outlives the server. `exec` keeps the shell's pid, the group leader's.
-const LIFELINE: &str = "exec 3<&0 </dev/null; (cat <&3; kill -KILL 0) >/dev/null 2>&1 & \
+/// The watchdog uses only builtins (nothing ever writes the pipe, so
+/// `read` returns at end of file), so it works whatever the `PATH`.
+const LIFELINE: &str = "exec 3<&0 </dev/null; (read -r _ <&3; kill -KILL 0) >/dev/null 2>&1 & \
                         exec 3<&-; exec /bin/sh -c \"$1\"";
 
 /// Why the command stopped.
@@ -212,11 +214,13 @@ mod tests {
     use super::*;
 
     /// The server dying closes the lifeline's write end; the watchdog then
-    /// kills the whole group, with nobody signalling it.
+    /// kills the whole group, with nobody signalling it. It needs nothing
+    /// on the `PATH`.
     #[tokio::test]
     async fn closing_the_lifeline_kills_the_group() {
         let dir = tempfile::tempdir().unwrap();
-        let mut child = spawn("sleep 30", dir.path(), &BTreeMap::new(), true).unwrap();
+        let env = BTreeMap::from([("PATH".to_owned(), "/nonexistent".to_owned())]);
+        let mut child = spawn("/bin/sleep 30", dir.path(), &env, true).unwrap();
         let mut held = child.stdin.take();
         let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
         assert!(
