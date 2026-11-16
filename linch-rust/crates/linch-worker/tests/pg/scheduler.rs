@@ -1,0 +1,389 @@
+//! Heartbeat schedules (one fixed session), jobs with a stored agent
+//! definition run by a factory, job status and history, and a fire that
+//! crashes before its commit.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use linch_core::{RunStatus, SessionId, ToolScope};
+use linch_postgres::PgPool;
+use linch_worker::{
+    AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
+    WorkerError, create_schedule, enqueue, enqueue_run, fire_due_schedules, get_schedule, job,
+    jobs,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::common::*;
+use crate::schedule::{fire_all, hourly};
+
+async fn make_due(db: &TestDb, ago: &'static str) {
+    let sql = format!("UPDATE linch_worker_schedules SET next_fire = now() - interval '{ago}'");
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_heartbeat_skips_a_fire_while_its_last_one_is_unfinished() {
+    let Some(db) = TestDb::new("beat_job").await else {
+        return;
+    };
+    create_schedule(&db.pool, &hourly("beat"), None)
+        .await
+        .unwrap();
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    // Its job is still queued: the next fire is skipped, not stacked.
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(db.jobs().await, 1);
+    let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
+    assert_eq!((info.fires, info.skips), (1, 1));
+    assert!(info.next_fire > crate::schedule::now(&db).await);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_heartbeats_missed_fires_collapse_into_one() {
+    let Some(db) = TestDb::new("beat_catchup").await else {
+        return;
+    };
+    create_schedule(&db.pool, &hourly("beat"), None)
+        .await
+        .unwrap();
+    make_due(&db, "150 minutes").await;
+    assert_eq!(fire_all(&db).await, 1);
+    let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
+    assert_eq!((info.fires, info.skips), (1, 2));
+    db.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_heartbeat_skips_a_fire_while_its_session_has_a_live_run() {
+    let Some(db) = TestDb::new("beat_live").await else {
+        return;
+    };
+    // A run in the session that suspends for approval: its job ends, but
+    // the run stays live until a person answers.
+    let probe = Probe::new("Write", ToolScope::Write, Hold::None);
+    let worker = Running::spawn(&db.pool, config("w1"), agent(&db.pool, probe));
+    enqueue_run(&db.pool, "default", NS, &SessionId::new("sched"), "go")
+        .await
+        .unwrap();
+    let run_id = db.run_of("sched").await;
+    wait_until("the run suspends and its job ends", || async {
+        db.status(&run_id).await == RunStatus::AwaitingApproval && db.jobs().await == 0
+    })
+    .await;
+    worker.stop().await;
+    create_schedule(&db.pool, &hourly("beat"), None)
+        .await
+        .unwrap();
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(db.jobs().await, 0);
+    let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
+    assert_eq!((info.fires, info.skips), (0, 1));
+    db.finish().await;
+}
+
+/// Opens the probe agent for any definition but `refuse`, counting opens
+/// and closes.
+struct Factory {
+    pool: PgPool,
+    probe: Probe,
+    opened: Arc<AtomicU32>,
+    closed: Arc<AtomicU32>,
+}
+
+impl AgentFactory for Factory {
+    fn open<'a>(
+        &'a self,
+        namespace: &'a str,
+        definition: &'a str,
+    ) -> BoxFuture<'a, Result<JobAgent, FactoryError>> {
+        async move {
+            assert_eq!(namespace, NS);
+            if definition == "refuse" {
+                return Err(FactoryError::Refused("not allowed".into()));
+            }
+            self.opened.fetch_add(1, Ordering::SeqCst);
+            let closed = Arc::clone(&self.closed);
+            let close = async move {
+                closed.fetch_add(1, Ordering::SeqCst);
+            };
+            Ok(JobAgent::new(agent(&self.pool, self.probe.clone())).on_close(close.boxed()))
+        }
+        .boxed()
+    }
+}
+
+fn request(session: &str, definition: &str) -> RunRequest {
+    RunRequest {
+        queue: "default".into(),
+        namespace: NS.into(),
+        session_id: SessionId::new(session),
+        prompt: "go".into(),
+        agent: Some(definition.into()),
+    }
+}
+
+async fn state(db: &TestDb, id: JobId) -> JobState {
+    job(&db.pool, NS, id).await.unwrap().unwrap().state
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_factory_runs_jobs_with_a_stored_definition() {
+    let Some(db) = TestDb::new("factory").await else {
+        return;
+    };
+    let probe = Probe::new("Lookup", ToolScope::Read, Hold::None);
+    // A worker with only a fixed agent leaves a definition job alone.
+    let fixed = Running::spawn(&db.pool, config("w0"), agent(&db.pool, probe.clone()));
+    let first = enqueue(&db.pool, &request("s1", "def-1"), None)
+        .await
+        .unwrap();
+    assert_eq!(state(&db, first).await, JobState::Queued);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state(&db, first).await, JobState::Queued);
+    fixed.stop().await;
+
+    let (opened, closed) = (Arc::default(), Arc::<AtomicU32>::default());
+    let factory = Factory {
+        pool: db.pool.clone(),
+        probe: probe.clone(),
+        opened: Arc::clone(&opened),
+        closed: Arc::clone(&closed),
+    };
+    let shutdown = CancellationToken::new();
+    let worker =
+        Worker::new(db.pool.clone(), config("w1")).definitions([NS.to_owned()], Arc::new(factory));
+    let handle = tokio::spawn(worker.run(shutdown.clone()));
+    let refused = enqueue(&db.pool, &request("s2", "refuse"), None)
+        .await
+        .unwrap();
+    wait_until("both jobs end", || async {
+        state(&db, first).await == JobState::Done && state(&db, refused).await == JobState::Failed
+    })
+    .await;
+    let done = job(&db.pool, NS, first).await.unwrap().unwrap();
+    let run_id = done.run_id.clone().expect("the job names its run");
+    assert_eq!(db.status(&run_id).await, RunStatus::Completed);
+    assert_eq!(done.session_id, Some(SessionId::new("s1")));
+    assert!(done.finished_at.is_some());
+    let failed = job(&db.pool, NS, refused).await.unwrap().unwrap();
+    assert!(failed.error.unwrap().contains("not allowed"));
+    assert_eq!(
+        (opened.load(Ordering::SeqCst), closed.load(Ordering::SeqCst)),
+        (1, 1)
+    );
+    // The same definition is stored once.
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM linch_worker_agents")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 2);
+    // Listed newest first; another namespace sees none of them.
+    let listed: Vec<JobId> = jobs(&db.pool, NS, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(listed, vec![refused, first]);
+    assert!(job(&db.pool, "other", first).await.unwrap().is_none());
+    assert!(jobs(&db.pool, "other", None, 10).await.unwrap().is_empty());
+    shutdown.cancel();
+    handle.await.unwrap().unwrap();
+    db.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduled_jobs_are_listed_by_schedule() {
+    let Some(db) = TestDb::new("by_schedule").await else {
+        return;
+    };
+    let mut every = hourly("h");
+    every.session_id = None;
+    every.timing = Timing::Every(Duration::from_secs(3600));
+    create_schedule(&db.pool, &every, None).await.unwrap();
+    make_due(&db, "90 minutes").await;
+    assert_eq!(fire_all(&db).await, 2);
+    enqueue_run(&db.pool, "default", NS, &SessionId::new("s"), "go")
+        .await
+        .unwrap();
+    let all = jobs(&db.pool, NS, None, 10).await.unwrap();
+    let by_schedule = jobs(&db.pool, NS, Some("h"), 10).await.unwrap();
+    assert_eq!((all.len(), by_schedule.len()), (3, 2));
+    assert!(by_schedule.iter().all(|job| job.fire_at.is_some()));
+    assert_eq!(jobs(&db.pool, NS, None, 1).await.unwrap().len(), 1);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn the_job_cap_counts_unfinished_jobs() {
+    let Some(db) = TestDb::new("job_cap").await else {
+        return;
+    };
+    let cap = Cap {
+        root: NS.into(),
+        max: 1,
+    };
+    enqueue(&db.pool, &request("s1", "d"), Some(&cap))
+        .await
+        .unwrap();
+    let refused = enqueue(&db.pool, &request("s2", "d"), Some(&cap)).await;
+    assert!(matches!(
+        refused,
+        Err(WorkerError::LimitReached {
+            what: "jobs",
+            max: 1
+        })
+    ));
+    // A failed job no longer counts.
+    db.sql("UPDATE linch_worker_jobs SET failed_at = now()")
+        .await;
+    enqueue(&db.pool, &request("s3", "d"), Some(&cap))
+        .await
+        .unwrap();
+    db.finish().await;
+}
+
+/// The test schema's trigger on job inserts, which runs `body`.
+async fn job_insert_trigger(db: &TestDb, body: &str) {
+    let sql = format!(
+        "CREATE FUNCTION crash_fire() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN {body} RETURN NEW; END $$; \
+         CREATE TRIGGER crash_fire BEFORE INSERT ON linch_worker_jobs \
+         FOR EACH ROW EXECUTE FUNCTION crash_fire();"
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+async fn drop_trigger(db: &TestDb) {
+    db.sql("DROP TRIGGER crash_fire ON linch_worker_jobs").await;
+}
+
+#[tokio::test]
+async fn a_fire_that_fails_before_its_commit_leaves_nothing() {
+    let Some(db) = TestDb::new("fire_abort").await else {
+        return;
+    };
+    create_schedule(&db.pool, &hourly("h"), None).await.unwrap();
+    make_due(&db, "1 second").await;
+    let due = get_schedule(&db.pool, NS, "h")
+        .await
+        .unwrap()
+        .unwrap()
+        .next_fire;
+    job_insert_trigger(&db, "RAISE EXCEPTION 'crash';").await;
+    assert!(fire_due_schedules(&db.pool).await.is_err());
+    assert_eq!(db.jobs().await, 0);
+    let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
+    assert_eq!((info.next_fire, info.fires), (due, 0), "nothing moved");
+    drop_trigger(&db).await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(db.jobs().await, 1);
+
+    // The dedupe key guards the same fire time a second time.
+    sqlx::query("UPDATE linch_worker_schedules SET next_fire = $1, skips = 0")
+        .bind(due)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    db.sql("UPDATE linch_worker_jobs SET schedule_id = NULL")
+        .await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(db.jobs().await, 1);
+    db.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_firer_killed_mid_transaction_leaves_nothing() {
+    let Some(db) = TestDb::new("fire_kill").await else {
+        return;
+    };
+    create_schedule(&db.pool, &hourly("h"), None).await.unwrap();
+    make_due(&db, "1 second").await;
+    job_insert_trigger(&db, "PERFORM pg_sleep(30);").await;
+    // The firer's connection is killed while it waits inside the insert,
+    // after the schedule row was locked and before the commit.
+    let firing = tokio::spawn({
+        let pool = db.pool.clone();
+        async move { fire_due_schedules(&pool).await }
+    });
+    wait_until("the firer sleeps in its insert", || async {
+        let pid: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity \
+             WHERE wait_event = 'PgSleep' AND query LIKE 'INSERT INTO linch_worker_jobs%'",
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+        if let Some(pid) = pid {
+            sqlx::query("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        pid.is_some()
+    })
+    .await;
+    assert!(firing.await.unwrap().is_err(), "the fire did not commit");
+    drop_trigger(&db).await;
+    assert_eq!(db.jobs().await, 0);
+    let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
+    assert_eq!(info.fires, 0);
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(db.jobs().await, 1);
+    db.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_firers_make_each_fire_once() {
+    let Some(db) = TestDb::new("fire_race").await else {
+        return;
+    };
+    for i in 0..20 {
+        let mut every = hourly(&format!("s{i}"));
+        every.session_id = None;
+        every.timing = Timing::Every(Duration::from_secs(60));
+        create_schedule(&db.pool, &every, None).await.unwrap();
+    }
+    make_due(&db, "150 seconds").await;
+    let firers = (0..8).map(|_| {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            let mut total = 0;
+            for _ in 0..10 {
+                total += fire_due_schedules(&pool).await.unwrap();
+            }
+            total
+        })
+    });
+    let mut fired = 0;
+    for firer in firers {
+        fired += firer.await.unwrap();
+    }
+    fired += fire_all(&db).await;
+    // Three fires each (150 s, 90 s and 30 s ago), none twice.
+    assert_eq!(fired, 60);
+    assert_eq!(db.jobs().await, 60);
+    let distinct: i64 =
+        sqlx::query_scalar("SELECT count(DISTINCT (schedule_id, fire_at)) FROM linch_worker_jobs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(distinct, 60);
+    db.finish().await;
+}

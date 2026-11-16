@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use linch_core::{RunError, RunId, SessionId, StoreError};
+use linch_core::{Agent, RunError, RunId, SessionId, StoreError};
 
 use crate::error::{WorkerError, chain};
 use crate::execute::Shared;
@@ -29,11 +29,16 @@ pub(crate) fn backoff(base: Duration, attempt: i32) -> Duration {
 }
 
 /// Settle `lease`'s job as `outcome` says.
-pub(crate) async fn settle(shared: &Shared, lease: &JobLease, outcome: Outcome) {
+pub(crate) async fn settle(
+    shared: &Shared,
+    lease: &JobLease,
+    agent: Option<&Agent>,
+    outcome: Outcome,
+) {
     let (pool, id) = (&shared.pool, lease.job.id.0);
     let settled = match outcome {
-        Outcome::Done => lease.ack(pool).await,
-        Outcome::Retry(error) => retry(shared, lease, &error, true).await,
+        Outcome::Done => lease.ack(pool, "done").await,
+        Outcome::Retry(error) => retry(shared, lease, agent, &error, true).await,
         Outcome::Busy(error) => {
             let delay = backoff(shared.retry_delay, lease.attempt());
             tracing::info!(job = id, %error, ?delay, "the session or the run is busy; trying again later");
@@ -46,17 +51,17 @@ pub(crate) async fn settle(shared: &Shared, lease: &JobLease, outcome: Outcome) 
         // The run first: a crash in between leaves a terminal run, which the
         // job's next attempt acks.
         Outcome::FailRun { run_id, error } => {
-            match fail_run(shared, lease, &run_id, &error).await {
+            match fail_run(shared, lease, agent, &run_id, &error).await {
                 Ok(()) => {
                     tracing::warn!(job = id, run = %run_id, %error, "failing a job and its run");
                     lease.fail(pool, &error).await
                 }
-                Err(why) => retry(shared, lease, &why, false).await,
+                Err(why) => retry(shared, lease, agent, &why, false).await,
             }
         }
         Outcome::Fenced(error) => {
             tracing::info!(job = id, %error, "another owner claimed the run; dropping the job");
-            lease.ack(pool).await
+            lease.ack(pool, "superseded").await
         }
         Outcome::Lost => {
             tracing::info!(job = id, "lost the job; dropped its run");
@@ -77,6 +82,7 @@ pub(crate) async fn settle(shared: &Shared, lease: &JobLease, outcome: Outcome) 
 async fn retry(
     shared: &Shared,
     lease: &JobLease,
+    agent: Option<&Agent>,
     error: &str,
     with_run: bool,
 ) -> Result<bool, WorkerError> {
@@ -89,7 +95,7 @@ async fn retry(
     }
     let error = format!("gave up after {failures} failed attempts: {error}");
     if let Some(run_id) = lease.job.run_id.as_ref().filter(|_| with_run) {
-        match fail_run(shared, lease, run_id, &error).await {
+        match fail_run(shared, lease, agent, run_id, &error).await {
             Ok(()) => tracing::warn!(job = id, run = %run_id, %error, "failing a job and its run"),
             Err(why) => {
                 tracing::warn!(job = id, %error, run = %run_id, %why, "failing a job; failing its run failed")
@@ -106,11 +112,12 @@ async fn retry(
 async fn fail_run(
     shared: &Shared,
     lease: &JobLease,
+    agent: Option<&Agent>,
     run_id: &RunId,
     error: &str,
 ) -> Result<(), String> {
     let namespace = &lease.job.namespace;
-    let Some(agent) = shared.agents.get(namespace) else {
+    let Some(agent) = agent else {
         return Err(format!("no agent for namespace {namespace}"));
     };
     let options = shared.options(SessionId::new(""));

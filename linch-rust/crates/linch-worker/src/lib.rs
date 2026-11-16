@@ -52,20 +52,31 @@ use linch_postgres::{MigrateError, PgPool};
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
+mod definition;
 mod error;
 mod execute;
+mod factory;
 mod job;
 mod lease;
 mod outcome;
 mod schedule;
 mod settle;
+mod status;
+mod timing;
 mod worker;
 
+pub use definition::Cap;
 pub use error::WorkerError;
-pub use job::{JobId, enqueue_approve, enqueue_resume, enqueue_run};
+pub use factory::{AgentFactory, FactoryError, JobAgent};
+pub use job::{JobId, RunRequest, enqueue, enqueue_approve, enqueue_resume, enqueue_run};
 pub use lease::set_queue_limit;
-pub use schedule::{Schedule, cancel_schedule, create_schedule, fire_due_schedules};
-pub use worker::{Worker, WorkerConfig};
+pub use schedule::{
+    Schedule, ScheduleInfo, create_schedule, delete_schedule, fire_due_schedules, get_schedule,
+    list_schedules, pause_schedule, resume_schedule,
+};
+pub use status::{JobInfo, JobState, MAX_JOBS_LISTED, job, jobs, prune_history};
+pub use timing::Timing;
+pub use worker::{HISTORY_RETENTION, Worker, WorkerConfig};
 
 /// Table that records which worker migrations have been applied.
 ///
@@ -114,6 +125,11 @@ fn migrator() -> Migrator {
             4,
             "queue limits",
             include_str!("../migrations/0004_queue_limits.sql"),
+        ),
+        simple(
+            5,
+            "scheduler",
+            include_str!("../migrations/0005_scheduler.sql"),
         ),
     ];
     Migrator {

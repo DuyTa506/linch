@@ -32,6 +32,21 @@ pub enum WorkerError {
         /// Its active job.
         job: JobId,
     },
+    /// The namespace already has a schedule with this id.
+    #[error("schedule {id:?} already exists")]
+    ScheduleExists {
+        /// The id.
+        id: String,
+    },
+    /// A [`crate::Cap`] is reached: the root already holds `max`
+    /// schedules, or `max` unfinished jobs.
+    #[error("the namespace root already holds its {max} {what}")]
+    LimitReached {
+        /// `schedules` or `jobs`.
+        what: &'static str,
+        /// The cap.
+        max: u64,
+    },
 }
 
 /// `error` and every source under it, joined with `: `, for job records and
