@@ -58,10 +58,15 @@ pub(crate) async fn post(
     ))
 }
 
-/// A request that got no response, with its text redacted.
+/// A request that got no response, with its text redacted: a
+/// [`ProviderError::Connect`] when the connection was never made, so the
+/// request never went out.
 pub(crate) fn transport(key: &ApiKey, err: &reqwest::Error) -> ProviderError {
-    ProviderError::Transport {
-        message: key.redact(&err.to_string()),
+    let message = key.redact(&err.to_string());
+    if err.is_connect() {
+        ProviderError::Connect { message }
+    } else {
+        ProviderError::Transport { message }
     }
 }
 

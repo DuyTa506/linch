@@ -14,7 +14,7 @@ use common::*;
 use futures::StreamExt;
 use linch_core::events::kinds::{ProviderRetryEvent, ResultSubtype};
 use linch_core::events::model_call::CallDisposition;
-use linch_core::provider::scripted::{ScriptedError, TurnBuilder};
+use linch_core::provider::scripted::{ScriptedError, ScriptedTurn, TurnBuilder};
 use linch_core::{
     Agent, AgentSpec, Commit, Envelope, Event, Lease, LogEntry, NewRun, PermissionMode,
     ProviderRetry, RunId, RunOptions, RunRecord, RunStatus, RunStore, ScriptedProvider, SessionId,
@@ -278,8 +278,8 @@ async fn a_run_dropped_during_the_backoff_resumes_with_the_next_call() {
     );
     assert_eq!(retries(&events).len(), 1);
     assert!(
-        !result(&resumed).usage_complete,
-        "the failed call reported no usage"
+        result(&resumed).usage_complete,
+        "a 503 before any output cost nothing"
     );
 }
 
@@ -395,26 +395,88 @@ async fn reliability_costs_nothing_when_no_call_fails() {
     assert_eq!(trace(reliable).await, plain);
 }
 
-/// Pinned: with a capped budget, a failed call of unknown usage leaves the
-/// cap unkeepable, so the run is not retried and ends with the provider's
-/// error as it would without retries (see the report on receipts).
-#[tokio::test]
-async fn a_capped_budget_ends_the_run_with_the_provider_error_instead_of_retrying() {
-    let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, busy()));
+/// A spec that retries under a 1000-token cap.
+fn capped() -> AgentSpec {
     let mut spec = retrying(3, 1);
     spec.budget = Some(linch_core::RunBudget {
         max_tokens: Some(1_000),
         ..Default::default()
     });
-    let agent = flaky_agent(spec, provider.clone(), Arc::new(Stores::default()));
-    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
-    assert_eq!(provider.calls().len(), 1);
-    assert!(retries(&envelopes).is_empty());
-    let error = envelopes.iter().find_map(|e| match &e.event {
-        Event::Error(error) => Some(error.error.clone()),
-        _ => None,
+    spec
+}
+
+fn receipt_usages(envelopes: &[Envelope]) -> Vec<Option<linch_core::Usage>> {
+    (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::ModelCallReceipt(receipt) => Some(receipt.usage),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A provider that answered with an error status before any output, or a
+/// connection never made, cost nothing: the receipt says so, the total stays
+/// complete, and a capped budget lets the run retry.
+#[tokio::test]
+async fn under_a_capped_budget_a_call_known_to_cost_nothing_is_retried() {
+    let refused = ScriptedError::Connect {
+        message: "connection refused".into(),
+    };
+    for error in [busy(), refused] {
+        let provider =
+            Arc::new(Flaky::new(vec![text_turn("done")]).fail_with(0, MODEL, error.clone()));
+        let stores = Arc::new(Stores::default());
+        let agent = flaky_agent(capped(), provider.clone(), stores.clone());
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        let envelopes = finish(stream).await;
+        let receipts = receipt_usages(&durable(&stores, &run_id).await);
+
+        assert_eq!(provider.calls().len(), 2, "{error:?}");
+        assert_eq!(retries(&envelopes).len(), 1, "{error:?}");
+        assert_eq!(receipts[0], Some(linch_core::Usage::default()), "{error:?}");
+        let done = result(&envelopes);
+        assert_eq!(done.subtype, ResultSubtype::Success, "{error:?}");
+        assert!(done.usage_complete, "{error:?}");
+        let usage_events = (envelopes.iter()).filter(|e| matches!(e.event, Event::Usage(_)));
+        assert_eq!(
+            usage_events.count(),
+            1,
+            "no usage event for the free failure"
+        );
+    }
+}
+
+/// A request that went out with nothing back (a reset or a read timeout),
+/// or a failure after output began, may have been paid: its usage stays
+/// unknown, and a capped budget ends the run with the provider's error.
+#[tokio::test]
+async fn under_a_capped_budget_a_call_that_may_have_been_paid_ends_the_run() {
+    let reset = ScriptedTurn::failing(ScriptedError::Transport {
+        message: "connection reset".into(),
     });
-    assert_eq!(error.unwrap()["status"], 503);
+    let mut cut = TurnBuilder::new(MODEL).text("partial").build();
+    cut.events.pop();
+    cut.error = Some(busy());
+    for (failure, kind) in [(reset, "transport"), (cut, "status")] {
+        let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail(0, MODEL, failure));
+        let stores = Arc::new(Stores::default());
+        let agent = flaky_agent(capped(), provider.clone(), stores.clone());
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        let envelopes = finish(stream).await;
+        let receipts = receipt_usages(&durable(&stores, &run_id).await);
+
+        assert_eq!(provider.calls().len(), 1, "{kind}");
+        assert!(retries(&envelopes).is_empty(), "{kind}");
+        assert_eq!(receipts, [None], "{kind}");
+        let error = envelopes.iter().find_map(|e| match &e.event {
+            Event::Error(error) => Some(error.error.clone()),
+            _ => None,
+        });
+        assert_eq!(error.unwrap()["kind"], kind);
+        assert!(!result(&envelopes).usage_complete, "{kind}");
+    }
 }
 
 /// Without a policy a failure ends the run as it always did.

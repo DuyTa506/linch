@@ -6,7 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::test_server::{
-    assert_redirect_refused, redirect_response, serve_once, serve_stalled_error,
+    assert_never_connected, assert_redirect_refused, closed_url, redirect_response, serve_once,
+    serve_stalled_error,
 };
 
 mod catalog;
@@ -156,4 +157,14 @@ async fn a_huge_error_body_is_read_only_in_part() {
             if message.chars().count() == 500 && !message.contains(SECRET)),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn a_port_nothing_listens_on_is_a_connect_error() {
+    let err = provider(closed_url())
+        .stream(request(), CancellationToken::new())
+        .await
+        .err()
+        .expect("nothing listens");
+    assert_never_connected(&err);
 }

@@ -113,8 +113,11 @@ impl Runner {
         let (usage, cost) = (receipt.usage, receipt.cost_usd);
         let served = receipt.actual_model.clone();
         self.journal.stage(Event::ModelCallReceipt(receipt));
-        // Paid whether or not it gave a summary.
-        self.stage_usage(usage, cost, served);
+        // Paid whether or not it gave a summary, unless it failed before
+        // costing anything.
+        if !(outcome.result.as_ref()).is_err_and(|failure| failure.free) {
+            self.stage_usage(usage, cost, served);
+        }
         let text = match outcome.result {
             Ok(assembly) => assembly.message.text(),
             Err(failure) if matches!(failure.error, ProviderError::Cancelled) => {

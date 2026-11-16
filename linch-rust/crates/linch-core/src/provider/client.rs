@@ -56,7 +56,16 @@ pub trait Provider: Send + Sync {
 /// request headers, including ones a server echoes back in an error body.
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    /// The request never got a response (connect, TLS, timeout, reset).
+    /// The connection was never made (refused, DNS, TLS handshake, connect
+    /// timeout), so the request never went out and cost nothing.
+    #[error("provider connect error: {message}")]
+    Connect {
+        /// Redacted description.
+        message: String,
+    },
+    /// The request went out but no response came back (reset, read
+    /// timeout), or the stream broke after it began: the provider may have
+    /// billed it.
     #[error("provider transport error: {message}")]
     Transport {
         /// Redacted description.
@@ -88,11 +97,12 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// Whether retrying the same request may succeed: no response at all,
-    /// a request timeout (408), a rate limit (429) or a server error (5xx).
+    /// Whether retrying the same request may succeed: no connection or no
+    /// response at all, a request timeout (408), a rate limit (429) or a
+    /// server error (5xx).
     pub fn retryable(&self) -> bool {
         match self {
-            Self::Transport { .. } => true,
+            Self::Connect { .. } | Self::Transport { .. } => true,
             Self::Status { status, .. } => matches!(*status, 408 | 429) || *status >= 500,
             Self::InvalidRequest { .. } | Self::Stream(_) | Self::Cancelled => false,
         }
@@ -122,6 +132,12 @@ mod tests {
         assert!(
             ProviderError::Transport {
                 message: "reset".into()
+            }
+            .retryable()
+        );
+        assert!(
+            ProviderError::Connect {
+                message: "refused".into()
             }
             .retryable()
         );

@@ -138,6 +138,19 @@ async def test_a_spec_retries_a_failed_call_then_fails_over() -> None:
     assert final(envelopes).final_text == "done"
 
 
+async def test_a_capped_budget_retries_a_call_that_cost_nothing() -> None:
+    refused = {"error": {"type": "connect", "message": "connection refused"}}
+    retry: ProviderRetry = {"base_delay_ms": 1, "jitter": 0.0}
+    cfg = config([refused, overloaded(), text_turn("done")])
+    cfg["spec"] = {"model": MODEL, "provider_retry": retry, "budget": {"max_tokens": 100}}
+    envelopes = await run_once(cfg)
+
+    retried = [e.event for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
+    assert [r.error["kind"] for r in retried] == ["connect", "status"]
+    assert final(envelopes).final_text == "done"
+    assert final(envelopes).usage_complete
+
+
 async def test_a_spec_without_a_retry_policy_ends_the_run_on_a_failure() -> None:
     envelopes = await run_once(config([overloaded(), text_turn("never")]))
 

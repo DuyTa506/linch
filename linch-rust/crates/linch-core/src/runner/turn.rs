@@ -370,8 +370,11 @@ impl Runner {
             Ok(assembly) => return self.accept(assembly, cost, served).await,
             Err(failure) => failure,
         };
-        // A call that failed or was cancelled may still have been paid.
-        self.stage_usage(usage, cost, served);
+        // A call that failed or was cancelled may still have been paid; one
+        // known to have cost nothing reports no usage, as Python's does not.
+        if !failure.free {
+            self.stage_usage(usage, cost, served);
+        }
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);

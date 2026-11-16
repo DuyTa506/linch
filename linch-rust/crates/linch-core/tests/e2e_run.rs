@@ -256,7 +256,10 @@ async fn a_provider_error_fails_the_run_with_an_error_result() {
         (result.subtype, result.stop_reason),
         (ResultSubtype::Error, StopReason::Error)
     );
-    assert!(!result.usage_complete, "the failed call reported no usage");
+    assert!(
+        result.usage_complete,
+        "a 503 before any output cost nothing"
+    );
     let record = stores.runs.load(NS, &run_id).await.unwrap();
     assert_eq!(record.status, RunStatus::Failed);
 }

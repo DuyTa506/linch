@@ -400,8 +400,8 @@ async fn a_failed_summary_leaves_the_turn_uncompacted() {
         linch_core::events::kinds::ResultSubtype::Success
     );
     assert!(
-        !result.usage_complete,
-        "the failed summaries reported no usage"
+        result.usage_complete,
+        "summaries refused with an error status cost nothing"
     );
     // A failed summary costs two writes: its delivery, then its receipt.
     assert_eq!(stores.runs.writes().commit, 18 + 2 * 2);
