@@ -237,7 +237,7 @@ async def _apply(report: EvalReport, custom: Sequence[CustomScorer]) -> None:
     """Add the verdicts of `custom` to each case and recompute the pass counts."""
     for case in report["cases"]:
         for scorer in custom:
-            verdict = scorer(case)
+            verdict: Any = scorer(case)
             if inspect.isawaitable(verdict):
                 verdict = await verdict
             if verdict is not None and not isinstance(verdict, bool):

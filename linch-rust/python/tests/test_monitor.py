@@ -32,7 +32,7 @@ async def test_eval_scores_cases_and_reports_cost_tokens_and_duration() -> None:
         assert (report["total"], report["passed"], report["pass_rate"]) == (2, 1, 0.5)
         assert report["usage"]["input_tokens"] == 6
         assert report["total_cost_usd"] == pytest.approx(2 * COST)
-        assert report["markdown"].startswith("# Linch Eval Report")
+        assert report.get("markdown", "").startswith("# Linch Eval Report")
         first = report["cases"][0]
         assert first["scores"][1] == {"name": "cost_under:1.0", "verdict": True}
         assert first["total_cost_usd"] == pytest.approx(COST)
