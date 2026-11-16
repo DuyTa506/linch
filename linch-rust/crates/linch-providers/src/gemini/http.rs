@@ -20,15 +20,15 @@ pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
     key: &ApiKey,
+    send_key: bool,
     body: &JsonValue,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, ProviderError> {
-    let request = client
-        .post(url)
-        .header("x-goog-api-key", key.expose())
-        .header(ACCEPT, "text/event-stream")
-        .json(body)
-        .send();
+    let mut request = client.post(url).header(ACCEPT, "text/event-stream");
+    if send_key {
+        request = request.header("x-goog-api-key", key.expose());
+    }
+    let request = request.json(body).send();
     let response = cancel
         .run_until_cancelled(request)
         .await

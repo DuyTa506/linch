@@ -48,7 +48,7 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 | Field | Meaning |
 |---|---|
 | `request.extra_body` | Fields merged into every request body. They replace what the adapter set, except `model`, `stream`, `temperature` and the conversation (`messages`, `tools`, `input`, `contents`, `system`, `instructions`), which the session owns. `chat_template_kwargs` merges per field |
-| `request.default_headers` | Headers sent with every request, for gateways. The key headers (`authorization`, `x-api-key`, `x-goog-api-key`) and `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer` are refused at open. Values are hidden when a config is printed or logged |
+| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key` or `x-goog-api-key` replaces the provider key: the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te` and `trailer` are refused at open. Values are hidden when a config is printed or logged |
 | `request.timeout_ms` | Longest silence between two chunks of a response before the call fails; absent: the adapter's own limit |
 | `chat.parallel_tool_calls` | Sent when the request has tools; absent: the server's default |
 | `chat.include_stream_options` | `false` drops `stream_options`, for servers that reject it. On when absent |
@@ -56,8 +56,6 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 | `chat.sampling_params` | Native sampling fields (`top_k`, `min_p`, ...), under `extra_body` |
 
 `chat` applies to `deepseek`, `openai-chat`, `vllm`, `sglang` and `llamacpp`.
-The key still comes from the server's environment, so a gateway that needs
-only a header token still needs the provider's key variable set to some value.
 On a remote server, `request` is admitted with the `base_url` that carries it;
 it cannot widen `provider_base_urls`.
 

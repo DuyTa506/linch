@@ -28,12 +28,11 @@ const PROTECTED_FIELDS: [&str; 9] = [
 
 const CHAT_TEMPLATE_KWARGS: &str = "chat_template_kwargs";
 
-/// Headers a caller cannot set: the ones the HTTP client owns, and the
-/// key headers, which only the provider's key sets.
-const FORBIDDEN_HEADERS: [&str; 10] = [
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
+/// Headers that carry the provider's key. A caller that sets one sends its
+/// own credential, and the adapter then leaves the environment's key out.
+const KEY_HEADERS: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
+/// Headers a caller cannot set: the ones the HTTP client owns.
+const FORBIDDEN_HEADERS: [&str; 7] = [
     "host",
     "content-length",
     "transfer-encoding",
@@ -64,15 +63,17 @@ impl RequestOptions {
     /// Add a header sent with every request. A value that may be a
     /// credential is hidden from `Debug` output.
     ///
-    /// The key headers (`authorization`, `x-api-key`, `x-goog-api-key`)
-    /// are refused: the key comes from the environment.
+    /// A key header (`authorization`, `x-api-key`, `x-goog-api-key`) sends
+    /// the caller's credential in place of the provider key from the
+    /// environment, which is then not sent; see
+    /// [`RequestOptions::sets_key_header`].
     ///
     /// # Errors
     ///
     /// [`ProviderError::InvalidRequest`] when `name` or `value` is not a
-    /// valid header, or `name` is a key header or one the HTTP client sets
-    /// itself (`host`, `content-length`, `transfer-encoding`, `connection`,
-    /// `upgrade`, `te`, `trailer`). The value is not part of the message.
+    /// valid header, or `name` is one the HTTP client sets itself (`host`,
+    /// `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`,
+    /// `trailer`). The value is not part of the message.
     pub fn header(mut self, name: &str, value: &str) -> Result<Self, ProviderError> {
         let invalid = |what: &str| ProviderError::InvalidRequest {
             message: format!("header {name:?} is not allowed: {what}"),
@@ -80,15 +81,21 @@ impl RequestOptions {
         let header_name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| invalid("not a valid header name"))?;
         if FORBIDDEN_HEADERS.contains(&header_name.as_str()) {
-            return Err(invalid(
-                "only the provider's key or the HTTP client sets it",
-            ));
+            return Err(invalid("the HTTP client sets it"));
         }
         let mut header_value =
             HeaderValue::from_str(value).map_err(|_| invalid("its value is not valid"))?;
         header_value.set_sensitive(true);
         self.headers.insert(header_name, header_value);
         Ok(self)
+    }
+
+    /// Whether a header carries the caller's own credential. The adapter
+    /// then does not send the provider key.
+    pub fn sets_key_header(&self) -> bool {
+        KEY_HEADERS
+            .iter()
+            .any(|name| self.headers.contains_key(*name))
     }
 
     /// Merge `extra_body` into `body`, which must be a JSON object.
@@ -263,14 +270,7 @@ mod tests {
 
     #[test]
     fn headers_the_client_owns_are_refused_without_echoing_the_value() {
-        for name in [
-            "Host",
-            "content-length",
-            "Transfer-Encoding",
-            "connection",
-            "Authorization",
-            "x-api-key",
-        ] {
+        for name in ["Host", "content-length", "Transfer-Encoding", "connection"] {
             let err = RequestOptions::default()
                 .header(name, "secret")
                 .unwrap_err();

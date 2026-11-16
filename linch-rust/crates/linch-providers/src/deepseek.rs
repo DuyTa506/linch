@@ -122,7 +122,14 @@ impl Provider for DeepSeek {
             self.options.base_url.trim_end_matches('/')
         );
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, Some(key), &body, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            (!self.options.request.sets_key_header()).then_some(key),
+            &body,
+            &cancel,
+        )
+        .await?;
         let translator =
             Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage);
         Ok(stream::events(

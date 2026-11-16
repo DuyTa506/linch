@@ -153,7 +153,14 @@ impl Provider for OpenAiResponses {
         self.options.request.merge_body(&mut body);
         let url = format!("{}/responses", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, Some(key), &body, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            (!self.options.request.sets_key_header()).then_some(key),
+            &body,
+            &cancel,
+        )
+        .await?;
         Ok(stream::events(
             response.bytes_stream(),
             stream::Translator::new(request.model),

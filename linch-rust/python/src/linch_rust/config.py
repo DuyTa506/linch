@@ -181,7 +181,7 @@ class AgentConfig(TypedDict, total=False):
             `request`: `{"extra_body": {...}, "default_headers": {...},
             "timeout_ms": 60000}`: extra fields merged into the request
             body (not `model`, `stream`, `temperature` or the conversation),
-            headers sent with every request (not the key headers), and the
+            headers sent with every request (a key header replaces the provider key), and the
             longest silence in milliseconds before a call fails. The
             `deepseek`, `openai-chat`, `vllm`, `sglang` and `llamacpp`
             providers also take `chat`: `{"parallel_tool_calls": false,

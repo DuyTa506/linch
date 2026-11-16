@@ -202,7 +202,10 @@ impl Provider for OpenAiChat {
         if self.context_window.is_some() || self.probed.get().is_some() {
             return;
         }
-        let key = self.api_key.as_ref();
+        let key = self
+            .api_key
+            .as_ref()
+            .filter(|_| !self.request.sets_key_header());
         let probed = context::probe(&self.client, self.profile.context, &self.base_url, key).await;
         let _ = self.probed.set(probed);
     }
@@ -216,7 +219,10 @@ impl Provider for OpenAiChat {
         self.chat.apply(&mut body);
         self.request.merge_body(&mut body);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let key = self.api_key.as_ref();
+        let key = self
+            .api_key
+            .as_ref()
+            .filter(|_| !self.request.sets_key_header());
         let response = http::post(&self.client, &url, key, &body, &cancel).await?;
         let translator = Translator::new(
             request.model,

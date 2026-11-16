@@ -140,7 +140,15 @@ impl Provider for Gemini {
             utf8_percent_encode(model, PATH_SEGMENT),
         );
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, key, &body, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            key,
+            !self.options.request.sets_key_header(),
+            &body,
+            &cancel,
+        )
+        .await?;
         let translator = stream::Translator::new(request.model, key.clone());
         Ok(stream::events(
             response.bytes_stream(),

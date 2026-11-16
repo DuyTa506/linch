@@ -19,15 +19,18 @@ pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
     key: &ApiKey,
+    send_key: bool,
     body: &JsonValue,
     beta: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, ProviderError> {
     let mut request = client
         .post(url)
-        .header("x-api-key", key.expose())
         .header("anthropic-version", API_VERSION)
         .header(ACCEPT, "text/event-stream");
+    if send_key {
+        request = request.header("x-api-key", key.expose());
+    }
     if let Some(beta) = beta {
         request = request.header("anthropic-beta", beta);
     }

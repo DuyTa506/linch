@@ -12,8 +12,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   `request.timeout_ms` on every live provider, and `chat.parallel_tool_calls`,
   `chat.include_stream_options`, `chat.chat_template_kwargs` and
   `chat.sampling_params` on the Chat Completions providers (`deepseek`,
-  `openai-chat`, `vllm`, `sglang`, `llamacpp`). Header values are hidden when a
-  config is printed; key headers and the conversation fields are refused or kept.
+  `openai-chat`, `vllm`, `sglang`, `llamacpp`). A caller's key header
+  (`authorization`, `x-api-key`, `x-goog-api-key`) replaces the provider key,
+  which then need not be set. Header values are hidden when a config is
+  printed; `extra_body` cannot replace the conversation fields.
 
 ## 0.1.1 - 2026-11-07
 

@@ -373,7 +373,8 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             request,
             chat,
         } => {
-            let mut options = DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV)?);
+            let mut options =
+                DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV, &request)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
             options.request = request.options().map_err(OpenError::Provider)?;
@@ -386,7 +387,8 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             request,
             chat,
         } => {
-            let mut options = OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV)?);
+            let mut options =
+                OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV, &request)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
             options.request = request.options().map_err(OpenError::Provider)?;
@@ -400,7 +402,7 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             native_catalog_changes,
             request,
         } => {
-            let api_key = key("openai-responses", openai::API_KEY_ENV)?;
+            let api_key = key("openai-responses", openai::API_KEY_ENV, &request)?;
             let mut options = ResponsesOptions::new(api_key);
             override_url(&mut options.base_url, base_url);
             options.reasoning_summary = reasoning_summary.map(summary);
@@ -414,17 +416,17 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             native_catalog_changes,
             request,
         } => {
-            let mut options = AnthropicOptions::from_env().ok_or(OpenError::MissingKey {
-                provider: "anthropic",
-                env: anthropic::API_KEY_ENV,
-            })?;
+            let mut options = match AnthropicOptions::from_env() {
+                Some(options) => options,
+                None => AnthropicOptions::new(key("anthropic", anthropic::API_KEY_ENV, &request)?),
+            };
             override_url(&mut options.base_url, base_url);
             options.native_catalog_changes = native_catalog_changes;
             options.request = request.options().map_err(OpenError::Provider)?;
             Arc::new(Anthropic::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Gemini { base_url, request } => {
-            let mut options = GeminiOptions::new(key("gemini", gemini::API_KEY_ENV)?);
+            let mut options = GeminiOptions::new(key("gemini", gemini::API_KEY_ENV, &request)?);
             override_url(&mut options.base_url, base_url);
             options.request = request.options().map_err(OpenError::Provider)?;
             Arc::new(Gemini::new(options).map_err(OpenError::Provider)?)
@@ -473,8 +475,22 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
 }
 
 /// The key in `env`, or [`OpenError::MissingKey`].
-fn key(provider: &'static str, env: &'static str) -> Result<ApiKey, OpenError> {
-    ApiKey::from_env(env).ok_or(OpenError::MissingKey { provider, env })
+///
+/// A request that sets its own key header (`authorization`, `x-api-key`,
+/// `x-goog-api-key`) needs no key in the environment: the adapter does not
+/// send this stand-in.
+fn key(
+    provider: &'static str,
+    env: &'static str,
+    request: &RequestConfig,
+) -> Result<ApiKey, OpenError> {
+    match ApiKey::from_env(env) {
+        Some(key) => Ok(key),
+        None if request.sets_key_header() => {
+            Ok(ApiKey::new("set-by-request-header").expect("not blank"))
+        }
+        None => Err(OpenError::MissingKey { provider, env }),
+    }
 }
 
 fn override_url(target: &mut String, base_url: Option<String>) {
