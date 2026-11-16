@@ -12,6 +12,7 @@ use crate::openai::profile_payload;
 use crate::openai::test_support::{assemble_ok, bytes, request, serve_once, sse_response};
 use crate::openai_compat::stream::{self, Translator};
 
+mod cache_usage;
 mod fixtures;
 
 const ALL: [Server; 3] = [Server::Vllm, Server::SgLang, Server::LlamaCpp];
@@ -202,7 +203,7 @@ fn cached_prefix_is_split_from_input() {
     // Without a cache report (vLLM and SGLang need a launch flag) the
     // whole prompt reads as uncached.
     let bare: WireUsage = serde_json::from_value(json!({"prompt_tokens": 10})).unwrap();
-    assert_eq!(prompt_minus_cached(&bare).input_tokens, 10);
+    assert_eq!(sglang_usage(&bare).input_tokens, 10);
 }
 
 #[tokio::test]

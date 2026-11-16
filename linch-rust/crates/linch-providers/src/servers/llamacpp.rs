@@ -27,7 +27,7 @@
 use linch_core::JsonObject;
 use serde_json::json;
 
-use super::{kwargs, prompt_minus_cached};
+use super::{kwargs, llamacpp_usage};
 use crate::context::ContextRule;
 use crate::openai::{ChatProfile, ToolChoiceSupport};
 use crate::openai_compat::stream::ReasoningField;
@@ -44,7 +44,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     json_schema: false,
     reasoning_effort: true,
     template_thinking_switch: true,
-    usage: prompt_minus_cached,
+    usage: llamacpp_usage,
     context: ContextRule::Props,
     overflow: &crate::overflow::LLAMACPP,
 };

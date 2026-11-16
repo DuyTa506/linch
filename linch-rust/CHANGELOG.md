@@ -114,6 +114,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `LeaseLost` (-32022) and `RunLeased` (-32033) in the Python client, both `RunError`s.
 - `Agent::released` waits for the lease releases of runs that were dropped; `OpenedAgent::close` waits for them (at most `RELEASE_WAIT`, 5 s), so a `linch-server` that exits normally frees the runs it was driving at once.
 - A workflow `agent` call whose run is still leased to a runner that crashed waits until the lease runs out (or the workflow is cancelled) instead of failing.
+- Local-server cache usage reads Python's fields: SGLang's top-level
+  `cached_tokens` without `prompt_tokens_details`, llama.cpp's
+  `cache_read_tokens` and `prompt_cache_hit_tokens` (details or `usage`) and
+  `timings.cache_n` when usage reports no cache hit.
 
 ### Changed
 
