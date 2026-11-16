@@ -179,6 +179,39 @@ async fn a_process_id_is_known_only_to_its_session_and_registry() {
     assert!(error.message.contains("restart"), "{}", error.message);
 }
 
+/// Session B names session A's process to both tools: each is
+/// `no_such_process`, and A's process runs on, its output unread.
+#[tokio::test]
+async fn another_session_can_neither_read_nor_kill_a_process() {
+    let ws = Workspace::new();
+    let tools = tools(&ws);
+    let (id, pid) = start(&tools, "echo from-a; sleep 30").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for tool in [&tools.output as &dyn Tool, &tools.kill] {
+        let error = call_in(tool, "s2", json!({"process_id": id}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code.as_deref(),
+            Some(NO_SUCH_PROCESS_CODE),
+            "{}",
+            tool.name()
+        );
+        assert!(!error.message.contains("from-a"), "{}", error.message);
+    }
+    assert!(!reaped(pid), "A's process runs on");
+    assert_eq!(tools.processes.running(&"s1".into()), 1);
+    let mine = read(&tools, &id, 0).await.unwrap();
+    assert_eq!(mine.metadata["status"], "running");
+    assert!(
+        mine.value.as_str().unwrap().starts_with("from-a\n"),
+        "{:?}",
+        mine.value
+    );
+    tools.processes.close();
+    eventually_reaped(pid).await;
+}
+
 fn tools_after_restart(ws: &Workspace) -> Tools {
     tools(ws)
 }

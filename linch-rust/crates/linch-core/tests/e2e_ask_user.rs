@@ -13,6 +13,7 @@ use common::*;
 use linch_core::ask_user::{AnswerValue, AskUser, AskUserAnswer};
 use linch_core::events::kinds::{InputRequestKind, SuspendStatus};
 use linch_core::hooks::{ApprovalResponse, PreToolUse, PreToolUseResponse};
+use linch_core::journal::INTERRUPTED_TOOL_TEXT;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
@@ -423,6 +424,116 @@ async fn a_crash_at_any_write_after_the_answer_replays_it_once() {
             assert!(calls.values().all(|&n| n <= 2), "{context}: {calls:?}");
         }
     }
+}
+
+/// Drive `run_id` to its end after a crash: answer it while it awaits
+/// input, else resume it. An answer that already committed is refused.
+async fn recover(agent: &Agent, stores: &Stores, run_id: &RunId, context: &str) {
+    for _ in 0..4 {
+        let record = stores.runs.load(NS, run_id).await.unwrap();
+        if record.status.is_terminal() {
+            assert_eq!(record.status, RunStatus::Completed, "{context}");
+            return;
+        }
+        let options = RunOptions::new("s1");
+        let stream = match record.checkpoint.phase {
+            Phase::AwaitingInput { .. } => agent.answer(run_id.clone(), postgres(), options),
+            _ => agent.resume(run_id.clone(), options),
+        };
+        let (_, error) = drain(stream).await;
+        assert!(error.is_none(), "{context}: {error:?}");
+    }
+    panic!("{context}: the run did not end");
+}
+
+/// One response asks the user and calls a write tool, which waits with the
+/// question. A crash at any write, from the start to the end of the
+/// answered run, then recovery: the write tool runs exactly once and the
+/// log is the clean run's, except at the two writes around the tool itself,
+/// where it is reported interrupted (run at most once, never twice).
+#[tokio::test]
+async fn a_crash_at_any_write_of_a_mixed_batch_runs_the_other_tool_once() {
+    let turns = || {
+        Arc::new(Replay::new(vec![
+            ask_turn(0, 1, "Write"),
+            text_turn("done"),
+        ]))
+    };
+    fn build<S: RunStore + SessionStore + 'static>(
+        provider: Arc<Replay>,
+        runs: &Runs,
+        stores: Arc<S>,
+    ) -> Agent {
+        let skip = policy(PermissionMode::SkipDangerous);
+        agent(provider, tools(runs), skip, stores)
+    }
+    let clean = Arc::new(Stores::default());
+    let runs = Runs::default();
+    let agent = build(turns(), &runs, clean.clone());
+    let (run_id, envelopes) = start(&agent).await;
+    let pending = (SuspendStatus::AwaitingInput, vec!["ask_0".to_owned()]);
+    assert_eq!(
+        suspended(&envelopes),
+        pending,
+        "the write waits with the question"
+    );
+    assert!(runs.lock().unwrap().is_empty());
+    finish(agent.answer(run_id, postgres(), RunOptions::new("s1"))).await;
+    assert_eq!(runs.lock().unwrap()["call_0_0"], 1);
+    let want = messages(&*clean, "s1").await;
+    assert_eq!(result_texts(&want[2]), ["v0.0", ANSWERED]);
+    let writes = clean.log.lock().unwrap().len() as u64;
+
+    let mut interrupted = Vec::new();
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let (stores, runs, provider) = (Arc::new(Stores::default()), Runs::default(), turns());
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let crashed = build(provider.clone(), &runs, faulty);
+            let stream = crashed.run("go", RunOptions::new("s1"));
+            let run_id = stream.run_id().clone();
+            let (_, error) = drain(stream).await;
+            if error.is_none() {
+                let answer = crashed.answer(run_id.clone(), postgres(), RunOptions::new("s1"));
+                let (_, error) = drain(answer).await;
+                assert!(error.is_some(), "{context}: the fault hit no write");
+            }
+            let agent = build(provider.clone(), &runs, stores.clone());
+            let run_id = match stores.runs.load(NS, &run_id).await {
+                Ok(_) => run_id,
+                // The create failed: nothing exists, so start over.
+                Err(_) => start(&agent).await.0,
+            };
+            recover(&agent, &stores, &run_id, &context).await;
+
+            let ran = runs.lock().unwrap().get("call_0_0").copied().unwrap_or(0);
+            let log = messages(&*stores, "s1").await;
+            match result_texts(&log[2]).as_slice() {
+                [first, answer] if first == INTERRUPTED_TOOL_TEXT => {
+                    assert_eq!(answer, ANSWERED, "{context}");
+                    interrupted.push((n, timing, ran));
+                }
+                _ => {
+                    assert_eq!(ran, 1, "{context}");
+                    assert_eq!(log, want, "{context}");
+                }
+            }
+            let calls = provider.calls();
+            assert!(calls.values().all(|&n| n <= 2), "{context}: {calls:?}");
+        }
+    }
+    // At most once, as for any tool: only a crash between the write tool's
+    // durable start and its durable end leaves it interrupted. Either its
+    // start's ack was lost (it never ran) or its end was (it ran once).
+    let [
+        (start, FaultTiming::After, 0),
+        (end, FaultTiming::Before, 1),
+    ] = interrupted[..]
+    else {
+        panic!("interrupted only around the write tool: {interrupted:?}");
+    };
+    assert_eq!(end, start + 1, "{interrupted:?}");
 }
 
 /// A crash at any write of the run before the answer: the run is resumed
