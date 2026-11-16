@@ -169,6 +169,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A journal write fenced by another claim answers -32022 (`LeaseLost`) on the RPC, as a fenced claim does, instead of -32024.
 - A run whose stream ends with an error or is dropped releases its Postgres lease (one extra write), so another server can resume it at once; a run that ends or suspends writes nothing more.
 - A worker job whose run another process leases waits like a busy session (released with back-off, not counting a failure).
+- `store::conformance::run_lease_suite` takes two pairs of handles, `(short, long)`: the steps that expect a live lease without renewing it use the long TTL, so a pause on a loaded machine no longer lets their lease run out; only the renewal and expiry steps wait out the short one.
 - `linch_worker::cancel_schedule` is gone: use `pause_schedule` or `delete_schedule`. `Schedule` has `timing` (`Timing::Cron { pattern, timezone }` or `Timing::Every`) instead of `cron`, `session_id: Option<SessionId>` and `agent`; `create_schedule` takes a cap and returns the stored `ScheduleInfo`.
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
