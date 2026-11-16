@@ -371,7 +371,8 @@ async fn cancelling_a_suspended_parent_aborts_its_children() {
     }
     assert!(fixture.agent.parked_children(&run_id).is_none());
     let events = fixture.stores.runs.events(NS, &run_id, 0).await.unwrap();
-    let ended: Vec<_> = (events.iter())
+    // The children stop concurrently, so their ends land in either order.
+    let mut ended: Vec<_> = (events.iter())
         .filter_map(|envelope| match &envelope.event {
             Event::ChildRunStatus(end) if end.status == RunStatus::Aborted => {
                 Some(end.child_run_id.to_string())
@@ -379,6 +380,7 @@ async fn cancelling_a_suspended_parent_aborts_its_children() {
             _ => None,
         })
         .collect();
+    ended.sort();
     assert_eq!(ended, ["r1:sub_0", "r1:sub_1"], "{ended:?}");
     assert_eq!(*fixture.write_runs.lock().unwrap(), HashMap::new());
     let calls = fixture.provider.calls.lock().unwrap().clone();
