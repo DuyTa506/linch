@@ -196,7 +196,7 @@ async fn a_scripted_agent_reads_a_workspace_file() {
     let Event::Init(init) = &events[0] else {
         panic!("first event {:?}", events[0]);
     };
-    assert_eq!(init.tools.len(), 6, "{:?}", init.tools);
+    assert_eq!(init.tools.len(), 8, "{:?}", init.tools);
     let end = events.iter().find_map(|event| match event {
         Event::ToolCallEnd(end) => Some(end.clone()),
         _ => None,
