@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use futures::{FutureExt, StreamExt};
 use linch::{Principal, RunId, RunOptions, RunStream};
 use tokio::sync::OwnedSemaphorePermit;
+use tokio_util::sync::CancellationToken;
 
 use super::{Driven, Parked, Reply, Server, Tables, lock, to_value};
 use crate::error::{ErrorObject, code};
@@ -66,14 +67,44 @@ impl Server {
         })
     }
 
-    pub(super) fn cancel(&self, params: CancelParams) -> Cancelled {
-        let tables = lock(&self.0.tables);
-        let driven = tables.runs.get(&params.run_id);
-        if let Some(driven) = driven {
-            driven.cancel.cancel();
-        }
-        Cancelled {
-            cancelled: driven.is_some(),
+    /// Cancel a run this connection drives with its token; else, given an
+    /// agent, a suspended run through the agent's stores. The run counts
+    /// as driven meanwhile, so an approve on this connection cannot claim
+    /// it in between.
+    pub(super) async fn cancel(&self, params: CancelParams) -> Result<Cancelled, ErrorObject> {
+        let run_id = params.run_id;
+        let (agent, _cancelling, kept) = {
+            let mut tables = lock(&self.0.tables);
+            if let Some(driven) = tables.runs.get(&run_id) {
+                driven.cancel.cancel();
+                return Ok(Cancelled { cancelled: true });
+            }
+            let Some(handle) = params.agent else {
+                return Ok(Cancelled { cancelled: false });
+            };
+            let agent = tables.agent(&handle)?;
+            let driven = Driven {
+                agent: handle,
+                cancel: CancellationToken::new(),
+                _place: None,
+            };
+            tables.runs.insert(run_id.clone(), driven);
+            // A suspended run that kept its place for its workers frees it
+            // once the cancel has stopped them.
+            let kept = (tables.parked.remove(&run_id)).and_then(|held| lock(&held).take());
+            let cancelling = Cancelling {
+                server: self,
+                run_id: &run_id,
+            };
+            (agent, cancelling, kept)
+        };
+        let mut options = RunOptions::new("");
+        options.owner = OWNER.into();
+        let cancelled = agent.cancel(run_id.clone(), options).await;
+        drop(kept);
+        match cancelled {
+            Ok(cancelled) => Ok(Cancelled { cancelled }),
+            Err(error) => Err(ErrorObject::from(&error)),
         }
     }
 
@@ -202,6 +233,19 @@ impl Server {
         let end = RunEnd { run_id, error };
         let params = to_value(&end).expect("run.end params encode");
         self.0.outbox.notify(method::RUN_END, params).await;
+    }
+}
+
+/// A store cancel in progress: its entry among the driven runs, removed
+/// when the cancel ends, a panic included.
+struct Cancelling<'a> {
+    server: &'a Server,
+    run_id: &'a RunId,
+}
+
+impl Drop for Cancelling<'_> {
+    fn drop(&mut self) {
+        lock(&self.server.0.tables).runs.remove(self.run_id);
     }
 }
 

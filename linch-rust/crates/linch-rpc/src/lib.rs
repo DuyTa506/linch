@@ -14,7 +14,8 @@
 //! Each connection has its own agents, runs and server requests. Handles
 //! are numbered per connection, so `agent-1` names the connection's own
 //! first agent and never another connection's; `run.cancel` reaches only
-//! the runs its own connection drives.
+//! the runs its own connection drives, or, given an agent handle, a
+//! suspended run in that agent's stores.
 //!
 //! - **stdio** ([`serve`]): `linch-server` with no arguments. The client
 //!   started the server and is trusted ([`Access::Local`]): no login, no
@@ -252,11 +253,19 @@
 //! run's outcome, errors included, then arrives as notifications. A
 //! `run_id` the connection already drives is refused with `-32002`.
 //!
-//! **`run.cancel`** `{run_id}` ([`CancelParams`](protocol::CancelParams))
+//! **`run.cancel`** `{run_id, agent?}` ([`CancelParams`](protocol::CancelParams))
 //! aborts a run the connection drives: it ends with a `result` envelope of
-//! subtype `aborted`. The result is `{"cancelled": true}`, or
-//! `{"cancelled": false}` when the connection does not drive that run (it
-//! may have just ended); that is not an error.
+//! subtype `aborted`. With `agent`, a run the connection does not drive
+//! that waits for an approval or an answer (suspended here, in another
+//! process, or before a restart) is cancelled through that agent's
+//! stores: its pending calls get aborted results, it ends with a `result`
+//! of subtype `aborted` and status `aborted`, readable with `run.events`.
+//! The result is `{"cancelled": true}`, or `{"cancelled": false}` when
+//! there was nothing to cancel (the run is not driven here and, with
+//! `agent`, is finished or not suspended); that is not an error. A store
+//! cancel can fail like a resume: `-32021` for an unknown run, `-32033`
+//! while another process drives it, `-32022` when a racing approve took
+//! it over.
 //!
 //! **`run.events`** `{agent, run_id, after_seq?}`
 //! ([`EventsParams`](protocol::EventsParams)) returns
