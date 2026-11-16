@@ -72,6 +72,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 ### Changed
 
 - `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
+- With a `provider_call_stop` or `after_provider_call` hook attached, an accepted call's receipt and `usage` event are written before those hooks run, with `ProviderPending` at the totals that count them; the response is written after them, as before. A crash while such a hook runs no longer loses the paid usage: the resume keeps it in the totals and the budget and calls again under the next delivery attempt, which spends no `provider_retry`. The run costs one more write per accepted call; without such a hook nothing changes. `ReconcileError::MissingAssistant` is gone.
+- A binary older than this one refuses to resume a run that crashed between such a receipt and its response (an accepted receipt with no `assistant` event, under `provider_pending`): it fails with `MissingAssistant` and resumes nothing wrongly. Roll back only once those runs have been resumed or ended.
 - A call that failed with a 500, 502 or 504 before any stream event now settles with an unknown usage instead of a zero one: a gateway can send those after the upstream model already ran and billed. Only a connection never made, a 4xx (408 and 429 included), a 503 or a 529 before any event counts as costing nothing; any other status is unknown too. Under a capped `budget` such a failure is no longer retried, and `usage_complete` is false.
 
 - `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.

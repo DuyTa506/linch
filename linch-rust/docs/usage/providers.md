@@ -453,6 +453,11 @@ Each attempt is its own durable call, so a crash never buys an answer twice:
 - A run resumed after a crash during a wait calls again at once, without
   waiting the rest, and keeps counting the turn's retries.
 - A run that failed over resumes on its fallback.
+- With a `provider_call_stop` or `after_provider_call` callback attached, a
+  paid answer's usage is written before those callbacks run. If the server
+  crashes while one runs, the resumed run keeps that usage and cost in its
+  totals and calls the model again; that call spends none of the turn's
+  retries.
 - A failed attempt that cost nothing, a connection never made or a refusal
   before any output (a 4xx status, 408 and 429 included, or 503 or 529),
   counts as zero usage: it sends no `usage` event and leaves

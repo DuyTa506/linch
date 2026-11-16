@@ -60,12 +60,21 @@ What differs in Rust:
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
    events (`turn.rs:306-317`). The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
+   When a `provider_call_stop` or `after_provider_call` hook is attached, an
+   accepted receipt and its `Usage` are written at once, with
+   `ProviderPending` re-saved at the totals that count them, before those
+   hooks run (`turn.rs:369-378`, `runner/hooks.rs`, `hooks_after_stream`).
+   A hook may be a client callback with no timeout; a crash while it runs
+   keeps the paid usage ([below](#a-crash-between-a-receipt-and-its-response)).
+   The response itself is not written yet: an `after_provider_call` rewrite
+   (a redaction, say) must be the only version that reaches the log.
 6. **Write the response through.** `after_provider_call` runs on the
    assembled response first: a rewrite replaces it before it is staged; a
    block ends the run as failed and nothing is staged (`hooks/assembly.rs`,
-   `runner/hooks.rs`). On success the run then stages the `Assistant` and
-   `Usage` events and saves `AssistantReceived`, which writes through with
-   the receipt (`turn.rs:353-380`, `journal.rs:192-193`). A hook's retry
+   `runner/hooks.rs`). On success the run then stages the `Assistant` event,
+   and the `Usage` event unless step 5 already wrote it, and saves
+   `AssistantReceived`, which writes through with the receipt when step 5
+   did not (`turn.rs:421-465`, `journal.rs:192-193`). A hook's retry
    rides that same write as the checkpoint's `retry_feedback`, so the paid
    response and what to do with it are durable together. The caller sees
    those events only after this commit (`journal.rs:25-28`).
@@ -174,6 +183,7 @@ The caller places the barriers, and the run does it in these places:
 | Barrier | Call | Where |
 |---|---|---|
 | Before a provider dispatch | `Journal::flush` | `turn.rs:303-305` |
+| After an accepted call, before the hooks that follow it (only with a `provider_call_stop` or `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:372-378` |
 | Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:69-72` |
 | Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
@@ -187,7 +197,9 @@ ends only after every pending event and checkpoint is durable. Never defer a
 write past a barrier. Three kinds of write do not wait for the next barrier:
 
 - A paid receipt. An accepted call writes through with `AssistantReceived`
-  (`turn.rs:370-374`). A compaction summary writes through with `Compacted`
+  (`turn.rs:459`), or, when hooks run between the stream and that write, on
+  its own with `ProviderPending` re-saved at the totals that count it,
+  before those hooks (`turn.rs:372-378`). A compaction summary writes through with `Compacted`
   (`compact.rs:134-147`). A summary call that gave no text saves
   `CompactionPending` and flushes at once, so a resume does not buy it again
   (`compact.rs:20-24, 114-120`). A failed call the run retries saves
@@ -327,7 +339,7 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 | Checkpoint phase | Recovery | The run continues with |
 |---|---|---|
 | `Started` | `Started` | Append the prompt unless it is in the session, then the turn |
-| `ProviderPending` | `Redispatch`, or `Received` with an accepted receipt | A cancelled receipt for a delivery with no receipt, then attempt + 1; attempt + 1 at once after a failed receipt (a retry's wait cut short, or a failover), on the model and with the retries its `provider_retry` and `model_fallback` events say; or the durable response |
+| `ProviderPending` | `Redispatch` | A cancelled receipt for a delivery with no receipt, then attempt + 1; attempt + 1 at once after a failed receipt (a retry's wait cut short, or a failover), or after an accepted receipt whose response was never written (an orphan, below), on the model and with the retries its `provider_retry` and `model_fallback` events say |
 | `AssistantReceived` | `Received` | Append the response unless it is in the session, then branch on its tool calls; with `retry_feedback`, send that feedback instead, without asking the hook again |
 | `ToolBatch` | `ToolBatch` | Each call: its durable result, a placeholder, or a re-plan |
 | `AwaitingApproval` | `AwaitingApproval` | Re-plan with the recorded decisions; suspend again if one still needs an answer |
@@ -356,6 +368,42 @@ does not fit the checkpoint (`journal/reconcile/session.rs:9-22`).
 A retried approve or answer gets `NotSuspended`: once it has committed the
 run is in `ToolBatch`, and the host continues it with `resume`
 (`agent.rs:262-273`, `start.rs:432-437`).
+
+### A crash between a receipt and its response
+
+With a `provider_call_stop` or `after_provider_call` hook attached, an
+accepted receipt is durable before those hooks run, and the response only
+after them. A crash in between leaves `ProviderPending` (at the totals that
+count the receipt), an `accepted` receipt and its `usage` event, and no
+`assistant` event. That receipt is an orphan:
+
+- It keeps the `accepted` label it was written with. The log is
+  append-only, so nothing relabels it; an orphan is an accepted receipt with
+  no `assistant` event before the next delivery of its logical call. A turn
+  therefore has one answered accepted receipt, plus at most one orphan per
+  crash in that window.
+- It stays in the totals. The checkpoint already counts its usage and cost,
+  the budget is rebuilt from every durable receipt (`Spent::of`), and its
+  `usage` event is in the log, so the result's `total_usage` and
+  `total_cost_usd` are the sum of every receipt, the orphan's included.
+- The call goes again. `reconcile` returns `Redispatch` with the next
+  attempt and no abandoned receipt (`journal/reconcile.rs:237-255`), so the
+  call gets a new delivery attempt id under the same logical call id. No
+  `provider_retry` event is written, so it spends none of the turn's
+  retries (`Standing::of` counts only those). Under a capped budget the
+  orphan's cost may leave no room for the call: the resumed run then ends on
+  the budget, which is correct, since the money was spent.
+
+The response is not kept, so `after_provider_call` runs again on the new
+response. Python does the same: it settles a usage-only receipt as soon as
+the stream ends, before its hooks (`src/linch/loop/streaming.py:498`), and
+on resume a receipt with no `primary_append` projection recovers no prefix
+and dispatches the call again, with the receipt still in the ledger and the
+totals (`src/linch/loop/resume.py:243-300`, `src/linch/model_calls.py:711-745`).
+Without such a hook nothing changes: the receipt rides `AssistantReceived`
+as before, byte for byte (pinned by
+`without_hooks_the_receipt_rides_the_response_write`,
+`crates/linch-core/tests/e2e_durable_receipt.rs`).
 
 ## Terminals
 
@@ -393,4 +441,7 @@ session writes (`runner.rs:36-37`):
 
 The table is the shape pinned by
 `a_tool_turn_costs_three_plus_two_k_run_writes_and_two_session_writes`
-(`journal/tests/turn.rs:116`).
+(`journal/tests/turn.rs:116`). With a `provider_call_stop` or
+`after_provider_call` hook attached, the response step is two writes: the
+receipt and `Usage` with `ProviderPending` before the hooks, then
+`Assistant` with `AssistantReceived` after them, so the turn costs `4 + 2k`.

@@ -175,6 +175,14 @@ retry or failover, as it does when a resumed run redispatches a call that
 never settled (`Recovery::Redispatch`, `runner/start.rs:227`). Each attempt
 settles one receipt.
 
+An accepted receipt is durable before any `provider_call_stop` or
+`after_provider_call` hook runs on its call. A resume after a crash in such
+a hook finds the accepted receipt without its response (an orphan), keeps
+its usage and cost in the totals and the budget, and dispatches the call
+again under the next attempt; that is not a retry, so no `provider_retry`
+event is written and the turn's retries are untouched
+([turn lifecycle](./turn-lifecycle.md#a-crash-between-a-receipt-and-its-response)).
+
 A failed receipt's usage is a known zero when the call cost nothing, and
 unknown (`None`) when it may have been billed (`costs_nothing`,
 `provider/call.rs:257`, applied at `call.rs:169`):

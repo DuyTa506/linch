@@ -251,6 +251,13 @@ writes (`crates/linch-core/src/runner.rs:36-37`). The count is pinned by
 | `ToolResults` is held; `flush_checkpoint` writes it before the results are appended | 1 | |
 | The results are appended to the session | | 1 |
 
+With a `provider_call_stop` or `after_provider_call` hook attached, an
+accepted call adds one run write: its receipt and `Usage` are flushed with
+`ProviderPending` before those hooks run, and `AssistantReceived` then
+writes through with the `Assistant` event alone, so the turn costs `4 + 2k`
+([turn lifecycle](./turn-lifecycle.md#a-crash-between-a-receipt-and-its-response)).
+Without such a hook the count and every checkpoint are as above.
+
 A call that runs nothing (refused, served by a hook, aborted before it
 started) adds no barrier: its start and end ride the next write. A text-only
 final turn ends with one terminal write that carries the pending events, the
