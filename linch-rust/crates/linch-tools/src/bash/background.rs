@@ -7,12 +7,11 @@
 //! exiting (its process group is killed then, as in the foreground),
 //! its timeout, `BashKill`, the session closing, or the registry dropping.
 
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::mem;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -23,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::capture::Capture;
 use super::process::{self, End};
+use crate::exec::{Launch, Shell};
 
 /// Most processes of one session that may run at once.
 pub const MAX_RUNNING: usize = 4;
@@ -48,6 +48,9 @@ const REAPED: Duration = Duration::from_secs(5);
 pub struct Processes {
     sessions: Mutex<HashMap<SessionId, Vec<Arc<Proc>>>>,
     started: AtomicU64,
+    /// Held from the count check to the insert, so two starts cannot both
+    /// pass [`MAX_RUNNING`] while a backend spawns.
+    starting: tokio::sync::Mutex<()>,
 }
 
 /// One background process.
@@ -116,26 +119,24 @@ impl Processes {
         procs.iter().filter(|proc| proc.is_running()).count()
     }
 
-    /// Start `command` for `session` and supervise it on the current Tokio
-    /// runtime until it ends or `timeout` passes.
-    pub(super) fn start(
+    /// Start `launch` with `shell` for `session` and supervise it on the
+    /// current Tokio runtime until it ends or `timeout` passes.
+    pub(super) async fn start(
         &self,
         session: &SessionId,
-        command: &str,
-        cwd: &Path,
-        env: &BTreeMap<String, String>,
+        shell: &dyn Shell,
+        launch: Launch<'_>,
         timeout: Duration,
     ) -> Result<Arc<Proc>, StartError> {
-        let mut sessions = self.lock();
-        let procs = sessions.entry(session.clone()).or_default();
-        if procs.iter().filter(|proc| proc.is_running()).count() >= MAX_RUNNING {
+        let _starting = self.starting.lock().await;
+        if self.running(session) >= MAX_RUNNING {
             return Err(StartError::Full);
         }
-        let child = process::spawn(command, cwd, env, true).map_err(StartError::Spawn)?;
+        let spawned = shell.spawn(launch).await.map_err(StartError::Spawn)?;
         let (finished, done) = watch::channel(false);
         let proc = Arc::new(Proc {
             id: self.fresh_id(),
-            pid: child.id(),
+            pid: spawned.child.id(),
             timeout,
             kill: CancellationToken::new(),
             state: Mutex::default(),
@@ -145,7 +146,7 @@ impl Processes {
         tokio::spawn(async move {
             let (out, err) = (Arc::clone(&supervised), Arc::clone(&supervised));
             let end = process::supervise(
-                child,
+                spawned,
                 supervised.timeout,
                 &supervised.kill,
                 |chunk| out.lock().stdout.push(chunk),
@@ -157,6 +158,8 @@ impl Processes {
             supervised.lock().end = Some(end.unwrap_or(End::Aborted));
             let _ = finished.send(true);
         });
+        let mut sessions = self.lock();
+        let procs = sessions.entry(session.clone()).or_default();
         procs.push(Arc::clone(&proc));
         prune(procs);
         Ok(proc)

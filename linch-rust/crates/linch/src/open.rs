@@ -19,7 +19,9 @@ use linch_providers::{
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
     ServerOptions, anthropic, deepseek, gemini, openai,
 };
-use linch_tools::{LocalFs, Processes, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools};
+use linch_tools::{
+    ExecutionBackend, LocalFs, Processes, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools,
+};
 
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::deep;
@@ -340,10 +342,10 @@ async fn register_workspace(
         Ok(fs) => fs.map_err(OpenError::Workspace)?,
         Err(join) => std::panic::resume_unwind(join.into_panic()),
     };
-    let fs = Arc::new(fs);
-    let canonical = fs.root().display().to_string();
+    let backend = ExecutionBackend::local(Arc::new(fs));
+    let canonical = backend.root().display().to_string();
     let wanted = |tool: &Arc<dyn Tool>| bash || !BASH_TOOLS.contains(&tool.name());
-    for tool in workspace_tools(fs, reads, processes)
+    for tool in workspace_tools(&backend, reads, processes)
         .into_iter()
         .filter(wanted)
     {

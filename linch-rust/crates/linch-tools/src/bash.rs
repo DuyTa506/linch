@@ -3,7 +3,7 @@
 mod background;
 mod capture;
 mod control;
-mod process;
+pub(crate) mod process;
 
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
@@ -18,6 +18,7 @@ use linch_core::{
 use serde_json::json;
 use tokio::time::Instant;
 
+use crate::exec::{ExecutionBackend, Launch, LocalShell, Shell};
 use crate::input::{coded, flag, optional_count, schema, string};
 use background::StartError;
 use process::{End, Finished};
@@ -60,14 +61,42 @@ const ALLOWED_ENV: [&str; 9] = [
 /// killed, its session closes or the registry drops; it also dies with the
 /// server process, even on `SIGKILL`. A session runs at most
 /// [`MAX_RUNNING`] at once.
+///
+/// [`Bash::new`] runs commands directly as the process's user;
+/// [`Bash::in_backend`] runs them through an [`ExecutionBackend`], whose
+/// confinement its description then states.
 pub struct Bash {
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     processes: Option<Arc<Processes>>,
     schema: JsonObject,
+    shell: Arc<dyn Shell>,
+    description: String,
 }
 
+/// What the description says before a backend's own sentence.
+const DESCRIPTION: &str = "Run a shell command (/bin/sh) in the workspace root with stdin closed. \
+     The command and everything it starts are killed on timeout (default 120 s, \
+     max 30 min) or cancellation, and background jobs are killed when the \
+     command exits. Each output stream keeps its first 4000 and last 26000 bytes. \
+     With run_in_background the command keeps running and the call returns its \
+     process id: read it with BashOutput, stop it with BashKill (default timeout \
+     30 min, at most 4 at once).";
+
 impl Bash {
+    /// A `Bash` running commands through `backend`, in its root, with the
+    /// allowlisted host variables, read now. Its description ends with what
+    /// the backend confines, so the backend is part of the run contract; the
+    /// local backend adds nothing.
+    pub fn in_backend(backend: &ExecutionBackend) -> Self {
+        let mut bash = Self::new(backend.root());
+        bash.shell = backend.shell();
+        if let Some(confinement) = backend.describe() {
+            bash.description = format!("{DESCRIPTION} {confinement}");
+        }
+        bash
+    }
+
     /// A `Bash` running in `cwd` (normally [`crate::LocalFs::root`]) with the
     /// allowlisted host variables, read now.
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
@@ -96,6 +125,8 @@ impl Bash {
             env,
             processes: None,
             schema,
+            shell: Arc::new(LocalShell),
+            description: DESCRIPTION.to_owned(),
         }
     }
 
@@ -121,13 +152,7 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command (/bin/sh) in the workspace root with stdin closed. \
-         The command and everything it starts are killed on timeout (default 120 s, \
-         max 30 min) or cancellation, and background jobs are killed when the \
-         command exits. Each output stream keeps its first 4000 and last 26000 bytes. \
-         With run_in_background the command keeps running and the call returns its \
-         process id: read it with BashOutput, stop it with BashKill (default timeout \
-         30 min, at most 4 at once)."
+        &self.description
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -166,24 +191,51 @@ impl Tool for Bash {
             return Err(coded("[aborted before start]", "aborted"));
         }
         if background {
-            return self.start(command, Duration::from_millis(timeout_ms), &ctx);
+            return self
+                .start(command, Duration::from_millis(timeout_ms), &ctx)
+                .await;
         }
         let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline);
-        let finished = process::run(command, &self.cwd, &self.env, timeout, &ctx.cancel)
+        let spawned = (self.shell)
+            .spawn(self.launch(command, &ctx, false))
             .await
-            .map_err(|error| coded(format!("could not start /bin/sh: {error}"), "spawn_failed"))?;
+            .map_err(|error| self.spawn_failed(error))?;
+        let finished = process::run(spawned, timeout, &ctx.cancel)
+            .await
+            .map_err(|error| self.spawn_failed(error))?;
         render(finished, timeout.as_millis())
     }
 }
 
 impl Bash {
+    fn launch<'a>(&'a self, command: &'a str, ctx: &'a ToolContext, lifeline: bool) -> Launch<'a> {
+        Launch {
+            command,
+            cwd: &self.cwd,
+            env: &self.env,
+            session: &ctx.session_id,
+            lifeline,
+        }
+    }
+
+    fn spawn_failed(&self, error: std::io::Error) -> ToolOutputError {
+        let program = self.shell.program();
+        coded(
+            format!("could not start {program}: {error}"),
+            "spawn_failed",
+        )
+    }
+
     /// Start `command` in the background for the call's session.
-    fn start(&self, command: &str, timeout: Duration, ctx: &ToolContext) -> ToolResult {
+    async fn start(&self, command: &str, timeout: Duration, ctx: &ToolContext) -> ToolResult {
         let Some(processes) = &self.processes else {
             let message = "run_in_background is not available: this Bash has no process registry";
             return Err(coded(message, "no_background"));
         };
-        let started = processes.start(&ctx.session_id, command, &self.cwd, &self.env, timeout);
+        let launch = self.launch(command, ctx, true);
+        let started = processes
+            .start(&ctx.session_id, &*self.shell, launch, timeout)
+            .await;
         let proc = match started {
             Ok(proc) => proc,
             Err(StartError::Full) => {
@@ -193,10 +245,7 @@ impl Bash {
                 );
                 return Err(coded(message, "too_many_processes"));
             }
-            Err(StartError::Spawn(error)) => {
-                let message = format!("could not start /bin/sh: {error}");
-                return Err(coded(message, "spawn_failed"));
-            }
+            Err(StartError::Spawn(error)) => return Err(self.spawn_failed(error)),
         };
         let ms = timeout.as_millis();
         let text = format!(
