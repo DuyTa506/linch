@@ -483,17 +483,16 @@ impl Runner {
         self.push_records(records, None);
     }
 
-    /// Run `provider_call_stop` once the call returns, on every exit path:
-    /// accepted, empty, failed or cancelled.
-    /// Whether a hook runs between a provider stream that settled with an
-    /// answer and the write of that answer: a `provider_call_stop` or
-    /// `after_provider_call` chain is attached. The run then makes the
-    /// call's receipt durable first (see `Runner::dispatch`).
-    pub(super) fn hooks_after_stream(&self) -> bool {
-        let hooks = &self.agent.hooks;
-        !hooks.provider_call_stop.is_empty() || !hooks.after_provider_call.is_empty()
+    /// Whether an `after_provider_call` chain is attached: a hook then runs
+    /// between a provider stream that settled with an answer and the write
+    /// of that answer, so the run makes the call's receipt durable first
+    /// (see `Runner::dispatch`).
+    pub(super) fn checks_responses(&self) -> bool {
+        !self.agent.hooks.after_provider_call.is_empty()
     }
 
+    /// Run `provider_call_stop` once the call returns, on every exit path:
+    /// accepted, empty, failed or cancelled.
     pub(super) async fn provider_call_stop(
         &self,
         turn: u32,

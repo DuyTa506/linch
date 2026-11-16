@@ -175,9 +175,8 @@ retry or failover, as it does when a resumed run redispatches a call that
 never settled (`Recovery::Redispatch`, `runner/start.rs:227`). Each attempt
 settles one receipt.
 
-An accepted receipt is durable before any `provider_call_stop` or
-`after_provider_call` hook runs on its call. A resume after a crash in such
-a hook finds the accepted receipt without its response (an orphan), keeps
+With an `after_provider_call` hook attached, an accepted receipt is durable
+before any hook runs on its call. A resume after a crash in a hook finds the accepted receipt without its response (an orphan), keeps
 its usage and cost in the totals and the budget, and dispatches the call
 again under the next attempt; that is not a retry, so no `provider_retry`
 event is written and the turn's retries are untouched
@@ -198,7 +197,7 @@ unknown (`None`) when it may have been billed (`costs_nothing`,
 
 `Option<Usage>` already tells a zero from unknown, so the receipt format does
 not change, and a binary from before this reads `Some(zero)` as a call that
-cost nothing. A free failure sends no `usage` event (`runner/turn.rs:397`,
+cost nothing. A free failure sends no `usage` event (`runner/turn.rs:399`,
 and the same in `runner/compact.rs`), as Python sends none for a failed call,
 and leaves `usage_complete` true. A capped `budget` only refuses the next
 call after an unknown usage (`budget.rs:110`), so a free failure is retried

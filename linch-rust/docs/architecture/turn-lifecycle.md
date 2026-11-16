@@ -60,10 +60,10 @@ What differs in Rust:
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
    events (`turn.rs:306-317`). The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
-   When a `provider_call_stop` or `after_provider_call` hook is attached, an
-   accepted receipt and its `Usage` are written at once, with
-   `ProviderPending` re-saved at the totals that count them, before those
-   hooks run (`turn.rs:369-378`, `runner/hooks.rs`, `hooks_after_stream`).
+   When an `after_provider_call` hook is attached, an accepted receipt and
+   its `Usage` are written at once, with `ProviderPending` re-saved at the
+   totals that count them, before the hooks run, `provider_call_stop`
+   included (`turn.rs:369-380`, `runner/hooks.rs`, `checks_responses`).
    A hook may be a client callback with no timeout; a crash while it runs
    keeps the paid usage ([below](#a-crash-between-a-receipt-and-its-response)).
    The response itself is not written yet: an `after_provider_call` rewrite
@@ -74,7 +74,7 @@ What differs in Rust:
    `runner/hooks.rs`). On success the run then stages the `Assistant` event,
    and the `Usage` event unless step 5 already wrote it, and saves
    `AssistantReceived`, which writes through with the receipt when step 5
-   did not (`turn.rs:421-465`, `journal.rs:192-193`). A hook's retry
+   did not (`turn.rs:422-466`, `journal.rs:192-193`). A hook's retry
    rides that same write as the checkpoint's `retry_feedback`, so the paid
    response and what to do with it are durable together. The caller sees
    those events only after this commit (`journal.rs:25-28`).
@@ -183,7 +183,7 @@ The caller places the barriers, and the run does it in these places:
 | Barrier | Call | Where |
 |---|---|---|
 | Before a provider dispatch | `Journal::flush` | `turn.rs:303-305` |
-| After an accepted call, before the hooks that follow it (only with a `provider_call_stop` or `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:372-378` |
+| After an accepted call, before the hooks that follow it (only with an `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:373-380` |
 | Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:69-72` |
 | Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:94-96, 116-118, 143-147` |
 | Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
@@ -197,9 +197,9 @@ ends only after every pending event and checkpoint is durable. Never defer a
 write past a barrier. Three kinds of write do not wait for the next barrier:
 
 - A paid receipt. An accepted call writes through with `AssistantReceived`
-  (`turn.rs:459`), or, when hooks run between the stream and that write, on
+  (`turn.rs:460`), or, when an `after_provider_call` hook is attached, on
   its own with `ProviderPending` re-saved at the totals that count it,
-  before those hooks (`turn.rs:372-378`). A compaction summary writes through with `Compacted`
+  before the hooks (`turn.rs:373-380`). A compaction summary writes through with `Compacted`
   (`compact.rs:134-147`). A summary call that gave no text saves
   `CompactionPending` and flushes at once, so a resume does not buy it again
   (`compact.rs:20-24, 114-120`). A failed call the run retries saves
@@ -371,9 +371,9 @@ run is in `ToolBatch`, and the host continues it with `resume`
 
 ### A crash between a receipt and its response
 
-With a `provider_call_stop` or `after_provider_call` hook attached, an
-accepted receipt is durable before those hooks run, and the response only
-after them. A crash in between leaves `ProviderPending` (at the totals that
+With an `after_provider_call` hook attached, an accepted receipt is
+durable before the hooks run (`provider_call_stop` included), and the
+response only after them. A crash in between leaves `ProviderPending` (at the totals that
 count the receipt), an `accepted` receipt and its `usage` event, and no
 `assistant` event. That receipt is an orphan:
 
@@ -396,11 +396,15 @@ count the receipt), an `accepted` receipt and its `usage` event, and no
 
 The response is not kept, so `after_provider_call` runs again on the new
 response. Python does the same: it settles a usage-only receipt as soon as
-the stream ends, before its hooks (`src/linch/loop/streaming.py:498`), and
-on resume a receipt with no `primary_append` projection recovers no prefix
-and dispatches the call again, with the receipt still in the ledger and the
-totals (`src/linch/loop/resume.py:243-300`, `src/linch/model_calls.py:711-745`).
-Without such a hook nothing changes: the receipt rides `AssistantReceived`
+the stream ends (`src/linch/loop/streaming.py:498`), before its
+`after_provider_call` hooks run (`src/linch/loop/provider_turn.py:370`,
+`453`) and before the `primary_append` projection that records the
+response (`provider_turn.py:466`). On resume a receipt with no such
+projection recovers no prefix and the call is dispatched again
+(`src/linch/loop/resume.py:243-300`), with the receipt restored into the
+ledger and its totals (`src/linch/model_calls.py:870`).
+Without an `after_provider_call` hook nothing changes, a
+`provider_call_stop` observer or not: the receipt rides `AssistantReceived`
 as before, byte for byte (pinned by
 `without_hooks_the_receipt_rides_the_response_write`,
 `crates/linch-core/tests/e2e_durable_receipt.rs`).
@@ -441,7 +445,7 @@ session writes (`runner.rs:36-37`):
 
 The table is the shape pinned by
 `a_tool_turn_costs_three_plus_two_k_run_writes_and_two_session_writes`
-(`journal/tests/turn.rs:116`). With a `provider_call_stop` or
-`after_provider_call` hook attached, the response step is two writes: the
+(`journal/tests/turn.rs:116`). With an `after_provider_call` hook
+attached, the response step is two writes: the
 receipt and `Usage` with `ProviderPending` before the hooks, then
 `Assistant` with `AssistantReceived` after them, so the turn costs `4 + 2k`.

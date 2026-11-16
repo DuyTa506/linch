@@ -1,9 +1,9 @@
 //! A paid receipt is durable before the hooks that follow its call run.
 //!
-//! With an `after_provider_call` (or `provider_call_stop`) chain attached,
-//! the accepted receipt and its usage are committed as soon as the stream
-//! settles, before the hooks, so a crash while a hook runs keeps the paid
-//! usage. Resume finds the accepted receipt with no `assistant` event (an
+//! With an `after_provider_call` chain attached, the accepted receipt and
+//! its usage are committed as soon as the stream settles, before the hooks
+//! (`provider_call_stop` included), so a crash while a hook runs keeps the
+//! paid usage. Resume finds the accepted receipt with no `assistant` event (an
 //! orphan), keeps it in the totals, and dispatches the call again under the
 //! next delivery attempt, without spending a provider retry. Without such
 //! a chain the run writes exactly as before.
@@ -19,7 +19,9 @@ use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::{BudgetKind, ResultEvent, ResultSubtype};
 use linch_core::events::model_call::{CallDisposition, ModelCallKind, ModelCallReceiptEvent};
-use linch_core::hooks::{AfterProviderCall, AfterProviderCallRequest, AfterProviderCallResponse};
+use linch_core::hooks::{
+    AfterProviderCall, AfterProviderCallRequest, AfterProviderCallResponse, ProviderCallStop,
+};
 use linch_core::journal::INTERRUPTED_TOOL_TEXT;
 use linch_core::run::Phase;
 use linch_core::store::faulty::{FaultTiming, Faulty};
@@ -506,9 +508,9 @@ async fn recorded(hooks: Hooks) -> Vec<(Vec<String>, Option<String>)> {
     stores.commits.lock().unwrap().clone()
 }
 
-/// Without a hook between the stream and the response, a run writes as it
-/// always did: the receipt rides the `AssistantReceived` write-through,
-/// byte for byte.
+/// Without an `after_provider_call` chain, a run writes as it always did,
+/// an observing `provider_call_stop` chain or not: the receipt rides the
+/// `AssistantReceived` write-through, byte for byte.
 #[tokio::test]
 async fn without_hooks_the_receipt_rides_the_response_write() {
     let commits = recorded(Hooks::default()).await;
@@ -522,6 +524,11 @@ async fn without_hooks_the_receipt_rides_the_response_write() {
         .map(|(kinds, checkpoint)| (kinds.to_vec(), *checkpoint))
         .collect();
     assert_eq!(shapes, expected);
+
+    let observed = Hooks::default();
+    let watch = hook::<ProviderCallStop>("watch", |_| Ok(()));
+    let _ = observed.provider_call_stop.register(watch.arc()).unwrap();
+    assert_eq!(recorded(observed).await, commits, "provider_call_stop only");
 
     // The same run with an accepting chain writes once more per call: the
     // receipt and its usage, under `ProviderPending`, before the hooks.

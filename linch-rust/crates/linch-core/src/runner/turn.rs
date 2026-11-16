@@ -283,8 +283,8 @@ impl Runner {
     }
 
     /// One provider call: the `ProviderPending` barrier, the call, and the
-    /// `AssistantReceived` write-through. With a hook between the stream and
-    /// that write, the paid receipt and its usage are written first, with
+    /// `AssistantReceived` write-through. With an `after_provider_call`
+    /// chain, the paid receipt and its usage are written first, with
     /// `ProviderPending` re-saved at the totals that count them.
     async fn dispatch(
         &mut self,
@@ -366,10 +366,11 @@ impl Runner {
             receipt.disposition = CallDisposition::Rejected;
         }
         self.journal.stage(Event::ModelCallReceipt(receipt));
-        // A hook between the stream and the response may never return (a
-        // client callback with no timeout): the paid receipt and its usage
-        // are made durable before it runs, the response only after it.
-        let early = outcome.result.is_ok() && !empty && self.hooks_after_stream();
+        // An `after_provider_call` hook may never return (a client callback
+        // with no timeout): the paid receipt and its usage are made durable
+        // before the hooks run (`provider_call_stop` included), the response
+        // only after them.
+        let early = outcome.result.is_ok() && !empty && self.checks_responses();
         if early {
             self.stage_usage(usage, cost, served.clone());
             self.save(Phase::ProviderPending { attempt }).await?;

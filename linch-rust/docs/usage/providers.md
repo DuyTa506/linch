@@ -453,8 +453,8 @@ Each attempt is its own durable call, so a crash never buys an answer twice:
 - A run resumed after a crash during a wait calls again at once, without
   waiting the rest, and keeps counting the turn's retries.
 - A run that failed over resumes on its fallback.
-- With a `provider_call_stop` or `after_provider_call` callback attached, a
-  paid answer's usage is written before those callbacks run. If the server
+- With an `after_provider_call` callback attached, a paid answer's usage is
+  written before the callbacks run (`provider_call_stop` included). If the server
   crashes while one runs, the resumed run keeps that usage and cost in its
   totals and calls the model again; that call spends none of the turn's
   retries.
