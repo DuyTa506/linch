@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -551,3 +552,45 @@ async def test_an_invalid_memory_config_does_not_open() -> None:
         with pytest.raises(OpenError) as raised:
             await server.open_agent(config([], memory={"recall": {"k": 0}}))
     assert "memory.recall.k" in str(raised.value)
+
+
+def _no_key_env() -> dict[str, str]:
+    # Only PATH: GEMINI_API_KEY is left out whatever this process's own
+    # environment holds, so the provider's key is deterministically missing.
+    return {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+
+
+async def test_provider_request_options_reach_the_server_and_a_key_header_opens() -> None:
+    gemini = config(
+        [],
+        provider={
+            "id": "gemini",
+            "request": {
+                "extra_body": {"cache_salt": "t1"},
+                "default_headers": {"x-goog-api-key": "secret-stand-in-key"},
+                "timeout_ms": 5000,
+            },
+        },
+    )
+    async with Server(env=_no_key_env()) as server:
+        agent = await server.open_agent(gemini)
+        assert agent.handle, "the key header stood in for the missing GEMINI_API_KEY"
+
+
+async def test_without_a_key_header_the_missing_env_key_still_fails_open() -> None:
+    gemini = config([], provider={"id": "gemini"})
+    async with Server(env=_no_key_env()) as server:
+        with pytest.raises(OpenError) as raised:
+            await server.open_agent(gemini)
+    assert "GEMINI_API_KEY" in str(raised.value)
+
+
+async def test_a_refused_header_never_echoes_its_value() -> None:
+    env = {**_no_key_env(), "GEMINI_API_KEY": "sk-not-real"}
+    gemini = config(
+        [], provider={"id": "gemini", "request": {"default_headers": {"host": "shh-secret-value"}}}
+    )
+    async with Server(env=env) as server:
+        with pytest.raises(OpenError) as raised:
+            await server.open_agent(gemini)
+    assert "shh-secret-value" not in str(raised.value)
