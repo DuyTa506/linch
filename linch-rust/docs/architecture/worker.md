@@ -143,6 +143,10 @@ between its claim and its commit leaves the status `running`
 (`execute.rs:116-118`). A run that suspends for approval ends its job;
 `enqueue_approve` queues the continuation.
 
+There is no answer job: a run that suspends for an `AskUser` answer ends its
+job, a resume job on it only suspends it again, and the answer comes from a
+host through `Agent::answer` (or `run.answer`).
+
 ## Outcomes, back-off and dead letters
 
 Each attempt ends in one `Outcome` (`crates/linch-worker/src/outcome.rs:9-32`),

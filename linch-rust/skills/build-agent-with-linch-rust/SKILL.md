@@ -81,6 +81,9 @@ async with Server() as server:  # or Server.connect(address, token=...)
 - Modes are `default`, `accept_edits` and `skip_dangerous`. In `default`, a `write` or `exec`
   call ends the stream with `SuspendedEvent`; `agent.approve(run.id, decisions)` continues it
   with `Allow()` or `Deny(reason)` per pending `tool_use_id`.
+- `ask_user: True` gives the model `AskUser`. Its call ends the stream with `InputRequestEvent`
+  (the `questions`) and a `SuspendedEvent` of status `awaiting_input`;
+  `agent.answer(run.id, {request_id: Answer({question_id: choice})})` continues it.
 - A session is an id you choose with one live run at most (`SessionBusy`). Refusals such as
   `RunNotFound` and `ContractMismatch` arrive at the end of the stream. A provider or tool failure
   is an `ErrorEvent` and a `ResultEvent` of subtype `error`, not an exception.

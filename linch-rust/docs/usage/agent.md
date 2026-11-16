@@ -166,8 +166,9 @@ absent, except `bash`.
 | `spec` | required | The model, instructions and loop limits ([below](#spec)) |
 | `provider` | required | The model provider, by `id` ([Providers](./providers.md)) |
 | `stores` | `{"type": "memory"}` | Where runs and sessions live ([Stores](./stores.md)) |
-| `workspace` | none: no workspace tools | An existing directory, the root of `Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash` ([Tools](./tools.md#workspace-tools)). A relative path resolves against the server's working directory, which is this process's |
-| `bash` | `True` | Whether the workspace tools include `Bash`. Unused without a workspace |
+| `workspace` | none: no workspace tools | An existing directory, the root of `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and `BashKill` ([Tools](./tools.md#workspace-tools)). A relative path resolves against the server's working directory, which is this process's |
+| `bash` | `True` | Whether the workspace tools include `Bash`, `BashOutput` and `BashKill`. Unused without a workspace |
+| `ask_user` | `False` | Whether the model has `AskUser`, which suspends the run until you answer ([Tools](./tools.md#ask-the-user)) |
 | `permissions` | mode `default`, project root the workspace (or `/`) | Which calls run, ask or are denied ([below](#permissions)) |
 | `mcp_servers` | `[]` | MCP servers connected in order when the agent opens ([below](#mcp_servers)) |
 | `skills` | `False` | The `Skill` tool, with the built-in `verify` skill and those in `config_dir/skills` ([Skills](./skills.md)) |
