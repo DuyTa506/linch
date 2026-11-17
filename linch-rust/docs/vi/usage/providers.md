@@ -50,7 +50,7 @@ Mọi provider thật đều nhận `request`, dạng dữ liệu của `extra_b
 | Trường | Ý nghĩa |
 |---|---|
 | `request.extra_body` | Trường gộp vào mọi body. Chúng thay trường adapter đã đặt, trừ `model`, `stream`, `temperature`, hội thoại (`messages`, `input`, `contents`, `system`, `instructions`, `systemInstruction`, `system_instruction`), tool và cách chọn tool (`tools`, `tool_choice`, `toolConfig`, `tool_config`) và các trường trạng thái phía vendor (`store`, `previous_response_id`, `conversation`) do session sở hữu. `chat_template_kwargs` gộp từng trường, `generationConfig` của Gemini cũng vậy, và trường của chính request thắng |
-| `request.default_headers` | Header gửi kèm mọi request, cho gateway. `authorization`, `x-api-key`, `x-goog-api-key` hoặc `api-key` thay khóa provider cho mọi lời gọi (một lượt, danh sách model, dò window): khóa trong môi trường khi đó không được gửi và không cần đặt. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` và `proxy-connection` bị từ chối khi mở. Giá trị được ẩn khi in hoặc ghi log config, và bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte |
+| `request.default_headers` | Header gửi kèm mọi request, cho gateway. `authorization`, `x-api-key`, `x-goog-api-key` hoặc `api-key` thay khóa provider cho mọi lời gọi (một lượt, danh sách model, dò window): khóa trong môi trường khi đó không được gửi và không cần đặt. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` và `proxy-connection` bị từ chối khi mở. Trong các kiểu Rust, giá trị được ẩn khỏi đầu ra `Debug`; một config Python là dict thường và hiện giá trị khi được in hoặc ghi log. Giá trị bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte, hoặc ở mọi độ dài khi tên header có `token`, `key`, `secret`, `auth` hoặc `cookie` |
 | `request.timeout_ms` | Khoảng lặng dài nhất giữa hai chunk của phản hồi trước khi call lỗi; vắng: giới hạn của adapter |
 | `chat.parallel_tool_calls` | Gửi khi request có tool; vắng: mặc định của server |
 | `chat.include_stream_options` | `false` bỏ `stream_options`, cho server từ chối nó. Mặc định bật |
@@ -78,11 +78,14 @@ số áp dụng cho mọi giai đoạn của lời gọi (connect, read, write, 
 `request.timeout_ms` ở trên chỉ thay timeout đọc, còn timeout kết nối (30 giây)
 vẫn cố định.
 
-Giá trị của `default_headers` được ẩn khi một config được echo lại hoặc ghi
-log, và bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte (một gateway
-lặp lại header bị từ chối trong response body sẽ hiện `[redacted]`). Giá trị
-ngắn hơn được giữ nguyên trong nội dung lỗi vì xóa nó sẽ làm hỏng thông báo.
-Hãy đặt secret trong môi trường của server nếu có thể: giá trị trong config
+Trong các kiểu Rust (`RequestOptions`, `Schedule`, `RunRequest`), giá trị của
+`default_headers` được ẩn khỏi đầu ra `Debug`; điều này không tới Python, nơi một
+config là dict thường và in ra, ghi log các giá trị của nó, nên đừng để config vào
+log. Giá trị bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte, và ở mọi độ
+dài khi tên header có `token`, `key`, `secret`, `auth` hoặc `cookie` (một gateway
+lặp lại header bị từ chối trong response body sẽ hiện `[redacted]`). Giá trị của
+header khác ngắn hơn 8 byte được giữ nguyên trong nội dung lỗi vì xóa nó sẽ làm hỏng
+thông báo. Hãy đặt secret trong môi trường của server nếu có thể: giá trị trong config
 được lưu cùng config (một run theo lịch giữ nó trong store, như giá trị header
 của MCP), và giá trị của `extra_body` không được ẩn. `request` và `chat` không
 thuộc run contract, như `base_url`: resume run với thiết lập khác không gây

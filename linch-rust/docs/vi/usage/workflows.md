@@ -79,8 +79,8 @@ về những gì nó trả về. `wf` là một `WorkflowContext`:
 `wf.agent` nhận `name`, `subagent`, `label`, `key`, `output_schema`,
 `fork`, `timeout_ms` và `retry`. `run_workflow` nhận `budget`,
 `max_concurrency` (4 khi không đặt; một fan-out lồng nhau có giới hạn riêng),
-`step_timeout_ms`, `deadline_ms`, `resume` (các câu trả lời cho interrupt) và
-`on_event`, nơi nhận các `WorkflowEvent`: `phase`, `agent_start`,
+`step_timeout_ms`, `deadline_ms`, `resume` (các câu trả lời cho interrupt),
+`principal` (bên dưới) và `on_event`, nơi nhận các `WorkflowEvent`: `phase`, `agent_start`,
 `agent_end`, `agent_replayed`, `step_start`, `step_end`, `step_replayed`,
 `interrupt_requested`, `interrupt_resolved` và `interrupt_replayed`.
 
@@ -213,6 +213,25 @@ chạm tới workflow của tenant khác. Một tenant không bao giờ đọc n
 một store hay của một run: một lỗi journal được trả lời bằng `the workflow journal
 failed`.
 
+## Hành động thay cho một principal
+
+`run_workflow(..., principal={"tenant": "acme", "user": "ada", "roles":
+["support"]})` (`principal` trong `workflow.start`) khiến run của mọi lời gọi
+agent hành động thay cho principal đó, nên một quy tắc permission dựa trên role
+áp dụng cho các lời gọi của workflow như với một run bắt đầu cho cùng principal.
+Principal của một tenant phải nêu tên tenant, như với `run.start`. Không có
+principal thì các lời gọi hành động thay cho không ai, và một tính năng theo
+principal (bộ nhớ có cấu trúc) không có gì để chạm tới.
+
+Principal được lưu cùng workflow khi nó được start lần đầu. Start lại cùng id
+phải nêu cùng principal, đầy đủ (tenant, user và role; thứ tự role không quan
+trọng), nếu không việc start bị từ chối bằng `NotAllowed` (`-32004`, `kind:
+workflow_principal`) và không có gì thay đổi: các lời gọi đã ghi journal chạy
+dưới quy tắc của principal đó, và replay dưới quy tắc khác sẽ đưa kết quả của
+chúng cho một user mà chúng không được tạo ra cho. Điều đó gồm cả principal ở
+chỗ trước đó không có, và không có principal ở chỗ trước đó có. Hãy start một
+`run_id` mới để hành động thay cho người khác.
+
 ## Một driver cho mỗi workflow
 
 `workflow.start` lấy một **hold** độc quyền trên `(namespace, run_id)`
@@ -271,8 +290,6 @@ node có thể được thử lại bao nhiêu lần tùy ý và run chỉ xảy
 
 ## Những chỗ còn thiếu
 
-- Các lời gọi workflow chạy không có `principal`; các quy tắc permission dựa trên
-  role của một principal không áp dụng cho chúng.
 - Không có `workflow.answer` riêng: một câu trả lời đi qua `resume` của
   `workflow.start` kế tiếp.
 - Deadline và timeout của step được thực thi trong client; một client chết thì

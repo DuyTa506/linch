@@ -1001,7 +1001,8 @@ class AgentConfig(TypedDict, total=False):
             providers also take `chat`: `{"parallel_tool_calls": false,
             "include_stream_options": false, "chat_template_kwargs": {...},
             "sampling_params": {"top_k": 20}}`. Header values are hidden
-            when a config is printed.
+            from `Debug` output in the Rust types only: a Python config
+            is a plain dict that prints them, so keep it out of logs.
         stores: `{"type": "memory"}` (the default: runs live in the agent
             handle) or `{"type": "postgres", "dsn": ...}`, with an optional
             `max_connections`: the pool size, by default the server's number

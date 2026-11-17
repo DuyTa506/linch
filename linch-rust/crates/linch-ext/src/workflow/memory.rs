@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use linch_core::JsonValue;
+use linch_core::{JsonValue, Principal};
 
 use super::journal::{
     JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowHold, WorkflowRun,
-    WorkflowStatus,
+    WorkflowStatus, principal_text,
 };
 
 /// A [`JournalStore`] kept in process memory. It passes the same
@@ -43,6 +43,7 @@ impl Drop for Held {
 struct Stored {
     status: WorkflowStatus,
     epoch: u64,
+    principal: Option<String>,
     records: BTreeMap<(String, u64), JsonValue>,
 }
 
@@ -78,15 +79,23 @@ impl JournalStore for MemoryJournalStore {
         &self,
         namespace: &str,
         workflow_id: &str,
+        principal: Option<&Principal>,
     ) -> Result<JournalLease, JournalStoreError> {
+        let principal = principal_text(principal);
         let mut workflows = self.workflows();
         let stored = workflows
             .entry((namespace.to_owned(), workflow_id.to_owned()))
             .or_insert_with(|| Stored {
                 status: WorkflowStatus::Running,
                 epoch: 0,
+                principal: principal.clone(),
                 records: BTreeMap::new(),
             });
+        if stored.principal != principal {
+            return Err(JournalStoreError::PrincipalMismatch {
+                workflow_id: workflow_id.to_owned(),
+            });
+        }
         stored.epoch += 1;
         stored.status = WorkflowStatus::Running;
         Ok(JournalLease {

@@ -45,7 +45,10 @@ const FIRE_BATCH: i64 = 64;
 const MISSED_COUNTED: u64 = 10_000;
 
 /// A schedule that enqueues a run of `prompt` at every fire.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides the agent definition, whose provider headers and MCP
+/// headers may hold credentials.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Schedule {
     /// Store namespace of the agent that runs the fires; schedule ids are
     /// unique within it.
@@ -68,6 +71,21 @@ pub struct Schedule {
     /// Who every fire's run acts for: permission rules match on its
     /// roles, as for a run started directly. Stored with the schedule.
     pub principal: Option<Principal>,
+}
+
+impl std::fmt::Debug for Schedule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Schedule")
+            .field("namespace", &self.namespace)
+            .field("id", &self.id)
+            .field("queue", &self.queue)
+            .field("session_id", &self.session_id)
+            .field("prompt", &self.prompt)
+            .field("timing", &self.timing)
+            .field("agent", &self.agent.as_ref().map(|_| "[redacted]"))
+            .field("principal", &self.principal)
+            .finish()
+    }
 }
 
 /// A stored schedule and what it did so far.
@@ -659,4 +677,27 @@ async fn busy(
     .fetch_one(&mut **tx)
     .await?;
     Ok(busy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_schedule_hides_its_definition_from_debug() {
+        let definition = r#"{"request": {"default_headers": {"x-gw": "hunter2-secret"}}}"#;
+        let schedule = Schedule {
+            namespace: "acme".into(),
+            id: "nightly".into(),
+            queue: "q".into(),
+            session_id: None,
+            prompt: "go".into(),
+            timing: Timing::Every(std::time::Duration::from_secs(60)),
+            agent: Some(definition.into()),
+            principal: None,
+        };
+        let shown = format!("{schedule:?}");
+        assert!(!shown.contains("hunter2-secret"), "{shown}");
+        assert!(shown.contains("nightly") && shown.contains("go"), "{shown}");
+    }
 }

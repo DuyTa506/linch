@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use linch::ext::workflow::Interrupt;
-use linch::{JsonValue, OutputSchema, SessionId};
+use linch::{JsonValue, OutputSchema, Principal, SessionId};
 use serde::{Deserialize, Serialize};
 
 /// Most bytes of a workflow id; it is part of the journal key and of the
@@ -48,6 +48,15 @@ pub struct WorkflowStartParams {
     /// each is used once, by the first interrupt of that key, and journaled.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resume: BTreeMap<String, JsonValue>,
+    /// Who the workflow's agent calls act for: the principal of every
+    /// call's run, so permission rules keyed on its roles apply, checked
+    /// against the tenant as for `run.start`. It is stored with the
+    /// workflow; starting an existing id with another principal (or none,
+    /// or one where it had none) is refused with `-32004`
+    /// (`data.kind` `workflow_principal`) and changes nothing. Absent: the
+    /// calls act for nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
 }
 
 /// What a tenant's allowlists hold one workflow to; absent fields are

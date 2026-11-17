@@ -302,6 +302,13 @@ scope an toàn là scope bạn có được khi bỏ trống trường, còn sco
 viết ra (`"scope": "agent"`), cho agent chỉ có một user như agent cục bộ hoặc cá nhân. Dù
 chọn cái nào, scope vẫn là một phần của run contract.
 
+Một run chỉ chạm tới bộ nhớ của một principal nếu nó có principal đó. Các lời gọi
+agent của một workflow hành động thay cho principal đưa vào `workflow.start`
+(`run_workflow(..., principal=...)`) và thay cho không ai nếu không có, nghĩa là
+trong scope `principal` không có bộ nhớ. Với `tool_cache`, khóa mang principal, nên
+một kết quả `MemorySearch` được cache chỉ phục vụ principal đã tạo ra nó, bất kể
+`scope` của cache.
+
 ### Các tool
 
 | Tool | Scope | Đầu vào |

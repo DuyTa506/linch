@@ -132,7 +132,9 @@ ambient set, since a command would keep them.
   with a `CLONE_NEW*` flag, so not even an unprivileged user namespace
   opens. `clone3`, whose flags the filter cannot read, gets `ENOSYS` and
   glibc falls back to `clone`. `io_uring`, whose requests the filter would
-  not see, is refused.
+  not see, is refused. The filter is a denylist: a syscall it does not name
+  is allowed, so Landlock and the refusal to run as root are the boundary,
+  and the filter only closes the doors listed here.
 - **Resources.** Each process is held to `memory_bytes`, `cpu_seconds` and
   `file_size_bytes`, and a command to `max_processes` more processes, so a
   fork bomb or a memory hog fails inside the command. Wall time is `Bash`'s
