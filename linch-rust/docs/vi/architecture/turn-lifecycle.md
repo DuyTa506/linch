@@ -212,8 +212,8 @@ một spec không đặt nó không đổi.
 
 | Kiểm tra | Mặc định | Kích hoạt | Kiểm tra khi |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc, đã bỏ tên file offload), không phải lỗi. Một tool poll chỉ lặp khi một lệnh đã xong bị đọc lại | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:350-354`) |
-| `max_identical_inputs` | 10 | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và lỗi; một tool poll không được đếm. Một lời gọi write hay exec (tool bất kỳ thuộc scope đó) thành công với input mới trong 50 lời gọi như vậy gần nhất xóa bộ đếm của mọi lời gọi khác, không bao giờ xóa của chính nó. Không có trên wire khi bằng 10 | Như trên |
+| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc, đã bỏ tên file offload), không phải lỗi. Một tool poll chỉ lặp khi một lệnh đã xong bị đọc lại. Một write hay exec thành công với input mới cũng xóa bộ đếm này của mọi lời gọi khác (dòng kế) | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:350-354`) |
+| `max_identical_inputs` | 10 | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và lỗi; một tool poll không được đếm. Một lời gọi write hay exec (tool bất kỳ thuộc scope đó) thành công với input mới trong 50 lời gọi như vậy gần nhất xóa bộ đếm của mọi lời gọi khác, cả input giống nhau lẫn kết quả giống nhau, không bao giờ xóa của chính nó. Không có trên wire khi bằng 10 | Như trên |
 | `max_consecutive_failures` | 3 | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi; một batch có một lời gọi thành công thì đếm lại từ đầu | Như trên |
 | `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:489-492`) |
 
@@ -238,13 +238,13 @@ with select:X first`); các lời gọi cứ lỗi mãi thuộc về chuỗi l�
 gần nhất, nên một trạng thái thỉnh thoảng được đọc trong một run dài không phải vòng
 lặp, và cách đếm thứ hai là luật của Python (đếm các input giống nhau của một tool trên toàn
 run, kể cả kết quả và lỗi, với ngưỡng 3) được nới thành 10 trong 50 input gần nhất. Một kết quả thành công của tool write hay exec
-(`writes()` trong `registry.rs`, đọc từ các tool của agent) xóa chỗ của mọi lời gọi khác trong cửa sổ đó
-(`Recent::keep_only`) khi input của chính nó là mới trong một cửa sổ thứ hai không bao giờ bị xóa
+(`writes()` trong `registry.rs`, đọc từ các tool của agent) xóa chỗ của mọi lời gọi khác trong cửa sổ đó và trong cửa sổ kết quả giống nhau
+(`Recent::keep_only`, giữ lại khóa của chính lời gọi write) khi input của chính nó là mới trong một cửa sổ thứ hai không bao giờ bị xóa
 gồm các write và exec thành công (`mutations`), vì điều nó đã đổi khiến một lời gọi giống hệt về
-sau là một câu hỏi mới: mười lần chạy test giữa mười lần sửa không phải vòng lặp. Một input
+sau là một câu hỏi mới: mười lần chạy test giữa mười lần sửa không phải vòng lặp, kể cả khi test in cùng một lỗi mỗi lần. Một input
 write hay exec lặp lại không đổi gì, nên cùng một lời gọi chạy đi chạy lại, một chu trình 2, 3
 hoặc 5 lời gọi exec, và một lần sửa cùng lần hoàn tác nó với một lần chạy test sau mỗi lần, đều
-giữ nguyên bộ đếm và kích hoạt ở 10. Một lần write thất bại không xóa gì.
+giữ nguyên bộ đếm và kích hoạt ở 10, còn cùng một lời gọi với cùng kết quả và không có bản vá nào ở giữa kích hoạt ở 3. Một lần write thất bại không xóa gì.
 
 Cửa sổ không nhìn thấy gì: một chu trình hơn 5 lời gọi khác nhau mà kết quả đổi mỗi lần
 không bao giờ có 10 lần của một lời gọi trong 50, nên chỉ `max_turns` và budget (cả hai mặc

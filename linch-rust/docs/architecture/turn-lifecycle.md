@@ -220,8 +220,8 @@ wire, so it does not change the contract of a spec that does not set it.
 
 | Check | Default | Trips | Checked |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again | At `Step::Results`, after the batch's results are appended (`turn.rs:350-354`) |
-| `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. A write or exec call (any tool of that scope) that succeeds with an input new among the latest 50 such calls clears the count of every other call, never its own. Off the wire at 10 | Same |
+| `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again. A write or exec success with a new input also clears this count of every other call (next row) | At `Step::Results`, after the batch's results are appended (`turn.rs:350-354`) |
+| `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. A write or exec call (any tool of that scope) that succeeds with an input new among the latest 50 such calls clears the count of every other call, identical inputs and same results alike, never its own. Off the wire at 10 | Same |
 | `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
 | `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:489-492`) |
 
@@ -249,13 +249,13 @@ second count, Python's rule (which counts a tool's identical inputs over the
 whole run, results and failures included, at its limit of 3) loosened to 10
 among the latest 50 inputs. A successful result of a write or exec tool
 (`registry.rs` `writes()`, read from the agent's tools) clears every other
-call's slot in that window (`Recent::keep_only`) when its own input is new in
+call's slot in that window and in the same-result window (`Recent::keep_only`, which keeps the write call's own key) when its own input is new in
 a second, never cleared window of write and exec successes (`mutations`),
 because what it changed makes a later identical call a new question: ten test
-runs between ten edits are no loop. A repeated write or exec input changed
+runs between ten edits are no loop, even when the test prints the same failure every time. A repeated write or exec input changed
 nothing, so the same call run again and again, a cycle of 2, 3 or 5 exec calls,
 and an edit and its undo with a test run after each, all keep their counts and
-trip at 10. A failed write clears nothing.
+trip at 10, and the same call with the same result and no patch between trips at 3. A failed write clears nothing.
 
 What the window cannot see: a cycle of more than 5 distinct calls whose results
 change every time never puts 10 of one call in 50, so only `max_turns` and the
