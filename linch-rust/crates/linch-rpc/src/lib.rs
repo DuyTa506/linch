@@ -278,7 +278,7 @@
 //! drives is `-32033`, a finished one `-32026`, an unknown one (or one of
 //! another tenant) `-32021`, a blank or over-long (16 KiB) text or an
 //! unusable id, or an idle run (queued, or running with no server driving it:
-//! resume it first) `-32035`, and a run with 16 unread steers `-32005` (`kind`
+//! resume it first) `-32038`, and a run with 16 unread steers `-32005` (`kind`
 //! `steers`). It is not routed to another server.
 //!
 //! **`run.cancel`** `{run_id, agent?}` ([`CancelParams`](protocol::CancelParams))
