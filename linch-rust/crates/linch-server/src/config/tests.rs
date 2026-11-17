@@ -16,6 +16,7 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
                 "tokens": [{"env": "ACME_TOKEN"}, {"value": "tok-acme-inline-0001"}],
                 "allow": {"exec_tools": true, "max_runs": 3, "max_connections": 2,
                           "max_agents": 5, "max_pool_connections": 4,
+                          "max_provider_concurrency": 2,
                           "provider_base_urls": ["http://10.0.0.5:8000/v1"],
                           "permission_modes": ["skip_dangerous"],
                           "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
@@ -35,6 +36,8 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
     assert_eq!((acme.max_agents, beta.max_agents), (Some(5), None));
     let pool = (acme.max_pool_connections, beta.max_pool_connections);
     assert_eq!(pool, (Some(4), None));
+    let provider = (acme.max_provider_concurrency, beta.max_provider_concurrency);
+    assert_eq!(provider, (Some(2), None));
     let debug = format!("{config:?}");
     assert!(!debug.contains("tok-acme-inline-0001"), "{debug}");
     let env = |name: &str| (name == "ACME_TOKEN").then(|| "tok-acme-env-0001".to_owned());
@@ -129,6 +132,7 @@ fn a_cap_of_zero_is_refused_when_the_config_loads() {
         "max_connections",
         "max_agents",
         "max_pool_connections",
+        "max_provider_concurrency",
         "max_schedules",
         "max_queued_jobs",
     ] {

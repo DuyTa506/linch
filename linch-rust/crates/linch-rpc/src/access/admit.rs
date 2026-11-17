@@ -3,6 +3,7 @@
 //! refused request.
 
 use std::io::ErrorKind;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use linch::permissions::RuleDecision;
@@ -43,6 +44,7 @@ impl Tenant {
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
         admit_guardrails(&config.spec)?;
+        allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
         if !allow.permission_modes.contains(&mode) {
             // The config's spelling (`skip_dangerous`), not the variant's.
@@ -191,6 +193,33 @@ impl Allowlists {
             *chosen = None;
         }
         Ok(())
+    }
+
+    /// A config may lower the provider concurrency to below the tenant's
+    /// cap, not raise it past: one that asks for none gets the cap. The
+    /// cap is not part of the run contract, so the fill changes no digest.
+    fn admit_provider_concurrency(
+        &self,
+        asked: &mut Option<NonZeroU32>,
+    ) -> Result<(), ErrorObject> {
+        let Some(cap) = self.max_provider_concurrency else {
+            return Ok(());
+        };
+        match *asked {
+            Some(asked) if asked > cap => {
+                let message = format!(
+                    "max_provider_concurrency {asked} is above the tenant's \
+                     max_provider_concurrency {cap}"
+                );
+                let data = json!({"kind": "provider_concurrency", "max": cap});
+                Err(ErrorObject::new(code::NOT_ALLOWED, message).with_data(data))
+            }
+            Some(_) => Ok(()),
+            None => {
+                *asked = Some(cap);
+                Ok(())
+            }
+        }
     }
 
     fn admit_provider(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {

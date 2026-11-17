@@ -676,6 +676,16 @@ class AgentConfig(TypedDict, total=False):
             prices a model with, in place of the published table or in
             addition to it. A model neither lists costs `None`, as does any
             model a local server (`vllm`, `sglang`, `llamacpp`) serves.
+        max_provider_concurrency: The most provider calls its runs, and the
+            runs of every agent opened on the same server with the same
+            provider key and endpoint, make at once; the rest wait their
+            turn, first come first served. A run that waits has dispatched
+            nothing, so cancelling it leaves no delivery or receipt.
+            Unlimited when absent; at least 1. A remote tenant may ask for
+            at most its `max_provider_concurrency` and gets that when it
+            asks for none. The limit is the server process's: a worker
+            process or a second server counts its own calls. It is not
+            part of the run contract.
     """
 
     namespace: Required[str]
@@ -700,3 +710,4 @@ class AgentConfig(TypedDict, total=False):
     deep_agent: DeepAgent
     profile: Profile
     pricing: Mapping[str, ModelRates]
+    max_provider_concurrency: int

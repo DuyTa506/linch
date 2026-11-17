@@ -50,6 +50,7 @@ pub struct Allowlists {
     pub(super) max_agents: usize,
     pub(super) max_connections: usize,
     pub(crate) max_pool_connections: NonZeroU32,
+    pub(crate) max_provider_concurrency: Option<NonZeroU32>,
     pub(crate) max_schedules: Option<u64>,
     pub(crate) min_schedule_interval: Duration,
     pub(crate) max_queued_jobs: Option<u64>,
@@ -224,6 +225,7 @@ impl Allowlists {
             max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_pool_connections: linch::postgres::default_max_connections(),
+            max_provider_concurrency: None,
             max_schedules: None,
             min_schedule_interval: DEFAULT_MIN_SCHEDULE_INTERVAL,
             max_queued_jobs: None,
@@ -289,6 +291,19 @@ impl Allowlists {
     /// what the tenant holds of the database's connections on each target.
     pub fn max_pool_connections(mut self, max: NonZeroU32) -> Self {
         self.max_pool_connections = max;
+        self
+    }
+
+    /// The most provider calls the tenant's runs make at once, all together
+    /// and on each provider key and endpoint: its agents share one gate
+    /// per key and endpoint (see `max_provider_concurrency` of
+    /// [`AgentConfig`](linch::AgentConfig)), so no number of agents or
+    /// runs goes past it. A config asking for more is refused
+    /// (`kind: provider_concurrency`); one that asks for none gets this.
+    /// `None` (the default) caps nothing. The gate is the server
+    /// process's: a worker process, or a second server, has its own.
+    pub fn max_provider_concurrency(mut self, max: Option<NonZeroU32>) -> Self {
+        self.max_provider_concurrency = max;
         self
     }
 
