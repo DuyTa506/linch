@@ -13,6 +13,7 @@ Một agent ghi nhớ ở ba nơi:
 | Cuộc hội thoại của một session | Log của session, trong store của nó; model nhìn thấy một view của log | Không cần gì: session nào cũng có |
 | Một view ngắn hơn của một cuộc hội thoại dài | Một bản tóm tắt (hoặc các kết quả tool đã xóa) được ghi log trong session | [`spec.compaction`](#compaction) |
 | Các sự thật agent giữ trong tệp của chính nó | `/memories/MEMORY.md` trong hệ thống tệp ảo | [`filesystem.memory`](#file-memory) |
+| Các sự thật giữ qua nhiều session | Store của server (Postgres full-text search) | [`memory`](#built-in-long-term-memory) trong config; dùng được cho agent chạy theo lịch |
 | Các sự thật giữ qua nhiều session | Store của chính bạn: tệp, một vector index, Notion, một database | Một [callback `context_build`](#external-memory) để đọc nó, một host tool để ghi nó |
 
 Hai trường spec nữa khôi phục một lời gọi model đi sai vì kích thước:
@@ -261,6 +262,83 @@ quyền thông thường áp dụng.
   hay agent `memory` tạo trước đó không thể resume.
 - `memory` là một trường của `filesystem`, nên nó cần hệ thống tệp bật; không có cách xin
   nó khi hệ thống tệp tắt.
+<a id="built-in-long-term-memory"></a>
+
+## Bộ nhớ dài hạn có sẵn
+
+`memory` trong config của agent cho model các sự thật sống lâu hơn session của nó, không
+cần callback hay host tool. Nhờ vậy nó dùng được cho
+[agent chạy theo lịch và agent nền](./scheduler.md), vốn không thể có callback.
+
+```python
+config: AgentConfig = {
+    "namespace": "support",
+    "spec": {"model": "claude-sonnet-4-6"},
+    "provider": {"id": "anthropic"},
+    "stores": {"type": "postgres", "dsn": dsn},
+    "permissions": {"mode": "accept_edits", "project_root": "/srv/app"},
+    "memory": {"scope": "principal", "recall": {"k": 5}, "max_memories": 1000},
+}
+```
+
+`memory: {}` là đủ để bật. Khi vắng mặt thì tắt, và một agent không có nó giữ nguyên tool
+và run contract như trước.
+
+| Trường | Mặc định | Điều khiển gì |
+|---|---|---|
+| `scope` | `agent` | `agent`: mọi session của namespace dùng chung một bộ nhớ. `principal`: một bộ nhớ cho mỗi tenant và user của principal của run. Run không có principal thì không có bộ nhớ (tool lỗi `not_allowed`, recall không thêm gì); nó không bao giờ quay về bộ nhớ chung |
+| `recall` | tắt | `{"k": 5}` tìm trong bộ nhớ bằng tin nhắn cuối của user trước mỗi request và cho model xem `k` kết quả tốt nhất (1 đến 20) |
+| `max_memories` | không giới hạn | Số memory nhiều nhất tenant được giữ trong mọi namespace của database; lưu quá mức này thì model nhận lỗi `limit_reached` |
+
+### Các tool
+
+| Tool | Scope | Input |
+|---|---|---|
+| `MemorySave` | write | `content` (tối đa 4096 byte), `tags` (tối đa 8 nhãn, mỗi nhãn tối đa 64 byte) |
+| `MemorySearch` | read | `query`, `limit` (1 đến 20, mặc định 5) |
+| `MemoryDelete` | write | `id`, như `MemorySearch` hiển thị (`[memory:<id>]`) |
+
+Khóa lạ bị từ chối. Namespace và scope không bao giờ là input: host gắn chúng, nên một lời
+gọi chỉ chạm tới memory của chính agent của nó, và ở scope `principal` là của chính
+principal của nó. `MemorySave` và `MemoryDelete` là tool write, nên một run nền (không thể
+trả lời yêu cầu phê duyệt) cần một permission mode cho phép chúng, như `accept_edits`; chúng
+không bao giờ tự động được cho phép. Một lần lưu bị phát lại sau sự cố chỉ lưu một memory.
+
+### Tìm kiếm
+
+Với Postgres store, memory nằm trong `linch_memories` và được tìm bằng full-text search
+của Postgres: một `tsvector` với chỉ mục GIN, xếp hạng bằng `ts_rank`. Không cần extension.
+Cấu hình `simple` không stemming và không bỏ stop word, nên tiếng Việt và tiếng Anh hoạt
+động như nhau; đổi lại `run` không tìm ra `running`. Từ nào của query khớp cũng được, và
+memory khớp nhiều từ hơn đứng trước. Query được rút về các từ của nó (chữ và số) trước khi
+tới database, nên dấu nháy, toán tử và SQL trong đó chỉ là dấu câu: một query không bao giờ
+làm hỏng việc tìm kiếm hay khớp nhiều hơn những gì nó nêu. Với memory store, cùng các quy
+tắc chạy trong process, mất khi thoát (cho test và phát triển). Vector search là một lựa
+chọn có thể có sau này, không thuộc phần này.
+
+### Recall
+
+Với `recall`, các kết quả khớp được thêm vào phần đuôi của request thành một block, như
+[`retrieval`](#external-memory) làm: không bao giờ ghi log, nên session không phình ra và
+cached prefix không dịch chuyển. Các id nằm trên `ContextBuildEvent` của lời gọi ở
+`metadata["memory"]["ids"]`. Store lỗi thì không thêm gì (`context_build` fail open). Recall
+là một phần của run contract, cùng `k` và `scope`, chỉ khi bật.
+
+### Trên một server
+
+Một tenant cần `memory: true` trong danh sách `allow` (mặc định bị từ chối), và có thể được
+cấp `max_memories`:
+
+```json
+{"tenants": {"acme": {"allow": {"memory": true, "max_memories": 5000}}}}
+```
+
+Cả giới hạn của tenant lẫn `max_memories` của agent đều được giữ: giá trị nhỏ hơn thắng, và
+agent không nêu gì thì nhận giá trị của tenant. Việc đếm và lưu chạy dưới một advisory lock
+của Postgres, nên các lần lưu đồng thời không thể vượt giới hạn.
+
+Lỗi store không bao giờ tới model theo lời của database, vì văn bản đó có thể nêu tên host:
+model thấy `the memory store is unavailable` với mã `store`.
 
 ---
 
@@ -268,7 +346,7 @@ quyền thông thường áp dụng.
 
 ## Bộ nhớ ngoài
 
-Bộ nhớ dài hạn là một store do bạn sở hữu. Agent đọc nó qua một
+Bộ nhớ dài hạn cũng có thể là một store do bạn sở hữu. Agent đọc nó qua một
 [callback](./agent.md#callback) `context_build`: trước mỗi lời gọi model, callback tìm
 trong store và trả về các block văn bản. Các block chỉ đi cùng request đó, ở phần đuôi
 của nó, như một phần của message user cuối cùng. Chúng không bao giờ được ghi log, nên:
@@ -427,6 +505,7 @@ cache.
 | `ContextBudget` trên kết quả của một builder | `spec.context_budget`, trên các block của callback, theo `drop_order` và `pinned` được khai báo (Python bỏ message cũ nhất trước, rồi system block cũ nhất) |
 | `SystemPromptConfig` | `spec.system` ([Config của agent](./agent.md#system-sections)) |
 | `register_grounding_check` | Chưa xây: nó cần các id đã truy xuất trong run, được hai callback chia sẻ, và một budget sửa lỗi; các lần thử lại của `stop` bị giới hạn một lần cho mỗi lời gọi run trừ khi đặt `spec.verification` |
+| Không có store có sẵn (một công thức mem0 với client bạn cung cấp) | `memory` trong config: tool, scope, giới hạn và recall tùy chọn nằm trong server |
 
 ## Các trang liên quan
 

@@ -129,6 +129,8 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `max_tool_cache_bytes` | 67108864 (64 MiB) | Số byte kết quả cache mà mọi namespace của tenant được giữ cùng nhau; tối thiểu 1 |
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
 | `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
+| `memory` | `false`: không có bộ nhớ dài hạn | Config có được bật [`memory`](./memory.md#built-in-long-term-memory) hay không |
+| `max_memories` | không có: không giới hạn | Số memory nó được giữ trong mọi namespace của một database; `max_memories` của agent bị giữ dưới mức này |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không

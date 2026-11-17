@@ -13,6 +13,7 @@ An agent remembers in three places:
 | The conversation of a session | The session's log, in its store; the model sees a view of it | Nothing: every session has it |
 | A shorter view of a long conversation | A summary (or cleared tool results) logged in the session | [`spec.compaction`](#compaction) |
 | Facts the agent keeps in its own files | `/memories/MEMORY.md` in the virtual filesystem | [`filesystem.memory`](#file-memory) |
+| Facts kept across sessions | The server's store (Postgres full-text search) | [`memory`](#built-in-long-term-memory) in the config; works for scheduled agents |
 | Facts kept across sessions | Your own store: files, a vector index, Notion, a database | A [`context_build` callback](#external-memory) to read it, a host tool to write it |
 
 Two more spec fields recover a model call that went wrong because of size:
@@ -267,9 +268,93 @@ and are never logged. Nothing writes memory for the model: it uses
 
 ---
 
+## Built-in long-term memory
+
+`memory` in the agent config gives the model facts that outlive its
+sessions, with no callback and no host tool. That is what makes it work for
+[scheduled and background agents](./scheduler.md), which cannot have
+callbacks.
+
+```python
+config: AgentConfig = {
+    "namespace": "support",
+    "spec": {"model": "claude-sonnet-4-6"},
+    "provider": {"id": "anthropic"},
+    "stores": {"type": "postgres", "dsn": dsn},
+    "permissions": {"mode": "accept_edits", "project_root": "/srv/app"},
+    "memory": {"scope": "principal", "recall": {"k": 5}, "max_memories": 1000},
+}
+```
+
+`memory: {}` is enough to turn it on. Off when absent, and an agent
+without it has the same tools and the same run contract as before.
+
+| Field | Default | What it controls |
+|---|---|---|
+| `scope` | `agent` | `agent`: every session of the namespace shares one memory. `principal`: one memory per tenant and user of the run's principal. A run with no principal has no memory (the tools fail with `not_allowed`, recall adds nothing); it never falls back to the shared one |
+| `recall` | off | `{"k": 5}` searches memory with the user's latest message before each request and shows the model the best `k` (1 to 20) |
+| `max_memories` | no cap | The most memories the tenant may keep in all its namespaces of the database; a save past it fails for the model with `limit_reached` |
+
+### The tools
+
+| Tool | Scope | Input |
+|---|---|---|
+| `MemorySave` | write | `content` (up to 4096 bytes), `tags` (up to 8 labels of up to 64 bytes) |
+| `MemorySearch` | read | `query`, `limit` (1 to 20, 5 when absent) |
+| `MemoryDelete` | write | `id`, as `MemorySearch` shows it (`[memory:<id>]`) |
+
+Unknown keys are refused. The namespace and the scope are never inputs: the
+host binds them, so a call can only reach its own agent's, and in `principal`
+scope its own principal's, memories. `MemorySave` and `MemoryDelete` are
+write tools, so a background run (which cannot answer an approval) needs a
+permission mode that allows them, such as `accept_edits`; they are never
+auto-allowed for you. A save replayed after a crash stores one memory.
+
+### Search
+
+With Postgres stores, memories live in `linch_memories` and are found with
+Postgres full-text search: a `tsvector` with a GIN index, ranked by
+`ts_rank`. It needs no extension. The `simple` configuration does no
+stemming and drops no stop words, so Vietnamese and English work the same
+way; the cost is that `run` does not find `running`. Any word of the query
+matches, and a memory that matches more of them comes first. The query
+is reduced to its words (letters and digits) before it reaches the database,
+so quotes, operators and SQL in it are plain punctuation: a query can never
+fail the search or match more than it names. With memory stores the same
+rules run in process, lost on exit (tests and development). Vector search is
+a possible future option, not part of this.
+
+### Recall
+
+With `recall`, the matches are added at the tail of the request as one
+block, like [`retrieval`](#external-memory) does: never logged, so the
+session does not grow and the cached prefix does not move. The ids land on
+the call's `ContextBuildEvent` as `metadata["memory"]["ids"]`. A store failure
+adds nothing (`context_build` fails open). Recall is part of the run
+contract, with its `k` and `scope`, only when on.
+
+### On a server
+
+A tenant needs `memory: true` in its `allow` list (denied by default), and
+may be given `max_memories`:
+
+```json
+{"tenants": {"acme": {"allow": {"memory": true, "max_memories": 5000}}}}
+```
+
+The tenant's cap and an agent's own `max_memories` are both held: the smaller
+wins, and an agent that names none gets the tenant's. The count and the save
+run under a Postgres advisory lock, so concurrent saves cannot pass it.
+
+A store failure never reaches the model as the database worded it, since
+that text can name the host: the model sees `the memory store is unavailable`
+with the code `store`.
+
+---
+
 ## External memory
 
-Long-term memory is a store you own. The agent reads it through a
+Long-term memory can also be a store you own. The agent reads it through a
 `context_build` [callback](./agent.md#callbacks): before each model
 call, the callback searches the store and returns text blocks. The blocks
 ride only that one request, at its tail, as part of the last user message.
@@ -427,6 +512,7 @@ rides the tail of the request, so retrieval never moves the cached prefix.
 | `ContextBudget` on a builder's result | `spec.context_budget`, on the callbacks' blocks, by a declared `drop_order` and `pinned` (Python drops oldest messages, then oldest system blocks) |
 | `SystemPromptConfig` | `spec.system` ([Agent config](./agent.md#system-sections)) |
 | `register_grounding_check` | Not built: it needs the ids retrieved in the run, shared by two callbacks, and a correction budget; `stop` retries are bounded to one per run call unless `spec.verification` is set |
+| No built-in store (a mem0 recipe with the client you supply) | `memory` in the config: tools, scopes, caps and optional recall in the server |
 
 ## Related pages
 
