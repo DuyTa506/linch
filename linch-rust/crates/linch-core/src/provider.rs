@@ -13,6 +13,7 @@ mod assembler;
 pub mod call;
 mod client;
 mod event;
+mod gate;
 mod request;
 pub mod scripted;
 
@@ -22,6 +23,7 @@ pub use event::{
     MessageEndEvent, MessageStartEvent, ProviderEvent, TextDeltaEvent, ThinkingDeltaEvent,
     ToolUseEndEvent, ToolUseInputDeltaEvent, ToolUseStartEvent,
 };
+pub use gate::{ProviderGate, ProviderPermit, WeakProviderGate};
 pub use request::{
     CacheControl, CacheTtl, OutputSchema, ProviderRequest, ReasoningEffort, Thinking,
     ThinkingDisplay, ToolChoice, ToolDefinition,

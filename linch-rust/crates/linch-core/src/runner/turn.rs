@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::cancel::Unpaired;
 use super::end::cut_empty;
 use super::final_tool::Unanswered;
+use super::gate::Slot;
 use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
@@ -458,6 +459,15 @@ impl Runner {
                 return Ok(None);
             }
         };
+        // Before anything of the call is staged: a run that waits for its
+        // place has dispatched nothing.
+        let slot = match self.slot().await? {
+            Slot::Cancelled => {
+                self.abort().await?;
+                return Ok(None);
+            }
+            held => held,
+        };
         self.stage_context(&request, context.metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
@@ -485,6 +495,7 @@ impl Runner {
             };
             call.drive(provider, request, &self.cancel, on_delta).await
         };
+        drop(slot);
         let mut receipt = outcome.receipt;
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);

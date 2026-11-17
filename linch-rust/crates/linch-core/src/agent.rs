@@ -23,7 +23,8 @@ use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
 use crate::provider::{
-    CacheControl, OutputSchema, Provider, ProviderRequest, Thinking, ToolChoice, ToolDefinition,
+    CacheControl, OutputSchema, Provider, ProviderGate, ProviderRequest, Thinking, ToolChoice,
+    ToolDefinition,
 };
 use crate::redaction::Redactor;
 use crate::registration::Registration;
@@ -209,6 +210,9 @@ pub(crate) struct AgentInner {
     pub(crate) child: bool,
     /// Prices each paid call; `None` reports no cost.
     pub(crate) pricing: Option<Pricing>,
+    /// The cap on concurrent provider calls this agent's runs share, its
+    /// subagents' included; `None` for no cap. Not part of the contract.
+    pub(crate) gate: Option<ProviderGate>,
     /// The inbox each run of a session drains; `None` without one.
     pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
     /// The subagent child runs of each run that is live or suspended in

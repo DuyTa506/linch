@@ -10,7 +10,7 @@ use crate::ids::SessionId;
 use crate::json::JsonObject;
 use crate::message::SystemBlock;
 use crate::permissions::PermissionEngine;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderGate};
 use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
@@ -41,6 +41,7 @@ pub struct AgentBuilder {
     skills: Option<Vec<Skill>>,
     subagents: Option<Vec<SubagentDefinition>>,
     pricing: Option<Pricing>,
+    gate: Option<ProviderGate>,
     mailbox: Option<Arc<dyn Mailbox>>,
     workers: Option<Workers>,
     tool_search: Option<ToolSearch>,
@@ -63,6 +64,7 @@ impl AgentBuilder {
             skills: None,
             subagents: None,
             pricing: None,
+            gate: None,
             mailbox: None,
             workers: None,
             tool_search: None,
@@ -197,6 +199,18 @@ impl AgentBuilder {
     /// contract.
     pub fn tool_search(mut self, search: ToolSearch) -> Self {
         self.tool_search = Some(search);
+        self
+    }
+
+    /// Cap the provider calls of every run of this agent, and of its
+    /// subagents', at what `gate` allows (see [`ProviderGate`]). A run
+    /// whose call must wait has dispatched nothing yet: it stages no
+    /// delivery until it holds a place, and cancelling it while it waits
+    /// aborts it with nothing written for the call. A gate shared with
+    /// other agents caps them all together. It is not part of the
+    /// contract, so changing the cap never strands a suspended run.
+    pub fn provider_gate(mut self, gate: ProviderGate) -> Self {
+        self.gate = Some(gate);
         self
     }
 
@@ -404,6 +418,7 @@ impl AgentBuilder {
             worker_registry: Default::default(),
             child: false,
             pricing: self.pricing,
+            gate: self.gate,
             mailbox: self.mailbox,
             families: Default::default(),
             releases: Default::default(),

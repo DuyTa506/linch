@@ -160,6 +160,7 @@ impl AgentInner {
             worker_registry: Default::default(),
             child: true,
             pricing: self.pricing.clone(),
+            gate: self.gate.clone(),
             mailbox: self.mailbox.clone(),
             families: Default::default(),
             releases: self.releases.clone(),
