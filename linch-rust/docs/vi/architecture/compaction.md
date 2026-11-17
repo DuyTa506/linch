@@ -254,7 +254,7 @@ Một bản tóm tắt được chấp nhận trở thành một message của u
    đi (`crates/linch-core/src/skills.rs`).
 3. Nếu session có catalog, một thông báo nhắc lại mọi thay đổi catalog của session.
 4. `replacement` là message đầu tiên như cũ, bản tóm tắt, rồi các message từ `keep_from`
-   trở đi (`compaction.rs:689-701`).
+   trở đi (`compaction.rs:692-704`).
 
 Sau đó run stage event `compaction` (số message và token trước và sau, chiến lược, thời
 lượng, `forced`) và lưu `Compacted` cùng bản tóm tắt và `keep_from`
@@ -375,7 +375,7 @@ Request mà model nhận được sau một lần compaction được dựng t�
 | Phần | Nguồn |
 |---|---|
 | Các block system và tool | Prefix đã đóng băng của session, từng byte một (`session_log.rs:53-60`) |
-| Message đầu tiên | Message đầu tiên của view, không đổi (`compaction.rs:689-701`) |
+| Message đầu tiên | Message đầu tiên của view, không đổi (`compaction.rs:692-704`) |
 | Bản tóm tắt | Message user `summary` cùng các reminder và thông báo catalog của nó |
 | Các lượt được giữ | `keep_recent_turns` lượt assistant cuối và những gì theo sau chúng |
 | Các message sau đó | Được nối sau projection khi run tiếp tục |

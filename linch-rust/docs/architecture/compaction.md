@@ -264,7 +264,7 @@ An accepted summary becomes a user message and a replacement view:
 3. If the session has a catalog, one notice restates every catalog change of
    the session.
 4. `replacement` is the first message as it was, the summary, then the
-   messages from `keep_from` on (`compaction.rs:689-701`).
+   messages from `keep_from` on (`compaction.rs:692-704`).
 
 The run then stages the `compaction` event (message and token counts before
 and after, the strategy, the duration, `forced`) and saves `Compacted` with
@@ -392,7 +392,7 @@ The request the model gets after a compaction is built from these parts:
 | Part | Source |
 |---|---|
 | System blocks and tools | The session's frozen prefix, byte for byte (`session_log.rs:53-60`) |
-| First message | The first message of the view, unchanged (`compaction.rs:689-701`) |
+| First message | The first message of the view, unchanged (`compaction.rs:692-704`) |
 | Summary | The `summary` user message with its reminders and catalog notice |
 | Kept turns | The last `keep_recent_turns` assistant turns and what follows them |
 | Later messages | Appended after the projection as the run goes on |
