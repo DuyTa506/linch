@@ -127,8 +127,9 @@ your promise that the tool answers the same for the same input; it is per sessio
 `scope: "namespace"`, and background work in the workspace switches it off. Both are optional and
 leave the run contract alone when unset.
 
-**Memory.** Decide what must outlive what. This run: the history, with compaction. This
-conversation's notes: `filesystem.memory`. Facts across sessions and for background agents:
+**Memory.** Decide what must outlive what. This run: the history, with compaction. Notes the
+model keeps for itself (files it reads back, per principal, across sessions on Postgres):
+`filesystem.memory`. Facts across sessions and for background agents:
 `memory` with `scope` `principal` (one user's facts never reach another) or `agent` (shared, so
 one user's text, or an injection, reaches every user; choose it knowingly), with `max_memories`.
 Your own corpus: a `context_build` retrieval callback. Memories are untrusted data to the model.

@@ -517,7 +517,7 @@ input can never name the namespace, the scope or the queue:
   namespace when it is built. The model chooses the text, tags, query and id;
   the scope is the calling run's principal, or the agent's shared memory, and
   comes from the host. Every memory the model reads is escaped first
-  (`memory.rs:1-14`), and a store failure reaches it as a fixed text with the
+  (`crates/linch-tools/src/memory.rs:1-14`), and a store failure reaches it as a fixed text with the
   code `store`. `MemoryRecall` (`memory_recall.rs`) is a `context_build` hook
   that searches with the user's latest message and adds the best matches to
   the request tail only, within 8 KiB and 300 ms, so a slow store costs a

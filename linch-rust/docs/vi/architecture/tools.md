@@ -506,7 +506,7 @@ giờ đặt tên được namespace, scope hay hàng đợi:
   `MemoryStore` (`crates/linch-core/src/memory.rs:202`), được gắn với một
   namespace khi dựng. Model chọn nội dung, tag, truy vấn và id; scope là
   principal của run đang gọi, hoặc bộ nhớ chung của agent, và do host quyết
-  định. Mọi memory mà model đọc đều được escape trước (`memory.rs:1-14`), và
+  định. Mọi memory mà model đọc đều được escape trước (`crates/linch-tools/src/memory.rs:1-14`), và
   một lỗi của store đến model dưới dạng một văn bản cố định với mã `store`.
   `MemoryRecall` (`memory_recall.rs`) là hook `context_build` tìm bằng tin nhắn
   mới nhất của người dùng và thêm các kết quả khớp nhất vào đuôi request mà
