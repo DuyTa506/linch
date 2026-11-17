@@ -16,7 +16,7 @@
 //! [`PreToolUseOutcome::Run`] only comes from a chain that ran every
 //! matching hook.
 //!
-//! Twelve further points observe only ([`observe`]): `agent_start`,
+//! Twelve further points observe only (`observe`): `agent_start`,
 //! `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`,
 //! `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
 //! `post_compact`, `subagent_start`, `subagent_stop`. A hook there answers
