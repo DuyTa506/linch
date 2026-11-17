@@ -95,6 +95,50 @@ class Filesystem(TypedDict, total=False):
     memory_scope: Literal["namespace", "principal"]
 
 
+class Recall(TypedDict, total=False):
+    """Automatic recall, as `LongTermMemory.recall`.
+
+    Attributes:
+        k: Most memories one request carries, 1 to 20; 5 when absent.
+    """
+
+    k: int
+
+
+class LongTermMemory(TypedDict, total=False):
+    """Long-term memory kept by the server, as `AgentConfig.memory`.
+
+    `{}` gives the model `MemorySave`, `MemorySearch` and `MemoryDelete`
+    over a store the server picks from `stores`: Postgres rows with
+    full-text search (any language, any word of the query matches, more
+    matches rank first) with Postgres stores, in-process memory otherwise.
+    No callback is involved, so scheduled and background agents have it
+    too. The model never names the namespace or the scope. `MemorySave`
+    and `MemoryDelete` are write tools: a background run, which cannot
+    answer an approval, needs a permission mode that allows them, such as
+    `accept_edits`. A remote tenant needs `memory` in its server allowlists.
+
+    Attributes:
+        scope: `agent` (the default): every session of the namespace shares
+            one memory. `principal`: one memory per tenant and user of the
+            run's principal; a run with none has no memory, never the
+            shared one.
+        recall: Search memory with the user's latest message before each
+            request and show the model the best matches, at the tail of
+            the request. They are never written to the session, so the
+            cached prefix does not move. Off when absent; on, it is part of
+            the run contract.
+        max_memories: The most memories the tenant may keep in all its
+            namespaces; a save past it fails for the model with
+            `limit_reached`. The tenant's `max_memories` allowlist bounds
+            it. No cap when absent.
+    """
+
+    scope: str
+    recall: Recall
+    max_memories: int
+
+
 class LocalExecution(TypedDict):
     """The default execution backend: `Bash` runs as the server's user.
 
@@ -876,6 +920,8 @@ class AgentConfig(TypedDict, total=False):
             Needs Postgres stores, no host tools or callbacks, and a tenant
             whose allowlists give it schedules (a worker runs them); a
             local connection is refused. Off when absent.
+        memory: Long-term memory for the model, in a store that outlives
+            sessions; see `LongTermMemory`. Off when absent.
         deep_agent: The deep agent preset; see `DeepAgent`.
         profile: The domain profile its runs take; see `Profile`.
         pricing: Rates by exact model id (see `ModelRates`) that this agent
@@ -913,6 +959,7 @@ class AgentConfig(TypedDict, total=False):
     tasks: bool
     ask_user: bool
     schedule_tools: bool
+    memory: LongTermMemory
     deep_agent: DeepAgent
     profile: Profile
     pricing: Mapping[str, ModelRates]

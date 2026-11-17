@@ -12,6 +12,7 @@ from scripted import MODEL, config, text_turn, tool_turn
 from linch_rust import (
     AgentConfig,
     BudgetEvent,
+    ContextBuildEvent,
     Envelope,
     ErrorEvent,
     HookEvent,
@@ -405,3 +406,40 @@ async def test_pricing_prices_a_model_the_table_lacks() -> None:
     rates = {model: {"input": 0.2, "output": 0.6}}
     priced = final(await run_once(config(turns, spec=spec, pricing=rates)))
     assert priced.total_cost_usd == pytest.approx(3 * 0.2e-6 + 1 * 0.6e-6)
+
+
+MEMORY_TOOLS = ["MemorySave", "MemorySearch", "MemoryDelete"]
+
+
+async def test_memory_is_off_unless_the_config_turns_it_on() -> None:
+    off = tools_of(await run_once(config([text_turn("hi")])))
+    assert off == []
+    on = tools_of(await run_once(config([text_turn("hi")], memory={})))
+    assert on == MEMORY_TOOLS
+
+
+async def test_a_memory_saved_in_one_session_is_recalled_in_another() -> None:
+    save = {"content": "Ann's favourite tea is oolong", "tags": ["tea"]}
+    turns = [tool_turn("c1", "MemorySave", save), text_turn("saved"), text_turn("oolong")]
+    memory = {"recall": {"k": 3}}
+    async with Server() as server:
+        agent = await server.open_agent(config(turns, mode="accept_edits", memory=memory))
+        first = [e async for e in await agent.run("s1", "Remember my tea.")]
+        second = [e async for e in await agent.run("s2", "Which tea do I like?")]
+
+    [saved] = results(first)
+    assert saved.startswith("Saved memory ")
+    recalled = [
+        e.event.metadata["memory"]["ids"]
+        for e in second
+        if isinstance(e.event, ContextBuildEvent) and "memory" in e.event.metadata
+    ]
+    assert recalled == [[saved.removeprefix("Saved memory ")]]
+    assert final(second).final_text == "oolong"
+
+
+async def test_an_invalid_memory_config_does_not_open() -> None:
+    async with Server() as server:
+        with pytest.raises(OpenError) as raised:
+            await server.open_agent(config([], memory={"recall": {"k": 0}}))
+    assert "memory.recall.k" in str(raised.value)
