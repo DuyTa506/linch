@@ -49,6 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::events::kinds::{PolicyAction, PolicyEvent, PolicyRule, UserEventSubtype};
 use crate::events::{Envelope, Event};
+use crate::json::{JsonObject, JsonValue};
 use crate::message::ContentBlock;
 use crate::provider::ToolChoice;
 use crate::verification::{Check, OnFail, VerificationSpec, Verifier, Verifiers};
@@ -511,14 +512,29 @@ impl Gates {
     /// How the final answer `text` fails the gates; `None` when it meets
     /// them all.
     pub(crate) fn check(&self, text: &str) -> Option<Failure> {
+        self.check_texts(&[text])
+    }
+
+    /// How the final answer fails the gates, which judge it as every one of
+    /// `texts`: a `forbids` check fails when it matches any of them, any
+    /// other check when it passes on none. A final tool's input is its JSON
+    /// text, which escapes what a pattern may name (a quote, a newline),
+    /// together with the strings the input holds, as they read.
+    pub(crate) fn check_texts(&self, texts: &[&str]) -> Option<Failure> {
         let policy = &self.rules.policy;
         let (mut gates, mut missing, mut lines) = (Vec::new(), Vec::new(), Vec::new());
         for (gate, check) in policy.gates.iter().zip(&self.rules.checks) {
             let short: Vec<&String> = (gate.succeeded.iter())
                 .filter(|tool| self.successes.get(*tool).copied().unwrap_or(0) < gate.min_calls)
                 .collect();
-            let failed = check.as_ref().and_then(|check| check.check(text));
-            if short.is_empty() && failed.is_none() {
+            let failed = check.as_ref().is_some_and(|verifiers| {
+                let fails = |text: &&str| verifiers.check(text).is_some();
+                match gate.check {
+                    Some(Check::Forbids { .. }) => texts.iter().any(fails),
+                    _ => texts.iter().all(fails),
+                }
+            });
+            if short.is_empty() && !failed {
                 continue;
             }
             gates.push(gate.name.clone());
@@ -531,7 +547,7 @@ impl Gates {
                 (Some(feedback), _) => feedback.clone(),
                 // Not the pattern or keywords: they are the operator's, and the
                 // model that reads this may be a tenant's.
-                (None, Some(_)) if short.is_empty() => format!(
+                (None, true) if short.is_empty() => format!(
                     "The requirement '{}' is not met: your final answer does not satisfy its \
                      check. Revise it and give your final answer again.",
                     gate.name
@@ -578,6 +594,20 @@ impl Gates {
         }
     }
 
+    /// The `policy` event of the stop that ends the run on `failure`, a
+    /// final answer a `stop` hook rewrote into one the gates do not accept.
+    /// No correction goes back: the hook would rewrite the next answer too.
+    pub(crate) fn rewritten(&self, failure: &Failure) -> PolicyEvent {
+        PolicyEvent {
+            detail: format!(
+                "a stop hook rewrote the final answer into one that does not meet the completion \
+                 gates: {}",
+                failure.feedback
+            ),
+            ..self.stop(failure)
+        }
+    }
+
     /// The `policy` event of the stop `failure` ends the run on.
     pub(crate) fn stop(&self, failure: &Failure) -> PolicyEvent {
         let max = self.rules.policy.corrections();
@@ -598,6 +628,29 @@ impl Gates {
             detail: format!("{detail}: {}", failure.feedback),
         }
     }
+}
+
+/// The strings in `input`, keys and values, at any depth, as they read.
+pub(crate) fn leaves(input: &JsonObject) -> Vec<String> {
+    fn walk(value: &JsonValue, found: &mut Vec<String>) {
+        match value {
+            JsonValue::String(text) => found.push(text.clone()),
+            JsonValue::Array(items) => items.iter().for_each(|item| walk(item, found)),
+            JsonValue::Object(map) => {
+                for (key, item) in map {
+                    found.push(key.clone());
+                    walk(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for (key, item) in input {
+        found.push(key.clone());
+        walk(item, &mut found);
+    }
+    found
 }
 
 /// `names` quoted and joined for a sentence.

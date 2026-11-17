@@ -75,14 +75,23 @@ impl Runner {
         }
     }
 
-    /// Check the final answer `text` against the completion gates.
+    /// Check the final answer `text` against the completion gates, which
+    /// also judge it as each of `decoded` (see `Gates::check_texts`).
     /// `None`: it meets them, or the policy has none; otherwise the answer
     /// went back to the model, or the run ended failed.
-    pub(super) async fn gate_answer(&mut self, text: &str) -> Result<Option<Checked>, RunError> {
+    pub(super) async fn gate_answer(
+        &mut self,
+        text: &str,
+        decoded: &[String],
+    ) -> Result<Option<Checked>, RunError> {
         let Some(gates) = &self.gates else {
             return Ok(None);
         };
-        let Some(failure) = gates.check(text) else {
+        let texts: Vec<&str> = [text]
+            .into_iter()
+            .chain(decoded.iter().map(String::as_str))
+            .collect();
+        let Some(failure) = gates.check_texts(&texts) else {
             return Ok(None);
         };
         if gates.can_correct() {
@@ -92,6 +101,32 @@ impl Runner {
             return Ok(Some(Checked::Retry(step)));
         }
         let event = gates.stop(&failure);
+        self.end_gate(event, text).await.map(Some)
+    }
+
+    /// Check `answer`, which the `stop` chain made of `text`, against the
+    /// gates again when it is not `text`. A failure ends the run: the hook
+    /// that rewrote it would rewrite the next answer too.
+    pub(super) async fn gate_rewrite(
+        &mut self,
+        text: &str,
+        answer: &str,
+    ) -> Result<Option<Checked>, RunError> {
+        let Some(gates) = &self.gates else {
+            return Ok(None);
+        };
+        if answer == text {
+            return Ok(None);
+        }
+        let Some(failure) = gates.check(answer) else {
+            return Ok(None);
+        };
+        let event = gates.rewritten(&failure);
+        self.end_gate(event, answer).await.map(Some)
+    }
+
+    /// End the run failed on the `stop` `event`, with `text` as its answer.
+    async fn end_gate(&mut self, event: PolicyEvent, text: &str) -> Result<Checked, RunError> {
         let message = event.detail.clone();
         self.stage_policy(event);
         let error = json!({"name": "PolicyGateError", "message": message, "retryable": false});
@@ -104,6 +139,6 @@ impl Runner {
         let (status, subtype) = (RunStatus::Failed, ResultSubtype::Error);
         self.end_with(status, subtype, StopReason::Error, answer)
             .await?;
-        Ok(Some(Checked::Ended))
+        Ok(Checked::Ended)
     }
 }

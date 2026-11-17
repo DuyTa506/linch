@@ -50,7 +50,7 @@ impl Runner {
     /// Check the text-only answer `text` against the policy's completion
     /// gates, then the run's schema, then the agent's verifiers.
     pub(super) async fn check_answer(&mut self, text: &str) -> Result<Checked, RunError> {
-        if let Some(checked) = self.gate_answer(text).await? {
+        if let Some(checked) = self.gate_answer(text, &[]).await? {
             return Ok(checked);
         }
         let value = match self.output.clone() {

@@ -693,6 +693,9 @@ impl Runner {
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),
                 Stopping::Ended => return Ok(None),
             };
+            if self.gate_rewrite(&text, &answer).await?.is_some() {
+                return Ok(None);
+            }
             let value = match self.check_rewrite(&text, &answer, value).await? {
                 Checked::Valid(value) => value,
                 Checked::Retry(feedback) => return Ok(Some(feedback)),

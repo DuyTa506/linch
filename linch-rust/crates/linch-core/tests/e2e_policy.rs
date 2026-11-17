@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::PolicyAction;
-use linch_core::hooks::{PreToolUse, PreToolUseResponse};
+use linch_core::hooks::{PreToolUse, PreToolUseResponse, Stop, StopResponse};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
@@ -114,11 +114,30 @@ fn agent_on<S: RunStore + SessionStore + 'static>(
     runs: &Runs,
     stores: Arc<S>,
 ) -> Agent {
-    let hooks = Hooks::default();
+    agent_with(spec, provider, Hooks::default(), runs, stores)
+}
+
+fn agent_with<S: RunStore + SessionStore + 'static>(
+    spec: AgentSpec,
+    provider: Arc<Replay>,
+    hooks: Hooks,
+    runs: &Runs,
+    stores: Arc<S>,
+) -> Agent {
     let mode = PermissionMode::SkipDangerous;
     builder(spec, provider, mode, hooks, runs, stores)
         .build()
         .unwrap()
+}
+
+/// A `stop` hook that rewrites every final answer into `text`.
+fn rewriting(text: &'static str) -> Hooks {
+    let hooks = Hooks::default();
+    let rewrite = hook::<Stop>("rewrite", move |_| {
+        Ok(StopResponse::Rewrite { text: text.into() })
+    });
+    let _ = hooks.stop.register(rewrite.arc()).unwrap();
+    hooks
 }
 
 /// A response with one call of `tool`, id `call_{turn}_0`.
@@ -940,6 +959,16 @@ async fn crash_everywhere(
     turns: impl Fn() -> Vec<ScriptedTurn>,
     native: bool,
 ) -> (Vec<Crashed>, Crashed) {
+    crash_everywhere_with(spec, turns, native, Hooks::default).await
+}
+
+/// [`crash_everywhere`] on an agent with `hooks`.
+async fn crash_everywhere_with(
+    spec: AgentSpec,
+    turns: impl Fn() -> Vec<ScriptedTurn>,
+    native: bool,
+    hooks: impl Fn() -> Hooks,
+) -> (Vec<Crashed>, Crashed) {
     let provider = || {
         let replay = Replay::new(turns());
         Arc::new(match native {
@@ -949,7 +978,13 @@ async fn crash_everywhere(
     };
     let clean_stores = Arc::new(Stores::default());
     let runs = Runs::default();
-    let agent = agent_on(spec.clone(), provider(), &runs, clean_stores.clone());
+    let agent = agent_with(
+        spec.clone(),
+        provider(),
+        hooks(),
+        &runs,
+        clean_stores.clone(),
+    );
     let stream = agent.run("go", RunOptions::new("s1"));
     let run_id = stream.run_id().clone();
     finish(stream).await;
@@ -972,11 +1007,17 @@ async fn crash_everywhere(
             let (stores, runs, provider) =
                 (Arc::new(Stores::default()), Runs::default(), provider());
             let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
-            let doomed = agent_on(spec.clone(), provider.clone(), &runs, faulty);
+            let doomed = agent_with(spec.clone(), provider.clone(), hooks(), &runs, faulty);
             let stream = doomed.run("go", RunOptions::new("s1"));
             let run_id = stream.run_id().clone();
             assert!(drain(stream).await.1.is_some(), "{context}");
-            let agent = agent_on(spec.clone(), provider.clone(), &runs, stores.clone());
+            let agent = agent_with(
+                spec.clone(),
+                provider.clone(),
+                hooks(),
+                &runs,
+                stores.clone(),
+            );
             let run_id = recover(&agent, &stores, run_id).await;
             let (status, events) = ended(&stores, &run_id).await;
             let session = messages(&*stores, "s1").await;
@@ -1173,5 +1214,127 @@ async fn a_crash_at_any_write_still_stops_a_final_tool_gate() {
             }
         }
         assert_eq!(run.session, clean.session, "{context}");
+    }
+}
+
+fn noted() -> OutputSchema {
+    OutputSchema {
+        name: "report".into(),
+        schema: object(json!({
+            "type": "object",
+            "properties": {"note": {"type": "string"}},
+            "required": ["note"],
+        })),
+        strict: true,
+        description: None,
+    }
+}
+
+fn report(id: &str, note: &str) -> ScriptedTurn {
+    TurnBuilder::new(MODEL)
+        .tool_call(id, "report", &json!({"note": note}))
+        .usage(usage(10, 5))
+        .build()
+}
+
+/// A final tool's input is judged as the strings it holds, not only as its
+/// JSON text, where a quote or a newline is escaped: a pattern that names
+/// either still catches them.
+#[tokio::test]
+async fn a_forbidden_pattern_is_not_dodged_by_json_escaping() {
+    for (pattern, note) in [("say \"hi\"", "please say \"hi\" now"), ("a\\nb", "a\nb")] {
+        let mut spec = with_policy(json!({"gates": [{"name": "clean",
+            "check": {"type": "forbids", "pattern": pattern}}]}));
+        spec.output_schema = Some(noted());
+        let turns = vec![report("f1", note), report("f2", "fine")];
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Replay::new(turns).without_native_output_schema());
+        let agent = agent_on(spec, provider, &Runs::default(), stores.clone());
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        finish(stream).await;
+        let (status, events) = ended(&stores, &run_id).await;
+        assert_eq!(status, RunStatus::Completed, "{pattern:?}");
+        assert_eq!(actions(&events, PolicyAction::Correct), 1, "{pattern:?}");
+        let session = messages(&*stores, "s1").await;
+        let answered = answers(&session);
+        assert!(answered[0].2, "the first answer went back: {answered:?}");
+    }
+    // A required text may be in a string only: its JSON text escapes it.
+    let mut spec = with_policy(json!({"gates": [{"name": "lines",
+        "check": {"type": "matches", "pattern": "x\ny"}}]}));
+    spec.output_schema = Some(noted());
+    let stores = Arc::new(Stores::default());
+    let turns = vec![report("f1", "x\ny")];
+    let provider = Arc::new(Replay::new(turns).without_native_output_schema());
+    let agent = agent_on(spec, provider, &Runs::default(), stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Completed);
+    assert_eq!(actions(&events, PolicyAction::Correct), 0);
+}
+
+/// A `stop` hook that rewrites the answer into one a gate forbids does not
+/// get it through: the run ends failed with one `stop` event and no
+/// correction, on the text route and on the final tool's.
+#[tokio::test]
+async fn a_stop_rewrite_is_gated_again() {
+    let gates = json!({"gates": [{"name": "clean", "check":
+        {"type": "forbids", "pattern": "SECRET"}}]});
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![text_turn("all good")]));
+    let spec = with_policy(gates.clone());
+    let hooks = rewriting("SECRET");
+    let agent = agent_with(spec, provider, hooks, &Runs::default(), stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(actions(&events, PolicyAction::Correct), 0);
+    assert_eq!(actions(&events, PolicyAction::Stop), 1);
+    assert_eq!(errors(&events), ["PolicyGateError"]);
+    let detail = policies(&events)[0]["detail"].as_str().unwrap().to_owned();
+    assert!(detail.contains("rewrote"), "{detail}");
+
+    let mut spec = with_policy(gates);
+    spec.output_schema = Some(noted());
+    let stores = Arc::new(Stores::default());
+    let turns = vec![report("f1", "all good")];
+    let provider = Arc::new(Replay::new(turns).without_native_output_schema());
+    let hooks = rewriting("{\"note\": \"SECRET\"}");
+    let agent = agent_with(spec, provider, hooks, &Runs::default(), stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(actions(&events, PolicyAction::Stop), 1);
+    let session = messages(&*stores, "s1").await;
+    for (at, message) in session.iter().enumerate() {
+        for call in message.tool_uses() {
+            let next = &session[at + 1];
+            assert!(results_of(next).iter().any(|(id, ..)| *id == call.id));
+        }
+    }
+}
+
+/// A crash at any write cannot let a rewritten answer past the gate.
+#[tokio::test]
+async fn a_crash_at_any_write_still_gates_a_rewritten_answer() {
+    let spec = with_policy(json!({"gates": [{"name": "clean", "check":
+        {"type": "forbids", "pattern": "SECRET"}}]}));
+    let turns = || vec![text_turn("all good")];
+    let hooks = || rewriting("SECRET");
+    let (crashed, clean) = crash_everywhere_with(spec, turns, true, hooks).await;
+    assert_eq!(clean.status, RunStatus::Failed);
+    for run in &crashed {
+        let context = &run.context;
+        assert_eq!(run.status, RunStatus::Failed, "{context}");
+        assert_eq!(actions(&run.events, PolicyAction::Stop), 1, "{context}");
+        assert_eq!(actions(&run.events, PolicyAction::Correct), 0, "{context}");
+        assert_eq!(errors(&run.events), ["PolicyGateError"], "{context}");
     }
 }

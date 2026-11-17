@@ -125,7 +125,11 @@ impl Runner {
             Decided::Over(next) => return Ok(next),
         };
         let text = JsonValue::Object(input.clone()).to_string();
-        if let Some(checked) = self.gate_answer(&text).await? {
+        let decoded = match &self.gates {
+            Some(_) => crate::gates::leaves(&input),
+            None => Vec::new(),
+        };
+        if let Some(checked) = self.gate_answer(&text, &decoded).await? {
             return Ok(step(checked));
         }
         let checked = match &self.output {
