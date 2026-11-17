@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use linch::{ExecutionConfig, PermissionMode, SystemConfig, SystemSection};
+use linch::{ExecutionConfig, PermissionMode, ReliabilityPolicy, SystemConfig, SystemSection};
 use serde::Deserialize;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::{Origin, Url};
@@ -73,6 +73,7 @@ pub struct Allowlists {
     pub(super) mcp_origins: Vec<Origin>,
     pub(super) execution: Vec<ExecutionConfig>,
     pub(super) system_sections: Vec<SystemSection>,
+    pub(super) required_policy: Option<ReliabilityPolicy>,
 }
 
 /// One MCP `stdio` server a tenant may start: its program and arguments,
@@ -254,6 +255,7 @@ impl Allowlists {
             mcp_origins: Vec::new(),
             execution: vec![ExecutionConfig::Local {}],
             system_sections: Vec::new(),
+            required_policy: None,
         }
     }
 
@@ -454,6 +456,21 @@ impl Allowlists {
         }
         self.system_sections = sections.to_vec();
         Ok(self)
+    }
+
+    /// The reliability policy every agent of the tenant must carry: the
+    /// operator's prerequisites and completion gates, which a config's own
+    /// `spec.policy` may add to but not remove or weaken. `agent.open`
+    /// merges it into the config before the agent is built, so it is part
+    /// of the run contract: a prerequisite takes the union of both sides'
+    /// requirements, a gate the operator named cannot be redefined (the
+    /// same gate, or one of another name, may be added), and the
+    /// corrections allowed are the lesser of the two caps. A rule that
+    /// names a tool the agent lacks refuses the open rather than being
+    /// dropped. Absent (the default), the tenant's policy stands alone.
+    pub fn required_policy(mut self, policy: Option<ReliabilityPolicy>) -> Self {
+        self.required_policy = policy;
+        self
     }
 
     /// The permission modes a config may choose, replacing the default

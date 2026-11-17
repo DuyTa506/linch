@@ -10,8 +10,8 @@ use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
     AgentConfig, AgentSpec, ByteQuota, CacheScope, ExecutionConfig, McpTransportConfig,
-    PermissionMode, PermissionPolicy, Principal, ProviderConfig, StoreConfig, SystemSection,
-    ToolChoice,
+    PermissionMode, PermissionPolicy, Principal, ProviderConfig, ReliabilityPolicy, StoreConfig,
+    SystemSection, ToolChoice,
 };
 use serde_json::json;
 
@@ -47,6 +47,7 @@ impl Tenant {
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
         admit_guardrails(&mut config.spec, allow, &self.name)?;
+        admit_policy(&mut config.spec, allow.required_policy.as_ref())?;
         allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;
         admit_system(&mut config.spec, &allow.system_sections)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
@@ -513,6 +514,101 @@ pub(crate) fn admit_tool_choice(
                        needs spec.max_turns or spec.final_tool_name, or the run could never end";
         return Err(refused("tool_choice", message.into()));
     }
+    Ok(())
+}
+
+/// Most prerequisites, gates, and tools or keywords in one of them, a
+/// tenant's reliability policy may list: the server checks each on every
+/// tool batch and final answer.
+pub const MAX_POLICY_RULES: usize = 32;
+
+/// Most correction turns a tenant's reliability policy may allow in one
+/// run: each is a provider call on the server's key that the policy, not
+/// the model, asks for.
+pub const MAX_CORRECTIONS: u32 = 16;
+
+/// Refuse a reliability policy past the bounds above, then put the
+/// operator's required policy under it: the tenant keeps what it adds and
+/// loses nothing the operator set.
+fn admit_policy(
+    spec: &mut AgentSpec,
+    required: Option<&ReliabilityPolicy>,
+) -> Result<(), ErrorObject> {
+    if let Some(policy) = &spec.policy {
+        let too_long = |text: &str| text.len() > MAX_PATTERN_BYTES;
+        let oversized = |check: &Check| match check {
+            Check::Matches { pattern } | Check::Forbids { pattern } => too_long(pattern),
+            Check::Keywords { keywords, .. } => {
+                keywords.len() > MAX_POLICY_RULES || keywords.iter().any(|k| too_long(k))
+            }
+        };
+        let names =
+            |tools: &[String]| tools.len() > MAX_POLICY_RULES || tools.iter().any(|t| too_long(t));
+        let too_many = policy.prerequisites.len() > MAX_POLICY_RULES
+            || policy.gates.len() > MAX_POLICY_RULES
+            || (policy.prerequisites.iter())
+                .any(|rule| too_long(&rule.tool) || names(&rule.requires))
+            || (policy.gates.iter()).any(|gate| {
+                too_long(&gate.name)
+                    || names(&gate.succeeded)
+                    || gate.feedback.as_deref().is_some_and(too_long)
+                    || gate.check.as_ref().is_some_and(oversized)
+            });
+        if too_many {
+            let message = format!(
+                "policy allows at most {MAX_POLICY_RULES} prerequisites and {MAX_POLICY_RULES} \
+                 gates, each naming at most {MAX_POLICY_RULES} tools or keywords, with texts \
+                 of at most {MAX_PATTERN_BYTES} bytes"
+            );
+            return Err(refused("policy", message));
+        }
+        if policy.max_corrections > MAX_CORRECTIONS {
+            let message = format!("policy.max_corrections may be at most {MAX_CORRECTIONS}");
+            return Err(refused("policy", message));
+        }
+    }
+    let Some(required) = required else {
+        return Ok(());
+    };
+    let Some(tenant) = spec.policy.take() else {
+        spec.policy = Some(required.clone());
+        return Ok(());
+    };
+    let mut prerequisites = required.prerequisites.clone();
+    for rule in tenant.prerequisites {
+        match prerequisites.iter_mut().find(|held| held.tool == rule.tool) {
+            Some(held) => {
+                let new = rule
+                    .requires
+                    .into_iter()
+                    .filter(|tool| !held.requires.contains(tool));
+                held.requires.extend(new.collect::<Vec<_>>());
+            }
+            None => prerequisites.push(rule),
+        }
+    }
+    let mut gates = required.gates.clone();
+    for gate in tenant.gates {
+        match gates
+            .iter()
+            .find(|held| held.name.trim() == gate.name.trim())
+        {
+            Some(held) if *held == gate => {}
+            Some(_) => {
+                let message = format!(
+                    "policy gate {:?} is the operator's; add gates under other names",
+                    gate.name
+                );
+                return Err(refused("policy", message));
+            }
+            None => gates.push(gate),
+        }
+    }
+    spec.policy = Some(ReliabilityPolicy {
+        prerequisites,
+        gates,
+        max_corrections: required.max_corrections.min(tenant.max_corrections),
+    });
     Ok(())
 }
 

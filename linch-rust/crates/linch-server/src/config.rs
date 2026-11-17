@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use linch::{ExecutionConfig, PermissionMode, SystemSection};
+use linch::{ExecutionConfig, PermissionMode, ReliabilityPolicy, SystemSection};
 use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
 use serde::Deserialize;
 use thiserror::Error;
@@ -204,6 +204,11 @@ pub struct AllowConfig {
     /// tenant, each `{"name", "text", "order"?, "cacheable"?}`; a tenant
     /// cannot remove or rename them. None when absent.
     pub system_sections: Vec<SystemSection>,
+    /// The reliability policy (`{"prerequisites", "gates",
+    /// "max_corrections"}`, as a spec's `policy`) every agent of the
+    /// tenant carries: its own `policy` may add to it, not remove or
+    /// weaken it. None when absent.
+    pub required_policy: Option<ReliabilityPolicy>,
 }
 
 /// The server config could not be read or set up. No message holds a
@@ -416,6 +421,9 @@ impl AllowConfig {
         }
         if let Some(backends) = &self.execution {
             allow = allow.execution(backends);
+        }
+        if self.required_policy.is_some() {
+            allow = allow.required_policy(self.required_policy.clone());
         }
         Ok(allow)
     }
