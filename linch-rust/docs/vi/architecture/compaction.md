@@ -174,9 +174,13 @@ Lời gọi kết thúc với một receipt. Usage của nó được tính và 
 ### Khi không có bản tóm tắt
 
 Một câu trả lời bị từ chối, và không được áp dụng, khi nó gọi một tool, rỗng, hoặc ước
-lượng của toàn bộ checkpoint mà nó sẽ tạo ra không nhỏ hơn phần mà nó sẽ thay thế
-(`compaction::rejection`; đo cả message: phần đầu, văn bản của model, phần nguyên văn, các
-reminder của skill và các thay đổi catalog được nhắc lại). Receipt có disposition `rejected`;
+lượng của view mà nó sẽ để lại không nhỏ hơn view mà nó thay thế
+(`compaction::rejection`). Hai con số này chính là `tokens_before` và `tokens_after` mà event
+`compaction` báo: message đầu, toàn bộ checkpoint (phần đầu, văn bản của model, phần nguyên
+văn, các reminder của skill và các thay đổi catalog được nhắc lại) và các lượt được giữ.
+Ước lượng là số ký tự chia bốn, nên một checkpoint ít hơn phần nó thay thế vài ký tự vẫn có
+thể để view ở cùng một ước lượng; đó không phải là tiết kiệm và bị từ chối, nên một lần nén
+được chấp nhận luôn có `tokens_after < tokens_before`. Receipt có disposition `rejected`;
 view giữ nguyên như cũ, và một event `compaction` với số đếm trước và sau bằng nhau cùng một
 lý do `rejected` được ghi ở mọi lần từ chối: mã (`tool_call`, `empty`, `not_smaller`), rồi
 điều xảy ra tiếp theo, "the next due turn asks again" ở đầu một lượt, "asks again once the
@@ -217,8 +221,8 @@ message user của phần đã gộp, được harness sao chép nguyên văn (m
 cho mỗi token), không bao giờ quá một nửa ước lượng của phần đã gộp, và không bao giờ quá
 phần còn lại của phần đã gộp sau khi trừ phần đầu, văn bản của model và các block đuôi
 (reminder của skill, thay đổi catalog được nhắc lại): các block nguyên văn và marker của
-chúng co lại cho vừa. Quy tắc luôn đúng: toàn bộ checkpoint được ước lượng nhỏ hơn phần đã
-gộp, nếu không bản tóm tắt bị từ chối với `not_smaller` (ở trên); nên một checkpoint không
+chúng co lại cho vừa. Quy tắc luôn đúng: toàn bộ view còn lại được ước lượng nhỏ hơn view trước đó,
+nếu không bản tóm tắt bị từ chối với `not_smaller` (ở trên); nên một checkpoint không
 bao giờ lớn hơn thứ nó thay thế, và với một window nhỏ hơn `keep_user_tokens` cộng output của
 bản tóm tắt thì nó không bao giờ vượt window mà phần đã gộp vừa trong đó. Message không vừa
 thì bị cắt với `[truncated]` (được tính vào phép vừa, không tính vào hai mức trần) và các

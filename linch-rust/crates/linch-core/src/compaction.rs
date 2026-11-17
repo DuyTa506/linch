@@ -543,20 +543,22 @@ fn is_summary(message: &Message) -> bool {
 
 /// Why a summary reply is not used, or `None` when it is: `called` a tool
 /// (a reply of a summary request that offers the tools), no `text`, or a
-/// whole `checkpoint` message (the summary, the verbatim blocks, the
-/// reminders) no smaller, estimated, than the `folded` messages it would
-/// replace, so applying it would not shorten the view.
+/// compacted view (the first message, the whole checkpoint, the kept turns)
+/// whose estimate, `tokens_after`, is no smaller than the view's,
+/// `tokens_before`, so applying it would not shorten the view. These are the
+/// two numbers the `compaction` event reports, so what the event says
+/// is what was checked.
 pub(crate) fn rejection(
     called: bool,
     text: &str,
-    checkpoint: &Message,
-    folded: &[Arc<Message>],
+    tokens_before: u64,
+    tokens_after: u64,
 ) -> Option<&'static str> {
     if called {
         Some("tool_call")
     } else if text.is_empty() {
         Some("empty")
-    } else if estimate_tokens(&[Arc::new(checkpoint.clone())]) >= estimate_tokens(folded) {
+    } else if tokens_after >= tokens_before {
         Some("not_smaller")
     } else {
         None
@@ -579,7 +581,7 @@ pub(crate) fn summary_message(text: &str) -> Message {
 /// part's estimate, and no more than what is left of the folded part after
 /// the header, the `text` and the `tail`, markers included. So the whole
 /// message is estimated smaller than the folded part whenever those three
-/// alone are; when they are not, [`rejection`] measures the whole message
+/// alone are; when they are not, [`rejection`] measures the whole view
 /// and rejects the summary as `not_smaller`. The first message that does
 /// not fit is cut with `[truncated]` and the older ones are dropped. A
 /// checkpoint of an earlier compaction in `folded` hands over its blocks,

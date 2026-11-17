@@ -177,9 +177,14 @@ budget, and a `usage` event is staged, whether or not the call gave a summary
 ### When there is no summary
 
 A reply is rejected, and not applied, when it called a tool, is empty, or the
-whole checkpoint it would make has an estimate no smaller than the part it would
-replace (`compaction::rejection`; the whole message is measured: header, the
-model's text, verbatim section, skill reminders and restated catalog changes).
+view it would leave has an estimate no smaller than the view it replaces
+(`compaction::rejection`). The two numbers are the ones the `compaction` event
+reports as `tokens_before` and `tokens_after`: the first message, the whole
+checkpoint (header, the model's text, verbatim section, skill reminders and
+restated catalog changes) and the kept turns. The estimate is characters over
+four, so a checkpoint a few characters under the part it replaces can leave the
+view at the same estimate; that is no saving and is rejected, so an accepted
+compaction always has `tokens_after < tokens_before`.
 The receipt has the disposition `rejected`; the view stays as it was, and a
 `compaction` event with equal before and after counts and a `rejected` reason is
 written, on every rejection: the code (`tool_call`, `empty`, `not_smaller`), then
@@ -223,8 +228,8 @@ it are the user messages of the folded part, copied verbatim by the harness
 the folded part's estimate, and never more than what is left of the folded part
 after the header, the model's text and the tail blocks (skill reminders,
 restated catalog changes): the verbatim blocks and their markers shrink to fit.
-The rule that holds: the whole checkpoint is estimated smaller than the folded
-part, or the summary is rejected as `not_smaller` (above); so a checkpoint never
+The rule that holds: the whole view left is estimated smaller than the view
+before, or the summary is rejected as `not_smaller` (above); so a checkpoint never
 outgrows what it replaces, and with a window below `keep_user_tokens` plus the
 summary's output it never exceeds the window the folded part fit in. The message
 that does not fit is cut with `[truncated]` (counted in the fit, not in the two

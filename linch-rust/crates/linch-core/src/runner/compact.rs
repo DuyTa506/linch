@@ -204,12 +204,15 @@ impl Runner {
         }
         let folded = &view[1..keep_from];
         let summary = compaction::checkpoint(text, folded, spec.keep_user_tokens, tail);
-        // A reply that called a tool, is empty, or whose whole checkpoint
-        // (header, verbatim user messages and reminders included) is no
-        // smaller than the part it replaces is rejected: the view stays as
-        // it was, and the receipt and the `compaction` event say why.
+        // A reply that called a tool, is empty, or leaves a view (checkpoint
+        // with its header, verbatim user messages and reminders, and the
+        // kept turns) whose estimate is no smaller than the view's is
+        // rejected, by the numbers the event reports: the view stays as it
+        // was, and the receipt and the `compaction` event say why.
+        let compacted = compaction::replacement(&view, summary.clone(), keep_from);
+        let tokens_after = estimate_tokens(&compacted);
         let rejection = answered
-            .then(|| compaction::rejection(called, text, &summary, folded))
+            .then(|| compaction::rejection(called, text, tokens_before, tokens_after))
             .flatten();
         if rejection.is_some() {
             receipt.disposition = CallDisposition::Rejected;
@@ -260,9 +263,7 @@ impl Runner {
             return Ok(Some(next));
         }
         self.rejections.accepted();
-        let compacted = compaction::replacement(&view, summary.clone(), keep_from);
         let (messages_before, messages_after) = (view.len() as u64, compacted.len() as u64);
-        let tokens_after = estimate_tokens(&compacted);
         self.journal.stage(Event::Compaction(CompactionEvent {
             messages_before,
             messages_after,

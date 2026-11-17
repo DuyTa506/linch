@@ -220,6 +220,27 @@ fn the_summary_instruction_guards_against_the_conversation_and_updates_an_earlie
     assert!(!is_summary(&quoted));
 }
 
+/// [`rejection`] for a `made` checkpoint of `folded`, in a view whose other
+/// messages are empty: the whole-view measure then equals the part's.
+fn rejected(
+    called: bool,
+    text: &str,
+    made: &Message,
+    folded: &[Arc<Message>],
+) -> Option<&'static str> {
+    let first = Arc::new(Message::user_text(""));
+    let view: Vec<_> = std::iter::once(first)
+        .chain(folded.iter().cloned())
+        .collect();
+    let compacted = replacement(&view, made.clone(), view.len());
+    rejection(
+        called,
+        text,
+        estimate_tokens(&view),
+        estimate_tokens(&compacted),
+    )
+}
+
 #[test]
 fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     let folded = view(2);
@@ -229,7 +250,7 @@ fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     let sized = |chars: usize| "x".repeat(chars);
     let check = |called, text: &str| {
         let made = checkpoint(text, folded, 0, Vec::new());
-        rejection(called, text, &made, folded)
+        rejected(called, text, &made, folded)
     };
     // The whole checkpoint is measured, header included.
     let header = SUMMARY_HEADER.len();
@@ -417,13 +438,13 @@ fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
     // header is counted: the whole checkpoint is what is measured.
     let long = "s".repeat(before as usize * 4 - 8);
     let made = checkpoint(&long, &folded, 15_000, Vec::new());
-    assert_eq!(rejection(false, &long, &made, &folded), Some("not_smaller"));
+    assert_eq!(rejected(false, &long, &made, &folded), Some("not_smaller"));
     // Whatever the summary, an accepted checkpoint is smaller.
     for chars in [100, 1000, 2000, 3000, 4000, 4300] {
         let text = "s".repeat(chars);
         let made = checkpoint(&text, &folded, 15_000, Vec::new());
         let after = size_of(made.clone());
-        match rejection(false, &text, &made, &folded) {
+        match rejected(false, &text, &made, &folded) {
             None => assert!(after < before, "{chars}: {after} tokens for {before}"),
             Some(why) => assert_eq!(why, "not_smaller", "{chars}"),
         }
@@ -434,24 +455,30 @@ fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
 }
 
 /// The `compaction` event reports the estimate of the whole view before and
-/// after. The check must use that measure: a checkpoint one character under
-/// the part it replaces is a whole token smaller on its own, yet the view
-/// around it (the first message and the kept turns) can round to the same
-/// estimate, and the event then says `tokens_after == tokens_before`.
+/// after, and the check uses those two numbers. A checkpoint one character
+/// under the part it replaces is a whole token smaller on its own, yet the
+/// view around it (the first message and the kept turns) can round to the
+/// same estimate: that is no saving, and the event must not say
+/// `tokens_after == tokens_before` for an accepted compaction.
 #[test]
 fn an_accepted_checkpoint_shrinks_the_view_by_the_measure_the_event_reports() {
     let text = |chars: usize| Message::user_text("x".repeat(chars));
     let first = Arc::new(Message::user_text("a"));
     let folded = vec![Arc::new(text(40))];
     let view = vec![first, folded[0].clone(), Arc::new(text(2))];
+    let before = estimate_tokens(&view);
+    assert_eq!(before, 10);
     for chars in 30..=39 {
-        let made = text(chars);
-        let accepted = rejection(false, "summary", &made, &folded).is_none();
-        let compacted = replacement(&view, made, 2);
-        if accepted {
-            let (before, after) = (estimate_tokens(&view), estimate_tokens(&compacted));
-            assert!(after < before, "{chars} chars: {after} tokens for {before}");
-        }
+        let compacted = replacement(&view, text(chars), 2);
+        let after = estimate_tokens(&compacted);
+        // 37 chars and up leave the view at 10 tokens, though the
+        // checkpoint alone is a token smaller than the 40 it replaces.
+        let expected = (chars >= 37).then_some("not_smaller");
+        assert_eq!(
+            rejection(false, "summary", before, after),
+            expected,
+            "{chars}"
+        );
     }
 }
 
@@ -475,7 +502,7 @@ fn the_tail_is_counted_in_the_fit() {
     let over = checkpoint("short", &folded, 15_000, tail(before as usize * 4));
     assert_eq!(verbatim(&over), 0);
     assert_eq!(
-        rejection(false, "short", &over, &folded),
+        rejected(false, "short", &over, &folded),
         Some("not_smaller")
     );
 }
@@ -501,7 +528,7 @@ fn a_tiny_window_never_gets_a_checkpoint_over_it() {
                 .collect();
             let made = checkpoint(&text, &folded, spec.keep_user_tokens, blocks);
             let after = size_of(made.clone());
-            if rejection(false, &text, &made, &folded).is_none() {
+            if rejected(false, &text, &made, &folded).is_none() {
                 assert!(
                     after < before && after < window,
                     "{summary}/{tail}: {after}"

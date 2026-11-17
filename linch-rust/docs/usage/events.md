@@ -320,11 +320,11 @@ provider's refusal of a prompt as too long caused it
 ([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` is set when
 the summary was not applied and the view is unchanged (the counts agree). It
 starts with a code, `tool_call` (the reply called a tool), `empty`, or
-`not_smaller` (no smaller than the part it would replace), then says what
+`not_smaller` (the view it would leave is estimated no smaller than the view now), then says what
 follows: at a turn's start the run goes on and the next due turn asks again (from
 the second rejection in a row, once the view has grown by a tenth of the
 context window or the provider refuses the prompt); a forced summary ends the
-run. `not_smaller` is judged on the whole checkpoint, not the model's text.
+run. `not_smaller` is judged on the whole view with the checkpoint in it (the same `tokens_before` and `tokens_after` the event reports), not the model's text, so an accepted compaction always has `tokens_after < tokens_before`.
 
 ### `LoopGuardEvent` (`loop_guard`)
 

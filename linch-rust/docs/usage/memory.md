@@ -67,9 +67,10 @@ the summary. The summary is applied as a checkpoint message that also carries
 the folded user messages verbatim, up to `keep_user_tokens`
 ([Architecture](../architecture/compaction.md#the-summary-call)).
 
-A summary the model gives back as a tool call, as nothing, or as a text no
-smaller than the part it replaces (measured on the whole checkpoint, verbatim
-messages and reminders included) is rejected: the view stays as it was and a
+A summary the model gives back as a tool call, as nothing, or as a text that
+leaves a view no smaller than the one now (the estimate before and after the
+event reports, with the whole checkpoint, verbatim messages and reminders
+included) is rejected: the view stays as it was and a
 `compaction` event with `rejected` says why. After two rejections in a row
 the run stops asking at every due turn: it asks again once the view has grown
 by a tenth of the context window, or when the provider refuses the prompt (a
