@@ -231,6 +231,88 @@ async fn a_connection_past_the_tenants_cap_gets_429_before_the_upgrade() {
     server.stop().await;
 }
 
+/// A server at `max_connections: 1` that pings every `ping_ms` and ends a
+/// connection that sent nothing for `pong_ms`.
+async fn pinging(ping_ms: u64, pong_ms: u64) -> (Running, SocketAddr) {
+    let text = json!({"http": "127.0.0.1:0",
+                      "liveness": {"ping_interval_ms": ping_ms, "pong_timeout_ms": pong_ms},
+                      "tenants": {"acme": {"tokens": [{"value": TOKEN}],
+                                           "allow": {"max_connections": 1}}}});
+    let (server, listening) = running(&ServerConfig::from_json(&text.to_string()).unwrap()).await;
+    (server, listening.http.unwrap())
+}
+
+/// A client that stops answering (a vanished peer: nothing reads its socket,
+/// so no pong is sent) is dropped, and its place is free for a replacement.
+#[tokio::test]
+async fn a_websocket_that_stops_answering_pings_is_dropped_and_frees_its_place() {
+    let (server, address) = pinging(100, 400).await;
+    let bearer = format!("Bearer {TOKEN}");
+    // Held open, never polled again: the pings pile up unanswered.
+    let silent = connect(address, Some(&bearer)).await.unwrap();
+    match connect(address, Some(&bearer)).await {
+        Err(Error::Http(response)) => assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS),
+        other => panic!("the place was free at once: {:?}", other.map(|_| ())),
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut replacement = loop {
+        match connect(address, Some(&bearer)).await {
+            Ok(socket) => break socket,
+            Err(Error::Http(response)) if response.status() == StatusCode::TOO_MANY_REQUESTS => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "a connection that answers no ping keeps its place"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    send(&mut replacement, 1, "run.cancel", json!({"run_id": "r"})).await;
+    assert_eq!(
+        recv(&mut replacement).await.unwrap()["result"],
+        json!({"cancelled": false})
+    );
+    drop(silent);
+    server.stop().await;
+}
+
+/// A client that reads answers every ping with a pong (its WebSocket code
+/// does), so it stays connected for many ping intervals while it is idle.
+#[tokio::test]
+async fn a_websocket_that_answers_pings_stays_connected() {
+    let (server, address) = pinging(100, 400).await;
+    let bearer = format!("Bearer {TOKEN}");
+    let mut live = connect(address, Some(&bearer)).await.unwrap();
+    // Reads (and so pongs) through a second of silence: ten ping intervals.
+    let until = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut pings = 0;
+    while let Ok(frame) = tokio::time::timeout_at(until, live.next()).await {
+        match frame {
+            Some(Ok(Message::Ping(_))) => pings += 1,
+            other => panic!("the server ended a connection that answers pings: {other:?}"),
+        }
+    }
+    assert!(pings >= 3, "the server sent {pings} pings in a second");
+    send(&mut live, 1, "run.cancel", json!({"run_id": "r"})).await;
+    assert_eq!(
+        recv(&mut live).await.unwrap()["result"],
+        json!({"cancelled": false})
+    );
+    server.stop().await;
+}
+
+#[test]
+fn a_liveness_field_of_zero_is_refused() {
+    let text = json!({"http": "127.0.0.1:0", "liveness": {"pong_timeout_ms": 0},
+                      "tenants": {"acme": {"tokens": [{"value": TOKEN}]}}});
+    let error = ServerConfig::from_json(&text.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("liveness.pong_timeout_ms"),
+        "{error}"
+    );
+}
+
 /// A connection that sends the start of a request head and stops, as a
 /// slow or idle client does.
 async fn half_sent(address: SocketAddr) -> TcpStream {

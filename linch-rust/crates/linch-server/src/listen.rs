@@ -15,6 +15,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::ServerConfig;
 use crate::http;
+use crate::liveness::Liveness;
 
 /// The bound listeners of a [`ServerConfig`].
 #[derive(Debug)]
@@ -22,6 +23,7 @@ pub struct Listeners {
     socket: Option<(UnixListener, PathBuf)>,
     http: Option<TcpListener>,
     tokens: Arc<Tokens>,
+    liveness: Liveness,
 }
 
 impl Listeners {
@@ -51,6 +53,7 @@ impl Listeners {
             socket,
             http,
             tokens: Arc::new(tokens),
+            liveness: config.liveness.resolve(),
         })
     }
 
@@ -85,6 +88,7 @@ impl Listeners {
                 let shared = http::Shared {
                     tokens: Arc::clone(&self.tokens),
                     connections: connections.clone(),
+                    liveness: self.liveness,
                 };
                 http::serve(listener, shared, stop.clone()).await;
             }

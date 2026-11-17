@@ -34,6 +34,11 @@ pub struct ServerConfig {
     /// in one database. Absent: no worker, no scheduler loop, no query.
     #[serde(default)]
     pub worker: Option<WorkerSection>,
+    /// How the HTTP listener notices a client that vanished without
+    /// closing its connection (TCP keepalive, WebSocket pings). Every field
+    /// has a default.
+    #[serde(default)]
+    pub liveness: crate::liveness::LivenessConfig,
 }
 
 /// The `worker` section: where the worker's queue is and how it runs.
@@ -295,6 +300,13 @@ pub enum ConfigError {
         /// The tenant.
         tenant: String,
     },
+    /// A `liveness` field is 0, which would end every connection at once
+    /// or never check one.
+    #[error("liveness.{field} is 0; set at least 1, or leave it out for the default")]
+    ZeroLiveness {
+        /// The field.
+        field: &'static str,
+    },
     /// A token's environment variable is unset or not UTF-8.
     #[error("tenant {tenant:?}: environment variable {var} is unset")]
     TokenEnv {
@@ -325,6 +337,9 @@ impl ServerConfig {
         let config: Self = serde_json::from_str(text).map_err(ConfigError::Json)?;
         if config.socket.is_none() && config.http.is_none() && config.worker.is_none() {
             return Err(ConfigError::NoListener);
+        }
+        if let Some(field) = config.liveness.zero_field() {
+            return Err(ConfigError::ZeroLiveness { field });
         }
         for (name, tenant) in &config.tenants {
             let allow = &tenant.allow;

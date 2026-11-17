@@ -16,6 +16,11 @@
 //! running as the same user cannot read `/proc/<pid>/environ` or its
 //! memory. No key or token is written to any output.
 //!
+//! The server's log (the worker's, the scheduler's and the workflow
+//! journal's `tracing` records) goes to stderr, never to stdout: warnings
+//! and errors by default, more with `LINCH_LOG` (or `RUST_LOG`), such as
+//! `LINCH_LOG=info` or `LINCH_LOG=linch_worker=debug,warn`.
+//!
 //! Exit status: 0 after stdin closes or a stop signal, 1 if I/O fails, 2
 //! for a bad command line or config (the reason goes to stderr).
 
@@ -39,6 +44,7 @@ fn main() -> ExitCode {
         eprintln!("linch-server: cannot mark the process not dumpable: {error}");
         return ExitCode::FAILURE;
     }
+    linch_server::init_logging(|name| std::env::var(name).ok());
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config = match args.as_slice() {
         [] => None,

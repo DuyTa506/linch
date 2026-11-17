@@ -25,9 +25,16 @@ linch-rpc = { path = "../linch-rpc" }
 linch-worker = { path = "../linch-worker" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# TCP keepalive and user timeout on accepted sockets, which tokio does not
+# expose; already in the lockfile through tokio.
+socket2 = { version = "0.6.5", features = ["all"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["io-std", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
+# Writes the `tracing` records of the worker, the scheduler and the
+# workflow journal (`tracing::warn!` in linch-worker and linch-rpc) to
+# stderr; without a subscriber they go nowhere.
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Marks the process not dumpable, so a child cannot read its environment
