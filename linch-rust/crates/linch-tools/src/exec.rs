@@ -9,7 +9,7 @@
 //!
 //! | Backend | Commands run |
 //! |---|---|
-//! | `local` | Directly as the process's user ([`LocalShell`]) |
+//! | `local` | Directly as the process's user (`LocalShell`) |
 //! | `sandbox` | Under Landlock, a seccomp filter and rlimits, with a private home per session ([`SandboxPolicy`]) |
 //! | `docker` | In a fresh container per command, the workspace mounted at the same path ([`DockerPolicy`]) |
 //!
