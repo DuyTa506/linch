@@ -234,7 +234,9 @@ ignore `spec.thinking`. The servers (`vllm`, `sglang`, `llamacpp`) pass effort
 to the model's chat template, which decides what it accepts. vLLM's Qwen3
 template takes only `low`, `medium` and `xhigh`, so `high` and `max` are sent
 as `xhigh`; SGLang takes every level (it only switches thinking on) and llama.cpp lets the
-model's template refuse levels; both send the level as it is.
+model's template refuse levels; both send the level as it is. For a vLLM model
+whose template does not accept `xhigh`, set the level yourself in
+`request.extra_body.reasoning_effort`: it replaces the mapped value.
 
 ### `anthropic`
 
@@ -267,6 +269,12 @@ carries reasoning, which `tool_choice` forms work, which output limit field is
 sent and how thinking is turned off. A profile copies nothing from OpenAI's.
 The table of what each supports is in the
 [architecture providers page](../architecture/providers.md#openai-chat-completions-and-server-profiles).
+
+Only vLLM has live tests (`LINCH_TEST_VLLM_URL`; they skip without it). The SGLang profile has not
+been run against a live server, and the `n_ctx` that llama.cpp's `GET /props`
+returns was checked against its documentation only; if a server answers
+differently, the context window falls back to 128000 and `context_window`
+sets it.
 
 `base_url` is required and includes `/v1`. The key is optional: set it in the
 server's environment only when the inference server was started with one.
@@ -463,7 +471,7 @@ the vendor references):
 | Provider | Field | Notes |
 |---|---|---|
 | `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 to 2. OpenAI says parameter support varies by model; a model that refuses it answers with an HTTP error, which Linch does not predict. |
-| `anthropic` | `temperature` | 0 to 1. Claude Opus 4.7 and later, Sonnet 5 and later and Haiku 5.5 answer 400 to a non-default value on every request; older models refuse it only while thinking is on; API version `2026-10-21` removes it. |
+| `anthropic` | `temperature` | 0 to 1. Claude Sonnet 5.5 answers 400 to the sampling parameters (`temperature`, `top_p`, `top_k`): its migration guide says to remove them, and does not say a default value passes. Claude Opus 4.7 and later, Sonnet 5 and Haiku 5.5 answer 400 to a non-default value on every request; older models refuse it only while thinking is on; API version `2026-10-21` removes it. Documented by Anthropic as of 2026-11-17 (<https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide>); Linch sends what the spec sets and does not predict the refusal. |
 | `deepseek` | `temperature` | 0 to 2. Has no effect in thinking mode (the default), where it is sent and ignored. |
 | `gemini` | `generationConfig.temperature` | 0.0 to 2.0. Silently ignored on Gemini 3.6 Flash and newer models. |
 

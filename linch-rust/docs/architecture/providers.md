@@ -534,7 +534,11 @@ Pricing is opt-in on the agent: `AgentBuilder::pricing`
 `Fn(&str, &Usage) -> Option<f64>`. The `linch` crate passes
 `linch_providers::cost` (`crates/linch/src/open.rs:143`). When a receipt has
 usage, the runner prices it by the model that served the call, else the
-agent's model (`crates/linch-core/src/runner/write.rs:107`). A missing price
+agent's model (`crates/linch-core/src/runner/write.rs:107`). `AgentBuilder::build` refuses a
+`budget.max_cost_usd` when pricing has no finite price for the spec's model
+(`BuildError::Invalid`, which `agent.open` reports as `-32011`), and a run
+with one ends in `BudgetAccountingError` on a call that has usage and no
+price. A missing price
 or a non-finite one stays `None` (`crates/linch-core/src/agent.rs:141`), and a
 run's total adds only priced calls. Costs appear as `cost_usd` on the
 receipt and `Usage` events and `total_cost_usd` on `Result`. Pricing is not
