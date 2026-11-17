@@ -1,0 +1,124 @@
+//! [`InMemoryMemoryStore`]: memories in process memory, for tests and
+//! development.
+
+use std::collections::HashSet;
+use std::sync::{Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+
+use super::{Memory, MemoryError, MemoryStore, NewMemory, search_terms};
+
+struct Row {
+    scope: Option<String>,
+    key: String,
+    memory: Memory,
+    /// Lower-cased words of the content and tags.
+    words: HashSet<String>,
+}
+
+/// A [`MemoryStore`] in process memory, for one agent. Everything is lost
+/// on exit; a durable agent uses linch-postgres' `PgMemoryStore`.
+#[derive(Default)]
+pub struct InMemoryMemoryStore {
+    rows: Mutex<Vec<Row>>,
+    cap: Option<u64>,
+}
+
+impl InMemoryMemoryStore {
+    /// An empty store without a cap.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This store refusing a new memory once it holds `max`, in every
+    /// scope.
+    pub fn with_cap(mut self, max: u64) -> Self {
+        self.cap = Some(max);
+        self
+    }
+}
+
+fn now_ms() -> u64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH);
+    since.map_or(0, |elapsed| {
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+    })
+}
+
+#[async_trait]
+impl MemoryStore for InMemoryMemoryStore {
+    async fn save(&self, scope: Option<&str>, memory: NewMemory) -> Result<Memory, MemoryError> {
+        let mut rows = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = |row: &&Row| row.scope.as_deref() == scope && row.key == memory.key;
+        if let Some(row) = rows.iter().find(held) {
+            return Ok(row.memory.clone());
+        }
+        if let Some(max) = self.cap
+            && rows.len() as u64 >= max
+        {
+            return Err(MemoryError::LimitReached { max });
+        }
+        let mut words = search_terms_all(&memory.content);
+        words.extend(memory.tags.iter().flat_map(|tag| search_terms_all(tag)));
+        let stored = Memory {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            content: memory.content,
+            tags: memory.tags,
+            created_at_ms: now_ms().max(1),
+        };
+        rows.push(Row {
+            scope: scope.map(str::to_owned),
+            key: memory.key,
+            memory: stored.clone(),
+            words,
+        });
+        Ok(stored)
+    }
+
+    async fn search(
+        &self,
+        scope: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>, MemoryError> {
+        let terms = search_terms(query);
+        let rows = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        // Row order is save order, so a later row is newer among equals.
+        let mut scored: Vec<(usize, usize, &Memory)> = (rows.iter().enumerate())
+            .filter(|(_, row)| row.scope.as_deref() == scope)
+            .filter_map(|(at, row)| {
+                let score = terms.iter().filter(|t| row.words.contains(*t)).count();
+                (score > 0).then_some((score, at, &row.memory))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        Ok(scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, memory)| memory.clone())
+            .collect())
+    }
+
+    async fn delete(&self, scope: Option<&str>, id: &str) -> Result<bool, MemoryError> {
+        let mut rows = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = rows.len();
+        rows.retain(|row| !(row.scope.as_deref() == scope && row.memory.id == id));
+        Ok(rows.len() < before)
+    }
+}
+
+/// Every word of `text`, as [`search_terms`] reads them but without its
+/// bounds: a stored word beyond the search's limits would never be asked
+/// for anyway.
+fn search_terms_all(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            word.to_lowercase()
+                .chars()
+                .take(super::MAX_TERM_CHARS)
+                .collect()
+        })
+        .collect()
+}
