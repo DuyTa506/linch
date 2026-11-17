@@ -291,7 +291,8 @@ def final_text(events: list[Envelope]) -> str:
 
 def seqs_increasing(events: list[Envelope]) -> bool:
     """Whether the durable seqs strictly increase: no repeat, no reorder.
-    Gaps are by design (a seq is reserved for each streamed event)."""
+    Gaps are by design: each model call's dispatch and receipt records take
+    seqs and are never sent to clients (docs/usage/events.md, Sequence numbers)."""
     seqs = [e.seq for e in events]
     return seqs == sorted(set(seqs)) and bool(seqs)
 

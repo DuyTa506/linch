@@ -22,12 +22,11 @@ from live_sched_support import (
     serving,
     tenant_allow,
     until,
-    vllm,
 )
 
 from linch_rust import Agent, Envelope, Principal, ResultEvent, ToolCallEndEvent
 
-__all__ = ["kind", "pg_dsn", "vllm"]
+__all__ = ["kind", "pg_dsn"]
 
 pytestmark = pytest.mark.live
 
@@ -127,6 +126,15 @@ async def test_the_model_creates_lists_and_cancels_its_own_schedule(
         )
         assert job_digest == digest, "the fire runs the config the schedule was made with"
 
+        # Stop the heartbeat and let its last fire end, so no fire is in the
+        # session while the next asks run in it (a busy session is refused).
+        await agent.pause_schedule(schedule_id)
+
+        async def idle() -> bool:
+            return all(j["state"] in ("done", "failed") for j in await agent.jobs())
+
+        await until(idle, timeout=60, every=1, what="the heartbeat's jobs to end")
+
         listed = await ask(
             agent, "tools-1", "Call the tool ListSchedules, then answer: listed.", "ListSchedules"
         )
@@ -145,12 +153,12 @@ async def test_the_model_creates_lists_and_cancels_its_own_schedule(
 
 
 async def test_max_schedules_holds_against_the_model(
-    vllm: str, pg_dsn: str, tmp_path: Path
+    kind: str, pg_dsn: str, tmp_path: Path
 ) -> None:
     root = tmp_path.resolve()
     tenants = allow(pg_dsn, root, max_schedules=1)
     async with serving(pg_dsn, tenants=tenants) as live, live.connect() as server:
-        agent = await server.open_agent(config(vllm, pg_dsn, root))
+        agent = await server.open_agent(config(kind, pg_dsn, root))
         events = await ask(
             agent,
             "cap-1",

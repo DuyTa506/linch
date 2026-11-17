@@ -9,6 +9,7 @@ from live_sched_support import (
     TOKEN,
     kind,
     live_config,
+    needs_deepseek,
     pg_dsn,
     serving,
     tenant_allow,
@@ -25,10 +26,10 @@ pytestmark = pytest.mark.live
 PING = "Reply with the single word PONG and nothing else."
 
 
-async def test_a_run_that_errors_is_a_done_job_with_an_error_result(vllm: str, pg_dsn: str) -> None:
-    # A wrong model name is a 404 from vLLM: not retryable, so the run ends
+async def test_a_run_that_errors_is_a_done_job_with_an_error_result(kind: str, pg_dsn: str) -> None:
+    # A wrong model name is a 4xx from the provider: not retryable, so the run ends
     # with an error event; the job did its work, so it is `done`.
-    config = live_config(vllm, "acme", pg_dsn, spec={"model": "no-such-model"})
+    config = live_config(kind, "acme", pg_dsn, spec={"model": "no-such-model"})
     async with serving(pg_dsn) as live, live.connect() as server:
         agent = await server.open_agent(config)
         job = await agent.enqueue("bad-model", PING)
@@ -42,6 +43,7 @@ async def test_a_run_that_errors_is_a_done_job_with_an_error_result(vllm: str, p
         assert any(isinstance(e.event, ErrorEvent) for e in events)
 
 
+@needs_deepseek
 async def test_the_queue_cap_holds_and_a_tightened_allowlist_fails_the_job(
     vllm: str, pg_dsn: str
 ) -> None:

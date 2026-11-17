@@ -19,7 +19,6 @@ from live_sched_support import (
     query,
     serving,
     tenant_allow,
-    vllm,
 )
 
 from linch_rust import (
@@ -31,7 +30,7 @@ from linch_rust import (
     ToolCallEndEvent,
 )
 
-__all__ = ["kind", "pg_dsn", "vllm"]
+__all__ = ["kind", "pg_dsn"]
 
 pytestmark = pytest.mark.live
 
@@ -39,7 +38,7 @@ PONG = "Reply with the single word PONG and nothing else."
 
 
 async def test_two_tenants_do_not_see_each_others_runs_schedules_or_jobs(
-    vllm: str, pg_dsn: str
+    kind: str, pg_dsn: str
 ) -> None:
     tenants = {
         "acme": {"tokens": [{"value": TOKEN}], "allow": tenant_allow(pg_dsn)},
@@ -48,8 +47,8 @@ async def test_two_tenants_do_not_see_each_others_runs_schedules_or_jobs(
     async with serving(pg_dsn, tenants=tenants) as live:
         async with live.connect(TOKEN) as one, live.connect(TOKEN_BETA) as two:
             assert (one.tenant, two.tenant) == ("acme", "beta")
-            acme = await one.open_agent(live_config(vllm, "acme", pg_dsn))
-            beta = await two.open_agent(live_config(vllm, "beta", pg_dsn))
+            acme = await one.open_agent(live_config(kind, "acme", pg_dsn))
+            beta = await two.open_agent(live_config(kind, "beta", pg_dsn))
 
             run = await acme.run("s1", PONG)
             assert isinstance(await run.result(), ResultEvent)
@@ -68,7 +67,7 @@ async def test_two_tenants_do_not_see_each_others_runs_schedules_or_jobs(
             assert await beta.jobs() == []
             # Another tenant's namespace is refused at open.
             with pytest.raises(NotAllowed) as refused:
-                await two.open_agent(live_config(vllm, "acme", pg_dsn))
+                await two.open_agent(live_config(kind, "acme", pg_dsn))
             assert refused.value.kind == "namespace"
             # And another tenant's principal.
             with pytest.raises(NotAllowed) as impostor:

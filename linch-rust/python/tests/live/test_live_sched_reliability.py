@@ -44,6 +44,7 @@ class Proxy:
     def __init__(self, upstream: str, fail: Callable[[str, int], int | None]) -> None:
         self.upstream = urlsplit(upstream)
         self.fail = fail
+        self.bodies: list[dict[str, Any]] = []  # every chat request, as sent
         self.seen: list[tuple[str, int | None]] = []  # (model, status it got; None: forwarded)
         proxy = self
 
@@ -77,7 +78,8 @@ class Proxy:
 
             def do_POST(self) -> None:
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                name = str(json.loads(body).get("model", ""))
+                proxy.bodies.append(json.loads(body))
+                name = str(proxy.bodies[-1].get("model", ""))
                 number = len(proxy.seen) + 1
                 status = proxy.fail(name, number)
                 proxy.seen.append((name, status))
