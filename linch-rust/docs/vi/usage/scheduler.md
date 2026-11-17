@@ -263,6 +263,10 @@ cho model nhiều hơn run đã tạo ra nó:
   đang gọi (một [heartbeat](#heartbeat-một-session-được-kiểm-tra-liên-tục), nên các lần
   kích hoạt bị bỏ qua khi session đang bận) và hành động thay cho principal của run đang
   gọi: permission rule theo `role` có hiệu lực với các lần kích hoạt như với run.
+  Một lời gọi đã hỏi sẽ chạy sau `approve` cho principal mà approve nêu tên, như mọi lời
+  gọi của phần tiếp tục đó: hãy approve với cùng principal bạn đã bắt đầu run.
+- **Một lần cho mỗi lời gọi.** Id của lịch là `<run_id>:<tool_use_id>` của lời gọi, nên một
+  lần retry cùng lời gọi tìm thấy lịch của nó thay vì tạo thêm một lịch khác.
 - **Cùng các mức trần.** Một lời gọi được chấp nhận như `create_schedule`: `max_schedules`
   của tenant (tính cả các lịch do client tạo) và `min_schedule_interval_ms`. Một lần từ chối
   là lỗi của tool, với mã `not_allowed`, `limit_reached` hoặc `invalid_schedule`; run vẫn

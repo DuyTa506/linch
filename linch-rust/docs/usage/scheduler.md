@@ -273,6 +273,11 @@ had:
   calling run's session (a [heartbeat](#heartbeat-one-session-checked-in-on),
   so fires skip while the session is busy) and acts for the calling run's
   principal: permission rules on `role` hold for the fires as for the run.
+  A call that asked runs after `approve` for the principal the approve
+  names, as every call of that continuation does: approve with the same
+  principal you started the run with.
+- **Once per call.** The schedule id is the call's `<run_id>:<tool_use_id>`,
+  so a retry of the same call finds its schedule instead of making another.
 - **The same caps.** A call is admitted as `create_schedule` is: the
   tenant's `max_schedules` (counting the schedules the client made) and
   `min_schedule_interval_ms`. A refusal is the tool's error, with code
