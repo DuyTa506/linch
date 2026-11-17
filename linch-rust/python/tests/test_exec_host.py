@@ -181,7 +181,7 @@ async def test_a_command_sees_only_the_hosts_identity_and_the_servers_allowed_va
         if chunk.exit is not None:
             break
     names = {line.split("=", 1)[0] for line in out.splitlines() if "=" in line}
-    # `sh` itself adds PWD, OLDPWD and `_`.
-    allowed = {"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "PWD", "OLDPWD", "_"}
+    # `sh` itself adds PWD, OLDPWD and `_` (and SHLVL where `sh` is bash, as on macOS).
+    allowed = {"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "PWD", "OLDPWD", "SHLVL", "_"}
     assert names <= allowed, names
     assert "sentinel" not in out
