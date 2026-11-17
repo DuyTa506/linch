@@ -218,6 +218,11 @@ ghi gì; `.owner` là id của server đang giữ nó (mờ đục: 8 ký tự h
 Store memory không có lease: mỗi tiến trình có các run riêng, và agent giữ chúng là
 agent duy nhất điều khiển được chúng.
 
+Store memory giữ lịch sử của mọi run chừng nào agent còn sống, nên bộ nhớ của server tăng
+theo số run: khoảng 110 KB mỗi run trong một lần đo trên server release (100 run, mỗi run một
+lời gọi `Bash`, 24 MB sau 25 run và 32 MB sau 100; đóng agent không làm process nhỏ lại). Hãy
+dùng store Postgres cho một agent sống lâu hoặc phục vụ nhiều run.
+
 <a id="the-virtual-filesystem"></a>
 
 ## Hệ thống tệp ảo

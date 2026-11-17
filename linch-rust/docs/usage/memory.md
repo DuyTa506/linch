@@ -581,7 +581,9 @@ changes nothing in the session: the dropped blocks are simply not sent. The
 ([Events](./events.md#contextbuildevent-context_build)): `max_tokens`,
 `used_tokens`, `remaining_tokens`, `trimmed`, `over_by` when pinned blocks
 exceed the cap, and `dropped`, one `{source, index, tokens}` per block, `index`
-being the block's position among its callback's blocks. A retrieval callback's
+being the block's position among its callback's blocks. The list is in the
+order the blocks were assembled (by callback, then by `index`), not in the
+order the budget dropped them. A retrieval callback's
 `metadata["memory"]["ids"]` still lists every chunk it found, so use `index` to
 tell which of them were sent. In Python, `ContextBuildEvent.dropped` gives
 these as `DroppedContext`s.

@@ -557,6 +557,13 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   chối ngay, nên các steer đang chờ không bao giờ chiếm chỗ request của kết nối và
   một `cancel` trên nó luôn được đọc. Một tenant chỉ steer các run của agent của chính nó: run id của
   namespace khác là `RunNotFound`.
+- **Một cancel khi có steer đang chờ.** Một steer là bền vững trước khi lời gọi của nó
+  được trả lời, nên một run bị cancel khi còn steer đang chờ vẫn giữ chúng: các steer
+  đang chờ được ghi vào journal và vẫn trả lời bằng id của chúng (đã đo: 16 steer đang chờ,
+  16 hàng `steer_received`, 16 câu trả lời), và mỗi steer xuất hiện như một event
+  `alignment` trong run đã aborted. Run kế tiếp của session thấy chúng như một phần của
+  cuộc hội thoại, nên một steer gửi trước cancel không bị mất, và steer bạn không muốn
+  giữ phải được sửa bằng prompt kế tiếp.
 - **Kiểm tra prompt.** Việc redact prompt và các callback `user_prompt_submit` xem
   một steer như một prompt, với `source` là `"steer"` trong request của callback.
   Một steer bị callback chặn sẽ bị bỏ; các bản ghi `hook` của nó được stream.

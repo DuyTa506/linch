@@ -228,7 +228,7 @@ The request for the next model call was assembled; the call starts.
 | `system_blocks` | Number of system blocks |
 | `messages` | Number of conversation messages sent |
 | `selected_tools` | Tool names offered in this request |
-| `budget` | The [context budget](./memory.md#context-budget)'s decision for this request: `{}` without `spec.context_budget`; with it `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (a list of `{source, index, tokens}`) and `over_by` when pinned blocks exceed the cap. `ContextBuildEvent.dropped` in Python reads the list |
+| `budget` | The [context budget](./memory.md#context-budget)'s decision for this request: `{}` without `spec.context_budget`; with it `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (a list of `{source, index, tokens}`, ordered by callback and `index`, not by the order the budget dropped them) and `over_by` when pinned blocks exceed the cap. `ContextBuildEvent.dropped` in Python reads the list |
 | `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any. On a turn whose named `tool_choice` the request did not offer, or whose `required` choice a hook left with no tool, `tool_choice_dropped` holds the tool's name (`required` for that choice) |
 
 ### `UsageEvent` (`usage`)
