@@ -157,7 +157,8 @@ impl ExecutionBackend {
                 (sandbox_shell(fs.root(), policy)?, policy.describe())
             }
             ExecutionConfig::Docker(policy) => {
-                let shell = docker::DockerShell::open(policy.clone())?;
+                let shell = docker::DockerShell::open(policy.clone(), fs.root())?;
+                shell.reap_stale();
                 (Arc::new(shell), policy.describe())
             }
         };
@@ -321,7 +322,7 @@ impl Cleanup {
                 .name("linch-cleanup".into())
                 .spawn(move || {
                     if let Ok(mut child) = command.spawn() {
-                        wait_at_most(&mut child, CLEANUP);
+                        let _ = wait_at_most(&mut child, CLEANUP);
                     }
                 });
             return;
@@ -336,17 +337,22 @@ impl Cleanup {
 }
 
 /// Wait for `child` from a plain thread for at most `limit`, then kill it;
-/// either way it is reaped.
-fn wait_at_most(child: &mut std::process::Child, limit: Duration) {
+/// either way it is reaped. Its exit status when it exited in time.
+fn wait_at_most(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + limit;
     while std::time::Instant::now() < deadline {
         match child.try_wait() {
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Ok(Some(_)) | Err(_) => return,
+            Ok(status) => return status,
+            Err(_) => return None,
         }
     }
     let _ = child.kill();
     let _ = child.wait();
+    None
 }
 
 #[cfg(test)]

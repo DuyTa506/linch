@@ -125,13 +125,16 @@ class DockerExecution(TypedDict, total=False):
         image: The image; `python:3.12-slim` when absent.
         docker_path: The `docker` client; found on the server's `PATH`
             when absent.
-        network: `--network`; `none` when absent.
+        network: `--network`; `none` when absent. `none`, `bridge` or a
+            network's name; `host` and `container:...` are refused.
         memory_bytes: `--memory`; 2 GiB when absent.
         cpu_millis: `--cpus` in thousandths of a CPU; 2000 when absent.
         pids_limit: `--pids-limit`; 512 when absent.
         read_only_root: Whether the container's root is read-only.
         tmpfs: `--tmpfs` entries.
         user: `--user`; the server's uid and gid when absent.
+        allow_root: Whether a command may run as root in the container;
+            a root `user` (or a root server's default) is refused without.
     """
 
     backend: Required[Literal["docker"]]
@@ -144,6 +147,7 @@ class DockerExecution(TypedDict, total=False):
     read_only_root: bool
     tmpfs: Sequence[str]
     user: str
+    allow_root: bool
 
 
 Execution = LocalExecution | SandboxExecution | DockerExecution
