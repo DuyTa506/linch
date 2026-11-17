@@ -49,9 +49,10 @@ guard against instructions inside the conversation, the summary prompt, and, whe
 the folded part already begins with an earlier summary, a note to update it
 (`summary_instruction`). Without it the request ends with the user's last folded
 message, which a model answers or acknowledges instead of summarizing, and early
-facts are lost. The system block stays the summary prompt. A summary no smaller
-(about four characters per token) than the history it replaces is rejected: the
-accounted receipt is `rejected` with reason `not_smaller` and the usage is still
+facts are lost. The system block stays the summary prompt. A summary whose
+checkpoint message (the header and the text) is no smaller than the history it
+replaces is rejected, both estimated at four bytes per token over the content as
+linch-rust counts it: the accounted receipt is `rejected` with reason `not_smaller` and the usage is still
 billed; the direct helper raises `ProviderError`. The instruction text is shared
 with linch-rust through `tests/compaction/fixtures/compaction_request.json`.
 Python Linch does not yet copy the user's messages verbatim into the summary, nor

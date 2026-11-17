@@ -18,11 +18,21 @@ from linch.abort import AbortContext
 from linch.compaction import (
     CompactionContext,
     DetailedCompaction,
+    _estimate_history_tokens,
+    _summary_text_limit,
     summarize_with_provider,
     summary_instruction,
 )
 from linch.errors import ProviderError
-from linch.types import Message, SystemBlock, TextBlock, Usage
+from linch.types import (
+    ImageBlock,
+    Message,
+    SystemBlock,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    Usage,
+)
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "compaction_request.json").read_text())
 
@@ -61,6 +71,52 @@ async def test_a_summary_no_smaller_than_the_folded_history_is_rejected() -> Non
         await summarize_with_provider(provider, "m", older, AbortContext())
 
 
+# linch-rust measures the checkpoint message (the header and the summary) against the folded
+# content, four characters per token, so the same summary is rejected by both. The folded
+# part below is 400 characters of text (100 tokens): 400 - 35 (the header) = 365 is the
+# first summary length that is rejected.
+_FOLDED_TOKENS_100 = [_user("f" * 400)]
+
+
+@pytest.mark.parametrize(("length", "rejected"), [(364, False), (365, True)])
+async def test_the_rejection_counts_the_header_and_the_folded_content_like_linch_rust(
+    length: int, rejected: bool
+) -> None:
+    provider = _Provider(_events("s" * length))
+    call = summarize_with_provider(provider, "m", _FOLDED_TOKENS_100, AbortContext())
+    if rejected:
+        with pytest.raises(ProviderError, match="not smaller"):
+            await call
+    else:
+        assert await call == "s" * length
+
+
+async def test_the_accounted_rejection_counts_the_header_too() -> None:
+    for length, reason in [(364, None), (365, "not_smaller")]:
+        provider = _Provider(_events("s" * length, usage=Usage(1, 1)))
+        _, _, _, caller = _setup(provider=provider)
+        result = await caller.text(
+            logical_call_id="op",
+            model="m",
+            system=[SystemBlock("recap")],
+            messages=_FOLDED_TOKENS_100,
+            max_output_tokens=300,
+            signal=AbortContext(),
+            reject_text_bytes_at=_summary_text_limit(_FOLDED_TOKENS_100),
+        )
+        assert result.receipt.rejection_reason == reason
+
+
+def test_the_folded_estimate_counts_content_not_the_serialization() -> None:
+    folded = [
+        Message("assistant", [ToolUseBlock("c1", "Read", {"path": "a.py"})]),
+        Message("user", [ToolResultBlock("c1", "x" * 40)]),
+        Message("user", [ToolResultBlock("c2", [TextBlock("y" * 8), ImageBlock({"url": "u"})])]),
+    ]
+    # Read (4) + {"path":"a.py"} (15) + 40 + 8 = 67 characters, one image.
+    assert _estimate_history_tokens(folded) == 67 // 4 + 1000
+
+
 async def test_the_accounted_summary_is_rejected_when_not_smaller() -> None:
     _, ledger, _, caller = _setup(provider=_Provider(_events("x" * 400, usage=Usage(11, 2))))
     result = await caller.text(
@@ -70,7 +126,7 @@ async def test_the_accounted_summary_is_rejected_when_not_smaller() -> None:
         messages=[_user("short")],
         max_output_tokens=300,
         signal=AbortContext(),
-        reject_text_tokens_at=10,
+        reject_text_bytes_at=40,
     )
     assert result.text is None
     assert result.receipt.disposition == "rejected"

@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared by linch-rust (crates/linch-core/src/compaction/tests.rs) and Python Linch (tests/compaction/test_compaction_checkpoint.py): the instruction that ends a summary request, and the checkpoint message that replaces the folded turns. Keep the two copies identical. Texts are ASCII, so bytes and characters agree.",
+  "_comment": "The folded parts hold padding where the checkpoint must fit inside the part it replaces. Shared by linch-rust (crates/linch-core/src/compaction/tests.rs) and Python Linch (tests/compaction/test_compaction_checkpoint.py): the instruction that ends a summary request, and the checkpoint message that replaces the folded turns. Keep the two copies identical. Texts are ASCII, so bytes and characters agree.",
   "instruction": [
     {
       "name": "the prompt follows the guard",
@@ -40,7 +40,7 @@
       "folded": [
         {"role": "user", "content": [{"type": "text", "text": "do X"}]},
         {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "Read", "input": {}}]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": [{"type": "text", "text": "file body"}]}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": [{"type": "text", "text": "file body pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"}]}]},
         {"role": "user", "content": [{"type": "text", "text": "<system-reminder>stop feedback</system-reminder>"}]}
       ],
       "expected": {
@@ -57,7 +57,8 @@
       "keep_user_tokens": 1,
       "folded": [
         {"role": "user", "content": [{"type": "text", "text": "older"}]},
-        {"role": "user", "content": [{"type": "text", "text": "abcdefghij"}]}
+        {"role": "user", "content": [{"type": "text", "text": "abcdefghij"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"}]}
       ],
       "expected": {
         "role": "user",
@@ -72,14 +73,14 @@
       "summary": "S",
       "keep_user_tokens": 100,
       "folded": [
-        {"role": "user", "content": [{"type": "text", "text": "abcdefghijklmnopqrstuvwxyz012345"}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "yyyyyyyy"}]}
+        {"role": "user", "content": [{"type": "text", "text": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}]}
       ],
       "expected": {
         "role": "user",
         "content": [
           {"type": "text", "text": "<summary of earlier conversation>\n\nS"},
-          {"type": "text", "text": "[user message, verbatim]\nabcdefghijklmnopqrst\n[truncated]"}
+          {"type": "text", "text": "[user message, verbatim]\nabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij\n[truncated]"}
         ]
       }
     },
@@ -107,7 +108,7 @@
           {"type": "text", "text": "[user message, verbatim]\nnever touch prod"},
           {"type": "text", "text": "[user message, verbatim]\nthe code word is PELICAN"}
         ]},
-        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "ok pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"}]},
         {"role": "user", "content": [{"type": "text", "text": "newer request"}]}
       ],
       "expected": {

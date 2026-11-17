@@ -27,11 +27,14 @@ from .providers.limiter import provider_slot
 from .run_store import LeaseLostError, durable_call
 from .types import (
     CatalogChangeBlock,
+    ImageBlock,
     Message,
     ProviderRequest,
     SystemBlock,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
+    ToolUseBlock,
     message_to_dict,
 )
 
@@ -313,6 +316,8 @@ _UPDATE_SUMMARY = (
     "precedence over it, and keep the facts from it that still matter."
 )
 
+_SUMMARY_HEADER = "<summary of earlier conversation>\n\n"
+
 _SUMMARY_HEADERS = (
     "<summary of earlier conversation>",
     "<detailed summary of earlier conversation>",
@@ -349,16 +354,49 @@ def _summary_request_messages(prompt: str, older: list[Message]) -> list[Message
 
 
 def _estimate_history_tokens(messages: Sequence[Message]) -> int:
-    """Four characters per token over the serialized messages, for the "not smaller" check."""
-    chars = sum(
-        len(json.dumps(message_to_dict(message), ensure_ascii=False, default=str))
-        for message in messages
-    )
-    return chars // 4
+    """Estimate *messages* as linch-rust's ``estimate_tokens`` does, for the "not smaller" check.
+
+    Four characters (UTF-8 bytes) per token over the content: text, thinking, a tool call's
+    name and compact JSON input, tool result text; a fixed cost per image. The framing of the
+    serialized message is not counted.
+    """
+    chars = images = 0
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, (TextBlock, CatalogChangeBlock)):
+                chars += len(block.text.encode())
+            elif isinstance(block, ThinkingBlock):
+                chars += len(block.thinking.encode())
+            elif isinstance(block, ImageBlock):
+                images += 1
+            elif isinstance(block, ToolUseBlock):
+                arguments = json.dumps(
+                    block.input, ensure_ascii=False, separators=(",", ":"), default=str
+                )
+                chars += len((block.name + arguments).encode())
+            elif isinstance(block, ToolResultBlock):
+                parts = (
+                    [TextBlock(block.content)] if isinstance(block.content, str) else block.content
+                )
+                for part in parts:
+                    if isinstance(part, ImageBlock):
+                        images += 1
+                    else:
+                        chars += len(part.text.encode())
+    return chars // 4 + images * 1000
+
+
+def _summary_text_limit(older: Sequence[Message]) -> int:
+    """Bytes at which a summary of *older* is rejected as not smaller.
+
+    The checkpoint that replaces *older* is the header and the summary; it is rejected when
+    its estimate, four bytes per token, reaches that of *older* (as linch-rust measures it).
+    """
+    return 4 * _estimate_history_tokens(older) - len(_SUMMARY_HEADER.encode())
 
 
 def _not_smaller(text: str, older: Sequence[Message]) -> bool:
-    return len(text.encode("utf-8")) // 4 >= _estimate_history_tokens(older)
+    return len(text.encode()) >= _summary_text_limit(older)
 
 
 async def summarize_with_provider(
@@ -442,7 +480,7 @@ async def _summarize_context(
         messages=_summary_request_messages(prompt, older),
         max_output_tokens=max_output_tokens,
         signal=ctx.signal,
-        reject_text_tokens_at=_estimate_history_tokens(older),
+        reject_text_bytes_at=_summary_text_limit(older),
     )
     if result.receipt.disposition != "accepted" or result.text is None:
         raise ProviderError("compaction provider returned an unusable summary", retryable=False)

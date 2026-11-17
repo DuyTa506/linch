@@ -14,8 +14,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard
   against instructions inside the conversation, the summary prompt and, when the folded part
   already begins with a summary, a note to update it (`linch.compaction.summary_instruction`).
-  A summary no smaller than the history it replaces is rejected (receipt `rejected`, reason
-  `not_smaller`, usage still billed; `summarize_with_provider` raises `ProviderError`).
+  A summary whose checkpoint message (header and text) is no smaller than the history it
+  replaces is rejected, both counted as linch-rust counts them: four bytes per token over the
+  content, not the serialized message (receipt `rejected`, reason `not_smaller`, usage still
+  billed; `summarize_with_provider` raises `ProviderError`).
 - OpenAI-compatible providers replay tool-call arguments as UTF-8 literal JSON
   (`ensure_ascii=False`) instead of `\uXXXX` escapes, so non-ASCII arguments keep their
   form and token count across turns.

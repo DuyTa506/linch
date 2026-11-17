@@ -41,8 +41,9 @@ chống chỉ dẫn nằm trong cuộc hội thoại, prompt tóm tắt, và, kh
 một bản tóm tắt trước đó, một ghi chú yêu cầu cập nhật nó (`summary_instruction`). Thiếu
 message này, request kết thúc bằng message user cuối cùng của phần bị gộp, mà model sẽ trả
 lời hoặc xác nhận thay vì tóm tắt, nên các dữ kiện đầu cuộc hội thoại bị mất. Block system
-vẫn là prompt tóm tắt. Một bản tóm tắt không nhỏ hơn (khoảng bốn ký tự mỗi token) lịch sử mà
-nó thay thế bị từ chối: biên nhận có hạch toán là `rejected` với lý do `not_smaller` và mức
+vẫn là prompt tóm tắt. Một bản tóm tắt bị từ chối khi message checkpoint (phần đầu và văn bản) không
+nhỏ hơn lịch sử mà nó thay thế, cả hai ước lượng bốn byte mỗi token trên nội dung như linch-rust
+đếm: biên nhận có hạch toán là `rejected` với lý do `not_smaller` và mức
 sử dụng vẫn bị tính phí; helper trực tiếp ném `ProviderError`. Văn bản chỉ dẫn dùng chung với
 linch-rust qua `tests/compaction/fixtures/compaction_request.json`. Python Linch chưa sao
 chép nguyên văn các message của user vào bản tóm tắt, và chưa dùng chung prefix đã cache của
