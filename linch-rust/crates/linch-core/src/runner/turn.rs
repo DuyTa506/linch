@@ -219,7 +219,8 @@ impl Runner {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
         let output = agent.output.clone();
-        let watch = Watch::new(&agent.spec.loop_guard, agent.snapshot().polls());
+        let snapshot = agent.snapshot();
+        let watch = Watch::new(&agent.spec.loop_guard, snapshot.polls(), snapshot.writes());
         let tool_choice = agent.spec.tool_choice.clone();
         let final_tool = agent.final_tool.clone();
         let gates = agent.gates.clone().map(Gates::new);
