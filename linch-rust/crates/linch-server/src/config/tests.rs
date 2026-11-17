@@ -191,3 +191,23 @@ fn a_worker_section_runs_without_listeners_or_tokens() {
     let error = ServerConfig::from_json(&unknown.to_string()).unwrap_err();
     assert!(error.to_string().contains("unknown field"), "{error}");
 }
+
+#[test]
+fn a_tenant_may_have_system_sections_of_the_operator() {
+    let tenant = |sections: serde_json::Value| {
+        json!({"http": "127.0.0.1:1",
+               "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                    "allow": {"system_sections": sections}}}})
+        .to_string()
+    };
+    let good = tenant(json!([{"name": "policy", "text": "Be kind.", "order": -1}]));
+    let config = ServerConfig::from_json(&good).unwrap();
+    let sections = &config.tenants["acme"].allow.system_sections;
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].order, -1);
+    assert!(config.build(no_env).is_ok());
+    // A section the server could not send is refused when the config loads.
+    let blank = tenant(json!([{"name": "policy", "text": " "}]));
+    let config = ServerConfig::from_json(&blank).unwrap();
+    assert!(config.build(no_env).is_err());
+}

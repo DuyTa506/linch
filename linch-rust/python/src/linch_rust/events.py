@@ -174,8 +174,31 @@ class SuspendedEvent:
 
 
 @dataclass(frozen=True)
+class DroppedContext:
+    """One block the context budget dropped from a request.
+
+    Attributes:
+        source: The `policy_id` of the callback or hook that added it.
+        index: Its position among that callback's blocks, from 0; the same
+            index as in what the callback put in its metadata, so a
+            retrieval callback's ids can be reconciled with what was sent.
+        tokens: Its estimated tokens.
+    """
+
+    source: str
+    index: int
+    tokens: int
+
+
+@dataclass(frozen=True)
 class ContextBuildEvent:
-    """The context of the next provider request was assembled; the call starts."""
+    """The context of the next provider request was assembled; the call starts.
+
+    `budget` is empty unless `spec.context_budget` is set; then it holds
+    `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped`
+    and, when pinned blocks alone are over the cap, `over_by`. The decision
+    is made again for every request and is not stored for recovery.
+    """
 
     type: ClassVar[str] = "context_build"
     model: str
@@ -184,6 +207,14 @@ class ContextBuildEvent:
     budget: JsonObject
     metadata: JsonObject
     selected_tools: list[str] | None = None
+
+    @property
+    def dropped(self) -> list[DroppedContext]:
+        """The blocks the context budget dropped from this request, in order."""
+        return [
+            DroppedContext(str(item["source"]), int(item["index"]), int(item["tokens"]))
+            for item in self.budget.get("dropped", [])
+        ]
 
 
 @dataclass(frozen=True)

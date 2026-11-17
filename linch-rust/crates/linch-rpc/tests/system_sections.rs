@@ -110,7 +110,7 @@ async fn a_tenant_may_not_inflate_every_request() {
 async fn the_operator_s_sections_join_every_tenant_agent_and_cannot_be_removed() {
     let policy = linch::SystemSection::new("policy", "Company policy.").order(-10);
     let allow = Allowlists::new()
-        .system_sections(&[policy.clone()])
+        .system_sections(std::slice::from_ref(&policy))
         .unwrap();
     let remote = remote(allow);
     // The same spec a local connection holds with the section in it.
