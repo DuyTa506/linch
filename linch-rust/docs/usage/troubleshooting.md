@@ -11,8 +11,8 @@ exception class tells you its family:
 
 | Class | Codes | Raised by |
 |---|---|---|
-| `ProtocolError` | -32700 to -32600 | A config or declaration the server cannot read |
-| `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed |
+| `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | A config or declaration the server cannot read (-32602); a method the server binary lacks (-32601: the binary is older than the client); a bug in the server (-32603: report it with the server's stderr) |
+| `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed; -32012 is a run contract that could not be digested (report it) |
 | `RunError` and its subclasses | -32020 to -32034 and -32038 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
 | `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | A remote server's token, tenant checks and caps ([A remote server](#a-remote-server-serverconnect)) |

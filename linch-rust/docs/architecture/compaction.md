@@ -23,16 +23,16 @@ What differs in Rust:
 
 - `CompactionSpec` is data. The ladder is fixed: micro-compaction when
   `micro` is set, then a summary. There is no custom strategy; the prompt is
-  the summary's only hook (`compaction.rs:111-148`). Python's
-  `DetailedCompaction` is a prompt, `DETAILED_PROMPT` (`compaction.rs:45-68`).
+  the summary's only hook (`compaction.rs:143-190`). Python's
+  `DetailedCompaction` is a prompt, `DETAILED_PROMPT` (`compaction.rs:46-83`).
 - The reactive path (a context-length refusal) runs only when the spec has
   compaction. Python always has a strategy to fall back on; here a refusal
   without compaction ends the run.
 - The size estimate is built in: about four characters per token and 1000 per
-  image (`compaction.rs:193-226`). There is no pluggable token estimator.
+  image (`compaction.rs:235-268`). There is no pluggable token estimator.
 - A paid summary is kept whole in the `Compacted` checkpoint, not as a
   hash-only recipe. A resume appends it without another provider call
-  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:256-278`).
+  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:303-318`).
 - The projection is always written to the session store as a log entry
   (`runner/write.rs:83-98`). There is no store detection and no opt-in.
 
@@ -40,7 +40,7 @@ What differs in Rust:
 
 `AgentSpec::compaction` is `None` by default, which never compacts
 (`crates/linch-core/src/agent/spec.rs:67`). Set a `CompactionSpec`
-(`compaction.rs:111-148`):
+(`compaction.rs:143-190`):
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -55,9 +55,9 @@ What differs in Rust:
 `micro` and `max_forced` are left out of the serialized spec at their
 defaults, so the contract digest of a spec written before they existed is
 unchanged. `CompactionSpec::new(n)` sets the threshold and leaves the rest
-at their defaults (`compaction.rs:168-173`). `AgentBuilder::build` refuses a
+at their defaults (`compaction.rs:207-216`). `AgentBuilder::build` refuses a
 zero threshold, a zero `keep_recent_turns` or a zero `max_output_tokens`
-with `BuildError::Invalid` (`compaction.rs:176-191`, `agent/builder.rs:240`).
+with `BuildError::Invalid` (`compaction.rs:218-233`, `agent/builder.rs:282`).
 
 The spec is part of the run contract, so changing it makes agents with the old
 and the new setting incompatible: a resume of an old run is refused
@@ -66,19 +66,19 @@ and the new setting incompatible: a resume of an old run is refused
 ## When a run compacts
 
 A turn starts at `Step::Compact` when the spec has compaction, and at
-`Step::Dispatch` otherwise (`runner/turn.rs:319`). `compact` goes to the
+`Step::Dispatch` otherwise (`runner/turn.rs:316`). `compact` goes to the
 primary call without doing anything when any of these hold
-(`runner/compact.rs:72-132`):
+(`runner/compact.rs:73-129`):
 
 1. The run was cancelled: it aborts instead.
 2. `max_turns` or the budget already allows no more calls. The primary call
    ends the run with its own terminal.
 3. The view is not due.
 4. `keep_from` finds no point to fold. The view needs at least one assistant
-   turn between its first message and the kept turns (`compaction.rs:260-270`).
+   turn between its first message and the kept turns (`compaction.rs:289-313`).
    A one-prompt first turn never compacts.
 
-Due is decided by `due` (`compaction.rs:228-243`):
+Due is decided by `due` (`compaction.rs:270-288`):
 
 - With `threshold_tokens`, the estimate is at or above it.
 - Without it, the estimate plus an output reserve reaches 80% of the model's
@@ -89,23 +89,23 @@ Due is decided by `due` (`compaction.rs:228-243`):
 
 The estimate counts text, thinking, catalog notices, tool inputs and tool
 results; images cost a fixed amount; signatures and redacted reasoning are not
-counted (`compaction.rs:193-226`).
+counted (`compaction.rs:235-268`).
 
 `keep_from` is the `keep_recent_turns`-th assistant message from the end of
 the view. The kept part starts at that message, so a tool result is never cut
-off from its call (`compaction.rs:245-270`).
+off from its call (`compaction.rs:289-313`).
 
 ## Micro-compaction
 
-With `micro`, a due view is cleared first (`runner/compact.rs:104-111`).
+With `micro`, a due view is cleared first (`runner/compact.rs:110-115`).
 `clear_tool_results` replaces every tool result before the kept turns with
 `CLEARED_RESULT`, `[tool result elided to save context]`, unless it is
 already no longer than the placeholder and holds no image (Python's test,
-`compaction.rs:276-333`). Every `tool_use_id` keeps its result, and messages
+`compaction.rs:322-359`). Every `tool_use_id` keeps its result, and messages
 that do not change are shared, not copied.
 
 If the cleared view is no longer due, `clear` records it and the turn goes
-on with its primary call (`runner/compact.rs:313-354`):
+on with its primary call (`runner/compact.rs:359-402`):
 
 1. `pre_compact` runs with strategy `micro`.
 2. The `compaction` event (strategy `micro`, `messages_before` equal to
@@ -118,7 +118,7 @@ on with its primary call (`runner/compact.rs:313-354`):
 That is one run write and one session write, and no provider call. If the
 cleared view is still due, the summary follows, and it reads the folded part
 with its tool results already cleared, as Python's does after its micro step
-(`runner/compact.rs:133-140`).
+(`runner/compact.rs:135-142`).
 
 Clearing changes messages in the middle of the view, so the provider's cached
 prefix ends at the first cleared result. That is why `micro` is off by
@@ -246,7 +246,7 @@ tests read as well.
 An accepted summary becomes a user message and a replacement view:
 
 1. `summary_message` leads the text with `<summary of earlier conversation>`,
-   so the model reads it as a recap (`compaction.rs:82, 406-410`). With
+   so the model reads it as a recap (`compaction.rs:106, 568-587`). With
    redaction scrubbing responses, the summary text is scrubbed first.
 2. With skills on, the message also carries a `<system-reminder>` with the body
    of each skill the model loaded in the session, since the summary folds their
@@ -254,16 +254,16 @@ An accepted summary becomes a user message and a replacement view:
 3. If the session has a catalog, one notice restates every catalog change of
    the session.
 4. `replacement` is the first message as it was, the summary, then the
-   messages from `keep_from` on (`compaction.rs:412-424`).
+   messages from `keep_from` on (`compaction.rs:676-688`).
 
 The run then stages the `compaction` event (message and token counts before
 and after, the strategy, the duration, `forced`) and saves `Compacted` with
-the summary and `keep_from` (`runner/compact.rs:222-254`,
+the summary and `keep_from` (`runner/compact.rs:262-297`,
 `crates/linch-core/src/events/kinds/control.rs`). `Compacted` writes through
 with the receipt and `usage`, so a paid summary is never lost.
 
 Next, `compacted` writes the projection to the session
-(`runner/compact.rs:256-278`). `project` flushes the held checkpoint, appends
+(`runner/compact.rs:303-318`). `project` flushes the held checkpoint, appends
 a `LogEntry::Projection` to the session store in one write, records it in the
 in-memory log, then runs the agent's `on_compact` callbacks
 (`runner/write.rs:83-98`). The `Compacted` checkpoint is already durable, so
@@ -293,7 +293,7 @@ event is free, like any such refusal (`provider/call.rs:257`). The error
 event's `kind` is `context_length`.
 
 `dispatch` asks `overflow` before it treats the failure as final
-(`runner/turn.rs:470`, `runner/compact.rs:280-307`):
+(`runner/turn.rs:591`, `runner/compact.rs:326-358`):
 
 1. With `micro`, if any old tool result is worth clearing, `clear` records
    the cleared view (with `forced` set on the event) and goes to the next
@@ -302,7 +302,7 @@ event's `kind` is `context_length`.
    `forced_keep_from` finds a point to fold, the run makes a summary with
    `redispatch` set to the next primary attempt. `forced_keep_from` keeps
    `keep_recent_turns`, or only the last turn when that folds nothing, since
-   the kept turns alone may be what does not fit (`compaction.rs:272-274`).
+   the kept turns alone may be what does not fit (`compaction.rs:314-321`).
 3. Else `overflow` gives nothing and the refusal ends the run as any
    provider failure does.
 
@@ -324,10 +324,10 @@ bounds a turn.
 ### What a resume reads back
 
 Nothing new is written to remember a forced compaction. `Forced::of` reads
-it from the durable deliveries (`compaction.rs:336-386`): a summary
+it from the durable deliveries (`compaction.rs:382-445`): a summary
 delivery that comes after a primary delivery of the same turn was forced; the
 count of those is the run's spent `max_forced`; the turn's primary and summary
-delivery counts give the next attempt numbers. `runner/start.rs:454` sets the
+delivery counts give the next attempt numbers. `runner/start.rs:523-524` sets the
 runner's counters from it, so a resumed run neither forgets a forced summary
 nor reuses a delivery id.
 
@@ -382,7 +382,7 @@ The request the model gets after a compaction is built from these parts:
 | Part | Source |
 |---|---|
 | System blocks and tools | The session's frozen prefix, byte for byte (`session_log.rs:53-60`) |
-| First message | The first message of the view, unchanged (`compaction.rs:412-424`) |
+| First message | The first message of the view, unchanged (`compaction.rs:676-688`) |
 | Summary | The `summary` user message with its reminders and catalog notice |
 | Kept turns | The last `keep_recent_turns` assistant turns and what follows them |
 | Later messages | Appended after the projection as the run goes on |
@@ -419,7 +419,7 @@ starts a new chain of parts.
 Nothing new is checkpointed. `Truncated::of` reads the attempts and the
 pending parts back from the durable `assistant` and `user` events: a cut
 answer counts once its feedback is durable (`truncation.rs`,
-`runner/start.rs:457`).
+`runner/start.rs:526-528`).
 
 ## Tests
 
