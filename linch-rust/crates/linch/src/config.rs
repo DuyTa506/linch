@@ -150,6 +150,17 @@ pub struct AgentConfig {
         skip_serializing_if = "PricingOverrides::is_empty"
     )]
     pub pricing: PricingOverrides,
+    /// The most provider calls this agent's runs, and the runs of every
+    /// agent opened with the same [`PgPools`](crate::PgPools) on the same
+    /// provider key and endpoint, make at once (Python's
+    /// `max_provider_concurrency`); the rest wait their turn, first come
+    /// first served. A run that waits has dispatched nothing, so cancelling
+    /// it leaves no delivery or receipt. Unlimited when absent, which keeps
+    /// it off the wire; it is not part of the run contract, so changing it
+    /// never strands a suspended run. A cap of one process: runs in another
+    /// process (a worker, a second server) count separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_provider_concurrency: Option<NonZeroU32>,
 }
 
 fn is_false(value: &bool) -> bool {

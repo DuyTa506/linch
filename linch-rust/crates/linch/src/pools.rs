@@ -1,5 +1,5 @@
-//! [`PgPools`]: one Postgres pool per connection target, shared by the
-//! agents opened with it.
+//! [`PgPools`]: one Postgres pool per connection target, and one provider
+//! gate per key and endpoint, shared by the agents opened with it.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
+use linch_core::{ProviderGate, WeakProviderGate};
 use linch_postgres::PgPool;
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
@@ -34,12 +35,44 @@ use crate::error::OpenError;
 /// a fresh one, so each agent gets its own pool. `Debug` shows the number
 /// of pools and their sizes, and no DSN.
 ///
+/// It also holds the provider gates of the agents opened with it. A config
+/// with `max_provider_concurrency` gets the gate for its provider key and
+/// endpoint (the key variable and the `base_url`, so `openai-chat` and
+/// `openai-responses` on one `OPENAI_API_KEY` share it), and agents
+/// asking for the same one share a gate: all their runs together make at
+/// most that many provider calls at once. A gate has the size of the open
+/// that created it, as a pool does, and goes once no open agent uses it. So
+/// the cap holds across every agent opened with one `PgPools`: a server
+/// keeps one per tenant. It does not cross processes; a worker or a second
+/// server has its own gates.
+///
 /// [`AgentConfig::open_with`]: crate::AgentConfig::open_with
 /// [`AgentConfig::open`]: crate::AgentConfig::open
 /// [`OpenedAgent`]: crate::OpenedAgent
 #[derive(Default)]
 pub struct PgPools {
     pools: Mutex<HashMap<Target, Weak<Shared>>>,
+    gates: Mutex<HashMap<GateKey, WeakProviderGate>>,
+}
+
+/// What a provider gate is shared by: the variable the provider reads its
+/// key from, and the endpoint it was told to call. The size is not part of
+/// it, or two agents' limits would add up.
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct GateKey {
+    /// Empty for a provider with no key of its own (the scripted one).
+    key_env: &'static str,
+    endpoint: String,
+}
+
+impl GateKey {
+    pub(crate) fn new(key_env: &'static str, endpoint: Option<&str>) -> Self {
+        let endpoint = endpoint.unwrap_or_default().trim_end_matches('/');
+        Self {
+            key_env,
+            endpoint: endpoint.to_owned(),
+        }
+    }
 }
 
 /// Where a DSN connects and as whom, as sqlx reads it: the key of its
@@ -109,6 +142,20 @@ impl PgPools {
         let pool = shared.0.get_or_try_init(|| connect(dsn, max_connections));
         let pool = pool.await?.clone();
         Ok((shared, pool))
+    }
+
+    /// The gate for `key`, or a new one of `max` places when no open agent
+    /// holds one. A gate in use keeps the size it was made with. Gates no
+    /// agent holds any more are dropped first.
+    pub(crate) fn gate(&self, key: GateKey, max: NonZeroU32) -> ProviderGate {
+        let mut gates = lock(&self.gates);
+        gates.retain(|_, gate| gate.upgrade().is_some());
+        if let Some(gate) = gates.get(&key).and_then(WeakProviderGate::upgrade) {
+            return gate;
+        }
+        let gate = ProviderGate::new(max);
+        gates.insert(key, gate.downgrade());
+        gate
     }
 
     /// The slot in use for the target of `dsn`, or a new one. Slots no
@@ -203,6 +250,35 @@ mod tests {
         let drop = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
         let query = sqlx::raw_sql(AssertSqlSafe(drop));
         query.execute(&admin).await.expect("drop the test schema");
+    }
+
+    #[test]
+    fn agents_on_one_key_and_endpoint_share_a_gate_of_the_first_size() {
+        let two = NonZeroU32::new(2).unwrap();
+        let nine = NonZeroU32::new(9).unwrap();
+        let pools = PgPools::new();
+        let key = |env, url| GateKey::new(env, Some(url));
+        let first = pools.gate(key("OPENAI_API_KEY", "http://a/v1"), two);
+        let same = pools.gate(key("OPENAI_API_KEY", "http://a/v1/"), nine);
+        assert_eq!((same.max(), first.max()), (two, two));
+        let (a, b) = (first.try_acquire(), same.try_acquire());
+        assert!(a.is_some() && b.is_some());
+        assert!(first.try_acquire().is_none(), "one budget, two handles");
+        drop((a, b));
+        for other in [
+            key("ANTHROPIC_API_KEY", "http://a/v1"),
+            key("OPENAI_API_KEY", "http://b/v1"),
+        ] {
+            assert_eq!(pools.gate(other, nine).max(), nine);
+        }
+        // No agent holds the gate: the next open sizes a new one.
+        drop((first, same));
+        let fresh = pools.gate(key("OPENAI_API_KEY", "http://a/v1"), nine);
+        assert_eq!(fresh.max(), nine);
+        assert_eq!(lock(&pools.gates).len(), 1);
+        // Another `PgPools` shares nothing.
+        let other = PgPools::new().gate(key("OPENAI_API_KEY", "http://a/v1"), two);
+        assert_eq!(other.max(), two);
     }
 
     #[test]
