@@ -302,6 +302,37 @@ async fn a_websocket_that_answers_pings_stays_connected() {
     server.stop().await;
 }
 
+/// Silence is judged as it happens, not at the next ping: with a ping every
+/// 5 s and a 300 ms pong timeout the silent client is gone well before the
+/// second ping, and its place is not free before the timeout has passed.
+#[tokio::test]
+async fn a_silent_websocket_is_dropped_at_the_pong_timeout_not_at_the_next_ping() {
+    let (server, address) = pinging(5_000, 300).await;
+    let bearer = format!("Bearer {TOKEN}");
+    let started = Instant::now();
+    let silent = connect(address, Some(&bearer)).await.unwrap();
+    let mut freed = None;
+    while started.elapsed() < Duration::from_secs(3) {
+        match connect(address, Some(&bearer)).await {
+            Ok(_) => {
+                freed = Some(started.elapsed());
+                break;
+            }
+            Err(Error::Http(response)) if response.status() == StatusCode::TOO_MANY_REQUESTS => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    let freed = freed.expect("the silent connection kept its place past 3 s");
+    assert!(
+        freed >= Duration::from_millis(300),
+        "dropped after {freed:?}, before its pong timeout"
+    );
+    drop(silent);
+    server.stop().await;
+}
+
 #[test]
 fn a_liveness_field_of_zero_is_refused() {
     let text = json!({"http": "127.0.0.1:0", "liveness": {"pong_timeout_ms": 0},
