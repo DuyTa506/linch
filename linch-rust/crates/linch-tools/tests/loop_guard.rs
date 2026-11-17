@@ -28,7 +28,9 @@ const MODEL: &str = "scripted-model";
 
 /// A provider that answers each request with `answer(request, n)`, `n`
 /// the number of assistant messages the request holds.
-struct Answering(Box<dyn Fn(&ProviderRequest, usize) -> ScriptedTurn + Send + Sync>);
+struct Answering(Box<Answer>);
+
+type Answer = dyn Fn(&ProviderRequest, usize) -> ScriptedTurn + Send + Sync;
 
 #[async_trait]
 impl Provider for Answering {
