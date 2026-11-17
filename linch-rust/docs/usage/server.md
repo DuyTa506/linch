@@ -350,6 +350,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `execution` | An `execution` that equals no `allow.execution` entry, or none when that list is empty | The backend decides what `Bash` can reach; its policy is the operator's |
 | `redaction` | More than 32 `spec.redaction` rules, or a pattern over 1024 bytes | The server compiles each pattern and runs it on every response and tool result |
 | `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
+| `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
 
 A path that does not exist is refused like one outside the roots, so a
 client cannot probe the server's file system. Four changes are made
