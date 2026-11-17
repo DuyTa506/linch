@@ -261,6 +261,7 @@ fn options(max_concurrency: usize) -> ExecuteOptions {
         cancel: CancellationToken::new(),
         redactor: None,
         retry: None,
+        retry_clock: Default::default(),
         cache: None,
     }
 }

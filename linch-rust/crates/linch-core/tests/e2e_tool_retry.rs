@@ -138,7 +138,16 @@ fn agent_on<S: RunStore + SessionStore + 'static>(
     tool: &Arc<Shaky>,
     stores: Arc<S>,
 ) -> (Agent, Arc<Replay>) {
-    let provider = Arc::new(Replay::new(fetch_turns()));
+    agent_with(spec, tool, stores, fetch_turns())
+}
+
+fn agent_with<S: RunStore + SessionStore + 'static>(
+    spec: AgentSpec,
+    tool: &Arc<Shaky>,
+    stores: Arc<S>,
+    turns: Vec<ScriptedTurn>,
+) -> (Agent, Arc<Replay>) {
+    let provider = Arc::new(Replay::new(turns));
     let registry = ToolRegistry::new();
     let _ = registry.register(Arc::new(Handle(tool.clone()))).unwrap();
     let agent = AgentBuilder::new(spec)
@@ -262,6 +271,46 @@ async fn a_call_stops_retrying_when_its_retry_budget_is_spent() {
     let delays: Vec<_> = retries(&events).iter().map(|r| r.delay_ms).collect();
     assert_eq!(delays, [100_000, 200_000]);
     assert_eq!(end_error(&events), Some(true));
+}
+
+/// The budget is the run's: a call that spent it leaves the next one none,
+/// so a run of many failing calls is bounded too.
+#[tokio::test(start_paused = true)]
+async fn the_retry_budget_is_the_runs_and_not_each_calls() {
+    let call = |id: &str| {
+        TurnBuilder::new(MODEL)
+            .text("working")
+            .tool_call(id, "Fetch", &json!({}))
+            .usage(usage(10, 5))
+            .build()
+    };
+    let turns = vec![call("call_1"), call("call_2"), text_turn("done")];
+    let tool = Shaky::new(true, 99, Some("transient"));
+    let mut spec = spec();
+    spec.tool_retry = Some(ToolRetry {
+        max_attempts: 5,
+        base_delay_ms: 50_000,
+        max_delay_ms: 100_000,
+        ..ToolRetry::default()
+    });
+    let (agent, _) = agent_with(spec, &tool, Arc::new(Stores::default()), turns);
+    let events = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let retried = retries(&events);
+    let waits: Vec<_> = (retried.iter())
+        .map(|r| (r.tool_use_id.as_str(), r.delay_ms))
+        .collect();
+    // The first call retries until the 300 s are spent (the last wait cut
+    // to the 50 s left); the second gets none.
+    assert_eq!(
+        waits,
+        [
+            ("call_1", 50_000),
+            ("call_1", 100_000),
+            ("call_1", 100_000),
+            ("call_1", 50_000)
+        ]
+    );
+    assert_eq!(tool.attempts(), 6, "5 for call_1, 1 for call_2");
 }
 
 #[tokio::test]

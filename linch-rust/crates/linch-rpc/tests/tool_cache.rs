@@ -76,6 +76,29 @@ async fn a_cache_that_cannot_run_is_refused_at_open() {
     );
 }
 
+/// The workspace's `Read` records what the session saw so `Edit` may
+/// follow, and a hit would skip that: naming it is refused when the agent
+/// opens, while `Grep` is fine.
+#[tokio::test]
+async fn the_workspace_read_tool_cannot_be_cached_but_grep_can() {
+    let dir = std::env::temp_dir().join(format!("linch-tool-cache-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rpc = Rpc::new();
+    let open = |tool: &str| {
+        let mut config = scripted(vec![text_turn("OK.")], Some(&dir), "default");
+        config["spec"]["tool_cache"] = json!({ "tools": [tool] });
+        config
+    };
+    let refused = rpc.call(method::AGENT_OPEN, open("Read")).await;
+    let Err(linch_rpc::ClientError::Rpc(error)) = refused else {
+        panic!("Read must be refused, got {refused:?}");
+    };
+    assert_eq!(error.code, linch_rpc::code::BUILD_INVALID);
+    assert!(error.message.contains("Read"), "{}", error.message);
+    assert!(rpc.call(method::AGENT_OPEN, open("Grep")).await.is_ok());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A tenant's config for `cache`: its namespace, redaction over tool
 /// results (the cache stores what a tool returned after it), and no project
 /// root, which must be one of the tenant's workspace roots.

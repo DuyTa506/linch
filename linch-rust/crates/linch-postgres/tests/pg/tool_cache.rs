@@ -204,17 +204,21 @@ async fn a_put_sweeps_expired_rows_of_other_namespaces() {
         return;
     };
     let cache = PgToolCache::new(db.pool.clone());
-    let brief = room(Duration::from_millis(100), 8);
+    let long = room(LONG, 8);
     for ns in ["gone-1", "gone-2", "gone-3"] {
-        assert!(put(&cache, ns, "k", "old", &brief).await);
+        assert!(put(&cache, ns, "k", "old", &long).await);
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Expire them by SQL, so the test does not depend on how fast puts run.
+    sqlx::query("UPDATE linch_tool_cache SET expires_at = now() - interval '1 minute'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
     let rows = || async {
         let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM linch_tool_cache");
         count.fetch_one(&db.pool).await.unwrap()
     };
     assert_eq!(rows().await, 3i64, "expired rows linger until swept");
-    assert!(put(&cache, "live", "k", "new", &room(LONG, 8)).await);
+    assert!(put(&cache, "live", "k", "new", &long).await);
     assert_eq!(rows().await, 1i64, "only the live row is left");
     db.finish().await;
 }

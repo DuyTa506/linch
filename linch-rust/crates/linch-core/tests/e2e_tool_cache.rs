@@ -789,7 +789,7 @@ async fn a_store_that_hangs_is_a_miss_and_the_run_goes_on() {
 }
 
 /// An abort cuts a lookup short; it does not wait out the store.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_abort_cuts_a_hanging_lookup_short() {
     let shared: Arc<dyn ToolCacheStore> = Arc::new(Hanging { get_only: true });
     let runs = Runs::default();
@@ -803,11 +803,14 @@ async fn an_abort_cuts_a_hanging_lookup_short() {
     );
     let options = RunOptions::new("s1");
     let cancel = options.cancel.clone();
+    let begun = tokio::time::Instant::now();
     let running = tokio::spawn(drain(agent.run("go", options)));
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
-    let settled = tokio::time::timeout(Duration::from_millis(1_000), running).await;
-    assert!(settled.is_ok(), "the abort waited for the store");
+    running.await.unwrap();
+    // The clock is paused, so only the abort can have ended the run before
+    // the store's own time limit.
+    assert!(begun.elapsed() < linch_core::tool_cache::STORE_TIMEOUT);
     assert_eq!(ran(&runs, "call_0"), 0, "the tool never started");
 }
 

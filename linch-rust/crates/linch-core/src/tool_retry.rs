@@ -20,16 +20,18 @@
 //! **Bounds.** The error text of a `tool_retry` event is run through the
 //! agent's redaction (when it covers tool results) and cut to
 //! [`ERROR_BYTES`] bytes, since the event is persisted and streamed before
-//! any `post_tool_use` hook sees the failure. A call's retries together
-//! stop at [`RETRY_BUDGET`] from its first attempt. A timed-out attempt of
-//! a host tool is abandoned with a `$/cancelRequest` notification and no
-//! acknowledgement exists in the protocol, so the next attempt may start
-//! while the client's handler is still winding down: a host tool that
-//! declares itself idempotent must tolerate two calls overlapping.
+//! any `post_tool_use` hook sees the failure. The time a run spends
+//! retrying, all its calls together, stops at [`RETRY_BUDGET`] (a resumed
+//! run starts at zero). A timed-out attempt of a host tool is abandoned
+//! with a `$/cancelRequest` notification and no acknowledgement exists in
+//! the protocol, so the next attempt may start while the client's handler
+//! is still winding down: a host tool that declares itself idempotent
+//! must tolerate two calls overlapping.
 //!
 //! [`Tool::idempotent`]: crate::Tool::idempotent
 //! [`ToolOutputError::code`]: crate::ToolOutputError::code
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -38,11 +40,32 @@ use serde::{Deserialize, Serialize};
 /// [`ToolRetry::retry_on`]. The timeout error itself has no code.
 pub const TIMEOUT_CLASS: &str = "timeout";
 
-/// Longest a call may spend retrying, from the start of its first attempt:
-/// no attempt starts once it is spent, and a wait is cut to what is left.
-/// Each attempt has its own `call_timeout`, so without this a call could
-/// take `max_attempts` times that, plus every wait.
+/// Longest a run may spend retrying, all its calls together: no retry
+/// starts once it is spent, and a wait is cut to what is left. A call's
+/// retry time runs from its first failed attempt to its end (the waits and
+/// the later attempts); calls that overlap in a read group each add their
+/// own. Each attempt has its own `call_timeout`, so without this one call
+/// could take `max_attempts` times that plus every wait, and a run
+/// `max_attempts` times that for each call. A resumed run starts at zero.
 pub const RETRY_BUDGET: Duration = Duration::from_secs(300);
+
+/// What a run has spent retrying, shared by its calls and batches. See
+/// [`RETRY_BUDGET`].
+#[derive(Debug, Default)]
+pub struct RetryClock(AtomicU64);
+
+impl RetryClock {
+    /// The time spent so far.
+    pub(crate) fn spent(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::Relaxed))
+    }
+
+    /// Add `time` to what the run has spent.
+    pub(crate) fn charge(&self, time: Duration) {
+        let millis = u64::try_from(time.as_millis()).unwrap_or(u64::MAX);
+        self.0.fetch_add(millis, Ordering::Relaxed);
+    }
+}
 
 /// Most bytes of a failed attempt's error a `tool_retry` event keeps.
 pub const ERROR_BYTES: usize = 512;
@@ -148,10 +171,9 @@ impl ToolRetry {
         Duration::from_millis(wait.min(self.max_delay_ms))
     }
 
-    /// The wait before attempt `next` of a call that has spent `spent`
-    /// since its first attempt began, or `None` once the call's
-    /// [`RETRY_BUDGET`] is gone: the wait is cut to what the budget has
-    /// left.
+    /// The wait before attempt `next` of a call in a run that has spent
+    /// `spent` retrying, or `None` once the run's [`RETRY_BUDGET`] is gone:
+    /// the wait is cut to what the budget has left.
     pub(crate) fn wait(&self, next: u32, spent: Duration) -> Option<Duration> {
         let left = RETRY_BUDGET
             .checked_sub(spent)
@@ -177,7 +199,16 @@ mod tests {
     }
 
     #[test]
-    fn a_call_stops_retrying_when_its_budget_is_spent_and_the_wait_is_cut() {
+    fn the_clock_adds_up_what_the_calls_charge() {
+        let clock = RetryClock::default();
+        assert_eq!(clock.spent(), Duration::ZERO);
+        clock.charge(Duration::from_millis(1_500));
+        clock.charge(Duration::from_secs(2));
+        assert_eq!(clock.spent(), Duration::from_millis(3_500));
+    }
+
+    #[test]
+    fn a_run_stops_retrying_when_its_budget_is_spent_and_the_wait_is_cut() {
         let retry = ToolRetry {
             base_delay_ms: 100,
             max_delay_ms: 200,

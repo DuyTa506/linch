@@ -244,6 +244,7 @@ impl Runner {
             cancel: self.cancel.clone(),
             redactor: self.agent.result_redactor().cloned(),
             retry: spec.tool_retry.clone(),
+            retry_clock: self.retry_clock.clone(),
             cache: self.agent.tool_cache.clone(),
         };
         let run_id = self.run.run_id.clone();

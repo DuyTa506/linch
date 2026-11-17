@@ -68,6 +68,12 @@ impl Tool for SkillTool {
         ToolScope::Read
     }
 
+    /// Loading a skill changes what the session is offered and told, so a
+    /// cache hit would skip it.
+    fn cache_safe(&self) -> bool {
+        false
+    }
+
     fn validate(&self, input: JsonObject) -> Result<JsonObject, ToolOutputError> {
         if requested(&input).trim().is_empty() {
             return Err(ToolOutputError::new("skill must be a non-empty string"));

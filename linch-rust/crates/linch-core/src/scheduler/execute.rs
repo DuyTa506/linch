@@ -26,7 +26,7 @@ use crate::tool::{Report, ToolContext, ToolOutputError, ToolProgress, ToolResult
 use crate::tool_cache::{
     CacheScope, Lookup, PutLimits, STORE_TIMEOUT, ToolCacheError, ToolCacheHandle, cache_key,
 };
-use crate::tool_retry::{ERROR_BYTES, TIMEOUT_CLASS, ToolRetry};
+use crate::tool_retry::{ERROR_BYTES, RetryClock, TIMEOUT_CLASS, ToolRetry};
 
 use super::RunIdentity;
 use super::plan::{BatchPlan, PlannedAction, PlannedCall};
@@ -140,6 +140,10 @@ pub struct ExecuteOptions {
     /// Runs an idempotent tool again after a failure it reports as
     /// transient (see [`crate::tool_retry`]). `None` never retries.
     pub retry: Option<ToolRetry>,
+    /// What the run has spent retrying, which its retries stop at
+    /// [`crate::tool_retry::RETRY_BUDGET`]; shared by every batch of the
+    /// run.
+    pub retry_clock: Arc<RetryClock>,
     /// Serves an identical call of a named read tool from the cache, after
     /// the call was planned (see [`crate::tool_cache`]). `None` caches
     /// nothing.
@@ -480,10 +484,18 @@ impl<S: ToolSink> Runner<'_, S> {
         let tool = call.tool.as_ref().expect("a Run entry holds its tool");
         let idempotent = tool.tool().idempotent();
         let retry = (self.options.retry.as_ref()).filter(|r| r.covers(&call.tool_name, idempotent));
-        let begun = tokio::time::Instant::now();
+        // When this call's retry time was last charged to the run's clock;
+        // `None` until a failure is retried.
+        let mut charged = None::<tokio::time::Instant>;
         let mut attempt = 1;
         loop {
             let (result, timed_out) = self.run_attempt(call, tool, attempt, raw).await;
+            if let Some(since) = charged.as_mut() {
+                // The wait and the attempt that just ended.
+                let now = tokio::time::Instant::now();
+                self.options.retry_clock.charge(now - *since);
+                *since = now;
+            }
             let (Some(retry), Err(failure)) = (retry, &result) else {
                 return Ok(result);
             };
@@ -498,11 +510,13 @@ impl<S: ToolSink> Runner<'_, S> {
             if attempt >= retry.max_attempts {
                 return Ok(result);
             }
-            // The call's retries are bounded as a whole, not only each
+            // The run's retries are bounded as a whole, not only each
             // attempt by the call timeout.
-            let Some(delay) = retry.wait(attempt + 1, begun.elapsed()) else {
+            let spent = self.options.retry_clock.spent();
+            let Some(delay) = retry.wait(attempt + 1, spent) else {
                 return Ok(result);
             };
+            charged.get_or_insert_with(tokio::time::Instant::now);
             attempt += 1;
             let retrying = Retrying {
                 attempt,
