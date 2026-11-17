@@ -19,7 +19,7 @@
 //!   `force_continue` does. Always on: a hook that skips every call would
 //!   otherwise append to the session forever and never reach the budget.
 //!
-//! Nothing new is checkpointed. [`Watch::of`] reads the counts back from
+//! Nothing new is checkpointed. `Watch::of` reads the counts back from
 //! the run's `assistant` events (the calls asked for), its `tool_result`
 //! user events (the batches' results, which count those calls) and its primary `model_call_delivery`
 //! events (the turn of the last call), each durable before the step that
