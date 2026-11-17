@@ -76,8 +76,10 @@ giữ chúng.
   cùng `read_paths`. Nó chỉ ghi workspace và home của nó. Home của người dùng server
   (khóa, `~/.ssh`, cấu hình cloud), terminal của server, phần còn lại của `/tmp`, home
   của các session khác, `/opt` và mọi mục khác của `/etc` đều bị đóng.
-- **`/etc`, theo danh sách cho phép.** Chỉ những gì một shell, coreutils, `git`,
-  `python3` và `curl` đọc (tìm ra bằng cách chạy chúng trong sandbox dưới `strace`):
+- **`/etc`, theo danh sách cho phép.** Những gì một shell, coreutils, `git`,
+  `python3` và `curl` đọc trên Ubuntu (dò bằng `strace`, rồi chạy thử trong sandbox),
+  cộng với các đường dẫn chứng chỉ và cấu hình mà bản phân phối khác dùng (`pki/*` và
+  `crypto-policies` trên Fedora, `ssl/cert.pem` trên Alpine và Arch):
   `alternatives`, `ca-certificates*`, `crypto-policies/back-ends`,
   `debian_version`, `fonts`, `gai.conf`, `gitattributes`, `gitconfig`,
   `gnutls/config`, `group`, `host.conf`, `hosts`, `ld.so.cache`,
@@ -86,9 +88,8 @@ giữ chúng.
   `netconfig`, `networks`, `nsswitch.conf`, `os-release`, `passwd`,
   `pki/ca-trust/extracted`, `pki/tls/cert.pem`, `pki/tls/certs`,
   `pki/tls/openssl.cnf`, `protocols`, `python3*`, `resolv.conf`,
-  `selinux/config`, `services`, `ssh/ssh_config`, `ssh/ssh_config.d`,
-  `ssh/ssh_known_hosts`, `ssl/cert.pem`, `ssl/certs`, `ssl/openssl.cnf`,
-  `terminfo`, `timezone`, `userdb` và `wgetrc` (một mục có `*` đại diện cho mọi tên bắt
+  `selinux/config`, `services`, `ssl/cert.pem`, `ssl/certs`, `ssl/openssl.cnf`,
+  `terminfo`, `timezone` và `userdb` (một mục có `*` đại diện cho mọi tên bắt
   đầu như vậy). Một bí mật được giữ ở chỗ khác trong `/etc` (cấu hình của một ứng dụng,
   thông tin xác thực trong `/etc/fstab`) vẫn bị đóng ngay cả khi quyền tệp cho phép
   người dùng đọc nó. Một chương trình cần mục khác sẽ thất bại với `Permission denied`;
@@ -183,10 +184,12 @@ không dừng được nó: một lệnh hết timeout, bị hủy hoặc bị k
 được xóa bằng `docker rm -f`. Mọi lệnh, foreground hay background, chạy dưới lifeline:
 khi server chết, watchdog của nó kill client trước (để một client còn đang tạo
 container không thể khởi động nó) rồi xóa container theo tên. Mỗi container được gắn
-nhãn `linch.boot=<host boot id>:<server pid>:<start time>`; việc mở một backend docker
-xóa, ở nền, các container có nhãn của lần boot host này mà process server của chúng đã
-mất. Nó không bao giờ xóa container của một server còn sống hay của một host khác dùng
-chung daemon.
+nhãn `linch.boot=<host boot id>:<pid namespace>:<uid>:<server pid>:<start time>`; việc
+mở một backend docker xóa, ở nền, các container có nhãn mà server của chúng đã chạy
+trong lần boot host này, cùng pid namespace và cùng người dùng, và đã mất. Một container
+có server mà nó không nhìn thấy (host khác, container khác, người dùng khác dưới
+`hidepid`) được để nguyên. Một container mà client bị kill đã yêu cầu tạo nhưng chưa
+khởi động có thể còn lại cho tới khi server của nó mất; nó không chạy gì.
 
 Một container giới hạn những gì runtime của Docker giới hạn: hệ thống tệp, cây process
 và network namespace của chính nó, cùng các giới hạn ở trên. Không có gì ngoài

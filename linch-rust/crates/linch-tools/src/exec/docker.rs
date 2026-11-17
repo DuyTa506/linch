@@ -9,8 +9,9 @@
 //! command (foreground too) runs under a lifeline whose watchdog kills the
 //! client and then removes the container when the server dies. Each
 //! container carries a `linch.boot` label naming the server process that
-//! started it (host boot id, pid and start time); opening a backend
-//! removes labelled containers whose server is provably gone.
+//! started it (host boot id, pid namespace, uid, pid and start time);
+//! opening a backend removes labelled containers whose server is provably
+//! gone.
 
 use std::collections::{BTreeMap, hash_map::RandomState};
 use std::hash::{BuildHasher, Hasher};
@@ -404,11 +405,15 @@ impl Shell for DockerShell {
 }
 
 /// The server process that starts containers, as their `linch.boot` label
-/// names it: the host's boot id, the pid and the pid's start time (clock
-/// ticks since boot), which together never name another process.
+/// names it: the host's boot id, the pid namespace (the boot id is shared
+/// by every container of a host, pids are not), the user (`hidepid` hides
+/// other users' processes), the pid and the pid's start time (clock ticks
+/// since boot). Together they never name another process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Owner {
     boot: String,
+    pid_namespace: u64,
+    uid: u32,
     pid: u32,
     start: u64,
 }
@@ -417,10 +422,13 @@ impl Owner {
     /// This process, or `None` when `/proc` cannot say (then nothing is
     /// labelled or reaped).
     fn this_process() -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
         let pid = std::process::id();
         Some(Self {
             boot: boot.trim().to_owned(),
+            pid_namespace: std::fs::metadata("/proc/self/ns/pid").ok()?.ino(),
+            uid: rustix::process::getuid().as_raw(),
             pid,
             start: start_time(pid)?,
         })
@@ -430,10 +438,20 @@ impl Owner {
         let mut parts = label.split(':');
         let owner = Self {
             boot: parts.next()?.to_owned(),
+            pid_namespace: parts.next()?.parse().ok()?,
+            uid: parts.next()?.parse().ok()?,
             pid: parts.next()?.parse().ok()?,
             start: parts.next()?.parse().ok()?,
         };
         parts.next().is_none().then_some(owner)
+    }
+
+    /// Whether this process can tell if `other` runs: same host boot, pid
+    /// namespace and user.
+    fn sees(&self, other: &Self) -> bool {
+        self.boot == other.boot
+            && self.pid_namespace == other.pid_namespace
+            && self.uid == other.uid
     }
 
     /// Whether the process `owner` names still runs on this host.
@@ -444,7 +462,11 @@ impl Owner {
 
 impl std::fmt::Display for Owner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{}", self.boot, self.pid, self.start)
+        write!(
+            f,
+            "{}:{}:{}:{}:{}",
+            self.boot, self.pid_namespace, self.uid, self.pid, self.start
+        )
     }
 }
 
@@ -456,10 +478,10 @@ fn start_time(pid: u32) -> Option<u64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// The containers of `listing` (`ID LABEL` lines) to remove: those started
-/// on this host boot by a server process that is not `me` and not `alive`.
-/// A container of another host (a shared daemon), of an unreadable label,
-/// or of a live server is kept.
+/// The containers of `listing` (`ID LABEL` lines) to remove: those whose
+/// server `me` can see (see [`Owner::sees`]) is not `me` and not `alive`.
+/// A container of another host, another container or another user, of an
+/// unreadable label, or of a live server is kept.
 fn stale(listing: &str, me: &Owner, alive: impl Fn(&Owner) -> bool) -> Vec<String> {
     let mut stale = Vec::new();
     for line in listing.lines() {
@@ -469,7 +491,7 @@ fn stale(listing: &str, me: &Owner, alive: impl Fn(&Owner) -> bool) -> Vec<Strin
         let Some(owner) = Owner::parse(label.trim()) else {
             continue;
         };
-        if owner.boot == me.boot && owner != *me && !alive(&owner) {
+        if me.sees(&owner) && owner != *me && !alive(&owner) {
             stale.push(id.to_owned());
         }
     }
@@ -518,11 +540,7 @@ mod tests {
     use super::*;
 
     fn owner() -> Owner {
-        Owner {
-            boot: "b00t".into(),
-            pid: 42,
-            start: 7,
-        }
+        Owner::parse("b00t:4026531836:1000:42:7").unwrap()
     }
 
     fn open(policy: DockerPolicy) -> Result<DockerShell, ExecutionError> {
@@ -575,7 +593,7 @@ mod tests {
             args[3..6],
             ["/usr/bin/docker", "linch-x", "/usr/bin/docker"]
         );
-        let expected = "run --rm --quiet --name linch-x --label linch.boot=b00t:42:7 \
+        let expected = "run --rm --quiet --name linch-x --label linch.boot=b00t:4026531836:1000:42:7 \
                         --memory 2147483648 --cpus 2.000 \
                         --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges \
                         --network none --user 1000:1000 --env LANG -w /work/space \
@@ -672,12 +690,17 @@ mod tests {
     #[test]
     fn only_containers_of_a_dead_server_are_reaped() {
         let me = owner();
-        let listing = "c1 b00t:42:7\n\
-                       c2 b00t:43:9\n\
-                       c3 b00t:44:9\n\
-                       c4 other:43:9\n\
+        // The boot id is the host's, so servers in other containers (other
+        // pid namespaces) or of other users (hidden by `hidepid`) share it
+        // but cannot be seen: never judged dead.
+        let listing = "c1 b00t:4026531836:1000:42:7\n\
+                       c2 b00t:4026531836:1000:43:9\n\
+                       c3 b00t:4026531836:1000:44:9\n\
+                       c4 other:4026531836:1000:43:9\n\
                        c5 garbage\n\
-                       c6 b00t:43:9:extra\n";
+                       c6 b00t:4026531836:1000:43:9:extra\n\
+                       c7 b00t:4026532999:1000:43:9\n\
+                       c8 b00t:4026531836:1001:43:9\n";
         let alive = |owner: &Owner| owner.pid == 44;
         assert_eq!(stale(listing, &me, alive), ["c2"]);
         let own = Owner::this_process().unwrap();

@@ -80,8 +80,11 @@ ambient set, since a command would keep them.
   user's home (keys, `~/.ssh`, cloud config), the server's terminal, the
   rest of `/tmp`, other sessions' homes, `/opt` and every other entry of
   `/etc` are closed.
-- **`/etc`, by allowlist.** Only what a shell, coreutils, `git`, `python3`
-  and `curl` read (found by running them in the sandbox under `strace`):
+- **`/etc`, by allowlist.** What a shell, coreutils, `git`, `python3`
+  and `curl` read on Ubuntu (traced with `strace`, then run in the
+  sandbox), plus the certificate and configuration paths other
+  distributions use (`pki/*` and `crypto-policies` on Fedora,
+  `ssl/cert.pem` on Alpine and Arch):
   `alternatives`, `ca-certificates*`, `crypto-policies/back-ends`,
   `debian_version`, `fonts`, `gai.conf`, `gitattributes`, `gitconfig`,
   `gnutls/config`, `group`, `host.conf`, `hosts`, `ld.so.cache`,
@@ -90,10 +93,9 @@ ambient set, since a command would keep them.
   `netconfig`, `networks`, `nsswitch.conf`, `os-release`, `passwd`,
   `pki/ca-trust/extracted`, `pki/tls/cert.pem`, `pki/tls/certs`,
   `pki/tls/openssl.cnf`, `protocols`, `python3*`, `resolv.conf`,
-  `selinux/config`, `services`, `ssh/ssh_config`, `ssh/ssh_config.d`,
-  `ssh/ssh_known_hosts`, `ssl/cert.pem`, `ssl/certs`, `ssl/openssl.cnf`,
-  `terminfo`, `timezone`, `userdb` and `wgetrc` (a `*` entry stands for
-  every name that starts so). A secret kept elsewhere in `/etc` (an
+  `selinux/config`, `services`, `ssl/cert.pem`, `ssl/certs`,
+  `ssl/openssl.cnf`, `terminfo`, `timezone` and `userdb` (a `*` entry
+  stands for every name that starts so). A secret kept elsewhere in `/etc` (an
   application's config, `/etc/fstab` credentials) stays closed even when
   its permissions let the user read it. A program that needs another
   entry fails with `Permission denied`; name it in `read_paths`.
@@ -200,10 +202,13 @@ cancelled or killed, or whose session closes is removed with
 lifeline: when the server dies, its watchdog kills the client first (so
 a client still creating the container cannot start it) and then removes
 the container by name. Each container is labelled
-`linch.boot=<host boot id>:<server pid>:<start time>`; opening a docker
-backend removes, in the background, labelled containers of this host boot
-whose server process is gone. It never removes those of a live server or
-of another host sharing the daemon.
+`linch.boot=<host boot id>:<pid namespace>:<uid>:<server pid>:<start time>`;
+opening a docker backend removes, in the background, labelled containers
+whose server ran on this host boot, in this pid namespace and as this
+user, and is gone. A container whose server it cannot see (another host,
+another container, another user under `hidepid`) is left alone. A
+container a killed client had asked for but not yet started can remain
+until its server is gone; it runs nothing.
 
 A container confines what Docker's runtime confines: its own file system,
 process tree and network namespace, the limits above. Nothing outside the

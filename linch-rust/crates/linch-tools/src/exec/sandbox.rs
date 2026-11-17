@@ -95,7 +95,7 @@ pub(super) const SYSTEM_READ_PATHS: [&str; 9] = [
 /// `/etc` stays closed. A name ending in `*` stands for every entry that
 /// starts with the rest. Entries a host lacks are skipped; a symbolic link
 /// (`resolv.conf` into `/run`) opens its target.
-pub(super) const ETC_READ_PATHS: [&str; 46] = [
+pub(super) const ETC_READ_PATHS: [&str; 42] = [
     "alternatives",
     "ca-certificates*",
     "crypto-policies/back-ends",
@@ -132,16 +132,12 @@ pub(super) const ETC_READ_PATHS: [&str; 46] = [
     "resolv.conf",
     "selinux/config",
     "services",
-    "ssh/ssh_config",
-    "ssh/ssh_config.d",
-    "ssh/ssh_known_hosts",
     "ssl/cert.pem",
     "ssl/certs",
     "ssl/openssl.cnf",
     "terminfo",
     "timezone",
     "userdb",
-    "wgetrc",
 ];
 
 impl SandboxPolicy {
