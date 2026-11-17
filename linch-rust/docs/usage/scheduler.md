@@ -239,6 +239,68 @@ A `Job` is a dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
 The run's events are durable: read them with `agent.events(run_id)` on an
 agent of the namespace. Background runs send no live stream to any client.
 
+## Let the model schedule
+
+`schedule_tools: True` in the agent config gives the model three tools, so
+it can schedule its own follow-ups ("check the deploy every hour"):
+
+| Tool | Scope | Input | Does |
+|---|---|---|---|
+| `CreateSchedule` | `exec` | `payload`, and `cron` (with an optional `timezone`) or `interval_s` | A heartbeat of this agent in the calling run's session; answers `Scheduled <id> at <next fire>` |
+| `ListSchedules` | `read` | none | This agent's schedules, one line each: `<id>: <payload> enabled=<bool> next_fire=<time>` |
+| `CancelSchedule` | `write` | `id` | Deletes one of this agent's schedules; runs it already queued finish |
+
+```python
+config = {
+    "namespace": "acme",
+    "spec": {"model": "deepseek-chat"},
+    "provider": {"id": "deepseek"},
+    "stores": {"type": "postgres", "dsn": dsn},
+    "schedule_tools": True,
+}
+agent = await server.open_agent(config)
+run = await agent.run("ops", "Check the deploy every hour.", principal=ada)
+```
+
+The model chooses only the prompt and the timing. The server fixes the
+rest, so a schedule never gives the model more than the run that made it
+had:
+
+- **The same agent.** Every fire runs the config this agent was opened
+  with, stored as `create_schedule` stores it. No config, id, queue or
+  session comes from the tool input.
+- **The same session and principal.** Every fire is a new run in the
+  calling run's session (a [heartbeat](#heartbeat-one-session-checked-in-on),
+  so fires skip while the session is busy) and acts for the calling run's
+  principal: permission rules on `role` hold for the fires as for the run.
+- **The same caps.** A call is admitted as `create_schedule` is: the
+  tenant's `max_schedules` (counting the schedules the client made) and
+  `min_schedule_interval_ms`. A refusal is the tool's error, with code
+  `not_allowed`, `limit_reached` or `invalid_schedule`; the run goes on.
+- **Its own schedules only.** `ListSchedules` and `CancelSchedule` see the
+  schedules of the agent's namespace that run this same config, whoever
+  made them: not another agent's, nor another namespace's.
+- **Not from a subagent.** A subagent may hold fewer tools than the agent a
+  schedule runs, so its `CreateSchedule` gets an error.
+- **Asked like any exec tool.** `CreateSchedule` asks in modes `default` and
+  `accept_edits`. A fire that calls it with nobody to approve suspends;
+  give the background runs a mode or rules that allow what they must do.
+
+The fires queue on the `default` queue. A fire's run has the tools too,
+so it can schedule again, within the same caps.
+
+`open_agent` refuses `schedule_tools`:
+
+| Refusal | When |
+|---|---|
+| `NotAllowed`, `kind == "schedule_tools"` | The tenant's allowlists have no `max_schedules` (deny by default), or the connection is local: a stdio server runs no worker, and a local client has no caps |
+| `NotBackground`, `.reason` | Memory stores, host tools or callbacks: the fires could not run the same agent |
+
+A worker must serve the agent's database ([Run a worker](#run-a-worker));
+the server cannot see a worker in another process, so `max_schedules` is
+the operator's word that one runs. A worker also checks it again at every
+fire: a tenant whose `max_schedules` was removed fails the fire's job.
+
 ## Durability
 
 - **Each fire is queued exactly once.** A due schedule's row is locked, its
@@ -267,7 +329,7 @@ agent of the namespace. Background runs send no live stream to any client.
 | `ScheduleExists` (-32042) | `create_schedule` with an id the namespace has |
 | `JobNotFound` (-32043) | `job` of an id the namespace lacks, or whose history was pruned |
 | `InvalidSchedule` (-32044) | A cron pattern that does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `.reason` |
-| `NotAllowed` (-32004) | A tenant without `max_schedules` or `max_queued_jobs`, or a schedule faster than `min_schedule_interval_ms`, or a principal of another tenant; `.kind` |
+| `NotAllowed` (-32004) | A tenant without `max_schedules` or `max_queued_jobs`, or a schedule faster than `min_schedule_interval_ms`, or a principal of another tenant; `.kind`. From `open_agent`: `schedule_tools` without `max_schedules`, or on a local connection (`kind == "schedule_tools"`) |
 | `LimitReached` (-32005) | The tenant holds its `max_schedules` (`kind == "schedules"`) or `max_queued_jobs` (`kind == "jobs"`) |
 
 All are `SchedulerError`s except the last two.
@@ -282,7 +344,7 @@ All are `SchedulerError`s except the last two.
 | `cancel_schedule` disables future fires | `pause_schedule`, `resume_schedule` and `delete_schedule` |
 | The host passes an `agent_factory` to its `Worker` | The agent's config is stored with the schedule; the server's worker opens it |
 | `RunRequest.principal` is restored by the worker | `principal=` on `create_schedule` and `enqueue`, given to every fire's run |
-| `register_schedule_tools` lets the model schedule | Not available yet |
+| `register_schedule_tools` lets the model schedule; the host binds a session | `schedule_tools: True`: the server binds the agent, its session is the calling run's ([below](#let-the-model-schedule)) |
 | Missed fires catch up in order | The same |
 
 ## Related pages

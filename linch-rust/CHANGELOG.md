@@ -8,6 +8,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Added
 
+- Schedule tools: `schedule_tools: true` gives the model `CreateSchedule` (exec), `ListSchedules` (read) and `CancelSchedule` (write), Python's `register_schedule_tools`. A model-made schedule runs the same stored agent in the calling run's session for its principal, under the tenant's `max_schedules` and `min_schedule_interval_ms` (the `schedule.create` admission); the model lists and cancels only its own agent's schedules, and a subagent cannot create one. Off by default; `agent.open` refuses it without `max_schedules`, on a local connection, or for an agent that cannot run in the background.
+
 - Cancel a suspended run: `Agent::cancel`, `run.cancel` with an `agent` handle, and `Agent.cancel(run_id)` / `Run.cancel()` in Python end a run waiting for an approval or an answer, from any process and across restarts on Postgres; each pending call gets a `Tool call aborted` result so the session stays paired, the run ends `aborted`, and a late approve or answer gets `RunTerminal`.
 - Execution backends: `AgentConfig.execution` runs `Bash` (foreground and
   background) through `local` (the default, unchanged), `sandbox` or

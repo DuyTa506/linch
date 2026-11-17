@@ -170,6 +170,7 @@ absent, except `bash`.
 | `bash` | `True` | Whether the workspace tools include `Bash`, `BashOutput` and `BashKill`. Unused without a workspace |
 | `execution` | `local`: `Bash` runs as the server's user | Where `Bash` runs: a `SandboxExecution` (Landlock, seccomp, rlimits) or a `DockerExecution` ([Sandbox](./sandbox.md)). Part of the run contract unless `local` |
 | `ask_user` | `False` | Whether the model has `AskUser`, which suspends the run until you answer ([Tools](./tools.md#ask-the-user)) |
+| `schedule_tools` | `False` | Whether the model has `CreateSchedule`, `ListSchedules` and `CancelSchedule`, which schedule runs of this agent; needs a tenant with `max_schedules` ([Scheduler](./scheduler.md#let-the-model-schedule)) |
 | `permissions` | mode `default`, project root the workspace (or `/`) | Which calls run, ask or are denied ([below](#permissions), [Security](./security.md#permission-modes)) |
 | `mcp_servers` | `[]` | MCP servers connected in order when the agent opens ([below](#mcp_servers)) |
 | `skills` | `False` | The `Skill` tool, with the built-in `verify` skill and those in `config_dir/skills` ([Skills](./skills.md)) |

@@ -14,6 +14,7 @@ which calls run, ask or are denied.
 | Virtual filesystem: `ls`, `read_file`, `write_file`, `edit_file` | In the server, over text files kept in the stores | `filesystem` |
 | MCP tools: `mcp__<server>__<tool>` | In the MCP server | `mcp_servers` |
 | Session tasks: `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate` | In the server | `tasks` ([Tasks](./tasks.md)) |
+| Schedules: `CreateSchedule`, `ListSchedules`, `CancelSchedule` | In the server; a worker runs the fires | `schedule_tools` ([below](#schedule-tools)) |
 | `Skill`, `Subagent`, `SubagentContinue`, `TaskStop`, `send_message` | In the server | `skills`, `subagents`, `workers`, `mailbox` ([Skills](./skills.md), [Subagents](./subagents.md)) |
 | `tool_search` | In the server | `tool_search` ([Agent config](./agent.md#top-level-fields)) |
 
@@ -663,6 +664,18 @@ Postgres it is.
   its call gets an error saying the run cannot wait for the user.
 - A response that both asks and needs an approval suspends for the approval
   first, then for the answer.
+
+## Schedule tools
+
+`schedule_tools: True` gives the model `CreateSchedule` (scope `exec`),
+`ListSchedules` (`read`) and `CancelSchedule` (`write`), Python's
+`register_schedule_tools`. A schedule it creates runs this same agent, in
+the calling run's session, for the calling run's principal, under the
+tenant's schedule caps; it lists and cancels only this agent's schedules.
+It needs Postgres stores, no host tools or callbacks, and a tenant whose
+allowlists give it `max_schedules`, and it is off by default: with it off
+the tool list and the run contract are as before. Everything else is in
+[Scheduler](./scheduler.md#let-the-model-schedule).
 
 ## Virtual filesystem
 
