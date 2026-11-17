@@ -164,3 +164,24 @@ async def test_two_agents_with_the_same_handle_on_two_connections_do_not_collide
     assert alive(second)
     host.close("c2/agent-1")
     await until(lambda: not alive(second), "close did not kill the other command")
+
+
+async def test_a_command_sees_only_the_hosts_identity_and_the_servers_allowed_variables(
+    monkeypatch: pytest.MonkeyPatch, host: SubprocessHost
+) -> None:
+    monkeypatch.setenv("LINCH_TEST_DSN", "postgres://u:pw-sentinel@h/db")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "key-sentinel")
+    await host.start(
+        ExecStart("c1/agent-1", "exec-1", "env", None, {"LANG": "C.UTF-8"}, False, "s1")
+    )
+    out = ""
+    while True:
+        chunk = await host.read("c1/agent-1", "exec-1", 2.0)
+        out += chunk.stdout
+        if chunk.exit is not None:
+            break
+    names = {line.split("=", 1)[0] for line in out.splitlines() if "=" in line}
+    # `sh` itself adds PWD, OLDPWD and `_`.
+    allowed = {"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "PWD", "OLDPWD", "_"}
+    assert names <= allowed, names
+    assert "sentinel" not in out
