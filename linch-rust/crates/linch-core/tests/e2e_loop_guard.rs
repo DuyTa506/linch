@@ -13,8 +13,8 @@ use linch_core::hooks::{BeforeProviderCall, BeforeProviderCallResponse};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, Message, PermissionMode, Role, RunId,
-    RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, ToolScope,
+    Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, LoopGuard, Message, PermissionMode,
+    Role, RunId, RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, ToolScope,
 };
 use serde_json::{Value, json};
 
@@ -220,32 +220,41 @@ async fn an_identical_failing_call_is_the_failure_streaks() {
 }
 
 /// A `before_provider_call` hook that always skips the call is bounded with
-/// `max_turns` unset: 25 turns in a row may end without a call, and the run
-/// ends at the next one, having paid for nothing.
+/// `max_turns` unset, and with both tool-call checks off: 25 turns in a row
+/// may end without a call, and the run ends at the next one, having paid
+/// for nothing.
 #[tokio::test]
 async fn an_always_skipping_hook_ends_the_run_without_max_turns() {
-    let stores = Arc::new(Stores::default());
-    let provider = Arc::new(Replay::new(Vec::new()));
-    let agent = agent_on(
-        spec(),
-        provider.clone(),
-        always_skip(),
-        stores.clone(),
-        &Runs::default(),
-    );
-    let stream = agent.run("go", RunOptions::new("s1"));
-    let run_id = stream.run_id().clone();
-    finish(stream).await;
+    let mut checks_off = spec();
+    checks_off.loop_guard = LoopGuard {
+        max_identical_tool_calls: 0,
+        max_consecutive_failures: 0,
+        ..LoopGuard::default()
+    };
+    for spec in [spec(), checks_off] {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Replay::new(Vec::new()));
+        let agent = agent_on(
+            spec,
+            provider.clone(),
+            always_skip(),
+            stores.clone(),
+            &Runs::default(),
+        );
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        finish(stream).await;
 
-    let (status, events) = ended(&stores, &run_id).await;
-    assert_eq!(status, RunStatus::Failed);
-    assert!(provider.calls().is_empty());
-    let guard = guards(&events);
-    assert_eq!(guard.len(), 1, "{guard:?}");
-    assert_eq!(guard[0]["reason"], "idle_turns");
-    assert_eq!(errors(&events), ["LoopGuardError"]);
-    let session = messages(&*stores, "s1").await;
-    assert_eq!(session.len(), 1 + 25, "the prompt and 25 skipped turns");
+        let (status, events) = ended(&stores, &run_id).await;
+        assert_eq!(status, RunStatus::Failed);
+        assert!(provider.calls().is_empty());
+        let guard = guards(&events);
+        assert_eq!(guard.len(), 1, "{guard:?}");
+        assert_eq!(guard[0]["reason"], "idle_turns");
+        assert_eq!(errors(&events), ["LoopGuardError"]);
+        let session = messages(&*stores, "s1").await;
+        assert_eq!(session.len(), 1 + 25, "the prompt and 25 skipped turns");
+    }
 }
 
 /// Continue whatever a crash left: resume, or run again if never created.
