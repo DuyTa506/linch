@@ -443,8 +443,14 @@ class ToolRetry(TypedDict, total=False):
     that ran past the call timeout), and attempts are left. A tool that is
     not idempotent is never run twice, whatever `tools` lists. Each retry
     is durable before it runs: a `ToolRetryEvent` is written first, and a
-    crash leaves the call interrupted, never repeated. A remote tenant may
-    ask for at most 5 attempts and a 60 s wait.
+    crash leaves the call interrupted, never repeated. A call's retries
+    stop together once five minutes have passed since its first attempt,
+    and the event's `error` is redacted (with `spec.redaction`) and cut to
+    512 bytes. A timed-out host tool call is cancelled with a notification
+    the client does not acknowledge, so the next attempt may start while
+    the handler is still winding down: an idempotent host tool must
+    tolerate two overlapping calls. A remote tenant may ask for at most 5
+    attempts and a 60 s wait.
 
     Attributes:
         max_attempts: Most attempts of one call, the first included; at
@@ -469,16 +475,26 @@ class ToolCache(TypedDict, total=False):
     """Which read tools' results are reused, as `spec.tool_cache`.
 
     Off when absent. A call of a tool named in `tools` with the same
-    canonical input, in the same agent namespace, is served from the cache
-    while its entry lives: permission and the `pre_tool_use` and
-    `post_tool_use` hooks still run, and the call's `ToolCallEndEvent` has
-    `cache_hit` set. Only a successful result of a read-scope tool is
-    stored, after redaction and before `post_tool_use`. Naming a tool is a
-    promise that it returns the same for the same input for every session
-    of the namespace: do not name one that reads session state. With
-    Postgres stores the cache is a table shared by the namespace's
-    servers; otherwise it lives in the agent. A remote tenant may use it
-    only when its server allows.
+    canonical input, in the same agent namespace and session, is served
+    from the cache while its entry lives: permission and the
+    `pre_tool_use` and `post_tool_use` hooks still run, and the call's
+    `ToolCallEndEvent` has `cache_hit` set. `tool_execute` layers do not
+    run on a hit, so a layer that must see every result belongs in
+    `post_tool_use`. Only the tool's own successful result is stored,
+    after the output schema check and redaction and before
+    `post_tool_use`: without `spec.redaction` over tool results it is
+    stored as the tool returned it. A result a `tool_execute` layer
+    vetoed or replaced is never stored. A write or exec tool's call clears
+    the namespace, and a read that began before the clear never stores its
+    result. The first call that starts background work (`Bash` with
+    `run_in_background`, a background subagent) ends caching for the
+    agent. A tool that keeps session state, such as `Read` (which records
+    what the session saw so `Edit` may follow), cannot be named. The key
+    has no tool version: after a tool changes, old entries live until
+    their ttl. With Postgres stores the cache is a table shared by the
+    namespace's servers; otherwise it lives in the agent. A remote tenant
+    may use it only when its server allows, with redaction over tool
+    results, and within a byte cap for all its namespaces together.
 
     Attributes:
         tools: Names of the cacheable tools; required, never empty.
@@ -490,6 +506,12 @@ class ToolCache(TypedDict, total=False):
         invalidate_on_write: Whether a write or exec tool's call clears the
             namespace's entries, before it starts and after it ends; true
             when absent.
+        scope: `"session"` (the default): an entry serves only the session
+            that stored it, since a read tool may answer per session.
+            `"namespace"`: every session of the namespace shares entries,
+            your promise that the tool answers the same for the same input
+            whoever asks; a remote tenant needs its server's
+            `tool_cache_shared`.
     """
 
     tools: list[str]
@@ -497,6 +519,7 @@ class ToolCache(TypedDict, total=False):
     max_entries: int
     max_value_bytes: int
     invalidate_on_write: bool
+    scope: Literal["session", "namespace"]
 
 
 class DeepAgentProfile(TypedDict):

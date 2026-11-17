@@ -194,10 +194,19 @@ def tool_middleware(
     to_millis(park_timeout, "park_timeout")
 
     def wrap(fn: ToolMiddlewareFn) -> Callback:
-        parked: dict[Any, _Parked] = {}
+        parked: dict[tuple[Any, ...], _Parked] = {}
 
         async def answer(request: dict[str, Any]) -> dict[str, Any]:
-            token = request.get("token")
+            # A token counts per agent and the request does not name the
+            # agent, so one decorated layer shared by two agents, or by two
+            # connections, sees equal tokens. The run and the call tell
+            # them apart: run ids are unique.
+            token = (
+                request.get("run_id"),
+                request.get("tool_use_id"),
+                request.get("attempt"),
+                request.get("token"),
+            )
             if request.get("phase") == "after":
                 waiting = parked.pop(token, None)
                 if waiting is None:

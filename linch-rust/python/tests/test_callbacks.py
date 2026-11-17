@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -369,3 +370,36 @@ async def test_a_post_tool_use_callback_mutates_the_result() -> None:
         envelopes = [e async for e in run]
 
     assert _end_text(envelopes) == "[scrubbed]"
+
+
+async def test_one_tool_middleware_shared_by_two_agents_keeps_its_calls_apart() -> None:
+    inflight = 0
+    both = asyncio.Event()
+
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        nonlocal inflight
+        inflight += 1
+        if inflight == 2:
+            both.set()
+        # Both calls are inside the layer at once, each with token 0.
+        await asyncio.wait_for(both.wait(), 5)
+        return q
+
+    @tool_middleware("wrap", 1)
+    async def wrap(call: dict[str, Any], next: Any) -> dict[str, Any]:
+        result = await next()
+        return {"output": {"value": f"[{result['output']['value']}]"}}
+
+    async def drain(agent: Any) -> list[Envelope]:
+        run = await agent.run("s1", "go")
+        return [e async for e in run]
+
+    first = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("Done.")]
+    second = [tool_turn("call_1", "lookup", {"q": "y"}), text_turn("Done.")]
+    async with Server() as server:
+        a = await server.open_agent(config(first), tools=[lookup], callbacks=[wrap])
+        b = await server.open_agent(config(second), tools=[lookup], callbacks=[wrap])
+        got = await asyncio.gather(drain(a), drain(b))
+
+    assert [_end_text(envelopes) for envelopes in got] == ["[x]", "[y]"]

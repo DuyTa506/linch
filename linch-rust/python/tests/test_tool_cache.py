@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from scripted import MODEL, config, text_turn, tool_turn
 
@@ -39,6 +39,35 @@ async def test_a_repeated_call_is_served_from_the_cache() -> None:
         ("call_2", True),
         ("call_3", False),
     ]
+
+
+async def _second_session_hits(scope: Literal["session", "namespace"]) -> bool:
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        return "found"
+
+    turns = [
+        tool_turn("call_1", "lookup", {"q": "x"}),
+        text_turn("One."),
+        tool_turn("call_2", "lookup", {"q": "x"}),
+        text_turn("Two."),
+    ]
+    cache: ToolCache = {"tools": ["lookup"], "scope": scope}
+    hits: list[bool] = []
+    async with Server() as server:
+        agent = await server.open_agent(caching(turns, cache), tools=[lookup])
+        for session in ("s1", "s2"):
+            run = await agent.run(session, "go")
+            envelopes = [e async for e in run]
+            [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+            hits.append(end.cache_hit)
+    assert hits[0] is False
+    return hits[1]
+
+
+async def test_another_session_is_served_only_when_the_scope_is_the_namespace() -> None:
+    assert await _second_session_hits("session") is False
+    assert await _second_session_hits("namespace") is True
 
 
 async def test_a_tool_the_cache_does_not_name_always_runs() -> None:
