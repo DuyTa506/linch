@@ -292,10 +292,12 @@ A definition holds the config's secrets in plain text, so
 `prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) deletes
 the ones no schedule, no unfinished job and no history row of a run that
 is not terminal names, after setting `agent` to NULL on failed jobs (never
-run again). A run suspended for an approval or an answer so keeps its
-definition for the job that continues it, until its history row is pruned
-(`history_retention`); after that, `enqueue_resume` and `enqueue_approve`
-refuse it. A worker runs it with the history
+run again) whose run is terminal. A run suspended for an approval or an
+answer so keeps its definition for the job that continues it: `prune_history`
+keeps a history row or failed job that names a definition while its run is
+not terminal, and deletes it at the first prune after the run ends.
+`enqueue_resume` and `enqueue_approve` refuse a run whose named definition
+is gone (`WorkerError::Invalid`). A worker runs it with the history
 pruning, from its first poll and every 10 minutes after, whether or not it
 keeps history. A writer storing a definition locks its row
 (`ON CONFLICT ... DO UPDATE`) until it commits, and the prune locks its

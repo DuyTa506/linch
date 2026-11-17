@@ -944,7 +944,17 @@ error or a timeout is a miss: the model never sees it. An abort of the run
 also cuts a lookup short. A clear that fails or times out may leave stale
 entries, so caching ends for the agent. The clear after a write is not cut
 by an abort, since the write may already have changed state; it is still
-bounded by the 2 seconds.
+bounded by the 2 seconds. A failed clear is tried once more before caching
+ends, and the server writes a `tracing` warning when it does
+(`the tool cache stopped for an agent`, with the reason; see
+[Server](./server.md#logging)).
+
+**The window after a failed clear.** Stopping caching protects only the agent
+that failed to clear: the entries stay in the table, so another agent of the
+namespace, and another server that shares the Postgres cache, serves them
+until their ttl (an hour by default for a tenant), though a write has changed
+what they hold. Keep `ttl_ms` short where a stale answer costs something, and
+leave `tool_cache` off a workspace that several servers write to.
 
 **Bounds.** Entries are bounded per namespace (`max_entries`,
 `max_value_bytes`). A Postgres put also deletes a bounded batch of expired

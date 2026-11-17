@@ -132,7 +132,8 @@ Không có gì được spawn; mọi nhánh chạy trong task của bên gọi. 
 phát một event tiến độ. Mỗi lời gọi phát một `WorkflowEvent` tới
 sink `on_event` tùy chọn, với kind là `phase`, `step_start`, `step_end`,
 `step_replayed`, `agent_start`, `agent_end`, `agent_replayed`,
-`interrupt_requested`, `interrupt_resolved` hoặc `interrupt_replayed`
+`interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` hoặc
+`interrupt_stale`
 (`crates/linch-core/src/events/kinds/skills.rs:50`).
 
 ### Quy tắc phát lại
@@ -141,8 +142,11 @@ Một lời gọi được xác định bằng một khóa nội dung cộng v�
 nhiêu lời gọi với khóa đó đã đến trước nó trong run này (`workflow.rs:43-51`). Các khóa
 là digest được tách miền: `step_key` của tên và khóa input tùy chọn,
 `agent_key` của tên và prompt, `interrupt_key` chỉ của khóa, nên một
-payload có thể đổi giữa các lần resume mà không mất câu trả lời
-(`journal.rs:164-196`). Hàm phải đi lại cùng một đường: rẽ nhánh
+câu trả lời đã ghi journal được replay bất kể payload. Một câu trả lời chưa ghi journal
+(`resume`) chỉ áp dụng cho câu hỏi mà workflow đang bị park ở đó: khóa của interrupt đã
+lưu và digest chuẩn tắc của payload của nó phải bằng của lời gọi, nếu không câu trả lời bị
+bỏ cùng một event `interrupt_stale` và interrupt hỏi lại (`interrupt.rs`, `is_awaited`;
+`engine.rs` đọc interrupt đã lưu khi claim workflow). Hàm phải đi lại cùng một đường: rẽ nhánh
 theo một giá trị đã ghi journal thì được, rẽ nhánh theo đồng hồ, số ngẫu nhiên hay
 môi trường thì không, trừ khi giá trị đó đến từ một step.
 

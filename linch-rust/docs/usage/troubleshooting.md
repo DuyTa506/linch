@@ -39,6 +39,12 @@ exception class tells you its family:
 | `[Errno 2] No such file or directory: <path>` (`FileNotFoundError`) | `LINCH_SERVER_BIN` or `binary=` names a file that does not exist | Point it at the built binary |
 | A field documented here is refused as unknown (`ProtocolError`, -32602) | The server binary is older than the client: an old wheel, or a stale cargo build that the search still prefers | Reinstall the wheel, or rebuild with `cargo build -p linch-server` |
 
+The server writes its own log to stderr: warnings and errors by default,
+more with `LINCH_LOG=info` (or `debug`). A failed scheduled job, a retry, a
+pruning error and a workflow journal failure show there and nowhere else
+([Server](./server.md#logging)). A server started by `Server()` writes it to
+the stderr of your process.
+
 ## The `Server` object
 
 | Message | Cause | Fix |
@@ -55,7 +61,7 @@ exception class tells you its family:
 | `a server address is unix:PATH, ws://HOST:PORT/rpc or wss://...` (`ValueError`) | Another scheme, such as `http://`, or a bare path | Copy the address the server printed at startup |
 | `[Errno 2] No such file or directory` or `[Errno 111] Connect call failed` (`OSError`) | Nothing listens there | Start `linch-server --config`, or fix the path or port |
 | `authentication required: the first message must be connection.auth with a valid token (code -32003)` on the socket, `the server refused the token (HTTP 401) (code -32003)` on the WebSocket (`Unauthenticated`) | The token is not in the server's config | Use a token of the config; the server read its variables at startup |
-| `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | The tenant holds `max_connections` connections | Close one, or raise the tenant's `max_connections` |
+| `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | The tenant holds `max_connections` connections, one of them maybe a client that vanished without closing, which the server ends after about a minute ([liveness](./server.md#liveness)) | Close one, or raise the tenant's `max_connections`; retry after a minute if a client died |
 | `at most <n> logins at once; try again once one ends` (`LimitReached`, `kind == "logins"`) | 32 socket connections wait to log in at once | Retry with backoff; the server is busy, not gone |
 | `at most <n> agents at once; try again once one ends` (`LimitReached`, `kind == "agents"`) by `open_agent` | The tenant keeps `max_agents` agents open, across its connections | Close agents it no longer uses, or raise the tenant's `max_agents` |
 | `stores.max_connections <n> is above the tenant's max_pool_connections <max>` (`NotAllowed`, `kind == "pool_connections"`) by `open_agent` | The config asks for a larger Postgres pool than the tenant may have | Ask for at most `<max>`, leave `max_connections` out, or raise the tenant's `max_pool_connections` (see [Stores](./stores.md#connections-and-pools) before going past 32) |

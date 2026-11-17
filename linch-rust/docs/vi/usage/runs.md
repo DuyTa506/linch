@@ -539,6 +539,11 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   được resume đọc lại từ journal những gì còn đang chờ: một steer chỉ được ghi vào
   log một lần, dù lần crash cắt ngang lần ghi nào. Với kho memory không có gì sống
   sót qua process, nên steer cũng vậy.
+- **Một steer thất bại sau khi claim.** Một run bị tạm dừng được claim để ghi rồi trả lại
+  trạng thái cũ. Nếu lần ghi trả lại đó thất bại, run có thể hiển thị `running` dù nó vẫn
+  đang tạm dừng và không ai điều khiển nó. Nó không bị kẹt: `approve`, `answer`, `cancel`
+  và `resume` mỗi cái vẫn kết thúc hoặc tiếp tục được nó, và một steer gửi lại với cùng id
+  chỉ được nhận một lần.
 - **Một lời gọi được gửi lại.** `steer_id` đặt tên cho steer (chữ cái, chữ số và
   `-_.:`, tối đa 128 byte). Gửi lại với cùng id sau khi câu trả lời bị rớt, steer
   chỉ được nhận một lần. Một lời gọi thất bại vì run đã dừng trước đó (`RunExists`,
@@ -547,8 +552,10 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   lời gọi nhận `RunLeased` (kèm `expires_in`), như `approve`, và run có server đã
   crash mà lease chưa hết hạn cũng vậy.
 - **Giới hạn.** Tối đa 16 KiB văn bản, không để trống (`InvalidSteer`, -32038,
-  `reason`), và tối đa 16 steer mà run chưa đọc (`LimitReached`, `kind` là
-  `steers`). Một tenant chỉ steer các run của agent của chính nó: run id của
+  `reason`), và tối đa 16 steer mà run chưa đọc, tính cả những steer còn đang chờ
+  bước kế tiếp của nó (`LimitReached`, `kind` là `steers`): quá 16 thì lời gọi bị từ
+  chối ngay, nên các steer đang chờ không bao giờ chiếm chỗ request của kết nối và
+  một `cancel` trên nó luôn được đọc. Một tenant chỉ steer các run của agent của chính nó: run id của
   namespace khác là `RunNotFound`.
 - **Kiểm tra prompt.** Việc redact prompt và các callback `user_prompt_submit` xem
   một steer như một prompt, với `source` là `"steer"` trong request của callback.

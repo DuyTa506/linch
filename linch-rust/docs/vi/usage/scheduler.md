@@ -53,7 +53,7 @@ worker (không có `socket` hay `http`); khi đó các tenant của nó không c
 | `poll_interval_ms` | 1000 | Thời gian chờ dài nhất giữa các lần poll; các lịch đến hạn được kiểm tra mỗi interval một lần |
 | `visibility_timeout_ms` | 30000 | Một job đã được nhận vẫn bị ẩn bao lâu khi không có heartbeat. Hãy giữ `stores.lease_ttl_ms` của các agent không dài hơn mức này |
 | `retry_delay_ms` | 5000 | Thời gian chờ trước lần thử kế tiếp của một job thất bại; nhân đôi mỗi lần, tối đa 5 phút |
-| `history_retention_ms` | 7 ngày | Các job đã kết thúc và job thất bại còn đọc được bao lâu bằng `job` và `jobs` |
+| `history_retention_ms` | 7 ngày | Các job đã kết thúc và job thất bại còn đọc được bao lâu bằng `job` và `jobs`; job của một run chưa terminal được giữ lâu hơn ([cái gì bị dọn](#cái-gì-bị-dọn)) |
 | `local_namespaces` | không có | Các namespace root nằm ngoài mọi tenant mà nó cũng chạy job của, không kiểm tra (các lịch do một client stdio tạo); `dev` bao gồm `dev` và `dev/...` |
 
 Bạn có thể chạy bao nhiêu server như vậy trên một cơ sở dữ liệu tùy ý: mỗi lần kích hoạt
@@ -109,11 +109,29 @@ Các hàng job, history và lịch gọi cấu hình bằng digest SHA-256 của
 lời `schedule.*` hay `job.*` nào, không lỗi nào mang các giá trị của nó, kể cả lỗi của một
 run nền mà worker không mở được. Lỗi của chính một run thì khác: nó chứa những gì provider,
 một tool hay một MCP server đã nói, và một endpoint lặp lại một credential nó nhận được sẽ
-đưa credential đó vào đó, như với một run được khởi động trực tiếp. Một cấu hình đã lưu bị xóa khi không lịch nào và không
-job chưa xong nào gọi tên nó: một worker kiểm tra từ lần poll đầu tiên và cứ 10 phút một lần
+đưa credential đó vào đó, như với một run được khởi động trực tiếp. Một cấu hình đã lưu bị xóa khi không lịch nào, không
+job chưa xong nào và không run chưa terminal nào gọi tên nó: một worker kiểm tra từ lần poll đầu tiên và cứ 10 phút một lần
 sau đó (`prune_definitions`). Hãy giữ secret ra khỏi cấu hình được lập lịch khi có thể (một
 key mà server đọc từ môi trường của nó thì không bao giờ được lưu), và bảo vệ cơ sở dữ liệu
 như bạn bảo vệ các secret đó.
+
+## Cái gì bị dọn
+
+Một worker dọn cứ 10 phút một lần: history của các job đã kết thúc và các job thất bại cũ hơn
+`history_retention_ms`, và các cấu hình đã lưu mà không ai gọi tên. Một hàng history hoặc job
+thất bại gọi tên một cấu hình đã lưu được giữ lại khi run của nó chưa terminal (đang suspend
+chờ approval hoặc câu trả lời, hoặc job của nó đã thất bại), dù cũ đến đâu: đó là cách
+`approve` và `resume` tìm ra agent để tiếp tục run. Lần dọn kế tiếp sau khi run kết thúc xóa
+hàng đó rồi xóa cấu hình.
+
+**Run và session không bị dọn.** Chỉ job và history của chúng bị dọn. Mỗi lần fire để lại một
+run (event và checkpoint của nó) và, với lịch không có `session_id`, một session: khoảng 1.440
+mỗi loại mỗi ngày cho một lịch fire mỗi 60 giây, chừng nào cơ sở dữ liệu còn giữ chúng.
+Không có lời gọi server hay cài đặt nào xóa chúng, và các hàng của chúng không mang timestamp.
+Operator buộc phải xóa thì làm bằng SQL trên cơ sở dữ liệu của agent, trên `linch_runs` và
+`linch_run_events` (chỉ các run terminal) cùng `linch_sessions` và `linch_session_entries`, và
+chỉ với các run mà không job nào còn gọi tên; nên ưu tiên khoảng thời gian dài hơn, hoặc một
+heartbeat (một `session_id`) để chỉ có một session.
 
 ## Lập lịch một run
 

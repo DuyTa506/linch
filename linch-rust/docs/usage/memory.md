@@ -382,6 +382,17 @@ Recall runs before every provider call, so it is cheap by design:
 
 - The hook has a 300 ms timeout. A store that does not answer in time costs
   the request that much, and the request goes out without recall.
+- **Recall time grows with the scope's largest posting list**, the memories
+  of one scope that hold a word of the message (measured on one scope,
+  Postgres on the same host: about 80 ms at 60,000 memories and about
+  630 ms at 600,000). Above about 200,000 memories in one scope recall times
+  out on every turn: each costs the 300 ms and goes out without recall, and
+  the run continues, so a scope that grew too large shows as recall that
+  silently stopped, not as an error. Size `max_memories_per_scope` (a quarter
+  of `max_memories` when unset) so the largest scope stays well under that,
+  for example 100,000, and remember that a `max_memories` above 800,000 lets
+  a single scope pass 200,000 with the default. `MemorySearch`, which has no
+  300 ms hook but the 2 s statement timeout, is slow the same way.
 - It searches with the words of the user's message that select: English
   function words (`the`, `and`, `what`, `with`, ...), English words under 3
   letters, and a few Vietnamese particles (`và`, `của`, `là`, `những`, `các`,

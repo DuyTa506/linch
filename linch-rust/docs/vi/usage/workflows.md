@@ -82,7 +82,8 @@ về những gì nó trả về. `wf` là một `WorkflowContext`:
 `step_timeout_ms`, `deadline_ms`, `resume` (các câu trả lời cho interrupt) và
 `on_event`, nơi nhận các `WorkflowEvent`: `phase`, `agent_start`,
 `agent_end`, `agent_replayed`, `step_start`, `step_end`, `step_replayed`,
-`interrupt_requested`, `interrupt_resolved` và `interrupt_replayed`.
+`interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` và
+`interrupt_stale`.
 
 `parallel`, `settled` và `pipeline` chạy trong client. Mỗi nhánh đếm các lời gọi
 của riêng nó, dưới đường dẫn nhánh của nó, nên các nhánh đến lời gọi của mình
@@ -99,7 +100,7 @@ một digest của:
 |---|---|
 | `wf.agent` | `name` (hoặc tên của subagent), prompt, `subagent`, `output_schema`, session `fork`; với `key=` thì chỉ tên và key |
 | `wf.step` | tên step và `key` của nó |
-| `wf.interrupt` | chỉ key của interrupt; payload có thể đổi |
+| `wf.interrupt` | chỉ key của interrupt: một câu trả lời đã ghi journal được replay bất kể payload, nhưng một câu trả lời chưa ghi journal còn cần payload khớp ([bên dưới](#một-câu-trả-lời-dành-cho-câu-hỏi-đã-được-hỏi)) |
 
 Sửa một prompt chỉ làm lời gọi đó trượt record của nó; các lời gọi trước và sau
 nó, có key vẫn khớp, được replay. Đổi tên một step cũng chỉ ảnh hưởng step đó.
@@ -183,6 +184,18 @@ async def sign_flow(wf: WorkflowContext) -> str:
 đầu cùng id với `resume={"approve": True}` (từ bất kỳ process nào). Câu trả lời
 được ghi journal, nên nó không bao giờ bị hỏi lại.
 
+### Một câu trả lời dành cho câu hỏi đã được hỏi
+
+Một câu trả lời chỉ áp dụng cho câu hỏi mà workflow đang bị park ở đó: cùng key và payload
+bằng nhau (so sánh bằng digest chuẩn tắc). Nếu bản nháp bị sửa giữa lúc hỏi và lúc resume,
+lời gọi hỏi lại với payload hiện có: câu trả lời lỗi thời bị bỏ, một event `interrupt_stale` báo việc
+đó, không có gì được ghi journal, và workflow được lưu là `awaiting_input` với câu hỏi đó.
+Hãy trả lời câu hỏi đó. Vì vậy hãy trả lời interrupt mà `workflow_status` nêu tên, với payload
+mà hàm sẽ dựng lại; một lần resume mang câu trả lời cho một workflow chưa từng bị park, hoặc
+cho một interrupt khác với cái đã lưu (interrupt thứ hai trong cùng lần resume), cũng sẽ hỏi
+lại. Nếu server crash sau khi nhận workflow và trước khi câu trả lời được ghi journal, câu
+hỏi đã lưu không còn (trạng thái là `running`): hãy hỏi và trả lời lại.
+
 Một lần crash sau khi signer đã chạy nhưng trước khi record của step được ghi
 khiến lần resume chạy lại hàm. Journal không phân biệt được "chưa từng chạy" với
 "đã chạy rồi mới crash", nên chốt chặn là key: hàm được gọi lại với **cùng**
@@ -224,6 +237,18 @@ các record của một writer cũ. `workflow.finish` (được gửi khi `run_w
 thúc, kể cả khi bị hủy) giải phóng workflow; một client chết thì để việc đó cho
 kết nối của nó kết thúc, nên hãy thử lại một lần start nhận `WorkflowHeld` sau một
 lần crash.
+
+Một client biến mất mà không đóng kết nối (mất điện, đứt route) kết thúc theo cùng cách một khi
+server nhận ra: nó đặt TCP keepalive trên mọi socket được chấp nhận (30 giây nhàn rỗi, 3
+probe cách nhau 10 giây, tức khoảng một phút) và một TCP user timeout cùng độ dài, ping mỗi
+WebSocket cứ 30 giây, và kết thúc cái nào không gửi gì trong 60 giây. Cho đến lúc đó kết nối
+vẫn giữ chỗ trong `max_connections` của tenant và hold của workflow, nên một lần start thay
+thế nhận `WorkflowHeld` trong khoảng một phút; các mốc thời gian là phần
+[`liveness`](./server.md#liveness) của cấu hình server. Kết nối cơ sở dữ liệu riêng của hold
+đặt các keepalive của Postgres (`tcp_keepalives_idle` 30 giây, `tcp_keepalives_interval` 10
+giây, `tcp_keepalives_count` 3), nên một máy chủ server biến mất giải phóng lock sau khoảng
+một phút chứ không phải sau mặc định của hệ điều hành (hai giờ). Một Unix socket không cần cả
+hai: kernel đóng nó khi process của đầu bên kia kết thúc.
 
 Một server bị kill để lại run con của lời gọi nó đang drive ở trạng thái bền vững
 cuối cùng, cùng lease của nó (từ 1 giây đến vài phút, `stores.lease_ttl_ms`). Lời
@@ -277,7 +302,13 @@ node có thể được thử lại bao nhiêu lần tùy ý và run chỉ xảy
   `workflow.start` kế tiếp.
 - Deadline và timeout của step được thực thi trong client; một client chết thì
   không giữ cái nào. `timeout_ms` của một lời gọi agent được server thực thi.
-- Một agent dùng store bộ nhớ chỉ ghi journal trong vòng đời kết nối của nó.
+- Một agent dùng store bộ nhớ chỉ ghi journal trong vòng đời kết nối của nó: sau một kết nối
+  mới (hoặc một lần khởi động lại server) workflow chạy lại từ step đầu tiên, **kể cả các
+  step**, vì journal trống. Một `workflow.start` mang câu trả lời `resume` cho một workflow mà
+  journal không có gì bị từ chối (`-32049`, `WorkflowNoJournal`) thay vì chạy lại tất cả với
+  những câu trả lời không có gì để trả lời. Một start không có câu trả lời không bị từ chối:
+  đó là cách một workflow bắt đầu. Hãy dùng store Postgres cho workflow phải sống sót qua một
+  kết nối.
 
 Các method trên wire nằm ở [RPC](../architecture/rpc.md#các-method-workflow) và
 engine nằm ở [Extensions](../architecture/ext.md#workflows-qua-rpc).

@@ -282,10 +282,12 @@ admit lại theo tenant của nó ở mỗi lần thử ([RPC](./rpc.md#run-nề
 Một định nghĩa giữ các secret của cấu hình dưới dạng văn bản thuần, nên
 `prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) xóa những định nghĩa mà
 không lịch nào, không job chưa xong nào và không hàng history nào của một run chưa terminal
-gọi tên, sau khi đặt `agent` thành NULL trên các job đã thất bại (không bao giờ chạy lại).
-Vì vậy một run suspend chờ approval hoặc câu trả lời giữ định nghĩa của nó cho job tiếp tục
-nó, đến khi hàng history của nó bị dọn (`history_retention`); sau đó `enqueue_resume` và
-`enqueue_approve` từ chối nó. Một worker chạy nó cùng việc dọn history, từ lần poll
+gọi tên, sau khi đặt `agent` thành NULL trên các job đã thất bại (không bao giờ chạy lại)
+mà run của chúng đã terminal. Vì vậy một run suspend chờ approval hoặc câu trả lời giữ định
+nghĩa của nó cho job tiếp tục nó: `prune_history` giữ một hàng history hoặc job thất bại gọi
+tên một định nghĩa khi run của nó chưa terminal, và xóa nó ở lần dọn đầu tiên sau khi run
+kết thúc. `enqueue_resume` và `enqueue_approve` từ chối một run mà định nghĩa được gọi tên
+đã mất (`WorkerError::Invalid`). Một worker chạy nó cùng việc dọn history, từ lần poll
 đầu tiên và cứ 10 phút một lần sau đó, dù có giữ history hay không. Một writer lưu một định
 nghĩa khóa hàng của nó (`ON CONFLICT ... DO UPDATE`) đến khi commit, và prune khóa các ứng cử
 viên của nó bằng `FOR UPDATE SKIP LOCKED`, nên một định nghĩa sắp được gọi tên sẽ bị bỏ qua;

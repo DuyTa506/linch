@@ -55,7 +55,7 @@ no token.
 | `poll_interval_ms` | 1000 | Longest wait between polls; due schedules are checked once per interval |
 | `visibility_timeout_ms` | 30000 | How long a taken job stays hidden without a heartbeat. Keep the agents' `stores.lease_ttl_ms` no longer |
 | `retry_delay_ms` | 5000 | Wait before a failed job's next attempt; doubles each time, at most 5 minutes |
-| `history_retention_ms` | 7 days | How long ended and failed jobs stay readable with `job` and `jobs` |
+| `history_retention_ms` | 7 days | How long ended and failed jobs stay readable with `job` and `jobs`; a job of a run that is not terminal stays longer ([what is pruned](#what-is-pruned)) |
 | `local_namespaces` | none | Namespace roots outside every tenant whose jobs it also runs, without checks (schedules a stdio client made); `dev` covers `dev` and `dev/...` |
 
 Run as many such servers on one database as you like: each fire is queued
@@ -117,11 +117,32 @@ error of a background run the worker could not open. A run's own error
 is another matter: it holds what the provider, a tool or an MCP server
 said, and an endpoint that quotes back a credential it was sent puts it
 there, as in a run started directly. A stored config is deleted once
-no schedule and no unfinished job names it: a worker checks from its first
+no schedule, no unfinished job and no run that is not terminal names it: a worker checks from its first
 poll and every 10 minutes after (`prune_definitions`). Keep secrets out of
 a scheduled config where you can (a key the server reads from its
 environment is never stored), and protect the database as you protect
 those secrets.
+
+## What is pruned
+
+A worker prunes every 10 minutes: the history of ended jobs and the failed
+jobs older than `history_retention_ms`, and the stored configs nothing names.
+A history row or failed job that names a stored config stays while its run
+is not terminal (suspended for an approval or an answer, or its job failed),
+however old: it is how `approve` and `resume` find the agent to continue the
+run with. The next prune after the run ends removes the row and then the
+config.
+
+**Runs and sessions are not pruned.** Only jobs and their history are. Each
+fire leaves a run (its events and checkpoint) and, for a schedule with no
+`session_id`, a session: about 1,440 of each a day for a schedule that fires
+every 60 seconds, for as long as the database keeps them. No server call and
+no setting removes them, and their rows carry no timestamp. An operator who
+must remove them does it with SQL on the agent's database, over
+`linch_runs` and `linch_run_events` (terminal runs only) and
+`linch_sessions` and `linch_session_entries`, and only for runs no job
+still names; prefer a longer interval, or a heartbeat (one `session_id`),
+which keeps the sessions to one.
 
 ## Schedule a run
 
