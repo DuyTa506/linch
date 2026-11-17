@@ -669,6 +669,23 @@ mod tests {
         }
     }
 
+    /// RED: a tenant server sets `quota` (the tenant's name and the
+    /// operator's byte cap) at every admission, so changing the cap must not
+    /// make a stored run of the same agent a contract mismatch.
+    #[test]
+    fn the_cache_quota_is_not_part_of_the_contract() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let digest = |max_bytes: u64| {
+            let quota = json!({"group": "acme", "max_bytes": max_bytes});
+            let cache = json!({"tools": ["Read"], "quota": quota});
+            let spec: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "tool_cache": cache})).unwrap();
+            contract_digest(&spec, &[], hooks, &none).unwrap()
+        };
+        assert_eq!(digest(64 << 20), digest(128 << 20));
+    }
+
     /// A spec with no policy is off, off the wire and the contract it had
     /// before policies existed; any policy, an empty one included, is on
     /// the wire and a contract of its own.
