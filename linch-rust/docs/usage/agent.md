@@ -370,6 +370,13 @@ answer changes on every call (an elapsed time in a status line) is kept out of
 every count, so it is bounded by `max_turns` and the budget alone. Set
 `max_turns` (and a budget) on a run that must end.
 
+On a server with tenants this is a rule, not advice: `agent.open` of a tenant
+is refused (`-32004`, `kind: run_bound`) when the spec has neither `max_turns`
+nor a `budget` with `max_tokens` or `max_cost_usd` (the `profile`'s and a deep-agent profile's
+`max_turns` count), and the message names both settings
+([Server](./server.md#what-admission-refuses-and-why)). A trusted local
+connection keeps the unbounded default.
+
 ### `policy`
 
 `spec.policy` states what a run must do in order: which tools may only run

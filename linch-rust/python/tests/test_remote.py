@@ -112,7 +112,7 @@ def acme(turns: list[dict[str, Any]], **extra: Any) -> AgentConfig:
     """A scripted config in tenant `acme`'s namespace, in mode `default`."""
     fields = {
         "namespace": "acme/support",
-        "spec": {"model": MODEL},
+        "spec": {"model": MODEL, "max_turns": 100},
         "provider": {"id": "scripted", "turns": turns},
         **extra,
     }
@@ -221,11 +221,15 @@ async def test_the_tenants_checks_refuse_what_it_may_not_do(transport: str) -> N
             await server.open_agent({**acme([]), "namespace": "beta"})
         with pytest.raises(NotAllowed) as tasks:
             await server.open_agent({**acme([]), "tasks": True})
+        with pytest.raises(NotAllowed) as bound:
+            await server.open_agent({**acme([]), "spec": {"model": MODEL}})
         agent = await server.open_agent(acme([text_turn("unused")]))
         with pytest.raises(NotAllowed) as principal:
             await agent.run("s1", "hi", principal={"tenant": "beta", "user": "eve"})
 
     assert (namespace.value.kind, tasks.value.kind) == ("namespace", "auto_allow")
+    assert bound.value.kind == "run_bound"
+    assert "max_turns" in str(bound.value) and "budget" in str(bound.value)
     assert principal.value.kind == "principal"
 
 

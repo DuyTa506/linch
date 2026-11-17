@@ -83,7 +83,7 @@ async fn terminate(mut child: Child) {
 fn agent_config(db: &TestDb, turns: Vec<linch::ScriptedTurn>, extra: Value) -> Value {
     let mut config = json!({
         "namespace": "acme",
-        "spec": {"model": MODEL},
+        "spec": {"model": MODEL, "max_turns": 100},
         "provider": {"id": "scripted", "turns": turns},
         "stores": {"type": "postgres", "dsn": db.dsn, "lease_ttl_ms": 1000},
     });

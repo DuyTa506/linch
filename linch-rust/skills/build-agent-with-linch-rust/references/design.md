@@ -93,8 +93,8 @@ which no mode overrides. Cost is priced only for the models in the built-in tabl
 **Tenants.** Give each tenant or product area its own `namespace`, since stores are keyed by it.
 Pass a `principal` to every `run`, `resume` and `approve` that acts for someone. A shared
 `linch-server --config` adds per-tenant tokens, allowlists for providers, paths, DSNs and MCP
-commands, and caps on runs, agents and connections (`usage/server.md`). Keys stay in the
-server's environment.
+commands, and caps on runs, agents and connections (`usage/server.md`). A tenant's agent needs
+`max_turns` or a `budget` cap, or it is not opened. Keys stay in the server's environment.
 
 **Context.** Prefer host tools, MCP servers or a `context_build` callback that adds retrieved
 blocks over stuffing data into the prompt (`usage/agent.md`). Long sessions need

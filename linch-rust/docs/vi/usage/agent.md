@@ -367,7 +367,14 @@ hạn) không bao giờ đạt 10 trong 50 và không bị bắt: chỉ `max_tur
 kết thúc một run như vậy, và cả hai mặc định đều không có. Một tool `polls` của
 [MCP](#mcp_servers) mà câu trả lời đổi ở mọi lần gọi (một thời gian đã trôi trong dòng trạng
 thái) nằm ngoài mọi bộ đếm, nên chỉ `max_turns` và budget giới hạn nó. Hãy đặt `max_turns`
-(và một budget) cho một run phải kết thúc.
+`max_turns` (và một budget) cho một run phải kết thúc.
+
+Trên một server có tenant, đây là quy tắc chứ không phải lời khuyên: `agent.open`
+của một tenant bị từ chối (`-32004`, `kind: run_bound`) khi spec không có
+`max_turns` lẫn một `budget` có `max_tokens` hoặc `max_cost_usd` (`max_turns` của
+`profile` và của profile deep agent được tính), và thông báo nêu tên cả hai thiết lập
+([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)). Một kết nối local
+tin cậy vẫn giữ mặc định không giới hạn.
 
 ### `policy`
 

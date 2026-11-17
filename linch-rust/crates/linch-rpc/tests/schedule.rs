@@ -508,6 +508,101 @@ async fn a_definition_the_tenant_no_longer_allows_fails_its_job() {
     db.drop().await;
 }
 
+/// A definition stored before a tenant had to bound its runs (made here by a
+/// trusted local connection, which the rule does not touch) is refused when
+/// the worker opens it, for a queued job and for each fire of a schedule: the
+/// job fails with the refusal text, `job.list` shows it, and the worker goes
+/// on to run a bounded definition.
+#[tokio::test]
+async fn a_stored_definition_with_no_bound_fails_its_jobs_and_fires_with_the_reason() {
+    let Some(db) = TestDb::empty("sched_unbounded").await else {
+        return;
+    };
+    let local = Rpc::new();
+    let mut unbounded = on_postgres(&db, "acme");
+    unbounded["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_turns");
+    let agent = local.open(unbounded).await;
+    let queued = local
+        .call(
+            method::JOB_ENQUEUE,
+            json!({"agent": agent, "session_id": "s1", "prompt": "go"}),
+        )
+        .await
+        .unwrap();
+    let queued = job(queued);
+    local
+        .call(
+            method::SCHEDULE_CREATE,
+            json!({"agent": agent, "id": "beat", "prompt": "Check in.",
+                   "interval_ms": 200, "session_id": "ops"}),
+        )
+        .await
+        .unwrap();
+    let bounded = local.open(on_postgres(&db, "acme/bounded")).await;
+    let fine = local
+        .call(
+            method::JOB_ENQUEUE,
+            json!({"agent": bounded, "session_id": "s2", "prompt": "go"}),
+        )
+        .await
+        .unwrap();
+    let fine = job(fine);
+
+    let acme = Arc::new(Tenant::new("acme", allow(&db)).unwrap());
+    let pool = linch::postgres::connect(
+        &db.dsn,
+        linch::postgres::CONNECT_TIMEOUT,
+        4.try_into().unwrap(),
+    )
+    .await
+    .unwrap();
+    let factory = BackgroundAgents::new(db.dsn.clone()).tenant(acme);
+    let shutdown = CancellationToken::new();
+    let worker =
+        Worker::new(pool, worker_config("w1")).definitions(factory.roots(), Arc::new(factory));
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+
+    let failed = wait_for(&local, &agent, queued.job_id, "failed").await;
+    let reason = failed.error.unwrap();
+    assert!(
+        reason.contains("max_turns") && reason.contains("budget"),
+        "{reason}"
+    );
+    assert!(failed.run_id.is_none(), "nothing ran");
+    let deadline = Instant::now() + DEADLINE;
+    let fire = loop {
+        let listed = local
+            .call(
+                method::JOB_LIST,
+                json!({"agent": agent, "schedule_id": "beat"}),
+            )
+            .await
+            .unwrap();
+        let fires = serde_json::from_value::<Vec<JobInfo>>(listed["jobs"].clone()).unwrap();
+        if let Some(fire) = fires.into_iter().find(|job| job.state == "failed") {
+            break fire;
+        }
+        assert!(Instant::now() < deadline, "no fire failed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(fire.error.unwrap().contains("max_turns"));
+    // The worker is alive: a bounded definition of the tenant still runs.
+    wait_for(&local, &bounded, fine.job_id, "done").await;
+    local
+        .call(
+            method::SCHEDULE_DELETE,
+            json!({"agent": agent, "id": "beat"}),
+        )
+        .await
+        .unwrap();
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+    db.drop().await;
+}
+
 /// `cargo test` builds the examples next to the test binaries' `deps`
 /// directory.
 fn example(name: &str) -> PathBuf {

@@ -81,7 +81,7 @@ def acme(dsn: str | None, **extra: Any) -> AgentConfig:
     """A scripted config in tenant `acme`'s namespace, on Postgres when `dsn`."""
     fields: dict[str, Any] = {
         "namespace": "acme",
-        "spec": {"model": MODEL},
+        "spec": {"model": MODEL, "max_turns": 100},
         "provider": {"id": "scripted", "turns": [text_turn("Checked in.")]},
         **extra,
     }

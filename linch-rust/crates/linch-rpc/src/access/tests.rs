@@ -159,7 +159,7 @@ fn an_mcp_entry_never_lets_a_client_choose_what_code_loads() {
 fn scripted_config(limit: Option<u32>) -> AgentConfig {
     let mut value = serde_json::json!({
         "namespace": "acme",
-        "spec": {"model": "m"},
+        "spec": {"model": "m", "max_turns": 8},
         "provider": {"id": "scripted", "turns": []},
     });
     if let Some(limit) = limit {
@@ -197,6 +197,78 @@ async fn a_tenant_may_lower_the_provider_concurrency_not_raise_it() {
     }
 }
 
+/// A tenant's run has to end on something the operator can count on: with
+/// neither `max_turns` nor a budget cap, a model that keeps calling a tool
+/// runs until the loop guard, which an input that keeps changing evades.
+#[tokio::test]
+async fn a_tenant_agent_with_no_bound_on_its_runs_is_refused() {
+    let allow = Allowlists::new()
+        .scripted_provider(true)
+        .permission_modes(&[
+            linch::PermissionMode::Default,
+            linch::PermissionMode::SkipDangerous,
+        ]);
+    let tenant = Tenant::new("acme", allow).unwrap();
+    let with = |spec: serde_json::Value, deep: Option<&str>| -> AgentConfig {
+        let mut value = serde_json::json!({
+            "namespace": "acme",
+            "spec": spec,
+            "provider": {"id": "scripted", "turns": []},
+        });
+        if let Some(profile) = deep {
+            value["deep_agent"] = serde_json::json!({"profile": profile});
+        }
+        serde_json::from_value(value).unwrap()
+    };
+    // The domain profile replaces the spec's `max_turns` when it opens.
+    let mut profiled = with(serde_json::json!({"model": "m"}), None);
+    profiled.profile =
+        serde_json::from_value(serde_json::json!({"id": "triage", "version": "1", "max_turns": 6}))
+            .unwrap();
+    tenant.admit(&mut profiled).await.unwrap();
+    let bounded = [
+        (serde_json::json!({"model": "m", "max_turns": 8}), None),
+        (
+            serde_json::json!({"model": "m", "budget": {"max_tokens": 1000}}),
+            None,
+        ),
+        (
+            serde_json::json!({"model": "m", "budget": {"max_cost_usd": 1.0}}),
+            None,
+        ),
+        // The deep agent's balanced profile sets 64 turns when the spec sets none.
+        (serde_json::json!({"model": "m"}), Some("balanced")),
+    ];
+    for (spec, deep) in bounded {
+        let mut config = with(spec.clone(), deep);
+        tenant
+            .admit(&mut config)
+            .await
+            .unwrap_or_else(|e| panic!("{spec}: {e:?}"));
+    }
+    let unbounded = [
+        (serde_json::json!({"model": "m"}), None),
+        // A budget with only a warning ratio caps nothing.
+        (
+            serde_json::json!({"model": "m", "budget": {"warn_ratio": 0.5}}),
+            None,
+        ),
+        (serde_json::json!({"model": "m"}), Some("unbounded")),
+    ];
+    for (spec, deep) in unbounded {
+        let mut config = with(spec.clone(), deep);
+        let refusal = tenant.admit(&mut config).await.unwrap_err();
+        assert_eq!(refusal.code, crate::error::code::NOT_ALLOWED, "{spec}");
+        assert_eq!(
+            refusal.data,
+            Some(serde_json::json!({"kind": "run_bound"})),
+            "{spec}"
+        );
+        assert!(refusal.message.contains("max_turns"), "{}", refusal.message);
+        assert!(refusal.message.contains("budget"), "{}", refusal.message);
+    }
+}
+
 /// Admitting a config twice, as a stored background config is admitted
 /// again, adds the operator's sections once and keeps the tenant's.
 #[tokio::test]
@@ -211,7 +283,7 @@ async fn admitting_a_config_again_adds_the_operator_sections_once() {
     let tenant = Tenant::new("acme", allow).unwrap();
     let mut config: AgentConfig = serde_json::from_value(serde_json::json!({
         "namespace": "acme",
-        "spec": {"model": "m", "system": {"sections": [
+        "spec": {"model": "m", "max_turns": 8, "system": {"sections": [
             {"name": "policy", "text": "Mine."}, {"name": "tone", "text": "Brief."}]}},
         "provider": {"id": "scripted", "turns": []},
     }))

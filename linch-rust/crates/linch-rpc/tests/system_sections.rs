@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 fn config(namespace: &str, spec: Value) -> Value {
     let mut config = scripted(vec![], None, "");
     config["namespace"] = json!(namespace);
-    config["spec"] = json!({"model": MODEL});
+    config["spec"] = json!({"model": MODEL, "max_turns": 100});
     config["spec"]
         .as_object_mut()
         .unwrap()

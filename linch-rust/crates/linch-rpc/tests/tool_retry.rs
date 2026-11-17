@@ -44,7 +44,7 @@ fn config(idempotent: bool, retry: Value) -> Value {
     hosted(
         turns,
         "default",
-        json!({"tools": [tool], "spec": {"model": MODEL, "tool_retry": retry}}),
+        json!({"tools": [tool], "spec": {"model": MODEL, "max_turns": 100, "tool_retry": retry}}),
     )
 }
 

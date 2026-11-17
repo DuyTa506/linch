@@ -39,7 +39,7 @@ permissions: Permissions = {
 }
 config: AgentConfig = {
     "namespace": "acme",
-    "spec": {"model": "deepseek-flash"},
+    "spec": {"model": "deepseek-flash", "max_turns": 20},
     "provider": {"id": "deepseek"},
     "workspace": "/srv/acme",
     "permissions": permissions,

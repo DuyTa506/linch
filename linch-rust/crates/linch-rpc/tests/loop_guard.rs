@@ -108,6 +108,8 @@ async fn a_tenant_may_not_force_a_tool_nothing_would_end() {
         let mut config = scripted(vec![], None, "");
         config["namespace"] = json!("acme");
         config["tools"] = json!([host_tool("lookup", "read")]);
+        // A token cap bounds the run for admission without ending it by turns.
+        config["spec"] = json!({"model": MODEL, "budget": {"max_tokens": 1_000_000}});
         for (key, value) in spec.as_object().unwrap() {
             config["spec"][key] = value.clone();
         }
