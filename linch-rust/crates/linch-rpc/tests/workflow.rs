@@ -812,3 +812,46 @@ async fn a_workflow_started_for_a_principal_runs_its_calls_under_that_principals
     let events: linch_rpc::protocol::Events = serde_json::from_value(events).unwrap();
     assert_eq!(denied(&events.events), [true], "the workflow's call");
 }
+
+/// A workflow keeps the principal it was started for: another principal, or
+/// none, cannot resume it, and one that had none cannot be given one.
+#[tokio::test]
+async fn a_workflow_is_resumed_only_by_the_principal_it_started_with() {
+    let rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![], None, "")).await;
+    let alice = json!({"tenant": "acme", "user": "alice", "roles": ["dev", "admin"]});
+    let start_as = |id: &str, principal: Option<&Value>| {
+        let mut params = json!({"agent": agent, "run_id": id});
+        if let Some(principal) = principal {
+            params["principal"] = principal.clone();
+        }
+        rpc.call(method::WORKFLOW_START, params)
+    };
+    start_as("w", Some(&alice)).await.unwrap();
+    finish(&rpc, "w", true).await;
+    let others = [
+        Some(json!({"tenant": "acme", "user": "bob", "roles": ["dev", "admin"]})),
+        Some(json!({"tenant": "acme", "user": "alice", "roles": ["dev"]})),
+        None,
+    ];
+    for other in &others {
+        let (kind, data) = code_of_call(start_as("w", other.as_ref()).await);
+        assert_eq!(kind, code::NOT_ALLOWED, "{other:?}");
+        assert_eq!(data["kind"], "workflow_principal", "{other:?}");
+    }
+    // The same principal, its roles in another order, resumes it.
+    let again = json!({"tenant": "acme", "user": "alice", "roles": ["admin", "dev"]});
+    let resumed = start_as("w", Some(&again)).await.unwrap();
+    assert_eq!(resumed["resumed"], json!(true));
+    finish(&rpc, "w", true).await;
+    // A workflow that acts for nobody stays so.
+    start_as("plain", None).await.unwrap();
+    finish(&rpc, "plain", true).await;
+    let (kind, data) = code_of_call(start_as("plain", Some(&alice)).await);
+    assert_eq!(
+        (kind, &data["kind"]),
+        (code::NOT_ALLOWED, &json!("workflow_principal"))
+    );
+    start_as("plain", None).await.unwrap();
+    finish(&rpc, "plain", true).await;
+}

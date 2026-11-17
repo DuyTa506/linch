@@ -13,7 +13,7 @@
 //! heartbeat.
 
 use async_trait::async_trait;
-use linch_core::{CanonicalError, JsonValue, digest_with_domain};
+use linch_core::{CanonicalError, JsonValue, Principal, digest_with_domain};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -110,6 +110,14 @@ pub enum JournalStoreError {
         /// What conflicted.
         message: String,
     },
+    /// The claim names a different principal than the one the workflow was
+    /// started for (or one where it had none, or the reverse): its
+    /// journaled calls acted for that principal.
+    #[error("workflow {workflow_id} was started for another principal")]
+    PrincipalMismatch {
+        /// The workflow whose principal differs.
+        workflow_id: String,
+    },
     /// Another holder has the workflow ([`JournalStore::hold`]).
     #[error("workflow {workflow_id} is held by another client")]
     Held {
@@ -173,10 +181,21 @@ pub trait JournalStore: Send + Sync {
     /// Always succeeds against a live holder: the epoch goes up by 1, which
     /// fences out every earlier lease. The status becomes
     /// [`WorkflowStatus::Running`]; the records are kept.
+    ///
+    /// The first claim stores `principal` (the user the workflow's calls act
+    /// for, `None` for nobody) with the workflow; a later claim must name
+    /// the same one, whole (tenant, user and roles), or it is refused and
+    /// nothing changes: the journaled calls ran under that principal's
+    /// rules.
+    ///
+    /// Raises:
+    ///     JournalStoreError: `PrincipalMismatch` when `principal` differs
+    ///         from the stored one.
     async fn claim(
         &self,
         namespace: &str,
         workflow_id: &str,
+        principal: Option<&Principal>,
     ) -> Result<JournalLease, JournalStoreError>;
 
     /// Read the workflow, or `None` when it was never claimed.
@@ -226,6 +245,14 @@ pub trait JournalStore: Send + Sync {
     ) -> Result<WorkflowHold, JournalStoreError> {
         Ok(WorkflowHold::default())
     }
+}
+
+/// A principal as the text a store keeps and compares: its JSON, whose
+/// roles are sorted, so equal principals give equal text.
+pub(super) fn principal_text(principal: Option<&Principal>) -> Option<String> {
+    principal.map(|principal| {
+        serde_json::to_string(principal).expect("a principal of three strings always encodes")
+    })
 }
 
 /// The content key of one `step` call: its name plus its optional input

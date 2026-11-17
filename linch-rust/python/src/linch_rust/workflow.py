@@ -550,6 +550,7 @@ async def run_workflow(
     step_timeout_ms: int | None = None,
     deadline_ms: int | None = None,
     resume: Mapping[str, Any] | None = None,
+    principal: Principal | None = None,
     on_event: Callable[[WorkflowEvent], None] | None = None,
 ) -> T:
     """Run `fn(wf)` as a directed workflow named `run_id`, and return its value.
@@ -575,6 +576,10 @@ async def run_workflow(
             cancelled, the calls in flight abort, and the finished calls
             stay journaled for a resume.
         resume: Answers to interrupts an earlier drive left pending, by key.
+        principal: Who the workflow's agent calls act for, as in `Agent.run`:
+            every call's run carries it, so rules keyed on its roles apply.
+            It is stored with the workflow, and a resume must pass the same
+            one (or none, if it had none).
         on_event: Called with each `WorkflowEvent` (phase, agent and step
             start, end and replay, interrupt), in order.
 
@@ -586,10 +591,14 @@ async def run_workflow(
             stored as awaiting input.
         WorkflowTimeoutError: `deadline_ms` passed.
         WorkflowHeld: Another client drives the workflow.
-        NotAllowed: The tenant's allowlists give it no workflows.
+        NotAllowed: The tenant's allowlists give it no workflows, or
+            `principal` names another tenant or differs from the one the
+            workflow was started for (`kind` is `workflow_principal`).
     """
     conn = agent._conn  # pyright: ignore[reportPrivateUsage]
     params: JsonObject = {"agent": agent.handle, "run_id": run_id}
+    if principal is not None:
+        params["principal"] = dict(principal)
     if budget is not None:
         params["budget"] = budget.wire()
     if resume:

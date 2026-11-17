@@ -7,8 +7,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use linch_core::JsonValue;
 use linch_core::events::kinds::{WorkflowEvent, WorkflowKind};
+use linch_core::{JsonValue, Principal};
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 
@@ -56,6 +56,8 @@ pub(super) struct Inner {
     max_records: Option<u64>,
     max_record_bytes: Option<usize>,
     pub(super) live_gate: Option<LiveGate>,
+    /// Who the agent calls' runs act for.
+    pub(super) principal: Option<Principal>,
 }
 
 /// Journaled results by `(call_key, occurrence)`, and how many calls of
@@ -96,6 +98,7 @@ impl WorkflowContext {
             max_records: options.max_records,
             max_record_bytes: options.max_record_bytes,
             live_gate: options.live_gate.clone(),
+            principal: options.principal.clone(),
         };
         Self {
             inner: Arc::new(inner),
