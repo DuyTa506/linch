@@ -24,6 +24,7 @@ use linch_tools::{
     task_tools, workspace_tools,
 };
 
+use crate::agent_memory::Memory;
 use crate::config::{
     AgentConfig, ExecutionConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig,
 };
@@ -162,6 +163,7 @@ impl AgentConfig {
             let _ = tools.register(Arc::new(AskUser::new()))?;
         }
         let pg = pool.as_deref().and_then(Shared::pool);
+        let memory = Memory::wire(self.memory.as_ref(), &tools, &hooks, pg, &self.namespace)?;
         // Postgres stores keep the messages in a table too.
         let mailbox = self.mailbox.then(|| -> Arc<dyn Mailbox> {
             match pg {
@@ -241,6 +243,7 @@ impl AgentConfig {
         match builder.build() {
             Ok(agent) => {
                 files.keep();
+                memory.keep();
                 Ok(OpenedAgent {
                     agent,
                     mcp,

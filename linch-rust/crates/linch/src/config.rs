@@ -13,12 +13,14 @@ use crate::profile::Profile;
 mod deep_agent;
 mod filesystem;
 mod mcp;
+mod memory;
 mod pricing;
 mod redact;
 
 pub use deep_agent::{DeepAgentConfig, DeepAgentProfileChoice};
 pub use filesystem::FilesystemConfig;
 pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
+pub use memory::{MemoryConfig, RecallConfig};
 pub(crate) use pricing::pricing;
 pub use pricing::{ModelRates, PricingOverrides};
 
@@ -129,6 +131,12 @@ pub struct AgentConfig {
     /// they are missing or the stores are not Postgres. Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub schedule_tools: bool,
+    /// Long-term memory: the `MemorySave`, `MemorySearch` and `MemoryDelete`
+    /// tools, and optionally a search before each request (see
+    /// [`MemoryConfig`]). It needs no host callback, so scheduled and
+    /// background agents have it. Off when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryConfig>,
     /// The deep agent preset: planning, a subagent roster, kept workers and
     /// file memory (see [`DeepAgentConfig`] for what it turns on). Off
     /// when absent.
