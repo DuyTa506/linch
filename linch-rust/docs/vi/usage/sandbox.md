@@ -14,6 +14,7 @@ chọn một backend khác:
 | `local` (mặc định) | Trực tiếp với tư cách người dùng của server | Không cần gì |
 | `sandbox` | Dưới Landlock, một bộ lọc seccomp và rlimit, với một home riêng cho mỗi session | Linux 6.12 trở lên (Landlock ABI 6) và `prlimit` (util-linux); không cần root, không cần user namespace, không cần daemon |
 | `docker` | Trong một container `docker run --rm` mới cho mỗi lệnh | Một client `docker` và một daemon mà người dùng của server truy cập được |
+| `remote` | Trên một máy do client của bạn cung cấp, không phải trên server (xem [Thực thi từ xa](./remote-execution.md)) | Một kết nối client phục vụ các lệnh |
 
 Lựa chọn này áp dụng cho `Bash` ở foreground và background, nên cũng áp dụng cho
 `BashOutput` và `BashKill`. Các tool tệp (`Read`, `Write`, `Edit`, `Grep`, `Glob`)

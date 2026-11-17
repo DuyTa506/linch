@@ -17,6 +17,7 @@ from .agent import Agent, Skipped
 from .callbacks import Callback
 from .config import AgentConfig
 from .errors import LinchError
+from .exec_host import ExecutionHost
 from .run import Observer
 from .tools import HostTool
 
@@ -179,6 +180,7 @@ class Server:
         tools: Sequence[HostTool] = (),
         callbacks: Sequence[Callback] = (),
         *,
+        execution: ExecutionHost | None = None,
         telemetry: Telemetry | None = None,
     ) -> Agent:
         """Open an agent from its config, with host tools and callbacks.
@@ -193,6 +195,10 @@ class Server:
             tools: Host tools made with `tool`, run in this process.
             callbacks: Intercept callbacks made with `callback`, answered in
                 this process.
+            execution: The host that runs the commands of a `remote`
+                execution backend, in this process (`SubprocessHost` is a
+                reference one). The agent's commands run wherever it runs
+                them; it must kill them when `close(agent)` is called.
             telemetry: The OpenTelemetry providers its runs are traced and
                 measured with (see `linch_rust.otel`); the global ones when
                 absent and the `otel` extra is installed, none otherwise.
@@ -205,8 +211,13 @@ class Server:
             OpenError: The config, provider, store or an MCP server failed.
             ProtocolError: The config or a declaration is invalid.
             NotAllowed: A remote server's allowlists refused the config.
+            ValueError: The config's backend is `remote` and no `execution`
+                host was given.
         """
         conn = self._started()
+        chosen = config.get("execution")
+        if execution is None and chosen is not None and chosen["backend"] == "remote":
+            raise ValueError("a remote execution backend needs open_agent(execution=...)")
         params: dict[str, Any] = dict(config)
         if tools:
             params["tools"] = [host_tool.spec() for host_tool in tools]
@@ -218,6 +229,7 @@ class Server:
             handle,
             {host_tool.name: host_tool for host_tool in tools},
             {(declared.point, declared.policy_id): declared for declared in callbacks},
+            execution,
         )
         skipped = [
             Skipped(str(item["path"]), str(item["reason"]), str(item["detail"]))

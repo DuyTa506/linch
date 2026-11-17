@@ -301,6 +301,7 @@ các lệnh nền qua cùng shell đó.
 | `local` | `LocalShell` (`exec.rs:264`) | Không gì cả: `process::spawn`, từng byte giống `Bash` cũ (golden test trong `crates/linch-tools/tests/execution_golden.rs` và `crates/linch/tests/execution_golden.rs`) |
 | `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp và `prlimit` bao quanh shell; một `HOME`/`TMPDIR` riêng cho mỗi session |
 | `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` cho mỗi lệnh; `docker rm -f` làm cleanup |
+| `remote` | `RemoteShell` (`exec/remote.rs`) | Không có process cục bộ: một host chạy lệnh (xem bên dưới) |
 
 Một backend không phải local kết thúc mô tả của `Bash` bằng
 `ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): model biết cái gì bị
@@ -342,6 +343,24 @@ bị giới hạn, và không có code nào chạy giữa fork và exec, nên cr
 `DOCKER_LIFELINE` (`docker.rs:118`), watchdog của nó chạy `docker rm -f` trước khi kill
 group. Chưa được kiểm chứng với một daemon trong CI ở đây;
 `crates/linch-tools/tests/docker.rs` bỏ qua khi không có.
+
+**Remote.** `spawn` trả về một `Started` (`bash/process.rs`): một `Spawned`
+cục bộ, hoặc một `RemoteRun` mà `supervise` (`exec/remote.rs`) hỏi host thay
+vì đọc pipe. Host là trait công khai `RemoteExec` (`start`, `read` kiểu long
+poll, `kill`); `linch-rpc` cài đặt nó qua `Peer` của kết nối thành
+`exec.start`, `exec.read` và `exec.kill` (`server/exec.rs`), và
+`AgentConfig::open_with_remote` nhận nó, nên khi không có (worker, schedule,
+extension Python) `ExecutionBackend::open` lỗi với `ExecutionError::NoHost`.
+`End::Exited` mang một `Exit` (code hoặc signal) thay cho `ExitStatus`, và
+`End::Interrupted` nghĩa là kết quả không biết: server chỉ báo một lệnh là
+timed out hoặc aborted sau khi host xác nhận `kill`, ngược lại báo
+interrupted, nên không bao giờ báo một kết quả chưa quay về. Một call bị drop
+gửi một kill tách rời. `PATH`, `HOME`, `USER`, `SHELL` và `TMPDIR` của server
+không được gửi, và `workspace_tools` không đăng ký tool tệp trừ khi
+`shared_workspace` của policy bật (`ExecutionBackend::has_file_tools`): chúng
+sẽ tác động lên thư mục của server trong khi lệnh chạy chỗ khác. Policy nằm
+trong mô tả của `Bash`, nên nằm trong contract. Xem
+[Thực thi từ xa](../../usage/remote-execution.md).
 
 ## Hệ thống tệp ảo và chuyển kết quả ra ngoài
 

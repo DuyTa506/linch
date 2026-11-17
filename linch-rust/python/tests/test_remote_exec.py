@@ -1,0 +1,185 @@
+"""A `remote` execution backend: the commands run in this process.
+
+`SubprocessHost` runs them with `asyncio.create_subprocess_exec`; the server
+only sends `exec.start`, `exec.read` and `exec.kill`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import signal
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+from scripted import config, text_turn, tool_turn
+
+from linch_rust import (
+    Agent,
+    AgentConfig,
+    RemoteExecution,
+    Server,
+    SubprocessHost,
+    ToolCallEndEvent,
+)
+
+REMOTE: RemoteExecution = {"backend": "remote"}
+CORE = Path(__file__).resolve().parents[2] / "crates/linch-tools/src/exec"
+
+
+def agent_config(root: Path, turns: list[dict[str, Any]], **extra: Any) -> AgentConfig:
+    return config(turns, mode="skip_dangerous", workspace=str(root), execution=REMOTE, **extra)
+
+
+def result_text(end: ToolCallEndEvent) -> str:
+    return "".join(part.get("text", "") for part in end.result["content"])
+
+
+async def bash_end(
+    root: Path, command: str, host: SubprocessHost | None = None, **extra: Any
+) -> ToolCallEndEvent:
+    turns = [tool_turn("c1", "Bash", {"command": command, **extra}), text_turn("done")]
+    async with Server() as server:
+        agent = await server.open_agent(
+            agent_config(root, turns), execution=host or SubprocessHost()
+        )
+        run = await agent.run("s1", "go")
+        [end] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+    return end
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def pid_in(path: Path) -> int:
+    """The pid a command wrote to `path`, once it did."""
+    deadline = time.monotonic() + 10
+    while not (path.exists() and path.read_text().strip()):
+        assert time.monotonic() < deadline, f"{path} was never written"
+        await asyncio.sleep(0.05)
+    return int(path.read_text())
+
+
+async def gone(pid: int, what: str) -> None:
+    deadline = time.monotonic() + 10
+    while alive(pid):
+        assert time.monotonic() < deadline, f"process {pid} outlived {what}"
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.source
+def test_the_typed_policy_names_every_field_the_server_reads() -> None:
+    body = (CORE / "remote.rs").read_text().split("pub struct RemotePolicy {", 1)[1]
+    fields = set(re.findall(r"^\s*pub (\w+):", body.split("\n}", 1)[0], re.MULTILINE))
+    typed = RemoteExecution.__required_keys__ | RemoteExecution.__optional_keys__
+    assert fields | {"backend"} == typed
+
+
+async def test_a_command_runs_in_this_process_with_its_output_and_exit_code(
+    tmp_path: Path,
+) -> None:
+    end = await bash_end(tmp_path, "echo out; echo err >&2; pwd; exit 3", SubprocessHost(cwd="/"))
+    assert end.is_error and end.error_code == "exit_status"
+    assert result_text(end) == "out\n/\n[stderr]\nerr\n[exit code 3]"
+
+
+async def test_the_command_gets_the_hosts_environment_not_the_servers(tmp_path: Path) -> None:
+    host = SubprocessHost(env={"FROM_HOST": "yes"})
+    end = await bash_end(tmp_path, "echo $FROM_HOST $HOME; env | grep -c _API_KEY", host)
+    text = result_text(end)
+    assert text.startswith(f"yes {os.environ.get('HOME', '')}\n0"), text
+
+
+async def test_a_large_output_arrives_in_pieces_and_is_capped_by_the_server(
+    tmp_path: Path,
+) -> None:
+    end = await bash_end(tmp_path, "head -c 1000000 /dev/zero | tr '\\0' x")
+    assert "bytes omitted" in result_text(end)
+    assert not end.is_error
+
+
+async def test_a_timeout_kills_the_command_in_this_process(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    command = f"echo $$ > {pidfile}; sleep 300"
+    end = await bash_end(tmp_path, command, timeout_ms=700)
+    assert end.error_code == "timeout"
+    assert "timed out after 700 ms" in result_text(end)
+    await gone(await pid_in(pidfile), "its timeout")
+
+
+async def test_cancelling_the_run_kills_the_command(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    turns = [tool_turn("c1", "Bash", {"command": f"echo $$ > {pidfile}; sleep 300"})]
+    async with Server() as server:
+        agent = await server.open_agent(
+            agent_config(tmp_path, turns + [text_turn("x")]), execution=SubprocessHost()
+        )
+        run = await agent.run("s1", "go")
+        pid = await pid_in(pidfile)
+        assert alive(pid)
+        assert await run.cancel()
+        await gone(pid, "its cancel")
+
+
+async def test_closing_the_session_kills_a_background_command(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    command = f"echo $$ > {pidfile}; sleep 300"
+    turns = [tool_turn("c1", "Bash", {"command": command, "run_in_background": True})]
+    async with Server() as server:
+        agent = await server.open_agent(
+            agent_config(tmp_path, [*turns, text_turn("started")]), execution=SubprocessHost()
+        )
+        run = await agent.run("s1", "start it")
+        [end] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+        assert end.metadata is not None and "pid" not in end.metadata
+        pid = await pid_in(pidfile)
+        assert alive(pid)
+        await agent.close_session("s1")
+        await gone(pid, "its session")
+
+
+async def test_a_command_does_not_outlive_the_server(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    turns = [tool_turn("c1", "Bash", {"command": f"echo $$ > {pidfile}; sleep 300"})]
+    server = Server()
+    await server.start()
+    agent = await server.open_agent(
+        agent_config(tmp_path, [*turns, text_turn("x")]), execution=SubprocessHost()
+    )
+    await agent.run("s1", "go")
+    pid = await pid_in(pidfile)
+    # The server dies without a word; the connection's end kills the command.
+    os.kill(server.pid, signal.SIGKILL)
+    await gone(pid, "its server")
+    await server.close()
+
+
+async def test_the_file_tools_are_left_out_unless_the_workspace_is_shared(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("hi")
+    read = {"file_path": str(tmp_path / "a.txt")}
+    async with Server() as server:
+        for execution, has_read in [(REMOTE, False), ({**REMOTE, "shared_workspace": True}, True)]:
+            turns = [tool_turn("c1", "Read", read), text_turn("done")]
+            cfg = config(turns, mode="skip_dangerous", workspace=str(tmp_path), execution=execution)
+            agent: Agent = await server.open_agent(cfg, execution=SubprocessHost())
+            run = await agent.run("s1", "go")
+            [end] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+            assert (not end.is_error) is has_read, result_text(end)
+
+
+async def test_a_remote_backend_needs_a_host(tmp_path: Path) -> None:
+    async with Server() as server:
+        with pytest.raises(ValueError, match="execution"):
+            await server.open_agent(agent_config(tmp_path, [text_turn("x")]))

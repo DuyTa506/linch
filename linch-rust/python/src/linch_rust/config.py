@@ -150,7 +150,31 @@ class DockerExecution(TypedDict, total=False):
     allow_root: bool
 
 
-Execution = LocalExecution | SandboxExecution | DockerExecution
+class RemoteExecution(TypedDict, total=False):
+    """`Bash` on a host this agent's client supplies.
+
+    Open the agent with `Server.open_agent(execution=host)`; the host runs
+    each command wherever it runs, under its own isolation, not the server's.
+    The agent cannot be scheduled or run by a worker. The file tools act on
+    the server's workspace, which is not where the commands run, so they are
+    left out unless `shared_workspace` says the host sees that directory.
+
+    Attributes:
+        backend: `"remote"`.
+        cwd: The directory commands start in on the host; the host's choice
+            when absent.
+        shared_workspace: Whether the host sees the server's workspace at
+            the same path. Then the file tools are registered and commands
+            start in the workspace unless `cwd` says otherwise. Off when
+            absent.
+    """
+
+    backend: Required[Literal["remote"]]
+    cwd: str
+    shared_workspace: bool
+
+
+Execution = LocalExecution | SandboxExecution | DockerExecution | RemoteExecution
 """Where `Bash` runs its commands; see `AgentConfig.execution`."""
 
 
@@ -569,8 +593,9 @@ class AgentConfig(TypedDict, total=False):
             commands through `execution`, and `BashOutput` and `BashKill`
             for its background commands. On when absent.
         execution: Where `Bash` runs its commands: `{"backend": "local"}`,
-            as the server's user, when absent; a `SandboxExecution` or a
-            `DockerExecution`. A non-local backend is part of the run
+            as the server's user, when absent; a `SandboxExecution`, a
+            `DockerExecution` or a `RemoteExecution` (commands run in this
+            client; see `ExecutionHost`). A non-local backend is part of the run
             contract. A remote tenant may name only a backend its server
             lists, and one naming none gets the server's first.
         permissions: The mode, `project_root` and rules; see

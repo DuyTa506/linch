@@ -105,6 +105,8 @@ pub(crate) struct Spawned {
 
 /// A command an execution backend started: a child of this process, or
 /// one a host runs elsewhere.
+// One value per command, moved once into `supervise`: boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum Started {
     /// A child of this process, supervised through its process group.
