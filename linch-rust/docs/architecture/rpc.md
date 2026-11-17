@@ -72,6 +72,13 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` when the list lacks it |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` on the agent; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown}`; an unknown run is `-32021` |
+| `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): tenant caps, then `WorkflowSession::open_held`; `-32045` while another client drives it | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
+| `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` on the branch; dropped with the connection like a run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
+| `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; the ticket is held by the server | `{replayed, value?, ticket?}`, `{}` |
+| `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
+| `workflow.cancel` | `{run_id, call_id?}` | cancels one agent call in flight, or all | `{cancelled}` |
+| `workflow.finish` | `{run_id, ok}` | ends the calls in flight, writes the status (`awaiting_input` when an interrupt suspended it), frees the hold | `{status}` |
+| `workflow.status` | `{agent, run_id}` | reads the stored workflow | `{status, records, interrupt?}` |
 | `schedule.create` | `ScheduleCreateParams` (`protocol/schedule.rs`) | `Server::create_schedule` (`server/schedule.rs`) | `ScheduleInfo` |
 | `schedule.list` | `ScheduleListParams` | `server/schedule.rs` | `{schedules}` |
 | `schedule.pause`, `schedule.resume` | `ScheduleIdParams` | `server/schedule.rs`; `-32041` for an unknown id | `ScheduleInfo` |
@@ -80,7 +87,7 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `job.get` | `JobGetParams` | `server/schedule.rs`; `-32043` for an unknown id | `JobInfo` |
 | `job.list` | `JobListParams` | `server/schedule.rs` | `{jobs}` |
 
-The server sends two notifications. `run.event` `{run_id, envelopes}`
+The server sends three notifications. `workflow.event` `{run_id, event}` carries each `WorkflowEvent` of a workflow the connection drives, in order, before the answer of the call that made it. The other two: `run.event` `{run_id, envelopes}`
 (`RunEvent`, `protocol.rs:256`) carries one or more consecutive envelopes
 of one run; `run.end` `{run_id, error?}` (`RunEnd`, `protocol.rs:266`) is
 the last message of a run. It also sends requests of its own: `tool.call`
@@ -108,6 +115,7 @@ docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
 | -32020 to -32034, -32038 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema` or `tool_choice` (`-32034`), an answer that does not fit (`-32032`, `data.reason`), a lost lease (`-32022`, from a claim or a fenced journal write), a run another process leases (`-32033`, `data: {run_id, owner, expires_in_ms}`), a steer that is blank, too long or has an unusable id (`-32038`, `data.reason`) |
 | -32035 to -32037 | The provider methods: a provider with no model list (`-32035`, `data.provider`), a model its list lacks (`-32036`, `data.model`, and `data.truncated` when the list was cut), a request that failed or an error answer (`-32037`, `data: {kind, status?}`, `kind` one of `unreachable` (connect, reset and timeout alike), `status`, `invalid_request`, `other`; the message is one fixed text per kind, never the key, the URL or the vendor's words). A missing key is `-32013` with `data.env`. A tenant needs `allow.provider_info` and an allowed `base_url` (`-32004`, `kind` `provider_info` or `provider_base_url`) |
 | -32040 to -32044 | The scheduler methods: an agent that cannot run in the background (`-32040`, `data.reason` `memory_store`, `host_tools` or `callbacks`), an unknown schedule (`-32041`), a taken schedule id (`-32042`), an unknown job (`-32043`), an unusable timing (`-32044`, `data.reason`) |
+| -32045 to -32048 | The workflow methods: another client drives the workflow (`-32045`), the budget is spent (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), an agent call did not produce a result (`-32047`, `data.kind` `failed`, `aborted`, `timeout`, `approval` or `invalid`), a call for a workflow this connection does not drive (`-32048`). A tenant needs `allow.workflow` (`-32004`, `kind: workflow`, or `workflow_budget` above its ceiling) and meets `-32005` with `kind` `workflows`, `agent_calls_in_flight` or `journal_records` |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to
@@ -126,6 +134,28 @@ whatever the id (`python/src/linch_rust/_remote.py:112-142`).
 The Python client maps codes to exceptions in `_BY_CODE`
 (`python/src/linch_rust/errors.py:158-170`), with ranges for the rest
 (`errors.py:173-186`); `python/tests/test_protocol.py:196` pins the map.
+
+### Workflow methods
+
+The workflow function runs in the client, and the server holds what has to
+be durable. The wire is the smallest cut that keeps both true: a call that
+must replay is one request (`workflow.agent`, `workflow.interrupt`, or a
+step's `begin` and `complete`), so a crash between two requests loses
+nothing the journal had, and the occurrence counters live with the journal,
+in the connection's `WorkflowSession`. The client names its fan-out branch on
+every call, so `parallel` runs client-side and still finds each branch's
+records on a resume. A cancelled `wf.agent` sends `workflow.cancel` for its
+`call_id` and waits for the call to end, so a failed `parallel` has stopped
+spending when it raises.
+
+The server drives a `workflow.agent` like a run: the connection ending drops
+it, leaving the child run at its last durable state, and the next drive
+continues that run. Only `workflow.cancel` aborts a child run.
+`workflow.finish` quiesces the calls in flight, writes the status and frees
+the hold. A tenant's `max_workflows` is taken at `workflow.start`; `max_fan_out`
+and the tenant's run place are taken by the `LiveGate` before each live
+call. Journal failures reach a tenant as the fixed text `the workflow
+journal failed`; the cause goes to the server's log.
 
 ## Inside a connection
 

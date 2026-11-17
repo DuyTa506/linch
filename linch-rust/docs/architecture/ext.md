@@ -216,6 +216,42 @@ process can read its question with `load`.
 Every store passes `workflow::conformance::journal_store_suite`
 (`crates/linch-ext/src/workflow/conformance.rs:25`).
 
+### Workflows over RPC
+
+A host whose workflow function runs elsewhere (the RPC server's client)
+drives a `WorkflowSession` (`crates/linch-ext/src/workflow/engine.rs`):
+
+- `WorkflowSession::open_held` takes the store's `hold` **before** it claims
+  (`engine.rs:145`), so a refused second driver leaves the epoch and the
+  status as they were. `PgJournalStore::hold` is a session advisory lock on
+  a detached connection, named by schema, namespace and workflow id
+  (`postgres.rs:259`); it frees the moment that connection closes, so a
+  killed process frees its workflow at once. `HoldGuard::release`
+  (`journal.rs:137`) frees it and waits; a dropped hold frees it in the
+  background. Each hold is a connection outside the pool's cap, bounded by
+  the tenant's `max_workflows`.
+- `step_begin` and `step_complete` (`step.rs:154`, `step.rs:191`) are the
+  two halves of `step_with`: the first counts the occurrence in call order
+  and answers from the journal, the second makes the value durable.
+- `WorkflowContext::scoped(path, future)` (`context.rs:127`) polls a future
+  as a fan-out branch, so a client that runs `parallel` itself names each
+  branch.
+- `agent_with(AgentCall)` (`agent.rs:188`) adds a subagent identity, an
+  output schema, `fork` (`Agent::fork_session` on a session an earlier call
+  returned), a timeout and retries. Its key is `agent_key_with`
+  (`journal.rs:268`): with none of those set it is exactly `agent_key`. The
+  journaled value is `{text, structured?, session_id, tokens, cost_usd}`.
+- `WorkflowBudget` is checked before each live call against what the
+  finished calls spent, replays included (`agent.rs:286`), so one running
+  call can overshoot. `max_records` is checked before a call spends
+  (`context.rs:160`) and `max_record_bytes` when a record is written.
+- `LiveGate` (`context.rs:24`) is asked before each call that would run
+  live, never for a replay; the server counts calls in flight and takes the
+  tenant's run place there.
+
+The journal has no event log to fold, so Python's `journal_snapshot_every`
+has no Rust counterpart: `load` is one query of the records.
+
 ## Example
 
 This compiles and runs at this revision. It scores one eval case, reports on

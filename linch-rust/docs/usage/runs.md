@@ -93,7 +93,7 @@ busy with True
   envelopes wait in memory. Cancel it if you no longer want it.
 - **Choose the run id** when you need to find the run again even if `run()`
   never returned (a timeout, a crash of your process). The server picks a UUID
-  when you do not. An id already stored ends the run with `RunError` (code
+  when you do not. An id already stored ends the run with `RunExists` (code
   -32023) and writes nothing.
 - Many runs of one server stream at once; each `Run` gets only its own
   envelopes.
@@ -116,7 +116,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | Exception | Code | When |
 |---|---|---|
 | `RunNotFound` | -32021 | No such run in the agent's stores (with memory stores: not in this handle) |
-| `RunError` | -32023 | `run_id` is already stored |
+| `RunExists` | -32023 | `run_id` is already stored; `run_or_resume` handles it ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data["expected"]` is the run's contract and `data["found"]` this agent's, as the message names them |
 | `RunTerminal` | -32026 | The run already finished; `data.status` is its status |
 | `NotSuspended` | -32027 | `approve` on a run that is not waiting for approval, or `answer` on one not waiting for an answer ([below](#approve)) |

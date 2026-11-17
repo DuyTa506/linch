@@ -217,6 +217,41 @@ process nào cũng có thể đọc câu hỏi của nó bằng `load`.
 Mọi store đều đạt `workflow::conformance::journal_store_suite`
 (`crates/linch-ext/src/workflow/conformance.rs:25`).
 
+### Workflows qua RPC
+
+Một host có hàm workflow chạy ở nơi khác (client của server RPC) drive một
+`WorkflowSession` (`crates/linch-ext/src/workflow/engine.rs`):
+
+- `WorkflowSession::open_held` lấy `hold` của store **trước** khi nó claim
+  (`engine.rs:145`), nên một driver thứ hai bị từ chối để epoch và trạng thái
+  nguyên như cũ. `PgJournalStore::hold` là một advisory lock cấp session trên một
+  kết nối tách riêng, được đặt tên theo schema, namespace và id workflow
+  (`postgres.rs:259`); nó được giải phóng ngay khi kết nối đó đóng, nên một process
+  bị kill giải phóng workflow của nó ngay. `HoldGuard::release`
+  (`journal.rs:137`) giải phóng nó và chờ; một hold bị drop sẽ được giải phóng
+  ngầm. Mỗi hold là một kết nối nằm ngoài giới hạn của pool, bị chặn bởi
+  `max_workflows` của tenant.
+- `step_begin` và `step_complete` (`step.rs:154`, `step.rs:191`) là hai nửa của
+  `step_with`: nửa đầu đếm occurrence theo thứ tự gọi và trả lời từ journal, nửa
+  sau làm giá trị trở nên bền vững.
+- `WorkflowContext::scoped(path, future)` (`context.rs:127`) poll một future như
+  một nhánh fan-out, nên một client tự chạy `parallel` đặt tên cho từng nhánh.
+- `agent_with(AgentCall)` (`agent.rs:188`) thêm một danh tính subagent, một output
+  schema, `fork` (`Agent::fork_session` trên một session mà một lời gọi trước đã
+  trả về), một timeout và các lần retry. Key của nó là `agent_key_with`
+  (`journal.rs:268`): khi không đặt cái nào trong số đó, nó đúng bằng `agent_key`.
+  Giá trị được ghi journal là `{text, structured?, session_id, tokens, cost_usd}`.
+- `WorkflowBudget` được kiểm tra trước mỗi lời gọi thật so với những gì các lời
+  gọi đã xong đã tiêu, tính cả replay (`agent.rs:286`), nên một lời gọi đang chạy
+  có thể vượt. `max_records` được kiểm tra trước khi một lời gọi tiêu tiền
+  (`context.rs:160`) và `max_record_bytes` khi một record được ghi.
+- `LiveGate` (`context.rs:24`) được hỏi trước mỗi lời gọi sẽ chạy thật, không bao
+  giờ cho một lần replay; server đếm các lời gọi đang chạy và lấy chỗ run của
+  tenant ở đó.
+
+Journal không có event log để fold, nên `journal_snapshot_every` của Python không
+có đối ứng trong Rust: `load` là một query lấy các record.
+
 ## Ví dụ
 
 Đoạn này biên dịch và chạy được ở revision này. Nó chấm điểm một eval case, báo cáo về

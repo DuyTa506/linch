@@ -95,7 +95,7 @@ busy with True
   trong bộ nhớ. Hãy hủy nó nếu bạn không còn cần.
 - **Hãy chọn run id** khi bạn cần tìm lại run ngay cả khi `run()` chưa bao giờ trả
   về (timeout, process của bạn bị crash). Server tự chọn một UUID khi bạn không
-  chọn. Một id đã được lưu sẽ kết thúc run bằng `RunError` (code -32023) và không
+  chọn. Một id đã được lưu sẽ kết thúc run bằng `RunExists` (code -32023) và không
   ghi gì.
 - Nhiều run của một server stream cùng lúc; mỗi `Run` chỉ nhận envelope của chính
   nó.
@@ -120,7 +120,7 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | Exception | Code | Khi nào |
 |---|---|---|
 | `RunNotFound` | -32021 | Không có run đó trong các kho lưu trữ của agent (với kho memory: không có trong handle này) |
-| `RunError` | -32023 | `run_id` đã được lưu |
+| `RunExists` | -32023 | `run_id` đã được lưu; `run_or_resume` xử lý nó ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | Run đã bắt đầu dưới một contract khác ([Config của agent](./agent.md#hợp-đồng-của-run)); `data["expected"]` là contract của run và `data["found"]` là của agent này, như thông báo nêu |
 | `RunTerminal` | -32026 | Run đã kết thúc; `data.status` là trạng thái của nó |
 | `NotSuspended` | -32027 | `approve` trên một run không đang chờ phê duyệt, hoặc `answer` trên một run không đang chờ câu trả lời ([bên dưới](#approve)) |

@@ -30,7 +30,7 @@ sử dụng riêng.
 | [MCP client](./mcp.md) | `linch-mcp`: transport stdio và HTTP, ánh xạ tool, relist, kết nối lại, hủy, kill cả process group, đóng có giới hạn thời gian, các giới hạn và che dữ liệu nhạy cảm |
 | [Stores](./stores.md) | Hợp đồng của store run, session, task và file cùng các bộ kiểm tra tuân thủ; store trong bộ nhớ; store Postgres: schema, migration, một run đang chạy cho mỗi session, fencing, ghi bằng một câu lệnh, phân loại từ chối, kích thước pool; số lần ghi của group commit |
 | [Worker](./worker.md) | `linch-worker`: hàng đợi job Postgres, vòng lặp worker, lease và fencing, back-off và dead letter, một job đang hoạt động cho mỗi run, lịch cron |
-| [Extensions](./ext.md) | `linch-ext`: bộ chạy eval và scorer, báo cáo run, workflow có journal trên journal bộ nhớ và Postgres |
+| [Extensions](./ext.md) | `linch-ext`: bộ chạy eval và scorer, báo cáo run, workflow có journal trên journal bộ nhớ và Postgres, và cách một client drive chúng qua RPC |
 | [OpenTelemetry](./otel.md) | `linch-otel`: span và metric dựng từ luồng event, ánh xạ sang tên của Linch bản Python, ghi lại nội dung, những gì host cần nối vào |
 | [Events](./events.md) | `Event` và các loại của nó, `Envelope`, các lớp lưu trữ bền vững, wire format và phiên bản của nó, việc bọc subagent, cách client Python giải mã và test parity, cách thêm một loại event |
 | [Skill và subagent](./skills-subagents.md) | Tool `Skill`, danh sách và overlay của nó; tool `Subagent`, worker foreground và background, `SubagentContinue` và `TaskStop`; họ run; hợp đồng của run con; resume sau sự cố; reload; danh sách deep agent |
