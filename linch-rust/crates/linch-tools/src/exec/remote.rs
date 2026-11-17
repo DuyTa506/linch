@@ -316,8 +316,10 @@ impl fmt::Debug for RemoteRun {
 enum Stop {
     TimedOut,
     Aborted,
-    /// The host stopped answering, or sent more than it may.
+    /// The host stopped answering.
     Lost,
+    /// The command printed more than [`OUTPUT_BUDGET`].
+    Flooded,
 }
 
 impl RemoteRun {
@@ -334,9 +336,10 @@ impl RemoteRun {
     /// `cancel` fires, feeding `on_out` and `on_err`. On a timeout or
     /// cancel the host is told to kill the command; the end is then
     /// [`End::TimedOut`] or [`End::Aborted`] only if the host confirmed the
-    /// kill with an exit, and [`End::Interrupted`] otherwise. The same when
-    /// the host stops answering, its connection closes, its start was not
-    /// confirmed or it sends more than [`OUTPUT_BUDGET`].
+    /// kill with an exit, and [`End::Interrupted`] otherwise. A command that
+    /// prints more than [`OUTPUT_BUDGET`] is killed the same way and ends
+    /// [`End::OutputLimit`]. When the host stops answering, its connection
+    /// closes or its start was not confirmed the end is [`End::Interrupted`].
     pub(crate) async fn supervise(
         mut self,
         limit: Duration,
@@ -367,6 +370,7 @@ impl RemoteRun {
             (_, Some(exit @ Exit::Code(_))) => End::Exited(exit),
             (Stop::TimedOut, Some(Exit::Signal(_))) => End::TimedOut,
             (Stop::Aborted, Some(Exit::Signal(_))) => End::Aborted,
+            (Stop::Flooded, Some(Exit::Signal(_))) => End::OutputLimit,
         }
     }
 
@@ -401,7 +405,7 @@ impl RemoteRun {
             let size = chunk.stdout.len() + chunk.stderr.len();
             taken += size;
             if taken > OUTPUT_BUDGET {
-                return Err(Stop::Lost);
+                return Err(Stop::Flooded);
             }
             if size < SMALL_ANSWER {
                 // A host that waits as asked is never early; one that does

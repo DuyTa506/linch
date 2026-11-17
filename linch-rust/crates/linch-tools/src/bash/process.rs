@@ -45,6 +45,9 @@ pub(crate) enum End {
     TimedOut,
     /// The call was cancelled (or the process killed) first.
     Aborted,
+    /// A remote command printed more than the server takes, and the host
+    /// confirmed the kill.
+    OutputLimit,
     /// A remote host stopped answering, or did not confirm a kill, so how
     /// the command ended is not known.
     Interrupted,

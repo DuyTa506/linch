@@ -30,6 +30,10 @@ pub use control::{BashKill, BashOutput, NO_SUCH_PROCESS_CODE};
 pub(crate) const INTERRUPTED: &str = "[interrupted: the remote host stopped answering, so the \
      command's outcome is unknown; it may still be running]";
 
+/// The status line of a remote command that printed more than the server
+/// takes (`exec::remote::OUTPUT_BUDGET`) and was killed.
+pub(crate) const OUTPUT_LIMIT: &str = "[output limit reached (256 MiB); the command was killed]";
+
 /// Timeout when the call gives none, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
@@ -313,6 +317,7 @@ fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
             "[aborted; process group killed]".into(),
             Some(("aborted", JsonValue::Null)),
         ),
+        End::OutputLimit => (OUTPUT_LIMIT.into(), Some(("output_limit", JsonValue::Null))),
         End::Interrupted => (INTERRUPTED.into(), Some(("interrupted", JsonValue::Null))),
     };
     let mut parts = Vec::new();

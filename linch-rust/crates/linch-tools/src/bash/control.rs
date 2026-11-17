@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::background::{Proc, Processes, Unread};
 use super::process::End;
-use super::{DEADLINE_MARGIN, INTERRUPTED, fit};
+use super::{DEADLINE_MARGIN, INTERRUPTED, OUTPUT_LIMIT, fit};
 use crate::exec::Exit;
 use crate::input::{coded, optional_count, schema, string};
 
@@ -205,6 +205,10 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
         Some(End::Aborted) => {
             metadata.insert("status".into(), "killed".into());
             ("[killed; process group killed]".into(), None)
+        }
+        Some(End::OutputLimit) => {
+            metadata.insert("status".into(), "output_limit".into());
+            (OUTPUT_LIMIT.into(), Some(("output_limit", JsonValue::Null)))
         }
         Some(End::Interrupted) => {
             metadata.insert("status".into(), "interrupted".into());
