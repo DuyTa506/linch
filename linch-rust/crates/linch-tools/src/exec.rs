@@ -291,8 +291,8 @@ pub(crate) struct Cleanup {
 }
 
 impl Cleanup {
-    fn command(&self) -> Command {
-        let mut command = Command::new(&self.program);
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.program);
         command
             .args(&self.args)
             .env_clear()
@@ -305,22 +305,76 @@ impl Cleanup {
 
     /// Run it and wait, at most [`CLEANUP`].
     pub(crate) async fn run(&self) {
-        if let Ok(mut child) = self.command().kill_on_drop(true).spawn() {
+        let mut command = Command::from(self.command());
+        if let Ok(mut child) = command.kill_on_drop(true).spawn() {
             let _ = tokio::time::timeout(CLEANUP, child.wait()).await;
         }
     }
 
-    /// Start it without waiting (from a `Drop`), when a Tokio runtime is
-    /// there to reap it.
+    /// Start it without waiting (from a `Drop`): on the Tokio runtime when
+    /// there is one, else on a thread of its own, so a guard dropped
+    /// outside a runtime still cleans up.
     pub(crate) fn detach(&self) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            let mut command = self.command();
+            let _ = std::thread::Builder::new()
+                .name("linch-cleanup".into())
+                .spawn(move || {
+                    if let Ok(mut child) = command.spawn() {
+                        wait_at_most(&mut child, CLEANUP);
+                    }
+                });
             return;
         };
-        let mut command = self.command();
+        let mut command = Command::from(self.command());
         handle.spawn(async move {
             if let Ok(mut child) = command.spawn() {
                 let _ = tokio::time::timeout(CLEANUP, child.wait()).await;
             }
         });
+    }
+}
+
+/// Wait for `child` from a plain thread for at most `limit`, then kill it;
+/// either way it is reaped.
+fn wait_at_most(child: &mut std::process::Child, limit: Duration) {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Ok(Some(_)) | Err(_) => return,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A guard dropped outside a Tokio runtime (a plain thread, a runtime
+    /// shutting down) still removes what its command left.
+    #[test]
+    fn a_cleanup_detached_without_a_runtime_still_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned");
+        let cleanup = Cleanup {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "touch \"$0\"".into(),
+                marker.display().to_string(),
+            ],
+            env: BTreeMap::new(),
+        };
+        cleanup.detach();
+        for _ in 0..250 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(marker.exists(), "the cleanup did not run");
     }
 }
