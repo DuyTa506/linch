@@ -166,6 +166,11 @@ entry. So `"execution": [{"backend": "sandbox"}]` holds every agent of the
 tenant to the sandbox and refuses `local`. The default is
 `[{"backend": "local"}]`, and `Bash` still needs `exec_tools`.
 
+A background run (`job.enqueue` or a schedule's fire) is admitted again by
+the server whose worker runs it, at every attempt, so it gets that
+server's backend for the tenant. A `local_namespaces` root is trusted as a
+stdio client is and keeps its config's choice.
+
 ## Python Linch
 
 Python's `ExecutionBackend` pairs a shell and a file backend

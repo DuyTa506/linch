@@ -155,6 +155,11 @@ hay giới hạn của mình; một cấu hình không nêu gì nhận mục đ�
 `"execution": [{"backend": "sandbox"}]` giữ mọi agent của tenant trong sandbox và từ
 chối `local`. Mặc định là `[{"backend": "local"}]`, và `Bash` vẫn cần `exec_tools`.
 
+Một run nền (`job.enqueue` hoặc một lần kích hoạt của lịch) được server có worker chạy
+nó kiểm tra lại ở mỗi lần thử, nên nó nhận backend mà server đó đặt cho tenant. Một
+gốc `local_namespaces` được tin cậy như một client stdio và giữ lựa chọn trong cấu hình
+của nó.
+
 ## Python Linch
 
 `ExecutionBackend` của Python ghép một shell và một file backend

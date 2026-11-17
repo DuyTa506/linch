@@ -352,7 +352,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
 
 A path that does not exist is refused like one outside the roots, so a
-client cannot probe the server's file system. Three changes are made
+client cannot probe the server's file system. Four changes are made
 silently instead:
 
 - Without `exec_tools`, the config's `bash` is turned off and the agent opens

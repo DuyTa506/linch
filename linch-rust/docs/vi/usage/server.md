@@ -353,7 +353,7 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `verification` | Hơn 32 verifier trong `spec.verification`, một pattern dài quá 1024 byte, hoặc hơn 32 keyword trong một verifier | Tương tự, cho mọi câu trả lời cuối cùng |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
-không thể dò hệ thống tệp của server. Ba thay đổi được thực hiện âm thầm thay vì từ
+không thể dò hệ thống tệp của server. Bốn thay đổi được thực hiện âm thầm thay vì từ
 chối:
 
 - Khi không có `exec_tools`, `bash` của cấu hình bị tắt và agent mở mà không có
