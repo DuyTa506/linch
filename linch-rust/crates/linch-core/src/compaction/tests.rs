@@ -379,6 +379,38 @@ fn the_verbatim_section_never_outgrows_the_folded_part() {
     );
 }
 
+/// An accepted summary must leave a view smaller than the part it replaced:
+/// the saving is measured on the whole checkpoint, not on the model's text
+/// alone, or the verbatim section added after the check can make a
+/// compaction grow the view.
+#[test]
+fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
+    let paste = |n: u8| Arc::new(Message::user_text(format!("{n}").repeat(2000)));
+    let reply = Arc::new(Message::assistant_text("a".repeat(400)));
+    let view = vec![
+        Arc::new(Message::user_text("go")),
+        paste(1),
+        reply.clone(),
+        paste(2),
+        reply.clone(),
+        Arc::new(Message::user_text("last question")),
+        reply,
+    ];
+    let keep = keep_from(&view, 1).unwrap();
+    let folded = &view[1..keep];
+    // A summary just under the folded part's size passes the saving check.
+    let text = "s".repeat(estimate_tokens(folded) as usize * 4 - 8);
+    let plain = Message::user_text(&text);
+    assert_eq!(rejection(false, &text, &plain, folded), None, "accepted");
+    let made = checkpoint(&text, folded, 15_000);
+    let before = estimate_tokens(folded);
+    let after = estimate_tokens(&[Arc::new(made)]);
+    assert!(
+        after < before,
+        "the checkpoint is {after} tokens, it replaces {before}"
+    );
+}
+
 #[test]
 fn the_user_message_budget_is_off_the_wire_at_its_default() {
     let spec = CompactionSpec::new(9);
