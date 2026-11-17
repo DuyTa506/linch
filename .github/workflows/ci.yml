@@ -2,10 +2,14 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - linch-rust/**
   push:
     branches:
       - main
       - master
+    paths-ignore:
+      - linch-rust/**
 
 permissions:
   contents: read
