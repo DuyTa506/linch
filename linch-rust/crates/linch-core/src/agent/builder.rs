@@ -257,7 +257,8 @@ impl AgentBuilder {
     ///         cannot run, the
     ///         compaction, budget (a cost cap on a model with no price
     ///         included) or
-    ///         provider retry settings cannot run, the loop guard allows no
+    ///         provider retry settings cannot run, the tool call timeout
+    ///         is under 100 ms, the loop guard allows no
     ///         turn without a provider call, the tool retry or tool cache policy cannot run, a fallback model is blank
     ///         or repeats a model, a built-in tool's name is taken, the
     ///         final tool is not registered (or, made from the output
@@ -298,6 +299,9 @@ impl AgentBuilder {
                  `pricing` for it or cap budget.max_tokens instead",
                 self.spec.model
             )));
+        }
+        if let Some(problem) = self.spec.call_timeout_problem() {
+            return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.loop_guard.problem() {
             return Err(BuildError::Invalid(problem.into()));
