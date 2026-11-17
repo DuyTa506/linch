@@ -380,9 +380,9 @@ macro_rules! digest_of {
     };
 }
 
-/// The schedules of `namespace` that run the stored agent definition
-/// `config` (the text of a [`Schedule::agent`]), by id: one agent's
-/// schedules, as its schedule tools see them.
+/// The schedules of `namespace` in `session` that run the stored agent
+/// definition `config` (the text of a [`Schedule::agent`]), by id: one
+/// agent's schedules in one session, as its schedule tools see them.
 ///
 /// Raises:
 ///     WorkerError: If the query fails.
@@ -390,26 +390,29 @@ pub async fn list_agent_schedules(
     pool: &PgPool,
     namespace: &str,
     config: &str,
+    session: &SessionId,
 ) -> Result<Vec<ScheduleInfo>, WorkerError> {
     let rows: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
         columns!(),
         " FROM linch_worker_schedules WHERE namespace = $1 AND agent = ",
         digest_of!("$2"),
-        " ORDER BY id"
+        " AND session_id = $3 ORDER BY id"
     ))
     .bind(namespace)
     .bind(config)
+    .bind(session.as_str())
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(info).collect())
 }
 
 /// [`delete_schedule`], only when the schedule runs the stored agent
-/// definition `config`, checked in the same statement.
+/// definition `config` in `session`, checked in the same statement.
 ///
 /// Returns:
-///     Whether `namespace` had a schedule `id` of that definition.
+///     Whether `namespace` had a schedule `id` of that definition in that
+///     session.
 ///
 /// Raises:
 ///     WorkerError: If the delete fails.
@@ -418,14 +421,17 @@ pub async fn delete_agent_schedule(
     namespace: &str,
     id: &str,
     config: &str,
+    session: &SessionId,
 ) -> Result<bool, WorkerError> {
     let done = sqlx::query(concat!(
         "DELETE FROM linch_worker_schedules WHERE namespace = $1 AND id = $2 AND agent = ",
-        digest_of!("$3")
+        digest_of!("$3"),
+        " AND session_id = $4"
     ))
     .bind(namespace)
     .bind(id)
     .bind(config)
+    .bind(session.as_str())
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)

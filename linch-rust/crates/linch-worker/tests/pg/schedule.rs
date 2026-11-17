@@ -184,10 +184,11 @@ async fn pause_resume_and_delete() {
     db.finish().await;
 }
 
-/// The schedule tools see only the schedules of their own agent: the
-/// namespace's schedules whose stored definition is theirs.
+/// The schedule tools see only the schedules of their own agent in their
+/// own session: the namespace's schedules whose stored definition is
+/// theirs and whose session is the calling run's.
 #[tokio::test]
-async fn agent_scoped_list_and_delete_see_only_that_definition() {
+async fn agent_scoped_list_and_delete_see_only_that_definition_and_session() {
     let Some(db) = TestDb::new("agent_scope").await else {
         return;
     };
@@ -197,10 +198,16 @@ async fn agent_scoped_list_and_delete_see_only_that_definition() {
         schedule.agent = agent.map(str::to_owned);
         schedule
     };
+    let mut other_session = with("mine-other-session", Some(mine));
+    other_session.session_id = Some(SessionId::new("other"));
+    let mut no_session = with("mine-no-session", Some(mine));
+    no_session.session_id = None;
     for schedule in [
         with("mine", Some(mine)),
         with("theirs", Some(theirs)),
         with("bare", None),
+        other_session,
+        no_session,
     ] {
         create_schedule(&db.pool, &schedule, None).await.unwrap();
     }
@@ -208,25 +215,27 @@ async fn agent_scoped_list_and_delete_see_only_that_definition() {
     elsewhere.namespace = "other".into();
     create_schedule(&db.pool, &elsewhere, None).await.unwrap();
 
-    let listed = list_agent_schedules(&db.pool, NS, mine).await.unwrap();
+    let session = SessionId::new("sched");
+    let listed = list_agent_schedules(&db.pool, NS, mine, &session)
+        .await
+        .unwrap();
     let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(ids, ["mine"]);
-    for id in ["theirs", "bare", "mine-elsewhere"] {
-        let deleted = delete_agent_schedule(&db.pool, NS, id, mine).await;
+    for id in [
+        "theirs",
+        "bare",
+        "mine-elsewhere",
+        "mine-other-session",
+        "mine-no-session",
+    ] {
+        let deleted = delete_agent_schedule(&db.pool, NS, id, mine, &session).await;
         assert!(!deleted.unwrap(), "{id}");
     }
-    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 3);
-    assert!(
-        delete_agent_schedule(&db.pool, NS, "mine", mine)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !delete_agent_schedule(&db.pool, NS, "mine", mine)
-            .await
-            .unwrap()
-    );
-    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 2);
+    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 5);
+    let delete = || delete_agent_schedule(&db.pool, NS, "mine", mine, &session);
+    assert!(delete().await.unwrap());
+    assert!(!delete().await.unwrap());
+    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 4);
     db.finish().await;
 }
 

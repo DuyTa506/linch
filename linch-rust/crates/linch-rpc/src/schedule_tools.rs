@@ -11,7 +11,7 @@
 //!   ([`admit_create`]): the tenant's `max_schedules` cap and
 //!   `min_schedule_interval_ms` floor;
 //! - list and cancel see only the namespace's schedules of that same
-//!   definition;
+//!   definition in the calling run's session;
 //! - a subagent's call is refused: a child with fewer tools would schedule
 //!   the whole agent.
 //!
@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use linch::postgres::{PgPool, PgRunStore};
 use linch::tools::{NewSchedule, ScheduleBackend, ScheduleEntry, ScheduleTiming, schedule_tools};
-use linch::{RunStore, ToolOutputError, ToolRegistry};
+use linch::{RunStore, SessionId, ToolOutputError, ToolRegistry};
 use linch_worker::{Schedule, ScheduleInfo};
 use tokio::sync::OnceCell;
 
@@ -102,10 +102,15 @@ impl Bound {
         }
     }
 
-    /// The schedule `id` of this agent, if it exists.
-    async fn own(&self, id: &str) -> Result<Option<ScheduleInfo>, ToolOutputError> {
+    /// The schedule `id` of this agent in `session`, if it exists.
+    async fn own(
+        &self,
+        session: &SessionId,
+        id: &str,
+    ) -> Result<Option<ScheduleInfo>, ToolOutputError> {
+        let (pool, namespace) = (&self.pool, &self.namespace);
         let listed =
-            linch_worker::list_agent_schedules(&self.pool, &self.namespace, &self.definition).await;
+            linch_worker::list_agent_schedules(pool, namespace, &self.definition, session).await;
         let listed = listed.map_err(|error| refusal(&worker_error(&error)))?;
         Ok(listed.into_iter().find(|schedule| schedule.id == id))
     }
@@ -136,7 +141,7 @@ impl ScheduleBackend for Binding {
         bound.migrated().await?;
         // The call's key as the id: a retry of the same call finds its
         // schedule instead of making a second one.
-        if let Some(made) = bound.own(&new.call_key).await? {
+        if let Some(made) = bound.own(&new.session_id, &new.call_key).await? {
             return Ok(entry(made));
         }
         let schedule = Schedule {
@@ -153,17 +158,17 @@ impl ScheduleBackend for Binding {
         Ok(entry(created.map_err(|error| refusal(&error))?))
     }
 
-    async fn list(&self) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
+    async fn list(&self, session: &SessionId) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
         let bound = self.bound()?;
         bound.migrated().await?;
+        let (pool, namespace) = (&bound.pool, &bound.namespace);
         let listed =
-            linch_worker::list_agent_schedules(&bound.pool, &bound.namespace, &bound.definition)
-                .await;
+            linch_worker::list_agent_schedules(pool, namespace, &bound.definition, session).await;
         let listed = listed.map_err(|error| refusal(&worker_error(&error)))?;
         Ok(listed.into_iter().map(entry).collect())
     }
 
-    async fn cancel(&self, id: &str) -> Result<bool, ToolOutputError> {
+    async fn cancel(&self, session: &SessionId, id: &str) -> Result<bool, ToolOutputError> {
         let bound = self.bound()?;
         bound.migrated().await?;
         let deleted = linch_worker::delete_agent_schedule(
@@ -171,6 +176,7 @@ impl ScheduleBackend for Binding {
             &bound.namespace,
             id,
             &bound.definition,
+            session,
         )
         .await;
         deleted.map_err(|error| refusal(&worker_error(&error)))

@@ -247,8 +247,8 @@ it can schedule its own follow-ups ("check the deploy every hour"):
 | Tool | Scope | Input | Does |
 |---|---|---|---|
 | `CreateSchedule` | `exec` | `payload`, and `cron` (with an optional `timezone`) or `interval_s` | A heartbeat of this agent in the calling run's session; answers `Scheduled <id> at <next fire>` |
-| `ListSchedules` | `read` | none | This agent's schedules, one line each: `<id>: <payload> enabled=<bool> next_fire=<time>` |
-| `CancelSchedule` | `write` | `id` | Deletes one of this agent's schedules; runs it already queued finish |
+| `ListSchedules` | `read` | none | This agent's schedules in the calling run's session, one line each: `<id>: <payload> enabled=<bool> next_fire=<time>` |
+| `CancelSchedule` | `write` | `id` | Deletes one of this agent's schedules in the calling run's session; runs it already queued finish |
 
 ```python
 config = {
@@ -282,9 +282,12 @@ had:
   tenant's `max_schedules` (counting the schedules the client made) and
   `min_schedule_interval_ms`. A refusal is the tool's error, with code
   `not_allowed`, `limit_reached` or `invalid_schedule`; the run goes on.
-- **Its own schedules only.** `ListSchedules` and `CancelSchedule` see the
-  schedules of the agent's namespace that run this same config, whoever
-  made them: not another agent's, nor another namespace's.
+- **Its own session's schedules only.** `ListSchedules` and
+  `CancelSchedule` see the schedules of the agent's namespace that run this
+  same config in the calling run's session, as Python's tools see one
+  session's: not another session's, not a schedule without a session (one
+  the client made with `create_schedule` and no `session_id`), not another
+  agent's, nor another namespace's.
 - **Not from a subagent.** A subagent may hold fewer tools than the agent a
   schedule runs, so its `CreateSchedule` gets an error.
 - **Asked like any exec tool.** `CreateSchedule` asks in modes `default` and

@@ -406,9 +406,9 @@ async fn the_tenant_caps_hold_through_the_tool() {
         said[4].0 && said[4].1.contains("already holds its 2 schedules"),
         "{said:?}"
     );
-    // The client's schedule is the same agent's, so the model sees it.
+    // The client's schedule has no session, so the model does not see it.
     let listing = &said[5].1;
-    assert!(listing.contains("client: p enabled=true"), "{listing}");
+    assert!(!listing.contains("client"), "{listing}");
     assert!(listing.contains(": hourly enabled=true"), "{listing}");
     // And the client meets the cap the model filled.
     let refused = rpc
@@ -425,10 +425,12 @@ async fn the_tenant_caps_hold_through_the_tool() {
     db.drop().await;
 }
 
-/// The model lists and cancels only its own agent's schedules: not those
-/// of another config in its namespace, nor of another namespace.
+/// The model lists and cancels only its own agent's schedules in its own
+/// session, as Python's tools do: not those of another session or none
+/// (the client's), of another config in its namespace, nor of another
+/// namespace.
 #[tokio::test]
-async fn the_model_reaches_only_its_own_agents_schedules() {
+async fn the_model_reaches_only_its_own_agents_schedules_in_its_session() {
     let Some(db) = TestDb::empty("stools_scope").await else {
         return;
     };
@@ -439,7 +441,9 @@ async fn the_model_reaches_only_its_own_agents_schedules() {
         tool_turn("l1", "ListSchedules", json!({})),
         tool_turn("x1", "CancelSchedule", json!({"id": "theirs"})),
         tool_turn("x2", "CancelSchedule", json!({"id": "support"})),
-        tool_turn("x3", "CancelSchedule", json!({"id": "mine"})),
+        tool_turn("x3", "CancelSchedule", json!({"id": "client"})),
+        tool_turn("x4", "CancelSchedule", json!({"id": "elsewhere"})),
+        tool_turn("x5", "CancelSchedule", json!({"id": "mine"})),
         text_turn("done"),
     ];
     let on = on_postgres(config(turns, "acme", dir.path()), &db);
@@ -450,25 +454,48 @@ async fn the_model_reaches_only_its_own_agents_schedules() {
     let mut support = on;
     support["namespace"] = json!("acme/support");
     let support = rpc.open(support).await;
-    let hourly = |agent: &str, id: &str| json!({"agent": agent, "id": id, "prompt": id, "cron": "0 * * * *"});
-    for (handle, id) in [(&agent, "mine"), (&other, "theirs"), (&support, "support")] {
-        rpc.call(method::SCHEDULE_CREATE, hourly(handle, id))
+    let hourly = |agent: &str, id: &str, session: Option<&str>| {
+        json!({"agent": agent, "id": id, "prompt": id, "cron": "0 * * * *",
+               "session_id": session})
+    };
+    for (handle, id, session) in [
+        (&agent, "mine", Some("s")),
+        (&agent, "client", None),
+        (&agent, "elsewhere", Some("other")),
+        (&other, "theirs", Some("s")),
+        (&support, "support", Some("s")),
+    ] {
+        rpc.call(method::SCHEDULE_CREATE, hourly(handle, id, session))
             .await
             .unwrap();
     }
     let ada = json!({"tenant": "acme", "user": "ada", "roles": []});
     let said = results(&run(&mut rpc, &agent, "s", ada).await);
     assert!(said[0].1.starts_with("mine: mine enabled=true"), "{said:?}");
-    assert!(!said[0].1.contains("theirs") && !said[0].1.contains("support"));
-    assert_eq!(said[1], (true, "No schedule theirs".to_owned()));
-    assert_eq!(said[2], (true, "No schedule support".to_owned()));
-    assert_eq!(said[3], (false, "Cancelled mine".to_owned()));
-    for (handle, id) in [(&other, "theirs"), (&support, "support")] {
+    assert_eq!(said[0].1.lines().count(), 1, "{said:?}");
+    for (at, id) in [
+        (1, "theirs"),
+        (2, "support"),
+        (3, "client"),
+        (4, "elsewhere"),
+    ] {
+        assert_eq!(said[at], (true, format!("No schedule {id}")));
+    }
+    assert_eq!(said[5], (false, "Cancelled mine".to_owned()));
+    // `schedule.list` shows each namespace's schedules: only `mine` is gone.
+    let ids = |listed: Value| -> Vec<String> {
+        let listed: Schedules = serde_json::from_value(listed).unwrap();
+        listed.schedules.into_iter().map(|s| s.id).collect()
+    };
+    for (handle, left) in [
+        (&agent, vec!["client", "elsewhere", "theirs"]),
+        (&support, vec!["support"]),
+    ] {
         let listed = rpc
             .call(method::SCHEDULE_LIST, json!({"agent": handle}))
             .await
             .unwrap();
-        assert_eq!(listed["schedules"][0]["id"], json!(id));
+        assert_eq!(ids(listed), left);
     }
     db.drop().await;
 }
