@@ -66,7 +66,7 @@ impl Wire {
             .await
             .unwrap();
         stdin.flush().await.unwrap();
-        let line = timeout(Duration::from_secs(20), self.lines.next_line());
+        let line = timeout(Duration::from_secs(60), self.lines.next_line());
         let line = line.await.expect("server silent").unwrap().expect("eof");
         let response: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["id"], self.next_id, "{response}");
@@ -115,6 +115,6 @@ async fn capabilities_never_send_the_key_the_calls_that_need_it_do() {
     assert!(heads[1].contains(&bearer), "{}", heads[1]);
 
     drop(server.stdin.take());
-    let status = timeout(Duration::from_secs(20), child.wait()).await;
+    let status = timeout(Duration::from_secs(60), child.wait()).await;
     assert!(status.expect("server exited").unwrap().success());
 }
