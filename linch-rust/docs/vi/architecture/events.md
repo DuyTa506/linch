@@ -49,7 +49,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
 | `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | Một event cho mỗi lời gọi `AskUser`, trước một `suspended` có trạng thái `awaiting_input`; `questions` là trường mới và bị bỏ khi rỗng |
 | `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Kết thúc stream của một run đã suspend thay cho `result`; trạng thái `awaiting_approval` hoặc `awaiting_input` |
-| `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | |
+| `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | `budget` là `{}` trừ khi `spec.context_budget` được đặt |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:113` | yes | yes | |
 | `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó |

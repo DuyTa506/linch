@@ -65,7 +65,15 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    thúc run với trạng thái failed trước khi lời gọi được thực hiện (`turn.rs:271-284`).
 3. **Dựng request** từ provider view của session. Các hook `context_build` chỉ thêm
    block vào phần đuôi của request (`turn.rs:285-295`, `runner/hooks.rs:117-129`).
-   Chúng không bao giờ được ghi log. Sau đó `before_provider_call` chạy trên request
+   Chúng không bao giờ được ghi log.
+   Khi `spec.context_budget` được đặt, `ContextBudget::apply` (`context_budget.rs`)
+   bỏ cả block theo thứ tự đã khai báo cho đến khi chúng vừa: nó chỉ đếm các block
+   này, bốn ký tự một token, không bao giờ đếm system, các tool hay log, và không
+   bao giờ làm run thất bại. Quyết định là một hàm thuần của câu trả lời của các
+   hook, được tính lại cho mọi request và báo cáo trong `budget` của event
+   `context_build`; không có gì trong checkpoint phụ thuộc vào nó, nên một resume
+   quyết định lại. Bản thân các system block được cố định lúc dựng từ `spec.system`
+   (`system.rs`), nằm trong contract. Sau đó `before_provider_call` chạy trên request
    đã dựng: một rewrite thay thế nó trước khi bất cứ thứ gì phía sau thấy nó; một
    block kết thúc run với trạng thái failed và provider không bao giờ được gọi
    (`hooks/call.rs`, `runner/hooks.rs`). Một `force_continue` bỏ qua các bước

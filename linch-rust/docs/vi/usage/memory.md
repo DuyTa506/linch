@@ -345,6 +345,62 @@ như một vault Obsidian: một `NoteStore` tìm theo từ khóa, `retrieval` t
 kiểm tra rằng một ghi chú lưu ở một run được nhớ lại ở run sau và không có văn bản nào được
 nhớ lại nằm trong session.
 
+<a id="context-budget"></a>
+
+### Context budget
+
+Mỗi block mà một callback `context_build` thêm vào đều tốn token ở mọi request.
+`spec.context_budget` đặt mức trần cho chúng, là `ContextBudget` của Python Linch:
+
+```python
+spec = {
+    "model": "claude-sonnet-4-6",
+    "context_budget": {
+        "max_tokens": 2000,
+        "pinned": ["policy"],
+        "drop_order": ["memory", "linch.deep-agent.file-memory-context"],
+    },
+}
+```
+
+| Trường | Điều khiển gì |
+|---|---|
+| `max_tokens` | Số token ước tính nhiều nhất (bốn ký tự một token, làm tròn lên cho mỗi block) mà các callback được thêm vào một request; tối thiểu 1 |
+| `drop_order` | Các `policy_id` của callback, cái bị bỏ đầu tiên đứng ở đầu |
+| `pinned` | Các `policy_id` của callback mà block của chúng không bao giờ bị bỏ; một id chỉ nằm trong nhiều nhất một danh sách |
+
+**Nó đếm gì.** Chỉ những gì callback `context_build` thêm vào: memory được truy
+xuất (`retrieval`, policy id là `memory` nếu bạn không đặt cái khác), file memory
+của deep agent (`linch.deep-agent.file-memory-context`), và bất cứ thứ gì khác một
+callback trả về, tất cả tính trên cùng một mức trần. System prompt, các tool và
+cuộc hội thoại đã ghi log không được đếm: spec sở hữu hai thứ đầu, còn
+[compaction](#compaction) sở hữu cuộc hội thoại.
+
+**Cái gì bị bỏ trước.** Cả block bị bỏ cho đến khi phần còn lại vừa, và không bỏ
+nhiều hơn thế. Block của các callback không nằm trong danh sách nào bị bỏ trước,
+callback đến sau trước callback đến trước; rồi đến các block trong `drop_order`,
+cái được liệt kê đầu tiên bị bỏ trước; block của callback `pinned` thì không bao
+giờ. Trong cùng một callback, block cuối cùng bị bỏ trước, nên một retrieval
+store trả chunk tốt nhất của nó đầu tiên sẽ giữ nó lâu nhất. Nếu riêng các block
+pinned đã vượt mức trần, chúng vẫn ở lại và request vượt mức trần đúng bằng phần
+đó.
+
+**Tràn thì sao.** Nó không bao giờ làm run thất bại, không compact gì và không
+thay đổi gì trong session: các block bị bỏ đơn giản là không được gửi. `budget`
+của event `context_build` báo cáo quyết định của từng request
+([Event](./events.md#contextbuildevent-context_build)): `max_tokens`,
+`used_tokens`, `remaining_tokens`, `trimmed`, `over_by` khi các block pinned vượt
+mức trần, và `dropped`, mỗi block một `{source, index, tokens}`, với `index` là vị
+trí của block trong các block của callback của nó. `metadata["memory"]["ids"]`
+của một callback retrieval vẫn liệt kê mọi chunk nó tìm thấy, nên hãy dùng
+`index` để biết chunk nào đã được gửi. Trong Python, `ContextBuildEvent.dropped`
+đưa chúng ra dưới dạng các `DroppedContext`.
+
+**Độ bền vững.** Budget là một phần của run contract, nên một run không được
+resume dưới budget khác. Bản thân quyết định được tính lại cho mỗi request từ câu
+trả lời của các callback và không được lưu để phục hồi; một run được resume sẽ
+quyết định lại. Khi không có budget, `budget` là `{}` và không có gì được đếm.
+
 ### Vì sao là callback chứ không phải một kiểu connector
 
 Python Linch có `RagConnector`, một protocol mà context builder gọi, và `RetrievedChunk`.
@@ -368,6 +424,9 @@ cache.
 | `reset_read_tracker` sau một lần compaction | Có sẵn cho agent workspace |
 | `TruncationRecovery` | `spec.truncation_recovery` |
 | `RagConnector`, `ContextBuilder`, `FileMemoryContextBuilder` | Một callback `context_build`; `linch_rust.memory.retrieval` |
+| `ContextBudget` trên kết quả của một builder | `spec.context_budget`, trên các block của callback, theo `drop_order` và `pinned` được khai báo (Python bỏ message cũ nhất trước, rồi system block cũ nhất) |
+| `SystemPromptConfig` | `spec.system` ([Config của agent](./agent.md#system-sections)) |
+| `register_grounding_check` | Chưa xây: nó cần các id đã truy xuất trong run, được hai callback chia sẻ, và một budget sửa lỗi; các lần thử lại của `stop` bị giới hạn một lần cho mỗi lời gọi run trừ khi đặt `spec.verification` |
 
 ## Các trang liên quan
 

@@ -66,6 +66,14 @@ What differs in Rust:
 3. **Build the request** from the session's provider view. The
    `context_build` hooks add blocks to the tail of the request only
    (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged.
+   With `spec.context_budget` set, `ContextBudget::apply` (`context_budget.rs`)
+   then drops whole blocks by the declared order until they fit: it counts
+   only these blocks at four characters per token, never the system, the tools
+   or the log, and never fails the run. The decision is a pure function of
+   the hooks' answers, recomputed for every request and reported in the
+   `context_build` event's `budget`; nothing in a checkpoint depends on it,
+   so a resume decides again. The system blocks themselves are fixed at
+   build from `spec.system` (`system.rs`), in the contract.
    `before_provider_call` then runs on the built request: a rewrite replaces
    it before anything downstream sees it; a block ends the run as failed and
    the provider is never called (`hooks/call.rs`, `runner/hooks.rs`). A

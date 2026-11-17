@@ -125,6 +125,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)); không có nó thì một agent có `schedule_tools` bị từ chối |
 | `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt của các lịch của nó |
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
+| `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không
@@ -354,11 +355,13 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `redaction` | Hơn 32 rule trong `spec.redaction`, hoặc một pattern dài quá 1024 byte | Server biên dịch từng pattern và chạy nó trên mọi response và kết quả tool |
 | `verification` | Hơn 32 verifier trong `spec.verification`, một pattern dài quá 1024 byte, hoặc hơn 32 keyword trong một verifier | Tương tự, cho mọi câu trả lời cuối cùng |
 | `provider_concurrency` | `max_provider_concurrency` lớn hơn mức của tenant | Các run của tenant sẽ gọi cùng lúc nhiều hơn mức nhà vận hành cho phép trên key của server; `data.max` là mức trần |
+| `system` | Hơn 16 section trong `spec.system`, một tên dài quá 64 byte, một section hoặc `append` dài quá 16 KiB, hoặc tổng cộng quá 64 KiB | Các section đi kèm mọi request của mọi run |
+| `context_budget` | Hơn 32 id trong `drop_order` hoặc `pinned`, hoặc một id dài quá 128 byte | Server giữ chúng cho từng agent |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
 | `tool_choice` | Một `tool_choice` bị ép (`required`, hoặc một tool không phải final tool), trong spec hoặc trong `run.start`, trên một agent không có `max_turns` và không có `final_tool_name` (riêng output schema không kết thúc run trên mọi provider) | Model bị ép gọi một tool mỗi lượt sẽ không bao giờ trả lời, và không budget nào kết thúc run |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
-không thể dò hệ thống tệp của server. Năm thay đổi được thực hiện âm thầm thay vì từ
+không thể dò hệ thống tệp của server. Sáu thay đổi được thực hiện âm thầm thay vì từ
 chối:
 
 - Khi không có `exec_tools`, `bash` của cấu hình bị tắt và agent mở mà không có
@@ -370,6 +373,10 @@ chối:
 - Một kho Postgres không có `max_connections` nhận kích thước pool mặc định hoặc
   `max_pool_connections` của tenant, tùy giá trị nào nhỏ hơn.
 - Một cấu hình không có `max_provider_concurrency` nhận mức của tenant, khi tenant có.
+- `system_sections` của operator được thêm vào những section của cấu hình, và một
+  section của cấu hình có cùng tên bị thay bằng section của operator
+  (`allow.system_sections`). Chúng không được tính vào giới hạn ở trên, và
+  `replace_defaults` để chúng lại.
 
 ---
 
