@@ -7,8 +7,9 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use linch_core::{RunStatus, SessionId, ToolScope};
 use linch_worker::{
-    Cap, Schedule, Timing, WorkerError, create_schedule, delete_schedule, enqueue_run,
-    fire_due_schedules, get_schedule, list_schedules, pause_schedule, resume_schedule,
+    Cap, Schedule, Timing, WorkerError, create_schedule, delete_agent_schedule, delete_schedule,
+    enqueue_run, fire_due_schedules, get_schedule, list_agent_schedules, list_schedules,
+    pause_schedule, resume_schedule,
 };
 
 use crate::common::*;
@@ -180,6 +181,52 @@ async fn pause_resume_and_delete() {
     assert!(delete_schedule(&db.pool, NS, "h").await.unwrap());
     assert!(!delete_schedule(&db.pool, NS, "h").await.unwrap());
     assert!(list_schedules(&db.pool, NS).await.unwrap().is_empty());
+    db.finish().await;
+}
+
+/// The schedule tools see only the schedules of their own agent: the
+/// namespace's schedules whose stored definition is theirs.
+#[tokio::test]
+async fn agent_scoped_list_and_delete_see_only_that_definition() {
+    let Some(db) = TestDb::new("agent_scope").await else {
+        return;
+    };
+    let (mine, theirs) = (r#"{"a":1}"#, r#"{"a":2}"#);
+    let with = |id: &str, agent: Option<&str>| {
+        let mut schedule = hourly(id);
+        schedule.agent = agent.map(str::to_owned);
+        schedule
+    };
+    for schedule in [
+        with("mine", Some(mine)),
+        with("theirs", Some(theirs)),
+        with("bare", None),
+    ] {
+        create_schedule(&db.pool, &schedule, None).await.unwrap();
+    }
+    let mut elsewhere = with("mine-elsewhere", Some(mine));
+    elsewhere.namespace = "other".into();
+    create_schedule(&db.pool, &elsewhere, None).await.unwrap();
+
+    let listed = list_agent_schedules(&db.pool, NS, mine).await.unwrap();
+    let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, ["mine"]);
+    for id in ["theirs", "bare", "mine-elsewhere"] {
+        let deleted = delete_agent_schedule(&db.pool, NS, id, mine).await;
+        assert!(!deleted.unwrap(), "{id}");
+    }
+    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 3);
+    assert!(
+        delete_agent_schedule(&db.pool, NS, "mine", mine)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !delete_agent_schedule(&db.pool, NS, "mine", mine)
+            .await
+            .unwrap()
+    );
+    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 2);
     db.finish().await;
 }
 

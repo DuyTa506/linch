@@ -372,6 +372,65 @@ pub async fn delete_schedule(
     Ok(done.rows_affected() == 1)
 }
 
+/// The digest of the stored definition `$n`, as [`definition::store`]
+/// keys it.
+macro_rules! digest_of {
+    ($n:literal) => {
+        concat!("encode(sha256(convert_to(", $n, ", 'UTF8')), 'hex')")
+    };
+}
+
+/// The schedules of `namespace` that run the stored agent definition
+/// `config` (the text of a [`Schedule::agent`]), by id: one agent's
+/// schedules, as its schedule tools see them.
+///
+/// Raises:
+///     WorkerError: If the query fails.
+pub async fn list_agent_schedules(
+    pool: &PgPool,
+    namespace: &str,
+    config: &str,
+) -> Result<Vec<ScheduleInfo>, WorkerError> {
+    let rows: Vec<Row> = sqlx::query_as(concat!(
+        "SELECT ",
+        columns!(),
+        " FROM linch_worker_schedules WHERE namespace = $1 AND agent = ",
+        digest_of!("$2"),
+        " ORDER BY id"
+    ))
+    .bind(namespace)
+    .bind(config)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(info).collect())
+}
+
+/// [`delete_schedule`], only when the schedule runs the stored agent
+/// definition `config`, checked in the same statement.
+///
+/// Returns:
+///     Whether `namespace` had a schedule `id` of that definition.
+///
+/// Raises:
+///     WorkerError: If the delete fails.
+pub async fn delete_agent_schedule(
+    pool: &PgPool,
+    namespace: &str,
+    id: &str,
+    config: &str,
+) -> Result<bool, WorkerError> {
+    let done = sqlx::query(concat!(
+        "DELETE FROM linch_worker_schedules WHERE namespace = $1 AND id = $2 AND agent = ",
+        digest_of!("$3")
+    ))
+    .bind(namespace)
+    .bind(id)
+    .bind(config)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
 /// Fire every due schedule once: enqueue its start job (or skip the fire
 /// while its fixed session is busy) and move its next fire to the first
 /// tick after this fire. Workers call this once per poll interval; a host
