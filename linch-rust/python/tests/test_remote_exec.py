@@ -226,3 +226,38 @@ async def test_closing_one_connection_leaves_the_commands_of_another(tmp_path: P
         assert alive(kept_pid)
         host.close(next(iter(host._commands))[0])
         await gone(kept_pid, "its host")
+
+
+async def test_a_dropped_connection_reaps_a_background_command_and_a_reconnect_sees_it_gone(
+    tmp_path: Path,
+) -> None:
+    pidfile = tmp_path / "pid"
+    command = f"echo $$ > {pidfile}; sleep 300"
+    turns = [tool_turn("c1", "Bash", {"command": command, "run_in_background": True})]
+    host = SubprocessHost()
+    server = Server()
+    await server.start()
+    agent = await server.open_agent(
+        agent_config(tmp_path, [*turns, text_turn("started")]), execution=host
+    )
+    run = await agent.run("s1", "start it")
+    [end] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+    assert end.metadata is not None
+    process_id = end.metadata["process_id"]
+    pid = await pid_in(pidfile)
+    assert alive(pid)
+    # The connection drops with the command still running in the background.
+    os.kill(server.pid, signal.SIGKILL)
+    await gone(pid, "its connection")
+    await server.close()
+    assert not host._commands
+
+    # A reconnect is a new server: it does not know the process, and says so.
+    again = [tool_turn("c2", "BashOutput", {"process_id": process_id}), text_turn("x")]
+    async with Server() as server:
+        agent = await server.open_agent(agent_config(tmp_path, again), execution=host)
+        run = await agent.run("s1", "look")
+        [end] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+    assert end.is_error, result_text(end)
+    assert end.error_code == "no_such_process"
+    assert "the server restarted" in result_text(end)
