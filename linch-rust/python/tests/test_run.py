@@ -6,7 +6,7 @@ import os
 from typing import cast
 
 import pytest
-from scripted import config, text_turn
+from scripted import MODEL, config, text_turn
 
 from linch_rust import (
     AgentConfig,
@@ -128,3 +128,22 @@ async def test_the_server_reads_keys_only_from_the_env_it_is_given(
             await bare.open_agent(deepseek)
     assert raised.value.code == -32013
     assert raised.value.data == {"env": "DEEPSEEK_API_KEY"}
+
+
+async def test_a_cost_cap_on_an_unpriced_model_and_a_zero_call_timeout_do_not_open() -> None:
+    capped = config([text_turn("ok")])
+    capped["spec"] = {**capped["spec"], "budget": {"max_cost_usd": 1.0}}
+    zero = config([text_turn("ok")])
+    zero["spec"] = {**zero["spec"], "call_timeout_ms": 0}
+    priced = config([text_turn("ok")], pricing={MODEL: {"input": 1.0, "output": 1.0}})
+    priced["spec"] = {**priced["spec"], "budget": {"max_cost_usd": 1.0}}
+    async with Server() as server:
+        with pytest.raises(OpenError) as cost:
+            await server.open_agent(capped)
+        with pytest.raises(OpenError) as timeout:
+            await server.open_agent(zero)
+        await server.open_agent(priced)
+    assert cost.value.code == -32011
+    assert MODEL in str(cost.value) and "max_tokens" in str(cost.value)
+    assert timeout.value.code == -32011
+    assert "call_timeout_ms" in str(timeout.value)
