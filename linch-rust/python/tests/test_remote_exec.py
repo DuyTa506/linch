@@ -183,3 +183,46 @@ async def test_a_remote_backend_needs_a_host(tmp_path: Path) -> None:
     async with Server() as server:
         with pytest.raises(ValueError, match="execution"):
             await server.open_agent(agent_config(tmp_path, [text_turn("x")]))
+
+
+async def test_one_host_serves_two_connections_without_mixing_their_commands(
+    tmp_path: Path,
+) -> None:
+    """Each server numbers its agents and commands from 1: the host tells them apart."""
+    host = SubprocessHost()
+    ends: dict[str, ToolCallEndEvent] = {}
+
+    async def run_on(name: str, command: str) -> None:
+        turns = [tool_turn("c1", "Bash", {"command": command}), text_turn("done")]
+        async with Server() as server:
+            agent = await server.open_agent(agent_config(tmp_path, turns), execution=host)
+            run = await agent.run("s1", "go")
+            [ends[name]] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+
+    await asyncio.gather(
+        run_on("a", "sleep 1; echo first"),
+        run_on("b", "sleep 1; echo second"),
+    )
+    assert result_text(ends["a"]) == "first\n[exit code 0]"
+    assert result_text(ends["b"]) == "second\n[exit code 0]"
+
+
+async def test_closing_one_connection_leaves_the_commands_of_another(tmp_path: Path) -> None:
+    host = SubprocessHost()
+    pids = [tmp_path / "pid-a", tmp_path / "pid-b"]
+    turns = [
+        [tool_turn("c1", "Bash", {"command": f"echo $$ > {pidfile}; sleep 300"}), text_turn("x")]
+        for pidfile in pids
+    ]
+    async with Server() as keeper:
+        kept = await keeper.open_agent(agent_config(tmp_path, turns[1]), execution=host)
+        await kept.run("s1", "go")
+        async with Server() as leaver:
+            left = await leaver.open_agent(agent_config(tmp_path, turns[0]), execution=host)
+            await left.run("s1", "go")
+            gone_pid, kept_pid = await pid_in(pids[0]), await pid_in(pids[1])
+            assert alive(gone_pid) and alive(kept_pid)
+        await gone(gone_pid, "its connection")
+        assert alive(kept_pid)
+        host.close(next(iter(host._commands))[0])
+        await gone(kept_pid, "its host")

@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -112,9 +113,9 @@ class _Handlers:
 _EXEC_METHODS = ("exec.start", "exec.read", "exec.kill")
 
 
-async def _exec(host: ExecutionHost, method: str, params: JsonObject) -> JsonObject:
-    """Answer one `exec.*` request with `host`."""
-    agent, exec_id = str(params.get("agent", "")), str(params.get("exec_id", ""))
+async def _exec(host: ExecutionHost, method: str, params: JsonObject, agent: str) -> JsonObject:
+    """Answer one `exec.*` request with `host`; `agent` is the connection's name for it."""
+    exec_id = str(params.get("exec_id", ""))
     if method == "exec.start":
         await host.start(
             ExecStart(
@@ -194,6 +195,9 @@ class Connection:
         self._runs: dict[str, RunQueue] = {}
         self._room = asyncio.Semaphore(NOTIFICATION_CAPACITY)
         self._agents: dict[str, _Handlers] = {}
+        # Tells this connection's agents from another's: handles are numbered
+        # per connection, and one execution host may serve several.
+        self._tag = uuid.uuid4().hex[:8]
         self._served: dict[Any, asyncio.Task[None]] = {}
         self._closed: str | None = None
         self._task = asyncio.create_task(self._read())
@@ -212,7 +216,11 @@ class Connection:
         """Forget the handlers of a closed agent, and kill its remote commands."""
         handlers = self._agents.pop(agent, None)
         if handlers is not None and handlers.execution is not None:
-            handlers.execution.close(agent)
+            handlers.execution.close(self._scoped(agent))
+
+    def _scoped(self, agent: str) -> str:
+        """The name an execution host knows `agent` by: unique across connections."""
+        return f"{self._tag}/{agent}"
 
     async def request(self, method: str, params: JsonObject) -> JsonObject:
         """Call `method` and return its result object."""
@@ -341,7 +349,7 @@ class Connection:
             host = handlers.execution if handlers else None
             if host is None:
                 raise _Refused(_METHOD_NOT_FOUND, "this agent has no execution host")
-            return await _exec(host, method, params)
+            return await _exec(host, method, params, self._scoped(str(params.get("agent", ""))))
         raise _Refused(_METHOD_NOT_FOUND, f"unknown method {method!r}")
 
     def _shutdown(self, reason: str) -> None:
@@ -356,6 +364,6 @@ class Connection:
         for agent, handlers in self._agents.items():
             if handlers.execution is not None:
                 # The server is gone: no command may outlive it.
-                handlers.execution.close(agent)
+                handlers.execution.close(self._scoped(agent))
         for task in self._served.values():
             task.cancel()
