@@ -541,7 +541,7 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   sót qua process, nên steer cũng vậy.
 - **Một lời gọi được gửi lại.** `steer_id` đặt tên cho steer (chữ cái, chữ số và
   `-_.:`, tối đa 128 byte). Gửi lại với cùng id sau khi câu trả lời bị rớt, steer
-  chỉ được nhận một lần. Một lời gọi thất bại vì run đã dừng trước đó (`RunError`,
+  chỉ được nhận một lần. Một lời gọi thất bại vì run đã dừng trước đó (`RunExists`,
   -32023) có thể đã hoặc chưa được ghi; hãy gửi lại với cùng id.
 - **Các server khác.** Một run do server khác điều khiển không được định tuyến tới:
   lời gọi nhận `RunLeased` (kèm `expires_in`), như `approve`, và run có server đã

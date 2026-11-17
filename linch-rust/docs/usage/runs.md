@@ -539,7 +539,7 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
 - **A call sent again.** `steer_id` names the steer (letters, digits and
   `-_.:`, at most 128 bytes). Sent again with the same id after a dropped
   answer, the steer is taken once. A call that fails with the run stopped
-  first (`RunError`, -32023) may or may not have landed; send it again with
+  first (`RunExists`, -32023) may or may not have landed; send it again with
   the same id.
 - **Other servers.** A run another server drives is not routed to: the call
   gets `RunLeased` (with `expires_in`), as `approve` does, and so does one for
