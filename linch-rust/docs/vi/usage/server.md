@@ -460,13 +460,13 @@ mốc thời gian được rút ngắn (timeout 400 ms và một client bị ch�
 
 | Trường `liveness` | Mặc định | Ý nghĩa |
 |---|---|---|
-| `keepalive_idle_ms` | 30000 | Thời gian nhàn rỗi trước probe đầu tiên |
-| `keepalive_interval_ms` | 10000 | Thời gian giữa các probe |
-| `keepalive_probes` | 3 | Số probe không được trả lời trước khi kết nối bị bỏ, tức tổng cộng khoảng 60 giây |
+| `keepalive_idle_secs` | 30 | Thời gian nhàn rỗi trước probe đầu tiên, tính bằng giây nguyên (1 đến 32767) |
+| `keepalive_interval_secs` | 10 | Thời gian giữa các probe, tính bằng giây nguyên (1 đến 32767) |
+| `keepalive_probes` | 3 | Số probe không được trả lời trước khi kết nối bị bỏ (1 đến 127), tức tổng cộng khoảng 60 giây |
 | `ping_interval_ms` | 30000 | Thời gian giữa các ping WebSocket |
 | `pong_timeout_ms` | 60000 | Thời gian im lặng sau đó một WebSocket bị kết thúc; giữ nó lớn hơn `ping_interval_ms` |
 
-Mỗi trường ít nhất là 1. Một **Unix socket** không có cả hai: kernel đóng nó khi process của đầu
+Mỗi trường ít nhất là 1, và một trường keepalive có giá trị lớn nhất mà các tùy chọn TCP của Linux nhận (ghi ở trên), nên một config mà kernel sẽ từ chối bị từ chối ngay khi nạp. Thời gian keepalive là giây nguyên vì đó là đơn vị của kernel; không có dạng mili giây, và tên `_ms` cho chúng là một trường không xác định. Một **Unix socket** không có cả hai: kernel đóng nó khi process của đầu
 bên kia kết thúc, bất kể lý do, nên nó không cần probe. Kết nối Postgres giữ một workflow đặt các
 keepalive riêng của cơ sở dữ liệu ([Workflows](./workflows.md#một-driver-cho-mỗi-workflow)).
 

@@ -307,6 +307,15 @@ pub enum ConfigError {
         /// The field.
         field: &'static str,
     },
+    /// A keepalive field is over what the kernel's TCP options take, which
+    /// would fail on every connection.
+    #[error("liveness.{field} is over {max}, the most the kernel takes")]
+    OversizedLiveness {
+        /// The field.
+        field: &'static str,
+        /// The largest value it takes.
+        max: u64,
+    },
     /// A token's environment variable is unset or not UTF-8.
     #[error("tenant {tenant:?}: environment variable {var} is unset")]
     TokenEnv {
@@ -340,6 +349,9 @@ impl ServerConfig {
         }
         if let Some(field) = config.liveness.zero_field() {
             return Err(ConfigError::ZeroLiveness { field });
+        }
+        if let Some((field, max)) = config.liveness.oversized_field() {
+            return Err(ConfigError::OversizedLiveness { field, max });
         }
         for (name, tenant) in &config.tenants {
             let allow = &tenant.allow;

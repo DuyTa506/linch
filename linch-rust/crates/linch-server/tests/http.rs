@@ -344,6 +344,39 @@ fn a_liveness_field_of_zero_is_refused() {
     );
 }
 
+/// The keepalive times are whole seconds, the kernel's unit: a value the
+/// kernel would refuse (0, over its largest) or a millisecond name is
+/// refused when the config loads, not once per connection.
+#[test]
+fn a_keepalive_time_the_kernel_would_refuse_is_refused_at_load() {
+    let load = |liveness: Value| {
+        let text = json!({"http": "127.0.0.1:0", "liveness": liveness,
+                          "tenants": {"acme": {"tokens": [{"value": TOKEN}]}}});
+        ServerConfig::from_json(&text.to_string())
+    };
+    for (liveness, field) in [
+        (
+            json!({"keepalive_idle_secs": 0}),
+            "liveness.keepalive_idle_secs",
+        ),
+        (
+            json!({"keepalive_interval_secs": 32768}),
+            "liveness.keepalive_interval_secs",
+        ),
+        (
+            json!({"keepalive_probes": 128}),
+            "liveness.keepalive_probes",
+        ),
+        (json!({"keepalive_idle_ms": 1500}), "keepalive_idle_ms"),
+    ] {
+        let error = load(liveness).unwrap_err().to_string();
+        assert!(error.contains(field), "{error}");
+    }
+    let largest = json!({"keepalive_idle_secs": 32767, "keepalive_interval_secs": 32767,
+                         "keepalive_probes": 127});
+    assert!(load(largest).is_ok());
+}
+
 /// A connection that sends the start of a request head and stops, as a
 /// slow or idle client does.
 async fn half_sent(address: SocketAddr) -> TcpStream {

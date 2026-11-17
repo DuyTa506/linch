@@ -469,13 +469,13 @@ two times shortened (a 400 ms timeout and a client blocked for 1 s).
 
 | `liveness` field | Default | Meaning |
 |---|---|---|
-| `keepalive_idle_ms` | 30000 | Idle time before the first probe |
-| `keepalive_interval_ms` | 10000 | Time between probes |
-| `keepalive_probes` | 3 | Unanswered probes before the connection is dropped, so about 60 s in all |
+| `keepalive_idle_secs` | 30 | Idle time before the first probe, in whole seconds (1 to 32767) |
+| `keepalive_interval_secs` | 10 | Time between probes, in whole seconds (1 to 32767) |
+| `keepalive_probes` | 3 | Unanswered probes before the connection is dropped (1 to 127), so about 60 s in all |
 | `ping_interval_ms` | 30000 | Time between WebSocket pings |
 | `pong_timeout_ms` | 60000 | Silence after which a WebSocket is ended; keep it above `ping_interval_ms` |
 
-Each is at least 1. A **Unix socket** has neither: the kernel closes it when
+Each is at least 1, and a keepalive field has the largest value Linux's TCP options take (shown above), so a config the kernel would refuse is refused when it loads. The keepalive times are whole seconds because that is the kernel's unit; there is no millisecond form, and an `_ms` name for them is an unknown field. A **Unix socket** has neither: the kernel closes it when
 the peer's process ends, whatever the cause, so it needs no probe. The
 Postgres connection that holds a workflow sets the database's own keepalives
 ([Workflows](./workflows.md#one-driver-per-workflow)).

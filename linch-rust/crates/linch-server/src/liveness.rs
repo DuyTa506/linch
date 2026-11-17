@@ -22,18 +22,27 @@ use serde::Deserialize;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 
+/// Largest idle time or probe interval, in seconds, that Linux's
+/// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` take.
+const MAX_KEEPALIVE_SECS: u64 = 32_767;
+
+/// Most probes Linux's `TCP_KEEPCNT` takes.
+const MAX_KEEPALIVE_PROBES: u64 = 127;
+
 /// The `liveness` section: how the server notices a vanished client on
-/// its HTTP listener. Each field is at least 1 when given.
+/// its HTTP listener. Each field is at least 1 when given, and a keepalive
+/// field is at most what Linux's TCP options take.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LivenessConfig {
-    /// Idle time before the first TCP keepalive probe, in milliseconds;
-    /// 30000 when absent.
-    pub keepalive_idle_ms: Option<u64>,
-    /// Time between two probes, in milliseconds; 10000 when absent.
-    pub keepalive_interval_ms: Option<u64>,
-    /// Probes without an answer before the kernel drops the connection;
-    /// 3 when absent.
+    /// Idle time before the first TCP keepalive probe, in whole seconds
+    /// (the unit of the kernel's setting), 1 to 32767; 30 when absent.
+    pub keepalive_idle_secs: Option<u64>,
+    /// Time between two probes, in whole seconds, 1 to 32767; 10 when
+    /// absent.
+    pub keepalive_interval_secs: Option<u64>,
+    /// Probes without an answer before the kernel drops the connection,
+    /// 1 to 127; 3 when absent.
     pub keepalive_probes: Option<u32>,
     /// Time between WebSocket pings, in milliseconds; 30000 when absent.
     pub ping_interval_ms: Option<u64>,
@@ -48,8 +57,11 @@ impl LivenessConfig {
     pub(crate) fn zero_field(&self) -> Option<&'static str> {
         let zero = |value: Option<u64>| value == Some(0);
         [
-            ("keepalive_idle_ms", zero(self.keepalive_idle_ms)),
-            ("keepalive_interval_ms", zero(self.keepalive_interval_ms)),
+            ("keepalive_idle_secs", zero(self.keepalive_idle_secs)),
+            (
+                "keepalive_interval_secs",
+                zero(self.keepalive_interval_secs),
+            ),
             ("keepalive_probes", self.keepalive_probes == Some(0)),
             ("ping_interval_ms", zero(self.ping_interval_ms)),
             ("pong_timeout_ms", zero(self.pong_timeout_ms)),
@@ -58,12 +70,38 @@ impl LivenessConfig {
         .find_map(|(name, is_zero)| is_zero.then_some(name))
     }
 
+    /// The first keepalive field over what the kernel takes, with its
+    /// largest value: a larger one makes `setsockopt` fail on every
+    /// connection.
+    pub(crate) fn oversized_field(&self) -> Option<(&'static str, u64)> {
+        [
+            (
+                "keepalive_idle_secs",
+                self.keepalive_idle_secs,
+                MAX_KEEPALIVE_SECS,
+            ),
+            (
+                "keepalive_interval_secs",
+                self.keepalive_interval_secs,
+                MAX_KEEPALIVE_SECS,
+            ),
+            (
+                "keepalive_probes",
+                self.keepalive_probes.map(u64::from),
+                MAX_KEEPALIVE_PROBES,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(name, value, max)| value.filter(|value| *value > max).map(|_| (name, max)))
+    }
+
     pub(crate) fn resolve(&self) -> Liveness {
         let millis =
             |value: Option<u64>, default: u64| Duration::from_millis(value.unwrap_or(default));
+        let secs = |value: Option<u64>, default: u64| Duration::from_secs(value.unwrap_or(default));
         Liveness {
-            keepalive_idle: millis(self.keepalive_idle_ms, 30_000),
-            keepalive_interval: millis(self.keepalive_interval_ms, 10_000),
+            keepalive_idle: secs(self.keepalive_idle_secs, 30),
+            keepalive_interval: secs(self.keepalive_interval_secs, 10),
             keepalive_probes: self.keepalive_probes.unwrap_or(3),
             ping_interval: millis(self.ping_interval_ms, 30_000),
             pong_timeout: millis(self.pong_timeout_ms, 60_000),
@@ -99,8 +137,11 @@ impl Liveness {
         socket.set_tcp_keepalive(&keepalive)?;
         #[cfg(target_os = "linux")]
         {
+            // `TCP_USER_TIMEOUT` is a signed int of milliseconds: the largest
+            // keepalive the config takes gives up later than 24 days.
             let giving_up = self.keepalive_idle + self.keepalive_interval * self.keepalive_probes;
-            socket.set_tcp_user_timeout(Some(giving_up))?;
+            let most = Duration::from_millis(i32::MAX as u64);
+            socket.set_tcp_user_timeout(Some(giving_up.min(most)))?;
         }
         Ok(())
     }
@@ -144,6 +185,44 @@ mod tests {
             socket.tcp_user_timeout().unwrap(),
             Some(Duration::from_secs(60))
         );
+    }
+
+    /// The largest values the config takes are the largest the kernel takes,
+    /// so no accepted config leaves a connection without keepalive.
+    #[tokio::test]
+    async fn the_largest_accepted_times_are_set_on_a_socket() {
+        let config = LivenessConfig {
+            keepalive_idle_secs: Some(MAX_KEEPALIVE_SECS),
+            keepalive_interval_secs: Some(MAX_KEEPALIVE_SECS),
+            keepalive_probes: Some(MAX_KEEPALIVE_PROBES as u32),
+            ..LivenessConfig::default()
+        };
+        assert_eq!(config.zero_field(), None);
+        assert_eq!(config.oversized_field(), None);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        config.resolve().tune(&accepted).unwrap();
+    }
+
+    #[test]
+    fn a_keepalive_field_over_the_kernels_limit_is_named() {
+        let over = |config: LivenessConfig| config.oversized_field();
+        let idle = LivenessConfig {
+            keepalive_idle_secs: Some(MAX_KEEPALIVE_SECS + 1),
+            ..LivenessConfig::default()
+        };
+        assert_eq!(
+            over(idle),
+            Some(("keepalive_idle_secs", MAX_KEEPALIVE_SECS))
+        );
+        let probes = LivenessConfig {
+            keepalive_probes: Some(128),
+            ..LivenessConfig::default()
+        };
+        assert_eq!(over(probes), Some(("keepalive_probes", 127)));
     }
 
     #[test]
