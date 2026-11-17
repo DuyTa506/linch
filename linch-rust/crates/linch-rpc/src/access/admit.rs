@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
-    AgentConfig, AgentSpec, ExecutionConfig, McpTransportConfig, PermissionMode, PermissionPolicy,
-    Principal, ProviderConfig, StoreConfig, SystemSection, ToolChoice,
+    AgentConfig, AgentSpec, ByteQuota, CacheScope, ExecutionConfig, McpTransportConfig,
+    PermissionMode, PermissionPolicy, Principal, ProviderConfig, StoreConfig, SystemSection,
+    ToolChoice,
 };
 use serde_json::json;
 
@@ -43,7 +44,7 @@ impl Tenant {
         }
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
-        admit_guardrails(&config.spec, allow)?;
+        admit_guardrails(&mut config.spec, allow, &self.name)?;
         allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;
         admit_system(&mut config.spec, &allow.system_sections)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
@@ -372,12 +373,38 @@ pub const MAX_TOOL_CACHE_VALUE_BYTES: u64 = 1_048_576;
 /// [`MAX_TOOL_ATTEMPTS`], [`MAX_TOOL_RETRY_DELAY_MS`] or [`MAX_GUARDRAILS`]
 /// names, and a `tool_cache` the tenant may not use or past its bounds.
 /// What the patterns match is the tenant's own business.
-fn admit_guardrails(spec: &AgentSpec, allow: &Allowlists) -> Result<(), ErrorObject> {
-    if let Some(cache) = &spec.tool_cache {
+///
+/// A `tool_cache` also needs `spec.redaction` over tool results (the cache
+/// stores what the tool returned after that redaction, in the server's
+/// memory or database), takes the session scope unless the tenant may share
+/// entries across sessions, and has its `quota` set to the tenant's name
+/// and the allowlist's byte cap, whatever the client sent: the cap bounds
+/// every namespace of the tenant together.
+fn admit_guardrails(
+    spec: &mut AgentSpec,
+    allow: &Allowlists,
+    tenant: &str,
+) -> Result<(), ErrorObject> {
+    let redacts_results = spec.redaction.as_ref().is_some_and(|r| r.tool_results);
+    if let Some(cache) = &mut spec.tool_cache {
         if !allow.tool_cache {
             let message = "tool_cache needs tool_cache in the tenant's allowlists";
             return Err(refused("tool_cache", message.into()));
         }
+        if !redacts_results {
+            let message = "tool_cache stores what a tool returned, so it needs spec.redaction \
+                           with tool_results on";
+            return Err(refused("tool_cache", message.into()));
+        }
+        if cache.scope == CacheScope::Namespace && !allow.tool_cache_shared {
+            let message = "tool_cache scope namespace shares results across sessions and needs \
+                           tool_cache_shared in the tenant's allowlists";
+            return Err(refused("tool_cache", message.into()));
+        }
+        cache.quota = Some(ByteQuota {
+            group: tenant.to_owned(),
+            max_bytes: allow.tool_cache_bytes,
+        });
         if cache.max_entries > MAX_TOOL_CACHE_ENTRIES
             || cache.ttl_ms > MAX_TOOL_CACHE_TTL_MS
             || cache.max_value_bytes > MAX_TOOL_CACHE_VALUE_BYTES

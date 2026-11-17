@@ -519,8 +519,8 @@ mod server;
 
 pub use access::{
     Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_RUNS, DEFAULT_MIN_SCHEDULE_INTERVAL, MAX_PENDING_LOGINS, McpCommand, Tenant,
-    Tokens,
+    DEFAULT_MAX_RUNS, DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS,
+    McpCommand, Tenant, Tokens,
 };
 pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};

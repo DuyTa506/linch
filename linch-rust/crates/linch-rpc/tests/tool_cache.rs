@@ -76,18 +76,22 @@ async fn a_cache_that_cannot_run_is_refused_at_open() {
     );
 }
 
-/// The cache holds results in the server, shared by a tenant's sessions, so
-/// a tenant needs the server's say and stays within its bounds; a local
-/// connection needs neither.
+/// A tenant's config for `cache`: its namespace, redaction over tool
+/// results (the cache stores what a tool returned after it), and no project
+/// root, which must be one of the tenant's workspace roots.
+fn as_tenant(cache: Value) -> Value {
+    let mut config = config(cache);
+    config["namespace"] = json!("acme");
+    config["spec"]["redaction"] = json!({"rules": [{"pattern": "sk-[0-9a-f]+"}]});
+    config.as_object_mut().unwrap().remove("permissions");
+    config
+}
+
+/// The cache holds results in the server, so a tenant needs the server's
+/// say and stays within its bounds; a local connection needs neither.
 #[tokio::test]
 async fn a_tenant_uses_the_cache_only_when_allowed_and_within_bounds() {
-    let open = |cache: Value| {
-        let mut config = config(cache);
-        config["namespace"] = json!("acme");
-        // A tenant's project root must be one of its workspace roots.
-        config.as_object_mut().unwrap().remove("permissions");
-        config
-    };
+    let open = as_tenant;
     let within = json!({"tools": ["lookup"], "max_entries": 1024, "ttl_ms": 3_600_000,
                         "max_value_bytes": 1_048_576});
     let closed = Rpc::remote(tenant("acme", Allowlists::new().scripted_provider(true)));
@@ -108,4 +112,55 @@ async fn a_tenant_uses_the_cache_only_when_allowed_and_within_bounds() {
     let local = Rpc::new();
     let big = json!({"tools": ["lookup"], "max_entries": 100_000});
     assert!(local.call(method::AGENT_OPEN, config(big)).await.is_ok());
+}
+
+/// The cache stores what a tool returned, so a tenant's config must redact
+/// tool results, and sharing one session's result with the others is the
+/// operator's decision.
+#[tokio::test]
+async fn a_tenant_needs_redaction_over_tool_results_and_the_operator_for_the_shared_scope() {
+    let allowed = Allowlists::new().scripted_provider(true).tool_cache(true);
+    let remote = Rpc::remote(tenant("acme", allowed));
+    let cache = json!({"tools": ["lookup"]});
+    let mut bare = as_tenant(cache.clone());
+    bare["spec"].as_object_mut().unwrap().remove("redaction");
+    assert_eq!(refused(&remote, bare).await.as_deref(), Some("tool_cache"));
+    let mut off = as_tenant(cache);
+    off["spec"]["redaction"] = json!({"rules": [{"pattern": "x"}], "tool_results": false});
+    assert_eq!(refused(&remote, off).await.as_deref(), Some("tool_cache"));
+
+    let shared = json!({"tools": ["lookup"], "scope": "namespace"});
+    let kind = refused(&remote, as_tenant(shared.clone())).await;
+    assert_eq!(kind.as_deref(), Some("tool_cache"));
+    let operator = Allowlists::new()
+        .scripted_provider(true)
+        .tool_cache(true)
+        .tool_cache_shared(true);
+    let remote = Rpc::remote(tenant("acme", operator));
+    assert_eq!(refused(&remote, as_tenant(shared)).await, None);
+}
+
+/// The operator's byte cap reaches the store: with room for no result the
+/// second identical call is not a hit.
+#[tokio::test]
+async fn a_tenants_cache_is_capped_in_bytes() {
+    for (cap, hits) in [(None, [false, true]), (Some(16), [false, false])] {
+        let mut allow = Allowlists::new().scripted_provider(true).tool_cache(true);
+        if let Some(cap) = cap {
+            allow = allow.tool_cache_bytes(cap);
+        }
+        let answer = handler(|_, _, _| async { Ok(json!({"value": "found"})) });
+        let mut rpc = Rpc::remote_with(tenant("acme", allow), answer);
+        let agent = rpc.open(as_tenant(json!({"tools": ["lookup"]}))).await;
+        let run_id = rpc.start(&agent, "s1", "Go.").await;
+        let ended = rpc.until_end(&run_id).await;
+        assert!(ended.error.is_none(), "{:?}", ended.error);
+        let seen: Vec<bool> = (ended.envelopes.iter())
+            .filter_map(|e| match &e.event {
+                Event::ToolCallEnd(end) => Some(end.cache_hit),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seen, hits, "cap {cap:?}");
+    }
 }
