@@ -53,6 +53,7 @@ compacts. The fields, typed as `Compaction`:
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
 | `micro` | `False` | Clear old tool results before summarizing ([below](#micro-compaction)) |
 | `max_forced` | `3` | Most summaries one run makes because the provider refused a prompt as too long ([below](#when-the-prompt-does-not-fit)); `0` never |
+| `keep_user_tokens` | `15000` | Tokens of the user messages a summary folds that the checkpoint carries verbatim, newest first, copied by the harness; `0` carries none |
 
 A summary is one extra provider call on the agent's provider and model, with
 its own usage, charged to the [budget](./agent.md#budget). It is reported by

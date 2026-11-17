@@ -328,6 +328,9 @@ class Compaction(TypedDict, total=False):
             micro-compaction). Off when absent.
         max_forced: Most summaries one run makes because the provider
             refused a prompt as too long; 3 when absent, 0 never.
+        keep_user_tokens: Tokens of the user messages the summary folded
+            that it carries verbatim, newest first; 15000 when absent, 0
+            carries none.
     """
 
     threshold_tokens: int
@@ -336,6 +339,7 @@ class Compaction(TypedDict, total=False):
     max_output_tokens: int
     micro: bool
     max_forced: int
+    keep_user_tokens: int
 
 
 DETAILED_COMPACTION_PROMPT = (

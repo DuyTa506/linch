@@ -310,7 +310,10 @@ View mà model nhìn thấy đã được rút ngắn
 (`summary`, hoặc `micro` khi các kết quả tool cũ bị xóa mà không có lời gọi model),
 `duration_ms`, là thời gian từ lúc quyết định nén đến event này (lời gọi tóm tắt và
 phép chiếu), và `forced`, là true khi nguyên nhân là provider từ chối một prompt vì quá
-dài ([Memory](./memory.md#when-the-prompt-does-not-fit)).
+dài ([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` được đặt khi bản
+tóm tắt không được áp dụng và view không đổi (các số đếm bằng nhau): `tool_call` (câu trả
+lời gọi một tool), `empty`, hoặc `not_smaller` (không nhỏ hơn phần nó sẽ thay thế). Run
+tiếp tục và hỏi lại ở một lượt sau đến hạn.
 
 ### `LoopGuardEvent` (`loop_guard`)
 

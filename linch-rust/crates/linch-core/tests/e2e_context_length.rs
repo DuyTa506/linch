@@ -20,7 +20,7 @@ use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, CompactionSpec, ContentBlock, Envelope, Event, LogEntry, PermissionMode, Provider,
     ProviderError, ProviderRequest, ProviderStream, RunId, RunOptions, RunStatus, RunStore,
-    ScriptedTurn, SessionId, SessionStore, ToolChoice, ToolResultPart, ToolScope, Usage,
+    ScriptedTurn, SessionId, SessionStore, ToolResultPart, ToolScope, Usage,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -144,7 +144,7 @@ impl Provider for Window {
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         self.requests.lock().unwrap().push(request.clone());
-        let turn = if summarizing(&request) {
+        let turn = if is_summary_call(&request) {
             self.count("summary".into());
             self.summary_requests.lock().unwrap().push(request.clone());
             if self.failing_summaries {
@@ -289,7 +289,7 @@ async fn a_refused_prompt_is_summarized_and_called_again() {
     // part (same system blocks, tools and bytes, so a prompt cache holds),
     // then one instruction message; only the tool choice and limits differ.
     let requests = provider.requests.lock().unwrap().clone();
-    let at = requests.iter().position(|r| summarizing(r)).unwrap();
+    let at = requests.iter().position(|r| is_summary_call(r)).unwrap();
     let (primary, summary) = (&requests[at - 1], &requests[at]);
     assert_eq!(primary.system, summary.system);
     assert_eq!(primary.tools, summary.tools);

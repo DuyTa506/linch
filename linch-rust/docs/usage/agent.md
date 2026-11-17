@@ -303,6 +303,7 @@ refused on resume until they finish.
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
 | `micro` | `False` | Clear old tool results before summarizing, with no model call ([Memory](./memory.md#micro-compaction)) |
 | `max_forced` | `3` | Most summaries one run makes because the provider refused a prompt as longer than the context window; `0` never ([Memory](./memory.md#when-the-prompt-does-not-fit)) |
+| `keep_user_tokens` | `15000` | Tokens of the user messages a summary folds that the checkpoint carries verbatim, newest first, copied by the harness; `0` carries none |
 
 Without `threshold_tokens` (`"compaction": {}` turns it on), the run compacts as
 Python Linch does: when the estimate plus an output reserve reaches 80% of the

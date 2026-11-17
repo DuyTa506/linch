@@ -308,7 +308,11 @@ The view the model sees was shortened
 call), `duration_ms`, the time from the decision to compact to this event
 (the summary call and the projection), and `forced`, true when the
 provider's refusal of a prompt as too long caused it
-([Memory](./memory.md#when-the-prompt-does-not-fit)).
+([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` is set when
+the summary was not applied and the view is unchanged (the counts agree):
+`tool_call` (the reply called a tool), `empty`, or `not_smaller` (no smaller
+than the part it would replace). The run goes on and asks again at a later turn
+that is due.
 
 ### `LoopGuardEvent` (`loop_guard`)
 

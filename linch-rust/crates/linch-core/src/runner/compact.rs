@@ -187,7 +187,7 @@ impl Runner {
             None => text,
         };
         let text = text.trim();
-        let mut summary = compaction::summary_message(text);
+        let mut summary = compaction::checkpoint(text, &view[1..keep_from], spec.keep_user_tokens);
         if agent.skills.is_some() {
             // The bodies the model loaded, which the summary folds away.
             let reminders = skills::reminders(&self.log.full_history());

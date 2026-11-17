@@ -15,7 +15,7 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     CompactionSpec, Envelope, Event, JsonObject, PermissionMode, Persistence, Provider,
     ProviderError, ProviderRequest, ProviderStream, RunOptions, RunStore, ScriptedProvider, Tool,
-    ToolChoice, ToolContext, ToolOutputError, ToolRegistry, ToolResult, ToolScope,
+    ToolContext, ToolOutputError, ToolRegistry, ToolResult, ToolScope,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -87,7 +87,7 @@ impl Provider for SlowSummaries {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        if summarizing(&request) {
+        if is_summary_call(&request) {
             tokio::time::sleep(self.delay).await;
         }
         self.script.stream(request, cancel).await

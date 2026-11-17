@@ -19,8 +19,7 @@ use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, AgentBuilder, CompactionSpec, ContentBlock, Envelope, Event, Hooks, LogEntry, Message,
     PermissionMode, Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunBudget,
-    RunId, RunOptions, RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolChoice,
-    ToolScope, Usage,
+    RunId, RunOptions, RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolScope, Usage,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -116,7 +115,7 @@ impl Provider for Keyed {
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         self.requests.lock().unwrap().push(request.clone());
-        let summarizing = summarizing(&request);
+        let summarizing = is_summary_call(&request);
         if summarizing && self.failing_summaries {
             return Err(ProviderError::Status {
                 status: 503,
@@ -199,7 +198,7 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
         .count();
     assert_eq!(projections, 2, "turns 2 and 3 compact");
     let compacted = view(log);
-    let summary = Message::user_text("<summary of earlier conversation>\n\nsummary of 5 messages");
+    let summary = Message::user_text("<summary of earlier conversation>\n\nsummary of 7 messages");
     assert_eq!(compacted[..2], [Message::user_text("go"), summary]);
     assert_eq!(
         compacted.len(),
@@ -208,7 +207,8 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
     );
 
     let requests = provider.requests.lock().unwrap().clone();
-    let (summaries, primaries): (Vec<_>, Vec<_>) = (requests.iter()).partition(|r| summarizing(r));
+    let (summaries, primaries): (Vec<_>, Vec<_>) =
+        (requests.iter()).partition(|r| is_summary_call(r));
     assert_eq!((summaries.len(), primaries.len()), (2, 4));
     let bytes = |m: &Message| serde_json::to_string(m).unwrap();
     for request in &primaries {
@@ -416,7 +416,7 @@ async fn without_a_threshold_compaction_follows_the_context_window() {
         let agent = agent_with(spec, provider.clone(), tools, permissions, stores.clone());
         finish(agent.run("go", RunOptions::new("s1"))).await;
         let requests = provider.requests.lock().unwrap();
-        let summarizing = |r: &&ProviderRequest| summarizing(r);
+        let summarizing = |r: &&ProviderRequest| is_summary_call(r);
         let made = requests.iter().filter(summarizing).count();
         assert_eq!(made, summaries, "window {window}");
     }
@@ -632,7 +632,11 @@ async fn a_reply_that_is_not_a_summary_is_rejected_and_the_run_goes_on() {
         let stream = agent.run("go", RunOptions::new("s1"));
         let run_id = stream.run_id().clone();
         let envelopes = finish(stream).await;
-        assert_eq!(status(&stores, &run_id).await, RunStatus::Completed, "{why}");
+        assert_eq!(
+            status(&stores, &run_id).await,
+            RunStatus::Completed,
+            "{why}"
+        );
         let log = entries(&stores).await;
         assert!(!log.iter().any(|e| matches!(e, LogEntry::Projection(_))));
         let events = stores.runs.events(NS, &run_id, 0).await.unwrap();

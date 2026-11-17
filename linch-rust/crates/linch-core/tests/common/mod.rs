@@ -395,7 +395,7 @@ pub fn object(value: JsonValue) -> JsonObject {
 
 /// Whether `request` is a compaction's summary call: its last message is the
 /// instruction to summarize the conversation above it.
-pub fn summarizing(request: &ProviderRequest) -> bool {
+pub fn is_summary_call(request: &ProviderRequest) -> bool {
     (request.messages.last()).is_some_and(|m| {
         m.text()
             .starts_with("The conversation to summarize ends above")

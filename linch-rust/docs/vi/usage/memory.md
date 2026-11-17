@@ -54,6 +54,7 @@ compact. Các trường, có kiểu `Compaction`:
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
 | `micro` | `False` | Xóa các kết quả tool cũ trước khi tóm tắt ([bên dưới](#micro-compaction)) |
 | `max_forced` | `3` | Số bản tóm tắt nhiều nhất một run tạo ra vì provider từ chối một prompt là quá dài ([bên dưới](#when-the-prompt-does-not-fit)); `0` là không bao giờ |
+| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì |
 
 Một bản tóm tắt là một lời gọi provider thêm trên provider và model của agent, với usage
 riêng, được tính vào [budget](./agent.md#budget). Nó được báo cáo bằng một

@@ -116,6 +116,7 @@ fn primary(messages: Vec<Message>) -> ProviderRequest {
     request.appended_tools = vec!["Read".into()];
     request.output_schema = spec.output_schema.clone();
     request.cache_control = Some(CacheControl::default());
+    request.tool_choice = spec.tool_choice.clone();
     request
 }
 
@@ -236,6 +237,119 @@ fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     assert_eq!(check(false, ""), Some("empty"));
     assert_eq!(check(true, "Let me look."), Some("tool_call"));
     assert_eq!(check(true, ""), Some("tool_call"));
+}
+
+/// The cases Python Linch's tests read as well.
+fn golden() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../tests/golden/compaction_request.json")).unwrap()
+}
+
+fn messages_of(value: &serde_json::Value) -> Vec<Message> {
+    serde_json::from_value(value.clone()).unwrap()
+}
+
+#[test]
+fn the_summary_instruction_matches_the_golden_cases() {
+    for case in golden()["instruction"].as_array().unwrap() {
+        let compaction = CompactionSpec {
+            prompt: Some(case["prompt"].as_str().unwrap().into()),
+            ..CompactionSpec::new(1)
+        };
+        let mut messages = vec![Message::user_text("go")];
+        if case["folded_has_checkpoint"].as_bool().unwrap() {
+            messages.push(summary_message("earlier"));
+        }
+        let request = summary_request(primary(messages), &compaction);
+        let last = request.messages.last().unwrap().text();
+        assert_eq!(last, case["expected"].as_str().unwrap(), "{}", case["name"]);
+    }
+}
+
+#[test]
+fn the_checkpoint_matches_the_golden_cases() {
+    for case in golden()["checkpoint"].as_array().unwrap() {
+        let folded: Vec<Arc<Message>> = messages_of(&case["folded"])
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let tokens = case["keep_user_tokens"].as_u64().unwrap() as u32;
+        let made = checkpoint(case["summary"].as_str().unwrap(), &folded, tokens);
+        let expected: Message = serde_json::from_value(case["expected"].clone()).unwrap();
+        assert_eq!(made, expected, "{}", case["name"]);
+    }
+}
+
+#[test]
+fn a_second_compaction_carries_the_first_ones_user_messages_and_asks_for_an_update() {
+    let user = |text: &str| Arc::new(Message::user_text(text));
+    let assistant = Arc::new(Message::assistant_text("ok"));
+    // First compaction: a fact and an instruction the user gave early.
+    let first_view = vec![
+        user("go"),
+        user("the code word is PELICAN-7421"),
+        assistant.clone(),
+        user("never touch prod"),
+        assistant.clone(),
+    ];
+    let first = checkpoint("S1: nothing yet", &first_view[1..], 15_000);
+    let after_first = replacement(&first_view, first, 4);
+    // Later turns, then a second compaction folds the first checkpoint.
+    let mut second_view = after_first;
+    second_view.extend([
+        user("now deploy"),
+        assistant.clone(),
+        user("and test"),
+        assistant.clone(),
+        user("last"),
+    ]);
+    let keep = keep_from(&second_view, 1).expect("something to fold");
+    let second = checkpoint("S2: deploying", &second_view[1..keep], 15_000);
+    let verbatim: Vec<_> = (second.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => t.text.strip_prefix(VERBATIM_MARK),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        verbatim,
+        [
+            "and test",
+            "now deploy",
+            "never touch prod",
+            "the code word is PELICAN-7421"
+        ],
+        "newest first, the early ones carried over"
+    );
+    // The request that makes it asks to update the first checkpoint.
+    let messages: Vec<Message> = second_view[..keep]
+        .iter()
+        .map(|m| Message::clone(m))
+        .collect();
+    let request = summary_request(primary(messages), &CompactionSpec::new(1));
+    assert!(
+        request
+            .messages
+            .last()
+            .unwrap()
+            .text()
+            .ends_with(UPDATE_SUMMARY)
+    );
+}
+
+#[test]
+fn the_user_message_budget_is_off_the_wire_at_its_default() {
+    let spec = CompactionSpec::new(9);
+    assert_eq!(spec.keep_user_tokens, 15_000);
+    assert!(
+        serde_json::to_value(&spec)
+            .unwrap()
+            .get("keep_user_tokens")
+            .is_none()
+    );
+    let set: CompactionSpec =
+        serde_json::from_value(json!({"threshold_tokens": 9, "keep_user_tokens": 0})).unwrap();
+    assert_eq!(set.keep_user_tokens, 0);
+    assert_eq!(serde_json::to_value(&set).unwrap()["keep_user_tokens"], 0);
 }
 
 #[test]
