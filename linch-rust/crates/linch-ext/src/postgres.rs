@@ -14,13 +14,22 @@ use sqlx::migrate::{MigrateError, Migration, MigrationType, Migrator};
 pub const MIGRATIONS_TABLE: &str = "linch_ext_migrations";
 
 fn migrator() -> Migrator {
-    let migrations = vec![Migration::new(
-        1,
-        Cow::Borrowed("workflow"),
-        MigrationType::Simple,
-        include_str!("../migrations/0001_workflow.sql").into_sql_str(),
-        false,
-    )];
+    let migrations = vec![
+        Migration::new(
+            1,
+            Cow::Borrowed("workflow"),
+            MigrationType::Simple,
+            include_str!("../migrations/0001_workflow.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            2,
+            Cow::Borrowed("workflow_principal"),
+            MigrationType::Simple,
+            include_str!("../migrations/0002_workflow_principal.sql").into_sql_str(),
+            false,
+        ),
+    ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),
         ..Migrator::with_migrations(migrations)

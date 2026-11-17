@@ -45,9 +45,14 @@ const PROTECTED_FIELDS: [&str; 17] = [
 /// Gemini's settings object, which holds the request's temperature.
 const GENERATION_CONFIG: &str = "generationConfig";
 
-/// Header values shorter than this are not scrubbed from error text: a
-/// word that short would mangle the message and is no secret.
+/// Values of other headers shorter than this are not scrubbed from error
+/// text: a word that short would mangle the message and is no secret. A
+/// credential-named header (see `holds_credential`) is scrubbed at any
+/// length.
 const MIN_SCRUBBED_VALUE: usize = 8;
+
+/// Parts of a header name that mark its value as a credential.
+const CREDENTIAL_NAMES: [&str; 5] = ["token", "key", "secret", "auth", "cookie"];
 
 const REDACTED: &str = "[redacted]";
 
@@ -74,6 +79,12 @@ const FORBIDDEN_HEADERS: [&str; 9] = [
 /// its case.
 pub fn is_key_header(name: &str) -> bool {
     KEY_HEADERS.iter().any(|key| key.eq_ignore_ascii_case(name))
+}
+
+/// Whether the value of header `name` (lower case) is a credential: a key
+/// header, or a name that says token, key, secret, auth or cookie.
+fn holds_credential(name: &str) -> bool {
+    is_key_header(name) || CREDENTIAL_NAMES.iter().any(|part| name.contains(part))
 }
 
 /// Extra request settings, the same for every adapter.
@@ -140,14 +151,16 @@ impl RequestOptions {
         (!self.sets_key_header()).then_some(key)
     }
 
-    /// `text` without any header value of 8 bytes or more. A server can
+    /// `text` without any header value of 8 bytes or more, and without the
+    /// value of a credential-named header whatever its length. A server can
     /// echo a request header in an error; the header's value is a secret
     /// even when the provider key is not.
     pub(crate) fn scrub(&self, text: &str) -> String {
         let mut text = text.to_owned();
-        for value in self.headers.values() {
+        for (name, value) in &self.headers {
             if let Ok(value) = value.to_str()
-                && value.len() >= MIN_SCRUBBED_VALUE
+                && !value.is_empty()
+                && (value.len() >= MIN_SCRUBBED_VALUE || holds_credential(name.as_str()))
             {
                 text = text.replace(value, REDACTED);
             }
@@ -419,6 +432,21 @@ mod tests {
         assert!(!is_key_header("x-gateway-token"));
         let options = RequestOptions::default().header("Api-Key", "k").unwrap();
         assert!(options.sets_key_header());
+    }
+
+    #[test]
+    fn a_credential_named_header_is_scrubbed_at_any_length() {
+        let options = RequestOptions::default()
+            .header("x-gateway-token", "gw-123")
+            .unwrap()
+            .header("cookie", "s=1")
+            .unwrap()
+            .header("x-tenant", "acme")
+            .unwrap();
+        assert_eq!(
+            options.scrub("bad gw-123 and s=1 for acme"),
+            "bad [redacted] and [redacted] for acme"
+        );
     }
 
     #[test]

@@ -316,6 +316,13 @@ you get by leaving the field out, and the shared scope is a choice you
 write down (`"scope": "agent"`), for an agent with one user such as a local
 or personal one. The scope is part of the run contract either way.
 
+A run reaches a principal's memories only if it has that principal. A
+workflow's agent calls act for the principal given to `workflow.start`
+(`run_workflow(..., principal=...)`) and for nobody without one, which in
+`principal` scope means no memory. With `tool_cache` the key carries the
+principal, so a cached `MemorySearch` result is served only to the principal
+that made it, whatever the cache's `scope`.
+
 ### The tools
 
 | Tool | Scope | Input |

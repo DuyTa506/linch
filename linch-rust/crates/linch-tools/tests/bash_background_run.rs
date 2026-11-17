@@ -16,6 +16,23 @@ use serde_json::json;
 
 const MODEL: &str = "scripted-model";
 
+/// Whether `pid` is in the process table. Without `/proc` a missing entry
+/// would read as gone for any pid, so other systems ask `ps`.
+fn exists(pid: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        !String::from_utf8_lossy(&ps.stdout).trim().is_empty()
+    }
+}
+
 fn registry(root: &Path, processes: &Arc<Processes>) -> Arc<ToolRegistry> {
     let tools = ToolRegistry::new();
     let bash = Bash::new(root).with_processes(Arc::clone(processes));
@@ -74,7 +91,7 @@ async fn a_resumed_run_hears_its_process_no_longer_exists() {
     drop(crashed);
     drop(first);
     let until = Instant::now() + Duration::from_secs(5);
-    while Path::new(&format!("/proc/{pid}")).exists() {
+    while exists(pid) {
         assert!(Instant::now() < until, "the process outlived its agent");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

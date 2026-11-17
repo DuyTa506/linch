@@ -205,7 +205,7 @@ có, trừ `bash`.
 | `max_output_tokens` | không có: mặc định của provider | Số token nhiều nhất mà một phản hồi được sinh ra |
 | `temperature` | không có: mặc định của provider | Temperature lấy mẫu, từ 0 đến 2 (`0` được phép; `anthropic` nhận tối đa 1). Giá trị ngoài khoảng làm `agent.open` thất bại. Provider nào bỏ qua hoặc từ chối nó có trong [Providers](./providers.md#temperature) |
 | `max_tool_concurrency` | `4` | Số lời gọi tool scope đọc nhiều nhất chạy cùng lúc; `0` được tính là 1 |
-| `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây; quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
+| `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây, tối thiểu 100 (`0` và giá trị nhỏ hơn làm `agent.open` thất bại: mọi lời gọi sẽ hết giờ ngay); quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
 | `compaction` | không có: không bao giờ nén | Khi nào tóm tắt phần cũ của cuộc hội thoại ([bên dưới](#compaction)) |
 | `budget` | không có: không giới hạn | Giới hạn token và USD cho mỗi run và các subagent của nó, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([bên dưới](#budget)) |
 | `provider_retry` | bật: 5 lần thử, từ 1 giây gấp đôi đến 30 giây, jitter 0.2 | Gọi lại cùng model sau một lỗi có thể thử lại, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, là các mặc định của Python; `{"max_attempts": 1}` tắt nó ([providers](./providers.md#lỗi-và-thử-lại)) |
@@ -475,7 +475,7 @@ lời gọi của model, không ràng buộc host của tenant
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `max_tokens` | không có: không giới hạn token | Số token nhiều nhất mà run và các subagent của nó được tiêu, cộng cả bốn nhóm usage |
-| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); model không có giá thì không cộng thêm gì, nên chỉ `max_tokens` ràng buộc nó |
+| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); model cần có giá (bảng tích hợp sẵn hoặc `pricing` của agent), nếu không `agent.open` thất bại với lỗi agent không hợp lệ (`-32011`) nêu tên model; với model không có giá, hãy đặt giới hạn `max_tokens` |
 | `warn_ratio` | `0.9` | Tỷ lệ của một trong hai giới hạn mà tại đó một event `budget` loại `warning` được phát ra |
 
 Giống Python Linch, mỗi lời gọi provider được tính phí một lần khi nó kết thúc, và
@@ -492,7 +492,12 @@ với một lỗi tên `BudgetAccountingError`. Một lời gọi thất bại t
 thứ gì (không kết nối được, hoặc status 4xx, 503 hay 529 trước khi có output) được tính bằng
 không và vẫn được thử lại như thường; một 500, 502 hay 504 có thể đã bị tính tiền ở
 upstream, nên nó được tính là không rõ. Một run bị crash giữa chừng một lời gọi sẽ
-resume vào đúng lỗi đó.
+resume vào đúng lỗi đó. Giới hạn chi phí cần mọi lời gọi đều có giá: một lời gọi có
+usage mà không có giá (provider phục vụ một model mà `pricing` không có đơn giá,
+kể cả [model dự phòng](./providers.md#lỗi-và-thử-lại)) làm lời gọi kế tiếp bị từ chối
+với một `BudgetAccountingError` nói rõ điều đó. Chỉ có giới hạn token thì không bị
+ảnh hưởng. Giá được tra theo id mà provider báo cáo, nếu không thì `spec.model`, nên
+hãy khóa `pricing` theo các id mà nó báo cáo.
 
 Mỗi run của agent bắt đầu với mức chi tiêu bằng không. Một run được resume bắt đầu
 từ mức chi tiêu mà bản ghi bền vững của nó và của các run con cho biết, nên một

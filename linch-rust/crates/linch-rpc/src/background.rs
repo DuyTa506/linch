@@ -102,8 +102,13 @@ impl BackgroundAgents {
 
     async fn open_job(&self, namespace: &str, definition: &str) -> Result<JobAgent, FactoryError> {
         let refused = FactoryError::Refused;
-        let mut config: AgentConfig = serde_json::from_str(definition)
-            .map_err(|error| refused(format!("the agent definition does not decode: {error}")))?;
+        // The decode error may quote a field of the definition, which can
+        // hold a credential (a header value, a DSN): it goes to the log, and
+        // the job's error text is fixed.
+        let mut config: AgentConfig = serde_json::from_str(definition).map_err(|error| {
+            tracing::warn!(namespace, %error, "a stored agent definition does not decode");
+            refused("the agent definition does not decode".into())
+        })?;
         if config.namespace != namespace {
             return Err(refused(format!(
                 "the agent definition is for namespace {:?}, not {namespace:?}",
@@ -207,5 +212,25 @@ impl fmt::Debug for BackgroundAgents {
         f.debug_struct("BackgroundAgents")
             .field("roots", &self.roots())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A definition that does not decode is refused with fixed text: the
+    /// decode error quotes the offending value, which may be a secret.
+    #[tokio::test]
+    async fn a_definition_that_does_not_decode_is_refused_without_quoting_it() {
+        let factory = BackgroundAgents::new("postgres://unused").local("acme");
+        let refused = factory
+            .open("acme", r#"{"stores": "hunter2-secret"}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            FactoryError::Refused("the agent definition does not decode".into())
+        );
     }
 }

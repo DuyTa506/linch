@@ -201,7 +201,7 @@ absent, except `bash`.
 | `max_output_tokens` | none: the provider's default | Most tokens one response may generate |
 | `temperature` | none: the provider's default | Sampling temperature, 0 to 2 (`0` is allowed; `anthropic` takes at most 1). A value outside the range fails `agent.open`. Which providers ignore or refuse it is in [Providers](./providers.md#temperature) |
 | `max_tool_concurrency` | `4` | Most read-scope tool calls that run at once; `0` counts as 1 |
-| `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
+| `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds, at least 100 (`0` and smaller values fail `agent.open`: every call would time out at once); past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |
 | `budget` | none: no cap | A token and USD cap for each run and its subagents, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([below](#budget)) |
 | `provider_retry` | on: 5 attempts, from 1 s doubling to 30 s, jitter 0.2 | Call the same model again after a retryable failure, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, Python's defaults; `{"max_attempts": 1}` turns it off ([providers](./providers.md#failures-and-retries)) |
@@ -482,7 +482,7 @@ the model's call order, not the tenant's host
 | Field | Default | What it controls |
 |---|---|---|
 | `max_tokens` | none: no token cap | Most tokens the run and its subagents may spend, all four usage buckets summed |
-| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); a model without a price adds nothing, so only `max_tokens` binds it |
+| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); the model needs a price (the built-in table or the agent's `pricing`), or `agent.open` fails with an invalid-agent error (`-32011`) that names the model; cap `max_tokens` instead for a model without one |
 | `warn_ratio` | `0.9` | Fraction of either cap at which one `budget` event of kind `warning` fires |
 
 As in Python Linch, every provider call is charged once it ends, and the run
@@ -499,7 +499,12 @@ error named `BudgetAccountingError`. A call that failed before costing
 anything (no connection, or a 4xx, 503 or 529 status before any output)
 counts as zero and is retried as usual; a 500, 502 or 504 may have been
 billed upstream, so it counts as unknown. A run that crashed during a call resumes into
-that error.
+that error. A cost cap needs every call priced: a call that has usage and no
+price (the provider served a model the pricing has no rate for, a
+[fallback model](./providers.md#failures-and-retries) included) refuses the next
+call with a `BudgetAccountingError` that says so. A token cap alone does not care.
+The price is looked up under the id the provider reports, else `spec.model`, so
+key `pricing` by the ids it reports.
 
 Each run of the agent starts with nothing spent. A resumed run starts from
 what its durable record and its children's say was spent, so a crash never

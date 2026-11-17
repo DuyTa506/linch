@@ -48,7 +48,7 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 | Field | Meaning |
 |---|---|
 | `request.extra_body` | Fields merged into every request body. They replace what the adapter set, except `model`, `stream`, `temperature`, the conversation (`messages`, `input`, `contents`, `system`, `instructions`, `systemInstruction`, `system_instruction`), the tools and how they are chosen (`tools`, `tool_choice`, `toolConfig`, `tool_config`) and the vendor-side state fields (`store`, `previous_response_id`, `conversation`), which the session owns. `chat_template_kwargs` merges per field, and so does Gemini's `generationConfig`, where the request's own fields win |
-| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key`, `x-goog-api-key` or `api-key` replaces the provider key for every call (a turn, a model list, a window probe): the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` and `proxy-connection` are refused at open. Values are hidden when a config is printed or logged, and removed (8 bytes or longer) from a provider's error text |
+| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key`, `x-goog-api-key` or `api-key` replaces the provider key for every call (a turn, a model list, a window probe): the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` and `proxy-connection` are refused at open. In the Rust types a value is hidden from `Debug` output; a Python config is a plain dict and shows its values when printed or logged. A value is removed from a provider's error text when it is 8 bytes or longer, or at any length when the header's name says `token`, `key`, `secret`, `auth` or `cookie` |
 | `request.timeout_ms` | Longest silence between two chunks of a response before the call fails; absent: the adapter's own limit |
 | `chat.parallel_tool_calls` | Sent when the request has tools; absent: the server's default |
 | `chat.include_stream_options` | `false` drops `stream_options`, for servers that reject it. On when absent |
@@ -76,10 +76,15 @@ excludes. Python's `timeout` is one number applied to every phase of the call
 (connect, read, write, the pool); `request.timeout_ms` only replaces the read
 timeout above, and the 30 s connect timeout stays fixed.
 
-A `default_headers` value is hidden when a config is echoed or logged, and
-removed from a provider's error text when it is 8 bytes or longer (a gateway
-that quotes a rejected header back in its response body shows `[redacted]`).
-A shorter value is left in the text, since it would mangle the message. Put a
+In the Rust types (`RequestOptions`, `Schedule`, `RunRequest`) a
+`default_headers` value is hidden from `Debug` output; this does not reach
+Python, where a config is a plain dict that prints and logs its values, so
+keep one out of logs. A value is removed from a provider's error text when it
+is 8 bytes or longer, and whatever its length when the header's name says
+`token`, `key`, `secret`, `auth` or `cookie` (a gateway that quotes a
+rejected header back in its response body shows `[redacted]`). Another
+header's value shorter than 8 bytes is left in the text, since it would
+mangle the message. Put a
 secret in the server's environment where you can; a value in the config is
 stored with the config (a scheduled run keeps it in the store, as the MCP
 header values are kept), and `extra_body` values are not hidden at all. None of
@@ -234,7 +239,9 @@ ignore `spec.thinking`. The servers (`vllm`, `sglang`, `llamacpp`) pass effort
 to the model's chat template, which decides what it accepts. vLLM's Qwen3
 template takes only `low`, `medium` and `xhigh`, so `high` and `max` are sent
 as `xhigh`; SGLang takes every level (it only switches thinking on) and llama.cpp lets the
-model's template refuse levels; both send the level as it is.
+model's template refuse levels; both send the level as it is. For a vLLM model
+whose template does not accept `xhigh`, set the level yourself in
+`request.extra_body.reasoning_effort`: it replaces the mapped value.
 
 ### `anthropic`
 
@@ -267,6 +274,12 @@ carries reasoning, which `tool_choice` forms work, which output limit field is
 sent and how thinking is turned off. A profile copies nothing from OpenAI's.
 The table of what each supports is in the
 [architecture providers page](../architecture/providers.md#openai-chat-completions-and-server-profiles).
+
+Only vLLM has live tests (`LINCH_TEST_VLLM_URL`; they skip without it). The SGLang profile has not
+been run against a live server, and the `n_ctx` that llama.cpp's `GET /props`
+returns was checked against its documentation only; if a server answers
+differently, the context window falls back to 128000 and `context_window`
+sets it.
 
 `base_url` is required and includes `/v1`. The key is optional: set it in the
 server's environment only when the inference server was started with one.
@@ -463,7 +476,7 @@ the vendor references):
 | Provider | Field | Notes |
 |---|---|---|
 | `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 to 2. OpenAI says parameter support varies by model; a model that refuses it answers with an HTTP error, which Linch does not predict. |
-| `anthropic` | `temperature` | 0 to 1. Claude Opus 4.7 and later, Sonnet 5 and later and Haiku 5.5 answer 400 to a non-default value on every request; older models refuse it only while thinking is on; API version `2026-10-21` removes it. |
+| `anthropic` | `temperature` | 0 to 1. Claude Sonnet 5.5 answers 400 to the sampling parameters (`temperature`, `top_p`, `top_k`): its migration guide says to remove them, and does not say a default value passes. Claude Opus 4.7 and later, Sonnet 5 and Haiku 5.5 answer 400 to a non-default value on every request; older models refuse it only while thinking is on; API version `2026-10-21` removes it. Documented by Anthropic as of 2026-11-17 (<https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide>); Linch sends what the spec sets and does not predict the refusal. |
 | `deepseek` | `temperature` | 0 to 2. Has no effect in thinking mode (the default), where it is sent and ignored. |
 | `gemini` | `generationConfig.temperature` | 0.0 to 2.0. Silently ignored on Gemini 3.6 Flash and newer models. |
 

@@ -886,11 +886,13 @@ config["spec"] = {
 | `invalidate_on_write` | `True` | Có hay không việc một lời gọi tool `write` hoặc `exec` xóa các mục của namespace, trước khi nó bắt đầu và sau khi nó kết thúc |
 | `scope` | `"session"` | `"session"`: một mục chỉ phục vụ session đã lưu nó. `"namespace"`: mọi session của namespace dùng chung các mục |
 
-**Khóa là gì.** `namespace` của agent, session (với `scope` mặc định), tên tool và input
-chuẩn hóa. Một tool read có thể trả lời theo từng session (file riêng của session, home của
-shell), nên mặc định một session không bao giờ nhận kết quả của session khác;
-`scope: "namespace"` chia sẻ các mục và là lời hứa của bạn rằng tool trả lời như nhau cho
-mọi người. Các mục không bao giờ lan sang namespace khác. Một lời gọi write hoặc exec xóa
+**Khóa là gì.** `namespace` của agent, session (với `scope` mặc định), principal của run
+(tenant và user, khi nó có), tên tool và input chuẩn hóa. Một tool read có thể trả lời theo
+từng session (file riêng của session, home của shell) hoặc theo từng principal (`MemorySearch`
+đọc bộ nhớ riêng của principal), nên mặc định một session không bao giờ nhận kết quả của
+session khác và không `scope` nào đưa kết quả của principal này cho principal khác;
+`scope: "namespace"` chia sẻ các mục giữa các session của một principal và là lời hứa của
+bạn rằng tool trả lời như nhau cho chúng. Các mục không bao giờ lan sang namespace khác. Một lời gọi write hoặc exec xóa
 cả namespace, mục của mọi session, và `max_entries` đếm cả namespace. Registry tool không
 có phiên bản hay digest của tool, nên khóa cũng không có: khi hành vi của một tool thay
 đổi, các mục cũ sống đến hết `ttl_ms`. Với store Postgres, các mục nằm trong một bảng

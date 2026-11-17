@@ -5,11 +5,14 @@
 //!   `2026-10-21` removes `temperature`, which [`ProviderRequest`] carries,
 //!   so the adapter stays on `2023-06-01` until that field is dropped.
 //! - `temperature` takes 0.0 to 1.0 ([`Provider::max_temperature`]).
-//!   Checked 2026-11-17 against the thinking page: Claude Opus 4.7 and
-//!   later, Sonnet 5 and later and Haiku 5.5 answer 400 to a non-default
-//!   `temperature` on every request; older models refuse it only while
-//!   thinking is on. The adapter sends what the spec sets and the API
-//!   decides.
+//!   Documented by Anthropic as of 2026-11-17: the Sonnet 5.5 migration
+//!   guide (`platform.claude.com/docs/en/models/sonnet-5-5/migration-guide`)
+//!   says its sampling parameters return an error and to remove
+//!   `temperature`, `top_p` and `top_k`, without saying a default passes;
+//!   the thinking page says Claude Opus 4.7 and later, Sonnet 5 and Haiku
+//!   5.5 answer 400 to a non-default `temperature` on every request, and
+//!   older models refuse it only while thinking is on. The adapter sends
+//!   what the spec sets and the API decides.
 //! - `max_tokens` is required; [`DEFAULT_MAX_TOKENS`] fills it.
 //! - Thinking: `enabled` needs `budget_tokens` below `max_tokens` and
 //!   rejects a forced `tool_choice`; an unbudgeted request is `adaptive`.

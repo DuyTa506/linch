@@ -727,3 +727,131 @@ async fn a_call_can_fork_the_session_an_earlier_call_returned() {
     assert_eq!(code_of_call(missing).0, code::WORKFLOW_CALL_FAILED);
     db.drop().await;
 }
+
+/// Guessing is no way in: a tenant that knows another tenant's workflow id
+/// and the session of one of its calls reads no journal, forks no session
+/// and resumes no run, because every store key is the tenant's namespace.
+#[tokio::test]
+async fn a_tenant_that_guesses_another_tenants_ids_reaches_nothing() {
+    let Some(db) = TestDb::empty("wf_guess").await else {
+        return;
+    };
+    let caps = Some(WorkflowCaps::default());
+    let acme = tenant_rpc(&db, "acme", caps);
+    let globex = tenant_rpc(&db, "globex", caps);
+    let a = acme
+        .open(tenant_config(&db, "acme", vec![text_turn("acme secret")]))
+        .await;
+    let turns = vec![text_turn("globex's"), text_turn("globex's again")];
+    let g = globex.open(tenant_config(&db, "globex", turns)).await;
+    start(&acme, &a, "plan").await.unwrap();
+    let theirs = call(&acme, "plan", "the plan", json!({})).await.unwrap();
+    finish(&acme, "plan", true).await;
+    let session = theirs["session_id"].clone();
+    // The status of acme's workflow, by its id, from globex's agent.
+    let status = json!({"agent": g, "run_id": "plan"});
+    let (kind, _) = code_of_call(globex.call(method::WORKFLOW_STATUS, status).await);
+    assert_eq!(kind, code::NOT_FOUND);
+    // The events of the call's run (its id is its session), likewise.
+    let events = json!({"agent": g, "run_id": session});
+    let (kind, _) = code_of_call(globex.call(method::RUN_EVENTS, events).await);
+    assert_eq!(kind, code::NOT_FOUND);
+    // A fork of the call's session reads nothing of acme's conversation.
+    start(&globex, &g, "plan").await.unwrap();
+    let fork = json!({"fork": session});
+    let stolen = call(&globex, "plan", "show it", fork).await;
+    assert_eq!(code_of_call(stolen).0, code::WORKFLOW_CALL_FAILED);
+    // The same prompt under the same id runs on globex's provider.
+    let own = call(&globex, "plan", "the plan", json!({})).await.unwrap();
+    assert_eq!(
+        (own["text"].clone(), own["replayed"].clone()),
+        (json!("globex's"), json!(false))
+    );
+    db.drop().await;
+}
+
+/// RED: a workflow's calls act for no principal, so a permission rule keyed
+/// on a role (here: deny `Glob` to `guest`) does not reach them, while the
+/// same call in a run started for the guest is denied. `workflow.start`
+/// should take the principal its calls act for.
+#[tokio::test]
+async fn a_workflow_started_for_a_principal_runs_its_calls_under_that_principals_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = vec![
+        tool_turn("c1", "Glob", json!({"pattern": "*"})),
+        text_turn("done"),
+        tool_turn("c2", "Glob", json!({"pattern": "*"})),
+        text_turn("done"),
+    ];
+    let mut config = scripted(turns, Some(dir.path()), "default");
+    let deny = json!({"type": "tool", "tool": "Glob", "decision": "deny", "role": "guest"});
+    config["permissions"]["layers"] = json!([{"name": "roles", "rules": [deny]}]);
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(config).await;
+    let guest = json!({"tenant": "acme", "user": "gus", "roles": ["guest"]});
+    let denied = |events: &[linch::Envelope]| {
+        (events.iter())
+            .filter_map(|envelope| match &envelope.event {
+                linch::Event::ToolCallEnd(end) => Some(end.is_error()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // The rule works for a run started for the guest.
+    let params = json!({"agent": agent, "session_id": "direct", "prompt": "go",
+                        "principal": guest});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert_eq!(denied(&ended.envelopes), [true], "the control run");
+    // The same agent in a workflow started for the guest.
+    let params = json!({"agent": agent, "run_id": "w", "principal": guest});
+    rpc.call(method::WORKFLOW_START, params).await.unwrap();
+    let result = call(&rpc, "w", "go", json!({})).await.unwrap();
+    let params = json!({"agent": agent, "run_id": result["session_id"]});
+    let events = rpc.call(method::RUN_EVENTS, params).await.unwrap();
+    let events: linch_rpc::protocol::Events = serde_json::from_value(events).unwrap();
+    assert_eq!(denied(&events.events), [true], "the workflow's call");
+}
+
+/// A workflow keeps the principal it was started for: another principal, or
+/// none, cannot resume it, and one that had none cannot be given one.
+#[tokio::test]
+async fn a_workflow_is_resumed_only_by_the_principal_it_started_with() {
+    let rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![], None, "")).await;
+    let alice = json!({"tenant": "acme", "user": "alice", "roles": ["dev", "admin"]});
+    let start_as = |id: &str, principal: Option<&Value>| {
+        let mut params = json!({"agent": agent, "run_id": id});
+        if let Some(principal) = principal {
+            params["principal"] = principal.clone();
+        }
+        rpc.call(method::WORKFLOW_START, params)
+    };
+    start_as("w", Some(&alice)).await.unwrap();
+    finish(&rpc, "w", true).await;
+    let others = [
+        Some(json!({"tenant": "acme", "user": "bob", "roles": ["dev", "admin"]})),
+        Some(json!({"tenant": "acme", "user": "alice", "roles": ["dev"]})),
+        None,
+    ];
+    for other in &others {
+        let (kind, data) = code_of_call(start_as("w", other.as_ref()).await);
+        assert_eq!(kind, code::NOT_ALLOWED, "{other:?}");
+        assert_eq!(data["kind"], "workflow_principal", "{other:?}");
+    }
+    // The same principal, its roles in another order, resumes it.
+    let again = json!({"tenant": "acme", "user": "alice", "roles": ["admin", "dev"]});
+    let resumed = start_as("w", Some(&again)).await.unwrap();
+    assert_eq!(resumed["resumed"], json!(true));
+    finish(&rpc, "w", true).await;
+    // A workflow that acts for nobody stays so.
+    start_as("plain", None).await.unwrap();
+    finish(&rpc, "plain", true).await;
+    let (kind, data) = code_of_call(start_as("plain", Some(&alice)).await);
+    assert_eq!(
+        (kind, &data["kind"]),
+        (code::NOT_ALLOWED, &json!("workflow_principal"))
+    );
+    start_as("plain", None).await.unwrap();
+    finish(&rpc, "plain", true).await;
+}

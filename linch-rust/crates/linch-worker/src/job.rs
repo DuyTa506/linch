@@ -184,7 +184,10 @@ pub async fn enqueue_run(
 
 /// A run to queue with [`enqueue`]: a new run of `prompt` in
 /// `session_id`, optionally with a stored agent definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides the agent definition, whose provider headers and MCP
+/// headers may hold credentials.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RunRequest {
     /// Queue name.
     pub queue: String,
@@ -201,6 +204,19 @@ pub struct RunRequest {
     /// Who the run acts for: permission rules match on its roles, as for a
     /// run started directly. Stored with the job.
     pub principal: Option<Principal>,
+}
+
+impl std::fmt::Debug for RunRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunRequest")
+            .field("queue", &self.queue)
+            .field("namespace", &self.namespace)
+            .field("session_id", &self.session_id)
+            .field("prompt", &self.prompt)
+            .field("agent", &self.agent.as_ref().map(|_| "[redacted]"))
+            .field("principal", &self.principal)
+            .finish()
+    }
 }
 
 /// Queue a new run, as [`enqueue_run`] does, with an optional agent
@@ -384,6 +400,22 @@ pub async fn enqueue_approve(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_run_request_hides_its_definition_from_debug() {
+        let definition = r#"{"request": {"default_headers": {"x-gw": "hunter2-secret"}}}"#;
+        let request = RunRequest {
+            queue: "q".into(),
+            namespace: "acme".into(),
+            session_id: SessionId::new("s"),
+            prompt: "go".into(),
+            agent: Some(definition.into()),
+            principal: None,
+        };
+        let shown = format!("{request:?}");
+        assert!(!shown.contains("hunter2-secret"), "{shown}");
+        assert!(shown.contains("go") && shown.contains("acme"), "{shown}");
+    }
 
     #[test]
     fn approvals_are_stored_in_the_core_wire_form() {

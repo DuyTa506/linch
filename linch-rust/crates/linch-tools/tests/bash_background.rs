@@ -61,7 +61,20 @@ async fn read(tools: &Tools, id: &str, wait_ms: u64) -> linch_core::ToolResult {
 
 /// Whether the shell is gone from the process table: exited and reaped.
 fn reaped(pid: u32) -> bool {
-    !Path::new(&format!("/proc/{pid}")).exists()
+    // Without `/proc` a missing entry would read as reaped for any pid, so
+    // other systems ask `ps`, which lists a zombie too.
+    #[cfg(target_os = "linux")]
+    {
+        !Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&ps.stdout).trim().is_empty()
+    }
 }
 
 async fn eventually_reaped(pid: u32) {
