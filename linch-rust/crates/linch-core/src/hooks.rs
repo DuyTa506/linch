@@ -16,23 +16,23 @@
 //! [`PreToolUseOutcome::Run`] only comes from a chain that ran every
 //! matching hook.
 //!
-//! Thirteen further points observe only ([`observe`]): `agent_start`,
+//! Thirteen further points observe only (`observe`): `agent_start`,
 //! `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`,
 //! `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
 //! `post_compact`, `subagent_start`, `subagent_stop`, `event_emit`. A hook
 //! there answers `()` and cannot fail closed. `event_emit` fires once per
 //! event about to be delivered to the caller, but only for events that are
 //! both streamed and durably logged: never for a hook's own record, and
-//! never for a stream-only delta or tool-progress event (see [`observe`]).
-//! [`BeforeProviderCall`] ([`call`]) lets a hook replace the provider
+//! never for a stream-only delta or tool-progress event (see `observe`).
+//! [`BeforeProviderCall`] (`call`) lets a hook replace the provider
 //! request about to be sent, block the call, or skip it and take another
 //! turn with feedback (Python's `force_continue` there); [`AfterProviderCall`]
-//! ([`assembly`]) lets a hook replace the assembled response a provider call
+//! (`assembly`) lets a hook replace the assembled response a provider call
 //! just produced, block it before it is staged and appended to the session,
 //! or accept it and take another turn instead of acting on it (Python's
 //! `retry`/`force_continue` there). Unlike the observe-only points, both
 //! points' blocking verdicts can fail closed. `before_final_answer` has no
-//! Rust hook point of its own: [`Stop`] ([`turn`]) can rewrite the run's
+//! Rust hook point of its own: [`Stop`] (`turn`) can rewrite the run's
 //! final-answer text, block the stop outright, or retry the answer once
 //! per run call, folding that point in; its `Continue` is Python's stop
 //! `force_continue`.

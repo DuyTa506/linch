@@ -14,7 +14,8 @@ from typing import Any, Literal
 from .config import Principal
 
 Scope = Literal["read", "write", "exec"]
-ToolFn = Callable[..., Awaitable[Any]]
+# What `tool` takes: an `async` function, or a plain one it runs in a thread.
+ToolFn = Callable[..., Any]
 
 _SCOPES = ("read", "write", "exec")
 _JSON_TYPES: dict[Any, str] = {
@@ -92,7 +93,7 @@ class HostTool:
     input_schema: dict[str, Any]
     scope: Scope
     timeout_ms: int | None
-    fn: ToolFn
+    fn: Callable[..., Awaitable[Any]]
     context_param: str | None = None
 
     def spec(self) -> dict[str, Any]:
