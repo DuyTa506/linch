@@ -173,10 +173,13 @@ Lời gọi kết thúc với một receipt. Usage của nó được tính và 
 
 ### Khi không có bản tóm tắt
 
-Một bản tóm tắt bị từ chối, và không được áp dụng, khi nó rỗng hoặc ước lượng của nó
-không nhỏ hơn phần mà nó sẽ thay thế (`compaction::inflates`). Receipt của một bản tóm
-tắt bị từ chối có disposition `rejected`; view giữ nguyên như cũ và không có event
-`compaction` nào được ghi.
+Một câu trả lời bị từ chối, và không được áp dụng, khi nó gọi một tool, rỗng, hoặc ước
+lượng của nó không nhỏ hơn phần mà nó sẽ thay thế (`compaction::rejection`; đo văn bản của
+model, không tính phần đầu hay phần nguyên văn). Receipt có disposition `rejected`; view
+giữ nguyên như cũ, và một event `compaction` với số đếm trước và sau bằng nhau cùng một lý
+do `rejected` được ghi: mã (`tool_call`, `empty`, `not_smaller`), rồi điều xảy ra tiếp theo,
+"the next due turn asks again" ở đầu một lượt hoặc "the prompt still does not fit, so the
+run ends" với bản tóm tắt bắt buộc. Không thử lại trong cùng lượt.
 
 Ở đầu một lượt, một lời gọi thất bại, trả lời không có văn bản, hoặc bị từ chối, không
 gây lỗi nghiêm trọng. Lượt tiếp tục mà không compact, với lời gọi chính. Receipt và
@@ -195,7 +198,9 @@ Message thay thế các lượt đã gộp là một checkpoint (`compaction::ch
 tiên là phần đầu của bản tóm tắt và bản tóm tắt của model; các block sau nó là các
 message user của phần đã gộp, được harness sao chép nguyên văn (mỗi block bắt đầu bằng
 `[user message, verbatim]`), mới nhất trước, tối đa `keep_user_tokens` (khoảng bốn ký tự
-cho mỗi token; message không vừa thì bị cắt với `[truncated]` và các message cũ hơn bị bỏ).
+cho mỗi token) và không bao giờ quá một nửa ước lượng của phần đã gộp, để checkpoint không
+lớn hơn thứ nó thay thế (message không vừa thì bị cắt với `[truncated]`, không được tính, và
+các message cũ hơn bị bỏ).
 Kết quả tool và các message `<system-reminder>` không phải lời của user nên không được
 sao chép. Codex giữ tối đa 20k token message user gần đây và opencode 15k; model không cần
 trích dẫn một chỉ dẫn để nó sống sót qua một bản tóm tắt.

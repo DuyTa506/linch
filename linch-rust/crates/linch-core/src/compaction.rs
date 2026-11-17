@@ -499,13 +499,17 @@ pub(crate) fn summary_message(text: &str) -> Message {
 
 /// The checkpoint that replaces the `folded` turns: the model's summary
 /// `text`, then the user messages of `folded` copied verbatim, newest
-/// first, up to `keep_user_tokens` (a block each). A checkpoint of an
-/// earlier compaction in `folded` hands over its blocks, which are older
-/// than every message after it. The view's first message stays as it was,
-/// so `folded` starts after it.
+/// first (a block each), up to `keep_user_tokens` and never more than half
+/// of the folded part's estimate, so the checkpoint cannot outgrow what it
+/// replaces. The first message that does not fit is cut with `[truncated]`
+/// (the marker is not counted) and the older ones are dropped. A checkpoint
+/// of an earlier compaction in `folded` hands over its blocks, which are
+/// older than every message after it. The view's first message stays as it
+/// was, so `folded` starts after it.
 pub(crate) fn checkpoint(text: &str, folded: &[Arc<Message>], keep_user_tokens: u32) -> Message {
     let mut message = summary_message(text);
-    let mut room = usize::try_from(keep_user_tokens)
+    let tokens = (estimate_tokens(folded) / 2).min(u64::from(keep_user_tokens));
+    let mut room = usize::try_from(tokens)
         .unwrap_or(usize::MAX)
         .saturating_mul(4);
     for original in folded.iter().rev().flat_map(|m| user_texts(m)) {

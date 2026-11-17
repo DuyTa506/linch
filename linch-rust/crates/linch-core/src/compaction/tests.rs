@@ -281,7 +281,8 @@ fn the_checkpoint_matches_the_golden_cases() {
 #[test]
 fn a_second_compaction_carries_the_first_ones_user_messages_and_asks_for_an_update() {
     let user = |text: &str| Arc::new(Message::user_text(text));
-    let assistant = Arc::new(Message::assistant_text("ok"));
+    // Long enough that half of each folded part holds the user messages.
+    let assistant = Arc::new(Message::assistant_text("ok ".repeat(200)));
     // First compaction: a fact and an instruction the user gave early.
     let first_view = vec![
         user("go"),
@@ -319,6 +320,10 @@ fn a_second_compaction_carries_the_first_ones_user_messages_and_asks_for_an_upda
         ],
         "newest first, the early ones carried over"
     );
+    // The cap holds for what was carried over too: the verbatim text is at
+    // most half of the folded part, so the checkpoint is smaller than it.
+    let carried: usize = verbatim.iter().map(|text| text.len()).sum();
+    assert!(carried as u64 <= estimate_tokens(&second_view[1..keep]) / 2 * 4);
     // The request that makes it asks to update the first checkpoint.
     let messages: Vec<Message> = second_view[..keep]
         .iter()
@@ -332,6 +337,45 @@ fn a_second_compaction_carries_the_first_ones_user_messages_and_asks_for_an_upda
             .unwrap()
             .text()
             .ends_with(UPDATE_SUMMARY)
+    );
+}
+
+#[test]
+fn the_verbatim_section_never_outgrows_the_folded_part() {
+    // Pastes of 500 tokens each, in a folded part not much bigger.
+    let paste = |n: u8| Arc::new(Message::user_text(format!("{n}").repeat(2000)));
+    let reply = Arc::new(Message::assistant_text("a".repeat(400)));
+    let view = vec![
+        Arc::new(Message::user_text("go")),
+        paste(1),
+        reply.clone(),
+        paste(2),
+        reply.clone(),
+        Arc::new(Message::user_text("last question")),
+        reply,
+    ];
+    let keep = keep_from(&view, 1).unwrap();
+    let folded = &view[1..keep];
+    let made = checkpoint("short summary", folded, 15_000);
+    let blocks: Vec<_> = (made.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => t.text.strip_prefix(VERBATIM_MARK),
+            _ => None,
+        })
+        .collect();
+    // Half of the folded part's tokens, in characters: the newest message,
+    // the newer paste whole, then the older paste cut to what is left.
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0], "last question");
+    assert_eq!(blocks[1], "2".repeat(2000));
+    assert!(blocks[2].starts_with("1111") && blocks[2].ends_with(TRUNCATED));
+    let cap = estimate_tokens(folded) / 2 * 4;
+    let copied: usize = blocks.iter().map(|text| text.len()).sum();
+    assert_eq!(copied as u64, cap + TRUNCATED.len() as u64);
+    let compacted = replacement(&view, made, keep);
+    assert!(
+        estimate_tokens(&compacted) < estimate_tokens(&view),
+        "tokens_after is below tokens_before"
     );
 }
 

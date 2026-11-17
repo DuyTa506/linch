@@ -660,7 +660,8 @@ async fn a_reply_that_is_not_a_summary_is_rejected_and_the_run_goes_on() {
             .collect();
         assert_eq!(reports.len(), 2, "{why}");
         for report in reports {
-            assert_eq!(report.rejected.as_deref(), Some(why));
+            let reason = report.rejected.as_deref().unwrap();
+            assert_eq!(reason, format!("{why}: the next due turn asks again"));
             assert_eq!(report.messages_before, report.messages_after);
             assert_eq!(report.tokens_before, report.tokens_after);
         }

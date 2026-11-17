@@ -176,10 +176,14 @@ budget, and a `usage` event is staged, whether or not the call gave a summary
 
 ### When there is no summary
 
-A summary is rejected, and not applied, when it is empty or its estimate is
-no smaller than the part it would replace (`compaction::inflates`). The
-receipt of a rejected summary has the disposition `rejected`; the view stays
-as it was and no `compaction` event is written.
+A reply is rejected, and not applied, when it called a tool, is empty, or its
+estimate is no smaller than the part it would replace (`compaction::rejection`;
+the model's text is measured, not the header or the verbatim section). The
+receipt has the disposition `rejected`; the view stays as it was, and a
+`compaction` event with equal before and after counts and a `rejected` reason is
+written: the code (`tool_call`, `empty`, `not_smaller`), then what follows, "the
+next due turn asks again" at a turn's start or "the prompt still does not fit, so
+the run ends" for a forced summary. There is no retry within the turn.
 
 At a turn's start, a call that failed, answered with no text, or was
 rejected, is not fatal. The turn goes on uncompacted with its primary call. The receipt and
@@ -197,8 +201,10 @@ The message that replaces the folded turns is a checkpoint (`compaction::checkpo
 the first block is the summary header and the model's summary; the blocks after
 it are the user messages of the folded part, copied verbatim by the harness
 (each block starts with `[user message, verbatim]`), newest first, up to
-`keep_user_tokens` (about four characters per token; the message that does not
-fit is cut with `[truncated]` and the older ones are dropped). Tool results and
+`keep_user_tokens` (about four characters per token) and never more than half of
+the folded part's estimate, so the checkpoint cannot outgrow what it replaces (the
+message that does not fit is cut with `[truncated]`, which is not counted, and
+the older ones are dropped). Tool results and
 `<system-reminder>` messages are not the user's words and are not copied.
 Codex keeps up to 20k tokens of recent user messages and opencode 15k; the model
 need not quote an instruction for it to survive a summary.

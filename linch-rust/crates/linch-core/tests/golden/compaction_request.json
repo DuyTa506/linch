@@ -21,7 +21,7 @@
       "keep_user_tokens": 100,
       "folded": [
         {"role": "user", "content": [{"type": "text", "text": "first request"}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]},
         {"role": "user", "content": [{"type": "text", "text": "second request"}]}
       ],
       "expected": {
@@ -64,6 +64,22 @@
         "content": [
           {"type": "text", "text": "<summary of earlier conversation>\n\nS"},
           {"type": "text", "text": "[user message, verbatim]\nabcd\n[truncated]"}
+        ]
+      }
+    },
+    {
+      "name": "the verbatim section is at most half of the folded part",
+      "summary": "S",
+      "keep_user_tokens": 100,
+      "folded": [
+        {"role": "user", "content": [{"type": "text", "text": "abcdefghijklmnopqrstuvwxyz012345"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "yyyyyyyy"}]}
+      ],
+      "expected": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "<summary of earlier conversation>\n\nS"},
+          {"type": "text", "text": "[user message, verbatim]\nabcdefghijklmnopqrst\n[truncated]"}
         ]
       }
     },

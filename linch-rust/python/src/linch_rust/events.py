@@ -271,7 +271,8 @@ class CompactionEvent:
     with no model call. `forced` is true when the provider's refusal of a
     prompt as too long caused it, rather than the view reaching the trigger.
     `rejected` is set when a summary was not applied (the counts then show an
-    unchanged view): `tool_call`, `empty` or `not_smaller`.
+    unchanged view): a code, `tool_call`, `empty` or `not_smaller`, then what follows
+    (the next due turn asks again, or the run ends).
     """
 
     type: ClassVar[str] = "compaction"

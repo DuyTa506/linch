@@ -230,7 +230,11 @@ impl Runner {
                     strategy: strategy.into(),
                     duration_ms: super::end::millis(started.elapsed()),
                     forced,
-                    rejected: Some(reason.into()),
+                    rejected: Some(if forced {
+                        format!("{reason}: the prompt still does not fit, so the run ends")
+                    } else {
+                        format!("{reason}: the next due turn asks again")
+                    }),
                 }));
             }
             if forced {
