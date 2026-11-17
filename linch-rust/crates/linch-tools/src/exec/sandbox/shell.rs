@@ -27,7 +27,7 @@ use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use super::{SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
+use super::{ETC_READ_PATHS, SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
 use crate::bash::process::{self, Spawned};
 use crate::exec::{ExecutionError, Launch, Shell};
 
@@ -115,6 +115,12 @@ impl SandboxShell {
         root: &Path,
         policy: SandboxPolicy,
     ) -> Result<Self, ExecutionError> {
+        Self::open_in(root, policy, Path::new("/etc"))
+    }
+
+    /// [`Self::open`] with the system configuration at `etc`, so a test
+    /// can stand in for `/etc`.
+    fn open_in(root: &Path, policy: SandboxPolicy, etc: &Path) -> Result<Self, ExecutionError> {
         if !seccomp::SUPPORTED {
             return Err(ExecutionError::Unsupported("sandbox"));
         }
@@ -132,11 +138,8 @@ impl SandboxShell {
             source,
         };
         let mut read: Vec<PathBuf> = SYSTEM_READ_PATHS.iter().map(PathBuf::from).collect();
+        read.extend(etc_read_paths(etc));
         read.extend(policy.read_paths.iter().cloned());
-        if policy.network {
-            // `/etc/resolv.conf` is often a link into `/run`.
-            read.extend(std::fs::canonicalize("/etc/resolv.conf").ok());
-        }
         let rules = Arc::new(Rules {
             network: policy.network,
             root: root.to_path_buf(),
@@ -174,6 +177,32 @@ impl SandboxShell {
         });
         home.clone()
     }
+}
+
+/// [`ETC_READ_PATHS`] under `etc`, each `*` entry expanded to the entries
+/// of its directory that start with the rest of its name.
+fn etc_read_paths(etc: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in ETC_READ_PATHS {
+        let Some(prefix) = entry.strip_suffix('*') else {
+            paths.push(etc.join(entry));
+            continue;
+        };
+        let path = etc.join(prefix);
+        let (Some(dir), Some(start)) = (path.parent(), path.file_name()) else {
+            continue;
+        };
+        let start = start.as_encoded_bytes();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().as_encoded_bytes().starts_with(start) {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths
 }
 
 /// `prlimit`'s arguments for `policy`, `nproc` counted from the `tasks`
@@ -402,6 +431,56 @@ mod tests {
             .expect("the watchdog killed the group")
             .unwrap();
         assert_eq!(status.signal(), Some(9));
+    }
+
+    /// Run `command` in `shell` and return what it printed.
+    async fn output(shell: &SandboxShell, root: &Path, command: &str) -> String {
+        let env = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+        let session = SessionId::from("s1");
+        let launch = Launch {
+            command,
+            cwd: root,
+            env: &env,
+            session: &session,
+            lifeline: false,
+        };
+        let child = shell.spawn(launch).await.unwrap().child;
+        let out = child.wait_with_output().await.unwrap();
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        text
+    }
+
+    /// Only the listed system configuration is readable: a file of the
+    /// configuration directory that is not listed (where host secrets
+    /// live) is closed, though its permissions would let the user read it.
+    #[tokio::test]
+    async fn only_listed_system_configuration_is_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        let etc = dir.path().join("etc");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(etc.join("ssl/certs")).unwrap();
+        std::fs::create_dir_all(etc.join("python3.99")).unwrap();
+        std::fs::write(etc.join("passwd"), "user\n").unwrap();
+        std::fs::write(etc.join("ssl/certs/ca.pem"), "cert\n").unwrap();
+        std::fs::write(etc.join("python3.99/site.py"), "site\n").unwrap();
+        std::fs::write(etc.join("linch-test-secret"), "hidden\n").unwrap();
+        std::fs::create_dir_all(etc.join("ssl/private")).unwrap();
+        std::fs::write(etc.join("ssl/private/key.pem"), "key\n").unwrap();
+        let root = root.canonicalize().unwrap();
+        let etc = etc.canonicalize().unwrap();
+        let shell = match SandboxShell::open_in(&root, SandboxPolicy::default(), &etc) {
+            Ok(shell) => shell,
+            Err(error) => return eprintln!("skipped: {error}"),
+        };
+        let e = etc.display();
+        let listed = format!("cat {e}/passwd {e}/ssl/certs/ca.pem {e}/python3.99/site.py");
+        assert_eq!(output(&shell, &root, &listed).await, "user\ncert\nsite\n");
+        for secret in ["linch-test-secret", "ssl/private/key.pem"] {
+            let read = output(&shell, &root, &format!("cat {e}/{secret}")).await;
+            assert!(read.contains("Permission denied"), "{secret}: {read}");
+        }
     }
 
     #[test]

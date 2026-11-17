@@ -104,6 +104,46 @@ async fn a_command_reads_and_writes_only_the_workspace_and_its_home() {
     assert!(tty.contains("Permission denied"), "{tty}");
 }
 
+/// `/etc` is open only for what programs need; `/opt` not at all unless
+/// `read_paths` names it.
+#[tokio::test]
+async fn system_configuration_is_open_only_where_listed() {
+    let ws = Workspace::new();
+    let Some(backend) = sandbox(&ws, SandboxPolicy::default()) else {
+        return;
+    };
+    let tool = Bash::in_backend(&backend);
+    let listed = text(
+        run(
+            &tool,
+            "cat /etc/passwd /etc/hosts /etc/nsswitch.conf >/dev/null && echo ok",
+        )
+        .await,
+    );
+    assert_eq!(listed, "ok\n[exit code 0]");
+    // World-readable files that are not listed are closed too, not only
+    // those the file permissions close (`/etc/shadow`).
+    for path in ["/etc/shadow", "/etc/fstab", "/etc/crontab", "/opt"] {
+        if !Path::new(path).exists() {
+            continue;
+        }
+        let read = any(run(&tool, &format!("cat {path} || ls {path}")).await);
+        assert!(read.contains("Permission denied"), "{path}: {read}");
+    }
+    if Path::new("/opt").is_dir() {
+        let policy = SandboxPolicy {
+            read_paths: vec!["/opt".into()],
+            ..SandboxPolicy::default()
+        };
+        let Some(backend) = sandbox(&ws, policy) else {
+            return;
+        };
+        let tool = Bash::in_backend(&backend);
+        let out = text(run(&tool, "ls /opt >/dev/null && echo listed").await);
+        assert_eq!(out, "listed\n[exit code 0]");
+    }
+}
+
 #[tokio::test]
 async fn no_host_secret_reaches_the_command() {
     let ws = Workspace::new();
