@@ -10,6 +10,8 @@ import asyncio
 import os
 import re
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -296,3 +298,53 @@ async def test_a_dropped_connection_reaps_a_background_command_and_a_reconnect_s
     assert end.is_error, result_text(end)
     assert end.error_code == "no_such_process"
     assert "the server restarted" in result_text(end)
+
+
+# A client process that starts a background command through `SubprocessHost`
+# and then waits to be killed.
+CLIENT = """
+import asyncio, sys
+from linch_rust import ExecStart, SubprocessHost
+
+async def main(command: str) -> None:
+    host = SubprocessHost()
+    await host.start(ExecStart("a", "e1", command, None, {}, True, "s1"))
+    print("started", flush=True)
+    await asyncio.sleep(300)
+
+asyncio.run(main(sys.argv[1]))
+"""
+
+
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def test_a_command_does_not_outlive_a_killed_client(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    command = f"echo $$ > {pidfile}; sleep 300"
+    client = subprocess.Popen(
+        [sys.executable, "-c", CLIENT, command], stdout=subprocess.PIPE, text=True
+    )
+    pid = 0
+    try:
+        assert client.stdout is not None and client.stdout.readline().strip() == "started"
+        pid = await pid_in(pidfile)
+        assert group_alive(pid)
+        # The client dies without a word: no destructor, no `finally`.
+        client.kill()
+        client.wait()
+        deadline = time.monotonic() + 5
+        while group_alive(pid):
+            assert time.monotonic() < deadline, f"command group {pid} outlived its client"
+            await asyncio.sleep(0.05)
+    finally:
+        client.kill()
+        if pid and group_alive(pid):
+            os.killpg(pid, signal.SIGKILL)
