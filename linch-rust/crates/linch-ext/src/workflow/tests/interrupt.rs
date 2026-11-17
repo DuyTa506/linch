@@ -128,3 +128,54 @@ async fn an_answer_of_the_wrong_type_fails_and_is_not_journaled() {
     let run = stored(&store, "w1").await;
     assert_eq!((run.status, run.records.len()), (WorkflowStatus::Failed, 1));
 }
+
+/// What the approver is shown: the interrupt's payload, here a draft that
+/// the workflow rebuilds on every run.
+async fn publish_flow(wf: WorkflowContext, draft: &'static str) -> Result<bool, WorkflowError> {
+    wf.interrupt("approve", json!({"draft": draft})).await
+}
+
+/// An approval is for the question it answered. If the draft changed between
+/// the question and the resume, the old approval must not publish the new one.
+#[tokio::test]
+async fn an_answer_for_an_edited_interrupt_is_not_applied() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let first = run_workflow(options(&store, "w1", &Recorder::default()), |wf| {
+        publish_flow(wf, "v1")
+    })
+    .await;
+    assert!(matches!(first, Err(WorkflowError::Suspended(_))));
+
+    let edited = answered(&store, &Recorder::default(), true);
+    let resumed = run_workflow(edited, |wf| publish_flow(wf, "v2")).await;
+    match resumed {
+        Err(WorkflowError::Suspended(interrupt)) => {
+            assert_eq!(interrupt.payload, json!({"draft": "v2"}));
+        }
+        other => panic!("the approval of v1 was applied to v2: {other:?}"),
+    }
+    let run = stored(&store, "w1").await;
+    assert!(run.records.is_empty(), "the stale answer was journaled");
+    let interrupt = Interrupt {
+        key: "approve".into(),
+        payload: json!({"draft": "v2"}),
+    };
+    assert_eq!(run.status, WorkflowStatus::AwaitingInput(interrupt));
+
+    // Answered again for the question as it now stands, it applies.
+    let again = answered(&store, &Recorder::default(), true);
+    let published = run_workflow(again, |wf| publish_flow(wf, "v2")).await;
+    assert!(published.unwrap());
+}
+
+/// An answer to a question the journal never stored is not applied either.
+#[tokio::test]
+async fn an_answer_for_a_question_never_asked_is_not_applied() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let options = answered(&store, &Recorder::default(), true);
+    let result = run_workflow(options, |wf| publish_flow(wf, "v1")).await;
+    assert!(
+        matches!(result, Err(WorkflowError::Suspended(_))),
+        "{result:?}"
+    );
+}
