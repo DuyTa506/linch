@@ -302,7 +302,7 @@ refused on resume until they finish.
 
 | Field | Default | What it controls |
 |---|---|---|
-| `threshold_tokens` | none: follow the context window | Compact before a turn whose conversation is estimated at this many tokens or more (about four characters per token, 1000 per image); at least 1 |
+| `threshold_tokens` | none: follow the context window | Compact before a turn whose conversation is measured at this many tokens or more: the estimate (about four characters per token, 1000 per image), or the provider's last reported prompt tokens plus the estimate of what followed, whichever is larger ([Memory](./memory.md#compaction)); at least 1 |
 | `keep_recent_turns` | `10` | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | the built-in prompt | Instructions for the summary call |
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |

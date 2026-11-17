@@ -307,7 +307,7 @@ chúng bị từ chối khi resume cho đến khi kết thúc.
 
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
-| `threshold_tokens` | không có: theo context window | Nén trước một lượt mà cuộc hội thoại được ước tính ở mức này trở lên (khoảng bốn ký tự mỗi token, 1000 mỗi ảnh); tối thiểu 1 |
+| `threshold_tokens` | không có: theo context window | Nén trước một lượt mà cuộc hội thoại có số đo ở mức này trở lên: ước lượng (khoảng bốn ký tự mỗi token, 1000 mỗi ảnh), hoặc số token prompt provider báo gần nhất cộng với ước lượng phần phát sinh sau đó, lấy số lớn hơn ([Memory](./memory.md#compaction)); tối thiểu 1 |
 | `keep_recent_turns` | `10` | Số lượt assistant được giữ nguyên văn sau bản tóm tắt; tối thiểu 1 |
 | `prompt` | prompt tích hợp sẵn | Chỉ dẫn cho lời gọi tóm tắt |
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |

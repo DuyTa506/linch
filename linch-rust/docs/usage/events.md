@@ -312,7 +312,10 @@ event of status `awaiting_input`. See [Tools](./tools.md#ask-the-user).
 
 The view the model sees was shortened
 ([`spec.compaction`](./agent.md#compaction)): `messages_before`,
-`messages_after`, `tokens_before`, `tokens_after` (estimates), `strategy`
+`messages_after`, `tokens_before`, `tokens_after` (estimates), `measured_tokens`
+(what the trigger measured the view at, when that was more than `tokens_before`:
+the provider's last reported prompt tokens plus the estimate of what followed
+them; absent until a provider has reported usage), `strategy`
 (`summary`, or `micro` when old tool results were cleared with no model
 call), `duration_ms`, the time from the decision to compact to this event
 (the summary call and the projection), and `forced`, true when the

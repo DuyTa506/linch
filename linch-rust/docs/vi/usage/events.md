@@ -315,7 +315,10 @@ Một lời gọi `AskUser` đang chờ người dùng: một event cho mỗi l�
 
 View mà model nhìn thấy đã được rút ngắn
 ([`spec.compaction`](./agent.md#compaction)): `messages_before`,
-`messages_after`, `tokens_before`, `tokens_after` (là giá trị ước tính), `strategy`
+`messages_after`, `tokens_before`, `tokens_after` (là giá trị ước tính), `measured_tokens`
+(số đo mà ngưỡng đã dùng cho view, khi nó lớn hơn `tokens_before`: số token prompt
+provider báo gần nhất cộng với ước lượng phần phát sinh sau đó; vắng mặt cho tới khi
+provider báo usage), `strategy`
 (`summary`, hoặc `micro` khi các kết quả tool cũ bị xóa mà không có lời gọi model),
 `duration_ms`, là thời gian từ lúc quyết định nén đến event này (lời gọi tóm tắt và
 phép chiếu), và `forced`, là true khi nguyên nhân là provider từ chối một prompt vì quá

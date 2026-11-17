@@ -115,12 +115,14 @@ def test_the_stream_names_the_provider_the_served_model_and_a_tool_error_code() 
     compaction = decode_event(
         {"type": "compaction", "messages_before": 4, "messages_after": 2}
         | {"tokens_before": 9, "tokens_after": 3, "strategy": "summary", "duration_ms": 12}
+        | {"measured_tokens": 21}
     )
 
     assert isinstance(init, InitEvent) and init.provider == "anthropic"
     assert isinstance(usage, UsageEvent) and usage.actual_model == "claude-served"
     assert isinstance(end, ToolCallEndEvent) and end.error_code == "not_found"
     assert isinstance(compaction, CompactionEvent) and compaction.duration_ms == 12
+    assert compaction.measured_tokens == 21
 
 
 def test_a_resumed_init_names_the_turn_it_continues_in() -> None:

@@ -48,7 +48,7 @@ compact. Các trường, có kiểu `Compaction`:
 
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
-| `threshold_tokens` | không có: theo context window | Compact một view được ước tính từ số token này trở lên (khoảng bốn ký tự mỗi token, 1000 mỗi ảnh). Nếu không có, compact khi ước lượng cộng với phần dự trữ cho đầu ra đạt 80% [context window](./providers.md#context-window) của provider |
+| `threshold_tokens` | không có: theo context window | Compact một view có số đo từ số token này trở lên: ước lượng (khoảng bốn ký tự mỗi token, 1000 mỗi ảnh), hoặc, khi provider đã báo usage, số token prompt nó báo gần nhất cộng với ước lượng phần phát sinh sau đó, lấy số lớn hơn. Nếu không có, compact khi số đo đó cộng với phần dự trữ cho đầu ra đạt 80% [context window](./providers.md#context-window) của provider |
 | `keep_recent_turns` | `10` | Số lượt assistant được giữ nguyên văn sau bản tóm tắt; tối thiểu 1 |
 | `prompt` | prompt tích hợp sẵn | Chỉ dẫn cho lời gọi tóm tắt. `DETAILED_COMPACTION_PROMPT` là `DetailedCompaction` của Python Linch (bên dưới) |
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
@@ -78,6 +78,17 @@ nhưng để view vẫn trên ngưỡng (một `threshold_tokens` thấp hơn tr
 các lượt được giữ, nên lượt nào cũng đến hạn lại) được tính như một lần từ chối, nên một
 ngưỡng quá thấp không mua một bản tóm tắt ở mọi lượt
 ([Kiến trúc](../architecture/compaction.md#lời-gọi-tóm-tắt)).
+
+Ước lượng đếm ít hơn provider từ 20% đến 2 lần, và bỏ qua system prompt cùng các tool.
+Vì vậy ngưỡng theo số token prompt mà provider báo cho lời gọi gần nhất (gồm system prompt
+và tool) cộng với ước lượng phần view tăng thêm kể từ đó, và không bao giờ ít hơn ước lượng;
+một run mà lượt đầu hoặc lần compact gần nhất không để lại báo cáo thì dùng ước lượng.
+Báo cáo được đọc lại từ các event của run khi resume. Event `compaction` vẫn giữ các giá trị
+ước lượng trong `tokens_before` và `tokens_after`, và thêm `measured_tokens` khi số đo cao hơn.
+Lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên hãy đặt `threshold_tokens` thấp hơn cửa sổ
+khá nhiều; một prompt mà provider vẫn từ chối thì được rút ngắn như
+[bên dưới](#when-the-prompt-does-not-fit) nói
+([Kiến trúc](../architecture/compaction.md#due-đo-cái-gì)).
 
 Spec compaction là một phần của [run contract](./agent.md#the-run-contract): một run bắt
 đầu dưới một cài đặt không được resume dưới một cài đặt khác.
