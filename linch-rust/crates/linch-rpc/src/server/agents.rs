@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use linch::{Agent, ExecutionConfig, JsonObject, JsonValue, RemoteExec};
+use linch::{Agent, JsonObject, JsonValue, RemoteExec};
 use serde_json::json;
 
 use super::exec::HostExec;
@@ -51,7 +51,7 @@ impl Server {
         };
         let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
         // A `remote` backend runs its commands in this connection's client.
-        let remote = matches!(params.config.execution, Some(ExecutionConfig::Remote(_)));
+        let remote = params.config.runs_bash_remotely();
         let remote =
             remote.then(|| Arc::new(HostExec::new(&handle, &self.0.peer)) as Arc<dyn RemoteExec>);
         let opened = params

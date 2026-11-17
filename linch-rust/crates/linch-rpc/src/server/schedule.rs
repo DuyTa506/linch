@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use linch::postgres::PgPool;
-use linch::{AgentConfig, ExecutionConfig, JsonValue, Principal, StoreConfig};
+use linch::{AgentConfig, JsonValue, Principal, StoreConfig};
 use linch_worker::{Cap, RunRequest, Schedule, Timing, WorkerError};
 use serde_json::json;
 use tokio::sync::OnceCell;
@@ -88,7 +88,7 @@ fn definition(config: &AgentConfig, tools: bool, callbacks: bool) -> Result<Stri
         return Err("callbacks");
     }
     // Its commands run in a live client connection, which a worker lacks.
-    if matches!(config.execution, Some(ExecutionConfig::Remote(_))) {
+    if config.runs_bash_remotely() {
         return Err("remote_execution");
     }
     if !matches!(config.stores, StoreConfig::Postgres { .. }) {

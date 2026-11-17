@@ -158,6 +158,17 @@ pub struct AgentConfig {
     pub pricing: PricingOverrides,
 }
 
+impl AgentConfig {
+    /// Whether this agent's `Bash` runs its commands on a remote host: a
+    /// `remote` backend, with `Bash` registered (a `workspace`, and `bash`
+    /// on). Only such an agent needs a live client connection; one without
+    /// `Bash` never starts a command, whatever backend its config names.
+    pub fn runs_bash_remotely(&self) -> bool {
+        let remote = matches!(self.execution, Some(ExecutionConfig::Remote(_)));
+        remote && self.bash && self.workspace.is_some()
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !value
 }

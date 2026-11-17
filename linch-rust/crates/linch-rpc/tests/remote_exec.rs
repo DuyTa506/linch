@@ -325,6 +325,86 @@ async fn an_agent_with_a_remote_backend_cannot_be_scheduled_or_queued() {
     db.drop().await;
 }
 
+/// Only an agent that has `Bash` needs the host: without `Bash` the backend
+/// is never used, so it does not stop the agent from running in the
+/// background.
+#[tokio::test]
+async fn an_agent_without_bash_can_be_scheduled_whatever_backend_it_names() {
+    let Some(db) = TestDb::empty("remote_no_bash").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (rpc, _calls) = host(Script::Quick);
+    let bash_off = |config: &mut Value| config["bash"] = json!(false);
+    let no_workspace = |config: &mut Value| {
+        config.as_object_mut().unwrap().remove("workspace");
+    };
+    let variants: [(&str, &dyn Fn(&mut Value)); 2] =
+        [("bash off", &bash_off), ("no workspace", &no_workspace)];
+    for (name, change) in variants {
+        let mut config = on_postgres(&db, dir.path(), remote());
+        change(&mut config);
+        let agent = rpc.open(config).await;
+        let created = rpc
+            .call(
+                method::SCHEDULE_CREATE,
+                json!({"agent": agent, "prompt": "p", "interval_ms": 60_000}),
+            )
+            .await;
+        assert!(created.is_ok(), "{name}: {created:?}");
+        let queued = rpc
+            .call(
+                method::JOB_ENQUEUE,
+                json!({"agent": agent, "session_id": "s", "prompt": "p"}),
+            )
+            .await;
+        assert!(queued.is_ok(), "{name}: {queued:?}");
+    }
+    db.drop().await;
+}
+
+/// A tenant whose first `execution` entry is remote gets that backend filled
+/// in; an agent of it without `Bash` still runs in a worker.
+#[tokio::test]
+async fn a_worker_opens_a_bash_less_agent_of_a_tenant_held_to_a_remote_host() {
+    let Some(db) = TestDb::empty("remote_worker_no_bash").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let listed = ExecutionConfig::Remote(linch::RemotePolicy::default());
+    let allow = Allowlists::new()
+        .scripted_provider(true)
+        .exec_tools(true)
+        .permission_modes(&[linch::PermissionMode::SkipDangerous])
+        .workspace_roots(&[dir.path().to_path_buf()])
+        .unwrap()
+        .postgres_dsns(std::slice::from_ref(&db.dsn))
+        .unwrap()
+        .execution(&[listed]);
+    let serving = linch_rpc::Tenant::new("acme", allow).unwrap();
+    let factory = BackgroundAgents::new(db.dsn.clone()).tenant(Arc::new(serving));
+    for named in [true, false] {
+        let mut definition =
+            on_postgres(&db, dir.path(), if named { remote() } else { Value::Null });
+        definition["namespace"] = json!("acme");
+        definition["stores"]["dsn"] = json!("");
+        definition["bash"] = json!(false);
+        if !named {
+            definition.as_object_mut().unwrap().remove("execution");
+        }
+        let opened = factory.open("acme", &definition.to_string()).await;
+        assert!(opened.is_ok(), "named: {named}");
+    }
+    // With `Bash` it is still refused.
+    let mut definition = on_postgres(&db, dir.path(), Value::Null);
+    definition["namespace"] = json!("acme");
+    definition["stores"]["dsn"] = json!("");
+    definition.as_object_mut().unwrap().remove("execution");
+    let opened = factory.open("acme", &definition.to_string()).await;
+    assert!(matches!(opened, Err(FactoryError::Refused(_))));
+    db.drop().await;
+}
+
 #[tokio::test]
 async fn a_worker_refuses_a_definition_with_a_remote_backend() {
     let Some(db) = TestDb::empty("remote_worker").await else {
