@@ -34,6 +34,7 @@ from linch_rust import (
     WorkflowContext,
     WorkflowEvent,
     WorkflowHeld,
+    WorkflowNoJournal,
     WorkflowNotFound,
     WorkflowSuspended,
     WorkflowTimeoutError,
@@ -433,6 +434,24 @@ async def test_a_second_client_is_refused_while_the_first_drives(pg_dsn: str) ->
         assert await driving == "first"
         status = await workflow_status(first, "w")
     assert (status.status, status.records) == ("completed", 1)
+
+
+async def test_answers_for_a_workflow_with_no_journal_are_refused() -> None:
+    """A memory-store agent's journal ends with its connection, so a resume
+    with answers on a new connection has nothing to answer."""
+
+    async def flow(wf: WorkflowContext) -> bool:
+        return bool(await wf.interrupt("approve", {"plan": "p"}))
+
+    async with Server() as server:
+        agent = await server.open_agent(config([]))
+        with pytest.raises(WorkflowNoJournal):
+            await run_workflow(agent, flow, run_id="w", resume={"approve": True})
+        # Nothing was claimed: the workflow starts and parks as usual.
+        with pytest.raises(WorkflowSuspended):
+            await run_workflow(agent, flow, run_id="w")
+        parked = await workflow_status(agent, "w")
+    assert (parked.status, parked.interrupt_key) == ("awaiting_input", "approve")
 
 
 async def test_a_call_with_no_started_workflow_is_refused() -> None:

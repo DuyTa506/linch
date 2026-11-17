@@ -383,7 +383,7 @@ class WorkflowContext:
         interrupts in a loop need distinct keys. An answer applies only to
         the question that was asked: if `payload` differs from the stored
         question's (a draft edited since), the call suspends again with the
-        new payload and the answer is dropped (an `interrupt_stale` event).
+        payload it has now and the answer is dropped (an `interrupt_stale` event).
         Answer the interrupt that `workflow_status` names (`interrupt_key`).
 
         Raises:
@@ -579,6 +579,10 @@ async def run_workflow(
             cancelled, the calls in flight abort, and the finished calls
             stay journaled for a resume.
         resume: Answers to interrupts an earlier drive left pending, by key.
+            An answer applies only to the interrupt the workflow was parked
+            on, asked with the same payload. For a workflow whose journal
+            holds nothing (a memory-store agent on a new connection) the
+            start is refused with `WorkflowNoJournal`.
         on_event: Called with each `WorkflowEvent` (phase, agent and step
             start, end and replay, interrupt), in order.
 

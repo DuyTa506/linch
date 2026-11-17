@@ -46,6 +46,9 @@ pub struct WorkflowStartParams {
     pub budget: Option<WorkflowBudget>,
     /// Answers to interrupts the workflow left pending, by interrupt key;
     /// each is used once, by the first interrupt of that key, and journaled.
+    /// An answer applies only to the question the workflow was parked on
+    /// (`workflow.status` names it): the key and an equal payload. A
+    /// workflow whose journal holds nothing is refused (`-32049`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resume: BTreeMap<String, JsonValue>,
 }

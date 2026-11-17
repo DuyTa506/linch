@@ -125,6 +125,16 @@ impl Server {
         if lock(&self.0.tables).workflows.contains_key(&run_id) {
             return Err(held(&run_id));
         }
+        // Answers need a question to answer: a journal that holds nothing
+        // (a memory-store agent on a new connection) would run everything
+        // again, steps included. Checked before the claim writes anything.
+        if !params.resume.is_empty() {
+            let stored = (store.load(&namespace, &run_id).await)
+                .map_err(|error| self.workflow_error(&WorkflowError::Store(error)))?;
+            if stored.is_none() {
+                return Err(no_journal(&run_id));
+            }
+        }
         let place = match &self.0.tenant {
             Some(tenant) => Some(tenant.workflow_place()?),
             None => None,
@@ -523,6 +533,15 @@ impl Server {
 fn held(run_id: &str) -> ErrorObject {
     let message = format!("workflow {run_id:?} is driven by another client");
     ErrorObject::new(code::WORKFLOW_HELD, message).with_data(json!({ "run_id": run_id }))
+}
+
+/// `-32049`: `resume` answers for a workflow whose journal holds nothing.
+fn no_journal(run_id: &str) -> ErrorObject {
+    let message = format!(
+        "workflow {run_id:?} has no journal here, so its answers have nothing to answer; \
+         start it without resume (a memory-store agent's journal ends with its connection)"
+    );
+    ErrorObject::new(code::WORKFLOW_NO_JOURNAL, message).with_data(json!({ "run_id": run_id }))
 }
 
 fn not_driven(run_id: &str) -> ErrorObject {
