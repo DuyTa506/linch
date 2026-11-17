@@ -225,8 +225,8 @@ pub enum StopResponse {
     /// This is Python's `before_final_answer` mutate action, folded into
     /// `stop`: it replaces the text the run reports as its result, not the
     /// assistant message already appended to the session (that message is
-    /// logged before `stop` runs; see [`super::assembly`] to change it
-    /// instead).
+    /// logged before `stop` runs; see
+    /// [`AfterProviderCall`](super::AfterProviderCall) to change it instead).
     Rewrite {
         /// The new final-answer text.
         text: String,
