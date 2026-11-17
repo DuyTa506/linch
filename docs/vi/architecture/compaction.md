@@ -36,6 +36,19 @@ và chiến lược có thể ghi đè prompt cho lĩnh vực khác. Cache snaps
 bị thiếu hoặc sai định dạng có thể được dựng lại từ `full_history`; phiên bản
 snapshot không tương thích bị từ chối thay vì được xem là cache miss.
 
+Request tóm tắt là các message bị gộp cộng thêm một message user ở cuối: câu rào chắn
+chống chỉ dẫn nằm trong cuộc hội thoại, prompt tóm tắt, và, khi phần bị gộp đã bắt đầu bằng
+một bản tóm tắt trước đó, một ghi chú yêu cầu cập nhật nó (`summary_instruction`). Thiếu
+message này, request kết thúc bằng message user cuối cùng của phần bị gộp, mà model sẽ trả
+lời hoặc xác nhận thay vì tóm tắt, nên các dữ kiện đầu cuộc hội thoại bị mất. Block system
+vẫn là prompt tóm tắt. Một bản tóm tắt không nhỏ hơn (khoảng bốn ký tự mỗi token) lịch sử mà
+nó thay thế bị từ chối: biên nhận có hạch toán là `rejected` với lý do `not_smaller` và mức
+sử dụng vẫn bị tính phí; helper trực tiếp ném `ProviderError`. Văn bản chỉ dẫn dùng chung với
+linch-rust qua `tests/compaction/fixtures/compaction_request.json`. Python Linch chưa sao
+chép nguyên văn các message của user vào bản tóm tắt, và chưa dùng chung prefix đã cache của
+lời gọi chính như linch-rust: việc phát lại kết quả đã trả phí chỉ dựng lại view từ văn bản
+biên nhận và các message gần đây.
+
 Quá trình thu gọn giữ nguyên tiền tố `system` và danh mục `base` đã lưu;
 khi có, danh sách skill gốc vẫn nằm trong tiền tố system đó, và quá trình thu gọn
 không tải lại skill. Nếu `notified` khác `base`, vòng lặp đặt lại nó thành bản sao
