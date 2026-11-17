@@ -23,6 +23,16 @@ Servers: debug binary for correctness, release binary for every measurement.
   so docker behaviour is NOT RUN. The `allow_root` refusal for a tenant is admission only and needs no daemon.
 - B5. No `mcp` package: the MCP server is a minimal JSON-RPC stdio server (extends live/mcp_tiny_server.py).
 
+## Addendum (still before the MCP, tenant and measurement runs)
+- A1. 4.3 corrected after reading agent.md#loop_guard: an MCP tool answering the same text repeatedly ends by loop guard
+  at the 3rd identical call+result (`max_identical_tool_calls` 3, reason `repeated_tool_call`); listed in `polls` it is waited on
+  until `max_idle_turns` (25) identical answers in a row: 12 calls succeed, 40 calls end by loop guard near call 26.
+- A2. The scripted provider cannot know a random `process_id`, so BashOutput/BashKill scenarios and everything needing a
+  dynamic reply use a local programmable OpenAI-compatible gateway (vLLM wire format, no LLM): `ts_fakemodel.py`.
+  The scripted provider is still used for the measurements.
+- A3. 3.3: `BashOutput` for an error result carries no metadata to the event stream (events.py docstring), so the
+  documented `status: output_limit` is checked through `error_code` and the text only.
+
 ## 1. Bash tool (local backend, scripted provider)
 | id | expected observable | basis |
 |---|---|---|
