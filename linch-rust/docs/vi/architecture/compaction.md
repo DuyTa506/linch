@@ -189,13 +189,17 @@ liên tiếp, hoặc "the prompt still does not fit, so the run ends" với bả
 Không thử lại trong cùng lượt.
 
 Một model không bao giờ cho ra bản tóm tắt dùng được sẽ không bị hỏi ở mọi lượt đến hạn
-(`compaction::Rejections`). Sau `REJECTIONS_BEFORE_HOLD` (2) lần từ chối liên tiếp, bất kể mã
-nào, một lượt đến hạn sẽ không hỏi cho tới khi view ước lượng đã lớn thêm
-`window / HOLD_GROWTH_DIVISOR` (một phần mười context window của model) kể từ lần hỏi bị
-từ chối gần nhất; lần từ chối kế tiếp lại giữ từ kích thước mới, và một bản tóm tắt được
-chấp nhận (bắt buộc hay không) xóa bộ đếm. Bản tóm tắt bắt buộc, theo sau một lần provider
+(`compaction::Rejections`). Một bản tóm tắt được áp dụng nhưng để view vẫn đến hạn
+(`compaction::due` trên `tokens_after` của event: ngưỡng kích hoạt thấp hơn trọng lượng của
+checkpoint cộng các lượt được giữ, nên lượt kế tiếp lại đến hạn) được tính như một lần từ
+chối: nó đã trả phí và không đổi điều gì mà ngưỡng nhìn thấy được. Sau
+`REJECTIONS_BEFORE_HOLD` (2) lần như vậy liên tiếp, bất kể mã nào, một lượt đến hạn sẽ không
+hỏi cho tới khi view ước lượng đã lớn thêm `window / HOLD_GROWTH_DIVISOR` (một phần mười
+context window của model) kể từ lần gần nhất; lần kế tiếp lại giữ từ kích thước mới, và một
+bản tóm tắt (bắt buộc hay không) để view dưới ngưỡng xóa bộ đếm. Hai bản tóm tắt đầu của một
+run như vậy vẫn được áp dụng: chỉ những lần hỏi sau đó phải chờ. Bản tóm tắt bắt buộc, theo sau một lần provider
 từ chối, không bao giờ bị giữ. Bộ đếm được đọc lại từ các event `compaction` bền vững của run
-khi resume, nên một lần crash không gỡ việc giữ. Bộ đếm là của riêng run: mỗi run mới trên
+khi resume (một event bị từ chối, hoặc một event được áp dụng mà `tokens_after` vẫn đến hạn), nên một lần crash không gỡ việc giữ. Bộ đếm là của riêng run: mỗi run mới trên
 một session bắt đầu từ không. Biên là một phần mười window bất kể `threshold_tokens` (một
 model mà provider báo window 0 có biên 1 token, tức không giữ gì). Hai lần hỏi là bằng chứng rằng model sẽ không
 làm được trên prefix này, mỗi lần là một request đầy đủ prefix trả phí vô ích; một phần mười

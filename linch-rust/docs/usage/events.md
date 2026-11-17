@@ -324,7 +324,9 @@ starts with a code, `tool_call` (the reply called a tool), `empty`, or
 follows: at a turn's start the run goes on and the next due turn asks again (from
 the second rejection in a row, once the view has grown by a tenth of the
 context window or the provider refuses the prompt); a forced summary ends the
-run. `not_smaller` is judged on the whole view with the checkpoint in it (the same `tokens_before` and `tokens_after` the event reports), not the model's text, so an accepted compaction always has `tokens_after < tokens_before`.
+run. An applied summary has no `rejected`, even when its `tokens_after` is still
+at or above the trigger: such summaries, 2 in a row, hold the next asks as rejections do
+([Memory](./memory.md#compaction)). `not_smaller` is judged on the whole view with the checkpoint in it (the same `tokens_before` and `tokens_after` the event reports), not the model's text, so an accepted compaction always has `tokens_after < tokens_before`.
 
 ### `LoopGuardEvent` (`loop_guard`)
 

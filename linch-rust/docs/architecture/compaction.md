@@ -194,13 +194,18 @@ second rejection in a row, or "the prompt still does not fit, so the run ends"
 for a forced summary. There is no retry within the turn.
 
 A model that never gives a usable summary is not asked at every due turn
-(`compaction::Rejections`). After `REJECTIONS_BEFORE_HOLD` (2) rejections in a
-row, whatever their codes, a turn's start that is due does not ask until the
-estimated view has grown by `window / HOLD_GROWTH_DIVISOR` (a tenth of the
-model's context window) since the last rejected ask; the next rejection holds
-again from the new size, and an accepted summary (forced or not) clears the
-count. A forced summary, which follows a provider refusal, is never held. The
-count is read back from the run's durable `compaction` events on a resume, so a
+(`compaction::Rejections`). A summary that is applied but leaves the view still
+due (`compaction::due` on the event's `tokens_after`: a trigger below what the
+checkpoint and the kept turns weigh, so the next turn is due again) counts like
+a rejection: it was paid for and changed nothing the trigger can see. After
+`REJECTIONS_BEFORE_HOLD` (2) of these in a row, whatever their codes, a turn's
+start that is due does not ask until the estimated view has grown by
+`window / HOLD_GROWTH_DIVISOR` (a tenth of the model's context window) since the
+last one; the next one holds again from the new size, and a summary (forced or
+not) that leaves the view under the trigger clears the count. The first two
+summaries of such a run are still applied: only the asks after them wait. A forced summary, which follows a provider refusal, is never held. The
+count is read back from the run's durable `compaction` events on a resume (a
+rejected one, or an applied one whose `tokens_after` is still due), so a
 crash does not lift the hold. The count is the run's own: each new run on a
 session starts at zero. The margin is a tenth of the window whatever the
 `threshold_tokens` (a model whose provider reports a window of 0 gets a margin

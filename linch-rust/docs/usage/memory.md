@@ -74,7 +74,11 @@ included) is rejected: the view stays as it was and a
 `compaction` event with `rejected` says why. After two rejections in a row
 the run stops asking at every due turn: it asks again once the view has grown
 by a tenth of the context window, or when the provider refuses the prompt (a
-forced summary is never held); an accepted summary clears the count
+forced summary is never held); a summary that leaves the view under the
+trigger clears the count. A summary that is applied but leaves the view still
+over the trigger (a `threshold_tokens` below what the checkpoint and the kept
+turns weigh, so every turn is due again) counts like a rejection, so a tiny
+threshold does not buy a summary at every turn
 ([Architecture](../architecture/compaction.md#the-summary-call)).
 
 The compaction spec is part of the [run contract](./agent.md#the-run-contract):

@@ -522,7 +522,18 @@ pub(super) async fn continue_run(
     runner.gates = (runner.agent.gates.clone()).map(|rules| Gates::of(rules, &events));
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
-    runner.rejections = crate::compaction::Rejections::of(&events);
+    runner.rejections = match &runner.agent.spec.compaction {
+        Some(spec) => {
+            let (limit, window) = (
+                runner.agent.spec.max_output_tokens,
+                runner.agent.context_window(),
+            );
+            crate::compaction::Rejections::of(&events, |tokens| {
+                crate::compaction::due(spec, limit, window, tokens)
+            })
+        }
+        None => crate::compaction::Rejections::default(),
+    };
     if let Some(truncation) = &runner.agent.spec.truncation_recovery {
         let spent = Truncated::of(&events, &truncation.reminder());
         runner.truncations = spent.attempts;

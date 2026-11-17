@@ -124,7 +124,7 @@ the ledger, the files and `agent.events` after the run (`usage/long-running.md`)
 `agent.steer` for what a person would say mid-run (16 unread steers at most; an idle run must be
 resumed first). A compaction summary the model fails to give (a tool call, nothing, or a
 view no smaller than the one it replaces) is rejected and the view stays as it was; after two in
-a row the run waits until the view has grown by a tenth of the window before asking again, so
+a row (a summary that is applied but leaves the view over the trigger counts too) the run waits until the view has grown by a tenth of the window before asking again, so
 size the window and `threshold_tokens` for the summary to fit. Test it the way it fails: low compaction
 threshold, SIGKILL the sidecar, resume on Postgres, start a fresh session, assert on the durable
 state and not on the model's words.

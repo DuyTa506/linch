@@ -262,7 +262,12 @@ impl Runner {
             self.outbox.deliver(ready).await;
             return Ok(Some(next));
         }
-        self.rejections.accepted();
+        // A view that is still due after the summary would ask for another
+        // at the next turn: that is no help, and counts toward the hold.
+        let window = agent.context_window();
+        let limit = agent.spec.max_output_tokens;
+        let still_due = compaction::due(spec, limit, window, tokens_after);
+        self.rejections.applied(tokens_after, still_due);
         let (messages_before, messages_after) = (view.len() as u64, compacted.len() as u64);
         self.journal.stage(Event::Compaction(CompactionEvent {
             messages_before,

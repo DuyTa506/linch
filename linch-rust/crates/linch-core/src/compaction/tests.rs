@@ -560,10 +560,31 @@ fn rejected_summaries_hold_until_the_view_has_grown_or_one_is_accepted() {
     rejections.rejected(1000);
     assert!(rejections.holds(1000 + margin - 1, window));
     assert!(!rejections.holds(1000 + margin, window));
-    rejections.accepted();
+    rejections.applied(500, false);
     assert_eq!(rejections, Rejections::default());
     assert!(!rejections.holds(0, window));
     assert_eq!(Rejections::margin(0), 1, "never a zero margin");
+}
+
+/// An applied summary that leaves the view still due counts as a rejection
+/// toward the hold; one that brings the view under the trigger clears it.
+#[test]
+fn applied_summaries_that_leave_the_view_due_hold_like_rejections() {
+    let window = 1000;
+    let mut rejections = Rejections::default();
+    rejections.applied(900, true);
+    assert!(!rejections.holds(900, window), "one is not the evidence");
+    rejections.rejected(900);
+    assert!(
+        rejections.holds(900, window),
+        "a rejection and an ineffective one"
+    );
+    rejections.applied(300, false);
+    assert_eq!(rejections, Rejections::default());
+    rejections.applied(900, true);
+    rejections.applied(950, true);
+    assert!(rejections.holds(950 + Rejections::margin(window) - 1, window));
+    assert!(!rejections.holds(950 + Rejections::margin(window), window));
 }
 
 #[test]
