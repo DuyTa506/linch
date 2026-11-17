@@ -90,6 +90,10 @@ PROVIDERS = [
 ONLY_VLLM = [PROVIDERS[0]]
 ONLY_DEEPSEEK = [PROVIDERS[1]]
 
+needs_live = pytest.mark.skipif(
+    not (VLLM_URL or DEEPSEEK_KEY),
+    reason="no live model: set LINCH_LIVE_VLLM_URL or DEEPSEEK_API_KEY",
+)
 needs_pg = pytest.mark.skipif(not PG_DSN, reason="LINCH_TEST_PG_DSN is not set")
 
 
@@ -266,6 +270,7 @@ __all__ = [
     "live_server",
     "make_config",
     "message_text",
+    "needs_live",
     "needs_pg",
     "pg_stores",
     "retry_once",

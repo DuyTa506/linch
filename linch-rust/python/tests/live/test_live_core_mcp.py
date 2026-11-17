@@ -17,6 +17,7 @@ from live_core_support import (
     drive,
     live_server,
     make_config,
+    needs_live,
     retry_once,
     server_env,
     text_of,
@@ -117,6 +118,7 @@ async def test_the_mcp_server_is_killed_when_the_server_connection_closes(
     assert not alive(pid), "the MCP server process outlived the linch-server sidecar"
 
 
+@needs_live
 @pytest.mark.xfail(
     strict=True,
     reason="finding: a stdio MCP server that ignores EOF and SIGTERM outlives a SIGKILLed "
