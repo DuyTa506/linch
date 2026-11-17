@@ -68,3 +68,14 @@ whole-checkpoint size), #148 (file memory, loop guard polls), #150 (sections, co
 | P1 | background `Bash sleep 20; echo done` + `BashOutput` polling | run does not end early (no `loop_guard`); the final answer reports `done`/exit 0 after >= 20 s; polls with changing answers are not repeats |
 | P2 | `max_idle_turns` rule | a poll answering the same text `max_idle_turns` times in a row ends the run with `loop_guard` reason `idle_turns`/`repeated_tool_call` (the setting lowered to 3 for the test; a silent never-ending command) |
 | P3 | process reaped | after the run ends and the session/agent closes, no `sleep` process of the test remains (checked with /proc) |
+
+## Amendments (same day, before any run; from review of the plan)
+- S7: after the cancel the 16 waiting steer calls end with `RunError` -32023 (run stopped first, documented) or an id; record which.
+- M1: the alignment envelope may arrive before `steer()` returns; values are recorded signed (`t_event - t_return`).
+- M2: worker `poll_interval_ms` is 250 in the live helper (documented default is 1000); the 60 s test states which was used. Jitter is taken from `schedule_fire.fire_at_ms` against the run's `init.ts_ms` (both server clocks) and from the job's `created_at`.
+- P1: the model is told to use `BashOutput` with `wait_ms` (vLLM answers in 0.2 s, a bare polling loop would trip `max_idle_turns` 25 legitimately; that is P2).
+- K4: `max_memories` and `max_memories_per_scope` set explicitly, so the refusing cap is known. K5 uses a per-scope cap >= 200.
+- L5/L7: `min_schedule_interval_ms` is left out of the tenant allow so the documented 60 s default applies (the helper sets 1000).
+- Compaction `max_output_tokens` <= 1500 everywhere (the proxy refuses more; the default 4096 would 400 the summary call).
+- S9: the reliable durable-pending case is a suspended run (steer answered at once, kill -9, restart, approve). For a running run: kill after the alignment and check that resume does not log it again.
+- K5 timing: if no hook duration is exposed, `MemorySearch` tool start->end and the gap before `context_build` (server `ts_ms`) are proxies, and I say so.
