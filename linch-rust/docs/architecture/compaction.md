@@ -157,7 +157,7 @@ call would send, plus one message:
   `uncached_tail` 1: an adapter that takes breakpoints (Anthropic) puts the
   message breakpoint on the last logged message, not on the instruction.
   DeepSeek, OpenAI and vLLM match the longest shared prefix.
-- With `micro` set the folded part has its old tool results cleared, so the
+- With `micro` set the folded part has its earlier tool results cleared, so the
   prefix is shared up to the first cleared result. Micro clears only when the
   view is due and the clear brings it back under the trigger, so it rewrites
   the prefix once per due view, not on every turn.
@@ -211,7 +211,7 @@ need not quote an instruction for it to survive a summary.
 
 When the folded part already holds a checkpoint, the summary instruction asks to
 update it (newer history takes precedence, keep the facts that still matter), and
-the new checkpoint takes the old one's verbatim blocks after the newer user
+the checkpoint takes the earlier one's verbatim blocks after the newer user
 messages, within the same budget. The summary prompt text is not part of the run
 contract. The request and checkpoint cases are in
 `crates/linch-core/tests/golden/compaction_request.json`, which Python Linch's
