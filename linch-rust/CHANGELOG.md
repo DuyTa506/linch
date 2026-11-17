@@ -188,6 +188,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `agent.close_session` and `session.close` also kill the session's background `Bash` commands.
 - DeepSeek and the vLLM, SGLang and llama.cpp profiles still refuse an output schema, now saying why: no native JSON-schema response format that carries the schema.
 - A Postgres resume of a run another server drives is refused (`RunLeased`) instead of taking the run over and paying for its in-flight model call again; it no longer fences the live driver out. `Agent::fail` and a parent resuming its subagents' runs still take a run over, and the driver they fence stops at its next heartbeat with `LeaseLost`.
+- `linch_postgres::migrate` serializes on an advisory lock per database and schema (it was sqlx's database-wide one), so two tenants on separate schemas no longer queue behind each other's migrations at startup.
 - A journal write fenced by another claim answers -32022 (`LeaseLost`) on the RPC, as a fenced claim does, instead of -32024.
 - A run whose stream ends with an error or is dropped releases its Postgres lease (one extra write), so another server can resume it at once; a run that ends or suspends writes nothing more.
 - A worker job whose run another process leases waits like a busy session (released with back-off, not counting a failure).

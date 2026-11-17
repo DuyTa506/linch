@@ -46,3 +46,34 @@ async fn migrations_run_twice_are_a_no_op() {
     assert_eq!(default, None, "sqlx's default table is left to the host");
     db.finish().await;
 }
+
+#[tokio::test]
+async fn a_schema_migrates_while_another_schemas_migration_is_stuck() {
+    let (Some(held), Some(free)) = (
+        TestDb::empty("migrate_lock_held").await,
+        TestDb::empty("migrate_lock_free").await,
+    ) else {
+        return;
+    };
+    // Stand in for a migration that never finishes: hold the held schema's lock.
+    let mut holder = held.pool.acquire().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_lock(hashtextextended(\
+         'linch_migrate:' || current_database() || ':' || current_schema(), 0))",
+    )
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+
+    let wait = std::time::Duration::from_secs(20);
+    let migrated = tokio::time::timeout(wait, migrate(&free.pool)).await;
+    migrated.expect("not blocked by the other schema").unwrap();
+
+    let blocked = std::time::Duration::from_millis(500);
+    let same = tokio::time::timeout(blocked, migrate(&held.pool)).await;
+    assert!(same.is_err(), "the held schema's own migration waits");
+
+    drop(holder);
+    held.finish().await;
+    free.finish().await;
+}

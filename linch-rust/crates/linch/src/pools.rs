@@ -143,9 +143,9 @@ impl fmt::Debug for PgPools {
     }
 }
 
-/// Longest wait for the migrations: they wait on a database-wide lock, so
-/// one stuck migration would otherwise hold every open of every DSN on
-/// that database.
+/// Longest wait for the migrations: they wait on a per-schema lock, so one
+/// stuck migration would otherwise hold every open of every DSN on that
+/// schema.
 const MIGRATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn connect(dsn: &str, max_connections: NonZeroU32) -> Result<PgPool, OpenError> {
