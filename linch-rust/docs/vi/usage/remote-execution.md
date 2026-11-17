@@ -46,19 +46,21 @@ chạy nó ở nơi bạn sẵn lòng để model chạy một shell.
   liệt kê mục remote, kèm policy, và một cấu hình chỉ được nêu một mục đúng như đã liệt
   kê (như với `sandbox` và `docker`). Một tenant có danh sách bắt đầu bằng `remote` nhận
   nó ngay cả khi cấu hình không nêu backend nào, nên mọi client của tenant đó phải phục
-  vụ host.
+  vụ host (một agent không có `Bash` không bao giờ gọi tới nó).
 - Một lỗi hiển thị cho model không bao giờ chứa đường dẫn của server hay chi tiết của
   kết nối. Một thông báo do chính host đưa ra khi nó từ chối một lần start được hiển thị
-  nguyên văn.
+  dưới dạng văn bản thuần, cắt còn 2 KiB.
 
 ## Một agent remote phục vụ được ai
 
-Host chính là kết nối. Vì vậy một agent có backend remote:
+Host chính là kết nối. Vì vậy một agent mà `Bash` chạy trên backend remote (`bash` bật,
+và `workspace` chứa các tool cũng có):
 
 - **không thể được lên lịch hay chạy trong worker.** `schedule.create` và `job.enqueue`
   từ chối nó với `-32040` (`not_background`, `data.reason` là `remote_execution`);
   `schedule_tools` bị từ chối ngay khi mở; một worker được đưa một definition như vậy
-  sẽ từ chối nó. Không có ai để chạy lệnh.
+  sẽ từ chối nó. Không có ai để chạy lệnh. Một agent không có `Bash` (`"bash": false`,
+  hoặc không có `workspace`) không bao giờ chạy lệnh nào, nên backend không cản nó.
 - **gắn với kết nối của nó.** Nếu kết nối đóng, các lệnh nó đã bắt đầu không còn thuộc
   quyền server dừng nữa: host phải kill chúng (`SubprocessHost` làm vậy, khi kết nối kết
   thúc hoặc agent đóng).
@@ -98,13 +100,25 @@ backend khác; một agent không có backend giữ hợp đồng mà nó đã c
 
 - **Timeout và hủy.** Server thực thi chúng. Khi tới hạn, hoặc khi run bị hủy, nó gửi
   `exec.kill` và chỉ báo `timed out` hoặc `aborted` sau khi host trả lời rằng lệnh đã
-  chết.
+  chết: câu trả lời phải mang `exit` của lệnh. Khi scheduler cho lời gọi một hạn chót
+  (`call_timeout_ms`), một lệnh remote kết thúc sớm hơn khoảng 6 giây (5 giây của kill
+  và một lần read), để câu trả lời kill và output đã có vẫn tới được model.
 - **Một host không trả lời là `interrupted`.** Nếu host ngừng trả lời các lần read (6
-  giây), báo lỗi, đóng kết nối, hoặc không xác nhận một lần kill (5 giây), lời gọi kết
-  thúc với mã `interrupted` và `[interrupted: ... the command's outcome is unknown; it
-  may still be running]`. Output đã tới được giữ lại; không có exit code, signal hay
-  timeout nào bị bịa ra. Một process nền hiển thị tương tự trong `BashOutput` (`status:
-  interrupted`).
+  giây), báo lỗi, đóng kết nối, hoặc không xác nhận một lần kill (5 giây, hoặc một câu
+  trả lời không có `exit`), lời gọi kết thúc với mã `interrupted` và `[interrupted: ...
+  the command's outcome is unknown; it may still be running]`. Một khi một lần read đã
+  mất, lời gọi vẫn là `interrupted` dù kill sau đó có báo exit. Output đã tới được giữ
+  lại; không có exit code, signal hay timeout nào bị bịa ra. Một process nền hiển thị
+  tương tự trong `BashOutput` (`status: interrupted`).
+- **Một lần start mà host có thể đã thực hiện cũng là `interrupted`.** Chỉ một lần start
+  mà host từ chối (một câu trả lời lỗi) mới là `spawn_failed`: nó chứng minh lệnh đã
+  không chạy. Nếu câu trả lời cho `exec.start` bị mất, không đọc được hoặc đến muộn,
+  server không thể biết, nên nó gửi `exec.kill` và kết thúc lời gọi là `interrupted`
+  thay vì để model thử lại một lệnh có thể chạy hai lần. Một lệnh nền start như vậy sẽ
+  hiện `interrupted` trong `BashOutput` ngay từ đầu.
+- **Một host không thể làm ngập server.** Server đợi ít nhất 25 ms giữa các lần read mà
+  câu trả lời gần như trống, và quá 256 MiB output của một lệnh thì nó kill lệnh và kết
+  thúc lời gọi là `interrupted`.
 - **Lệnh nền** không có pid trên server (`metadata` chỉ có `process_id`), chết cùng
   session của chúng (`session.close`), `BashKill` và agent, và, qua host, cùng kết nối.
 - Output bị giới hạn như mọi backend: 4000 byte đầu và 26000 byte cuối của mỗi stream
@@ -126,8 +140,16 @@ không thì sau `wait_ms` (1000) với `{}`. `exit` là `{"code": n}` hoặc `{"
 chỉ đến một lần và sau toàn bộ output, và host khi đó quên lệnh đó. Một lần read chỉ được
 lấy output khi nó trả lời: server hủy một lần read mà nó bỏ cuộc (`$/cancelRequest`) và
 khi đó không mất gì. `exec.kill` kill cả process group của lệnh, đợi tới khi nó chết và
-trả về những gì nó đã in kể từ lần read cuối cùng cùng `exit` của nó.
-`ExecutionHost` của Python mang cùng hợp đồng này.
+trả về những gì nó đã in kể từ lần read cuối cùng cùng `exit` của nó; một câu trả lời
+không có `exit` không phải là sự xác nhận. `ExecutionHost` của Python mang cùng hợp đồng
+này; ở đó `agent` của mỗi lời gọi còn nêu cả kết nối (`<tag>/<handle>`), nên một host có
+thể phục vụ nhiều kết nối.
+
+`SubprocessHost` giữ các giới hạn mà một host cần. Tối đa 4 MiB của mỗi stream chờ một
+lần read: quá đó nó ngừng đọc pipe của lệnh, và lệnh bị chặn cho tới khi server đọc. Một
+lần kill trả về 256 KiB cuối của mỗi stream, và chỉ kèm `exit` khi shell đã được thu
+dọn. Một lệnh không ai đọc trong `idle_timeout` giây (120) bị kill và bị quên: server
+poll mỗi giây khi nó còn kết nối.
 
 Khác biệt so với `RemoteExecutionBackend` của Python Linch: Python gộp một remote shell
 và một remote filesystem và chạy cả hai trong thế giới của host; ở đây lớp tệp ở lại

@@ -353,8 +353,12 @@ poll, `kill`); `linch-rpc` cài đặt nó qua `Peer` của kết nối thành
 extension Python) `ExecutionBackend::open` lỗi với `ExecutionError::NoHost`.
 `End::Exited` mang một `Exit` (code hoặc signal) thay cho `ExitStatus`, và
 `End::Interrupted` nghĩa là kết quả không biết: server chỉ báo một lệnh là
-timed out hoặc aborted sau khi host xác nhận `kill`, ngược lại báo
-interrupted, nên không bao giờ báo một kết quả chưa quay về. Một call bị drop
+timed out hoặc aborted sau khi host xác nhận `kill` kèm exit, ngược lại báo
+interrupted (cũng vậy sau một lần read bị mất, hoặc một lần start mà câu trả lời bị
+mất: chỉ `Rejected` chứng minh lệnh đã không chạy), nên không bao giờ báo một kết quả
+chưa quay về. Các lần read trả lời gần như trống ngay lập tức bị giãn nhịp, một lệnh
+quá 256 MiB output bị kill, và một lệnh remote kết thúc `KILL_MARGIN` (khoảng 6 giây,
+`Shell::deadline_margin`) trước hạn chót của scheduler. Một call bị drop
 gửi một kill tách rời. `PATH`, `HOME`, `USER`, `SHELL` và `TMPDIR` của server
 không được gửi, và `workspace_tools` không đăng ký tool tệp trừ khi
 `shared_workspace` của policy bật (`ExecutionBackend::has_file_tools`): chúng

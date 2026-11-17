@@ -50,19 +50,23 @@ content to let the model run a shell.
   list the remote entry, policy included, and a config may name only an entry
   exactly as listed (as for `sandbox` and `docker`). A tenant whose list
   starts with `remote` gets it even when its config names no backend, so
-  every client of such a tenant must serve the host.
+  every client of such a tenant must serve the host (an agent that has no
+  `Bash` never calls it).
 - An error shown to the model never carries the server's paths or the
   connection's details. A message the host itself raises when it refuses a
-  start is shown as is.
+  start is shown as plain text, cut to 2 KiB.
 
 ## Who a remote agent can serve
 
-The host is the connection. So an agent with a remote backend:
+The host is the connection. So an agent whose `Bash` runs on a remote backend
+(`bash` is on, and so is the `workspace` that holds the tools):
 
 - **cannot be scheduled or run in a worker.** `schedule.create` and
   `job.enqueue` refuse it with `-32040` (`not_background`, `data.reason`
   `remote_execution`); `schedule_tools` is refused at open; a worker given
-  such a definition refuses it. There is no one to run the command.
+  such a definition refuses it. There is no one to run the command. An agent
+  without `Bash` (`"bash": false`, or no `workspace`) never runs one, so the
+  backend does not stop it.
 - **is bound to its connection.** If the connection closes, the commands it
   started are not the server's to stop any more: the host must kill them
   (`SubprocessHost` does, when the connection ends or the agent closes).
@@ -105,14 +109,29 @@ through the host.
 
 - **Timeout and cancel.** The server enforces them. At the deadline, or when
   the run is cancelled, it sends `exec.kill` and reports `timed out` or
-  `aborted` only after the host answered that the command is dead.
+  `aborted` only after the host answered that the command is dead: the
+  answer must carry the command's `exit`. When the scheduler gives the call
+  a deadline (`call_timeout_ms`), a remote command ends about 6 s before it
+  (the kill's 5 s and one read), so the kill answer and the output so far
+  still reach the model.
 - **A host that does not answer is `interrupted`.** If the host stops
   answering reads (6 s), errors, closes the connection, or does not confirm a
-  kill (5 s), the call ends with code `interrupted` and `[interrupted: ...
-  the command's outcome is unknown; it may still be running]`. The output
-  that did arrive is kept; no exit code, signal or timeout is invented. A
-  background process reads the same way in `BashOutput` (`status:
-  interrupted`).
+  kill (5 s, or an answer without `exit`), the call ends with code
+  `interrupted` and `[interrupted: ... the command's outcome is unknown; it
+  may still be running]`. Once a read was lost the call stays `interrupted`
+  even if the kill then reports an exit. The output that did arrive is kept;
+  no exit code, signal or timeout is invented. A background process reads the
+  same way in `BashOutput` (`status: interrupted`).
+- **A start the host may have done is `interrupted` too.** Only a start the
+  host refuses (an error answer) is `spawn_failed`: it proves the command did
+  not run. If the answer to `exec.start` is lost, unreadable or late, the
+  server cannot know, so it sends `exec.kill` and ends the call
+  `interrupted` rather than letting the model retry a command that may run
+  twice. A background command started this way reads `interrupted` in
+  `BashOutput` from the start.
+- **A host cannot flood the server.** The server waits at least 25 ms between
+  reads that answer almost nothing, and past 256 MiB of output for one
+  command it kills the command and ends the call `interrupted`.
 - **Background commands** have no pid on the server (`metadata` has
   `process_id` only), die with their session (`session.close`), `BashKill`
   and the agent, and, through the host, with the connection.
@@ -137,8 +156,17 @@ or `{"signal": n}`, comes once and after all the output, and the host then
 forgets the command. A read must take output only when it answers: the server
 cancels a read it gives up on (`$/cancelRequest`) and loses nothing then.
 `exec.kill` kills the command's whole process group, waits until it is dead
-and returns what it printed since the last read with its `exit`.
-The Python `ExecutionHost` carries the same contract.
+and returns what it printed since the last read with its `exit`; an answer
+without `exit` is not a confirmation. The Python `ExecutionHost` carries the
+same contract; there the `agent` of each call also names the connection
+(`<tag>/<handle>`), so one host can serve several connections.
+
+`SubprocessHost` keeps the bounds a host needs. At most 4 MiB of each stream
+wait for a read: past that it stops reading the command's pipe, and the
+command blocks until the server reads. A kill answers with the last 256 KiB
+of each stream, and with `exit` only once the shell was reaped. A command
+that nobody reads for `idle_timeout` seconds (120) is killed and forgotten:
+the server polls every second while it is connected.
 
 Differences from Python Linch's `RemoteExecutionBackend`: Python bundles a
 remote shell and a remote filesystem and runs both in the host's world; here

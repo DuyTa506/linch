@@ -356,8 +356,12 @@ one (a worker, a schedule, the Python extension) `ExecutionBackend::open`
 fails with `ExecutionError::NoHost`. `End::Exited` carries an `Exit` (code or
 signal) instead of an `ExitStatus`, and `End::Interrupted` means the result
 is unknown: the server reports a command as timed out or aborted only after
-the host confirmed `kill`, and otherwise as interrupted, so it never reports
-a result that did not come back. A dropped call sends a detached kill. The
+the host confirmed `kill` with an exit, and otherwise as interrupted (also
+after a lost read, or a start whose answer was lost: only `Rejected` proves
+the command never ran), so it never reports a result that did not come
+back. Reads that answer next to nothing at once are paced, a command past
+256 MiB of output is killed, and a remote command ends `KILL_MARGIN` (about
+6 s, `Shell::deadline_margin`) before the scheduler's deadline. A dropped call sends a detached kill. The
 server's `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR` are not sent, and
 `workspace_tools` registers no file tools unless the policy's
 `shared_workspace` is on (`ExecutionBackend::has_file_tools`): they would act
