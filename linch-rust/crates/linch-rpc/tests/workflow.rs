@@ -420,6 +420,31 @@ async fn a_memory_agent_journals_within_its_connection() {
     assert_eq!(code_of_call(closed).0, code::RUN_BUSY);
 }
 
+/// A memory agent's journal lives in one connection. Answers sent for a
+/// workflow that journal does not hold (the client reconnected, so the
+/// workflow would run again from its first step) are refused, not applied
+/// to a run that starts over.
+#[tokio::test]
+async fn answers_for_a_workflow_with_no_journal_are_refused() {
+    let first = Rpc::new();
+    let agent = first.open(scripted(vec![text_turn("a")], None, "")).await;
+    start(&first, &agent, "w").await.unwrap();
+    call(&first, "w", "p", json!({})).await.unwrap();
+    let ask = json!({"run_id": "w", "key": "approve", "payload": {"plan": "p"}});
+    first.call(method::WORKFLOW_INTERRUPT, ask).await.unwrap();
+    finish(&first, "w", false).await;
+
+    // A new connection has an empty journal for the same agent config.
+    let second = Rpc::new();
+    let agent = second.open(scripted(vec![text_turn("a")], None, "")).await;
+    let params = json!({"agent": agent, "run_id": "w", "resume": {"approve": true}});
+    let refused = second.call(method::WORKFLOW_START, params).await;
+    assert_eq!(code_of_call(refused).0, -32049);
+    // Nothing was claimed: the workflow can still be started without answers.
+    let started = start(&second, &agent, "w").await.unwrap();
+    assert_eq!(started["resumed"], json!(false));
+}
+
 #[tokio::test]
 async fn the_budget_stops_the_next_call_and_counts_replays() {
     let rpc = Rpc::new();
