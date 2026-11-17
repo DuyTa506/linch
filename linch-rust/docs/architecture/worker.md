@@ -29,6 +29,7 @@ time is the database clock (`now()`), never a worker's.
 | `0004_queue_limits.sql` | `linch_worker_queues` (`name`, `max_held`) |
 | `0005_scheduler.sql` | `linch_worker_agents` (stored agent definitions by digest); interval, time-zone and fixed-session columns on schedules, with `fires`, `skips` and `last_fire`; `agent`, `schedule_id`, `fire_at` and `created_at` on jobs; `linch_worker_history` |
 | `0006_background_principal.sql` | `principal` (a `Principal` as JSON) on schedules and jobs; partial indexes on their `agent` column |
+| `0007_history_agent.sql` | `agent` on `linch_worker_history`, with partial indexes on `(namespace, run_id)` and `(namespace, agent)` |
 
 A job starts a run (`session_id` and `prompt`), continues one (`run_id`), or
 approves one (`run_id` and `approvals`); check constraints keep those shapes
@@ -42,8 +43,8 @@ heartbeat's live run), so run `linch_postgres::migrate` on the same schema.
 | Call | Job | Notes |
 |---|---|---|
 | `enqueue_run(pool, queue, namespace, session_id, prompt)` | start | The worker records the run id on the job before the run's first write, so a retry after a crash continues that run (`crates/linch-worker/src/job.rs:129-163`) |
-| `enqueue_resume(pool, queue, namespace, run_id)` | continue | When the run already has an active job, that job's id comes back instead of a new one (`job.rs:164-196`) |
-| `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Approvals are stored in the core's `ApprovalResponse` wire form. `WorkerError::RunBusy` when the run has an active job, which may end without reading them; enqueue again once it has ended (`job.rs:197-239`) |
+| `enqueue_resume(pool, queue, namespace, run_id)` | continue | When the run already has an active job, that job's id comes back instead of a new one. The job names the stored definition the run's latest job with one ran with (from `linch_worker_jobs` or `linch_worker_history`), so the worker that served the run serves it again; `WorkerError::Invalid` when that definition was pruned. It names no principal: core continues the run for its start principal (`job.rs`, `enqueue_continuation`) |
+| `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Approvals are stored in the core's `ApprovalResponse` wire form. The same definition and principal as `enqueue_resume`. `WorkerError::RunBusy` when the run has an active job, which may end without reading them; enqueue again once it has ended (`job.rs`) |
 | `enqueue(pool, &RunRequest, cap)` | start | `enqueue_run` with an optional stored agent definition and an optional [cap](#caps) on the root's unfinished jobs (`crates/linch-worker/src/job.rs`) |
 
 Each insert and its `pg_notify` on channel `linch_worker` (`lib.rs:76`) run in
@@ -275,8 +276,12 @@ agent config, re-admitted against its tenant at every attempt
 
 A definition holds the config's secrets in plain text, so
 `prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) deletes
-the ones no schedule and no unfinished job names, after setting `agent` to
-NULL on failed jobs (never run again). A worker runs it with the history
+the ones no schedule, no unfinished job and no history row of a run that
+is not terminal names, after setting `agent` to NULL on failed jobs (never
+run again). A run suspended for an approval or an answer so keeps its
+definition for the job that continues it, until its history row is pruned
+(`history_retention`); after that, `enqueue_resume` and `enqueue_approve`
+refuse it. A worker runs it with the history
 pruning, from its first poll and every 10 minutes after, whether or not it
 keeps history. A writer storing a definition locks its row
 (`ON CONFLICT ... DO UPDATE`) until it commits, and the prune locks its

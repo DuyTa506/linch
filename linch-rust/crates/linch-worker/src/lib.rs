@@ -145,6 +145,11 @@ fn migrator() -> Migrator {
             "background principal",
             include_str!("../migrations/0006_background_principal.sql"),
         ),
+        simple(
+            7,
+            "history agent",
+            include_str!("../migrations/0007_history_agent.sql"),
+        ),
     ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),

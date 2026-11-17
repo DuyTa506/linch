@@ -246,9 +246,76 @@ pub async fn enqueue(
     job_id(inserted)
 }
 
+/// Insert a job that continues `run_id`, with the agent definition the
+/// run's jobs ran with: a worker that serves stored definitions (the
+/// server's) takes it, and opens the same agent. The job names no
+/// principal: core continues the run for the principal it was started for.
+async fn enqueue_continuation(
+    pool: &PgPool,
+    queue: &str,
+    namespace: &str,
+    run_id: &RunId,
+    approvals: Option<String>,
+) -> Result<Inserted, WorkerError> {
+    let mut tx = crate::begin(pool).await?;
+    let agent = run_agent(&mut tx, namespace, run_id).await?;
+    let job = NewJob {
+        queue,
+        namespace,
+        run_id: Some(run_id.as_str()),
+        approvals,
+        agent: agent.as_deref(),
+        ..NewJob::default()
+    };
+    let inserted = insert(&mut tx, job).await?;
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// The stored definition the latest job of `run_id` that had one ran with,
+/// locked against [`definition::prune_definitions`] until `tx` ends; `None`
+/// when no job of the run had one (the worker's agent for the namespace).
+///
+/// Raises:
+///     WorkerError: `Invalid` when that definition was pruned (its job's
+///         history outlived it); otherwise if a query fails.
+async fn run_agent(
+    tx: &mut Transaction<'static, Postgres>,
+    namespace: &str,
+    run_id: &RunId,
+) -> Result<Option<String>, WorkerError> {
+    let agent: Option<String> = sqlx::query_scalar(
+        "SELECT agent FROM ( \
+             SELECT id, agent FROM linch_worker_jobs WHERE namespace = $1 AND run_id = $2 \
+             UNION ALL \
+             SELECT id, agent FROM linch_worker_history WHERE namespace = $1 AND run_id = $2 \
+         ) AS j WHERE agent IS NOT NULL ORDER BY id DESC LIMIT 1",
+    )
+    .bind(namespace)
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(agent) = agent else { return Ok(None) };
+    let kept: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM linch_worker_agents WHERE namespace = $1 AND digest = $2 FOR KEY SHARE",
+    )
+    .bind(namespace)
+    .bind(&agent)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match kept {
+        Some(_) => Ok(Some(agent)),
+        None => Err(WorkerError::Invalid(format!(
+            "the stored agent definition of run {run_id} was pruned; \
+             continue it from an agent of the same config instead"
+        ))),
+    }
+}
+
 /// Queue a continuation of an existing run, for example one whose process
 /// crashed outside the worker. A run that is terminal, or suspended for
-/// approval, ends the job without running.
+/// approval, ends the job without running. The job runs the agent
+/// definition the run's jobs ran with, for the run's start principal.
 ///
 /// A run has at most one active job. When it has one already, that job
 /// continues the run, and its id is returned instead of a new one.
@@ -263,24 +330,20 @@ pub async fn enqueue(
 ///     The id of the new job, or of the run's active job.
 ///
 /// Raises:
-///     WorkerError: If a name is blank or the insert fails.
+///     WorkerError: If a name is blank, the run's stored definition was
+///         pruned, or the insert fails.
 pub async fn enqueue_resume(
     pool: &PgPool,
     queue: &str,
     namespace: &str,
     run_id: &RunId,
 ) -> Result<JobId, WorkerError> {
-    let job = NewJob {
-        queue,
-        namespace,
-        run_id: Some(run_id.as_str()),
-        ..NewJob::default()
-    };
-    job_id(enqueue_one(pool, job).await?)
+    job_id(enqueue_continuation(pool, queue, namespace, run_id, None).await?)
 }
 
 /// Queue the host's answers for a run suspended for approval; the worker
-/// continues it with [`linch_core::Agent::approve`].
+/// continues it with [`linch_core::Agent::approve`], with the agent
+/// definition the run's jobs ran with, for the run's start principal.
 ///
 /// Args:
 ///     pool: Pool for the queue's database.
@@ -296,7 +359,8 @@ pub async fn enqueue_resume(
 /// Raises:
 ///     WorkerError: `RunBusy` if the run already has an active job, which
 ///         may end without reading these answers (enqueue them again once
-///         it has ended); otherwise if a name is blank or the insert fails.
+///         it has ended); otherwise if a name is blank, the run's stored
+///         definition was pruned, or the insert fails.
 pub async fn enqueue_approve(
     pool: &PgPool,
     queue: &str,
@@ -307,14 +371,7 @@ pub async fn enqueue_approve(
     let approvals: Approvals = approvals.into_iter().collect();
     let approvals = serde_json::to_string(&approvals)
         .map_err(|error| WorkerError::Invalid(format!("approvals: {error}")))?;
-    let job = NewJob {
-        queue,
-        namespace,
-        run_id: Some(run_id.as_str()),
-        approvals: Some(approvals),
-        ..NewJob::default()
-    };
-    match enqueue_one(pool, job).await? {
+    match enqueue_continuation(pool, queue, namespace, run_id, Some(approvals)).await? {
         Inserted::RunBusy(job) => Err(WorkerError::RunBusy {
             run_id: run_id.clone(),
             job,

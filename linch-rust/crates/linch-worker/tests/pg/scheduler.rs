@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use linch_core::hooks::ApprovalResponse;
 use linch_core::permissions::{Rule, RuleDecision, ToolRule};
 use linch_core::{PermissionLayer, Principal, RunOptions, RunStatus, SessionId, ToolScope};
 use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
-    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_run, fire_due_schedules,
-    get_schedule, job, jobs, prune_definitions,
+    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_approve, enqueue_run,
+    fire_due_schedules, get_schedule, job, jobs, prune_definitions,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -537,5 +538,87 @@ async fn a_background_run_acts_for_its_principal() {
     }
     assert_eq!(probe.started(), 0, "the rule denied the intern's write");
     worker.stop().await;
+    db.finish().await;
+}
+
+/// Opens, for every definition, the probe agent under a rule that denies
+/// `Write` to all but `admin`: an admin's write asks, anyone else's is
+/// denied.
+struct AdminsOnly {
+    pool: PgPool,
+    probe: Probe,
+}
+
+impl AgentFactory for AdminsOnly {
+    fn open<'a>(
+        &'a self,
+        _namespace: &'a str,
+        _definition: &'a str,
+    ) -> BoxFuture<'a, Result<JobAgent, FactoryError>> {
+        let mut deny = ToolRule::new("Write", RuleDecision::Deny);
+        deny.unless_role = Some("admin".into());
+        let layer = PermissionLayer::new("roles", [Rule::Tool(deny)]);
+        let agent = ruled_agent(&self.pool, self.probe.clone(), layer);
+        async move { Ok(JobAgent::new(agent)) }.boxed()
+    }
+}
+
+/// A scheduled run that suspends for approval is continued through the
+/// queue: `enqueue_approve` gives the job the run's stored definition, so a
+/// worker with only a factory takes it, and the run goes on for the
+/// principal it was started with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approve_job_continues_a_scheduled_run_with_its_agent_and_principal() {
+    let Some(db) = TestDb::new("approve_fire").await else {
+        return;
+    };
+    let probe = Probe::new("Write", ToolScope::Write, Hold::None);
+    let factory = AdminsOnly {
+        pool: db.pool.clone(),
+        probe: probe.clone(),
+    };
+    let shutdown = CancellationToken::new();
+    let worker =
+        Worker::new(db.pool.clone(), config("w1")).definitions([NS.to_owned()], Arc::new(factory));
+    let handle = tokio::spawn(worker.run(shutdown.clone()));
+    let mut fired = hourly("fired");
+    fired.session_id = None;
+    fired.timing = Timing::Every(Duration::from_secs(3600));
+    fired.agent = Some("def".into());
+    fired.principal = Some(Principal::new("acme", "ada", ["admin"]).unwrap());
+    create_schedule(&db.pool, &fired, None).await.unwrap();
+    // The worker fires it.
+    make_due(&db, "1 second").await;
+    wait_until("the fire suspends and its job ends", || async {
+        let listed = jobs(&db.pool, NS, Some("fired"), 10).await.unwrap();
+        listed
+            .first()
+            .is_some_and(|job| job.state == JobState::Done)
+    })
+    .await;
+    let listed = jobs(&db.pool, NS, Some("fired"), 10).await.unwrap();
+    let run_id = listed[0].run_id.clone().expect("the fire names its run");
+    assert_eq!(db.status(&run_id).await, RunStatus::AwaitingApproval);
+    // The suspended run keeps its definition after its schedule is gone.
+    assert!(delete_schedule(&db.pool, NS, "fired").await.unwrap());
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 0);
+
+    let approvals = [("call_0".to_owned(), ApprovalResponse::Allow)];
+    enqueue_approve(&db.pool, "default", NS, &run_id, approvals)
+        .await
+        .unwrap();
+    wait_until("the approved run completes", || async {
+        db.status(&run_id).await == RunStatus::Completed
+    })
+    .await;
+    assert_eq!(probe.started(), 1, "the write ran for the admin");
+    shutdown.cancel();
+    handle.await.unwrap().unwrap();
+    // Once the run ended, nothing keeps the definition.
+    wait_until("the approve job is acked", || async {
+        db.jobs().await == 0
+    })
+    .await;
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 1);
     db.finish().await;
 }

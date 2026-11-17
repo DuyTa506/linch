@@ -30,11 +30,13 @@ pub(crate) async fn store(
     Ok(digest)
 }
 
-/// Delete the stored definitions that no schedule and no unfinished job
-/// names, so the config secrets they hold (MCP env and header values) live
-/// no longer than their schedules and runs. A failed job is never run
-/// again, so it lets go of its definition first. A worker calls this with
-/// [`crate::prune_history`].
+/// Delete the stored definitions that no schedule, no unfinished job and
+/// no run that is not terminal names, so the config secrets they hold (MCP
+/// env and header values) live no longer than their schedules and runs. A
+/// failed job is never run again, so it lets go of its definition first. A
+/// run suspended for an approval or an answer keeps its job's definition
+/// through the job's history row, for the job that continues it, until
+/// that row is pruned. A worker calls this with [`crate::prune_history`].
 ///
 /// A definition a writer is storing right now is locked by that writer
 /// and skipped; one a writer stored after this call read the references
@@ -61,6 +63,11 @@ pub async fn prune_definitions(pool: &PgPool) -> Result<u64, WorkerError> {
                                WHERE s.namespace = a.namespace AND s.agent = a.digest) \
                AND NOT EXISTS (SELECT 1 FROM linch_worker_jobs AS j \
                                WHERE j.namespace = a.namespace AND j.agent = a.digest) \
+               AND NOT EXISTS (SELECT 1 FROM linch_worker_history AS h \
+                               JOIN linch_runs AS r \
+                                 ON r.namespace = h.namespace AND r.run_id = h.run_id \
+                               WHERE h.namespace = a.namespace AND h.agent = a.digest \
+                                 AND r.status NOT IN ('completed', 'failed', 'aborted')) \
              FOR UPDATE SKIP LOCKED)",
     )
     .execute(&mut *tx)

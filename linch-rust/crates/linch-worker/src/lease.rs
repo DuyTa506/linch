@@ -292,9 +292,9 @@ impl JobLease {
                 "WITH ended AS (DELETE FROM linch_worker_jobs \
                                 WHERE id = $1 AND attempts = $2 RETURNING *) \
                  INSERT INTO linch_worker_history (id, queue, namespace, session_id, run_id, \
-                     schedule_id, fire_at, attempts, created_at, outcome) \
+                     schedule_id, fire_at, attempts, created_at, outcome, agent) \
                  SELECT id, queue, namespace, session_id, run_id, schedule_id, fire_at, \
-                        attempts, created_at, $3 FROM ended",
+                        attempts, created_at, $3, agent FROM ended",
             )
             .bind(self.job.id.0)
             .bind(self.attempts)
