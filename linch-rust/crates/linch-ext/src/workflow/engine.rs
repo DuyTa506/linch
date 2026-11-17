@@ -44,7 +44,10 @@ pub struct WorkflowOptions {
     /// Stable id of this workflow; calling again with it resumes.
     pub workflow_id: String,
     /// Answers to pending interrupts, by interrupt key. Each answer is
-    /// used once, then journaled.
+    /// used once, then journaled. An answer applies only to the question
+    /// the workflow was parked on (its stored interrupt: same key, same
+    /// payload); asked again with another payload, the interrupt suspends
+    /// again and the answer is dropped with an `interrupt_stale` event.
     pub resume: HashMap<String, JsonValue>,
     /// Most branches one `parallel` or `settled` call runs at once; 0
     /// counts as 1. Each call, nested ones included, gets its own limit.
@@ -161,9 +164,13 @@ impl WorkflowSession {
         let lease = journal.claim(namespace, id).await?;
         let stored = journal.load(namespace, id).await?;
         let previous = before.map(|run| run.status);
+        let awaiting = match &previous {
+            Some(WorkflowStatus::AwaitingInput(interrupt)) => Some(interrupt.clone()),
+            _ => None,
+        };
         let records = stored.map(|run| run.records).unwrap_or_default();
         let count = records.len();
-        let context = WorkflowContext::new(lease.clone(), records, options);
+        let context = WorkflowContext::new(lease.clone(), records, awaiting, options);
         Ok(Self {
             journal,
             lease,

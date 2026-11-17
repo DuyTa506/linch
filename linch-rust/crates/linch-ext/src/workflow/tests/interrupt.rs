@@ -91,6 +91,11 @@ async fn a_resume_answer_is_used_once() {
         let second: bool = wf.interrupt("approve", "second").await?;
         Ok((first, second))
     };
+    let asked = run_workflow(options(&store, "w1", &Recorder::default()), flow).await;
+    match asked {
+        Err(WorkflowError::Suspended(interrupt)) => assert_eq!(interrupt.payload, "first"),
+        other => panic!("expected a suspend, got {other:?}"),
+    }
     let result = run_workflow(answered(&store, &Recorder::default(), true), flow).await;
     match result {
         Err(WorkflowError::Suspended(interrupt)) => assert_eq!(interrupt.payload, "second"),
@@ -120,6 +125,8 @@ async fn a_swallowed_suspend_still_suspends_the_run() {
 #[tokio::test]
 async fn an_answer_of_the_wrong_type_fails_and_is_not_journaled() {
     let store = Arc::new(MemoryJournalStore::default());
+    let first = run_workflow(options(&store, "w1", &Recorder::default()), approval_flow).await;
+    assert!(matches!(first, Err(WorkflowError::Suspended(_))));
     let mut wrong = options(&store, "w1", &Recorder::default());
     wrong.resume = HashMap::from([("approve".to_owned(), json!("yes"))]);
     let result = run_workflow(wrong, approval_flow).await;
@@ -146,7 +153,8 @@ async fn an_answer_for_an_edited_interrupt_is_not_applied() {
     .await;
     assert!(matches!(first, Err(WorkflowError::Suspended(_))));
 
-    let edited = answered(&store, &Recorder::default(), true);
+    let recorder = Recorder::default();
+    let edited = answered(&store, &recorder, true);
     let resumed = run_workflow(edited, |wf| publish_flow(wf, "v2")).await;
     match resumed {
         Err(WorkflowError::Suspended(interrupt)) => {
@@ -154,6 +162,13 @@ async fn an_answer_for_an_edited_interrupt_is_not_applied() {
         }
         other => panic!("the approval of v1 was applied to v2: {other:?}"),
     }
+    assert_eq!(
+        recorder.kinds(),
+        [
+            WorkflowKind::InterruptStale,
+            WorkflowKind::InterruptRequested
+        ]
+    );
     let run = stored(&store, "w1").await;
     assert!(run.records.is_empty(), "the stale answer was journaled");
     let interrupt = Interrupt {
@@ -178,4 +193,34 @@ async fn an_answer_for_a_question_never_asked_is_not_applied() {
         matches!(result, Err(WorkflowError::Suspended(_))),
         "{result:?}"
     );
+}
+
+/// A workflow parked on one question takes the answer of that one. Another
+/// interrupt reached in the same resume asks again, even with an answer
+/// given, so the second is answered on the next resume.
+#[tokio::test]
+async fn only_the_stored_question_takes_its_answer() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let flow = |wf: WorkflowContext| async move {
+        let ask = |key: &'static str| {
+            let wf = wf.clone();
+            async move { wf.interrupt::<bool>(key, json!({"q": key})).await }
+        };
+        wf.settled([ask("a"), ask("b")]).await
+    };
+    let first = run_workflow(options(&store, "w1", &Recorder::default()), flow).await;
+    assert!(matches!(first, Err(WorkflowError::Suspended(_))));
+    let stored_key = match stored(&store, "w1").await.status {
+        WorkflowStatus::AwaitingInput(interrupt) => interrupt.key,
+        other => panic!("{other:?}"),
+    };
+    let mut both = options(&store, "w1", &Recorder::default());
+    both.resume = HashMap::from([("a".to_owned(), json!(true)), ("b".to_owned(), json!(true))]);
+    let second = run_workflow(both, flow).await;
+    let Err(WorkflowError::Suspended(left)) = second else {
+        panic!("one of the two answers must not apply: {second:?}");
+    };
+    assert_ne!(left.key, stored_key, "the stored question took its answer");
+    let run = stored(&store, "w1").await;
+    assert_eq!(run.records.len(), 1);
 }

@@ -410,6 +410,7 @@ pub(super) fn workflow_event() -> impl Strategy<Value = WorkflowEvent> {
             Just(WorkflowKind::InterruptRequested),
             Just(WorkflowKind::InterruptResolved),
             Just(WorkflowKind::InterruptReplayed),
+            Just(WorkflowKind::InterruptStale),
         ],
         short_string(),
         short_string(),

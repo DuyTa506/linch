@@ -380,7 +380,11 @@ class WorkflowContext:
         ends `run_workflow`. Start the same `run_id` again with
         `resume={key: answer}` and this call returns the answer; it is
         journaled, so later drives replay it. An answer is used once, so
-        interrupts in a loop need distinct keys.
+        interrupts in a loop need distinct keys. An answer applies only to
+        the question that was asked: if `payload` differs from the stored
+        question's (a draft edited since), the call suspends again with the
+        new payload and the answer is dropped (an `interrupt_stale` event).
+        Answer the interrupt that `workflow_status` names (`interrupt_key`).
 
         Raises:
             WorkflowSuspended: There is no answer yet.

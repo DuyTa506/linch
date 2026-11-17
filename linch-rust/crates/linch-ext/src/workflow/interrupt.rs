@@ -2,7 +2,7 @@
 //! answers it.
 
 use linch_core::events::kinds::WorkflowKind;
-use linch_core::{JsonObject, JsonValue};
+use linch_core::{JsonObject, JsonValue, digest_with_domain};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -26,9 +26,18 @@ impl WorkflowContext {
     /// An answer is used once: a second interrupt with the same key in one
     /// run suspends again, so interrupts in a loop need distinct keys.
     ///
+    /// An answer is for the question that was asked: it applies only when
+    /// the workflow was parked on this key with an equal payload (compared
+    /// by canonical digest). Asked again with another payload (a draft
+    /// edited since), the interrupt suspends again with the new payload,
+    /// an `interrupt_stale` event reports the dropped answer, and nothing
+    /// is journaled. A workflow parked on one question takes the answer of
+    /// that one: another interrupt reached in the same resume asks again.
+    ///
     /// Args:
     ///     key: The interrupt's durable identity and the answer's key.
-    ///     payload: Context for whoever answers; it does not affect replay.
+    ///     payload: Context for whoever answers, and the identity of the
+    ///         question an answer applies to; it does not affect replay.
     ///
     /// Returns:
     ///     The answer, decoded from its journaled JSON.
@@ -55,16 +64,19 @@ impl WorkflowContext {
             return decode(&label, answer);
         }
         self.check_cancel(&label)?;
-        let answer = lock(&self.inner.resume).remove(key);
-        if let Some(answer) = answer {
-            let decoded = decode(&label, answer.clone())?;
-            self.record(&call_key, occurrence, &answer).await?;
-            self.emit(event(WorkflowKind::InterruptResolved, Some(&answer)));
-            return Ok(decoded);
-        }
         let payload = serde_json::to_value(payload).map_err(|error| {
             encode_error(&label, format!("its payload does not encode: {error}"))
         })?;
+        let answer = lock(&self.inner.resume).remove(key);
+        if let Some(answer) = answer {
+            if self.is_awaited(key, &payload) {
+                let decoded = decode(&label, answer.clone())?;
+                self.record(&call_key, occurrence, &answer).await?;
+                self.emit(event(WorkflowKind::InterruptResolved, Some(&answer)));
+                return Ok(decoded);
+            }
+            self.emit(event(WorkflowKind::InterruptStale, None));
+        }
         let mut requested = event(WorkflowKind::InterruptRequested, None);
         let mut structured = JsonObject::new();
         structured.insert("payload".into(), payload.clone());
@@ -76,5 +88,22 @@ impl WorkflowContext {
         };
         lock(&self.inner.suspended).get_or_insert_with(|| interrupt.clone());
         Err(WorkflowError::Suspended(interrupt))
+    }
+}
+
+impl WorkflowContext {
+    /// Whether the workflow was parked on `key` with a payload equal to
+    /// `payload`: its answer applies. The question is taken, so a second
+    /// interrupt of the run never reuses it.
+    fn is_awaited(&self, key: &str, payload: &JsonValue) -> bool {
+        let mut awaiting = lock(&self.inner.awaiting);
+        let same = awaiting.as_ref().is_some_and(|stored| {
+            let digest = |value: &JsonValue| digest_with_domain("interrupt", value).ok();
+            stored.key == key && digest(&stored.payload).is_some_and(|d| Some(d) == digest(payload))
+        });
+        if same {
+            awaiting.take();
+        }
+        same
     }
 }

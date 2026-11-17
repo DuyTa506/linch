@@ -50,6 +50,9 @@ pub(super) struct Inner {
     pub(super) resume: Mutex<HashMap<String, JsonValue>>,
     /// The first interrupt that suspended this run.
     pub(super) suspended: Mutex<Option<Interrupt>>,
+    /// The question the workflow was parked on when this run claimed it:
+    /// the only one a resume answer may answer, and only once.
+    pub(super) awaiting: Mutex<Option<Interrupt>>,
     pub(super) budget: Option<WorkflowBudget>,
     /// Tokens and USD the workflow's agent calls have spent so far.
     pub(super) spent: Mutex<(u64, f64)>,
@@ -71,6 +74,7 @@ impl WorkflowContext {
     pub(super) fn new(
         lease: JournalLease,
         records: Vec<JournalRecord>,
+        awaiting: Option<Interrupt>,
         options: &WorkflowOptions,
     ) -> Self {
         let records = records
@@ -91,6 +95,7 @@ impl WorkflowContext {
             max_concurrency: options.max_concurrency.max(1),
             resume: Mutex::new(options.resume.clone()),
             suspended: Mutex::new(None),
+            awaiting: Mutex::new(awaiting),
             budget: options.budget,
             spent: Mutex::new((0, 0.0)),
             max_records: options.max_records,

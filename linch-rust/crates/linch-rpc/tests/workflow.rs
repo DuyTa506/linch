@@ -341,7 +341,7 @@ async fn an_interrupt_waits_for_an_answer_across_a_restart() {
         call(&rpc, "w", "plan", json!({})).await.unwrap()["replayed"],
         json!(true)
     );
-    let ask = json!({"run_id": "w", "key": "approve", "payload": null});
+    let ask = json!({"run_id": "w", "key": "approve", "payload": {"plan": "draft"}});
     let answer = rpc
         .call(method::WORKFLOW_INTERRUPT, ask.clone())
         .await

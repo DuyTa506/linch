@@ -68,6 +68,10 @@ pub enum WorkflowKind {
     InterruptResolved,
     /// An interrupt resolution was replayed from the resume journal.
     InterruptReplayed,
+    /// A resume answer was dropped, because the interrupt was asked again
+    /// with another payload than the one it answered (or was not the stored
+    /// question); the interrupt asks again.
+    InterruptStale,
 }
 
 /// Progress/journal event emitted by the workflow engine.
