@@ -465,3 +465,47 @@ async fn a_tenants_model_questions_are_rate_limited() {
             .unwrap();
     }
 }
+
+/// A tenant's request headers ride the capabilities probe (they are how a
+/// gateway is reached), and the probe still carries no key: a tenant cannot
+/// set a key header, and the provider is built without the server's.
+#[tokio::test]
+async fn the_capabilities_probe_sends_the_request_headers_and_no_key() {
+    let (origin, seen) = serve_recording(models());
+    let allow = Allowlists::new()
+        .provider_info(true)
+        .provider_request(true)
+        .provider_base_urls(std::slice::from_ref(&origin))
+        .unwrap();
+    let rpc = Rpc::remote(tenant("acme", allow));
+    let url = format!("{origin}/v1");
+    let mut provider = vllm(&url);
+    provider["request"] = json!({"default_headers": {"x-gateway-token": "tok-gw"}});
+    let caps = rpc
+        .call(
+            method::PROVIDER_CAPABILITIES,
+            json!({"provider": provider, "model": "qwen"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(caps["context_source"], "server");
+    let heads = seen.lock().unwrap().join("\n").to_ascii_lowercase();
+    assert!(heads.contains("x-gateway-token: tok-gw"), "{heads}");
+    assert!(!heads.contains("authorization"), "{heads}");
+
+    // A key header is not the tenant's to set, so nothing is sent for it.
+    let before = seen.lock().unwrap().len();
+    provider["request"] = json!({"default_headers": {"Authorization": "Bearer tok-gw"}});
+    let error = rpc
+        .call(
+            method::PROVIDER_CAPABILITIES,
+            json!({"provider": provider, "model": "qwen"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(error),
+        (code::NOT_ALLOWED, Some("provider_request".into()))
+    );
+    assert_eq!(seen.lock().unwrap().len(), before);
+}

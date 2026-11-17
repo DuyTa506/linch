@@ -26,10 +26,11 @@ pub struct RequestConfig {
     #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
     pub extra_body: JsonObject,
     /// Headers sent with every request, for gateways. One of
-    /// `authorization`, `x-api-key` or `x-goog-api-key` replaces the
+    /// `authorization`, `x-api-key`, `x-goog-api-key` or `api-key` replaces the
     /// provider key: that key is then not sent and need not be set in the
     /// environment. `host`, `content-length`, `transfer-encoding`,
-    /// `connection`, `upgrade`, `te` and `trailer` are refused.
+    /// `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` and
+    /// `proxy-connection` are refused.
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
@@ -44,15 +45,14 @@ pub struct RequestConfig {
 }
 
 impl RequestConfig {
-    pub(super) fn is_default(&self) -> bool {
+    /// Whether nothing is set: no body fields, headers or timeout.
+    pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
 
     /// Whether a header replaces the provider key.
     pub fn sets_key_header(&self) -> bool {
-        const NAMES: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
-        (self.default_headers.keys())
-            .any(|name| NAMES.contains(&name.to_ascii_lowercase().as_str()))
+        (self.default_headers.keys()).any(|name| linch_providers::is_key_header(name))
     }
 
     /// The options an adapter takes.
@@ -128,7 +128,8 @@ impl Default for ChatConfig {
 }
 
 impl ChatConfig {
-    pub(super) fn is_default(&self) -> bool {
+    /// Whether every setting is the default.
+    pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
 

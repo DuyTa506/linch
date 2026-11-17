@@ -401,6 +401,22 @@ impl ProviderConfig {
             Self::Scripted { .. } => None,
         }
     }
+
+    /// The Chat Completions settings of `deepseek`, `openai-chat`, `vllm`,
+    /// `sglang` and `llamacpp`; `None` for the others.
+    pub fn chat(&self) -> Option<&ChatConfig> {
+        match self {
+            Self::DeepSeek { chat, .. }
+            | Self::OpenAiChat { chat, .. }
+            | Self::Vllm { chat, .. }
+            | Self::SgLang { chat, .. }
+            | Self::LlamaCpp { chat, .. } => Some(chat),
+            Self::OpenAiResponses { .. }
+            | Self::Anthropic { .. }
+            | Self::Gemini { .. }
+            | Self::Scripted { .. } => None,
+        }
+    }
 }
 
 fn native() -> bool {
