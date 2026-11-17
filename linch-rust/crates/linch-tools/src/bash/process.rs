@@ -117,6 +117,11 @@ pub(crate) fn spawn(
 /// Start `program` in `cwd` with exactly `env`, as the leader of a new
 /// process group, stdout and stderr piped, stdin a pipe with `lifeline`
 /// (the caller holds its write end) and closed without.
+///
+/// Every descriptor above stderr is first marked close-on-exec, so one
+/// this process holds without it (inherited from its parent, or opened by
+/// a library) does not pass to the command; Landlock checks only opens,
+/// so a passed descriptor would reach past a sandbox.
 pub(crate) fn start(
     mut program: Command,
     cwd: &Path,
@@ -127,6 +132,7 @@ pub(crate) fn start(
         true => Stdio::piped(),
         false => Stdio::null(),
     };
+    close_fds::set_fds_cloexec_threadsafe(3, &[]);
     program
         .stdin(stdin)
         .current_dir(cwd)

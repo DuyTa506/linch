@@ -144,6 +144,26 @@ async fn system_configuration_is_open_only_where_listed() {
     }
 }
 
+/// A descriptor the server holds open without close-on-exec (one it
+/// inherited, or a library opened) does not pass to a command: Landlock
+/// checks only opens, so it would let the command read past the sandbox.
+#[tokio::test]
+async fn an_open_descriptor_of_the_server_does_not_reach_the_command() {
+    let ws = Workspace::new();
+    let Some(backend) = sandbox(&ws, SandboxPolicy::default()) else {
+        return;
+    };
+    let tool = Bash::in_backend(&backend);
+    let secret = ws.outside().join("held-open-secret.txt");
+    std::fs::write(&secret, "hidden").unwrap();
+    let file = std::fs::File::open(&secret).unwrap();
+    // `dup` leaves close-on-exec off, as an inherited descriptor has it.
+    let held = rustix::io::dup(&file).unwrap();
+    let listed = text(run(&tool, "ls -l /proc/self/fd/").await);
+    assert!(!listed.contains("held-open-secret"), "{listed}");
+    drop(held);
+}
+
 #[tokio::test]
 async fn no_host_secret_reaches_the_command() {
     let ws = Workspace::new();
