@@ -22,6 +22,7 @@ from test_resume import pg_dsn
 from linch_rust import (
     CHECK_IN,
     AgentConfig,
+    InitEvent,
     InvalidSchedule,
     Job,
     JobNotFound,
@@ -33,6 +34,7 @@ from linch_rust import (
     ScheduleExists,
     ScheduleNotFound,
     Server,
+    ToolCallEndEvent,
     find_server,
     tool,
 )
@@ -195,3 +197,74 @@ async def test_a_tenant_without_scheduler_allowlists_is_refused(pg_dsn: str) -> 
             with pytest.raises(NotAllowed) as refused:
                 await agent.enqueue("s", "p")
             assert refused.value.kind == "background_runs"
+
+
+SCHEDULE_TOOLS = {"CreateSchedule", "ListSchedules", "CancelSchedule"}
+
+
+async def test_the_model_schedules_runs_of_its_own_agent(pg_dsn: str) -> None:
+    allow = {
+        "max_schedules": 1,
+        "max_queued_jobs": 8,
+        "min_schedule_interval_ms": 100,
+        "permission_modes": ["default", "skip_dangerous"],
+        "workspace_roots": ["/tmp"],
+    }
+    turns = [
+        tool_turn("c1", "CreateSchedule", {"payload": "Check in.", "interval_s": 0.2}),
+        text_turn("Scheduled."),
+    ]
+    on = acme(
+        pg_dsn,
+        provider={"id": "scripted", "turns": turns},
+        permissions={"mode": "skip_dangerous", "project_root": "/tmp"},
+        schedule_tools=True,
+    )
+    async with serving(pg_dsn, allow=allow) as at, Server.connect(at, token=TOKEN) as server:
+        off = await server.open_agent(acme(pg_dsn))
+        envelopes = [e async for e in await off.run("plain", "Hi.")]
+        init = envelopes[0].event
+        assert isinstance(init, InitEvent) and not SCHEDULE_TOOLS & set(init.tools)
+
+        agent = await server.open_agent(on)
+        ada: Principal = {"tenant": "acme", "user": "ada", "roles": ["ops"]}
+        envelopes = [e async for e in await agent.run("chat", "Check in hourly.", principal=ada)]
+        init = envelopes[0].event
+        assert isinstance(init, InitEvent) and SCHEDULE_TOOLS <= set(init.tools)
+        [made] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+        assert made.error_code is None and made.metadata is not None
+        [schedule] = await agent.schedules()
+        assert schedule["id"] == made.metadata["id"]
+        assert (schedule.get("session_id"), schedule.get("interval_ms")) == ("chat", 200)
+
+        # A worker fires it: the same agent in the same session, where its
+        # own CreateSchedule meets the tenant's cap.
+        fired: list[Job] = []
+        for _ in range(200):
+            fired = await agent.jobs(schedule_id=schedule["id"])
+            if any(job["state"] == "done" for job in fired):
+                break
+            await asyncio.sleep(0.05)
+        assert await agent.delete_schedule(schedule["id"])
+        done = next(job for job in fired if job["state"] == "done")
+        assert done.get("session_id") == "chat"
+        run_id = done.get("run_id")
+        assert run_id is not None
+        events = [envelope.event for envelope in await agent.events(run_id)]
+        [capped] = [event for event in events if isinstance(event, ToolCallEndEvent)]
+        assert capped.error_code == "limit_reached"
+        last = events[-1]
+        assert isinstance(last, ResultEvent) and last.final_text == "Scheduled."
+
+
+async def test_schedule_tools_need_schedules_in_the_allowlists(pg_dsn: str) -> None:
+    on = acme(pg_dsn, schedule_tools=True)
+    async with serving(pg_dsn, allow={}, worker=False) as at:
+        async with Server.connect(at, token=TOKEN) as server:
+            with pytest.raises(NotAllowed) as refused:
+                await server.open_agent(on)
+            assert refused.value.kind == "schedule_tools"
+    async with Server() as local:
+        with pytest.raises(NotAllowed) as refused:
+            await local.open_agent(on)
+        assert refused.value.kind == "schedule_tools"

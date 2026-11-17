@@ -597,6 +597,13 @@ class AgentConfig(TypedDict, total=False):
         ask_user: Whether the agent has the `AskUser` tool: a call suspends
             the run with an `input_request` until `Agent.answer`. Off when
             absent.
+        schedule_tools: Whether the model has `CreateSchedule`,
+            `ListSchedules` and `CancelSchedule`: it schedules runs of this
+            same agent in its own session, for the run's principal, under
+            the tenant's `max_schedules` and `min_schedule_interval_ms`.
+            Needs Postgres stores, no host tools or callbacks, and a tenant
+            whose allowlists give it schedules (a worker runs them); a
+            local connection is refused. Off when absent.
         deep_agent: The deep agent preset; see `DeepAgent`.
         profile: The domain profile its runs take; see `Profile`.
         pricing: Rates by exact model id (see `ModelRates`) that this agent
@@ -623,6 +630,7 @@ class AgentConfig(TypedDict, total=False):
     filesystem: Filesystem
     tasks: bool
     ask_user: bool
+    schedule_tools: bool
     deep_agent: DeepAgent
     profile: Profile
     pricing: Mapping[str, ModelRates]
