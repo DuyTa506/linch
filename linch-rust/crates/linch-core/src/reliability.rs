@@ -11,7 +11,7 @@
 //! Nothing new is checkpointed. Where a run stands, which fallback it is
 //! on and how many retries the current turn has spent, is read back from
 //! its durable `provider_retry` and `model_fallback` events
-//! ([`Standing::of`]), so a resumed run neither returns to a model it gave
+//! (`Standing::of`), so a resumed run neither returns to a model it gave
 //! up on nor starts the turn's retries over.
 
 use std::time::Duration;
