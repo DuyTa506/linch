@@ -25,7 +25,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream};
+use linch_core::{
+    ContextSource, ModelInfo, ModelsError, PromptCache, Provider, ProviderCapabilities,
+    ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps, ToolChoiceCaps,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
@@ -141,6 +144,53 @@ impl Provider for OpenAiResponses {
     /// Python's `openai_responses.KNOWN_CONTEXT_WINDOWS`, else 128000.
     fn context_window(&self, model: &str) -> u64 {
         crate::context::known(KNOWN_CONTEXT, model, linch_core::DEFAULT_CONTEXT_WINDOW)
+    }
+
+    /// The Responses API's own rules: native `text.format`, effort but no
+    /// `thinking` switch, reasoning text only when a summary is asked for,
+    /// and no stop sequences.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        let table = crate::context::in_table(KNOWN_CONTEXT, model);
+        ProviderCapabilities {
+            provider: self.id().to_owned(),
+            model: model.to_owned(),
+            declared: true,
+            context_window: table.unwrap_or(linch_core::DEFAULT_CONTEXT_WINDOW),
+            context_source: if table.is_some() {
+                ContextSource::Table
+            } else {
+                ContextSource::Default
+            },
+            native_output_schema: true,
+            tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
+                self.tool_choice_refusal(choice, thinking)
+            }),
+            thinking: ThinkingCaps {
+                disable: false,
+                budget: false,
+                effort: true,
+                reasoning_text: self.options.reasoning_summary.is_some(),
+            },
+            vision: Support::ModelDependent,
+            streams_tool_arguments: true,
+            prompt_cache: PromptCache::Automatic,
+            stop_sequences: false,
+        }
+    }
+
+    /// `GET {base}/models`, as OpenAI's list.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+        let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
+        let key = &self.options.api_key;
+        let bearer = format!("Bearer {}", key.expose());
+        let headers = [("authorization", bearer.as_str())];
+        let value = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+        let row = crate::models::OpenAiRow {
+            context: None,
+            output: None,
+            modalities: false,
+        };
+        Ok(crate::models::openai_list(&value, row))
     }
 
     async fn stream(

@@ -97,3 +97,31 @@ pub(crate) fn serve_once(response: String) -> (String, JoinHandle<String>) {
     });
     (url, handle)
 }
+
+/// Serve `responses` one per connection, in order, on a local port. Returns
+/// the base URL and a handle that yields each request's head, as read.
+/// Every response should say `connection: close`.
+pub(crate) fn serve_sequence(responses: Vec<String>) -> (String, JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let mut heads = Vec::new();
+        for response in responses {
+            let (socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.get_mut().write_all(response.as_bytes()).unwrap();
+            heads.push(head);
+        }
+        heads
+    });
+    (url, handle)
+}

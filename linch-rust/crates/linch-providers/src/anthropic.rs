@@ -25,7 +25,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream};
+use linch_core::{
+    ContextSource, ModelInfo, ModelsError, PromptCache, Provider, ProviderCapabilities,
+    ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps, ToolChoiceCaps,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
@@ -141,6 +144,62 @@ impl Provider for Anthropic {
         thinking: Option<&linch_core::Thinking>,
     ) -> Option<String> {
         payload::tool_choice_refusal(choice, thinking).map(str::to_owned)
+    }
+
+    /// Anthropic's own rules: native JSON outputs, every thinking control,
+    /// explicit `cache_control`, images in every Claude model.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        ProviderCapabilities {
+            provider: self.id().to_owned(),
+            model: model.to_owned(),
+            declared: true,
+            context_window: CONTEXT_WINDOW,
+            context_source: ContextSource::Table,
+            native_output_schema: true,
+            tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
+                self.tool_choice_refusal(choice, thinking)
+            }),
+            thinking: ThinkingCaps {
+                disable: true,
+                budget: true,
+                effort: true,
+                reasoning_text: true,
+            },
+            vision: Support::Supported,
+            streams_tool_arguments: true,
+            prompt_cache: PromptCache::Explicit,
+            stop_sequences: true,
+        }
+    }
+
+    /// `GET /v1/models`, paged by `after_id` while `has_more`.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+        let base = self.options.base_url.trim_end_matches('/');
+        let key = &self.options.api_key;
+        let headers = [
+            ("x-api-key", key.expose()),
+            ("anthropic-version", API_VERSION),
+        ];
+        let mut models = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..crate::models::MAX_PAGES {
+            let mut url = format!("{base}/v1/models?limit=1000");
+            if let Some(after) = &after {
+                url.push_str("&after_id=");
+                url.extend(percent_encoding::utf8_percent_encode(
+                    after,
+                    percent_encoding::NON_ALPHANUMERIC,
+                ));
+            }
+            let page = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+            let (listed, next) = crate::models::anthropic_page(&page);
+            models.extend(listed);
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        Ok(models)
     }
 
     async fn stream(

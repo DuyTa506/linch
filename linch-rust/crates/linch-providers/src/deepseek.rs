@@ -28,8 +28,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use linch_core::provider::Thinking;
 use linch_core::{
-    JsonValue, Provider, ProviderError, ProviderRequest, ProviderStream, ReasoningEffort,
-    ToolChoice, Usage,
+    ContextSource, JsonValue, ModelInfo, ModelsError, PromptCache, Provider, ProviderCapabilities,
+    ProviderError, ProviderRequest, ProviderStream, ReasoningEffort, Support, ThinkingCaps,
+    ToolChoice, ToolChoiceCaps, Usage,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -123,6 +124,54 @@ impl Provider for DeepSeek {
         thinking: Option<&Thinking>,
     ) -> Option<String> {
         tool_choice_refusal(choice, thinking).map(str::to_owned)
+    }
+
+    /// DeepSeek's own rules: its `thinking` switch (no budget), effort as
+    /// `low`, `high` or `max`, no schema, and images only for the models
+    /// that list `image` among their input modalities.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        let configured = self.options.context_window;
+        ProviderCapabilities {
+            provider: self.id().to_owned(),
+            model: model.to_owned(),
+            declared: true,
+            context_window: self.context_window(model),
+            context_source: if configured.is_some() {
+                ContextSource::Configured
+            } else {
+                ContextSource::Default
+            },
+            native_output_schema: false,
+            tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
+                self.tool_choice_refusal(choice, thinking)
+            }),
+            thinking: ThinkingCaps {
+                disable: true,
+                budget: false,
+                effort: true,
+                reasoning_text: true,
+            },
+            vision: Support::ModelDependent,
+            streams_tool_arguments: true,
+            prompt_cache: PromptCache::Automatic,
+            stop_sequences: true,
+        }
+    }
+
+    /// `GET /models`, which also gives each model's window, output limit
+    /// and input modalities.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+        let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
+        let key = &self.options.api_key;
+        let bearer = format!("Bearer {}", key.expose());
+        let headers = [("authorization", bearer.as_str())];
+        let value = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+        let row = crate::models::OpenAiRow {
+            context: Some("context_window"),
+            output: Some("max_output_tokens"),
+            modalities: true,
+        };
+        Ok(crate::models::openai_list(&value, row))
     }
 
     async fn stream(

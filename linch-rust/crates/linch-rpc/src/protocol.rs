@@ -68,6 +68,12 @@ pub mod method {
     pub const JOB_GET: &str = "job.get";
     /// List the jobs of the agent's namespace, newest first.
     pub const JOB_LIST: &str = "job.list";
+    /// What a provider supports for a model, from a provider config.
+    pub const PROVIDER_CAPABILITIES: &str = "provider.capabilities";
+    /// The models a provider's server lists.
+    pub const PROVIDER_MODELS: &str = "provider.models";
+    /// One model of a provider's list.
+    pub const PROVIDER_MODEL: &str = "provider.model";
     /// Notification: one or more envelopes of an active run, in order.
     pub const RUN_EVENT: &str = "run.event";
     /// Notification: the server stopped driving a run.
@@ -163,6 +169,33 @@ impl From<&linch::project::Skipped> for Skipped {
 pub struct CloseParams {
     /// Agent handle from `agent.open`.
     pub agent: String,
+}
+
+/// Params of `provider.models`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderParams {
+    /// The provider, as an agent config's `provider`: its `id` and
+    /// `base_url`. The key comes from the server's environment.
+    pub provider: linch::ProviderConfig,
+}
+
+/// Params of `provider.capabilities` and `provider.model`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelParams {
+    /// The provider, as an agent config's `provider`.
+    pub provider: linch::ProviderConfig,
+    /// The model asked about.
+    pub model: String,
+}
+
+/// Result of `provider.models`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModels {
+    /// The models the provider's server lists, in its order.
+    pub models: Vec<linch::ModelInfo>,
 }
 
 /// Params of `session.close`. The result is `{}`.

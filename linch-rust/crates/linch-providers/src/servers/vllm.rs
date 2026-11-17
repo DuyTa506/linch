@@ -36,8 +36,10 @@ use serde_json::json;
 
 use super::kwargs;
 use crate::context::ContextRule;
-use crate::openai::{ChatProfile, ToolChoiceSupport};
+use crate::models::OpenAiRow;
+use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport};
 use crate::openai_compat::stream::{ReasoningField, WireUsage};
+use linch_core::{PromptCache, Support};
 
 pub(super) static PROFILE: ChatProfile = ChatProfile {
     id: "vllm",
@@ -54,6 +56,18 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     usage,
     context: ContextRule::Models,
     overflow: &crate::overflow::VLLM,
+    vision: Support::ModelDependent,
+    streams_tool_arguments: true,
+    prompt_cache: PromptCache::Automatic,
+    stop_sequences: true,
+    models: ModelList {
+        row: OpenAiRow {
+            context: Some("max_model_len"),
+            output: None,
+            modalities: false,
+        },
+        props_context: false,
+    },
 };
 
 pub(super) fn thinking_off_kwargs() -> JsonObject {

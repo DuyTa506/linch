@@ -47,6 +47,8 @@
 //! name of an environment variable read at startup. Every `allow` list
 //! is empty when absent (it allows nothing), except `permission_modes`,
 //! which defaults to `default` and `accept_edits`; `scripted_provider`,
+//! `provider_info` (`provider.capabilities`, `provider.models` and
+//! `provider.model`, which send the key to an allowed `base_url`),
 //! `exec_tools` (`Bash`, `BashOutput` and `BashKill` for workspace
 //! agents), `tool_cache` (`spec.tool_cache`, which also needs
 //! `spec.redaction` over tool results) and `tool_cache_shared` (its

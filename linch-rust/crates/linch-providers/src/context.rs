@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use linch_core::{DEFAULT_CONTEXT_WINDOW, JsonValue};
+use linch_core::JsonValue;
 use reqwest::header::ACCEPT;
 
 use crate::ApiKey;
@@ -26,15 +26,20 @@ const SOLE_MODEL: &str = "*";
 
 /// The window of `model` in `table`, else `fallback`.
 pub(crate) fn known(table: &[(&str, u64)], model: &str, fallback: u64) -> u64 {
+    in_table(table, model).unwrap_or(fallback)
+}
+
+/// The window `table` names for `model`.
+pub(crate) fn in_table(table: &[(&str, u64)], model: &str) -> Option<u64> {
     (table.iter())
         .find(|(name, _)| *name == model)
-        .map_or(fallback, |(_, window)| *window)
+        .map(|(_, window)| *window)
 }
 
 /// How a Chat Completions target learns its context window.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ContextRule {
-    /// From a table of models, [`DEFAULT_CONTEXT_WINDOW`] for the others.
+    /// From a table of models, `DEFAULT_CONTEXT_WINDOW` for the others.
     Known(&'static [(&'static str, u64)]),
     /// `GET {base}/models`, each model's `max_model_len`.
     Models,
@@ -45,11 +50,21 @@ pub(crate) enum ContextRule {
 /// The windows a server reported, by model id.
 pub(crate) type Probed = HashMap<String, u64>;
 
-/// The window of `model` among `probed`: its own, the sole model's, else
-/// the default.
-pub(crate) fn probed_window(probed: Option<&Probed>, model: &str) -> u64 {
-    let probed = probed.map(|probed| probed.get(model).or_else(|| probed.get(SOLE_MODEL)));
-    probed.flatten().copied().unwrap_or(DEFAULT_CONTEXT_WINDOW)
+/// The window the server reported for `model`: its own, or the sole
+/// model's.
+pub(crate) fn probed_lookup(probed: Option<&Probed>, model: &str) -> Option<u64> {
+    let probed = probed?;
+    (probed.get(model).or_else(|| probed.get(SOLE_MODEL))).copied()
+}
+
+/// The window `/props` reports, for a server that serves one model.
+pub(crate) async fn props_window(
+    client: &reqwest::Client,
+    base_url: &str,
+    key: Option<&ApiKey>,
+) -> Option<u64> {
+    let probed = probe(client, ContextRule::Props, base_url, key).await;
+    probed.get(SOLE_MODEL).copied()
 }
 
 /// Ask the server at `base_url` for its windows by `rule`; empty when the

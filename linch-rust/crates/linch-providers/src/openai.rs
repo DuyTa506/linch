@@ -42,8 +42,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linch_core::{
-    DEFAULT_CONTEXT_WINDOW, JsonObject, Provider, ProviderError, ProviderRequest, ProviderStream,
-    Thinking, ToolChoice,
+    ContextSource, DEFAULT_CONTEXT_WINDOW, JsonObject, ModelInfo, ModelsError, Provider,
+    ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, Thinking, ThinkingCaps,
+    ToolChoice, ToolChoiceCaps,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -61,7 +62,7 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use profile::build_payload as profile_payload;
-pub(crate) use profile::{ChatProfile, ToolChoiceSupport, effort_value};
+pub(crate) use profile::{ChatProfile, ModelList, ToolChoiceSupport, effort_value};
 
 /// OpenAI's API root, including the `/v1` prefix.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -171,6 +172,37 @@ impl OpenAiChat {
     }
 }
 
+impl OpenAiChat {
+    /// The window of `model` and where it comes from: the configured one,
+    /// else the profile's table or what the server told
+    /// [`Provider::prepare`]; a model neither names gets the default.
+    fn window(&self, model: &str) -> (u64, ContextSource) {
+        if let Some(window) = self.context_window {
+            return (window, ContextSource::Configured);
+        }
+        let (found, source) = match self.profile.context {
+            ContextRule::Known(table) => (context::in_table(table, model), ContextSource::Table),
+            ContextRule::Models | ContextRule::Props => (
+                context::probed_lookup(self.probed.get(), model),
+                ContextSource::Server,
+            ),
+        };
+        match found {
+            Some(window) => (window, source),
+            None => (DEFAULT_CONTEXT_WINDOW, ContextSource::Default),
+        }
+    }
+
+    /// The request body `request` would be sent as; a test hook.
+    #[cfg(test)]
+    pub(crate) fn body(
+        &self,
+        request: &ProviderRequest,
+    ) -> Result<linch_core::JsonValue, ProviderError> {
+        profile::build_payload(self.profile, &self.thinking_off, request)
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAiChat {
     fn id(&self) -> &str {
@@ -180,15 +212,7 @@ impl Provider for OpenAiChat {
     /// The configured window, else the profile's: OpenAI's table, or
     /// what the server told [`Provider::prepare`].
     fn context_window(&self, model: &str) -> u64 {
-        if let Some(window) = self.context_window {
-            return window;
-        }
-        match self.profile.context {
-            ContextRule::Known(table) => context::known(table, model, DEFAULT_CONTEXT_WINDOW),
-            ContextRule::Models | ContextRule::Props => {
-                context::probed_window(self.probed.get(), model)
-            }
-        }
+        self.window(model).0
     }
 
     /// Whether the profile sends a `json_schema` `response_format`; a
@@ -204,6 +228,56 @@ impl Provider for OpenAiChat {
         _thinking: Option<&Thinking>,
     ) -> Option<String> {
         profile::tool_choice_refusal(self.profile, choice)
+    }
+
+    /// What this target's profile states, field by field; a server profile
+    /// inherits nothing from OpenAI's.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        let profile = self.profile;
+        let (context_window, context_source) = self.window(model);
+        ProviderCapabilities {
+            provider: profile.id.to_owned(),
+            model: model.to_owned(),
+            declared: true,
+            context_window,
+            context_source,
+            native_output_schema: profile.json_schema,
+            tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
+                self.tool_choice_refusal(choice, thinking)
+            }),
+            thinking: ThinkingCaps {
+                // The switch sends nothing when its kwargs are empty.
+                disable: profile.template_thinking_switch && !self.thinking_off.is_empty(),
+                budget: false,
+                effort: profile.reasoning_effort,
+                reasoning_text: profile.reasoning_field.is_some(),
+            },
+            vision: profile.vision,
+            streams_tool_arguments: profile.streams_tool_arguments,
+            prompt_cache: profile.prompt_cache,
+            stop_sequences: profile.stop_sequences,
+        }
+    }
+
+    /// `GET {base}/models`; a llama.cpp list has no windows, so its one
+    /// model's comes from `/props`.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let key = self.api_key.as_ref();
+        let bearer = key.map(|key| format!("Bearer {}", key.expose()));
+        let headers: Vec<(&str, &str)> = (bearer.as_deref())
+            .map(|value| ("authorization", value))
+            .into_iter()
+            .collect();
+        let value = crate::models::get_json(&self.client, &url, &headers, key).await?;
+        let mut models = crate::models::openai_list(&value, self.profile.models.row);
+        if self.profile.models.props_context {
+            let window = context::props_window(&self.client, &self.base_url, key).await;
+            for model in &mut models {
+                model.context_window = model.context_window.or(window);
+            }
+        }
+        Ok(models)
     }
 
     /// Ask a server for its context window once, unless one is configured.

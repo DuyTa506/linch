@@ -8,9 +8,12 @@
 
 pub mod anthropic;
 mod api_key;
+#[cfg(test)]
+mod capabilities_tests;
 mod context;
 pub mod deepseek;
 pub mod gemini;
+mod models;
 mod native;
 pub mod openai;
 mod openai_compat;

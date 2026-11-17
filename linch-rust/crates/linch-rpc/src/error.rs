@@ -3,7 +3,10 @@
 use std::error::Error;
 
 use linch::mcp::McpError;
-use linch::{BuildError, JournalError, JsonValue, OpenError, RunError, StoreError};
+use linch::{
+    BuildError, JournalError, JsonValue, ModelsError, OpenError, ProviderError, RunError,
+    StoreError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -117,6 +120,17 @@ pub mod code {
     /// a tool the run does not offer, or the agent's provider refuses it;
     /// `data.reason` says why. Nothing was written.
     pub const INVALID_TOOL_CHOICE: i64 = -32034;
+    /// `provider.models` or `provider.model` named a provider with no model
+    /// list (`scripted`); `data.provider` is its id.
+    pub const MODELS_UNSUPPORTED: i64 = -32035;
+    /// `provider.model` named a model the provider's list does not hold;
+    /// `data.model` is the id asked for.
+    pub const MODEL_NOT_FOUND: i64 = -32036;
+    /// The provider could not be asked, or answered with an error:
+    /// `data.kind` is `connect`, `transport`, `status` (with `data.status`),
+    /// `invalid_request` or `other`. The message never holds the key or
+    /// the provider's URL.
+    pub const PROVIDER_REQUEST_FAILED: i64 = -32037;
     /// The agent cannot run in the background, so `schedule.create` and
     /// `job.enqueue` refuse it: `data.reason` is `memory_store` (its runs
     /// would live in this connection only), `host_tools` or `callbacks`
@@ -240,6 +254,31 @@ fn store_code(error: &StoreError) -> i64 {
         StoreError::LeaseLost { .. } => code::LEASE_LOST,
         StoreError::Conflict { .. } => code::CONFLICT,
         _ => code::STORE,
+    }
+}
+
+impl From<&ModelsError> for ErrorObject {
+    fn from(error: &ModelsError) -> Self {
+        let message = chain(error);
+        match error {
+            ModelsError::Unsupported { provider } => Self::new(code::MODELS_UNSUPPORTED, message)
+                .with_data(json!({ "provider": provider })),
+            ModelsError::NotFound { model } => {
+                Self::new(code::MODEL_NOT_FOUND, message).with_data(json!({ "model": model }))
+            }
+            ModelsError::Provider(error) => {
+                let data = match error {
+                    ProviderError::Connect { .. } => json!({ "kind": "connect" }),
+                    ProviderError::Transport { .. } => json!({ "kind": "transport" }),
+                    ProviderError::Status { status, .. } => {
+                        json!({ "kind": "status", "status": status })
+                    }
+                    ProviderError::InvalidRequest { .. } => json!({ "kind": "invalid_request" }),
+                    _ => json!({ "kind": "other" }),
+                };
+                Self::new(code::PROVIDER_REQUEST_FAILED, message).with_data(data)
+            }
+        }
     }
 }
 

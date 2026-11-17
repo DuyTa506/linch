@@ -123,6 +123,11 @@ impl fmt::Debug for TokenSource {
 pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub scripted_provider: bool,
+    /// Whether the tenant may ask a provider for its capabilities and its
+    /// model list (`provider.capabilities`, `provider.models`,
+    /// `provider.model`), which sends the server's key to the provider's
+    /// `base_url` (that must be allowed too); off when absent.
+    pub provider_info: bool,
     /// Whether a workspace agent gets `Bash`, which runs commands through
     /// its execution backend (unconfined, as the server's user, with
     /// `local`), with `BashOutput` and `BashKill`; off when absent.
@@ -393,6 +398,7 @@ impl AllowConfig {
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
+            .provider_info(self.provider_info)
             .exec_tools(self.exec_tools)
             .tool_cache(self.tool_cache)
             .tool_cache_shared(self.tool_cache_shared)

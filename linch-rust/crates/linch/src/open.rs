@@ -123,7 +123,7 @@ impl AgentConfig {
                 max,
             )
         });
-        let provider = provider(self.provider)?;
+        let provider = provider(self.provider, true)?;
         // A self-hosted server reports its context window here, before the
         // offload threshold and the skill listing are derived from it.
         provider.prepare().await;
@@ -458,7 +458,30 @@ async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenErro
     }
 }
 
-fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
+impl ProviderConfig {
+    /// Build the provider this config names, as [`AgentConfig::open`]
+    /// does: its key is read from the process environment, and a missing
+    /// one is [`OpenError::MissingKey`]. It does not call
+    /// [`Provider::prepare`].
+    ///
+    /// Raises:
+    ///     OpenError: The key is missing or the HTTP client cannot be built.
+    pub fn build(&self) -> Result<Arc<dyn Provider>, OpenError> {
+        provider(self.clone(), true)
+    }
+
+    /// Like [`Self::build`], but a missing key is replaced by a placeholder
+    /// that no request may carry: for the questions a provider answers
+    /// without sending anything, such as [`Provider::capabilities`].
+    ///
+    /// Raises:
+    ///     OpenError: The HTTP client cannot be built.
+    pub fn build_keyless(&self) -> Result<Arc<dyn Provider>, OpenError> {
+        provider(self.clone(), false)
+    }
+}
+
+fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, OpenError> {
     let built: Arc<dyn Provider> = match config {
         ProviderConfig::Scripted {
             turns,
@@ -478,7 +501,7 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             base_url,
             context_window,
         } => {
-            let mut options = DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV)?);
+            let mut options = DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV, keyed)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
             Arc::new(DeepSeek::new(options).map_err(OpenError::Provider)?)
@@ -487,7 +510,8 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             base_url,
             context_window,
         } => {
-            let mut options = OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV)?);
+            let mut options =
+                OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV, keyed)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
             Arc::new(OpenAiChat::new(options).map_err(OpenError::Provider)?)
@@ -498,7 +522,7 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             store,
             native_catalog_changes,
         } => {
-            let api_key = key("openai-responses", openai::API_KEY_ENV)?;
+            let api_key = key("openai-responses", openai::API_KEY_ENV, keyed)?;
             let mut options = ResponsesOptions::new(api_key);
             override_url(&mut options.base_url, base_url);
             options.reasoning_summary = reasoning_summary.map(summary);
@@ -510,16 +534,16 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
             base_url,
             native_catalog_changes,
         } => {
-            let mut options = AnthropicOptions::from_env().ok_or(OpenError::MissingKey {
-                provider: "anthropic",
-                env: anthropic::API_KEY_ENV,
-            })?;
+            let mut options = match AnthropicOptions::from_env() {
+                Some(options) => options,
+                None => AnthropicOptions::new(key("anthropic", anthropic::API_KEY_ENV, keyed)?),
+            };
             override_url(&mut options.base_url, base_url);
             options.native_catalog_changes = native_catalog_changes;
             Arc::new(Anthropic::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Gemini { base_url } => {
-            let mut options = GeminiOptions::new(key("gemini", gemini::API_KEY_ENV)?);
+            let mut options = GeminiOptions::new(key("gemini", gemini::API_KEY_ENV, keyed)?);
             override_url(&mut options.base_url, base_url);
             Arc::new(Gemini::new(options).map_err(OpenError::Provider)?)
         }
@@ -572,9 +596,14 @@ fn base_url(config: &ProviderConfig) -> Option<&str> {
     }
 }
 
-/// The key in `env`, or [`OpenError::MissingKey`].
-fn key(provider: &'static str, env: &'static str) -> Result<ApiKey, OpenError> {
-    ApiKey::from_env(env).ok_or(OpenError::MissingKey { provider, env })
+/// The key in `env`, or [`OpenError::MissingKey`]; unless `keyed` is
+/// false, when a missing key is a placeholder that is never sent.
+fn key(provider: &'static str, env: &'static str, keyed: bool) -> Result<ApiKey, OpenError> {
+    match ApiKey::from_env(env) {
+        Some(key) => Ok(key),
+        None if !keyed => Ok(ApiKey::new("unset").expect("a non-empty placeholder")),
+        None => Err(OpenError::MissingKey { provider, env }),
+    }
 }
 
 fn override_url(target: &mut String, base_url: Option<String>) {

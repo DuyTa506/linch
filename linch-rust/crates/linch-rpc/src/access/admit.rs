@@ -38,6 +38,14 @@ impl Tenant {
         }
     }
 
+    /// Refuse a provider question (`provider.capabilities`, `provider.models`,
+    /// `provider.model`) unless the tenant may ask them and the provider
+    /// is one it may use: the same `base_url` check as `agent.open`, since
+    /// the model calls send the server's key there.
+    pub(crate) fn admit_provider_info(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
+        self.allow.admit_provider_info(provider)
+    }
+
     /// Refuse `config` unless its namespace is this tenant's and its
     /// provider, endpoints, permissions, workspace, store and MCP servers
     /// are all allowed. The workspace, the project root and the config
@@ -271,6 +279,14 @@ impl Allowlists {
                 Ok(())
             }
         }
+    }
+
+    fn admit_provider_info(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
+        if !self.provider_info {
+            let message = "asking a provider about its models is not allowed on this connection";
+            return Err(refused("provider_info", message.into()));
+        }
+        self.admit_provider(provider)
     }
 
     fn admit_provider(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {

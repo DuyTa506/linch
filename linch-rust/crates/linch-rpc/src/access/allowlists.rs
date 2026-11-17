@@ -51,6 +51,7 @@ pub const DEFAULT_TOOL_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
+    pub(super) provider_info: bool,
     pub(super) exec_tools: bool,
     pub(super) tool_cache: bool,
     pub(super) tool_cache_shared: bool,
@@ -233,6 +234,7 @@ impl Allowlists {
     pub fn new() -> Self {
         Self {
             scripted_provider: false,
+            provider_info: false,
             exec_tools: false,
             tool_cache: false,
             tool_cache_shared: false,
@@ -291,6 +293,16 @@ impl Allowlists {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub fn scripted_provider(mut self, allowed: bool) -> Self {
         self.scripted_provider = allowed;
+        self
+    }
+
+    /// Whether the connection may ask a provider for its capabilities and
+    /// its model list (`provider.capabilities`, `provider.models` and
+    /// `provider.model`). Off by default: the model calls send the server's
+    /// key to the provider, outside every run's cap. The provider's
+    /// `base_url` must be allowed too.
+    pub fn provider_info(mut self, allowed: bool) -> Self {
+        self.provider_info = allowed;
         self
     }
 

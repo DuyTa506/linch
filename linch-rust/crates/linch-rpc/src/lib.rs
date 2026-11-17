@@ -278,6 +278,17 @@
 //! while another process drives it, `-32022` when a racing approve took
 //! it over.
 //!
+//! **`provider.capabilities`** `{provider, model}`, **`provider.models`**
+//! `{provider}` and **`provider.model`** `{provider, model}` take a
+//! `provider` as an agent config has it (`{"id": "vllm", "base_url": ...}`),
+//! so a client can ask before it opens an agent. `provider.capabilities`
+//! answers [`ProviderCapabilities`](linch::ProviderCapabilities) from the
+//! adapter without a key, after a self-hosted server's one window probe;
+//! `provider.models` returns `{"models": [ModelInfo...]}` from the vendor's
+//! list and `provider.model` one entry, with the server's key. A tenant
+//! needs `provider_info` and an allowed `base_url` (`-32004`, `kind`
+//! `provider_info` or `provider_base_url`).
+//!
 //! **`run.events`** `{agent, run_id, after_seq?}`
 //! ([`EventsParams`](protocol::EventsParams)) returns
 //! `{"events": [<envelope>...]}`: the run's durable envelopes with a seq
@@ -486,6 +497,9 @@
 //! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
 //! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
 //! | -32034 | invalid tool choice | `RunError::InvalidToolChoice`: the `tool_choice` of `run.start` names a tool the run does not offer, or the provider refuses it, so nothing was written; `data: {reason}` |
+//! | -32035 | models unsupported | `provider.models` or `provider.model` on a provider with no model list; `data: {provider}` |
+//! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model}` |
+//! | -32037 | provider request failed | the provider could not be reached or answered with an error; `data: {kind, status?}`; the message holds neither the key nor the URL |
 //! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |

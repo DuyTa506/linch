@@ -38,6 +38,7 @@ mod login;
 mod monitor;
 mod outgoing;
 mod peer;
+mod provider;
 mod run;
 pub(crate) mod schedule;
 
@@ -303,6 +304,12 @@ impl Server {
             method::AGENT_OPEN => self.open(parse(params)?).await.map(Reply::Value),
             method::AGENT_CLOSE => self.close(parse(params)?).await.map(Reply::Value),
             method::SESSION_CLOSE => self.close_session(parse(params)?).map(Reply::Value),
+            method::PROVIDER_CAPABILITIES => self
+                .provider_capabilities(parse(params)?)
+                .await
+                .map(Reply::Value),
+            method::PROVIDER_MODELS => self.provider_models(parse(params)?).await.map(Reply::Value),
+            method::PROVIDER_MODEL => self.provider_model(parse(params)?).await.map(Reply::Value),
             method::RUN_START => self.start(parse(params)?),
             method::RUN_RESUME => self.resume(parse(params)?),
             method::RUN_APPROVE => self.approve(parse(params)?),

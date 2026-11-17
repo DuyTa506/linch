@@ -11,7 +11,10 @@ use futures::stream::BoxStream;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use super::{ProviderEvent, ProviderRequest, StreamError, Thinking, ToolChoice};
+use super::{
+    ModelInfo, ModelsError, ProviderCapabilities, ProviderEvent, ProviderRequest, StreamError,
+    Thinking, ToolChoice, ToolChoiceCaps,
+};
 
 /// The event stream of one provider call.
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
@@ -62,6 +65,49 @@ pub trait Provider: Send + Sync {
         _thinking: Option<&Thinking>,
     ) -> Option<String> {
         None
+    }
+
+    /// What the adapter supports for `model`, as plain data. It never does
+    /// I/O: a window the server reports is read by [`Self::prepare`].
+    ///
+    /// Every adapter overrides it and states each field itself, so none
+    /// takes another's rules by default. The default answers only what this
+    /// trait already says, with `declared` false.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        ProviderCapabilities::undeclared(
+            self.id(),
+            model,
+            self.context_window(model),
+            self.native_output_schema(),
+            ToolChoiceCaps::probe(|choice, thinking| self.tool_choice_refusal(choice, thinking)),
+        )
+    }
+
+    /// The models the provider's server lists, when its API has such a
+    /// list. It asks the server on every call.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelsError::Unsupported`] by default; an adapter's own failures
+    /// are [`ModelsError::Provider`], with the key and the URL left out.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+        Err(ModelsError::Unsupported {
+            provider: self.id().to_owned(),
+        })
+    }
+
+    /// What the server lists about `model`: its entry of
+    /// [`Self::list_models`].
+    ///
+    /// # Errors
+    ///
+    /// [`ModelsError::NotFound`] when the list lacks it, else as
+    /// [`Self::list_models`].
+    async fn model_info(&self, model: &str) -> Result<ModelInfo, ModelsError> {
+        let listed = self.list_models().await?;
+        (listed.into_iter().find(|info| info.id == model)).ok_or_else(|| ModelsError::NotFound {
+            model: model.to_owned(),
+        })
     }
 
     /// Start one call. The stream ends after `message_end` or an error.
