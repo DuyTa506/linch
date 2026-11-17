@@ -375,8 +375,8 @@ class Agent:
         database) fires it; this connection never does, and a stdio server
         runs no worker. The agent needs Postgres stores and no host tools or
         callbacks; its config as opened, without the store DSN, is stored
-        with the schedule. Missed fires are caught up in order after
-        downtime.
+        with the schedule. Fires missed while every worker was down
+        coalesce into one run; the rest count in `skips`.
 
         Args:
             prompt: The user prompt of every fire's run.

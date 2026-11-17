@@ -248,14 +248,14 @@ async fn scheduled_jobs_are_listed_by_schedule() {
     every.session_id = None;
     every.timing = Timing::Every(Duration::from_secs(3600));
     create_schedule(&db.pool, &every, None).await.unwrap();
-    make_due(&db, "90 minutes").await;
-    assert_eq!(fire_all(&db).await, 2);
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_all(&db).await, 1);
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s"), "go")
         .await
         .unwrap();
     let all = jobs(&db.pool, NS, None, 10).await.unwrap();
     let by_schedule = jobs(&db.pool, NS, Some("h"), 10).await.unwrap();
-    assert_eq!((all.len(), by_schedule.len()), (3, 2));
+    assert_eq!((all.len(), by_schedule.len()), (2, 1));
     assert!(by_schedule.iter().all(|job| job.fire_at.is_some()));
     assert_eq!(jobs(&db.pool, NS, None, 1).await.unwrap().len(), 1);
     db.finish().await;
@@ -412,15 +412,16 @@ async fn concurrent_firers_make_each_fire_once() {
         fired += firer.await.unwrap();
     }
     fired += fire_all(&db).await;
-    // Three fires each (150 s, 90 s and 30 s ago), none twice.
-    assert_eq!(fired, 60);
-    assert_eq!(db.jobs().await, 60);
+    // One fire each (the ticks 90 s and 30 s ago coalesce into it), none
+    // twice.
+    assert_eq!(fired, 20);
+    assert_eq!(db.jobs().await, 20);
     let distinct: i64 =
         sqlx::query_scalar("SELECT count(DISTINCT (schedule_id, fire_at)) FROM linch_worker_jobs")
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert_eq!(distinct, 60);
+    assert_eq!(distinct, 20);
     db.finish().await;
 }
 
@@ -526,8 +527,8 @@ async fn a_background_run_acts_for_its_principal() {
     beat.timing = Timing::Every(Duration::from_secs(3600));
     beat.principal = Some(intern);
     create_schedule(&db.pool, &beat, None).await.unwrap();
+    // The running worker fires it.
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
     for session in ["queued", "fired"] {
         let run_id = db.run_of(session).await;
         wait_until("the run ends", || async {

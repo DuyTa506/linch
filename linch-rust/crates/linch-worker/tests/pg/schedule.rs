@@ -1,5 +1,6 @@
-//! A due schedule fires once across many pollers and catches up the fires
-//! it missed; its fire becomes a run; pause, resume, delete and the cap.
+//! A due schedule fires once across many pollers and coalesces the fires
+//! it missed into one; its fire becomes a run; pause, resume, delete and
+//! the cap.
 
 use std::time::Duration;
 
@@ -89,15 +90,16 @@ async fn a_due_schedule_fires_once_across_pollers() {
         .await;
     let fired = join_all((0..8).map(|_| fire_due_schedules(&db.pool))).await;
     let fired: u64 = fired.into_iter().map(Result::unwrap).sum();
-    assert!((1..=3).contains(&fired), "{fired}");
-    // Missed fires are caught up, each once, in order.
-    assert_eq!(fired + fire_all(&db).await, 3);
+    // The missed fires coalesce into one, at the first missed tick.
+    assert_eq!(fired, 1);
+    assert_eq!(fire_all(&db).await, 0);
     let times = fire_times(&db).await;
-    assert_eq!(times.len(), 3);
+    assert_eq!(times.len(), 1);
     let hour = chrono::Duration::hours(1);
-    assert_eq!((times[1] - times[0], times[2] - times[1]), (hour, hour));
     let (next, now) = (next_fire(&db, "h").await, now(&db).await);
     assert!(next > now && next <= now + hour, "{next}");
+    // The next fire stays on the schedule's grid.
+    assert_eq!(next - times[0], hour * 3);
     let keys: Vec<String> = sqlx::query_scalar("SELECT dedupe_key FROM linch_worker_jobs")
         .fetch_all(&db.pool)
         .await
@@ -113,8 +115,45 @@ async fn a_due_schedule_fires_once_across_pollers() {
         .unwrap();
     assert_eq!(sessions, keys);
     let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
-    assert_eq!((info.fires, info.skips), (3, 0));
-    assert_eq!(info.last_fire, Some(times[2]));
+    assert_eq!((info.fires, info.skips), (1, 2));
+    assert_eq!(info.last_fire, Some(times[0]));
+    db.finish().await;
+}
+
+/// A schedule 100 ticks overdue (every worker was down) fires once, counts
+/// the other 100 as skips, and its next fire is the first tick after now:
+/// a heartbeat after a day of downtime is one run, not a storm.
+#[tokio::test]
+async fn missed_fires_coalesce_into_one() {
+    let Some(db) = TestDb::new("coalesce").await else {
+        return;
+    };
+    let mut cron = hourly("cron");
+    cron.session_id = None;
+    cron.timing = Timing::cron_utc("* * * * *");
+    let mut every = hourly("every");
+    every.session_id = None;
+    every.timing = Timing::Every(Duration::from_secs(60));
+    for schedule in [&cron, &every] {
+        create_schedule(&db.pool, schedule, None).await.unwrap();
+    }
+    // On a minute tick, 100 minutes ago: 100 more ticks are due by now.
+    db.sql(
+        "UPDATE linch_worker_schedules \
+         SET next_fire = date_trunc('minute', now()) - interval '100 minutes'",
+    )
+    .await;
+    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 2);
+    assert_eq!(fire_all(&db).await, 0, "nothing else is due");
+    let now = now(&db).await;
+    for id in ["cron", "every"] {
+        let info = get_schedule(&db.pool, NS, id).await.unwrap().unwrap();
+        assert_eq!((info.fires, info.skips), (1, 100), "{id}");
+        assert!(info.next_fire > now, "{id}: {}", info.next_fire);
+        let minute = chrono::Duration::minutes(1);
+        assert!(info.next_fire <= now + minute, "{id}: {}", info.next_fire);
+    }
+    assert_eq!(db.jobs().await, 2);
     db.finish().await;
 }
 

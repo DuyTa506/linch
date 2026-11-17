@@ -153,7 +153,8 @@ async with Server.connect("unix:/run/linch/linch.sock", token=token) as server:
 A `Schedule` is a dict: `id`, `namespace`, `queue`, `prompt`,
 `session_id` (fixed sessions only), `cron` and `timezone` or
 `interval_ms`, `paused`, `next_fire`, `last_fire`, `fires` (fires that
-queued a run), `skips` (fires skipped) and `created_at`.
+queued a run), `skips` (fires not made: skipped while busy or at a cap, or
+missed while every worker was down) and `created_at`.
 
 ### Time zones
 
@@ -321,10 +322,12 @@ fire: a tenant whose `max_schedules` was removed fails the fire's job.
   worker's job becomes visible again and another worker takes it; the run's
   lease and epoch fence the old holder out, and the run resumes from its
   last durable state ([Runs](./runs.md)).
-- **Missed fires are caught up.** After every worker was down, a schedule
-  fires each tick it missed, in order, one per poll, as Python Linch does. A
-  heartbeat skips them while its first catch-up fire runs, so it runs once.
-  Fires missed while paused are not made.
+- **Missed fires coalesce into one.** After every worker was down, a
+  schedule fires once, at the first tick it missed, counts the other missed
+  ticks in `skips`, and its next fire is the first tick after now. Python
+  Linch fires every missed tick instead; here a day of downtime under a
+  one-minute schedule would queue some 1,440 runs, each paid for, so this
+  differs on purpose. Fires missed while paused are not made.
 - **Deleting a schedule stops only future fires.** Its queued and running
   jobs finish.
 
@@ -353,7 +356,7 @@ All are `SchedulerError`s except the last two.
 | The host passes an `agent_factory` to its `Worker` | The agent's config is stored with the schedule; the server's worker opens it |
 | `RunRequest.principal` is restored by the worker | `principal=` on `create_schedule` and `enqueue`, given to every fire's run |
 | `register_schedule_tools` lets the model schedule; the host binds a session | `schedule_tools: True`: the server binds the agent, its session is the calling run's ([below](#let-the-model-schedule)) |
-| Missed fires catch up in order | The same |
+| Missed fires catch up in order, one run each | Missed fires coalesce into one run; the rest count in `skips` (no runaway cost after downtime) |
 
 ## Related pages
 

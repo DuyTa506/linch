@@ -231,8 +231,8 @@ id. `list_schedules`, `get_schedule`, `pause_schedule`, `resume_schedule`
 
 `fire_due_schedules(pool)` locks up to 64 due rows with
 `FOR UPDATE SKIP LOCKED` and, for each, enqueues one start job and moves
-`next_fire` to the first tick after **this fire** (not after now), all in one
-transaction:
+`next_fire` to the first tick after this fire, or after now when that tick
+has passed too, all in one transaction:
 
 - **Exactly once.** A worker that crashes before the commit leaves neither
   the job nor the move, so the next poll makes the fire; pollers at once skip
@@ -240,15 +240,20 @@ transaction:
   second guard. `tests/pg/scheduler.rs` aborts a fire inside its insert,
   kills the firing backend with `pg_terminate_backend` mid-transaction, and
   races eight firers over twenty schedules.
-- **Catch-up.** Since the next fire follows the fire just made, a schedule
-  that missed several ticks fires each, in order, one per call, as Python
-  Linch's schedules do.
+- **Coalesced catch-up.** A schedule that missed several ticks (every
+  worker was down) fires once, at its stored next fire, adds the ticks
+  missed after it up to now to `skips`, and moves `next_fire` to the first
+  tick after now (`after_missed` in `schedule.rs`; an interval stays on its
+  grid). An interval's missed ticks are counted by division; a cron
+  pattern's are walked, at most 10,000 (`MISSED_COUNTED`). Python Linch
+  fires each missed tick, in order; coalescing keeps a long downtime from
+  queueing a run per missed tick.
 - **Sessions.** Without a `session_id`, each fire starts the session
   `schedule:{id}:{fire time}`. With one, the fire is skipped (`skips` + 1)
   while a job of the schedule is not failed and not ended, or the session
   has a run that is not terminal in `linch_runs` (one suspended for approval
-  or input included). A heartbeat's catch-up therefore collapses into one
-  run, and fires never pile up behind a run that waits for a person.
+  or input included). Fires never pile up behind a run that waits for a
+  person.
 - A stored timing that no longer parses pauses its schedule (logged)
   instead of blocking the others.
 

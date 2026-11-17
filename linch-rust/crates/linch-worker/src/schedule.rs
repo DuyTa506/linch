@@ -9,13 +9,15 @@
 //! no longer due. Each job also carries the dedupe key
 //! `schedule:{id}:{fire time}`, a second guard against a double fire.
 //!
-//! Missed fires are caught up, as Python Linch does: the next fire is the
-//! first tick after the fire just made, not after now, so a schedule that
-//! was overdue by several ticks (every worker was down) fires each of them
-//! in order, one per call. A schedule with a fixed session skips a fire
-//! while an earlier fire's job is unfinished or the session has a live run,
-//! so its catch-up collapses into one run. Resuming a paused schedule
-//! starts from now: the fires it missed while paused are not made.
+//! Missed fires coalesce: a schedule overdue by several ticks (every
+//! worker was down) fires once, at its stored next fire, counts the other
+//! ticks up to now as skips, and moves its next fire to the first tick
+//! after now. Python Linch fires each missed tick in order instead; here a
+//! day of downtime under a one-minute schedule would queue some 1,440 runs,
+//! each paid for, so this differs on purpose. A schedule with a fixed
+//! session also skips a fire while an earlier fire's job is unfinished or
+//! the session has a live run. Resuming a paused schedule starts from now:
+//! the fires it missed while paused are not made.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use linch_core::{Principal, SessionId};
@@ -25,10 +27,16 @@ use sqlx::{Postgres, Transaction};
 use crate::definition::{self, Cap, Counted};
 use crate::error::{WorkerError, chain, non_blank};
 use crate::job::{Inserted, NewJob, insert, principal_json};
-use crate::timing::Timing;
+use crate::timing::{Parsed, Timing};
 
 /// Most due schedules one [`fire_due_schedules`] call fires.
 const FIRE_BATCH: i64 = 64;
+
+/// Most missed ticks of a cron schedule one coalesced fire counts in
+/// `skips`, so a catch-up of a seconds-field pattern after a long downtime
+/// does not walk every tick inside the fire's transaction. An interval's
+/// missed ticks are counted by division, without a bound.
+const MISSED_COUNTED: u64 = 10_000;
 
 /// A schedule that enqueues a run of `prompt` at every fire.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +89,8 @@ pub struct ScheduleInfo {
     pub last_fire: Option<DateTime<Utc>>,
     /// Fires that enqueued a job.
     pub fires: u64,
-    /// Fires skipped because the session was busy.
+    /// Fires not made: skipped while busy, or missed ticks coalesced into
+    /// one fire.
     pub skips: u64,
     /// When it was created.
     pub created_at: DateTime<Utc>,
@@ -439,8 +448,9 @@ pub async fn delete_agent_schedule(
 
 /// Fire every due schedule once: enqueue its start job (or skip the fire
 /// while its fixed session is busy) and move its next fire to the first
-/// tick after this fire. Workers call this once per poll interval; a host
-/// may call it too.
+/// tick after this fire, or after now when that tick is past too (the
+/// missed ticks coalesce into this fire and count as skips). Workers call
+/// this once per poll interval; a host may call it too.
 ///
 /// A stored timing that no longer parses pauses its schedule (logged)
 /// instead of blocking the others.
@@ -464,10 +474,11 @@ pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
     .bind(FIRE_BATCH)
     .fetch_all(&mut *tx)
     .await?;
+    let now = now(&mut tx).await?;
     let mut fired = 0;
     for row in due {
         let schedule = info(row);
-        if fire(&mut tx, &schedule).await? {
+        if fire(&mut tx, &schedule, now).await? {
             fired += 1;
         }
     }
@@ -475,14 +486,54 @@ pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
     Ok(fired)
 }
 
-/// Make `schedule`'s due fire inside `tx`; whether it enqueued a job.
+/// The fire after `fire_at` that is still to come at `now`, and how many
+/// ticks after `fire_at` were missed by then (they coalesce into the fire
+/// at `fire_at`). An interval stays on its grid: its next fire is
+/// `fire_at` plus a whole number of intervals.
+fn after_missed(
+    timing: &Timing,
+    fire_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, u64), WorkerError> {
+    let parsed = timing.parse()?;
+    let next = parsed.next_after(timing, fire_at)?;
+    if next > now {
+        return Ok((next, 0));
+    }
+    let out_of_range = || WorkerError::Invalid("the next fire is out of range".into());
+    if let Parsed::Every(every) = &parsed {
+        let every = every.num_microseconds().ok_or_else(out_of_range)?;
+        let elapsed = (now - fire_at)
+            .num_microseconds()
+            .ok_or_else(out_of_range)?;
+        let missed = elapsed / every;
+        let ahead = (missed + 1).checked_mul(every).ok_or_else(out_of_range)?;
+        let next = fire_at
+            .checked_add_signed(chrono::Duration::microseconds(ahead))
+            .ok_or_else(out_of_range)?;
+        return Ok((next, u64::try_from(missed).unwrap_or(0)));
+    }
+    let (mut tick, mut missed) = (next, 0);
+    while tick <= now && missed < MISSED_COUNTED {
+        missed += 1;
+        tick = parsed.next_after(timing, tick)?;
+    }
+    if tick <= now {
+        tick = parsed.next_after(timing, now)?;
+    }
+    Ok((tick, missed))
+}
+
+/// Make `schedule`'s due fire inside `tx`, at the database time `now`;
+/// whether it enqueued a job.
 async fn fire(
     tx: &mut Transaction<'static, Postgres>,
     schedule: &ScheduleInfo,
+    now: DateTime<Utc>,
 ) -> Result<bool, WorkerError> {
     let (namespace, id) = (&schedule.namespace, &schedule.id);
     let fire_at = schedule.next_fire;
-    let next = match schedule.timing.next_after(fire_at) {
+    let (next, missed) = match after_missed(&schedule.timing, fire_at, now) {
         Ok(next) => next,
         Err(error) => {
             tracing::warn!(%namespace, %id, error = chain(&error), "pausing a schedule");
@@ -542,9 +593,12 @@ async fn fire(
     .bind(next)
     .bind(fire_at)
     .bind(i64::from(enqueued))
-    .bind(i64::from(busy))
+    .bind(i64::try_from(missed).unwrap_or(i64::MAX) + i64::from(busy))
     .execute(&mut **tx)
     .await?;
+    if missed > 0 {
+        tracing::info!(%namespace, %id, missed, "coalesced missed fires into one");
+    }
     Ok(enqueued)
 }
 
