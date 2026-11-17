@@ -357,8 +357,10 @@ timed out hoặc aborted sau khi host xác nhận `kill` kèm exit, ngược l�
 interrupted (cũng vậy sau một lần read bị mất, hoặc một lần start mà câu trả lời bị
 mất: chỉ `Rejected` chứng minh lệnh đã không chạy), nên không bao giờ báo một kết quả
 chưa quay về. Các lần read trả lời gần như trống ngay lập tức bị giãn nhịp, một lệnh
-quá 256 MiB output bị kill, và một lệnh remote kết thúc `KILL_MARGIN` (khoảng 6 giây,
-`Shell::deadline_margin`) trước hạn chót của scheduler. Một call bị drop
+quá 256 MiB output bị kill và kết thúc `End::OutputLimit` (`interrupted` nếu host không
+xác nhận kill), và một lệnh remote kết thúc `KILL_MARGIN` (6,1 giây, tối đa một nửa
+hạn chót khi hạn chót dưới khoảng 12 giây, `Shell::deadline_margin`) trước hạn chót của
+scheduler. Một call bị drop
 gửi một kill tách rời. `PATH`, `HOME`, `USER`, `SHELL` và `TMPDIR` của server
 không được gửi, và `workspace_tools` không đăng ký tool tệp trừ khi
 `shared_workspace` của policy bật (`ExecutionBackend::has_file_tools`): chúng

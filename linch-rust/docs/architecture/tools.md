@@ -360,8 +360,10 @@ the host confirmed `kill` with an exit, and otherwise as interrupted (also
 after a lost read, or a start whose answer was lost: only `Rejected` proves
 the command never ran), so it never reports a result that did not come
 back. Reads that answer next to nothing at once are paced, a command past
-256 MiB of output is killed, and a remote command ends `KILL_MARGIN` (about
-6 s, `Shell::deadline_margin`) before the scheduler's deadline. A dropped call sends a detached kill. The
+256 MiB of output is killed and ends `End::OutputLimit` (`interrupted` if the
+host does not confirm the kill), and a remote command ends `KILL_MARGIN`
+(6.1 s, at most half of a deadline under about 12 s, `Shell::deadline_margin`)
+before the scheduler's deadline. A dropped call sends a detached kill. The
 server's `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR` are not sent, and
 `workspace_tools` registers no file tools unless the policy's
 `shared_workspace` is on (`ExecutionBackend::has_file_tools`): they would act

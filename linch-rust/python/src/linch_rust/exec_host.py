@@ -145,6 +145,9 @@ class SubprocessHost:
     `idle_timeout` seconds. At most 4 MiB of each stream wait for a read: past
     that the command blocks on its pipe until the server reads.
 
+    A command runs as this process's user, so it can read this process's
+    environment through `/proc/<pid>/environ`: keep secrets out of it.
+
     Args:
         cwd: Where a command starts when the server names no directory;
             this process's working directory when absent.

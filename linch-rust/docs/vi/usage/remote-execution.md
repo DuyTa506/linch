@@ -39,7 +39,13 @@ chạy nó ở nơi bạn sẵn lòng để model chạy một shell.
   `LANG`, `LC_ALL`, `LC_CTYPE`, cùng những biến agent đã thêm). Nó bỏ `PATH`, `HOME`,
   `USER`, `SHELL` và `TMPDIR`, vì chúng mô tả server và vô nghĩa trên host (backend
   `docker` cũng làm vậy); `SubprocessHost` tự điền chúng từ môi trường của nó. Không có
-  key provider hay bí mật nào khác của server trong môi trường đó.
+  key provider hay bí mật nào khác của server trong môi trường riêng của lệnh.
+- `SubprocessHost` chạy lệnh với tư cách người dùng của client, nên lệnh có thể đọc môi
+  trường của process client qua `/proc` (`cat /proc/$PPID/environ` hiện những gì client
+  đã khởi động cùng), như docstring của `Server` đã cảnh báo cho process server. Giữ
+  key provider và bí mật khác ra khỏi môi trường của client (đọc chúng từ một kho bí
+  mật). Operator cần cô lập hơn mức đó thì chạy host bằng một người dùng khác, hoặc
+  viết một `ExecutionHost` làm điều đó.
 - Host thấy các lệnh của model và phải được tin cậy với chúng; server tin câu trả lời
   của host về output và exit code, không hơn.
 - Một tenant của `linch-server` bị **từ chối theo mặc định**: `allow.execution` phải
@@ -101,8 +107,15 @@ backend khác; một agent không có backend giữ hợp đồng mà nó đã c
 - **Timeout và hủy.** Server thực thi chúng. Khi tới hạn, hoặc khi run bị hủy, nó gửi
   `exec.kill` và chỉ báo `timed out` hoặc `aborted` sau khi host trả lời rằng lệnh đã
   chết: câu trả lời phải mang `exit` của lệnh. Khi scheduler cho lời gọi một hạn chót
-  (`call_timeout_ms`), một lệnh remote kết thúc sớm hơn khoảng 6 giây (5 giây của kill
-  và một lần read), để câu trả lời kill và output đã có vẫn tới được model.
+  (`call_timeout_ms`), một lệnh remote kết thúc sớm hơn 6 giây (5 giây của kill và một
+  lần read) khi hạn chót lớn hơn khoảng 12 giây, và sớm hơn một nửa hạn chót khi nhỏ hơn
+  mức đó, để câu trả lời kill và output đã có vẫn tới được model. Một host mất 5 giây để
+  xác nhận kill cần `call_timeout_ms` ít nhất khoảng 10 giây: với giá trị ngắn hơn (hoặc
+  một `timeout_ms` của `Bash` chừa lại ít hơn thời gian kill cần trước hạn chót),
+  scheduler bỏ lời gọi trước và model đọc `Tool "Bash" timed out after N ms` mà không
+  có output. Không có `call_timeout_ms` thì scheduler không đặt hạn chót và chỉ
+  `timeout_ms` của `Bash` được áp dụng. Giữ `call_timeout_ms` từ 12 giây trở lên với
+  backend remote.
 - **Một host không trả lời là `interrupted`.** Nếu host ngừng trả lời các lần read (6
   giây), báo lỗi, đóng kết nối, hoặc không xác nhận một lần kill (5 giây, hoặc một câu
   trả lời không có `exit`), lời gọi kết thúc với mã `interrupted` và `[interrupted: ...
@@ -118,7 +131,9 @@ backend khác; một agent không có backend giữ hợp đồng mà nó đã c
   hiện `interrupted` trong `BashOutput` ngay từ đầu.
 - **Một host không thể làm ngập server.** Server đợi ít nhất 25 ms giữa các lần read mà
   câu trả lời gần như trống, và quá 256 MiB output của một lệnh thì nó kill lệnh và kết
-  thúc lời gọi là `interrupted`.
+  thúc lời gọi với mã `output_limit` và `[output limit reached (256 MiB); the command was
+  killed]` (một process nền hiển thị `status: output_limit`). Nếu host không xác nhận lần
+  kill đó, lời gọi là `interrupted`.
 - **Lệnh nền** không có pid trên server (`metadata` chỉ có `process_id`), chết cùng
   session của chúng (`session.close`), `BashKill` và agent, và, qua host, cùng kết nối.
 - Output bị giới hạn như mọi backend: 4000 byte đầu và 26000 byte cuối của mỗi stream

@@ -42,7 +42,14 @@ content to let the model run a shell.
   added). It leaves out `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR`, which
   describe the server and mean nothing on the host (as the `docker` backend
   does); `SubprocessHost` fills them from its own environment. No provider
-  key or other server secret is in that environment.
+  key or other server secret is in the command's own environment.
+- `SubprocessHost` runs the command as the client's user, so the command can
+  read the client process's environment through `/proc` (`cat
+  /proc/$PPID/environ` shows what the client started with), as the
+  `Server` docstring already warns for the server process. Keep provider keys
+  and other secrets out of the client's environment (read them from a secret
+  store). An operator who needs more isolation than that runs the host as a
+  different user, or writes an `ExecutionHost` that does.
 - The host sees the model's commands and must be trusted with them; the
   server trusts the host's answers about output and exit codes, nothing
   more.
@@ -111,9 +118,16 @@ through the host.
   the run is cancelled, it sends `exec.kill` and reports `timed out` or
   `aborted` only after the host answered that the command is dead: the
   answer must carry the command's `exit`. When the scheduler gives the call
-  a deadline (`call_timeout_ms`), a remote command ends about 6 s before it
-  (the kill's 5 s and one read), so the kill answer and the output so far
-  still reach the model.
+  a deadline (`call_timeout_ms`), a remote command ends 6 s before it for a
+  deadline over about 12 s (the kill's 5 s and one read), and half of it
+  below that, so the kill answer and the output so far still reach the
+  model. A host that takes 5 s to confirm a kill needs a `call_timeout_ms`
+  of at least about 10 s: with a shorter one (or a `Bash` `timeout_ms` that
+  leaves less than the kill needs before it) the scheduler drops the call
+  first and the model reads `Tool "Bash" timed out after N ms` with no
+  output. Without `call_timeout_ms` the scheduler sets no deadline and the
+  `Bash` `timeout_ms` alone applies. Keep `call_timeout_ms` at 12 s or more
+  with a remote backend.
 - **A host that does not answer is `interrupted`.** If the host stops
   answering reads (6 s), errors, closes the connection, or does not confirm a
   kill (5 s, or an answer without `exit`), the call ends with code
@@ -131,7 +145,10 @@ through the host.
   `BashOutput` from the start.
 - **A host cannot flood the server.** The server waits at least 25 ms between
   reads that answer almost nothing, and past 256 MiB of output for one
-  command it kills the command and ends the call `interrupted`.
+  command it kills the command and ends the call with code `output_limit`
+  and `[output limit reached (256 MiB); the command was killed]` (a
+  background process reads `status: output_limit`). If the host does not
+  confirm that kill, the call is `interrupted` instead.
 - **Background commands** have no pid on the server (`metadata` has
   `process_id` only), die with their session (`session.close`), `BashKill`
   and the agent, and, through the host, with the connection.
