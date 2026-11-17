@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from live_core_support import PROVIDERS, Live, ask, make_config, retry_once, text_of
+from live_core_support import PROVIDERS, Live, ask, first, make_config, retry_once, text_of
 
 from linch_rust import (
     ChildRunStatusEvent,
@@ -83,7 +83,7 @@ async def test_a_foreground_subagent_runs_and_its_answer_reaches_the_parent(
         "report it.' Then tell me the vault code.",
         config=config,
     )
-    [call] = trace.ends("Subagent")
+    call = first(trace.ends("Subagent"), "a Subagent call")
     assert not call.is_error and "8842" in text_of(call)
     wrapped = trace.of(SubagentEvent)
     assert wrapped
@@ -126,7 +126,7 @@ async def test_a_background_subagent_delivers_its_result_back(live: Live, tmp_pa
         "'Read facts.txt and report it.' When it finishes, tell me the vault code.",
         config=config,
     )
-    [ack] = trace.ends("Subagent")
+    ack = first(trace.ends("Subagent"), "a Subagent call")
     assert "background" in text_of(ack).lower()
     statuses = [s.status for s in trace.of(ChildRunStatusEvent)]
     assert statuses[:1] == ["running"] and statuses[-1] == "completed"

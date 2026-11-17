@@ -143,6 +143,9 @@ async def test_sandbox_reads_its_workspace_and_refuses_everything_else(
     assert denied(seen["WRITE_OUTSIDE"]) and seen["_outside_exists"] == "False"
     assert "ok" not in seen["UNSHARE_USER"] and "ok" not in seen["UNSHARE_MOUNT"]
     assert "ok" not in seen["MOUNT_BIND"]
+    # Not discriminating on this host: local refuses mount and `unshare -m` too (no
+    # privilege, and AppArmor blocks `unshare -Ur`), so the seccomp mount filter is not
+    # shown independently. `unshare -U` (ok locally, refused here) shows the unshare filter.
     assert "connected" not in seen["NET"] and denied(seen["NET"])
 
 

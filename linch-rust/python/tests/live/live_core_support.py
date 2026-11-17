@@ -148,8 +148,11 @@ def retry_once(fn: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
     async def wrapper(*args: Any, **kwargs: Any) -> T:
         try:
             return await fn(*args, **kwargs)
-        except AssertionError as error:
-            print(f"[live retry] {fn.__name__}: {str(error)[:300]}", file=sys.stderr)
+        except (AssertionError, ValueError, IndexError, KeyError) as error:
+            print(
+                f"[live retry] {fn.__name__}: {type(error).__name__} {str(error)[:300]}",
+                file=sys.stderr,
+            )
             return await fn(*args, **kwargs)
 
     return wrapper
@@ -182,6 +185,12 @@ class Trace:
 
     def assistants(self) -> list[AssistantEvent]:
         return self.of(AssistantEvent)
+
+
+def first(items: list[T], what: str) -> T:
+    """The first of `items`; a model that skipped the step fails an assertion (retried)."""
+    assert items, f"the model never produced {what}"
+    return items[0]
 
 
 def text_of(end: ToolCallEndEvent) -> str:
@@ -267,6 +276,7 @@ __all__ = [
     "Trace",
     "ask",
     "drive",
+    "first",
     "live_server",
     "make_config",
     "message_text",

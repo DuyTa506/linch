@@ -124,3 +124,12 @@ async def test_vllm_qwen_refuses_effort_high_and_max_with_a_clean_error(
     [error] = trace.of(ErrorEvent)
     assert error.error["status"] == 400 and error.error["retryable"] is False
     assert trace.result.subtype == "error" and trace.result.total_usage["output_tokens"] == 0
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "max"])
+@pytest.mark.parametrize("live", ONLY_DEEPSEEK)
+@retry_once
+async def test_deepseek_effort_is_accepted_while_thinking(live: Live, effort: str) -> None:
+    config = make_config(live, live.spec(thinking={"type": "enabled"}, effort=effort))
+    trace = await ask(live, "What is 6 times 7? Answer with the number only.", config=config)
+    assert trace.result.subtype == "success" and "42" in (trace.result.final_text or "")

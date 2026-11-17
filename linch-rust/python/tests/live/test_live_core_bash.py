@@ -13,6 +13,7 @@ from live_core_support import (
     PROVIDERS,
     Live,
     drive,
+    first,
     live_server,
     make_config,
     retry_once,
@@ -55,7 +56,7 @@ async def test_bash_runs_in_the_workspace(live: Live, tmp_path: Path) -> None:
     trace = await run_commands(
         live, workspace, "Run this command: echo hello > out.txt && pwd && echo second-line"
     )
-    [end] = trace.ends("Bash")
+    end = first(trace.ends("Bash"), "a Bash call")
     assert not end.is_error
     assert (workspace / "out.txt").read_text() == "hello\n"
     text = text_of(end)
@@ -68,7 +69,7 @@ async def test_a_failing_command_is_an_error_result_with_its_exit_status(
     live: Live, tmp_path: Path
 ) -> None:
     trace = await run_commands(live, tmp_path.resolve(), "Run this command: sh -c 'exit 7'")
-    [end] = trace.ends("Bash")
+    end = first(trace.ends("Bash"), "a Bash call")
     assert end.is_error and end.error_code == "exit_status" and "7" in text_of(end)
     assert trace.result.subtype == "success"
 
@@ -82,7 +83,7 @@ async def test_a_background_command_is_read_with_bashoutput(live: Live, tmp_path
         "Call Bash with command `sh -c 'sleep 1; echo bg-finished-77'` and run_in_background "
         "true. Then call BashOutput with the returned process_id and wait_ms 8000.",
     )
-    [start] = trace.ends("Bash")
+    start = first(trace.ends("Bash"), "a Bash call")
     assert "BashOutput" in text_of(start) and start.metadata
     process_id = start.metadata["process_id"]
     assert re.fullmatch(r"bash_[0-9a-f]{12}", process_id)
@@ -100,7 +101,7 @@ async def test_bashkill_stops_a_background_command(live: Live, tmp_path: Path) -
         "Call Bash with command `sleep 300` and run_in_background true. Then call BashKill "
         "with the returned process_id.",
     )
-    [start] = trace.ends("Bash")
+    start = first(trace.ends("Bash"), "a Bash call")
     assert start.metadata and "pid" in start.metadata
     assert trace.ends("BashKill") and not trace.ends("BashKill")[0].is_error
     assert not alive(start.metadata["pid"])
@@ -114,7 +115,7 @@ async def test_a_command_past_its_timeout_is_killed(live: Live, tmp_path: Path) 
         tmp_path.resolve(),
         "Call Bash with command `sleep 60` and timeout_ms 1500.",
     )
-    [end] = trace.ends("Bash")
+    end = first(trace.ends("Bash"), "a Bash call")
     assert end.is_error and end.error_code == "timeout"
     assert end.duration_ms < 20_000
 
@@ -146,7 +147,7 @@ async def test_the_servers_secrets_do_not_reach_the_command(live: Live, tmp_path
             f"tr '\\0' '\\n' < /proc/{server.pid}/environ; echo ---; pwd"
         )
         trace = await drive(agent, await agent.run("s1", prompt), timeout=240)
-    [end] = trace.ends("Bash")
+    end = first(trace.ends("Bash"), "a Bash call")
     text = text_of(end)
     assert CANARY not in text and "LIVECORE_CANARY" not in text
     assert "DEEPSEEK_API_KEY" not in text and "sk-" not in text
