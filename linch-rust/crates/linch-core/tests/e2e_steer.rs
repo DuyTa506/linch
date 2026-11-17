@@ -447,6 +447,55 @@ async fn a_crash_at_any_write_of_the_steer_still_delivers_it_once() {
     }
 }
 
+/// A steer whose write failed after its claim leaves the suspended run
+/// `running` with nobody driving it. The run is not stuck: its checkpoint
+/// still says what it waits for, so the client approves, cancels or resumes
+/// it as it would the suspended run.
+#[tokio::test]
+async fn a_steer_whose_write_failed_leaves_a_run_the_client_can_still_end() {
+    for exit in ["approve", "cancel", "resume"] {
+        let stores = Arc::new(Stores::default());
+        let agent = suspended(&stores).await;
+        let runs = Runs::default();
+        let tools = registry(vec![Echo::new("Write", ToolScope::Write, &runs)]);
+        let provider = Arc::new(Replay::new(vec![tool_turn(0, 1, "Write")]));
+        // Write 1 is the steer's claim, write 2 its commit.
+        let faulty = Arc::new(Faulty::new(stores.clone(), 2, FaultTiming::Before));
+        let crashing = agent_on(provider, tools, PermissionMode::Default, faulty);
+        let failed = crashing
+            .steer(RunId::new("r1"), TEXT, Some("s1".into()))
+            .await;
+        assert!(failed.is_err(), "{exit}: {failed:?}");
+        let status = stores
+            .runs
+            .load(NS, &RunId::new("r1"))
+            .await
+            .unwrap()
+            .status;
+        assert_eq!(status, RunStatus::Running, "{exit}: claimed, not driven");
+
+        let run_id = RunId::new("r1");
+        let expected = match exit {
+            "approve" => {
+                finish(agent.approve(run_id.clone(), allow(), RunOptions::new("s1"))).await;
+                RunStatus::Completed
+            }
+            "cancel" => {
+                let cancelled = agent.cancel(run_id.clone(), RunOptions::new("s1")).await;
+                assert!(cancelled.unwrap(), "{exit}: the cancel ended the run");
+                RunStatus::Aborted
+            }
+            _ => {
+                let (_, error) = drain(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
+                assert!(error.is_none(), "{exit}: {error:?}");
+                RunStatus::AwaitingApproval
+            }
+        };
+        let status = stores.runs.load(NS, &run_id).await.unwrap().status;
+        assert_eq!(status, expected, "{exit}");
+    }
+}
+
 /// A steer sent during a tool batch of a running run: cut the run at every
 /// write, either side of it, and continue it. A steer whose call was
 /// answered is delivered once; one whose call failed, at most once.

@@ -260,3 +260,48 @@ async fn a_cancel_racing_a_live_approve_is_refused() {
     assert_eq!(status(&db, &run_id).await, RunStatus::Completed);
     db.finish().await;
 }
+
+/// A steer of a run another process drives is refused with `RunLeased`,
+/// which names the holder and how long its lease runs, and writes nothing.
+#[tokio::test]
+async fn a_steer_of_a_run_another_process_drives_names_its_holder() {
+    let Some(db) = TestDb::migrated("steer_leased").await else {
+        return;
+    };
+    let run_id = suspend(&Process::new(&db, None, false).await).await;
+    let b = Process::new(&db, None, true).await;
+    let mut approve = b
+        .agent
+        .approve(run_id.clone(), allow(), RunOptions::new(""));
+    let polled = async {
+        while let Some(item) = approve.next().await {
+            item.expect("the approve goes on until the tool");
+        }
+    };
+    tokio::select! {
+        () = polled => panic!("the tool waits"),
+        () = b.tool.entered.notified() => {}
+    }
+    let c = Process::new(&db, None, true).await;
+    let before = PgRunStore::new(db.pool.clone()).load("ns", &run_id).await;
+    let refused = c.agent.steer(run_id.clone(), "use tabs", None).await;
+    match refused {
+        Err(RunError::Store(StoreError::RunLeased {
+            owner, expires_in, ..
+        })) => {
+            assert!(!owner.is_empty());
+            assert!(expires_in > Duration::ZERO, "{expires_in:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let after = PgRunStore::new(db.pool.clone()).load("ns", &run_id).await;
+    let (before, after) = (before.unwrap(), after.unwrap());
+    assert_eq!(
+        (before.epoch, before.last_seq),
+        (after.epoch, after.last_seq)
+    );
+    b.tool.open.add_permits(1);
+    let rest: Vec<_> = approve.collect().await;
+    assert!(rest.last().unwrap().is_ok());
+    db.finish().await;
+}

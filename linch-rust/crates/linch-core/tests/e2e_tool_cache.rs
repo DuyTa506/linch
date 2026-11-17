@@ -667,6 +667,88 @@ async fn a_background_launch_ends_caching_for_the_agent() {
     assert_eq!(hits, [false, true, false, false, false]);
 }
 
+/// A store whose clear can be made to fail, over a shared in-memory one.
+struct FlakyClear {
+    inner: InMemoryToolCache,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl ToolCacheStore for FlakyClear {
+    async fn get(&self, namespace: &str, key: &str) -> Result<Lookup, ToolCacheError> {
+        self.inner.get(namespace, key).await
+    }
+    async fn put(
+        &self,
+        namespace: &str,
+        key: &str,
+        output: &ToolOutput,
+        epoch: u64,
+        limits: &PutLimits,
+    ) -> Result<bool, ToolCacheError> {
+        self.inner.put(namespace, key, output, epoch, limits).await
+    }
+    async fn clear(&self, namespace: &str) -> Result<(), ToolCacheError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(ToolCacheError("injected".into()));
+        }
+        self.inner.clear(namespace).await
+    }
+}
+
+/// A clear that fails ends caching for the agent that ran the write, and
+/// only that agent: the entries stay in the shared store, so another agent
+/// of the namespace (another server on a Postgres cache) serves them until
+/// their ttl. This pins that window.
+#[tokio::test]
+async fn a_failed_clear_leaves_entries_other_agents_still_serve() {
+    let flaky = Arc::new(FlakyClear {
+        inner: InMemoryToolCache::new(),
+        fail: std::sync::atomic::AtomicBool::new(false),
+    });
+    let shared: Arc<dyn ToolCacheStore> = flaky.clone();
+    let runs = Runs::default();
+    let tools = || -> Vec<Arc<dyn Tool>> {
+        vec![
+            Arc::new(Echo::new("Read", ToolScope::Read, &runs)),
+            Arc::new(Echo::new("Write", ToolScope::Write, &runs)),
+        ]
+    };
+    let first = agent_of(
+        cached(&["Read"]),
+        tools(),
+        script(&["Read"]),
+        &shared,
+        Hooks::default(),
+    );
+    finish(first.run("go", RunOptions::new("s1"))).await;
+
+    flaky.fail.store(true, Ordering::SeqCst);
+    let writer = agent_of(
+        cached(&["Read"]),
+        tools(),
+        script(&["Write", "Read"]),
+        &shared,
+        Hooks::default(),
+    );
+    let events = finish(writer.run("go", RunOptions::new("s1"))).await;
+    let writer_hits: Vec<_> = ends(&events).into_iter().map(|e| e.2).collect();
+    assert_eq!(writer_hits, [false, false], "the writer stopped caching");
+
+    let other = agent_of(
+        cached(&["Read"]),
+        tools(),
+        script(&["Read"]),
+        &shared,
+        Hooks::default(),
+    );
+    let events = finish(other.run("go", RunOptions::new("s1"))).await;
+    assert!(
+        ends(&events)[0].2,
+        "another agent still serves the entry the write should have cleared"
+    );
+}
+
 /// How a `tool_execute` layer treats the call.
 #[derive(Clone, Copy)]
 enum Layer {
