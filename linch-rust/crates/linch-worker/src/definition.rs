@@ -125,10 +125,37 @@ pub(crate) async fn check(
     counted: Counted,
 ) -> Result<(), WorkerError> {
     let Some(cap) = cap else { return Ok(()) };
+    lock(tx, counted, &cap.root).await?;
+    if full(tx, cap, counted).await? {
+        return Err(WorkerError::LimitReached {
+            what: counted.name(),
+            max: cap.max,
+        });
+    }
+    Ok(())
+}
+
+/// Take the transaction-scoped advisory lock that serializes the writers
+/// counting `counted` under `root`. A transaction may take it again.
+pub(crate) async fn lock(
+    tx: &mut Transaction<'static, Postgres>,
+    counted: Counted,
+    root: &str,
+) -> Result<(), WorkerError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("linch_worker_cap:{}:{}", counted.name(), cap.root))
+        .bind(format!("linch_worker_cap:{}:{root}", counted.name()))
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+/// Whether `cap`'s root already holds its `max`, counted inside `tx`
+/// (take [`lock`] first).
+pub(crate) async fn full(
+    tx: &mut Transaction<'static, Postgres>,
+    cap: &Cap,
+    counted: Counted,
+) -> Result<bool, WorkerError> {
     let sql = match counted {
         Counted::Schedules => {
             "SELECT count(*) FROM linch_worker_schedules WHERE split_part(namespace, '/', 1) = $1"
@@ -142,11 +169,5 @@ pub(crate) async fn check(
         .bind(&cap.root)
         .fetch_one(&mut **tx)
         .await?;
-    if u64::try_from(held).unwrap_or(0) >= cap.max {
-        return Err(WorkerError::LimitReached {
-            what: counted.name(),
-            max: cap.max,
-        });
-    }
-    Ok(())
+    Ok(u64::try_from(held).unwrap_or(0) >= cap.max)
 }

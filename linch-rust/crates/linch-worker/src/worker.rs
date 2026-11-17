@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::CHANNEL;
-use crate::definition::prune_definitions;
+use crate::definition::{Cap, prune_definitions};
 use crate::error::{WorkerError, chain, non_blank};
 use crate::execute::{Shared, execute};
 use crate::factory::AgentFactory;
@@ -108,6 +108,7 @@ pub struct Worker {
     agents: HashMap<String, Agent>,
     roots: Vec<String>,
     factory: Option<Arc<dyn AgentFactory>>,
+    job_caps: Vec<Cap>,
 }
 
 impl Worker {
@@ -119,6 +120,7 @@ impl Worker {
             agents: HashMap::new(),
             roots: Vec::new(),
             factory: None,
+            job_caps: Vec::new(),
         }
     }
 
@@ -141,6 +143,15 @@ impl Worker {
     ) -> Self {
         self.roots = roots.into_iter().collect();
         self.factory = Some(factory);
+        self
+    }
+
+    /// Skip a schedule's fire while its root holds `caps`' most unfinished
+    /// jobs (a tenant's `max_queued_jobs`), as `enqueue` refuses a run;
+    /// the fire counts in the schedule's `skips`. A root without a cap
+    /// fires as before. Replaces caps given before.
+    pub fn job_caps(mut self, caps: impl IntoIterator<Item = Cap>) -> Self {
+        self.job_caps = caps.into_iter().collect();
         self
     }
 
@@ -186,7 +197,7 @@ impl Worker {
         while !shutdown.is_cancelled() {
             if schedules_due(fired, self.config.poll_interval) {
                 fired = Some(Instant::now());
-                if let Err(error) = fire_due_schedules(&shared.pool).await {
+                if let Err(error) = fire_due_schedules(&shared.pool, &self.job_caps).await {
                     tracing::warn!(error = chain(&error), "firing schedules failed");
                 }
             }

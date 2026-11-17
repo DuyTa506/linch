@@ -316,7 +316,10 @@ async fn a_background_run_keeps_the_principal_it_was_made_for() {
     rpc.call(method::JOB_ENQUEUE, queued).await.unwrap();
     let pool = pool(&db).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(linch_worker::fire_due_schedules(&pool).await.unwrap(), 1);
+    assert_eq!(
+        linch_worker::fire_due_schedules(&pool, &[]).await.unwrap(),
+        1
+    );
     let stored: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT principal FROM linch_worker_schedules \
          UNION ALL SELECT principal FROM linch_worker_jobs",
@@ -697,7 +700,10 @@ async fn a_heartbeat_fires_again_once_its_suspended_run_is_cancelled() {
     };
     for _ in 0..2 {
         due().await;
-        assert_eq!(linch_worker::fire_due_schedules(&pool).await.unwrap(), 0);
+        assert_eq!(
+            linch_worker::fire_due_schedules(&pool, &[]).await.unwrap(),
+            0
+        );
     }
     let status = || async {
         let status: String = sqlx::query_scalar("SELECT status FROM linch_runs WHERE run_id = $1")
@@ -716,7 +722,10 @@ async fn a_heartbeat_fires_again_once_its_suspended_run_is_cancelled() {
     assert_eq!(cancelled, json!({"cancelled": true}));
     assert_eq!(status().await, "aborted");
     due().await;
-    assert_eq!(linch_worker::fire_due_schedules(&pool).await.unwrap(), 1);
+    assert_eq!(
+        linch_worker::fire_due_schedules(&pool, &[]).await.unwrap(),
+        1
+    );
 
     // A worker runs the fire: a new run in the session.
     let factory = BackgroundAgents::new(db.dsn.clone()).local("rpc");

@@ -92,7 +92,9 @@ impl BackgroundWorker {
             factory = factory.local(root.clone());
         }
         let roots = factory.roots();
-        let worker = Worker::new(pool, config).definitions(roots.clone(), Arc::new(factory));
+        let worker = Worker::new(pool, config)
+            .job_caps(factory.job_caps())
+            .definitions(roots.clone(), Arc::new(factory));
         Ok(Self { worker, roots })
     }
 

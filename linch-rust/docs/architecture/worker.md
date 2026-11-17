@@ -229,7 +229,7 @@ id. `list_schedules`, `get_schedule`, `pause_schedule`, `resume_schedule`
 (next fire from now: fires missed while paused are not made) and
 `delete_schedule` (queued and running jobs are left alone) complete the set.
 
-`fire_due_schedules(pool)` locks up to 64 due rows with
+`fire_due_schedules(pool, caps)` locks up to 64 due rows with
 `FOR UPDATE SKIP LOCKED` and, for each, enqueues one start job and moves
 `next_fire` to the first tick after this fire, or after now when that tick
 has passed too, all in one transaction:
@@ -248,12 +248,18 @@ has passed too, all in one transaction:
   pattern's are walked, at most 10,000 (`MISSED_COUNTED`). Python Linch
   fires each missed tick, in order; coalescing keeps a long downtime from
   queueing a run per missed tick.
+- **Skips.** A fire is skipped (`skips` + 1, `next_fire` moved on as for a
+  fire made) while a job of the schedule is not failed and not ended, for
+  every schedule; with a `session_id`, also while the session has a run
+  that is not terminal in `linch_runs` (one suspended for approval or input
+  included); and while its root is at the `Cap` on unfinished jobs the
+  caller passes (`fire_due_schedules(pool, caps)`, the worker's
+  `Worker::job_caps`, which `linch-server` fills with each tenant's
+  `max_queued_jobs`). The batch's capped roots are locked in sorted order
+  first, so two firers never wait on each other. Fires never pile up behind
+  a backlog or a run that waits for a person, and never fail at the cap.
 - **Sessions.** Without a `session_id`, each fire starts the session
-  `schedule:{id}:{fire time}`. With one, the fire is skipped (`skips` + 1)
-  while a job of the schedule is not failed and not ended, or the session
-  has a run that is not terminal in `linch_runs` (one suspended for approval
-  or input included). Fires never pile up behind a run that waits for a
-  person.
+  `schedule:{id}:{fire time}`; with one, every fire is a new run in it.
 - A stored timing that no longer parses pauses its schedule (logged)
   instead of blocking the others.
 
@@ -262,9 +268,10 @@ has passed too, all in one transaction:
 `Cap { root, max }` (`crates/linch-worker/src/definition.rs`) bounds what
 the namespaces under one root (a namespace's first `/`-separated segment, a
 tenant's name) may hold: schedules for `create_schedule`, unfinished jobs
-for `enqueue`. The count runs in the insert's transaction after a
-transaction-scoped advisory lock on the root, so writers on any server count
-each other's rows; past it, `LimitReached`.
+for `enqueue` and for a schedule's fire. The count runs in the insert's
+transaction after a transaction-scoped advisory lock on the root, so writers
+on any server count each other's rows; past it, `LimitReached`, or for a
+fire a skip.
 
 ## Agent definitions
 

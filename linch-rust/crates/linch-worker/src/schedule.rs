@@ -18,6 +18,12 @@
 //! session also skips a fire while an earlier fire's job is unfinished or
 //! the session has a live run. Resuming a paused schedule starts from now:
 //! the fires it missed while paused are not made.
+//!
+//! A fire is skipped (counted in `skips`, its next fire moved on as for a
+//! fire made) while an earlier fire's job of the schedule is unfinished,
+//! for every schedule, and while its root holds the [`Cap`] on unfinished
+//! jobs the caller gives (a tenant's `max_queued_jobs`): a backlog never
+//! stacks a job per fire, and fires never fail at the cap.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use linch_core::{Principal, SessionId};
@@ -447,7 +453,7 @@ pub async fn delete_agent_schedule(
 }
 
 /// Fire every due schedule once: enqueue its start job (or skip the fire
-/// while its fixed session is busy) and move its next fire to the first
+/// while it is busy or at its cap) and move its next fire to the first
 /// tick after this fire, or after now when that tick is past too (the
 /// missed ticks coalesce into this fire and count as skips). Workers call
 /// this once per poll interval; a host may call it too.
@@ -457,13 +463,16 @@ pub async fn delete_agent_schedule(
 ///
 /// Args:
 ///     pool: Pool for the queue's database.
+///     caps: The most unfinished jobs each root may hold, as `enqueue`
+///         counts them; a fire of a root at its cap is skipped. A root
+///         without one has no cap.
 ///
 /// Returns:
 ///     How many jobs this call enqueued.
 ///
 /// Raises:
 ///     WorkerError: If a query fails; nothing of the call is kept then.
-pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
+pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, WorkerError> {
     let mut tx = crate::begin(pool).await?;
     let due: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
@@ -475,10 +484,24 @@ pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
     .fetch_all(&mut *tx)
     .await?;
     let now = now(&mut tx).await?;
+    let due: Vec<ScheduleInfo> = due.into_iter().map(info).collect();
+    let cap_of = |schedule: &ScheduleInfo| {
+        let root = root(&schedule.namespace);
+        caps.iter().find(|cap| cap.root == root)
+    };
+    // The batch's capped roots, locked in one order, so two firers never
+    // wait on each other's roots.
+    let mut capped: Vec<&str> = (due.iter().filter_map(cap_of))
+        .map(|cap| cap.root.as_str())
+        .collect();
+    capped.sort_unstable();
+    capped.dedup();
+    for root in capped {
+        definition::lock(&mut tx, Counted::Jobs, root).await?;
+    }
     let mut fired = 0;
-    for row in due {
-        let schedule = info(row);
-        if fire(&mut tx, &schedule, now).await? {
+    for schedule in &due {
+        if fire(&mut tx, schedule, now, cap_of(schedule)).await? {
             fired += 1;
         }
     }
@@ -524,12 +547,19 @@ fn after_missed(
     Ok((tick, missed))
 }
 
-/// Make `schedule`'s due fire inside `tx`, at the database time `now`;
-/// whether it enqueued a job.
+/// A namespace's root: its first `/`-separated segment, as a [`Cap`]
+/// counts it.
+fn root(namespace: &str) -> &str {
+    namespace.split('/').next().unwrap_or(namespace)
+}
+
+/// Make `schedule`'s due fire inside `tx`, at the database time `now`,
+/// under `cap` (its root's lock already held); whether it enqueued a job.
 async fn fire(
     tx: &mut Transaction<'static, Postgres>,
     schedule: &ScheduleInfo,
     now: DateTime<Utc>,
+    cap: Option<&Cap>,
 ) -> Result<bool, WorkerError> {
     let (namespace, id) = (&schedule.namespace, &schedule.id);
     let fire_at = schedule.next_fire;
@@ -550,12 +580,18 @@ async fn fire(
     };
     let stamp = fire_at.to_rfc3339_opts(SecondsFormat::Micros, true);
     let key = format!("schedule:{id}:{stamp}");
-    let busy = match &schedule.session_id {
-        Some(session) => session_busy(tx, schedule, session).await?,
-        None => false,
+    let skip = if busy(tx, schedule).await? {
+        Some("its last fire's job is unfinished, or its session is busy")
+    } else {
+        match cap {
+            Some(cap) if definition::full(tx, cap, Counted::Jobs).await? => {
+                Some("its root holds its cap of unfinished jobs")
+            }
+            _ => None,
+        }
     };
-    let enqueued = if busy {
-        tracing::info!(%namespace, %id, %stamp, "skipping a fire: its session is busy");
+    let enqueued = if let Some(why) = skip {
+        tracing::info!(%namespace, %id, %stamp, why, "skipping a fire");
         false
     } else {
         let session = match &schedule.session_id {
@@ -593,7 +629,7 @@ async fn fire(
     .bind(next)
     .bind(fire_at)
     .bind(i64::from(enqueued))
-    .bind(i64::try_from(missed).unwrap_or(i64::MAX) + i64::from(busy))
+    .bind(i64::try_from(missed).unwrap_or(i64::MAX) + i64::from(skip.is_some()))
     .execute(&mut **tx)
     .await?;
     if missed > 0 {
@@ -602,25 +638,24 @@ async fn fire(
     Ok(enqueued)
 }
 
-/// Whether a fire of `schedule` into its fixed `session` must be skipped:
-/// an earlier fire's job is unfinished, or the session has a run that is
-/// not terminal (one in progress, or one suspended for an approval or an
-/// answer, which only a person ends).
-async fn session_busy(
+/// Whether a fire of `schedule` must be skipped: an earlier fire's job is
+/// unfinished, or its fixed session has a run that is not terminal (one in
+/// progress, or one suspended for an approval or an answer, which only a
+/// person ends).
+async fn busy(
     tx: &mut Transaction<'static, Postgres>,
     schedule: &ScheduleInfo,
-    session: &SessionId,
 ) -> Result<bool, WorkerError> {
     let busy: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM linch_worker_jobs \
                         WHERE namespace = $1 AND schedule_id = $2 AND failed_at IS NULL) \
              OR EXISTS (SELECT 1 FROM linch_runs \
-                        WHERE namespace = $1 AND session_id = $3 \
+                        WHERE $3::text IS NOT NULL AND namespace = $1 AND session_id = $3 \
                           AND status NOT IN ('completed', 'failed', 'aborted'))",
     )
     .bind(&schedule.namespace)
     .bind(&schedule.id)
-    .bind(session.as_str())
+    .bind(schedule.session_id.as_ref().map(SessionId::as_str))
     .fetch_one(&mut **tx)
     .await?;
     Ok(busy)

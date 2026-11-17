@@ -83,7 +83,7 @@ job fails with the reason. Each background run takes one of the tenant's
 |---|---|---|
 | `max_schedules` | no schedules | Schedules the tenant may keep in each database, across its namespaces. Absent: `create_schedule` raises `NotAllowed` (`kind == "schedules"`); at the cap, `LimitReached` (`kind == "schedules"`) |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires: an interval, or the closest fires of a cron pattern (over its next 512 fires). Faster: `NotAllowed` (`kind == "schedule_interval"`) |
-| `max_queued_jobs` | no background runs | Unfinished jobs (queued, running or retrying) the tenant may have when it calls `enqueue`. Absent: `NotAllowed` (`kind == "background_runs"`); at the cap, `LimitReached` (`kind == "jobs"`). Fires are not refused, only counted |
+| `max_queued_jobs` | no background runs | Unfinished jobs (queued, running or retrying) the tenant may have when it calls `enqueue`. Absent: `NotAllowed` (`kind == "background_runs"`); at the cap, `LimitReached` (`kind == "jobs"`). A schedule's fire at the cap is skipped (counted in `skips`), never failed; its jobs count toward the cap. Absent, fires have no cap |
 
 A stdio client has no tenant and no caps.
 
@@ -166,8 +166,11 @@ they go back) fires once, the first time. An interval ignores time zones.
 ### Sessions
 
 Without `session_id`, each fire starts its own session,
-`schedule:<id>:<fire time>`, so fires never share a conversation and may
-run at the same time.
+`schedule:<id>:<fire time>`, so fires never share a conversation. A fire
+is still skipped (counted in `skips`) while the schedule's previous fire's
+job is unfinished (queued, running or retrying), so a backlog never stacks
+a job per fire; a fire whose run suspended for a person no longer blocks
+the next.
 
 With `session_id`, every fire is a new run in that session: a heartbeat.
 

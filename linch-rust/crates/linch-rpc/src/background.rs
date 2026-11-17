@@ -75,6 +75,22 @@ impl BackgroundAgents {
         self
     }
 
+    /// The cap on unfinished jobs of each tenant with `max_queued_jobs`,
+    /// for [`linch_worker::Worker::job_caps`]: a schedule's fire there is
+    /// skipped at the cap, as `job.enqueue` is refused. A tenant without it,
+    /// and a local root, have none.
+    pub fn job_caps(&self) -> Vec<linch_worker::Cap> {
+        let mut caps: Vec<linch_worker::Cap> = (self.tenants.values())
+            .filter_map(|tenant| {
+                let max = tenant.allowlists().max_queued_jobs?;
+                let root = tenant.name().to_owned();
+                Some(linch_worker::Cap { root, max })
+            })
+            .collect();
+        caps.sort_by(|a, b| a.root.cmp(&b.root));
+        caps
+    }
+
     /// Every root this factory serves: the tenants' names and the local
     /// roots, for [`linch_worker::Worker::definitions`].
     pub fn roots(&self) -> Vec<String> {

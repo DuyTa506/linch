@@ -41,10 +41,10 @@ async fn a_heartbeat_skips_a_fire_while_its_last_one_is_unfinished() {
     beat.timing = Timing::Every(Duration::from_secs(3600));
     create_schedule(&db.pool, &beat, None).await.unwrap();
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     // Its job is still queued: the next fire is skipped, not stacked.
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 1);
     let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
     assert_eq!((info.fires, info.skips), (1, 1));
@@ -92,13 +92,13 @@ async fn a_heartbeat_skips_a_fire_while_its_session_has_a_live_run() {
         .await
         .unwrap();
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
     assert_eq!((info.fires, info.skips), (0, 1));
     // Still suspended at the next tick: still skipped.
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
 
     // Cancelled through the store, the run is terminal: the next fire runs.
     let probe = Probe::new("Write", ToolScope::Write, Hold::None);
@@ -107,7 +107,7 @@ async fn a_heartbeat_skips_a_fire_while_its_session_has_a_live_run() {
     assert!(canceller.cancel(run_id.clone(), options).await.unwrap());
     assert_eq!(db.status(&run_id).await, RunStatus::Aborted);
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     let worker = Running::spawn(&db.pool, config("w2"), agent(&db.pool, probe));
     let runs = || async {
         let runs: i64 =
@@ -290,6 +290,83 @@ async fn the_job_cap_counts_unfinished_jobs() {
     db.finish().await;
 }
 
+/// Any schedule, with a fixed session or not, skips a fire while its last
+/// fire's job is unfinished: a sessionless schedule no longer stacks a job
+/// per fire behind a backlog.
+#[tokio::test]
+async fn a_sessionless_schedule_skips_a_fire_while_its_last_job_is_unfinished() {
+    let Some(db) = TestDb::new("fire_unfinished").await else {
+        return;
+    };
+    let mut every = hourly("every");
+    every.session_id = None;
+    every.timing = Timing::Every(Duration::from_secs(3600));
+    create_schedule(&db.pool, &every, None).await.unwrap();
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
+    assert_eq!(db.jobs().await, 1);
+    let info = get_schedule(&db.pool, NS, "every").await.unwrap().unwrap();
+    assert_eq!((info.fires, info.skips), (1, 1));
+    // Once that job failed for good, the next fire is made.
+    db.sql("UPDATE linch_worker_jobs SET failed_at = now()")
+        .await;
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
+    db.finish().await;
+}
+
+/// A fire meets the tenant's `max_queued_jobs` as `enqueue` does, but is
+/// skipped (counted in `skips`, its next fire moved on), not failed.
+#[tokio::test]
+async fn a_fire_at_the_job_cap_is_skipped() {
+    let Some(db) = TestDb::new("fire_cap").await else {
+        return;
+    };
+    let cap = Cap {
+        root: NS.into(),
+        max: 2,
+    };
+    // One unfinished job already: room for one fire of the two.
+    enqueue(&db.pool, &request("s1", "d"), Some(&cap))
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        let mut every = hourly(id);
+        every.session_id = None;
+        every.timing = Timing::Every(Duration::from_secs(3600));
+        create_schedule(&db.pool, &every, None).await.unwrap();
+    }
+    make_due(&db, "1 second").await;
+    let before = crate::schedule::now(&db).await;
+    assert_eq!(
+        fire_due_schedules(&db.pool, std::slice::from_ref(&cap))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.jobs().await, 2);
+    let mut counts = Vec::new();
+    for id in ["a", "b"] {
+        let info = get_schedule(&db.pool, NS, id).await.unwrap().unwrap();
+        assert!(info.next_fire > before, "{id} moved on");
+        counts.push((info.fires, info.skips));
+    }
+    counts.sort_unstable();
+    assert_eq!(counts, [(0, 1), (1, 0)]);
+    // A cap of another root does not hold here.
+    let other = Cap {
+        root: "elsewhere".into(),
+        max: 0,
+    };
+    make_due(&db, "1 second").await;
+    db.sql("UPDATE linch_worker_jobs SET failed_at = now() WHERE schedule_id IS NOT NULL")
+        .await;
+    assert_eq!(fire_due_schedules(&db.pool, &[other]).await.unwrap(), 2);
+    db.finish().await;
+}
+
 /// The test schema's trigger on job inserts, which runs `body`.
 async fn job_insert_trigger(db: &TestDb, body: &str) {
     let sql = format!(
@@ -321,13 +398,13 @@ async fn a_fire_that_fails_before_its_commit_leaves_nothing() {
         .unwrap()
         .next_fire;
     job_insert_trigger(&db, "RAISE EXCEPTION 'crash';").await;
-    assert!(fire_due_schedules(&db.pool).await.is_err());
+    assert!(fire_due_schedules(&db.pool, &[]).await.is_err());
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
     assert_eq!((info.next_fire, info.fires), (due, 0), "nothing moved");
     drop_trigger(&db).await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 1);
 
     // The dedupe key guards the same fire time a second time.
@@ -338,7 +415,7 @@ async fn a_fire_that_fails_before_its_commit_leaves_nothing() {
         .unwrap();
     db.sql("UPDATE linch_worker_jobs SET schedule_id = NULL")
         .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 1);
     db.finish().await;
 }
@@ -355,7 +432,7 @@ async fn a_firer_killed_mid_transaction_leaves_nothing() {
     // after the schedule row was locked and before the commit.
     let firing = tokio::spawn({
         let pool = db.pool.clone();
-        async move { fire_due_schedules(&pool).await }
+        async move { fire_due_schedules(&pool, &[]).await }
     });
     wait_until("the firer sleeps in its insert", || async {
         let pid: Option<i32> = sqlx::query_scalar(
@@ -380,7 +457,7 @@ async fn a_firer_killed_mid_transaction_leaves_nothing() {
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
     assert_eq!(info.fires, 0);
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     assert_eq!(db.jobs().await, 1);
     db.finish().await;
 }
@@ -402,7 +479,7 @@ async fn concurrent_firers_make_each_fire_once() {
         tokio::spawn(async move {
             let mut total = 0;
             for _ in 0..10 {
-                total += fire_due_schedules(&pool).await.unwrap();
+                total += fire_due_schedules(&pool, &[]).await.unwrap();
             }
             total
         })
@@ -459,7 +536,7 @@ async fn a_definition_no_one_names_is_pruned() {
         .execute(&db.pool)
         .await
         .unwrap();
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     assert!(delete_schedule(&db.pool, NS, "beat").await.unwrap());
 
     // Its fire's job is unfinished: the definition stays.

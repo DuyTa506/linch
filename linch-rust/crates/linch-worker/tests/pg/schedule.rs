@@ -47,7 +47,7 @@ async fn next_fire(db: &TestDb, id: &str) -> DateTime<Utc> {
 pub async fn fire_all(db: &TestDb) -> u64 {
     let mut total = 0;
     loop {
-        let fired = fire_due_schedules(&db.pool).await.unwrap();
+        let fired = fire_due_schedules(&db.pool, &[]).await.unwrap();
         let due: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM linch_worker_schedules \
              WHERE enabled AND next_fire <= now())",
@@ -80,7 +80,7 @@ async fn a_due_schedule_fires_once_across_pollers() {
     let created = create_schedule(&db.pool, &every, None).await.unwrap();
     assert!(created.next_fire > now(&db).await);
     assert_eq!(
-        fire_due_schedules(&db.pool).await.unwrap(),
+        fire_due_schedules(&db.pool, &[]).await.unwrap(),
         0,
         "not due yet"
     );
@@ -88,7 +88,7 @@ async fn a_due_schedule_fires_once_across_pollers() {
     // Three ticks overdue, as if every worker had been down.
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '150 minutes'")
         .await;
-    let fired = join_all((0..8).map(|_| fire_due_schedules(&db.pool))).await;
+    let fired = join_all((0..8).map(|_| fire_due_schedules(&db.pool, &[]))).await;
     let fired: u64 = fired.into_iter().map(Result::unwrap).sum();
     // The missed fires coalesce into one, at the first missed tick.
     assert_eq!(fired, 1);
@@ -143,7 +143,7 @@ async fn missed_fires_coalesce_into_one() {
          SET next_fire = date_trunc('minute', now()) - interval '100 minutes'",
     )
     .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 2);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 2);
     assert_eq!(fire_all(&db).await, 0, "nothing else is due");
     let now = now(&db).await;
     for id in ["cron", "every"] {
@@ -205,14 +205,14 @@ async fn pause_resume_and_delete() {
     );
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '3 hours'")
         .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 0);
 
     // Resuming starts from now: the fires missed while paused are not made.
     let resumed = resume_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
     assert!(!resumed.paused);
     assert!(resumed.next_fire > now(&db).await);
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
 
     let listed = list_schedules(&db.pool, NS).await.unwrap();
     assert_eq!(listed.len(), 1);
@@ -293,7 +293,7 @@ async fn a_broken_stored_timing_pauses_only_its_schedule() {
         .await;
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '1 second'")
         .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     let paused: Vec<(String, bool)> = list_schedules(&db.pool, NS)
         .await
         .unwrap()

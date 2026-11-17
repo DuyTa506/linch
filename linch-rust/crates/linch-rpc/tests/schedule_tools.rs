@@ -130,6 +130,26 @@ async fn schedule_tools_need_a_tenant_with_schedules_and_a_background_agent() {
     assert_eq!(not_background(refused), "host_tools");
 }
 
+/// A worker built from the tenants skips a fire at the tenant's
+/// `max_queued_jobs`: the factory hands it the caps. A tenant without one
+/// has none.
+#[test]
+fn background_agents_cap_fires_at_max_queued_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let capped = allow(dir.path()).max_queued_jobs(Some(3));
+    let acme = Arc::new(Tenant::new("acme", capped).unwrap());
+    let beta = Arc::new(Tenant::new("beta", allow(dir.path())).unwrap());
+    let factory = BackgroundAgents::new("postgres://localhost/x")
+        .tenant(acme)
+        .tenant(beta)
+        .local("dev");
+    let acme = linch_worker::Cap {
+        root: "acme".into(),
+        max: 3,
+    };
+    assert_eq!(factory.job_caps(), [acme]);
+}
+
 /// A run on `agent` in `session` for `principal`, to its end.
 async fn run(rpc: &mut Rpc, agent: &str, session: &str, principal: Value) -> Vec<Envelope> {
     let params = json!({"agent": agent, "session_id": session, "prompt": "Go.",
