@@ -143,6 +143,53 @@ async fn a_command_cannot_signal_the_server() {
     assert_eq!(own, "stopped\n[exit code 0]");
 }
 
+/// The server runs as the same user, so a call that takes a pid could
+/// reach it: a command changes only its own limits. The limit asked for
+/// is the server's current one, so the test cannot change it even before
+/// the filter refuses.
+#[tokio::test]
+async fn a_command_cannot_change_the_servers_limits() {
+    let ws = Workspace::new();
+    let Some(backend) = sandbox(&ws, SandboxPolicy::default()) else {
+        return;
+    };
+    let tool = Bash::in_backend(&backend);
+    let (soft, hard) = {
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        (limit.current.unwrap(), limit.maximum.unwrap())
+    };
+    let other = any(run(
+        &tool,
+        &format!("prlimit --pid $PPID --nofile={soft}:{hard}"),
+    )
+    .await);
+    assert!(other.contains("Operation not permitted"), "{other}");
+    let own = text(run(&tool, "ulimit -n 256 && ulimit -n").await);
+    assert_eq!(own, "256\n[exit code 0]");
+}
+
+/// A new namespace (a user namespace needs no privilege) would give a
+/// command capabilities inside it: refused.
+#[tokio::test]
+async fn a_command_cannot_enter_a_new_namespace() {
+    if !Path::new("/usr/bin/unshare").is_file() {
+        eprintln!("skipped: no /usr/bin/unshare");
+        return;
+    }
+    let ws = Workspace::new();
+    let Some(backend) = sandbox(&ws, SandboxPolicy::default()) else {
+        return;
+    };
+    let tool = Bash::in_backend(&backend);
+    let out = any(run(&tool, "unshare --user true && echo entered").await);
+    assert!(out.contains("Operation not permitted"), "{out}");
+    // Threads still start (glibc falls back from `clone3` to `clone`).
+    if python() {
+        let threads = "python3 -c \"import threading; t = threading.Thread(target=print, args=('thread',)); t.start(); t.join()\"";
+        assert_eq!(text(run(&tool, threads).await), "thread\n[exit code 0]");
+    }
+}
+
 #[tokio::test]
 async fn the_network_is_off_unless_the_policy_turns_it_on() {
     if !python() {
@@ -176,6 +223,17 @@ async fn the_network_is_off_unless_the_policy_turns_it_on() {
     let tool = Bash::in_backend(&on);
     assert_eq!(text(run(&tool, &connect).await), "connected\n[exit code 0]");
     assert_eq!(text(run(&tool, udp).await), "udp\n[exit code 0]");
+    // Names resolve without a netlink socket, which is refused: glibc's
+    // `AI_ADDRCONFIG` falls back when it cannot list the interfaces.
+    let by_name = format!(
+        "python3 -c \"import socket; a = socket.getaddrinfo('localhost', {port}, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_ADDRCONFIG)[0][4]; socket.create_connection(a, 5); print('resolved')\""
+    );
+    assert_eq!(text(run(&tool, &by_name).await), "resolved\n[exit code 0]");
+    for family in ["AF_NETLINK", "AF_VSOCK", "AF_PACKET"] {
+        let open = format!("python3 -c \"import socket; socket.socket(socket.{family})\"");
+        let out = any(run(&tool, &open).await);
+        assert!(out.contains("PermissionError"), "{family}: {out}");
+    }
 }
 
 /// A Unix socket of the server's user (a session bus, a Docker socket)
