@@ -6,7 +6,6 @@ mod control;
 pub(crate) mod process;
 
 use std::collections::BTreeMap;
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,13 +17,18 @@ use linch_core::{
 use serde_json::json;
 use tokio::time::Instant;
 
-use crate::exec::{ExecutionBackend, Launch, LocalShell, Shell};
+use crate::exec::{ExecutionBackend, Exit, Launch, LocalShell, Shell};
 use crate::input::{coded, flag, optional_count, schema, string};
 use background::StartError;
 use process::{End, Finished};
 
 pub use background::{MAX_RUNNING, Processes};
 pub use control::{BashKill, BashOutput, NO_SUCH_PROCESS_CODE};
+
+/// The status line of a remote command whose end is unknown: its host went
+/// quiet, or did not confirm a kill.
+pub(crate) const INTERRUPTED: &str = "[interrupted: the remote host stopped answering, so the \
+     command's outcome is unknown; it may still be running]";
 
 /// Timeout when the call gives none, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -282,17 +286,15 @@ fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
     let (stdout, out_cut) = finished.stdout.render();
     let (stderr, err_cut) = finished.stderr.render();
     let (status, failure): (String, Option<(&str, JsonValue)>) = match finished.end {
-        End::Exited(status) => match (status.code(), status.signal()) {
-            (Some(0), _) => ("[exit code 0]".into(), None),
-            (Some(code), _) => (
-                format!("[exit code {code}]"),
-                Some(("exit_status", json!({"exit_code": code}))),
-            ),
-            (None, signal) => (
-                format!("[killed by signal {}]", signal.unwrap_or(0)),
-                Some(("exit_status", json!({"signal": signal}))),
-            ),
-        },
+        End::Exited(Exit::Code(0)) => ("[exit code 0]".into(), None),
+        End::Exited(Exit::Code(code)) => (
+            format!("[exit code {code}]"),
+            Some(("exit_status", json!({"exit_code": code}))),
+        ),
+        End::Exited(Exit::Signal(signal)) => (
+            format!("[killed by signal {signal}]"),
+            Some(("exit_status", json!({"signal": signal}))),
+        ),
         End::TimedOut => (
             format!("[timed out after {timeout_ms} ms; process group killed]"),
             Some(("timeout", JsonValue::Null)),
@@ -301,6 +303,7 @@ fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
             "[aborted; process group killed]".into(),
             Some(("aborted", JsonValue::Null)),
         ),
+        End::Interrupted => (INTERRUPTED.into(), Some(("interrupted", JsonValue::Null))),
     };
     let mut parts = Vec::new();
     if !stdout.is_empty() {

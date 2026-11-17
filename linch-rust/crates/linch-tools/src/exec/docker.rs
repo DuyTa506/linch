@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use super::{CLEANUP, Cleanup, ExecutionError, Launch, Shell, wait_at_most};
-use crate::bash::process::{self, Spawned};
+use crate::bash::process::{self, Spawned, Started};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -379,7 +379,7 @@ impl DockerShell {
 
 #[async_trait]
 impl Shell for DockerShell {
-    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned> {
+    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started> {
         let name = self.fresh_name();
         let (program, args) = self.argv(&name, &launch);
         let env = self.client_env(&launch);
@@ -393,10 +393,10 @@ impl Shell for DockerShell {
             args: vec!["rm".into(), "-f".into(), name],
             env,
         };
-        Ok(Spawned {
+        Ok(Started::Process(Spawned {
             child,
             cleanup: Some(cleanup),
-        })
+        }))
     }
 
     fn program(&self) -> &str {
@@ -765,7 +765,7 @@ mod tests {
         let env = BTreeMap::from([("LOG".to_owned(), log.display().to_string())]);
         let mut launch = launch(&env, false);
         launch.cwd = dir.path();
-        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap();
+        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap().into_process();
         for _ in 0..250 {
             if log.with_extension("pid").exists() {
                 break;

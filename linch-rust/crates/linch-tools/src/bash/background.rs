@@ -156,7 +156,7 @@ impl Processes {
         let (finished, done) = watch::channel(false);
         let proc = Arc::new(Proc {
             id: self.fresh_id(),
-            pid: spawned.child.id(),
+            pid: spawned.pid(),
             timeout,
             kill: CancellationToken::new(),
             state: Mutex::default(),
@@ -278,7 +278,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::bash::process::Spawned;
+    use crate::bash::process::Started;
     use crate::exec::LocalShell;
 
     /// A local shell that spawns only once `go` is notified.
@@ -290,7 +290,7 @@ mod tests {
 
     #[async_trait]
     impl Shell for Slow {
-        async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned> {
+        async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started> {
             self.waiting.notify_one();
             self.go.notified().await;
             LocalShell.spawn(launch).await
