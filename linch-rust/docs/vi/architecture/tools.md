@@ -496,6 +496,34 @@ session của run gốc trong cây của nó: `Tasks::session` (`tasks.rs:70`) �
 gắn chúng với session đang gọi). Một run mà store không biết thì dùng session của chính
 nó. Hợp đồng của store nằm ở trang [stores](./stores.md#task-store).
 
+## Tool bộ nhớ, tool lịch và ledger
+
+Ba bộ tool nữa được host gắn với thứ nó sở hữu, nên input của model không bao
+giờ đặt tên được namespace, scope hay hàng đợi:
+
+- `memory_tools(store, scope)` (`crates/linch-tools/src/memory.rs:79`) trả về
+  `MemorySave` và `MemoryDelete` (write) và `MemorySearch` (read) trên một
+  `MemoryStore` (`crates/linch-core/src/memory.rs:202`), được gắn với một
+  namespace khi dựng. Model chọn nội dung, tag, truy vấn và id; scope là
+  principal của run đang gọi, hoặc bộ nhớ chung của agent, và do host quyết
+  định. Mọi memory mà model đọc đều được escape trước (`memory.rs:1-14`), và
+  một lỗi của store đến model dưới dạng một văn bản cố định với mã `store`.
+  `MemoryRecall` (`memory_recall.rs`) là hook `context_build` tìm bằng tin nhắn
+  mới nhất của người dùng và thêm các kết quả khớp nhất vào đuôi request mà
+  thôi, trong 8 KiB và 300 ms, nên một store chậm chỉ làm request mất recall
+  chứ không mất gì khác. Store nằm ở trang [stores](./stores.md#store-postgres).
+- `schedule_tools(backend)` (`crates/linch-tools/src/schedules.rs:88`) trả về
+  `CreateSchedule` (exec), `ListSchedules` (read) và `CancelSchedule` (write)
+  trên một `ScheduleBackend`. Model chọn prompt và thời điểm. Phần gắn trong
+  `linch-rpc` (`schedule_tools.rs`) cố định định nghĩa agent đã lưu mà mỗi lần
+  fire chạy, principal, namespace, hàng đợi và các cap của tenant, và từ chối
+  lời gọi của một subagent. Phía worker nằm ở trang [worker](./worker.md#lịch-chạy).
+- `TaskLedgerContext` (`crates/linch-tools/src/ledger.rs`) là một hook
+  `context_build`, policy id `linch.tasks.ledger-context`, cho thấy các task
+  còn mở của một danh sách task dùng chung trong mỗi request. Nó không ghi gì
+  và khối đó không bao giờ vào log; ghi policy id trong `context_budget.pinned`
+  để giữ nó khi một budget bỏ bớt các khối.
+
 ## Viết một tool bằng Rust
 
 Đoạn này biên dịch và chạy được ở revision này. Nó đăng ký một tool scope read,

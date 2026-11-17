@@ -371,6 +371,15 @@ the run: `from_model`, `to_model` and `error` (the failure that ended
 `from_model`'s calls). Python Linch's event has a `reason` string in place of
 `error`.
 
+### `VerificationEvent` (`verification`)
+
+A check on the final answer found it wanting, or ran out of retries:
+`verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback` and
+`attempt`. The [output schema](./structured-output.md#what-the-run-checks)
+check emits it with `verifier` `output_schema`; a
+[verifier](./security.md#verifiers) with its `name`; a `stop` callback's
+retry under `spec.verification` with its `policy_id`.
+
 ### `BudgetEvent` (`budget`)
 
 The run's [budget](./agent.md#budget) crossed its warning ratio (`kind`
@@ -487,6 +496,11 @@ and `turn_index`; `ModelCallReceiptEvent` the same ids and `kind` with
 `ModelCallUsageSettlementEvent` `logical_call_id`, `usage`, `budget_owner_id`
 and `cost_usd`.
 
+`SteerReceivedEvent` (`steer_received`) is a [steer](./runs.md#steer) the run
+accepted, with `steer_id` and `text` (after prompt redaction). It is written
+before `steer` answers and never streamed; the `user` event of subtype
+`alignment` with the same `steer_id` marks it delivered to the model.
+
 ### Kinds the server does not emit yet
 
 The core declares these kinds and the client decodes each into its class,
@@ -495,7 +509,6 @@ but no run emits them today:
 | Class (`type`) | Fields |
 |---|---|
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
-| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt`. The [output schema](./structured-output.md#what-the-run-checks) check emits it with `verifier` `output_schema`; a [verifier](./security.md#verifiers) with its `name`; a `stop` callback's retry under `spec.verification` with its `policy_id` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

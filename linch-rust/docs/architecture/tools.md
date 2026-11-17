@@ -506,6 +506,36 @@ shares its coordinator's tasks (Python scopes them to the calling session). A
 run the store does not know uses its own session. The store contract is on the
 [stores](./stores.md#task-store) page.
 
+## Memory, schedule and ledger tools
+
+Three more tool sets are bound by the host to something it owns, so a model's
+input can never name the namespace, the scope or the queue:
+
+- `memory_tools(store, scope)` (`crates/linch-tools/src/memory.rs:79`) returns
+  `MemorySave` and `MemoryDelete` (write) and `MemorySearch` (read) over a
+  `MemoryStore` (`crates/linch-core/src/memory.rs:202`), which is bound to one
+  namespace when it is built. The model chooses the text, tags, query and id;
+  the scope is the calling run's principal, or the agent's shared memory, and
+  comes from the host. Every memory the model reads is escaped first
+  (`memory.rs:1-14`), and a store failure reaches it as a fixed text with the
+  code `store`. `MemoryRecall` (`memory_recall.rs`) is a `context_build` hook
+  that searches with the user's latest message and adds the best matches to
+  the request tail only, within 8 KiB and 300 ms, so a slow store costs a
+  request its recall and nothing else. The store is on the
+  [stores](./stores.md#postgres-stores) page.
+- `schedule_tools(backend)` (`crates/linch-tools/src/schedules.rs:88`) returns
+  `CreateSchedule` (exec), `ListSchedules` (read) and `CancelSchedule`
+  (write) over a `ScheduleBackend`. The model chooses the prompt and the
+  timing. The binding in `linch-rpc` (`schedule_tools.rs`) fixes the stored
+  agent definition a fire runs, the principal, the namespace, the queue and
+  the tenant's caps, and refuses a subagent's call. The worker side is on the
+  [worker](./worker.md#schedules) page.
+- `TaskLedgerContext` (`crates/linch-tools/src/ledger.rs`) is a
+  `context_build` hook, policy id `linch.tasks.ledger-context`, that shows the
+  open tasks of one shared task list with every request. Nothing is written
+  and the block never enters the log; name the policy id in
+  `context_budget.pinned` to keep it when a budget drops blocks.
+
 ## Write a tool in Rust
 
 This compiles and runs at this revision. It registers a read-scope tool,

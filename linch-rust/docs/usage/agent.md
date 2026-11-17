@@ -171,6 +171,7 @@ absent, except `bash`.
 | `execution` | `local`: `Bash` runs as the server's user | Where `Bash` runs: a `SandboxExecution` (Landlock, seccomp, rlimits) or a `DockerExecution` ([Sandbox](./sandbox.md)). Part of the run contract unless `local` |
 | `ask_user` | `False` | Whether the model has `AskUser`, which suspends the run until you answer ([Tools](./tools.md#ask-the-user)) |
 | `schedule_tools` | `False` | Whether the model has `CreateSchedule`, `ListSchedules` and `CancelSchedule`, which schedule runs of this agent; needs a tenant with `max_schedules` ([Scheduler](./scheduler.md#let-the-model-schedule)) |
+| `memory` | none | Long-term memory in the stores: the model gets `MemorySave`, `MemorySearch` and `MemoryDelete`, and may be shown the best matches before each request, `{"scope"?, "recall"?, "max_memories"?, "max_memories_per_scope"?}` ([Memory](./memory.md#built-in-long-term-memory)) |
 | `permissions` | mode `default`, project root the workspace (or `/`) | Which calls run, ask or are denied ([below](#permissions), [Security](./security.md#permission-modes)) |
 | `mcp_servers` | `[]` | MCP servers connected in order when the agent opens ([below](#mcp_servers)) |
 | `skills` | `False` | The `Skill` tool, with the built-in `verify` skill and those in `config_dir/skills` ([Skills](./skills.md)) |
@@ -185,6 +186,7 @@ absent, except `bash`.
 | `deep_agent` | none | The deep agent preset ([below](#deep_agent)) |
 | `profile` | none | A versioned domain role for the agent's runs ([below](#profile)) |
 | `max_provider_concurrency` | none: no limit | The most provider calls its runs, and those of agents on the same provider key and endpoint, make at once; the rest wait their turn ([Providers](./providers.md#limit-concurrent-calls)). Not part of the run contract |
+| `pricing` | none: the built-in table | USD per million tokens by exact model id, for a model the table lacks or to replace its rate ([Monitoring](./monitoring.md#how-cost-is-computed)) |
 
 ## `spec`
 
@@ -215,6 +217,8 @@ absent, except `bash`.
 | `truncation_recovery` | none: a cut answer is final | Continue a text answer the output limit cut off, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
 | `loop_guard` | on: 3 identical calls with the same result, 10 identical inputs, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_identical_inputs"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
 | `policy` | none: nothing is checked | Tools that may only run after others succeeded, and what a final answer must satisfy, `{"prerequisites"?, "gates"?, "max_corrections"?}` ([below](#policy)) |
+| `tool_retry` | none: a failed call is not run again | Run a tool again after an error result whose `code` is listed, for tools that declare themselves idempotent, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "retry_on"?, "tools"?}` ([Tools](./tools.md#tool_retry)) |
+| `tool_cache` | none: every call runs | Serve an identical call of a named read tool from a cache, `{"tools", "ttl_ms"?, "max_entries"?, "max_value_bytes"?, "invalidate_on_write"?, "scope"?}` ([Tools](./tools.md#tool_cache)) |
 
 ### System blocks
 

@@ -21,9 +21,9 @@ Linch bản Python dựng cùng các bảo đảm này trên một IoC container
 - `Disposable` là `Registration`. `dispose` của nó là đồng bộ và chạy phần hoàn tác
   một lần; hoàn tác thất bại sẽ không được thử lại (`crates/linch-core/src/registration.rs:38-48`).
 - Các dispatcher `emit`, `serial` và `waterfall` của Python không có tương đương trong
-  Rust. Các điểm mở rộng là mười chín chuỗi hook có kiểu, mỗi chuỗi cho một `HookPoint`,
+  Rust. Các điểm mở rộng là hai mươi ba chuỗi hook có kiểu, mỗi chuỗi cho một `HookPoint`,
   mỗi chuỗi có quy tắc riêng để kết hợp các câu trả lời
-  ([chuỗi hook](#chuỗi-hook)). Mười hai trong số đó chỉ quan sát: được thêm
+  ([chuỗi hook](#chuỗi-hook)). Mười ba trong số đó chỉ quan sát: được thêm
   để tương đương với các lifecycle hook của Python, chúng trả lời `()`/`{}`
   và không thể fail closed (`hooks/observe.rs`).
 - Các seam của `ToolPipeline` trong Python ánh xạ vào các điểm hook.

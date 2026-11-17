@@ -61,6 +61,14 @@ riêng, được tính vào [budget](./agent.md#budget). Nó được báo cáo 
 [event](./events.md#compactionevent-compaction) `compaction` với `strategy` là `summary`.
 Các callback `pre_compact` và `post_compact` nhìn thấy nó.
 
+Request tóm tắt chính là request mà lời gọi của chính lượt đó sẽ gửi (cùng system
+block, tool, thinking và message, từng byte, nên prompt cache của provider phục
+vụ được nó) cộng thêm một user message cuối yêu cầu viết bản tóm tắt. Bản tóm tắt
+được áp dụng dưới dạng một checkpoint message, mang theo nguyên văn các user
+message đã gấp lại, tối đa `keep_user_tokens`. Một câu trả lời có gọi tool, rỗng
+hoặc không nhỏ hơn phần nó thay thế bị từ chối: view giữ nguyên và event
+`compaction` nói lý do ([Kiến trúc](../architecture/compaction.md#lời-gọi-tóm-tắt)).
+
 Spec compaction là một phần của [run contract](./agent.md#the-run-contract): một run bắt
 đầu dưới một cài đặt không được resume dưới một cài đặt khác.
 
@@ -562,7 +570,8 @@ cache.
 | Khôi phục từ lỗi prompt-too-long, luôn bật | Chỉ với `spec.compaction`; không có nó, lần từ chối kết thúc run |
 | `reset_read_tracker` sau một lần compaction | Có sẵn cho agent workspace |
 | `TruncationRecovery` | `spec.truncation_recovery` |
-| `RagConnector`, `ContextBuilder`, `FileMemoryContextBuilder` | Một callback `context_build`; `linch_rust.memory.retrieval` |
+| `RagConnector`, `ContextBuilder` | Một callback `context_build`; `linch_rust.memory.retrieval` |
+| `FileMemoryContextBuilder` | `filesystem.memory` ([ở trên](#bộ-nhớ-dạng-tệp)) |
 | `ContextBudget` trên kết quả của một builder | `spec.context_budget`, trên các block của callback, theo `drop_order` và `pinned` được khai báo (Python bỏ message cũ nhất trước, rồi system block cũ nhất) |
 | `SystemPromptConfig` | `spec.system` ([Config của agent](./agent.md#system-sections)) |
 | `register_grounding_check` | Chưa xây: nó cần các id đã truy xuất trong run, được hai callback chia sẻ, và một budget sửa lỗi; các lần thử lại của `stop` bị giới hạn một lần cho mỗi lời gọi run trừ khi đặt `spec.verification` |

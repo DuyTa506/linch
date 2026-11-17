@@ -20,9 +20,9 @@ Python Linch builds the same guarantees on a scoped IoC container
 - `Disposable` is `Registration`. Its `dispose` is synchronous and runs its
   undo once; a failed undo is not retried (`crates/linch-core/src/registration.rs:38-48`).
 - Python's `emit`, `serial` and `waterfall` dispatchers have no Rust
-  counterpart. The extension points are nineteen typed hook chains, one per
+  counterpart. The extension points are twenty-three typed hook chains, one per
   `HookPoint`, each with its own rule for how answers combine
-  ([hook chains](#hook-chains)). Twelve of them only observe: added for
+  ([hook chains](#hook-chains)). Thirteen of them only observe: added for
   parity with Python's lifecycle hooks, they answer `()`/`{}` and cannot fail
   closed (`hooks/observe.rs`).
 - Python's `ToolPipeline` seams map onto the hook points. `tools/pre-execute`

@@ -277,6 +277,6 @@ với `InvalidToolChoice` (mã -32034) trước khi có gì được ghi.
 ## Các trang liên quan
 
 - [Config của agent](./agent.md#spec): phần còn lại của `spec`
-- [Run](./runs.md#errors-arrive-at-the-end-of-the-stream): `InvalidOutputSchema`, `InvalidToolChoice` và các lỗi khác
+- [Run](./runs.md#lỗi-đến-ở-cuối-stream): `InvalidOutputSchema`, `InvalidToolChoice` và các lỗi khác
 - [Event](./events.md): `VerificationEvent` và `ResultEvent`
-- [Kiến trúc: vòng đời lượt](../architecture/turn-lifecycle.md#the-loop-continues-while-a-response-has-tool-calls): nơi việc kiểm tra chạy và nó ghi gì
+- [Kiến trúc: vòng đời lượt](../architecture/turn-lifecycle.md#vòng-lặp-tiếp-tục-khi-response-có-lời-gọi-tool): nơi việc kiểm tra chạy và nó ghi gì

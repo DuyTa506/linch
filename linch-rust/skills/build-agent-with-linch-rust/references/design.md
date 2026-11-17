@@ -26,7 +26,8 @@ with each one. Skip any question the request already answers, and record your as
 | Risk | Which actions need a person's approval first? | Scopes, permission rules, approvals |
 | Knowledge | Where does the data live, how large is it, how fresh must it be? | Host tools, MCP, `context_build` callbacks |
 | Output | Who consumes the result, a person or another program? | Streaming, or `spec.output_schema` for an answer a program parses (`usage/structured-output.md`) |
-| Limits | What is the budget per run, and how long may it take? | `max_turns`, timeouts, model choice |
+| Limits | What is the budget per run, and how long may it take? | `max_turns`, `spec.budget`, timeouts, model choice |
+| Duration | Minutes, or hours with people checking in? | Long-run pieces below, `usage/long-running.md` |
 | Load | How often does it run, how many at once, how many tenants? | Sidecars, a shared server, pools |
 | Proof | What would make you say it works? | Tests and a task set, section 5 |
 
@@ -94,12 +95,59 @@ which no mode overrides. Cost is priced only for the models in the built-in tabl
 Pass a `principal` to every `run`, `resume` and `approve` that acts for someone. A shared
 `linch-server --config` adds per-tenant tokens, allowlists for providers, paths, DSNs and MCP
 commands, and caps on runs, agents and connections (`usage/server.md`). Keys stay in the
-server's environment.
+server's environment. Admission denies by default what a tenant could abuse: `Bash`
+(`exec_tools`), execution backends, tool cache, long-term memory, schedules, the task ledger and
+provider lookups each need their `allow` entry, and the operator may add `system_sections` and a
+`required_policy` every agent of the tenant carries. List which of these each tenant needs.
 
 **Context.** Prefer host tools, MCP servers or a `context_build` callback that adds retrieved
 blocks over stuffing data into the prompt (`usage/agent.md`). Long sessions need
 `spec.compaction`; large tool results need `filesystem` offload; a large tool catalog needs
 `tool_search`.
+
+**Long runs.** A run that lasts hours loses its goal to compaction, its process to a restart and
+its definition of "done" to the model's optimism. Keep outside the conversation: the goal as a
+`spec.system` section (compaction cannot rewrite it), progress as `tasks` with `task_ledger`
+shared by every session, results in `filesystem` files, and the verdict in your code, which reads
+the ledger, the files and `agent.events` after the run (`usage/long-running.md`). Steer with
+`agent.steer` for what a person would say mid-run. Test it the way it fails: low compaction
+threshold, SIGKILL the sidecar, resume on Postgres, start a fresh session, assert on the durable
+state and not on the model's words.
+
+**Staying on task.** Lean on the defaults first: `loop_guard` is on, and `max_turns` bounds the
+rest. Add `spec.policy` when order matters (`Read` before `Edit`) or "done" needs evidence (a test
+tool succeeded, the answer cites a source); each failed gate is a correction turn, bounded by
+`max_corrections`. It steers the model and guards nothing: a prerequisite does not stop `Bash` from
+doing the work, so keep permissions and the sandbox for security. Use `tool_choice` only when the
+answer must come through a tool, with a final tool or `max_turns` to end it.
+
+**Tool reliability.** `tool_retry` re-runs only tools declared idempotent, after a coded transient
+error; it never doubles an effect across a restart. `tool_cache` serves identical read calls and is
+your promise that the tool answers the same for the same input; it is per session unless
+`scope: "namespace"`, and background work in the workspace switches it off. Both are optional and
+leave the run contract alone when unset.
+
+**Memory.** Decide what must outlive what. This run: the history, with compaction. This
+conversation's notes: `filesystem.memory`. Facts across sessions and for background agents:
+`memory` with `scope` `principal` (one user's facts never reach another) or `agent` (shared, so
+one user's text, or an injection, reaches every user; choose it knowingly), with `max_memories`.
+Your own corpus: a `context_build` retrieval callback. Memories are untrusted data to the model.
+
+**Commands.** `Bash` runs as the server's user unless `execution` says otherwise. Choose `sandbox`
+(Landlock and seccomp, Linux 6.12 or later, no daemon) when the model runs commands in a workspace,
+`docker` when you need an image's tools, and a shared server's `allow.execution` to pin tenants to
+one. Neither replaces permission rules.
+
+**Provider fit.** Before settling on a self-hosted model, ask `server.provider_capabilities(config)`
+(keyless) and `server.list_models(provider)`: context window and its source, whether structured
+output is native or a final tool, which tool choices it refuses, thinking and vision.
+`max_provider_concurrency` keeps many runs from exceeding one key's rate limit; `provider_retry`
+and `fallback_models` handle outages.
+
+**Schedules.** Cron, interval and heartbeat runs, and `schedule_tools` for the model's own
+follow-ups, need Postgres stores, an agent without host tools or callbacks, and a worker process.
+A heartbeat continues one session and skips a fire while that session is busy. A tenant needs
+`max_schedules` (`usage/scheduler.md`).
 
 **Load.** Decide where the kernel runs: one `Server()` sidecar per process, several sidecars
 with sessions spread across them, or one shared server. Size `stores.max_connections` at about
