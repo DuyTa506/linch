@@ -552,11 +552,84 @@ async fn a_subagent_cannot_create_schedules() {
     let envelopes = run(&mut rpc, &agent, "s", ada).await;
     let log = serde_json::to_string(&envelopes).unwrap();
     assert!(log.contains("a subagent cannot create schedules"), "{log}");
+    assert_eq!(child_codes(&rpc, &agent, &db).await, ["not_allowed"]);
     let listed = rpc
         .call(method::SCHEDULE_LIST, json!({"agent": agent}))
         .await
         .unwrap();
     assert_eq!(listed, json!({"schedules": []}));
+    db.drop().await;
+}
+
+/// The error code of each tool result of every child run in the database.
+async fn child_codes(rpc: &Rpc, agent: &str, db: &TestDb) -> Vec<String> {
+    let pool = pool(db).await;
+    let children: Vec<String> =
+        sqlx::query_scalar("SELECT run_id FROM linch_runs WHERE parent_run_id IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(!children.is_empty(), "a child ran");
+    let mut found = Vec::new();
+    for child in children {
+        let params = json!({"agent": agent, "run_id": child});
+        let events = rpc.call(method::RUN_EVENTS, params).await.unwrap();
+        let events: Events = serde_json::from_value(events).unwrap();
+        found.extend(codes(&events.events).into_iter().flatten());
+    }
+    found
+}
+
+/// A background subagent's call is refused too, with `not_allowed`: its
+/// durable child run is a child run however it was started. The parent's
+/// own call, racing it for the scripted turns, makes the only schedule.
+#[tokio::test]
+async fn a_background_subagent_cannot_create_schedules() {
+    let Some(db) = TestDb::empty("stools_bg_child").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db).max_schedules(Some(4));
+    let mut rpc = Rpc::remote(tenant("acme", allowed));
+    let spawn = json!({"description": "schedule", "prompt": "Schedule it.",
+                       "run_in_background": true});
+    let create = || {
+        tool_turn(
+            "c1",
+            "CreateSchedule",
+            json!({"payload": "p", "interval_s": 3600}),
+        )
+    };
+    // The parent and the child take the next turns in either order: both
+    // create, then both answer, then the parent hears of the child.
+    let turns = vec![
+        tool_turn("sub", "Subagent", spawn),
+        create(),
+        create(),
+        text_turn("done"),
+        text_turn("done"),
+        text_turn("done"),
+    ];
+    let mut on = on_postgres(config(turns, "acme", dir.path()), &db);
+    on["subagents"] = json!(true);
+    on["workers"] = json!({"background": true});
+    on["config_dir"] = json!(dir.path());
+    let agent = rpc.open(on).await;
+    let ada = json!({"tenant": "acme", "user": "ada", "roles": []});
+    let params = json!({"agent": agent, "session_id": "s", "prompt": "Go.", "principal": ada});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    assert_eq!(child_codes(&rpc, &agent, &db).await, ["not_allowed"]);
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    assert!(
+        (listed.schedules.iter()).all(|s| s.id.starts_with(run_id.as_str())),
+        "only the parent's: {listed:?}"
+    );
     db.drop().await;
 }
 
