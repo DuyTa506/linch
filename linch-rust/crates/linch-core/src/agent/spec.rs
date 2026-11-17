@@ -10,6 +10,7 @@ use crate::budget::RunBudget;
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
 use crate::context_budget::ContextBudget;
+use crate::gates::ReliabilityPolicy;
 use crate::json::JsonObject;
 use crate::loop_guard::LoopGuard;
 use crate::message::SystemBlock;
@@ -185,6 +186,14 @@ pub struct AgentSpec {
     /// before this existed. A subagent's runs do not use it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_cache: Option<ToolCache>,
+    /// Which tools must succeed before another may run, and what a run must
+    /// have done before it may end (see [`crate::gates`]). `None` (the
+    /// default) checks nothing and is left off the wire, so a spec that
+    /// does not set it keeps the contract of a spec written before
+    /// policies existed. A subagent's runs take its prerequisites, not its
+    /// gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ReliabilityPolicy>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -220,6 +229,7 @@ impl AgentSpec {
             final_tool_name: None,
             tool_retry: None,
             tool_cache: None,
+            policy: None,
         }
     }
 
@@ -608,6 +618,47 @@ mod tests {
             let ok = read.is_ok_and(|spec| spec.tool_cache.is_some_and(|c| c.problem().is_none()));
             assert!(!ok, "{refused}");
         }
+    }
+
+    /// A spec with no policy is off, off the wire and the contract it had
+    /// before policies existed; any policy, an empty one included, is on
+    /// the wire and a contract of its own.
+    #[test]
+    fn a_spec_without_a_policy_keeps_its_wire_shape_and_contract() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let unset = AgentSpec::new("m");
+        assert_eq!(unset.policy, None);
+        let wire = serde_json::to_value(&unset).unwrap();
+        assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+        let golden = "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300";
+        let digest = contract_digest(&unset, &[], hooks, &none).unwrap();
+        assert_eq!(digest.to_string(), golden);
+        let null: AgentSpec =
+            serde_json::from_value(json!({"model": "m", "policy": null})).unwrap();
+        assert_eq!(null, unset, "null is unset");
+
+        let mut seen = vec![golden.to_owned()];
+        for policy in [
+            json!({}),
+            json!({"max_corrections": 5}),
+            json!({"prerequisites": [{"tool": "b", "requires": ["a"]}]}),
+            json!({"gates": [{"name": "g", "succeeded": ["a"]}]}),
+            json!({"gates": [{"name": "g", "succeeded": ["a"], "min_calls": 2}]}),
+        ] {
+            let read: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "policy": policy})).unwrap();
+            let wire = serde_json::to_value(&read).unwrap();
+            assert_eq!(wire["policy"], policy, "the policy is on the wire as set");
+            assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), read);
+            let digest = contract_digest(&read, &[], hooks, &none)
+                .unwrap()
+                .to_string();
+            assert!(!seen.contains(&digest), "{policy}");
+            seen.push(digest);
+        }
+        let typo = json!({"model": "m", "policy": {"gate": []}});
+        assert!(serde_json::from_value::<AgentSpec>(typo).is_err());
     }
 
     #[test]

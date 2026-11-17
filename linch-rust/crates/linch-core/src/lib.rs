@@ -25,6 +25,7 @@ pub mod compaction;
 pub mod context_budget;
 pub mod coordination;
 pub mod events;
+pub mod gates;
 pub mod hooks;
 pub mod ids;
 pub mod journal;
@@ -69,6 +70,7 @@ pub use coordination::{Correlator, InMemoryMailbox, Mailbox, MailboxError, Mailb
 pub use events::{
     Envelope, Event, EventError, IgnorableEvent, Persistence, SubagentEvent, WIRE_VERSION,
 };
+pub use gates::{CompletionGate, Prerequisite, ReliabilityPolicy};
 pub use hooks::{
     CallbackError, ChainResult, Hook, HookChain, HookError, HookRecord, HookStatus, Hooks, Point,
     ToolMatcher,

@@ -1,6 +1,6 @@
 //! The tool half of a turn: plan, suspend or run, collect the results.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::cancel::Unpaired;
 use super::sink::JournalSink;
@@ -58,14 +58,17 @@ impl Runner {
                 }));
             }
         }
+        let refusals = self.refusals(&blocks);
         let (agent, run) = (&self.agent, &self.run);
-        let plan = scheduler::plan(
+        let held_back = |block: &ToolUseBlock| refusals.get(&block.id).map(|r| r.message.clone());
+        let plan = scheduler::plan_gated(
             &blocks,
             &self.snapshot,
             &agent.permissions,
             &agent.hooks,
             run,
             &approvals,
+            &held_back,
         );
         // A cancel, even one that came before approve or resume, aborts
         // without asking the hooks (again), each call answered so the
@@ -83,6 +86,22 @@ impl Runner {
             plan.refuse_inputs(CANNOT_WAIT);
         }
         self.refuse_unoffered(&mut plan);
+        if !refusals.is_empty() {
+            // The calls the policy answered, not those refused first for
+            // another reason (an unknown tool).
+            let gated: HashSet<String> = (plan.calls().iter())
+                .filter(
+                    |call| match (&call.action, refusals.get(&call.tool_use_id)) {
+                        (PlannedAction::Error { error }, Some(refusal)) => {
+                            error.message == refusal.message
+                        }
+                        _ => false,
+                    },
+                )
+                .map(|call| call.tool_use_id.clone())
+                .collect();
+            self.stage_refusals(&blocks, &refusals, &gated);
+        }
         for call in plan.calls() {
             let records = call.hook_records.clone();
             self.push_records(records, Some(&call.tool_use_id));

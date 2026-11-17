@@ -47,9 +47,12 @@ pub(super) enum Checked {
 }
 
 impl Runner {
-    /// Check the text-only answer `text` against the run's schema, then
-    /// the agent's verifiers.
+    /// Check the text-only answer `text` against the policy's completion
+    /// gates, then the run's schema, then the agent's verifiers.
     pub(super) async fn check_answer(&mut self, text: &str) -> Result<Checked, RunError> {
+        if let Some(checked) = self.gate_answer(text).await? {
+            return Ok(checked);
+        }
         let value = match self.output.clone() {
             None => None,
             Some(output) => match output.check(text) {

@@ -291,6 +291,35 @@ pub(super) fn budget_event() -> impl Strategy<Value = BudgetEvent> {
         )
 }
 
+pub(super) fn policy_event() -> impl Strategy<Value = PolicyEvent> {
+    (
+        prop_oneof![Just(PolicyRule::Prerequisite), Just(PolicyRule::Completion)],
+        prop_oneof![
+            Just(PolicyAction::Refuse),
+            Just(PolicyAction::Correct),
+            Just(PolicyAction::Stop)
+        ],
+        option::of(short_string()),
+        option::of(short_string()),
+        vec(short_string(), 0..3),
+        vec(short_string(), 0..3),
+        any::<u64>(),
+        short_string(),
+    )
+        .prop_map(
+            |(rule, action, tool, tool_use_id, gates, missing, attempt, detail)| PolicyEvent {
+                rule,
+                action,
+                tool,
+                tool_use_id,
+                gates,
+                missing,
+                attempt,
+                detail,
+            },
+        )
+}
+
 pub(super) fn provider_retry_event() -> impl Strategy<Value = ProviderRetryEvent> {
     (short_string(), any::<u32>(), any::<u64>(), json_object(1)).prop_map(
         |(model, retry, delay_ms, error)| ProviderRetryEvent {

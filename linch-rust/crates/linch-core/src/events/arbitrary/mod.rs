@@ -239,6 +239,7 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
         builders::provider_retry_event()
             .prop_map(Event::ProviderRetry)
             .boxed(),
+        builders::policy_event().prop_map(Event::Policy).boxed(),
         builders::model_fallback_event()
             .prop_map(Event::ModelFallback)
             .boxed(),

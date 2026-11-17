@@ -172,11 +172,29 @@ pub async fn plan(
     run: &RunIdentity,
     approvals: &HashMap<String, RecordedApproval>,
 ) -> BatchPlan {
+    plan_gated(blocks, tools, permissions, hooks, run, approvals, &|_| None).await
+}
+
+/// [`plan`], with a `gate` that may refuse a call before anything else
+/// is asked about it: it gets the call, and an error message answers the
+/// call with an error result, without the `pre_tool_use` chain, permission
+/// or approval (the call is as an unknown tool's). A call whose tool did
+/// not resolve is never gated.
+pub(crate) async fn plan_gated(
+    blocks: &[ToolUseBlock],
+    tools: &ToolSnapshot,
+    permissions: &PermissionEngine,
+    hooks: &Hooks,
+    run: &RunIdentity,
+    approvals: &HashMap<String, RecordedApproval>,
+    gate: &(dyn Fn(&ToolUseBlock) -> Option<String> + Sync),
+) -> BatchPlan {
     let planner = Planner {
         permissions,
         hooks,
         run,
         approvals,
+        gate,
     };
     let mut calls = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -202,6 +220,7 @@ pub(crate) async fn plan_one(
         hooks,
         run,
         approvals: &approvals,
+        gate: &|_| None,
     };
     planner.call(block, Some(tool)).await
 }
@@ -211,6 +230,7 @@ struct Planner<'a> {
     hooks: &'a Hooks,
     run: &'a RunIdentity,
     approvals: &'a HashMap<String, RecordedApproval>,
+    gate: &'a (dyn Fn(&ToolUseBlock) -> Option<String> + Sync),
 }
 
 impl Planner<'_> {
@@ -231,6 +251,12 @@ impl Planner<'_> {
             };
             return call;
         };
+        if let Some(message) = (self.gate)(block) {
+            call.action = PlannedAction::Error {
+                error: ToolOutputError::new(message),
+            };
+            return call;
+        }
         match tool.validate_input(block.input.clone()) {
             Ok(input) => call.input = input,
             Err(error) => {

@@ -125,6 +125,9 @@ impl Runner {
             Decided::Over(next) => return Ok(next),
         };
         let text = JsonValue::Object(input.clone()).to_string();
+        if let Some(checked) = self.gate_answer(&text).await? {
+            return Ok(step(checked));
+        }
         let checked = match &self.output {
             Some(output) => output.check_value(JsonValue::Object(input)).map(Some),
             None => Ok(Some(input)),
@@ -142,6 +145,9 @@ impl Runner {
             Stopping::Continue(feedback) => return Ok(Some(feedback)),
             Stopping::Ended => return Ok(None),
         };
+        if self.gate_rewrite(&text, &answer).await?.is_some() {
+            return Ok(None);
+        }
         let value = match self.recheck(&registered, &text, &answer, value).await? {
             Checked::Valid(value) => value,
             other => return Ok(step(other)),

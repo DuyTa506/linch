@@ -19,6 +19,7 @@ use crate::events::kinds::{
     InitEvent, SkillsLoadedEvent, ToolCallEndEvent, ToolCallStartEvent, UserEvent, UserEventSubtype,
 };
 use crate::events::{Envelope, Event};
+use crate::gates::Gates;
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, ToolRecovery, reconcile};
@@ -507,6 +508,7 @@ pub(super) async fn continue_run(
     runner.verify_retries = crate::verification::retries_spent(&events);
     let polls = runner.agent.snapshot().polls();
     runner.watch = Watch::of(&runner.agent.spec.loop_guard, polls, &events);
+    runner.gates = (runner.agent.gates.clone()).map(|rules| Gates::of(rules, &events));
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
     if let Some(truncation) = &runner.agent.spec.truncation_recovery {

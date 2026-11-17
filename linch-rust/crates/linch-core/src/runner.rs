@@ -72,6 +72,7 @@ mod fail;
 mod family;
 mod final_tool;
 mod gate;
+mod gates;
 mod hooks;
 mod inbox;
 mod lease;

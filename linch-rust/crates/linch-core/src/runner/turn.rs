@@ -23,6 +23,7 @@ use crate::catalog::Catalog;
 use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
 use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
+use crate::gates::Gates;
 use crate::journal::{Journal, ToolRecovery};
 use crate::loop_guard::Watch;
 use crate::message::Message;
@@ -193,6 +194,9 @@ pub(super) struct Runner {
     /// What the run spent retrying tool calls (see
     /// [`crate::tool_retry::RETRY_BUDGET`]); a resumed run starts at zero.
     pub(super) retry_clock: Arc<RetryClock>,
+    /// What the reliability policy counted of the run, read back from its
+    /// durable log on a resume; `None` without a policy.
+    pub(super) gates: Option<Gates>,
 }
 
 impl Runner {
@@ -211,6 +215,7 @@ impl Runner {
         let watch = Watch::new(&agent.spec.loop_guard, agent.snapshot().polls());
         let tool_choice = agent.spec.tool_choice.clone();
         let final_tool = agent.final_tool.clone();
+        let gates = agent.gates.clone().map(Gates::new);
         let mut runner = Self {
             snapshot: agent.snapshot(),
             narrowed: false,
@@ -246,6 +251,7 @@ impl Runner {
             final_tool,
             unpaired: None,
             retry_clock: Arc::default(),
+            gates,
         };
         runner.narrow();
         runner
@@ -381,10 +387,14 @@ impl Runner {
         }
     }
 
-    /// Stage `event` and count it for the loop guard: the live counts are
-    /// those [`Watch::of`] reads back from the durable log.
+    /// Stage `event` and count it for the loop guard and the reliability
+    /// policy: the live counts are those [`Watch::of`] and [`Gates::of`]
+    /// read back from the durable log.
     pub(super) fn stage_seen(&mut self, event: Event) {
         self.watch.see(&event);
+        if let Some(gates) = &mut self.gates {
+            gates.see(&event);
+        }
         self.journal.stage(event);
     }
 
