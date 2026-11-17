@@ -618,6 +618,51 @@ cùng `AssistantReceived` như trước, từng byte một (được cố địn
 `without_hooks_the_receipt_rides_the_response_write`,
 `crates/linch-core/tests/e2e_durable_receipt.rs`).
 
+## Steering
+
+`Agent::steer` (`agent/steer.rs`, `run.steer` qua RPC) đưa text vào một run
+đang chạy. Nó là một đầu vào điều khiển run như approve và cancel, không phải
+message của mailbox: model không thể gửi nó.
+
+- **Tiếp nhận.** Một run đăng ký một inbox trong map `Steering` của agent khi
+  nó bắt đầu hoặc tiếp tục (`runner/steer.rs`, `attach_steering`);
+  `Agent::steer` gửi text vào đó. Ở đầu mỗi bước runner rút inbox
+  (`take_steers`): nó stage một event `steer_received` chỉ-journal, flush một
+  lần, emit nó, rồi mới trả lời `{queued, id}`. Vậy câu trả lời là bền vững,
+  và phải chờ bước đang chạy (một lần gọi model hay một batch tool giữ journal).
+  Một id gửi lại được trả lời mà không tạo event thứ hai; hơn 16 steer chưa đọc
+  là `SteerQueueFull`.
+- **Một run bị suspend** (chờ approval hoặc câu trả lời) mà không runner nào
+  của process này lái được claim, được ghi event dưới claim, rồi được đặt lại
+  trạng thái cũ (`steer_stored`). Một lease còn sống ở nơi khác là
+  `RunLeased`; một run terminal là `Terminal`. Không có định tuyến giữa các
+  server.
+- **Một run nhàn rỗi** (đang xếp hàng, hoặc `running` mà không ai lái: server
+  crash, stream bị bỏ) bị từ chối với `InvalidSteer`, theo yêu cầu của chủ dự án;
+  trên store bền vững, việc từ chối trước hết claim một run `running` chỉ để phân
+  biệt holder còn sống ở nơi khác (`RunLeased`) với không có, rồi release nó.
+  Hãy resume nó, sau đó mới steer.
+- **Giao.** `Runner::steered` chạy ở nơi kết quả của một batch được append
+  (`Step::Results`) và trước khi một câu trả lời text kết thúc run (`received`):
+  nó lấy một steer đang chờ qua prompt redactor và `user_prompt_submit`
+  (`source` là `"steer"`), stage một event `user` có subtype `alignment` mang
+  `steer_id`, và đi qua cùng checkpoint `Phase::ToolResults` mà một stop
+  feedback dùng. Nó không bao giờ chạy giữa một `tool_use` của assistant và kết
+  quả của nó, vì chỉ được hỏi sau khi cả batch đã được append. Một câu trả lời
+  text mà còn steer đang chờ thì chạy thêm một lượt thay vì kết thúc.
+- **Resume.** Đang chờ = các id `steer_received` trừ các id `alignment`, dựng
+  lại từ journal (`steers_of`), như `Watch` và `Standing`. Không có bảng ack.
+  Một crash ở bất kỳ lần ghi nào vẫn giao một steer đúng một lần
+  (`e2e_steer.rs` cắt từng lần ghi). Một steer bị hook `user_prompt_submit` chặn
+  chỉ bị bỏ khỏi bộ nhớ, nên resume sẽ hỏi lại hook.
+- **Kho memory** giữ event trong process: không an toàn khi crash.
+
+`Session.align` của Python Linch (`src/linch/session.py:565`) giữ text trong
+một hàng đợi trong process, rút ở đầu lượt (`loop/runtime.py:327`), và lưu các
+entry chưa rút vào checkpoint dưới tên `pending_alignment` cho lần resume. Ở
+đây journal chính là hàng đợi, nên không có chỗ thứ hai để giữ nhất quán;
+`images` không được nhận.
+
 ## Các terminal
 
 Mọi terminal đều đi qua `Runner::end`: nó hủy và await các run con của run, stage trạng

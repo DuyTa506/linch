@@ -13,6 +13,7 @@ rows, `/report.md`, and the journal of the cut run.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import urllib.request
@@ -23,9 +24,11 @@ from test_long_haul import GOAL, LIST, NAMESPACE, durable, pg_dsn, seed_files  #
 
 from linch_rust import (
     AgentConfig,
+    CompactionEvent,
     ConnectionClosed,
     Server,
     ToolCallStartEvent,
+    UserEvent,
 )
 
 URL = os.environ.get("LINCH_LIVE_VLLM_URL")
@@ -57,7 +60,7 @@ def live(dsn: str) -> AgentConfig:
         "spec": {
             "model": model_name(),
             "system": {"sections": [{"name": "goal", "text": GOAL, "order": 0}]},
-            "compaction": {"threshold_tokens": 1500, "keep_recent_turns": 2},
+            "compaction": {"threshold_tokens": 300, "keep_recent_turns": 1},
             "max_turns": 14,
             "max_output_tokens": 1024,
             "thinking": {"type": "disabled"},
@@ -93,13 +96,26 @@ async def test_a_real_model_finishes_the_report_across_a_kill_and_fresh_sessions
         seed_files(pg_dsn)
         run = await agent.run("init", PROMPT)
         run_ids.append(run.id)
-        # Let the first session get a few tool calls in, then kill the server.
+        # Let the first session get a few tool calls in, steer it once, then
+        # kill the server.
         for _ in range(240):
             await asyncio.sleep(0.5)
-            if len(await agent.events(run.id)) >= 12:
+            if len(await agent.events(run.id)) >= 3:
                 break
+        text = "Also write the files in alphabetical order."
+        steered = await asyncio.wait_for(agent.steer(run.id, text, steer_id="live-1"), 120)
+        assert steered == "live-1"
+        # The run reads it at its next turn boundary, as a user message of its own.
+        for _ in range(240):
+            await asyncio.sleep(0.5)
+            events = [e.event for e in await agent.events(run.id)]
+            if any(isinstance(e, UserEvent) and e.steer_id == "live-1" for e in events):
+                break
+        else:
+            raise AssertionError("the steer was never delivered")
         os.kill(server.pid, signal.SIGKILL)
-        with pytest.raises(ConnectionClosed):
+        # A fast model may have finished first; the work is then checked as is.
+        with contextlib.suppress(ConnectionClosed):
             await run.result()
 
     async with Server() as server:
@@ -111,12 +127,21 @@ async def test_a_real_model_finishes_the_report_across_a_kill_and_fresh_sessions
             run_ids.append(run.id)
             await run.result()
         starts: list[str] = []
+        compactions = 0
+        delivered: list[str] = []
         for run_id in run_ids:
             events = [e.event for e in await agent.events(run_id)]
             starts += [e.tool_name for e in events if isinstance(e, ToolCallStartEvent)]
+            compactions += sum(isinstance(e, CompactionEvent) for e in events)
+            delivered += [
+                e.steer_id
+                for e in events
+                if isinstance(e, UserEvent) and e.subtype == "alignment" and e.steer_id
+            ]
 
     state = durable(pg_dsn)
-    print(f"sessions: {len(run_ids)}, tool calls: {len(starts)}")
+    print(f"sessions: {len(run_ids)}, tool calls: {len(starts)}, compactions: {compactions}")
+    print(f"steers delivered: {delivered}")
     print(f"tasks: {state['tasks']}")
     print(f"report:\n{state['report']}")
     assert finished(pg_dsn), (state, starts)

@@ -277,7 +277,8 @@
 //! names the steer: sent again, it is taken once. A run another process
 //! drives is `-32033`, a finished one `-32026`, an unknown one (or one of
 //! another tenant) `-32021`, a blank or over-long (16 KiB) text or an
-//! unusable id `-32035`, and a run with 16 unread steers `-32005` (`kind`
+//! unusable id, or an idle run (queued, or running with no server driving it:
+//! resume it first) `-32035`, and a run with 16 unread steers `-32005` (`kind`
 //! `steers`). It is not routed to another server.
 //!
 //! **`run.cancel`** `{run_id, agent?}` ([`CancelParams`](protocol::CancelParams))
@@ -519,7 +520,7 @@
 //! | -32035 | models unsupported | `provider.models` or `provider.model` on a provider with no model list; `data: {provider}` |
 //! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model, truncated?}` |
 //! | -32037 | provider request failed | the provider could not be reached or answered with an error; `data: {kind, status?}`, `kind` `unreachable`, `status`, `invalid_request` or `other`; the message is one fixed text per kind: no key, URL or vendor words |
-//! | -32038 | invalid steer | `RunError::InvalidSteer`: the text of a `run.steer` is blank or over 16 KiB, or its `id` is not usable; nothing was written; `data: {reason}` |
+//! | -32038 | invalid steer | `RunError::InvalidSteer`: the text of a `run.steer` is blank or over 16 KiB, its `id` is not usable, or the run is idle (queued, or running with no server driving it); nothing was written; `data: {reason}` |
 //! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |

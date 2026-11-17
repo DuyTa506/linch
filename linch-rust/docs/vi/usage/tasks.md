@@ -203,6 +203,9 @@ config: AgentConfig = {
   `linch.tasks.ledger-context`. `spec.context_budget` tính nó như mọi block context
   khác: hãy liệt kê id đó trong `pinned` để một budget không bao giờ bỏ nó.
 - Mặc định nó tắt; một agent không có `task_ledger` ghi và gửi đúng như trước đây.
+  Server nhiều tenant từ chối `task_ledger` trừ khi `allow` của tenant có
+  `task_ledger` ([Server](./server.md)): danh sách lớn lên theo công việc của
+  tenant và mỗi request đều đọc nó.
 - Với kho memory, ledger nằm trong bộ nhớ của server. Với Postgres, nó sống sót qua
   compaction, một session mới, một lần restart và một lần crash (cùng các hàng mà
   `TaskCreate` và `TaskUpdate` ghi, mỗi lần một transaction).

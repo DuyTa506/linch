@@ -97,9 +97,9 @@ bên ngoài vòng lặp, dựa trên các sự kiện bền vững: ledger khôn
 file sản phẩm tồn tại và có đúng hình dạng mà mục tiêu nêu, journal cho thấy các
 lời gọi mà mục tiêu yêu cầu. Hãy chạy bước kiểm tra này trong code của bạn sau khi
 run kết thúc, và nếu nó thất bại, hãy bắt đầu session kế tiếp với lỗi đó làm
-prompt. Nếu host có `spec.policy` và một bước verification, hãy dùng nó làm bước
-kiểm tra; mẫu hình vẫn vậy: phán quyết đến từ thứ gì đó khác với message cuối của
-chính model.
+prompt. Bước kiểm tra đó là gì
+cũng được (một script, một job CI, một agent thứ hai với prompt riêng); mẫu hình
+vẫn vậy: phán quyết đến từ thứ gì đó khác với message cuối của chính model.
 
 ## Steering
 
@@ -132,7 +132,7 @@ vững, không phải trên những gì model nói:
    chạy hai lần; mỗi file được đọc một lần; có các event compaction).
 
 Các test trong `python/tests/test_long_haul.py` (provider scripted, Postgres) và
-`python/tests/live/test_long_haul_vllm.py` (model thật, bị bỏ qua khi không có
+`python/tests/test_long_haul_live.py` (model thật, bị bỏ qua khi không có
 `LINCH_LIVE_VLLM_URL`) là các ví dụ chạy được.
 
 ## Giới hạn, nói thẳng

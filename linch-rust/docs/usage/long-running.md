@@ -95,10 +95,10 @@ A model that judges its own work says "done" too early. Check from outside the
 loop, on durable facts: the ledger has no open task, the deliverable file
 exists and has the shape the goal names, the journal shows the calls the goal
 requires. Run the check in your own code after the run ends, and if it fails,
-start the next session with the failure as the prompt. Where a host has
-`spec.policy` and a verification step, use that as the check; the pattern is
-the same: the verdict comes from something other than the model's own last
-message.
+start the next session with the failure as the prompt. Whatever the
+checker is (a script, a CI job, a second agent with its own prompt), the
+pattern is the same: the verdict comes from something other than the model's
+own last message.
 
 ## Steering
 
@@ -132,7 +132,7 @@ what the model said:
    tool ran twice; each file read once; the compaction events are there).
 
 The tests in `python/tests/test_long_haul.py` (scripted provider, Postgres)
-and `python/tests/live/test_long_haul_vllm.py` (a real model, skipped without
+and `python/tests/test_long_haul_live.py` (a real model, skipped without
 `LINCH_LIVE_VLLM_URL`) are runnable examples.
 
 ## Honest limits

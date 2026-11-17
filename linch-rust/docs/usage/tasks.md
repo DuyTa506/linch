@@ -205,7 +205,9 @@ config: AgentConfig = {
   `linch.tasks.ledger-context`. `spec.context_budget` counts it like any
   context block: list that id in `pinned` so a budget never drops it.
 - It is off by default; an agent without `task_ledger` writes and sends
-  exactly what it did before.
+  exactly what it did before. A tenant server refuses `task_ledger` unless the
+  tenant's `allow` has `task_ledger` ([Server](./server.md)): the list grows
+  with the tenant's work and every request reads it.
 - With memory stores the ledger lives in the server's memory. With Postgres
   it survives compaction, a new session, a restart and a crash (the same
   rows `TaskCreate` and `TaskUpdate` write, one transaction each).
