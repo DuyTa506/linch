@@ -468,7 +468,10 @@ async fn the_model_reaches_only_its_own_agents_schedules_in_its_session() {
         tool_turn("x5", "CancelSchedule", json!({"id": "mine"})),
         text_turn("done"),
     ];
-    let on = on_postgres(config(turns, "acme", dir.path()), &db);
+    let mut on = on_postgres(config(turns, "acme", dir.path()), &db);
+    // Four calls are refused in a row, which the loop guard's failure streak
+    // would end the run on.
+    on["spec"]["loop_guard"] = json!({"max_consecutive_failures": 0});
     let agent = rpc.open(on.clone()).await;
     let mut plain = on.clone();
     plain["schedule_tools"] = json!(false);
