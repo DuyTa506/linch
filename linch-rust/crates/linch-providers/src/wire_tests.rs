@@ -243,3 +243,195 @@ async fn a_key_header_from_the_caller_replaces_the_provider_key() {
     assert_eq!(head.matches("x-goog-api-key:").count(), 1, "{head}");
     assert!(!head.contains("sk-test-key"), "{head}");
 }
+
+fn rich_request() -> ProviderRequest {
+    ProviderRequest {
+        system: vec![linch_core::SystemBlock {
+            text: "be brief".into(),
+            cacheable: false,
+        }],
+        tools: vec![weather_tool()],
+        tool_choice: Some(linch_core::ToolChoice::Auto {}),
+        temperature: Some(0.25),
+        ..request("m")
+    }
+}
+
+/// An `extra_body` that names every top-level field an adapter owns, in
+/// each wire's spelling.
+fn hostile_body() -> RequestOptions {
+    let mut options = RequestOptions::default();
+    options.extra_body = json!({
+        "model": "other", "stream": false, "temperature": 2.0,
+        "messages": [{"role": "user", "content": "x"}], "tools": [], "tool_choice": "none",
+        "system": "x", "input": "x", "instructions": "x", "contents": [],
+        "systemInstruction": {"parts": []}, "system_instruction": {"parts": []},
+        "toolConfig": {}, "tool_config": {},
+        "previous_response_id": "resp_1", "conversation": "conv_1", "store": true,
+        "top_k": 40,
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    options
+}
+
+type Make = Box<dyn Fn(String, RequestOptions) -> Box<dyn Provider>>;
+
+fn adapters() -> Vec<(&'static str, &'static str, Make)> {
+    vec![
+        (
+            "openai-chat",
+            "authorization",
+            Box::new(|url, request| {
+                let mut o = OpenAiChatOptions::new(key());
+                o.base_url = url;
+                o.request = request;
+                Box::new(OpenAiChat::new(o).unwrap())
+            }),
+        ),
+        (
+            "deepseek",
+            "authorization",
+            Box::new(|url, request| {
+                let mut o = DeepSeekOptions::new(key());
+                o.base_url = url;
+                o.request = request;
+                Box::new(DeepSeek::new(o).unwrap())
+            }),
+        ),
+        (
+            "responses",
+            "authorization",
+            Box::new(|url, request| {
+                let mut o = ResponsesOptions::new(key());
+                o.base_url = url;
+                o.request = request;
+                Box::new(OpenAiResponses::new(o).unwrap())
+            }),
+        ),
+        (
+            "anthropic",
+            "x-api-key",
+            Box::new(|url, request| {
+                let mut o = AnthropicOptions::new(key());
+                o.base_url = url;
+                o.request = request;
+                Box::new(Anthropic::new(o).unwrap())
+            }),
+        ),
+        (
+            "gemini",
+            "x-goog-api-key",
+            Box::new(|url, request| {
+                let mut o = GeminiOptions::new(key());
+                o.base_url = url;
+                o.request = request;
+                Box::new(Gemini::new(o).unwrap())
+            }),
+        ),
+        (
+            "vllm",
+            "authorization",
+            Box::new(|url, request| {
+                let mut o = ServerOptions::new(Server::Vllm, url);
+                o.request = request;
+                Box::new(OpenAiChat::server(o).unwrap())
+            }),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn extra_body_cannot_change_what_the_session_logged_on_any_wire() {
+    for (name, _, make) in adapters() {
+        let (url, handle) = serve_once(bad_request());
+        let (_, plain) = sent(
+            make(url, RequestOptions::default()).as_ref(),
+            handle,
+            rich_request(),
+        )
+        .await;
+        let (url, handle) = serve_once(bad_request());
+        let (_, polluted) = sent(make(url, hostile_body()).as_ref(), handle, rich_request()).await;
+        let mut expected = plain.clone();
+        expected["top_k"] = json!(40);
+        assert_eq!(polluted, expected, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_key_header_from_the_caller_replaces_the_key_on_model_lists_too() {
+    for (name, header, make) in adapters() {
+        let (url, handle) = serve_once(bad_request());
+        let request = RequestOptions::default()
+            .header(header, "caller-credential")
+            .unwrap();
+        let provider = make(url, request);
+        let _ = provider.list_models().await;
+        let head = handle.join().unwrap().to_ascii_lowercase();
+        let head = head.split("\r\n\r\n").next().unwrap().to_owned();
+        assert_eq!(
+            head.matches(&format!("\n{header}:")).count(),
+            1,
+            "{name}: {head}"
+        );
+        assert!(head.contains("caller-credential"), "{name}: {head}");
+        assert!(!head.contains("sk-test-key"), "{name}: {head}");
+    }
+}
+
+#[tokio::test]
+async fn a_header_value_an_error_echoes_never_reaches_the_caller() {
+    let echo = || {
+        error_response(
+            "401 Unauthorized",
+            "",
+            r#"{"error":{"message":"bad token gw-secret-value"}}"#,
+        )
+    };
+    for (name, _, make) in adapters() {
+        let request = RequestOptions::default()
+            .header("x-gateway-token", "gw-secret-value")
+            .unwrap();
+        let (url, handle) = serve_once(echo());
+        let err = make(url, request.clone())
+            .stream(rich_request(), CancellationToken::new())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        handle.join().unwrap();
+        assert!(
+            matches!(err, ProviderError::Status { status: 401, .. }),
+            "{name}"
+        );
+        assert!(
+            !format!("{err} {err:?}").contains("gw-secret-value"),
+            "{name}: {err:?}"
+        );
+
+        let (url, handle) = serve_once(echo());
+        let err = make(url, request).list_models().await.unwrap_err();
+        handle.join().unwrap();
+        assert!(
+            !format!("{err} {err:?}").contains("gw-secret-value"),
+            "{name}: {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_gemini_generation_config_gains_fields_but_keeps_the_requests() {
+    let mut options = RequestOptions::default();
+    options.extra_body = json!({"generationConfig": {"temperature": 2.0, "topK": 40}})
+        .as_object()
+        .cloned()
+        .unwrap();
+    let (url, handle) = serve_once(bad_request());
+    let mut o = GeminiOptions::new(key());
+    o.base_url = url;
+    o.request = options;
+    let (_, body) = sent(&Gemini::new(o).unwrap(), handle, with_temperature()).await;
+    assert_eq!(body["generationConfig"]["temperature"], 0.25);
+    assert_eq!(body["generationConfig"]["topK"], 40);
+}

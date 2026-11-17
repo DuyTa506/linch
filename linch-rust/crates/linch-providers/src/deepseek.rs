@@ -173,10 +173,15 @@ impl Provider for DeepSeek {
     /// and input modalities.
     async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
+        let request = &self.options.request;
         let key = &self.options.api_key;
-        let bearer = format!("Bearer {}", key.expose());
-        let headers = [("authorization", bearer.as_str())];
-        let value = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+        let bearer = (request.key_to_send(key)).map(|key| format!("Bearer {}", key.expose()));
+        let headers: Vec<(&str, &str)> = (bearer.as_deref())
+            .map(|value| ("authorization", value))
+            .into_iter()
+            .collect();
+        let value = (crate::models::get_json(&self.client, &url, &headers, Some(key)).await)
+            .map_err(|err| request.scrub_error(err))?;
         let row = crate::models::OpenAiRow {
             context: Some("context_window"),
             output: Some("max_output_tokens"),
@@ -207,16 +212,17 @@ impl Provider for DeepSeek {
             overflow,
             &cancel,
         )
-        .await?;
+        .await
+        .map_err(|err| self.options.request.scrub_error(err))?;
         let translator =
             Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage)
                 .refusing(overflow);
-        Ok(stream::events(
+        Ok(self.options.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             Some(key.clone()),
-        ))
+        )))
     }
 }
 

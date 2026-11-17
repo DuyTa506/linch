@@ -193,11 +193,12 @@ impl Provider for Anthropic {
     /// `GET /v1/models`, paged by `after_id` while `has_more`.
     async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let base = self.options.base_url.trim_end_matches('/');
+        let request = &self.options.request;
         let key = &self.options.api_key;
-        let headers = [
-            ("x-api-key", key.expose()),
-            ("anthropic-version", API_VERSION),
-        ];
+        let mut headers = vec![("anthropic-version", API_VERSION)];
+        if let Some(key) = request.key_to_send(key) {
+            headers.push(("x-api-key", key.expose()));
+        }
         let mut models = Vec::new();
         let mut after: Option<String> = None;
         let mut truncated = false;
@@ -210,7 +211,8 @@ impl Provider for Anthropic {
                     percent_encoding::NON_ALPHANUMERIC,
                 ));
             }
-            let page = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+            let page = (crate::models::get_json(&self.client, &url, &headers, Some(key)).await)
+                .map_err(|err| request.scrub_error(err))?;
             let (listed, next) = crate::models::anthropic_page(&page);
             models.extend(listed);
             match next {
@@ -245,14 +247,15 @@ impl Provider for Anthropic {
             beta,
             &cancel,
         )
-        .await?;
+        .await
+        .map_err(|err| self.options.request.scrub_error(err))?;
         let translator = stream::Translator::new(request.model, key.clone());
-        Ok(stream::events(
+        Ok(self.options.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             key.clone(),
-        ))
+        )))
     }
 }
 

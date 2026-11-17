@@ -288,15 +288,17 @@ impl Provider for OpenAiChat {
     async fn list_models(&self) -> Result<linch_core::ModelList, ModelsError> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let key = self.api_key.as_ref();
-        let bearer = key.map(|key| format!("Bearer {}", key.expose()));
+        let sent = key.filter(|_| !self.request.sets_key_header());
+        let bearer = sent.map(|key| format!("Bearer {}", key.expose()));
         let headers: Vec<(&str, &str)> = (bearer.as_deref())
             .map(|value| ("authorization", value))
             .into_iter()
             .collect();
-        let value = crate::models::get_json(&self.client, &url, &headers, key).await?;
+        let value = (crate::models::get_json(&self.client, &url, &headers, key).await)
+            .map_err(|err| self.request.scrub_error(err))?;
         let mut models = crate::models::openai_list(&value, self.profile.models.row);
         if self.profile.models.props_context {
-            let window = context::props_window(&self.client, &self.base_url, key).await;
+            let window = context::props_window(&self.client, &self.base_url, sent).await;
             for model in &mut models {
                 model.context_window = model.context_window.or(window);
             }
@@ -331,18 +333,19 @@ impl Provider for OpenAiChat {
             .as_ref()
             .filter(|_| !self.request.sets_key_header());
         let overflow = self.profile.overflow;
-        let response = http::post(&self.client, &url, key, &body, overflow, &cancel).await?;
+        let response = (http::post(&self.client, &url, key, &body, overflow, &cancel).await)
+            .map_err(|err| self.request.scrub_error(err))?;
         let translator = Translator::new(
             request.model,
             self.profile.reasoning_field,
             self.profile.usage,
         )
         .refusing(overflow);
-        Ok(stream::events(
+        Ok(self.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             self.api_key.clone(),
-        ))
+        )))
     }
 }

@@ -7,32 +7,59 @@
 
 use std::time::Duration;
 
-use linch_core::{JsonObject, JsonValue, ProviderError};
+use futures::StreamExt;
+use linch_core::{JsonObject, JsonValue, ProviderError, ProviderStream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+use crate::ApiKey;
 
 /// Body fields an adapter owns: `extra_body` never replaces them. The
 /// request's own `temperature` always wins, as in Python.
-/// The conversation and tools stay what the session logged, so they are
-/// protected too.
-const PROTECTED_FIELDS: [&str; 9] = [
+///
+/// The conversation, the tools and how the model may choose among them stay
+/// what the session logged and admitted (each wire's spelling is listed),
+/// and so do the fields that would hand state to the vendor outside the
+/// session log (`store`, `previous_response_id`, `conversation`). The
+/// Gemini `generationConfig` is merged field by field instead
+/// ([`merge`]), so its `temperature` stays the request's.
+const PROTECTED_FIELDS: [&str; 17] = [
     "model",
     "stream",
     "temperature",
     "messages",
     "tools",
+    "tool_choice",
     "input",
     "contents",
     "system",
     "instructions",
+    "systemInstruction",
+    "system_instruction",
+    "toolConfig",
+    "tool_config",
+    "store",
+    "previous_response_id",
+    "conversation",
 ];
+
+/// Gemini's settings object, which holds the request's temperature.
+const GENERATION_CONFIG: &str = "generationConfig";
+
+/// Header values shorter than this are not scrubbed from error text: a
+/// word that short would mangle the message and is no secret.
+const MIN_SCRUBBED_VALUE: usize = 8;
+
+const REDACTED: &str = "[redacted]";
 
 const CHAT_TEMPLATE_KWARGS: &str = "chat_template_kwargs";
 
 /// Headers that carry the provider's key. A caller that sets one sends its
 /// own credential, and the adapter then leaves the environment's key out.
-const KEY_HEADERS: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
+const KEY_HEADERS: [&str; 4] = ["authorization", "x-api-key", "x-goog-api-key", "api-key"];
 /// Headers a caller cannot set: the ones the HTTP client owns.
-const FORBIDDEN_HEADERS: [&str; 7] = [
+const FORBIDDEN_HEADERS: [&str; 9] = [
+    "proxy-authorization",
+    "proxy-connection",
     "host",
     "content-length",
     "transfer-encoding",
@@ -42,6 +69,13 @@ const FORBIDDEN_HEADERS: [&str; 7] = [
     "trailer",
 ];
 
+/// Whether `name` is a header that carries a provider key
+/// (`authorization`, `x-api-key`, `x-goog-api-key`, `api-key`), whatever
+/// its case.
+pub fn is_key_header(name: &str) -> bool {
+    KEY_HEADERS.iter().any(|key| key.eq_ignore_ascii_case(name))
+}
+
 /// Extra request settings, the same for every adapter.
 ///
 /// The default adds nothing: no body fields, no headers, the adapter's own
@@ -50,8 +84,9 @@ const FORBIDDEN_HEADERS: [&str; 7] = [
 pub struct RequestOptions {
     /// Top-level fields merged into every request body, for vendor
     /// parameters the adapter does not know (`top_k`, `cache_salt`, ...).
-    /// They replace a field the adapter sets, except `model`, `stream` and
-    /// `temperature`, which the request keeps.
+    /// They replace a field the adapter sets, except the ones it owns
+    /// (see `PROTECTED_FIELDS`: the model, `stream`, `temperature`, the
+    /// conversation, the tools and `tool_choice`), which the request keeps.
     pub extra_body: JsonObject,
     /// Longest silence, between two chunks of the response, before the
     /// call fails; `None` keeps the adapter's own limit.
@@ -98,6 +133,65 @@ impl RequestOptions {
             .any(|name| self.headers.contains_key(*name))
     }
 
+    /// The provider key an adapter sends, `key` unless the caller's own key
+    /// header replaces it. Every call (a turn, a model list, a window probe)
+    /// asks here, so none of them sends both credentials.
+    pub(crate) fn key_to_send<'a>(&self, key: &'a ApiKey) -> Option<&'a ApiKey> {
+        (!self.sets_key_header()).then_some(key)
+    }
+
+    /// `text` without any header value of 8 bytes or more. A server can
+    /// echo a request header in an error; the header's value is a secret
+    /// even when the provider key is not.
+    pub(crate) fn scrub(&self, text: &str) -> String {
+        let mut text = text.to_owned();
+        for value in self.headers.values() {
+            if let Ok(value) = value.to_str()
+                && value.len() >= MIN_SCRUBBED_VALUE
+            {
+                text = text.replace(value, REDACTED);
+            }
+        }
+        text
+    }
+
+    /// `err` with its message scrubbed of the header values.
+    pub(crate) fn scrub_error(&self, err: ProviderError) -> ProviderError {
+        if self.headers.is_empty() {
+            return err;
+        }
+        match err {
+            ProviderError::Transport { message } => ProviderError::Transport {
+                message: self.scrub(&message),
+            },
+            ProviderError::Status {
+                status,
+                retry_after,
+                message,
+            } => ProviderError::Status {
+                status,
+                retry_after,
+                message: self.scrub(&message),
+            },
+            ProviderError::ContextLength { status, message } => ProviderError::ContextLength {
+                status,
+                message: self.scrub(&message),
+            },
+            other => other,
+        }
+    }
+
+    /// `stream` with the errors it yields scrubbed of the header values.
+    pub(crate) fn scrub_stream(&self, stream: ProviderStream) -> ProviderStream {
+        if self.headers.is_empty() {
+            return stream;
+        }
+        let options = self.clone();
+        stream
+            .map(move |item| item.map_err(|err| options.scrub_error(err)))
+            .boxed()
+    }
+
     /// Merge `extra_body` into `body`, which must be a JSON object.
     pub(crate) fn merge_body(&self, body: &mut JsonValue) {
         if let Some(object) = body.as_object_mut() {
@@ -119,11 +213,23 @@ impl RequestOptions {
 /// Merge `extra` into `body`: each field of `extra` replaces the field of
 /// the same name, except [`PROTECTED_FIELDS`].
 ///
-/// `chat_template_kwargs` is the exception to replacing: when both sides
-/// hold an object, their fields are merged and `extra` wins per field.
+/// Two objects are merged instead of replaced. In `chat_template_kwargs`
+/// `extra` wins per field; in Gemini's `generationConfig` the adapter's
+/// fields win, so the request's temperature, token limit and stop
+/// sequences stay, and `extra` adds the vendor's others (`topK`).
 pub(crate) fn merge(body: &mut JsonObject, extra: &JsonObject) {
     for (name, value) in extra {
         if PROTECTED_FIELDS.contains(&name.as_str()) {
+            continue;
+        }
+        if name == GENERATION_CONFIG
+            && let Some(have) = body.get_mut(name)
+        {
+            if let (JsonValue::Object(have), JsonValue::Object(add)) = (have, value) {
+                for (field, value) in add {
+                    have.entry(field.clone()).or_insert_with(|| value.clone());
+                }
+            }
             continue;
         }
         if name == CHAT_TEMPLATE_KWARGS
@@ -270,7 +376,14 @@ mod tests {
 
     #[test]
     fn headers_the_client_owns_are_refused_without_echoing_the_value() {
-        for name in ["Host", "content-length", "Transfer-Encoding", "connection"] {
+        for name in [
+            "Host",
+            "content-length",
+            "Transfer-Encoding",
+            "connection",
+            "Proxy-Authorization",
+            "proxy-connection",
+        ] {
             let err = RequestOptions::default()
                 .header(name, "secret")
                 .unwrap_err();
@@ -296,5 +409,32 @@ mod tests {
             .header("x-gateway-token", "very-secret")
             .unwrap();
         assert!(!format!("{options:?}").contains("very-secret"));
+    }
+
+    #[test]
+    fn api_key_is_a_key_header_in_any_case() {
+        for name in ["authorization", "X-Api-Key", "x-goog-api-key", "API-KEY"] {
+            assert!(is_key_header(name), "{name}");
+        }
+        assert!(!is_key_header("x-gateway-token"));
+        let options = RequestOptions::default().header("Api-Key", "k").unwrap();
+        assert!(options.sets_key_header());
+    }
+
+    #[test]
+    fn scrub_removes_long_header_values_and_keeps_short_ones() {
+        let options = RequestOptions::default()
+            .header("x-gateway-token", "gw-secret-value")
+            .unwrap()
+            .header("x-tenant", "acme")
+            .unwrap();
+        assert_eq!(
+            options.scrub("bad token gw-secret-value for acme"),
+            "bad token [redacted] for acme"
+        );
+        let err = options.scrub_error(ProviderError::Transport {
+            message: "echo gw-secret-value".into(),
+        });
+        assert!(!format!("{err:?}").contains("gw-secret-value"));
     }
 }
