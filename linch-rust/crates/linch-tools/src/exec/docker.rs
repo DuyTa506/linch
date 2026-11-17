@@ -223,7 +223,11 @@ impl DockerShell {
     /// The `docker run` arguments for `launch` in container `name`.
     fn run_args(&self, name: &str, launch: &Launch<'_>) -> Vec<String> {
         let policy = &self.policy;
-        let mut args: Vec<String> = ["run", "--rm", "--name", name].map(String::from).into();
+        // `--quiet`: an image pull's progress would land in the command's
+        // stderr.
+        let mut args: Vec<String> = ["run", "--rm", "--quiet", "--name", name]
+            .map(String::from)
+            .into();
         let mut flag = |flag: &str, value: String| {
             args.push(flag.to_owned());
             args.push(value);
@@ -351,7 +355,7 @@ mod tests {
         ]);
         let (program, args) = shell(DockerPolicy::default()).argv("linch-x", &launch(&env, false));
         assert_eq!(program, Path::new("/usr/bin/docker"));
-        let expected = "run --rm --name linch-x --memory 2147483648 --cpus 2.000 \
+        let expected = "run --rm --quiet --name linch-x --memory 2147483648 --cpus 2.000 \
                         --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges \
                         --network none --user 1000:1000 --env LANG -w /work/space \
                         -v /work/space:/work/space python:3.12-slim sh -c";

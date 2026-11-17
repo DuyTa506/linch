@@ -66,7 +66,8 @@ async fn a_command_runs_in_a_container_on_the_workspace() {
     }
     let ws = Workspace::new();
     let tool = Bash::in_backend(&backend(&ws));
-    ws.put("in.txt", "from the host");
+    // `cat` adds no newline, so the file ends with one before `id -u`'s line.
+    ws.put("in.txt", "from the host\n");
     let out = text(run(&tool, "cat in.txt; echo back > out.txt; id -u").await);
     let uid = rustix::process::getuid().as_raw();
     assert_eq!(out, format!("from the host\n{uid}\n[exit code 0]"));

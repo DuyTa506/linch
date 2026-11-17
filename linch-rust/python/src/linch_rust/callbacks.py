@@ -49,7 +49,7 @@ class Callback:
     matcher: tuple[str, ...] | None
     timeout_ms: int | None
     fail_mode: FailMode | None
-    fn: CallbackFn
+    fn: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
     def spec(self) -> dict[str, Any]:
         """The declaration as `agent.open` takes it in `callbacks`."""
