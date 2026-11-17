@@ -6,23 +6,31 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::*;
 use linch::{ExecutionConfig, PermissionMode, SandboxPolicy};
-use linch_rpc::{Access, Allowlists};
+use linch_rpc::protocol::method;
+use linch_rpc::{Access, Allowlists, BackgroundAgents, Tenant};
+use linch_worker::{Worker, WorkerConfig};
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 /// Tenant `acme` that may run `Bash` without asking in `root`, with the
 /// execution backends `backends`.
 fn acme(root: &Path, backends: &[ExecutionConfig]) -> Access {
-    let allow = Allowlists::new()
+    tenant("acme", acme_allow(root, backends))
+}
+
+fn acme_allow(root: &Path, backends: &[ExecutionConfig]) -> Allowlists {
+    Allowlists::new()
         .scripted_provider(true)
         .exec_tools(true)
         .permission_modes(&[PermissionMode::SkipDangerous])
         .workspace_roots(&[root.to_path_buf()])
         .unwrap()
-        .execution(backends);
-    tenant("acme", allow)
+        .execution(backends)
 }
 
 /// A config in `root/ws` whose one turn runs `command` in `Bash`.
@@ -105,4 +113,75 @@ async fn a_tenant_held_to_the_sandbox_runs_bash_in_it() {
     let config = self::config(dir.path(), "cat ../secret", Value::Null);
     let result = bash(&mut local, config).await;
     assert!(result.contains("hidden"), "{result}");
+}
+
+/// A background run is admitted again by the worker's tenant: a stored
+/// definition naming no backend runs in the sandbox the worker's server
+/// holds the tenant to, whatever the server that queued it allowed.
+#[tokio::test]
+async fn a_background_run_gets_the_workers_execution_backend() {
+    let Some(db) = common::pg::TestDb::empty("exec_background").await else {
+        return;
+    };
+    let dir = workspace();
+    let held = ExecutionConfig::Sandbox(SandboxPolicy::default());
+    let probe = Rpc::remote(acme(dir.path(), std::slice::from_ref(&held)));
+    let opened = probe
+        .call(
+            linch_rpc::protocol::method::AGENT_OPEN,
+            config(dir.path(), "true", Value::Null),
+        )
+        .await;
+    if let Err(error) = opened {
+        eprintln!("skipped: {error}");
+        db.drop().await;
+        return;
+    }
+    let with_db = |allow: Allowlists| {
+        allow
+            .postgres_dsns(std::slice::from_ref(&db.dsn))
+            .unwrap()
+            .max_queued_jobs(Some(4))
+    };
+    let local = [ExecutionConfig::Local {}];
+    let queuing = Tenant::new("acme", with_db(acme_allow(dir.path(), &local))).unwrap();
+    let rpc = Rpc::remote(Access::Tenant(Arc::new(queuing).connect().unwrap()));
+    let mut definition = config(dir.path(), "echo x > ../escaped", Value::Null);
+    definition["stores"] = json!({"type": "postgres", "dsn": db.dsn});
+    let agent = rpc.open(definition).await;
+    let queued = rpc
+        .call(
+            method::JOB_ENQUEUE,
+            json!({"agent": agent, "session_id": "s1", "prompt": "go"}),
+        )
+        .await
+        .unwrap();
+    let job_id = queued["job_id"].as_i64().unwrap();
+
+    let serving = Tenant::new("acme", with_db(acme_allow(dir.path(), &[held]))).unwrap();
+    let timeout = linch::postgres::CONNECT_TIMEOUT;
+    let pool = linch::postgres::connect(&db.dsn, timeout, 4.try_into().unwrap()).await;
+    let factory = BackgroundAgents::new(db.dsn.clone()).tenant(Arc::new(serving));
+    let mut worker = WorkerConfig::new("w1");
+    worker.poll_interval = Duration::from_millis(50);
+    let worker = Worker::new(pool.unwrap(), worker).definitions(factory.roots(), Arc::new(factory));
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+    let mut state = String::new();
+    for _ in 0..400 {
+        let got = rpc
+            .call(method::JOB_GET, json!({"agent": agent, "job_id": job_id}))
+            .await
+            .unwrap();
+        state = got["state"].as_str().unwrap_or_default().to_owned();
+        if state == "done" || state == "failed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+    db.drop().await;
+    assert_eq!(state, "done");
+    assert!(!dir.path().join("escaped").exists(), "Bash ran unconfined");
 }
