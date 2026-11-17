@@ -482,6 +482,51 @@ các run của subagent cũng dùng chúng. Các mặc định giữ hợp đồ
 thử lại, còn `{"max_attempts": 1}` làm nó đổi. Python Linch còn phục hồi khi prompt
 quá dài bằng cách compaction rồi gọi lại; server này không làm vậy.
 
+<a id="limit-concurrent-calls"></a>
+
+## Giới hạn số lời gọi đồng thời
+
+Nhiều run trên một API key cùng chạm giới hạn tốc độ của nó. `max_provider_concurrency`
+(số nguyên từ 1 trở lên, trong [cấu hình agent](./agent.md#trường-cấp-cao-nhất))
+đặt trần cho số lời gọi provider đang chạy; một lời gọi vượt trần chờ đến lượt, ai
+đến trước được trước. Đó là `max_provider_concurrency` của Python Linch, một semaphore
+bao quanh mọi lời gọi provider thật; không có giới hạn tốc độ hay token, vì Python
+Linch cũng không có.
+
+```python
+config = {
+    "namespace": "support",
+    "spec": {"model": "deepseek-flash"},
+    "provider": {"id": "deepseek"},
+    "max_provider_concurrency": 2,
+}
+```
+
+- **Đếm gì.** Mỗi lời gọi model: lời gọi của một lượt, bản tóm tắt compaction và các
+  lời gọi của subagent, tất cả qua một giới hạn. Thời gian chờ backoff của một lần
+  thử lại, bản tóm tắt sau khi bị từ chối vì độ dài ngữ cảnh và các hook quanh một
+  lời gọi không giữ chỗ, nên giới hạn 1 không làm một run tự kẹt.
+- **Phạm vi.** Mọi run của agent. Các agent mở trên cùng một server và dùng cùng key
+  provider và `base_url` chia sẻ một giới hạn, nên `openai-chat` và `openai-responses`
+  trên một `OPENAI_API_KEY` được đếm chung; biến key hoặc endpoint khác thì đếm riêng.
+  Các agent xin số khác nhau trên một key dùng giới hạn của agent đầu tiên, giữ đến khi
+  không agent nào đang mở còn dùng nó. Với tenant từ xa, đó là mọi agent và run của
+  tenant ([mức trần của tenant](./server.md#những-gì-admission-từ-chối-và-lý-do)). Giới hạn
+  thuộc tiến trình server: [worker](./scheduler.md#chạy-một-worker) là một tiến trình
+  khác, và server thứ hai cũng vậy, mỗi nơi tự đếm. Giới hạn dùng chung giữa các tiến
+  trình chưa được xây.
+- **Người gọi thấy gì.** Chỉ thấy thời gian: run vẫn `running` và không phát event nào
+  khi chờ. Nó chưa gửi gì, nên không có delivery hay receipt nào được ghi cho lời gọi
+  (Python Linch bắt đầu bản ghi lời gọi trước khi chờ; server này thì không). Hủy một
+  run đang chờ sẽ abort nó mà không có lời gọi nào, và nó rời hàng đợi mà không chiếm
+  chỗ.
+- **Độ bền.** Nếu một run phải chờ và có event chưa được ghi (receipt của một lời gọi
+  thất bại trước khi chuyển sang model dự phòng), chúng được ghi trước; một run thấy
+  còn chỗ thì không ghi thêm gì.
+- **Hợp đồng.** Không đặt nghĩa là không giới hạn và không được gửi đi. Giới hạn không
+  thuộc [hợp đồng của run](./agent.md#hợp-đồng-của-run), nên đổi nó không bao giờ làm
+  kẹt một run đang tạm dừng.
+
 ## Chi phí
 
 Các event usage và result mang `cost_usd`, `cumulative_cost_usd` và

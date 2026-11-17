@@ -183,6 +183,7 @@ absent, except `bash`.
 | `tasks` | `False` | The session task tools `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, which run without approval in every mode ([Tasks](./tasks.md)) |
 | `deep_agent` | none | The deep agent preset ([below](#deep_agent)) |
 | `profile` | none | A versioned domain role for the agent's runs ([below](#profile)) |
+| `max_provider_concurrency` | none: no limit | The most provider calls its runs, and those of agents on the same provider key and endpoint, make at once; the rest wait their turn ([Providers](./providers.md#limit-concurrent-calls)). Not part of the run contract |
 
 ## `spec`
 

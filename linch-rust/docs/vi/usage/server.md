@@ -115,6 +115,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
 | `max_connections` | 8 | Số kết nối hành động thay mặt tenant cùng lúc |
 | `max_pool_connections` | Kích thước pool mặc định của server: số core, trong khoảng 10 đến 32 | `stores.max_connections` lớn nhất mà một cấu hình có thể yêu cầu; pool của tenant trên mỗi đích có tối đa chừng này kết nối |
+| `max_provider_concurrency` | không có: không có trần | Số lời gọi provider tối đa mà các run của tenant thực hiện cùng lúc trên mỗi key và endpoint provider; một cấu hình có thể xin ít hơn ([Provider](./providers.md#limit-concurrent-calls)) |
 | `provider_base_urls` | không có | Các endpoint mà `base_url` của provider có thể nêu, khớp theo scheme, host và cổng |
 | `permission_modes` | `default`, `accept_edits` | Các chế độ mà một cấu hình có thể chọn |
 | `workspace_roots` | không có | Các thư mục mà `workspace`, `project_root` hoặc `config_dir` có thể là hoặc nằm dưới |
@@ -307,6 +308,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Một message | 16 MiB | Request nhận `-32600` |
 | Một pool Postgres | Một pool cho mỗi tenant và đích, `stores.max_connections` kết nối (số core, trong khoảng 10 đến 32, nếu không đặt) | Các truy vấn chờ một kết nối; lần mở của tenant đã kết nối pool của nó đặt kích thước, và các lần mở sau của tenant dùng chung ([Kho lưu trữ](./stores.md#kết-nối-và-pool)) |
 | `max_pool_connections` | Kích thước pool mặc định cho mỗi tenant nếu không đặt | `agent.open` yêu cầu `stores.max_connections` lớn hơn nhận `-32004`, `data: {"kind": "pool_connections", "max": ...}`; không có gì được kết nối |
+| `max_provider_concurrency` | Không có trần nếu không đặt | `agent.open` xin nhiều hơn nhận `-32004`, `data: {"kind": "provider_concurrency", "max": ...}`; cấu hình không xin gì nhận mức trần. Mọi agent của tenant trên một key và endpoint provider dùng chung chừng đó lời gọi provider; một tiến trình worker hay server thứ hai tự đếm |
 | Số request đang xử lý cho mỗi kết nối | 64 | Việc đọc chờ cho đến khi một request được trả lời |
 | Subagent nền cho mỗi run | `workers.max_background` của cấu hình agent, 4 nếu không đặt | Lệnh gọi `Subagent` nhận một lỗi tool và không khởi động gì ([Subagent](./subagents.md#worker-chạy-nền)) |
 
@@ -351,10 +353,11 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `execution` | Một `execution` không bằng mục `allow.execution` nào, hoặc có một cái khi danh sách đó rỗng | Backend quyết định `Bash` chạm tới được gì; policy của nó thuộc về operator |
 | `redaction` | Hơn 32 rule trong `spec.redaction`, hoặc một pattern dài quá 1024 byte | Server biên dịch từng pattern và chạy nó trên mọi response và kết quả tool |
 | `verification` | Hơn 32 verifier trong `spec.verification`, một pattern dài quá 1024 byte, hoặc hơn 32 keyword trong một verifier | Tương tự, cho mọi câu trả lời cuối cùng |
+| `provider_concurrency` | `max_provider_concurrency` lớn hơn mức của tenant | Các run của tenant sẽ gọi cùng lúc nhiều hơn mức nhà vận hành cho phép trên key của server; `data.max` là mức trần |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
-không thể dò hệ thống tệp của server. Bốn thay đổi được thực hiện âm thầm thay vì từ
+không thể dò hệ thống tệp của server. Năm thay đổi được thực hiện âm thầm thay vì từ
 chối:
 
 - Khi không có `exec_tools`, `bash` của cấu hình bị tắt và agent mở mà không có
@@ -365,6 +368,7 @@ chối:
 - Một cấu hình không có `execution` nhận mục `allow.execution` đầu tiên của tenant, giữ tenant trong sandbox khi đó là mục đầu.
 - Một kho Postgres không có `max_connections` nhận kích thước pool mặc định hoặc
   `max_pool_connections` của tenant, tùy giá trị nào nhỏ hơn.
+- Một cấu hình không có `max_provider_concurrency` nhận mức của tenant, khi tenant có.
 
 ---
 

@@ -187,6 +187,7 @@ có, trừ `bash`.
 | `tasks` | `False` | Các tool task của session `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, chạy không cần phê duyệt ở mọi mode ([Task](./tasks.md)) |
 | `deep_agent` | không có | Preset deep agent ([bên dưới](#deep_agent)) |
 | `profile` | không có | Một vai trò miền nghiệp vụ có phiên bản cho các run của agent ([bên dưới](#profile)) |
+| `max_provider_concurrency` | không có: không giới hạn | Số lời gọi provider tối đa mà các run của nó, và của các agent trên cùng key và endpoint provider, thực hiện cùng lúc; phần còn lại chờ đến lượt ([Provider](./providers.md#limit-concurrent-calls)). Không thuộc hợp đồng của run |
 
 ## `spec`
 
