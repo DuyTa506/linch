@@ -173,6 +173,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Changed
 
+- A run keeps the principal it was started for (`RunRecord::principal`, `NewRun::principal`), and a resume, approve or answer that names none acts for it, where it acted for no principal: leaving the principal out of `run.approve` no longer lets a continuation, or a schedule a `CreateSchedule` call makes in it, escape the start principal's `role` and `unless_role` rules. One that names a principal still acts for that one, checked by tenant admission as `run.start`'s is.
 - The permission policy joins the run contract when it is not the default (a mode other than `default`, or any layers, `auto_allow`, path or command fields; the facade's `tasks` and a profile's denied tools add to it), so a run is never resumed or approved under a policy that allows more, or less, than the one it started with (`ContractMismatch`).
 - A run cancelled while it plans its tool calls (a hook holding it, or an approve or answer in flight) answers each call with `Tool call aborted` before it ends, instead of leaving the calls unanswered in the session.
 - A binary older than this one cannot resume a run a cancel left half done (the `aborting` checkpoint phase); finish such a run with `cancel` or `resume` before rolling back.
@@ -204,6 +205,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Upgrading
 
+- Postgres migration 7 (`0007_run_principal.sql`) adds `linch_runs.principal` (nullable, no rewrite). Runs started before it have none, so their continuations act for the principal they name, as before. A `RunStore` implementation must store and return the new `principal` field of `NewRun` and `RunRecord` (the conformance suite checks it).
 - Runs started before this release by an agent whose permission policy is not the default (including an agent with `tasks` or a profile that denies tools) can no longer be resumed or approved under the new binary: the policy is now in the run contract, so they end with `ContractMismatch`. Let them finish on the old binary, or end them with `cancel`, which does not check the contract. Runs of agents with the default policy keep their contracts.
 
 - Postgres migration 6 adds `linch_runs.lease_holder` and `lease_until` (nullable, no rewrite). As with every migration, a server of an earlier version then refuses to start on that database, and a running one ignores leases: until every server is upgraded, an old one can still take over a run a new one drives (the epoch still fences the loser's writes).

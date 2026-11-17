@@ -193,6 +193,7 @@ mod tests {
             run_id: RunId::new("r1"),
             session_id: SessionId::new("s"),
             parent_run_id: None,
+            principal: None,
             contract: "0".repeat(64).parse().unwrap(),
             checkpoint: Checkpoint {
                 turn: 0,

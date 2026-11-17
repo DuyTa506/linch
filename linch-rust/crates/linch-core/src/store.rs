@@ -24,6 +24,7 @@ use thiserror::Error;
 use crate::canonical::Digest;
 use crate::events::Envelope;
 use crate::ids::{RunId, SessionId};
+use crate::policy::Principal;
 use crate::run::{Checkpoint, RunStatus};
 use crate::session_log::LogEntry;
 
@@ -45,6 +46,9 @@ pub struct NewRun {
     pub session_id: SessionId,
     /// Parent run, for a child run.
     pub parent_run_id: Option<RunId>,
+    /// Who the run acts for, as it was started: a continuation that names
+    /// no principal acts for this one.
+    pub principal: Option<Principal>,
     /// Digest of the run contract (spec, tools, hook policies).
     pub contract: Digest,
     /// Initial checkpoint (phase `started`).
@@ -64,6 +68,8 @@ pub struct RunRecord {
     pub session_id: SessionId,
     /// Parent run, for a child run.
     pub parent_run_id: Option<RunId>,
+    /// Who the run was started for (see [`NewRun::principal`]).
+    pub principal: Option<Principal>,
     /// Contract digest written at creation.
     pub contract: Digest,
     /// Current status.

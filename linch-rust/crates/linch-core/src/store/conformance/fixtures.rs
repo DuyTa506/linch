@@ -7,6 +7,7 @@ use crate::events::kinds::ErrorEvent;
 use crate::events::{Envelope, Event, WIRE_VERSION};
 use crate::ids::{RunId, SessionId};
 use crate::message::Message;
+use crate::policy::Principal;
 use crate::run::{Checkpoint, Phase, RunStatus};
 use crate::session_log::{LogEntry, MessageEntry};
 use crate::store::{Commit, Lease, NewRun, RunRecord};
@@ -46,6 +47,7 @@ pub(super) fn new_run(namespace: &str, run_id: &str, events: u64) -> NewRun {
         // A session per run: one session holds one live run at a time.
         session_id: SessionId::new(format!("s-{run_id}")),
         parent_run_id: Some(RunId::new("parent")),
+        principal: Some(Principal::new("acme", "ada", ["ops", "admin"]).unwrap()),
         contract: contract(),
         checkpoint: Checkpoint {
             phase: Phase::Started {

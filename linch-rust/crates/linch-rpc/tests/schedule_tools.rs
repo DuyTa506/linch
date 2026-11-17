@@ -605,6 +605,95 @@ async fn an_approved_call_stores_the_principal_it_runs_for() {
     db.drop().await;
 }
 
+/// A run started for a guest suspends on its `CreateSchedule`; an approve
+/// that names no principal acts for the guest, so the schedule stores the
+/// guest and a rule on `role: guest` still holds at every fire.
+#[tokio::test]
+async fn an_approve_without_a_principal_keeps_the_guests_rules_at_fire_time() {
+    let Some(db) = TestDb::empty("stools_guest").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db)
+        .max_schedules(Some(1))
+        .max_queued_jobs(Some(4))
+        .min_schedule_interval(Duration::from_millis(100));
+    let acme = Arc::new(Tenant::new("acme", allowed).unwrap());
+    let mut rpc = Rpc::remote(Access::Tenant(Arc::clone(&acme).connect().unwrap()));
+    let turns = vec![
+        tool_turn("l1", "ListSchedules", json!({})),
+        tool_turn(
+            "c1",
+            "CreateSchedule",
+            json!({"payload": "Check in.", "interval_s": 0.2}),
+        ),
+        text_turn("done"),
+    ];
+    let mut on = on_postgres(config(turns, "acme", dir.path()), &db);
+    on["permissions"]["mode"] = json!("default");
+    let deny = json!({"type": "tool", "tool": "ListSchedules", "decision": "deny",
+                      "role": "guest"});
+    on["permissions"]["layers"] = json!([{"name": "tenant", "rules": [deny]}]);
+    let agent = rpc.open(on).await;
+    let guest = json!({"tenant": "acme", "user": "gus", "roles": ["guest"]});
+    let params = json!({"agent": agent, "session_id": "chat", "prompt": "Go.",
+                        "principal": guest});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(
+        matches!(ended.last(), Event::Suspended(_)),
+        "{:?}",
+        ended.last()
+    );
+    assert!(results(&ended.envelopes)[0].0, "the guest's list is denied");
+    // No principal on the approve.
+    let approve = json!({"agent": agent, "run_id": run_id,
+                         "decisions": {"c1": {"decision": "allow"}}});
+    rpc.accepted(method::RUN_APPROVE, approve).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert_eq!(codes(&ended.envelopes), [None]);
+    let pool = pool(&db).await;
+    let principal: Option<String> =
+        sqlx::query_scalar("SELECT principal FROM linch_worker_schedules")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stored = principal.expect("the schedule acts for the guest");
+    assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), guest);
+
+    let factory = BackgroundAgents::new(db.dsn.clone()).tenant(Arc::clone(&acme));
+    let shutdown = CancellationToken::new();
+    let worker = Worker::new(pool.clone(), worker_config("w1"))
+        .definitions(factory.roots(), Arc::new(factory));
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    let id = listed.schedules[0].id.clone();
+    let fire = first_fire(&rpc, &agent, &id).await;
+    rpc.call(method::SCHEDULE_DELETE, json!({"agent": agent, "id": id}))
+        .await
+        .unwrap();
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+    let events = rpc
+        .call(
+            method::RUN_EVENTS,
+            json!({"agent": agent, "run_id": fire.run_id.unwrap()}),
+        )
+        .await
+        .unwrap();
+    let events: Events = serde_json::from_value(events).unwrap();
+    let said = results(&events.events);
+    assert!(
+        said[0].0,
+        "the fire's list is denied to the guest: {said:?}"
+    );
+    db.drop().await;
+}
+
 /// A worker checks the definition again at every fire: a tenant whose
 /// allowlists lost `max_schedules` fails the fire of an agent with the
 /// schedule tools.

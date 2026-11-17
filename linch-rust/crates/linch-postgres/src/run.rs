@@ -22,8 +22,9 @@ use linch_core::{
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 
 use crate::codec::{
-    backend, check_events, decode_checkpoint, decode_event, encode_checkpoint, encode_events,
-    not_found, parse_contract, parse_status, status_name, to_i64, to_u64,
+    backend, check_events, decode_checkpoint, decode_event, decode_principal, encode_checkpoint,
+    encode_events, encode_principal, not_found, parse_contract, parse_status, status_name, to_i64,
+    to_u64,
 };
 
 /// How long a run claim holds without a renewal, unless set with
@@ -82,7 +83,16 @@ impl PgRunStore {
     }
 }
 
-type RecordRow = (String, Option<String>, String, String, i64, String, i64);
+type RecordRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    i64,
+    String,
+    i64,
+);
 
 const STATE: &str = "SELECT status, epoch, last_seq FROM linch_runs \
                      WHERE namespace = $1 AND run_id = $2";
@@ -339,8 +349,8 @@ impl PgRunStore {
         // fails the statement through the partial unique index.
         let inserted = sqlx::query(
             "INSERT INTO linch_runs (namespace, run_id, session_id, parent_run_id, contract, \
-             status, epoch, checkpoint, last_seq) \
-             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8) \
+             status, epoch, checkpoint, last_seq, principal) \
+             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9) \
              ON CONFLICT (namespace, run_id) DO NOTHING",
         )
         .bind(&run.namespace)
@@ -351,6 +361,7 @@ impl PgRunStore {
         .bind(status_name(RunStatus::Pending))
         .bind(checkpoint)
         .bind(to_i64(last_seq, "last_seq")?)
+        .bind(encode_principal(run.principal.as_ref())?)
         .execute(&mut *tx)
         .await;
         let inserted = match inserted {
@@ -400,6 +411,7 @@ impl RunStore for PgRunStore {
             run_id: run.run_id,
             session_id: run.session_id,
             parent_run_id: run.parent_run_id,
+            principal: run.principal,
             contract: run.contract,
             status: RunStatus::Pending,
             epoch: 0,
@@ -446,21 +458,22 @@ impl RunStore for PgRunStore {
 
     async fn load(&self, namespace: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
         let row: Option<RecordRow> = sqlx::query_as(
-            "SELECT session_id, parent_run_id, contract, status, epoch, checkpoint, last_seq \
-             FROM linch_runs WHERE namespace = $1 AND run_id = $2",
+            "SELECT session_id, parent_run_id, principal, contract, status, epoch, checkpoint, \
+             last_seq FROM linch_runs WHERE namespace = $1 AND run_id = $2",
         )
         .bind(namespace)
         .bind(run_id.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(backend)?;
-        let (session_id, parent_run_id, contract, status, epoch, checkpoint, last_seq) =
+        let (session_id, parent_run_id, principal, contract, status, epoch, checkpoint, last_seq) =
             row.ok_or_else(|| not_found("run", namespace, run_id.as_str()))?;
         Ok(RunRecord {
             namespace: namespace.to_owned(),
             run_id: run_id.clone(),
             session_id: session_id.into(),
             parent_run_id: parent_run_id.map(RunId::from),
+            principal: decode_principal(principal.as_deref())?,
             contract: parse_contract(&contract)?,
             status: parse_status(&status)?,
             epoch: to_u64(epoch, "epoch")?,

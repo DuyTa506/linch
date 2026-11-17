@@ -505,10 +505,11 @@ another process or a later day.
 `principal` says who a run acts for: `{"tenant", "user", "roles"?}` (the
 `Principal` typed dict). Permission rules with `role` or `unless_role` match
 its roles ([Tools](./tools.md#permission-rules)), and a `permission_request`
-callback's request carries it. Pass it to `run`, and again to each `resume`
-and `approve`: each call acts for the principal it is given, and one without
-acts for nobody. On a remote server, `tenant` must be the connection's tenant
-([Server](./server.md#tenants-and-namespaces)).
+callback's request carries it. Pass it to `run`: the run keeps it, and each
+`resume`, `approve` and `answer` that names no principal acts for it, even
+after a crash or from another process. One that names a principal acts for
+that one instead. On a remote server, `tenant` must be the connection's
+tenant ([Server](./server.md#tenants-and-namespaces)).
 
 ```python
 import asyncio

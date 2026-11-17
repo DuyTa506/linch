@@ -111,7 +111,16 @@ async fn create_and_load(store: &dyn RunStore) {
     assert_eq!(record.contract, run.contract);
     assert_eq!(record.session_id, run.session_id);
     assert_eq!(record.parent_run_id, run.parent_run_id);
-    same_record(&store.load(ns, &run.run_id).await.unwrap(), &record);
+    assert_eq!(
+        record.principal, run.principal,
+        "the start principal is kept"
+    );
+    let loaded = store.load(ns, &run.run_id).await.unwrap();
+    same_record(&loaded, &record);
+    assert_eq!(
+        loaded.principal, run.principal,
+        "load returns the principal"
+    );
     assert_eq!(store.events(ns, &run.run_id, 0).await.unwrap(), run.events);
     assert_eq!(
         store.events(ns, &run.run_id, 1).await.unwrap(),

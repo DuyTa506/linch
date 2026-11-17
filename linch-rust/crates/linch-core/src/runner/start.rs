@@ -136,7 +136,13 @@ pub(super) async fn new_run(
     };
     let contract = agent.contract;
     let created = journal
-        .create(session_id.clone(), parent, contract, checkpoint)
+        .create(
+            session_id.clone(),
+            parent,
+            options.principal.clone(),
+            contract,
+            checkpoint,
+        )
         .await;
     let ready = match created {
         Ok(ready) => ready,
@@ -432,12 +438,10 @@ pub(super) async fn continue_run(
     for event in answered {
         journal.stage(event);
     }
-    let run = identity(
-        record.session_id.clone(),
-        run_id,
-        &options.principal,
-        trace_id,
-    );
+    // A continuation that names no principal acts for the one the run was
+    // started for, so a role rule cannot be escaped by leaving it out.
+    let principal = options.principal.clone().or(record.principal.clone());
+    let run = identity(record.session_id.clone(), run_id, &principal, trace_id);
     // The children picked up below charge the budget too.
     let budget = match inherited.or_else(|| family.as_ref()?.budget()) {
         Some(meter) => Some(meter),

@@ -210,6 +210,13 @@ fn migrator() -> Migrator {
             include_str!("../migrations/0006_run_leases.sql").into_sql_str(),
             false,
         ),
+        Migration::new(
+            7,
+            Cow::Borrowed("run principal"),
+            MigrationType::Simple,
+            include_str!("../migrations/0007_run_principal.sql").into_sql_str(),
+            false,
+        ),
     ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),

@@ -43,6 +43,7 @@ use crate::canonical::Digest;
 use crate::events::kinds::ResultEvent;
 use crate::events::{Envelope, Event, Persistence, WIRE_VERSION, now_ms};
 use crate::ids::{RunId, SessionId};
+use crate::policy::Principal;
 use crate::run::{Checkpoint, Phase, RunStatus};
 use crate::store::{Commit, Lease, NewRun, RunStore, StoreError};
 
@@ -149,6 +150,7 @@ impl Journal {
     /// Args:
     ///     session_id: Session the run belongs to.
     ///     parent_run_id: Parent run, for a child run.
+    ///     principal: Who the run acts for, stored with it.
     ///     contract: Digest of the run contract.
     ///     checkpoint: First checkpoint (phase `started`).
     ///
@@ -162,6 +164,7 @@ impl Journal {
         &mut self,
         session_id: SessionId,
         parent_run_id: Option<RunId>,
+        principal: Option<Principal>,
         contract: Digest,
         checkpoint: Checkpoint,
     ) -> Result<Vec<Envelope>, JournalError> {
@@ -174,6 +177,7 @@ impl Journal {
             run_id: self.lease.run_id.clone(),
             session_id,
             parent_run_id,
+            principal,
             contract,
             checkpoint,
             events,

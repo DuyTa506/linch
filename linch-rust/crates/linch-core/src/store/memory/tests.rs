@@ -33,6 +33,7 @@ fn new_run(run_id: &str) -> NewRun {
         run_id: RunId::new(run_id),
         session_id: SessionId::new("s"),
         parent_run_id: None,
+        principal: None,
         contract: "0".repeat(64).parse().unwrap(),
         checkpoint: Checkpoint {
             turn: 0,

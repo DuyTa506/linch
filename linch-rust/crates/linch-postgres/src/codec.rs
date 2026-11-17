@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use linch_core::{
-    Checkpoint, Digest, Envelope, LogEntry, Message, MessageEntry, PrefixEntry, ProjectionEntry,
-    RunId, RunStatus, StoreError,
+    Checkpoint, Digest, Envelope, LogEntry, Message, MessageEntry, PrefixEntry, Principal,
+    ProjectionEntry, RunId, RunStatus, StoreError,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -94,6 +94,19 @@ pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<String, Store
 
 pub(crate) fn decode_checkpoint(text: &str) -> Result<Checkpoint, StoreError> {
     serde_json::from_str(text).map_err(|e| decode_err("checkpoint")(e.into()))
+}
+
+pub(crate) fn encode_principal(
+    principal: Option<&Principal>,
+) -> Result<Option<String>, StoreError> {
+    principal
+        .map(|p| serde_json::to_string(p).map_err(|e| encode_err("principal")(e.into())))
+        .transpose()
+}
+
+pub(crate) fn decode_principal(text: Option<&str>) -> Result<Option<Principal>, StoreError> {
+    text.map(|t| serde_json::from_str(t).map_err(|e| decode_err("principal")(e.into())))
+        .transpose()
 }
 
 /// Seqs and envelope texts, ready to bind as two arrays.

@@ -224,7 +224,10 @@
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash
-//! or a dropped stream; a run awaiting approval suspends again.
+//! or a dropped stream; a run awaiting approval suspends again. A
+//! `run.resume`, `run.approve` or `run.answer` without `principal` acts for
+//! the principal the run was started with; one with a `principal` is
+//! checked as `run.start`'s is and acts for it instead.
 //!
 //! **`run.approve`** `{agent, run_id, decisions, principal?}`
 //! ([`ApproveParams`](protocol::ApproveParams)) answers a suspended run's

@@ -290,8 +290,10 @@ references fails the delete's foreign key, and that prune deletes nothing
 A schedule and a job may carry a principal (`Schedule::principal`,
 `RunRequest::principal`), stored as JSON; a fire copies its schedule's to
 its job. The worker decodes it at every attempt and sets it on the
-`RunOptions` of the start, resume or approve (`execute.rs`), since core keeps
-no principal with the run (a resume takes it from its options). A row whose
+`RunOptions` of the start, resume or approve (`execute.rs`). Core stores
+the start principal with the run (`RunRecord::principal`), and a resume or
+approve whose options name none acts for it, so a continuation job
+(`enqueue_resume`, `enqueue_approve`) carries none of its own. A row whose
 principal does not decode fails its job. Python's worker restores
 `RunRequest.principal` the same way (`linch/worker/runtime.py`).
 

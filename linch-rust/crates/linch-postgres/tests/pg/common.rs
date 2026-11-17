@@ -118,6 +118,7 @@ pub fn new_run(namespace: &str, run_id: &str, events: u64) -> NewRun {
         run_id,
         session_id,
         parent_run_id: None,
+        principal: None,
         contract: "0".repeat(64).parse().expect("a valid digest"),
         checkpoint: checkpoint(0),
     }

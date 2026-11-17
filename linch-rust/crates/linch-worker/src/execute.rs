@@ -119,8 +119,8 @@ async fn open(
     agent: &Agent,
 ) -> Result<Option<RunStream>, Outcome> {
     let job = &lease.job;
-    // Every start, resume and approve acts for the job's principal: core
-    // does not keep it with the run.
+    // A start acts for the job's principal, which core stores with the run;
+    // a resume or approve job without one acts for that stored principal.
     let principal = match &job.principal {
         None => None,
         Some(Ok(principal)) => Some(principal.clone()),
