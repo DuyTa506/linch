@@ -85,6 +85,17 @@ về những gì nó trả về. `wf` là một `WorkflowContext`:
 `interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` và
 `interrupt_stale`.
 
+Một `budget` có `max_cost_usd` cần có giá cho mọi model mà agent có thể dùng
+(model của nó và từng model trong `fallback_models`, từ bảng tích hợp sẵn hoặc
+`pricing` của agent), vì một lời gọi không có giá sẽ được tính là miễn phí và
+giới hạn không bao giờ kích hoạt. `workflow.start` từ chối nó (`-32011`, nêu tên
+model), và một lời gọi mà run của nó có usage nhưng không có chi phí (provider
+phục vụ một model mà `pricing` không có) sẽ kết thúc lời gọi agent kế tiếp của
+workflow với `-32046`, `data.kind: unpriced` (`WorkflowBudgetExceeded`,
+`WorkflowError::BudgetUnpriced`); lời gọi đó vẫn nằm trong journal, và resume sẽ
+từ chối lần nữa. Hãy đặt `pricing` hoặc giới hạn `max_tokens`. Mức trần
+`max_cost_usd` của tenant (bên dưới) cũng là một `max_cost_usd`.
+
 `parallel`, `settled` và `pipeline` chạy trong client. Mỗi nhánh đếm các lời gọi
 của riêng nó, dưới đường dẫn nhánh của nó, nên các nhánh đến lời gọi của mình
 theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng.

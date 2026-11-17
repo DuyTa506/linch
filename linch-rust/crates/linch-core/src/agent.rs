@@ -349,6 +349,13 @@ impl Agent {
         &self.inner.spec
     }
 
+    /// The first model that can serve this agent's calls (its own, then each
+    /// fallback) that the host's pricing has no price for, if any. A USD cap
+    /// cannot count a call of such a model.
+    pub fn unpriced_model(&self) -> Option<&str> {
+        first_unpriced(self.inner.pricing.as_ref(), &self.inner.spec)
+    }
+
     /// The contract digest every run of this agent stores.
     pub fn contract(&self) -> Digest {
         self.inner.contract

@@ -560,7 +560,7 @@
 //! | -32043 | job not found | no job with that id in the agent's namespace, or its history was pruned |
 //! | -32044 | invalid schedule | the timing does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `data: {reason}` |
 //! | -32045 | workflow held | another client drives the workflow; `workflow.start` wrote nothing; `data: {run_id}` |
-//! | -32046 | workflow budget | the workflow's budget is spent; `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}` |
+//! | -32046 | workflow budget | the workflow's budget is spent; `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`, or `data: {kind: "unpriced", model}` when `max_cost_usd` cannot count a model with no price |
 //! | -32047 | workflow call failed | a `workflow.agent` call's run failed, was aborted, timed out or waits for an approval, or its subagent is unknown; `data: {kind}` |
 //! | -32048 | workflow not found | this connection drives no workflow with that id |
 //! | -32049 | workflow has no journal | `workflow.start` carried `resume` answers for a workflow whose journal holds nothing (it never ran, or a memory-store agent's journal ended with its connection); nothing was claimed; `data: {run_id}` |

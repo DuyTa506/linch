@@ -123,6 +123,15 @@ impl Server {
         };
         let budget = admit_budget(params.budget.unwrap_or_default(), caps.as_ref())?;
         let (agent, store, namespace) = self.workflow_store(&params.agent).await?;
+        // A USD cap counts an unpriced call as free: refuse before it runs.
+        let costed = budget.is_some_and(|budget| budget.max_cost_usd.is_some());
+        if let Some(model) = agent.unpriced_model().filter(|_| costed) {
+            let message = format!(
+                "the workflow's max_cost_usd needs a price for the model {model:?}, which has \
+                 none: set `pricing` for it or cap max_tokens instead"
+            );
+            return Err(ErrorObject::new(code::BUILD_INVALID, message));
+        }
         if lock(&self.0.tables).workflows.contains_key(&run_id) {
             return Err(held(&run_id));
         }
@@ -499,6 +508,10 @@ impl Server {
                 "max_tokens": max_tokens,
                 "max_cost_usd": max_cost_usd,
             })),
+            WorkflowError::BudgetUnpriced { model } => {
+                ErrorObject::new(code::WORKFLOW_BUDGET, error.to_string())
+                    .with_data(json!({ "kind": "unpriced", "model": model }))
+            }
             WorkflowError::LimitExceeded { what, max } => {
                 let kind = what.replace(' ', "_");
                 let message = format!("the workflow is at its limit of {max} {what}");

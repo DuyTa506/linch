@@ -93,12 +93,24 @@ pub struct Fixture {
 }
 
 pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
-    build(turns, PermissionMode::Default, None, false)
+    build(turns, PermissionMode::Default, None, Pricing::None)
 }
 
 /// Like [`scripted`], priced at 1 USD per million tokens of any kind.
 pub fn scripted_priced(turns: Vec<ScriptedTurn>) -> Fixture {
-    build(turns, PermissionMode::Default, None, true)
+    build(turns, PermissionMode::Default, None, Pricing::Any)
+}
+
+/// Like [`scripted`], priced for [`MODEL`] only (a call another model
+/// serves has no price), with `fallbacks` as its fallback models.
+pub fn scripted_priced_for_model_only(turns: Vec<ScriptedTurn>, fallbacks: &[&str]) -> Fixture {
+    let fallbacks = fallbacks.iter().map(|model| (*model).to_owned()).collect();
+    build(
+        turns,
+        PermissionMode::Default,
+        None,
+        Pricing::ModelOnly(fallbacks),
+    )
 }
 
 /// An agent like [`scripted`]'s that allows every call and has foreground
@@ -108,15 +120,23 @@ pub fn with_subagents(turns: Vec<ScriptedTurn>) -> Fixture {
         turns,
         PermissionMode::SkipDangerous,
         Some(Vec::new()),
-        false,
+        Pricing::None,
     )
+}
+
+/// Which models the fixture's pricing has a rate for.
+enum Pricing {
+    None,
+    Any,
+    /// [`MODEL`] only; the agent's fallback models are the list.
+    ModelOnly(Vec<String>),
 }
 
 fn build(
     turns: Vec<ScriptedTurn>,
     mode: PermissionMode,
     subagents: Option<Vec<SubagentDefinition>>,
-    priced: bool,
+    priced: Pricing,
 ) -> Fixture {
     let provider = Arc::new(ScriptedProvider::new(turns));
     let tools = ToolRegistry::new();
@@ -131,7 +151,11 @@ fn build(
     let runs = Arc::new(MemoryRunStore::default());
     let closed = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&closed);
-    let mut builder = AgentBuilder::new(AgentSpec::new(MODEL))
+    let mut spec = AgentSpec::new(MODEL);
+    if let Pricing::ModelOnly(fallbacks) = &priced {
+        spec.fallback_models = fallbacks.clone();
+    }
+    let mut builder = AgentBuilder::new(spec)
         .provider(provider.clone())
         .tools(Arc::new(tools))
         .permissions(PermissionEngine::new(policy).unwrap())
@@ -144,10 +168,11 @@ fn build(
     if let Some(definitions) = subagents {
         builder = builder.subagents(definitions);
     }
-    if priced {
-        builder = builder.pricing(|_, usage| {
+    if !matches!(priced, Pricing::None) {
+        let only_model = matches!(priced, Pricing::ModelOnly(_));
+        builder = builder.pricing(move |model, usage| {
             let tokens = usage.total_input_tokens() + usage.output_tokens;
-            Some(tokens as f64 / 1_000_000.0)
+            (!only_model || model == MODEL).then_some(tokens as f64 / 1_000_000.0)
         });
     }
     let agent = builder.build().unwrap();

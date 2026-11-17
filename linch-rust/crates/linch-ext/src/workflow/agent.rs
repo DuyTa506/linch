@@ -115,6 +115,9 @@ struct Stored {
     cost_usd: f64,
     #[serde(default)]
     session_id: String,
+    /// The model of a call that had usage and no cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unpriced: Option<String>,
 }
 
 impl WorkflowContext {
@@ -207,7 +210,7 @@ impl WorkflowContext {
         };
         if let Some(value) = cached {
             let stored: Stored = decode(&label, value)?;
-            self.charge(stored.tokens, stored.cost_usd);
+            self.charge(stored.tokens, stored.cost_usd, stored.unpriced.as_deref());
             emit(WorkflowKind::AgentReplayed, Some(&stored.text));
             return Ok(AgentOutcome {
                 text: stored.text,
@@ -220,6 +223,7 @@ impl WorkflowContext {
         }
         self.check_cancel(&label)?;
         self.check_budget()?;
+        self.check_priced(agent)?;
         self.check_room()?;
         let _live = self.live_guard()?;
         emit(WorkflowKind::AgentStart, None);
@@ -244,17 +248,28 @@ impl WorkflowContext {
                 return Err(WorkflowError::Aborted { label });
             }
         };
+        // A provider that names no model served the agent's own.
+        let unpriced = (finished.unpriced.clone()).map(|model| {
+            Some(model)
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| agent.spec().model.clone())
+        });
         let stored = Stored {
             text: finished.text.clone(),
             structured: finished.structured.clone(),
             tokens: finished.tokens,
             cost_usd: finished.cost_usd,
             session_id: run_id.as_str().to_owned(),
+            unpriced,
         };
         let value = serde_json::to_value(&stored)
             .map_err(|error| encode_error(&label, format!("its value does not encode: {error}")))?;
         self.record(&call_key, occurrence, &value).await?;
-        self.charge(finished.tokens, finished.cost_usd);
+        self.charge(
+            finished.tokens,
+            finished.cost_usd,
+            stored.unpriced.as_deref(),
+        );
         agent.close_session(&SessionId::new(run_id.as_str()));
         emit(WorkflowKind::AgentEnd, Some(&stored.text));
         Ok(AgentOutcome {
@@ -275,11 +290,30 @@ impl WorkflowContext {
         }
     }
 
-    /// Add what a finished call spent to the workflow's total.
-    fn charge(&self, tokens: u64, usd: f64) {
+    /// Add what a finished call spent to the workflow's total; `unpriced`
+    /// names the model of a call that had usage and no cost.
+    fn charge(&self, tokens: u64, usd: f64, unpriced: Option<&str>) {
         let mut spent = lock(&self.inner.spent);
         spent.0 = spent.0.saturating_add(tokens);
         spent.1 += usd;
+        if let Some(model) = unpriced {
+            lock(&self.inner.unpriced).get_or_insert_with(|| model.to_owned());
+        }
+    }
+
+    /// `BudgetUnpriced` when the workflow has a USD cap and a model `agent`
+    /// can use has no price: the cap would count its calls as free.
+    fn check_priced(&self, agent: &Agent) -> Result<(), WorkflowError> {
+        let capped = (self.inner.budget).is_some_and(|budget| budget.max_cost_usd.is_some());
+        if !capped {
+            return Ok(());
+        }
+        match agent.unpriced_model() {
+            Some(model) => Err(WorkflowError::BudgetUnpriced {
+                model: model.to_owned(),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// `BudgetExceeded` when the workflow's budget is spent.
@@ -287,6 +321,11 @@ impl WorkflowContext {
         let Some(budget) = self.inner.budget else {
             return Ok(());
         };
+        if budget.max_cost_usd.is_some()
+            && let Some(model) = lock(&self.inner.unpriced).clone()
+        {
+            return Err(WorkflowError::BudgetUnpriced { model });
+        }
         let (tokens, usd) = self.spent();
         let spent = (budget.max_tokens.is_some_and(|max| tokens >= max))
             || (budget.max_cost_usd.is_some_and(|max| usd >= max));
@@ -471,6 +510,7 @@ struct Finished {
     structured: Option<JsonObject>,
     tokens: u64,
     cost_usd: f64,
+    unpriced: Option<String>,
 }
 
 /// The call's result, or why it has none.
@@ -496,6 +536,7 @@ fn finish(
                 structured: outcome.structured,
                 tokens: outcome.tokens,
                 cost_usd: outcome.cost_usd,
+                unpriced: outcome.unpriced,
             })
         }
         Some(ResultSubtype::Aborted | ResultSubtype::Interrupted) => Err(WorkflowError::Aborted {
@@ -526,6 +567,9 @@ struct Outcome {
     suspended: bool,
     tokens: u64,
     cost_usd: f64,
+    /// The model of the first call that has usage and no cost; empty when
+    /// the provider named none.
+    unpriced: Option<String>,
 }
 
 impl Outcome {
@@ -540,6 +584,12 @@ impl Outcome {
             Event::Assistant(response) => self.text = response.message.text(),
             Event::Error(error) => self.error = Some(message(&error.error)),
             Event::Suspended(_) => self.suspended = true,
+            Event::Usage(usage) => {
+                if usage.cost_usd.is_none() {
+                    let model = usage.actual_model.clone().unwrap_or_default();
+                    self.unpriced.get_or_insert(model);
+                }
+            }
             Event::Result(result) => {
                 if let Some(text) = &result.final_text {
                     self.text = text.clone();

@@ -20,12 +20,13 @@ from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
-from scripted import config, text_turn, tool_turn
+from scripted import MODEL, config, text_turn, tool_turn
 
 from linch_rust import (
     Budget,
     ConnectionClosed,
     NotAllowed,
+    OpenError,
     Principal,
     ResultEvent,
     RunLeased,
@@ -375,6 +376,20 @@ async def test_the_budget_stops_the_next_agent_call() -> None:
         with pytest.raises(WorkflowBudgetExceeded) as spent:
             await run_workflow(agent, flow, run_id="w", budget=Budget(max_tokens=4))
     assert spent.value.spent_tokens == 4
+
+
+async def test_a_cost_cap_on_an_unpriced_agent_does_not_start_the_workflow() -> None:
+    async def flow(wf: WorkflowContext) -> None:
+        await wf.agent("one")
+
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("a")]))
+        with pytest.raises(OpenError) as refused:
+            await run_workflow(agent, flow, run_id="w", budget=Budget(max_cost_usd=1.0))
+        # A token cap alone needs no price.
+        await run_workflow(agent, flow, run_id="w", budget=Budget(max_tokens=100))
+    assert refused.value.code == -32011
+    assert MODEL in str(refused.value) and "max_tokens" in str(refused.value)
 
 
 async def test_a_deadline_and_a_step_timeout_end_the_workflow() -> None:
