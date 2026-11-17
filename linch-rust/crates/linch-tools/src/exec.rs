@@ -83,6 +83,10 @@ pub enum ExecutionError {
     /// The kernel cannot enforce the sandbox; nothing would be confined.
     #[error("the sandbox backend needs Landlock ABI 6 (Linux 6.12 or later), enforced: {0}")]
     Landlock(String),
+    /// The server is root or holds capabilities, which a sandboxed command
+    /// would keep.
+    #[error("the sandbox backend refuses a privileged server: {0}")]
+    Privileged(String),
     /// A program the backend runs is missing.
     #[error("the {backend} backend needs {program}, which was not found")]
     Missing {

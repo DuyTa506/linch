@@ -119,6 +119,8 @@ impl SandboxShell {
             return Err(ExecutionError::Unsupported("sandbox"));
         }
         policy.validate()?;
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        unprivileged(&status).map_err(ExecutionError::Privileged)?;
         let prlimit = (PRLIMIT.iter().map(PathBuf::from))
             .find(|path| path.is_file())
             .ok_or_else(|| ExecutionError::Missing {
@@ -312,6 +314,44 @@ fn user_tasks() -> u64 {
     tasks
 }
 
+/// Refuse a server whose commands could hold privileges, from its
+/// `/proc/self/status`: any uid 0 (a real or saved root uid can be taken
+/// back), or a capability in the effective or ambient set (ambient ones
+/// pass to every command). Landlock and seccomp bound an unprivileged
+/// process; root keeps `RLIMIT_NPROC` off and many ways out. What cannot
+/// be read is refused too.
+fn unprivileged(status: &str) -> Result<(), String> {
+    let field = |name: &str| {
+        let line = status.lines().find(|line| line.starts_with(name))?;
+        Some(line[name.len()..].split_whitespace().collect::<Vec<_>>())
+    };
+    let uids: Option<Vec<u32>> = field("Uid:")
+        .filter(|uids| uids.len() == 4)
+        .and_then(|uids| uids.iter().map(|uid| uid.parse().ok()).collect());
+    let Some(uids) = uids else {
+        return Err("cannot read the server's user ids".into());
+    };
+    if uids.contains(&0) {
+        return Err("the server runs as root; run it as an unprivileged user".into());
+    }
+    for set in ["CapEff:", "CapAmb:"] {
+        let caps = field(set)
+            .and_then(|value| value.first().copied())
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+        match caps {
+            Some(0) => {}
+            Some(_) => {
+                return Err(format!(
+                    "the server holds capabilities ({set} not empty); \
+                     run it without any"
+                ));
+            }
+            None => return Err(format!("cannot read the server's {set}")),
+        }
+    }
+    Ok(())
+}
+
 /// Kill the group a started command leads.
 fn kill(child: &Child) {
     let pid = (child.id())
@@ -378,6 +418,57 @@ mod tests {
                 "/bin/sh"
             ]
         );
+    }
+
+    fn status(uid: &str, eff: &str, amb: &str) -> String {
+        format!(
+            "Name:\tlinch-server\nUid:\t{uid}\nGid:\t1000\t1000\t1000\t1000\n\
+             CapInh:\t0000000000000000\nCapPrm:\t{eff}\nCapEff:\t{eff}\n\
+             CapBnd:\t000001ffffffffff\nCapAmb:\t{amb}\n"
+        )
+    }
+
+    const NONE: &str = "0000000000000000";
+
+    #[test]
+    fn an_unprivileged_server_may_open_a_sandbox() {
+        let plain = status("1000\t1000\t1000\t1000", NONE, NONE);
+        assert_eq!(unprivileged(&plain), Ok(()));
+        // This test process is not root (the sandbox tests need that).
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let own = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(unprivileged(&own), Ok(()));
+    }
+
+    /// Root, a root uid it could return to, or any capability would pass
+    /// to the command (capabilities through the ambient set): refused.
+    #[test]
+    fn a_privileged_server_is_refused() {
+        let refused = [
+            status("0\t0\t0\t0", NONE, NONE),
+            status("1000\t0\t1000\t1000", NONE, NONE),
+            status("0\t1000\t1000\t1000", NONE, NONE),
+            status("1000\t1000\t0\t1000", NONE, NONE),
+            status("1000\t1000\t1000\t1000", "0000000000200000", NONE),
+            status("1000\t1000\t1000\t1000", NONE, "0000000000002000"),
+        ];
+        for text in refused {
+            assert!(unprivileged(&text).is_err(), "{text}");
+        }
+    }
+
+    /// What cannot be read is not assumed safe.
+    #[test]
+    fn an_unreadable_status_is_refused() {
+        let missing_caps = "Uid:\t1000\t1000\t1000\t1000\n";
+        let missing_uid = format!("CapEff:\t{NONE}\nCapAmb:\t{NONE}\n");
+        let garbled = status("1000\t1000\t1000\t1000", "zz", NONE);
+        let short_uid = status("1000", NONE, NONE);
+        for text in ["", missing_caps, &missing_uid, &garbled, &short_uid] {
+            assert!(unprivileged(text).is_err(), "{text:?}");
+        }
     }
 
     /// The count covers at least this process's own threads.

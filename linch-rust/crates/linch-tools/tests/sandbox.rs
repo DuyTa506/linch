@@ -21,11 +21,15 @@ use linch_tools::{
 use serde_json::json;
 
 /// The backend over `ws`, or `None` (noted) when this kernel cannot
-/// enforce it.
+/// enforce it or the tests run as root, which the sandbox refuses.
 fn sandbox(ws: &Workspace, policy: SandboxPolicy) -> Option<ExecutionBackend> {
     match ExecutionBackend::open(ws.fs.clone(), &ExecutionConfig::Sandbox(policy)) {
         Ok(backend) => Some(backend),
-        Err(error @ (ExecutionError::Landlock(_) | ExecutionError::Unsupported(_))) => {
+        Err(
+            error @ (ExecutionError::Landlock(_)
+            | ExecutionError::Unsupported(_)
+            | ExecutionError::Privileged(_)),
+        ) => {
             eprintln!("skipped: {error}");
             None
         }
