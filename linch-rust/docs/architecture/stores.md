@@ -184,6 +184,7 @@ schema. Queries are built at run time: building the crate needs no database.
 | `0004_tasks.sql` | `linch_sessions.next_task_id`, `linch_tasks`, `linch_task_edges` |
 | `0005_mailbox.sql` | `linch_mailbox` (`PgMailbox`: peer messages by namespace and recipient, leased by a drain, deleted by its ack) |
 | `0006_run_leases.sql` | `linch_runs.lease_holder` and `lease_until`, nullable, no default, not indexed: adding them rewrites no row, and a renewal stays a heap-only update. NULL is no live lease |
+| `0008_tool_cache.sql` | `linch_tool_cache` (`PgToolCache`: tool results by namespace and key digest, `expires_at` on the database's clock, `seq` to evict the oldest; `output` is `TEXT`) |
 
 JSON payloads (checkpoints, envelopes, log entries, task metadata) are `TEXT`,
 not `JSONB`: JSONB reorders keys and rewrites numbers, and the stores must

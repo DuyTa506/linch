@@ -124,6 +124,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `mcp_urls` | không có | Các endpoint mà một MCP HTTP transport có thể nêu, khớp như `provider_base_urls` |
 | `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)); không có nó thì một agent có `schedule_tools` bị từ chối |
 | `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt của các lịch của nó |
+| `tool_cache` | `false` | `spec.tool_cache`, giữ kết quả trong bộ nhớ hoặc cơ sở dữ liệu của server cho namespace của tenant; giới hạn 1024 mục, ttl một giờ, 1 MiB mỗi kết quả và 32 tool |
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
 | `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
@@ -357,6 +358,8 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `provider_concurrency` | `max_provider_concurrency` lớn hơn mức của tenant | Các run của tenant sẽ gọi cùng lúc nhiều hơn mức nhà vận hành cho phép trên key của server; `data.max` là mức trần |
 | `system` | Hơn 16 section trong `spec.system`, một tên dài quá 64 byte, một section hoặc `append` dài quá 16 KiB, hoặc tổng cộng quá 64 KiB | Các section đi kèm mọi request của mọi run |
 | `context_budget` | Hơn 32 id trong `drop_order` hoặc `pinned`, hoặc một id dài quá 128 byte | Server giữ chúng cho từng agent |
+| `tool_cache` | `spec.tool_cache` mà không có `allow.tool_cache`, hoặc vượt giới hạn của nó (`max_entries` 1024, `ttl_ms` 3600000, `max_value_bytes` 1048576, 32 tool) | Các mục do server lưu và được chia sẻ bởi mọi session của namespace; bảng hoặc bộ nhớ chúng chiếm thuộc về operator |
+| `tool_retry` | `spec.tool_retry.max_attempts` lớn hơn 5, `max_delay_ms` lớn hơn 60000, hoặc một danh sách dài quá 32 tên | Mỗi lần retry là một lần ghi bền và một khoảng chờ mà run giữ một slot suốt thời gian đó |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
 | `tool_choice` | Một `tool_choice` bị ép (`required`, hoặc một tool không phải final tool), trong spec hoặc trong `run.start`, trên một agent không có `max_turns` và không có `final_tool_name` (riêng output schema không kết thúc run trên mọi provider) | Model bị ép gọi một tool mỗi lượt sẽ không bao giờ trả lời, và không budget nào kết thúc run |
 

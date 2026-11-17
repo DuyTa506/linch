@@ -182,6 +182,7 @@ schema và bắt đầu bằng `linch_`, nên `search_path` của kết nối ch
 | `0004_tasks.sql` | `linch_sessions.next_task_id`, `linch_tasks`, `linch_task_edges` |
 | `0005_mailbox.sql` | `linch_mailbox` (`PgMailbox`: message giữa các peer theo namespace và người nhận, được một lần drain giữ lease, bị xóa bởi ack của nó) |
 | `0006_run_leases.sql` | `linch_runs.lease_holder` và `lease_until`, nullable, không default, không đánh chỉ mục: thêm chúng không viết lại hàng nào, và một lần gia hạn vẫn là một update chỉ trên heap. NULL nghĩa là không có lease còn sống |
+| `0008_tool_cache.sql` | `linch_tool_cache` (`PgToolCache`: kết quả tool theo namespace và digest của khóa, `expires_at` theo đồng hồ của database, `seq` để loại bỏ mục cũ nhất; `output` là `TEXT`) |
 
 Payload JSON (checkpoint, envelope, log entry, metadata của task) là `TEXT`, không phải
 `JSONB`: JSONB sắp xếp lại khóa và viết lại số, mà các store phải trả về đúng những gì đã

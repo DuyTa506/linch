@@ -45,7 +45,8 @@ encoding.
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
 | `usage` | `UsageEvent`, `kinds/control.rs:13` | yes | yes | |
 | `tool_call_start` | `ToolCallStartEvent`, `kinds/tooling.rs:11` | yes | yes | |
-| `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` and `is_error` live in `result` |
+| `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` and `is_error` live in `result`. `cache_hit` (left out when false) marks a result `spec.tool_cache` served: its `tool_call_start` is written with it, not before |
+| `tool_retry` | `ToolRetryEvent`, `kinds/tooling.rs` | yes | yes | A spec `tool_retry` (`crates/linch-core/src/tool_retry.rs`): flushed before the wait and the next attempt, so a crash after it leaves a started call a resume reports interrupted and never runs again |
 | `tool_progress` | `ToolProgressEvent`, `kinds/tooling.rs:98` | no | yes | |
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
 | `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | One per `AskUser` call before a `suspended` of status `awaiting_input`; `questions` is new and left out when empty |

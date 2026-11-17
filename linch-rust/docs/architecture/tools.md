@@ -139,6 +139,45 @@ them:
    tool's `output_schema`, then the `post_tool_use` chain runs on the result.
    A tool that panics gets an error result naming the panic.
 
+### One call, in order
+
+`Runner::call` (`scheduler/execute.rs`) takes a planned `Run` call through
+these steps. Each one is absent, and costs nothing, when its field is unset:
+
+1. **Cache lookup** (`spec.tool_cache`). A read-scope, non-`polls`,
+   non-`asks_user` tool named by the policy looks up the key
+   `[tool_name, input]` in the agent's namespace (`tool_cache.rs`,
+   `cache_key`). A live entry becomes the result: no durable start before it, no
+   tool, `cache_hit` on the `tool_call_end`; the start and end are written
+   together, as for any call that runs nothing. A store error is a miss.
+2. **Invalidate.** A write or exec tool clears the namespace first when
+   `invalidate_on_write` is set, before `tool_starting`, so a crash during the
+   effect cannot leave an entry from before it.
+3. **`tool_starting`**, the durable barrier. From here a crash leaves an
+   interrupted call that a resume never runs again.
+4. **Attempts** (`invoke`). Each attempt is the tool body wrapped by the
+   `tool_execute` waterfall (`hooks/execute.rs`, `ToolPipeline`) when a
+   layer is registered, and by the call timeout. A failure that
+   `spec.tool_retry` covers (`tool_retry.rs`: the tool is `Tool::idempotent`,
+   the error `code` or `timeout` is listed, attempts are left) goes to
+   `ToolSink::tool_retrying`, which writes and flushes a `tool_retry` event,
+   then waits (`base_delay_ms` doubling up to `max_delay_ms`) and runs again.
+5. **`finish`.** Output schema, redaction, then a fresh successful result is
+   stored in the cache (after redaction, before `post_tool_use`, so a
+   durable table never holds unredacted output and hooks run again on every
+   hit), then `post_tool_use`. A `Mutate` answer changes the value or the
+   error flag and keeps the metadata and error code.
+6. **Invalidate again** after a write or exec call, then `tool_finished`.
+
+The `tool_execute` waterfall is the Rust counterpart of Python's
+`tools/execute`: a `ToolMiddleware` gets the call and a `Next`, awaits
+`next.run()` to run what is inside, and returns the result. Not awaiting it
+vetoes the call. The first registered layer is the outermost; a layer cannot
+change the input, which permission has already checked (rewrite it in
+`pre_tool_use`). Registering returns a `Registration`, and with no layer the
+scheduler calls the tool directly, so the path is the one a run without it
+always had.
+
 ### Only read work runs in parallel
 
 `execute` walks the calls in order and groups them

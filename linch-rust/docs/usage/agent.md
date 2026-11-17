@@ -556,7 +556,8 @@ request has `session_id` and `run_id`:
 |---|---|---|
 | `pre_tool_use` | `tool_use_id`, `tool_name`, `input` | `{"action": "continue"}`, `{"action": "rewrite", "input"}`, `{"action": "block", "reason"}`, `{"action": "resolve", "result"}` |
 | `permission_request` | `tool_use_id`, `tool_name`, `input`, `reason?`, `principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
-| `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
+| `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}`, `{"action": "mutate", "content"?, "is_error"?}`; a `replace` is a whole new result, a `mutate` changes only the output value (`content`) or the error flag (`is_error`) and keeps the result's metadata and error code. The next request and the session log carry the mutated result |
+| `tool_execute` | `tool_use_id`, `tool_name`, `input`, `attempt`, `phase` (`before` or `after`), `result` (`after` only) | `before`: `{"action": "next", "after"?}` runs what is inside (the later callbacks, then the tool; with `after` the server calls again with the result), `{"action": "veto", "result"}` skips it and uses `result`. `after`: `{"action": "continue"}`, `{"action": "replace", "result"}`. This is Python's `tools/execute` waterfall; the `tool_middleware` decorator hides the two calls behind `async def layer(call, next)` (`await next()` runs the tool and returns its result; returning without it vetoes the call). The first callback declared is the outermost, a layer sees every attempt of a retried call, and the input is the one permission already allowed: rewrite inputs in `pre_tool_use`. A callback that is not declared costs nothing |
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
 | `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called. `force_continue` skips the call: `feedback` goes to the model in a `<system-reminder>` and the run takes another turn, bounded by `max_turns` and by the [loop guard](#loop_guard)'s `max_idle_turns` (25 turns in a row by default). `retry` is refused here (Python ignores it) |
@@ -596,9 +597,9 @@ and never for a stream-only delta or tool-progress event.
 
 | Argument | Default | What it controls |
 |---|---|---|
-| `point` | required | One of the twenty-two points above |
+| `point` | required | One of the twenty-three points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
-| `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
+| `matcher` | every tool | Tool-name globs (`*`, `?`), only at the tool points (`pre_tool_use`, `permission_request`, `post_tool_use`, `tool_execute`); a miss never reaches this process |
 | `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |
 | `fail_mode` | `closed` at `pre_tool_use` and `permission_request`, `open` elsewhere | What an exception, a bad answer or a timeout does: `closed` gives the point's blocking answer, `open` skips the callback. `context_build` and `post_turn` cannot fail closed |
 

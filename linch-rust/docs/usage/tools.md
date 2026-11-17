@@ -164,7 +164,9 @@ host reads: {'source': 'crm', 'cache': 'hit'}
 ```
 
 A tool error carries no metadata. A `post_tool_use` callback that replaces
-the result gives the event the metadata of its replacement.
+the result gives the event the metadata of its replacement; one that
+answers `mutate` keeps the result's metadata and error code and changes only
+its value or error flag.
 
 ### Which call a tool serves
 
@@ -807,6 +809,87 @@ An HTTP server is `{"type": "http", "url": "http://127.0.0.1:8000/mcp",
 agent opens enter the run contract; one it adds later does not. Every field
 and default is in [Agent config](./agent.md#mcp_servers); reconnects,
 cancellation and limits are in the [architecture MCP page](../architecture/mcp.md).
+
+## Retries and the cache
+
+Two spec fields make repeated tool work cheaper or safer. Both are off when
+unset, and an agent that sets neither keeps its run contract.
+
+### `tool_retry`
+
+A host tool that fails with a transient error can run again, but only when
+it is safe to. A call is retried when all of these hold:
+
+- `spec.tool_retry` is set;
+- the tool declares itself **idempotent** (`@tool(idempotent=True)`; the
+  built-in `Read`, `Grep` and `Glob` do): running it twice has no effect
+  beyond its result. A tool that does not is never run twice, whatever the
+  policy says;
+- the failure is an error result whose `code` is in `retry_on`. A host tool
+  sets it with `raise ToolError("busy", code="transient")`; a `timeout`
+  entry also retries a call that ran past `call_timeout_ms`. A panic, an
+  output that broke the tool's schema and an error without a code are not
+  retried;
+- attempts are left.
+
+```python
+config["spec"] = {
+    "model": "deepseek-flash",
+    "tool_retry": {"max_attempts": 3, "base_delay_ms": 200, "retry_on": ["transient"]},
+}
+```
+
+| Field | Default | What it controls |
+|---|---|---|
+| `max_attempts` | 3 | Attempts of one call, the first included; at least 2 |
+| `base_delay_ms` | 200 | Wait before the second attempt; each retry waits twice as long, up to `max_delay_ms` |
+| `max_delay_ms` | 5000 | Longest wait; at least `base_delay_ms` |
+| `retry_on` | `["transient"]` | Error classes retried: a tool error's `code`, or `timeout` |
+| `tools` | every idempotent tool | Narrows the tools that may be retried |
+
+Each retry writes a [`tool_retry` event](./events.md#toolretryevent-tool_retry)
+and flushes it before the wait and the next attempt. A crash after it leaves
+the call with a start and attempts but no end, and a resumed run reports it
+interrupted and does not run it again, so a retry never doubles an effect
+across a restart. A permission check and the `pre_tool_use` callbacks run
+once per call; a `tool_execute` callback runs once per attempt.
+
+### `tool_cache`
+
+`spec.tool_cache` reuses the result of a read tool for an identical call.
+Naming the tools is required: Linch cannot tell a deterministic tool from a
+volatile one, and naming one is your promise that it answers the same for
+the same input whoever asks.
+
+```python
+config["spec"] = {
+    "model": "deepseek-flash",
+    "tool_cache": {"tools": ["lookup"], "ttl_ms": 60_000},
+}
+```
+
+| Field | Default | What it controls |
+|---|---|---|
+| `tools` | required | The cacheable tools. A tool that is not `read` scope, polls or asks the user is never cached, even when listed |
+| `ttl_ms` | 300000 | How long an entry lives |
+| `max_entries` | 256 | Entries kept for the namespace; the oldest go first |
+| `max_value_bytes` | 100000 | A result whose JSON is larger is not stored |
+| `invalidate_on_write` | `True` | Whether a `write` or `exec` tool's call clears the namespace's entries, before it starts and after it ends |
+
+The key is the agent's `namespace`, the tool name and the canonical input,
+so entries are shared by every session and run of that namespace and never
+cross to another. With Postgres stores the entries live in a table (shared
+by every server of the namespace, surviving restarts); with memory stores
+they live in the agent.
+
+A hit never skips a check. The call has already passed validation, the
+`pre_tool_use` callbacks and permissions, so a call that is denied or blocked
+never reaches the cache. A hit then replaces only the tool's own run:
+`post_tool_use`, redaction and the output schema run on it as on a fresh
+result. Its `tool_call_end` has `cache_hit: true`, and its
+`tool_call_start` is written with that end, not before it, since nothing ran. What is stored is a successful result
+after redaction and before `post_tool_use`, never an error. If the store
+fails, the call is a miss and the model never sees the failure.
 
 ## Related pages
 

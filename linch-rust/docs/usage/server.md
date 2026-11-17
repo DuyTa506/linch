@@ -123,6 +123,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
 | `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)); without it an agent with `schedule_tools` is refused |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
+| `tool_cache` | `false` | `spec.tool_cache`, which keeps results in the server's memory or database for the tenant's namespace; bounded to 1024 entries, a one-hour ttl, 1 MiB a result and 32 tools |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
 | `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
 | `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |
@@ -356,6 +357,8 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `provider_concurrency` | `max_provider_concurrency` above the tenant's | The tenant's runs would make more calls at once on the server's key than the operator allows; `data.max` is the cap |
 | `system` | More than 16 `spec.system` sections, a name over 64 bytes, a section or `append` over 16 KiB, or over 64 KiB together | Sections ride every request of every run |
 | `context_budget` | More than 32 ids in `drop_order` or `pinned`, or an id over 128 bytes | The server keeps them per agent |
+| `tool_cache` | `spec.tool_cache` without `allow.tool_cache`, or past its bounds (`max_entries` 1024, `ttl_ms` 3600000, `max_value_bytes` 1048576, 32 tools) | Entries are stored by the server and shared by every session of the namespace; the table or memory they take is the operator's |
+| `tool_retry` | `spec.tool_retry.max_attempts` above 5, `max_delay_ms` above 60000, or a list over 32 names | Every retry is a durable write and a wait the run holds a slot through |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
 | `tool_choice` | A forced `tool_choice` (`required`, or a tool that is not the final tool), in the spec or in `run.start`, on an agent with no `max_turns` and no `final_tool_name` (an output schema alone does not end the run on every provider) | A model forced to call a tool every turn never answers, and no budget ends the run |
 

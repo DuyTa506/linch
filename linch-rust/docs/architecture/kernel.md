@@ -25,11 +25,13 @@ Python Linch builds the same guarantees on a scoped IoC container
   ([hook chains](#hook-chains)). Twelve of them only observe: added for
   parity with Python's lifecycle hooks, they answer `()`/`{}` and cannot fail
   closed (`hooks/observe.rs`).
-- There is no `ToolPipeline` with `tools/pre-execute`, `tools/execute` and
-  `tools/post-execute` seams. A batch runs through `plan` and `execute`
-  (`crates/linch-core/src/scheduler.rs:1-22`); the `pre_tool_use` and
-  `post_tool_use` chains are the places to add behavior, and `execute` has no
-  waterfall to wrap ([tool call seams](#tool-call-seams)).
+- Python's `ToolPipeline` seams map onto the hook points. `tools/pre-execute`
+  is `pre_tool_use`, `tools/post-execute` is `post_tool_use` (which can also
+  `Mutate` a result), and `tools/execute` is the `tool_execute` waterfall
+  (`hooks/execute.rs`): a `ToolMiddleware` wraps one attempt of a call and
+  must await `Next::run` to delegate inward, or vetoes the call by not doing
+  so ([tool call seams](#tool-call-seams)). A batch still runs through `plan`
+  and `execute` (`crates/linch-core/src/scheduler.rs:1-22`).
 - There are no plugins and no domain profiles in `linch-core`. The extension
   points are traits (`Provider`, `Tool`, `RunStore`, `SessionStore`,
   `TaskStore`, `FileBackend`, `Hook`) given to `AgentBuilder`.
@@ -152,7 +154,8 @@ where the table says so:
 | `context_build` | Every hook runs. The blocks join in order; metadata merges with a later key winning. Cannot fail closed (`hooks/turn.rs:150-154`) | open |
 | `pre_tool_use` | A rewrite feeds the next hook. A block, a resolve or a closed failure stops the chain. Only a chain that ran every matching hook lets the tool run (`hooks/tool.rs:101-136`) | closed |
 | `permission_request` | The strictest answer wins. A deny or closed failure stops the chain; an allow does not (`hooks/tool.rs:226-258`) | closed |
-| `post_tool_use` | A replacement feeds the next hook. A closed failure withholds the result and stops the chain (`hooks/tool.rs:312-336`) | open |
+| `post_tool_use` | A replacement or a `Mutate` (a new value, or error flag, keeping the metadata and error code) feeds the next hook. A closed failure withholds the result and stops the chain (`hooks/tool.rs`) | open |
+| `tool_execute` | A waterfall, not a chain of answers: the first registered layer is the outermost, and each awaits `Next::run` to run the layers inside it and then the tool, or returns a result without it to veto the call. Runs once per attempt, so a retried call passes through it again. A closed failure fails the call (or withholds the result when it came after the tool ran) (`hooks/execute.rs`) | closed |
 | `before_provider_call` | A rewrite feeds the next hook; the last rewrite is what is sent and what `context_build` records. A `force_continue` stops the chain and skips the call: no `context_build` or delivery is recorded, the hook's feedback goes to the model in a `<system-reminder>`, durable before the next turn as a stop feedback is, and the run takes another turn, bounded by `max_turns` and by the loop guard's `max_idle_turns` ([turn lifecycle](./turn-lifecycle.md#the-loop-guard); Python's `force_continue` there). A block or a closed failure stops the chain and ends the run as failed, before the provider is called (`hooks/call.rs`) | open, but its block can fail closed |
 | `after_provider_call` | A rewrite feeds the next hook; the last rewrite is what gets staged and appended to the session. A retry stops the chain: the response (with any earlier rewrite) is accepted, its tool calls do not run, and the hook's feedback goes to the model before another turn. A block or a closed failure stops the chain and ends the run as failed, before the response is staged (`hooks/assembly.rs`). The call's receipt and usage are already durable when the chain runs ([turn lifecycle](./turn-lifecycle.md#a-crash-between-a-receipt-and-its-response)) | open, but its block can fail closed |
 | `stop` | A rewrite feeds the next hook; the last rewrite is the run's final-answer text, not the assistant message already appended to the session. The first hook that keeps the run going (`Continue`, bounded only by `max_turns`) stops the chain; so does a `Retry` while the run call has its one retry left, after which a retry counts as an allow. A block or a closed failure fails the run (`hooks/turn.rs`). With an output schema it runs only on an answer that satisfies it, its request carries the parsed `structured_output`, and a rewrite is checked again: one that fails the schema fails the run | open |
@@ -202,7 +205,10 @@ that redactor set, progress reports are dropped. A tool that panics gets an erro
 To add behavior to tool execution, use one of these:
 
 - A `pre_tool_use` hook to rewrite, block or serve a call.
-- A `post_tool_use` hook to replace or redact a result.
+- A `post_tool_use` hook to replace, mutate or redact a result.
+- A `tool_execute` layer to wrap the tool body itself: timing, tracing, a
+  guard that vetoes a call, a result rewrite on the way out. With no layer
+  registered the body is called directly.
 - A `Tool` wrapper registered with `ToolRegistry::replace`, which hides the
   wrapped tool and is undone with its `Registration`.
 - `call_timeout_ms` and `max_tool_concurrency` in the spec for timeouts and

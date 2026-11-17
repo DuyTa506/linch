@@ -557,7 +557,8 @@ Hàm nhận dict request và trả về câu trả lời của điểm đó. M�
 |---|---|---|
 | `pre_tool_use` | `tool_use_id`, `tool_name`, `input` | `{"action": "continue"}`, `{"action": "rewrite", "input"}`, `{"action": "block", "reason"}`, `{"action": "resolve", "result"}` |
 | `permission_request` | `tool_use_id`, `tool_name`, `input`, `reason?`, `principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
-| `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
+| `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}`, `{"action": "mutate", "content"?, "is_error"?}`; một `replace` là một kết quả hoàn toàn mới, một `mutate` chỉ đổi giá trị output (`content`) hoặc cờ lỗi (`is_error`) và giữ nguyên metadata và mã lỗi của kết quả. Request kế tiếp và session log mang kết quả đã mutate |
+| `tool_execute` | `tool_use_id`, `tool_name`, `input`, `attempt`, `phase` (`before` hoặc `after`), `result` (chỉ `after`) | `before`: `{"action": "next", "after"?}` chạy phần bên trong (các callback sau, rồi đến tool; với `after` server gọi lại với kết quả), `{"action": "veto", "result"}` bỏ qua nó và dùng `result`. `after`: `{"action": "continue"}`, `{"action": "replace", "result"}`. Đây là waterfall `tools/execute` của Python; decorator `tool_middleware` che hai lời gọi sau `async def layer(call, next)` (`await next()` chạy tool và trả về kết quả của nó; trả về mà không gọi nó thì phủ quyết lời gọi). Callback được khai báo đầu tiên là ngoài cùng, một layer thấy mọi lần thử của một lời gọi được retry, và input là cái mà permission đã cho phép: hãy viết lại input trong `pre_tool_use`. Một callback không được khai báo thì không tốn gì |
 | `user_prompt_submit` | `content` (các content block) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (cuộc hội thoại mà model sẽ thấy) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` dành cho observer và eval: nó nằm trên `ContextBuildEvent` của lời gọi, key của callback đến sau thắng, và model không bao giờ thấy nó |
 | `before_provider_call` | `turn`, `request` (toàn bộ provider request sắp được gửi) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}`; một rewrite là thứ được gửi đi và được `context_build` ghi lại, và một block kết thúc run trước khi provider được gọi. `force_continue` bỏ qua lời gọi: `feedback` đi tới model trong một `<system-reminder>` và run chạy thêm một lượt, bị giới hạn bởi `max_turns` và bởi `max_idle_turns` của [loop guard](#loop_guard) (mặc định 25 lượt liên tiếp). `retry` bị từ chối ở đây (Python bỏ qua nó) |
@@ -599,9 +600,9 @@ và không bao giờ cho một delta hay tool-progress chỉ stream.
 
 | Đối số | Mặc định | Điều khiển gì |
 |---|---|---|
-| `point` | bắt buộc | Một trong hai mươi hai điểm ở trên |
+| `point` | bắt buộc | Một trong hai mươi ba điểm ở trên |
 | `policy_id`, `policy_version` | bắt buộc | Đi vào hợp đồng của run. Hãy tăng version mỗi khi hành vi, matcher, timeout hoặc fail mode thay đổi |
-| `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở ba điểm tool; một lần không khớp không bao giờ đến process này |
+| `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở các điểm tool (`pre_tool_use`, `permission_request`, `post_tool_use`, `tool_execute`); một lần không khớp không bao giờ đến process này |
 | `timeout` | không có | Server chờ câu trả lời bao lâu; vắng thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc |
 | `fail_mode` | `closed` ở `pre_tool_use` và `permission_request`, `open` ở các điểm còn lại | Điều xảy ra khi có exception, câu trả lời sai hoặc timeout: `closed` đưa ra câu trả lời chặn của điểm đó, `open` bỏ qua callback. `context_build` và `post_turn` không thể fail closed |
 

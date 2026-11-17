@@ -141,6 +141,45 @@ chúng:
    theo `output_schema` của tool, rồi chuỗi `post_tool_use` chạy trên kết quả.
    Một tool bị panic nhận một kết quả lỗi nêu tên panic đó.
 
+### Một lời gọi, theo thứ tự
+
+`Runner::call` (`scheduler/execute.rs`) đưa một lời gọi `Run` đã được lên kế hoạch
+qua các bước này. Mỗi bước vắng mặt, và không tốn gì, khi trường của nó không được đặt:
+
+1. **Tra cache** (`spec.tool_cache`). Một tool phạm vi read, không `polls`,
+   không `asks_user` mà policy nêu tên sẽ tra khóa `[tool_name, input]` trong
+   namespace của agent (`tool_cache.rs`, `cache_key`). Một mục còn sống trở thành
+   kết quả: không có durable start trước nó, không chạy tool, `cache_hit` nằm trên
+   `tool_call_end`; start và end được ghi cùng nhau, như với mọi lời gọi không chạy
+   gì. Một lỗi store được tính là miss.
+2. **Invalidate.** Một tool write hoặc exec xóa namespace trước, khi
+   `invalidate_on_write` được đặt, trước `tool_starting`, để một lần crash trong lúc
+   tác dụng diễn ra không thể để lại một mục từ trước nó.
+3. **`tool_starting`**, rào chắn bền vững. Từ đây một lần crash để lại một lời
+   gọi bị gián đoạn mà một lần resume không bao giờ chạy lại.
+4. **Các lần thử** (`invoke`). Mỗi lần thử là phần thân tool được bọc bởi waterfall
+   `tool_execute` (`hooks/execute.rs`, `ToolPipeline`) khi có một
+   layer được đăng ký, và bởi timeout của lời gọi. Một lỗi mà
+   `spec.tool_retry` bao phủ (`tool_retry.rs`: tool là `Tool::idempotent`,
+   `code` của lỗi hoặc `timeout` có trong danh sách, còn lần thử) đi tới
+   `ToolSink::tool_retrying`, nơi ghi và flush một event `tool_retry`,
+   rồi chờ (`base_delay_ms` nhân đôi đến `max_delay_ms`) và chạy lại.
+5. **`finish`.** Output schema, redaction, rồi một kết quả thành công mới được
+   lưu vào cache (sau redaction, trước `post_tool_use`, để một bảng
+   bền vững không bao giờ giữ output chưa che và các hook chạy lại ở mỗi
+   lần hit), rồi đến `post_tool_use`. Một câu trả lời `Mutate` đổi giá trị hoặc
+   cờ lỗi và giữ nguyên metadata và mã lỗi.
+6. **Invalidate lần nữa** sau một lời gọi write hoặc exec, rồi `tool_finished`.
+
+Waterfall `tool_execute` là bản đối ứng bằng Rust của `tools/execute` trong Python:
+một `ToolMiddleware` nhận lời gọi và một `Next`, await
+`next.run()` để chạy phần bên trong, và trả về kết quả. Không await nó thì
+phủ quyết lời gọi. Layer được đăng ký đầu tiên là ngoài cùng; một layer không thể
+đổi input, thứ mà permission đã kiểm tra (hãy viết lại nó trong
+`pre_tool_use`). Việc đăng ký trả về một `Registration`, và khi không có layer nào
+thì scheduler gọi tool trực tiếp, nên đường đi chính là đường mà một run không có nó
+vẫn luôn có.
+
 ### Chỉ công việc đọc mới chạy song song
 
 `execute` duyệt các lời gọi theo thứ tự và gom chúng thành nhóm
