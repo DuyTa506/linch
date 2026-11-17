@@ -359,18 +359,37 @@ info = await server.model_info(config["provider"], "qwen3.6-35b-a3b")
 `ProviderCapabilities` được đọc như trong
 [trang providers của kiến trúc](../architecture/providers.md#khả-năng-và-danh-sách-model):
 `context_window` cùng `context_source` của nó (`server`, `table`, `configured` hoặc
-`default`, một phỏng đoán), `native_output_schema`, `tool_choice` (với
+`default`, một phỏng đoán), `output_schema`, `tool_choice` (với
 `forced_refused_with`), `thinking`, `vision`, `streams_tool_arguments`,
 `prompt_cache` và `stop_sequences`. Câu trả lời của một provider cloud là của
 adapter, không phải của vendor; danh sách model là của vendor, và một trường mà nó
 không cung cấp (OpenAI không cung cấp cửa sổ) là `None`.
 
+`output_schema` nói một run có `output_schema` nhận câu trả lời có cấu trúc từ
+provider này bằng cách nào: `native` (schema nằm trong request, như với OpenAI,
+Anthropic và Gemini) hoặc `final_tool` (request không mang schema và run đưa ra
+một final tool có input là schema; DeepSeek, vLLM, SGLang và llama.cpp).
+`final_tool` không có nghĩa là server không làm được structured output. vLLM nhận
+một `response_format`, nhưng khi tool nằm trong cùng request, guided decoding của
+nó ràng buộc cả câu trả lời vào schema và model không bao giờ gọi tool, nên một
+run ở đó dùng final tool. (SGLang và llama.cpp giữ cùng quy tắc, chưa kiểm chứng
+với server thật.)
+
+`list_models` trả về một danh sách có thêm `.truncated`: true khi provider có
+nhiều trang hơn server theo (10), nên một model không có trong danh sách vẫn có
+thể tồn tại. `provider.capabilities` không bao giờ gửi key của server, kể cả khi
+có một key đặt cho provider đó; `list_models` và `model_info` thì gửi.
+
 Lỗi: `ModelsUnsupported` (-32035, provider `scripted`),
-`ModelNotFound` (-32036), `ProviderRequestFailed` (-32037: `.kind` là
-`connect`, `transport` hoặc `status`, với `.status`; message không nêu
-key lẫn URL), và `OpenError` (-32013) khi key không được
-đặt trên server. Một tenant từ xa cần `allow.provider_info` và một
-`base_url` được cho phép.
+`ModelNotFound` (-32036; `.truncated` là true khi danh sách bị cắt, nên nó không
+chứng minh gì), `ProviderRequestFailed` (-32037: `.kind` là `unreachable` (kết
+nối bị từ chối, bị reset và timeout trông như nhau), `status` (với `.status`),
+`invalid_request` hoặc `other`; message là văn bản cố định theo từng kind, không
+bao giờ là key, URL hay lời của vendor), và `OpenError` (-32013) khi key không
+được đặt trên server. Một tenant từ xa cần `allow.provider_info` và một
+`base_url` được cho phép cả origin lẫn path (`provider_base_urls`; xem
+[Server](./server.md)), và được gọi `list_models` và `model_info` 10 lần một
+phút, sau đó nhận `LimitReached` (`kind` là `provider_calls`).
 
 ## Lỗi và thử lại
 

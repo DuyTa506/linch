@@ -5,7 +5,7 @@
 //! `LINCH_TEST_VLLM_URL=http://127.0.0.1:8201/v1 LINCH_TEST_VLLM_MODEL=qwen3.6-35b-a3b \
 //!  cargo test -p linch-providers --test live_vllm -- --nocapture`
 
-use linch_core::{ContextSource, Provider};
+use linch_core::{ContextSource, OutputSchemaMode, Provider};
 use linch_providers::{OpenAiChat, Server, ServerOptions};
 
 fn vllm(test: &str) -> Option<(OpenAiChat, String)> {
@@ -45,5 +45,9 @@ async fn a_live_servers_capabilities_name_its_window_as_the_servers() {
     assert_eq!(caps.context_source, ContextSource::Server);
     let info = provider.model_info(&model).await.expect("the model");
     assert_eq!(Some(caps.context_window), info.context_window);
-    assert!(!caps.native_output_schema && caps.declared);
+    // The server takes a `response_format`, but with tools in the same request
+    // its guided decoding binds the answer to the schema and no tool is
+    // called, so a run offers its final tool instead.
+    assert_eq!(caps.output_schema, OutputSchemaMode::FinalTool);
+    assert!(caps.declared);
 }

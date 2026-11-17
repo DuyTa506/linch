@@ -17,7 +17,7 @@ from .agent import Agent, Skipped
 from .callbacks import Callback
 from .config import AgentConfig
 from .errors import LinchError
-from .provider import ModelInfo, ProviderCapabilities
+from .provider import ModelInfo, ModelList, ProviderCapabilities
 from .run import Observer
 from .tools import HostTool
 
@@ -259,7 +259,7 @@ class Server:
         )
         return ProviderCapabilities.from_wire(result)
 
-    async def list_models(self, provider: Mapping[str, Any] | AgentConfig) -> list[ModelInfo]:
+    async def list_models(self, provider: Mapping[str, Any] | AgentConfig) -> ModelList:
         """The models a provider's server lists, in its order.
 
         Asks the provider's API with the server's key, so the key must be
@@ -271,18 +271,21 @@ class Server:
 
         Returns:
             One `ModelInfo` per model; a field the API does not give is
-            `None`.
+            `None`. The list's `truncated` is true when the server followed
+            only the first pages of a longer list.
 
         Raises:
             ModelsUnsupported: The provider has no model list.
             ProviderRequestFailed: The provider could not be reached or
-                answered with an error; the message holds no key or URL.
+                answered with an error; the message is fixed text per `kind`.
+            LimitReached: A tenant asked more than 10 times in a minute.
             OpenError: The provider's key is not set on the server.
             NotAllowed: As for `provider_capabilities`.
         """
         found, _ = _provider_and_model(provider, None)
         result = await self._started().request("provider.models", {"provider": found})
-        return [ModelInfo.from_wire(item) for item in result["models"]]
+        models = [ModelInfo.from_wire(item) for item in result["models"]]
+        return ModelList(models, truncated=bool(result.get("truncated", False)))
 
     async def model_info(
         self, provider: Mapping[str, Any] | AgentConfig, model: str | None = None
@@ -299,7 +302,8 @@ class Server:
             The model's entry.
 
         Raises:
-            ModelNotFound: The list does not hold the model.
+            ModelNotFound: The list does not hold the model (`truncated` says
+                the list was cut, so it may exist past the cut).
             ModelsUnsupported: As for `list_models`.
             ProviderRequestFailed: As for `list_models`.
             OpenError: As for `list_models`.

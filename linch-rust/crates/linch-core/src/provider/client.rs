@@ -12,8 +12,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ModelInfo, ModelsError, ProviderCapabilities, ProviderEvent, ProviderRequest, StreamError,
-    Thinking, ToolChoice, ToolChoiceCaps,
+    ModelInfo, ModelList, ModelsError, ProviderCapabilities, ProviderEvent, ProviderRequest,
+    StreamError, Thinking, ToolChoice, ToolChoiceCaps,
 };
 
 /// The event stream of one provider call.
@@ -84,13 +84,15 @@ pub trait Provider: Send + Sync {
     }
 
     /// The models the provider's server lists, when its API has such a
-    /// list. It asks the server on every call.
+    /// list. It asks the server on every call; a list with more pages than
+    /// the adapter follows comes back cut, with [`ModelList::truncated`]
+    /// set.
     ///
     /// # Errors
     ///
     /// [`ModelsError::Unsupported`] by default; an adapter's own failures
     /// are [`ModelsError::Provider`], with the key and the URL left out.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+    async fn list_models(&self) -> Result<ModelList, ModelsError> {
         Err(ModelsError::Unsupported {
             provider: self.id().to_owned(),
         })
@@ -101,12 +103,17 @@ pub trait Provider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`ModelsError::NotFound`] when the list lacks it, else as
-    /// [`Self::list_models`].
+    /// [`ModelsError::NotFound`] when the list lacks it (with `truncated`
+    /// set when the list was cut, so the model may be past the cut), else
+    /// as [`Self::list_models`].
     async fn model_info(&self, model: &str) -> Result<ModelInfo, ModelsError> {
         let listed = self.list_models().await?;
-        (listed.into_iter().find(|info| info.id == model)).ok_or_else(|| ModelsError::NotFound {
-            model: model.to_owned(),
+        let truncated = listed.truncated;
+        (listed.models.into_iter().find(|info| info.id == model)).ok_or_else(|| {
+            ModelsError::NotFound {
+                model: model.to_owned(),
+                truncated,
+            }
         })
     }
 

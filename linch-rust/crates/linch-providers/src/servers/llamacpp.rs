@@ -26,10 +26,13 @@
 //!   mid-stream error is the same object in a `data:` frame, with no
 //!   `[DONE]` after it.
 //! - **`output_schema`** is refused in a request: the profile sends no
-//!   `response_format`, since the server's guided decoding would bind the
-//!   tool-call text to the schema too, and that was not checked live.
-//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
-//!   a schema offers its final tool instead.
+//!   `response_format`, as vLLM's must not (its guided decoding binds the
+//!   whole answer to the schema, so the model never calls a tool), and
+//!   this server was not checked live for it: the same rule is kept
+//!   rather than assumed away.
+//!   [`linch_core::Provider::native_output_schema`] is false and the
+//!   capabilities say `output_schema: final_tool`, so a run with a schema
+//!   offers its final tool instead.
 
 use linch_core::JsonObject;
 use serde_json::json;

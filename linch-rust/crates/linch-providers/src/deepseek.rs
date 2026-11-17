@@ -28,9 +28,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use linch_core::provider::Thinking;
 use linch_core::{
-    ContextSource, JsonValue, ModelInfo, ModelsError, PromptCache, Provider, ProviderCapabilities,
-    ProviderError, ProviderRequest, ProviderStream, ReasoningEffort, Support, ThinkingCaps,
-    ToolChoice, ToolChoiceCaps, Usage,
+    ContextSource, JsonValue, ModelList, ModelsError, OutputSchemaMode, PromptCache, Provider,
+    ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, ReasoningEffort, Support,
+    ThinkingCaps, ToolChoice, ToolChoiceCaps, Usage,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -96,6 +96,7 @@ impl DeepSeek {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built,
     /// for example when no TLS roots are available.
     pub fn new(options: DeepSeekOptions) -> Result<Self, ProviderError> {
+        crate::base_url::require(&options.base_url)?;
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
@@ -141,7 +142,7 @@ impl Provider for DeepSeek {
             } else {
                 ContextSource::Default
             },
-            native_output_schema: false,
+            output_schema: OutputSchemaMode::FinalTool,
             tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
                 self.tool_choice_refusal(choice, thinking)
             }),
@@ -160,7 +161,7 @@ impl Provider for DeepSeek {
 
     /// `GET /models`, which also gives each model's window, output limit
     /// and input modalities.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+    async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
         let bearer = format!("Bearer {}", key.expose());
@@ -171,7 +172,7 @@ impl Provider for DeepSeek {
             output: Some("max_output_tokens"),
             modalities: true,
         };
-        Ok(crate::models::openai_list(&value, row))
+        Ok(ModelList::new(crate::models::openai_list(&value, row)))
     }
 
     async fn stream(

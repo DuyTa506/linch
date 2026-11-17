@@ -32,17 +32,19 @@
 //!   the model still calls tools freely. `strict: true` asks the API to
 //!   enforce the schema, which then needs `additionalProperties: false`
 //!   and every property required. The server profiles send no schema
-//!   (their guided decoding would bind tool-call text to it as well, which
-//!   was not checked against a live server) and refuse one in a request:
-//!   [`Provider::native_output_schema`] is false for them, so a run with a
-//!   schema offers its final tool there instead.
+//!   (vLLM's guided decoding binds the whole answer to it, so the model
+//!   never calls a tool: checked live on 2026-11-17; SGLang and llama.cpp
+//!   keep the same rule unchecked) and refuse one in a request:
+//!   [`Provider::native_output_schema`] is false for them, and the
+//!   capabilities' `output_schema` is `final_tool`, so a run with a schema
+//!   offers its final tool there instead.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use linch_core::{
-    ContextSource, DEFAULT_CONTEXT_WINDOW, JsonObject, ModelInfo, ModelsError, Provider,
+    ContextSource, DEFAULT_CONTEXT_WINDOW, JsonObject, ModelsError, OutputSchemaMode, Provider,
     ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, Thinking, ThinkingCaps,
     ToolChoice, ToolChoiceCaps,
 };
@@ -158,6 +160,7 @@ impl OpenAiChat {
         thinking_off: JsonObject,
         context_window: Option<u64>,
     ) -> Result<Self, ProviderError> {
+        crate::base_url::require(&base_url)?;
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(api_key.as_ref(), &err))?;
         Ok(Self {
@@ -241,7 +244,7 @@ impl Provider for OpenAiChat {
             declared: true,
             context_window,
             context_source,
-            native_output_schema: profile.json_schema,
+            output_schema: OutputSchemaMode::of(profile.json_schema),
             tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
                 self.tool_choice_refusal(choice, thinking)
             }),
@@ -261,7 +264,7 @@ impl Provider for OpenAiChat {
 
     /// `GET {base}/models`; a llama.cpp list has no windows, so its one
     /// model's comes from `/props`.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+    async fn list_models(&self) -> Result<linch_core::ModelList, ModelsError> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let key = self.api_key.as_ref();
         let bearer = key.map(|key| format!("Bearer {}", key.expose()));
@@ -277,7 +280,7 @@ impl Provider for OpenAiChat {
                 model.context_window = model.context_window.or(window);
             }
         }
-        Ok(models)
+        Ok(linch_core::ModelList::new(models))
     }
 
     /// Ask a server for its context window once, unless one is configured.

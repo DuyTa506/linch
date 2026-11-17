@@ -31,8 +31,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linch_core::{
-    ContextSource, ModelInfo, ModelsError, PromptCache, Provider, ProviderCapabilities,
-    ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps, ToolChoiceCaps,
+    ContextSource, ModelList, ModelsError, OutputSchemaMode, PromptCache, Provider,
+    ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps,
+    ToolChoiceCaps,
 };
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio_util::sync::CancellationToken;
@@ -113,6 +114,7 @@ impl Gemini {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built,
     /// for example when no TLS roots are available.
     pub fn new(options: GeminiOptions) -> Result<Self, ProviderError> {
+        crate::base_url::require(&options.base_url)?;
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
@@ -145,7 +147,7 @@ impl Provider for Gemini {
             } else {
                 ContextSource::Default
             },
-            native_output_schema: true,
+            output_schema: OutputSchemaMode::Native,
             tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
                 self.tool_choice_refusal(choice, thinking)
             }),
@@ -163,13 +165,14 @@ impl Provider for Gemini {
     }
 
     /// `GET /v1beta/models`, paged by `pageToken` while `nextPageToken`.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+    async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let base = self.options.base_url.trim_end_matches('/');
         let key = &self.options.api_key;
         let headers = [("x-goog-api-key", key.expose())];
         let mut models = Vec::new();
         let mut token: Option<String> = None;
-        for _ in 0..crate::models::MAX_PAGES {
+        let mut truncated = false;
+        for n in 0..crate::models::MAX_PAGES {
             let mut url = format!("{base}/v1beta/models?pageSize=1000");
             if let Some(token) = &token {
                 url.push_str("&pageToken=");
@@ -182,8 +185,9 @@ impl Provider for Gemini {
                 Some(next) => token = Some(next),
                 None => break,
             }
+            truncated = n + 1 == crate::models::MAX_PAGES;
         }
-        Ok(models)
+        Ok(ModelList { models, truncated })
     }
 
     async fn stream(

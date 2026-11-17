@@ -284,10 +284,13 @@
 //! so a client can ask before it opens an agent. `provider.capabilities`
 //! answers [`ProviderCapabilities`](linch::ProviderCapabilities) from the
 //! adapter without a key, after a self-hosted server's one window probe;
-//! `provider.models` returns `{"models": [ModelInfo...]}` from the vendor's
-//! list and `provider.model` one entry, with the server's key. A tenant
-//! needs `provider_info` and an allowed `base_url` (`-32004`, `kind`
-//! `provider_info` or `provider_base_url`).
+//! `provider.models` returns `{"models": [ModelInfo...], "truncated"?: true}`
+//! from the vendor's list (`truncated` when it had more pages than the
+//! server follows) and `provider.model` one entry, with the server's key;
+//! `provider.capabilities` sends no key. A tenant needs `provider_info` and
+//! a `base_url` allowed in origin and path (`-32004`, `kind`
+//! `provider_info` or `provider_base_url`), and may make 10 `provider.models`
+//! and `provider.model` calls a minute (`-32005`, `kind` `provider_calls`).
 //!
 //! **`run.events`** `{agent, run_id, after_seq?}`
 //! ([`EventsParams`](protocol::EventsParams)) returns
@@ -498,8 +501,8 @@
 //! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
 //! | -32034 | invalid tool choice | `RunError::InvalidToolChoice`: the `tool_choice` of `run.start` names a tool the run does not offer, or the provider refuses it, so nothing was written; `data: {reason}` |
 //! | -32035 | models unsupported | `provider.models` or `provider.model` on a provider with no model list; `data: {provider}` |
-//! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model}` |
-//! | -32037 | provider request failed | the provider could not be reached or answered with an error; `data: {kind, status?}`; the message holds neither the key nor the URL |
+//! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model, truncated?}` |
+//! | -32037 | provider request failed | the provider could not be reached or answered with an error; `data: {kind, status?}`, `kind` `unreachable`, `status`, `invalid_request` or `other`; the message is one fixed text per kind: no key, URL or vendor words |
 //! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |

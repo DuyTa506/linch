@@ -99,8 +99,8 @@ pub use provider::{
     ProviderRequest, ReasoningEffort, StreamError, Thinking, ToolChoice, ToolDefinition, assemble,
 };
 pub use provider::{
-    ContextSource, ModelInfo, ModelsError, PromptCache, ProviderCapabilities, Support,
-    ThinkingCaps, ThinkingState, ToolChoiceCaps,
+    ContextSource, ModelInfo, ModelList, ModelsError, OutputSchemaMode, PromptCache,
+    ProviderCapabilities, Support, ThinkingCaps, ThinkingState, ToolChoiceCaps,
 };
 pub use provider::{DEFAULT_CONTEXT_WINDOW, Provider, ProviderError, ProviderStream};
 pub use provider::{ProviderGate, ProviderPermit, WeakProviderGate};

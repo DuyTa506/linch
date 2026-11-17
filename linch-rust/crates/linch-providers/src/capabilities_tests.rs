@@ -4,8 +4,9 @@
 
 use linch_core::provider::{OutputSchema, Thinking, ToolChoice};
 use linch_core::{
-    ContentBlock, ContextSource, ImageBlock, ImageSource, JsonValue, Message, PromptCache,
-    Provider, ProviderError, ProviderRequest, ReasoningEffort, Role, Support, ThinkingState,
+    ContentBlock, ContextSource, ImageBlock, ImageSource, JsonValue, Message, OutputSchemaMode,
+    PromptCache, Provider, ProviderError, ProviderRequest, ReasoningEffort, Role, Support,
+    ThinkingState,
 };
 use serde_json::json;
 
@@ -211,9 +212,10 @@ fn the_output_schema_rule_is_what_the_payload_does() {
         let caps = adapter.provider.capabilities(adapter.model);
         let request = with(adapter.model, |r| r.output_schema = Some(schema.clone()));
         let builds = (adapter.build)(&request).is_ok();
-        assert_eq!(caps.native_output_schema, builds, "{}", adapter.name);
+        let native = caps.output_schema == OutputSchemaMode::Native;
+        assert_eq!(native, builds, "{}", adapter.name);
         assert_eq!(
-            caps.native_output_schema,
+            native,
             adapter.provider.native_output_schema(),
             "{}",
             adapter.name

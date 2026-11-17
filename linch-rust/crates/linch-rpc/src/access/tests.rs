@@ -66,7 +66,7 @@ fn allowlists_take_only_web_urls_and_existing_roots() {
         "https://api.example.com/v1",
         "http://10.0.0.5:8000",
     ]));
-    assert_eq!(ok.unwrap().provider_origins.len(), 2);
+    assert_eq!(ok.unwrap().provider_endpoints.len(), 2);
     for bad in ["file:///etc", "api.example.com", "not a url"] {
         let list = urls(&["https://ok.example", bad]);
         let error = Allowlists::new().mcp_urls(&list).unwrap_err();

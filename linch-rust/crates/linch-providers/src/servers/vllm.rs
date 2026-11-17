@@ -26,10 +26,14 @@
 //!   the HTTP status as an integer `code`, also as a mid-stream frame
 //!   before `[DONE]`. `finish_reason` may be `abort` or `repetition`.
 //! - **`output_schema`** is refused in a request: the profile sends no
-//!   `response_format`, since the server's guided decoding would bind the
-//!   tool-call text to the schema too, and that was not checked live.
-//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
-//!   a schema offers its final tool instead.
+//!   `response_format`. The server takes one, but with it and tools in the
+//!   same request its guided decoding binds the whole answer to the
+//!   schema, and the model never calls a tool: a request that asked for a
+//!   tool call still came back as schema JSON with zero tool calls
+//!   (checked by hand against a live vLLM server, 2026-11-17).
+//!   [`linch_core::Provider::native_output_schema`] is false and the
+//!   capabilities say `output_schema: final_tool`, so a run with a schema
+//!   offers its final tool instead.
 
 use linch_core::{JsonObject, Usage};
 use serde_json::json;

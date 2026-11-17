@@ -17,6 +17,7 @@ from scripted import config
 
 from linch_rust import (
     ModelInfo,
+    ModelList,
     ModelNotFound,
     ModelsUnsupported,
     ProviderCapabilities,
@@ -81,7 +82,8 @@ async def test_a_client_asks_what_a_provider_supports_before_opening_an_agent() 
     assert isinstance(caps, ProviderCapabilities)
     assert (caps.provider, caps.model, caps.declared) == ("vllm", "qwen", True)
     assert (caps.context_window, caps.context_source) == (262144, "server")
-    assert not caps.native_output_schema
+    # vLLM takes a `response_format`, but not with tools in the same request.
+    assert caps.output_schema == "final_tool"
     assert caps.tool_choice.named and caps.tool_choice.forced_refused_with == ()
     assert caps.thinking.disable and caps.thinking.effort and caps.thinking.reasoning_text
     assert not caps.thinking.budget
@@ -99,9 +101,9 @@ async def test_a_cloud_provider_answers_capabilities_without_a_key() -> None:
         deepseek = await server.provider_capabilities({"id": "deepseek"}, "deepseek-flash")
 
     assert caps.prompt_cache == "explicit" and caps.tool_choice.forced_refused_with == ("budgeted",)
-    assert caps.native_output_schema and caps.thinking.budget
+    assert caps.output_schema == "native" and caps.thinking.budget
     assert deepseek.tool_choice.forced_refused_with == ("unset", "adaptive", "budgeted")
-    assert not deepseek.native_output_schema
+    assert deepseek.output_schema == "final_tool"
     assert deepseek.context_source == "default"
 
 
@@ -120,6 +122,8 @@ async def test_the_model_list_and_one_models_info() -> None:
         ModelInfo(id="qwen", context_window=262144),
         ModelInfo(id="small", context_window=8192),
     ]
+    assert isinstance(models, ModelList) and not models.truncated
+    assert not missing.value.truncated
     assert small == ModelInfo(id="small", context_window=8192)
     assert missing.value.model == "nope"
     assert unsupported.value.provider == "scripted"
@@ -133,6 +137,7 @@ async def test_a_failed_list_is_typed_and_names_neither_key_nor_url() -> None:
                 await server.list_models({"id": "vllm", "base_url": url})
     host = url.removeprefix("http://").removesuffix("/v1")
     assert (refused.value.kind, refused.value.status) == ("status", 401)
+    assert "rejected" not in str(refused.value)
     assert "sk-python-secret-5" not in str(refused.value)
     assert host not in str(refused.value)
 
@@ -140,7 +145,7 @@ async def test_a_failed_list_is_typed_and_names_neither_key_nor_url() -> None:
     async with Server(env=clean_env()) as server:
         with pytest.raises(ProviderRequestFailed) as unreachable:
             await server.list_models({"id": "vllm", "base_url": dead})
-    assert unreachable.value.kind == "connect" and unreachable.value.status is None
+    assert unreachable.value.kind == "unreachable" and unreachable.value.status is None
     assert dead.removeprefix("http://").removesuffix("/v1") not in str(unreachable.value)
 
 
@@ -150,3 +155,26 @@ def test_the_new_codes_map_to_their_classes() -> None:
     failed = error_from({"code": -32037, "message": "m", "data": {"kind": "status", "status": 502}})
     assert isinstance(failed, ProviderRequestFailed) and failed.status == 502
     assert isinstance(failed, ProviderInfoError)
+
+
+async def test_a_list_cut_at_the_page_cap_says_so() -> None:
+    # An endless Anthropic-style list: the server follows 10 pages and stops.
+    more = {"data": [{"id": "m"}], "has_more": True, "last_id": "m"}
+    with mock(200, more) as v1:
+        url = v1.removesuffix("/v1")
+        env = {**clean_env(), "ANTHROPIC_API_KEY": "sk-python-anthropic-9"}
+        async with Server(env=env) as server:
+            models = await server.list_models({"id": "anthropic", "base_url": url})
+    assert isinstance(models, ModelList)
+    assert len(models) == 10 and models.truncated
+
+
+def test_a_model_not_found_in_a_cut_list_says_the_list_was_cut() -> None:
+    missing = error_from(
+        {"code": -32036, "message": "m", "data": {"model": "x", "truncated": True}}
+    )
+    assert isinstance(missing, ModelNotFound) and missing.truncated and missing.model == "x"
+    limited = error_from(
+        {"code": -32005, "message": "m", "data": {"kind": "provider_calls", "max": 10}}
+    )
+    assert limited.kind == "provider_calls" and limited.max == 10  # type: ignore[attr-defined]

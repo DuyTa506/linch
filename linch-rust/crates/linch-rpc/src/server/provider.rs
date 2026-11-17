@@ -6,7 +6,7 @@ use linch::{JsonValue, ProviderConfig};
 
 use super::{Server, to_value};
 use crate::error::ErrorObject;
-use crate::protocol::{ProviderModelParams, ProviderModels, ProviderParams};
+use crate::protocol::{ProviderModelParams, ProviderParams};
 
 impl Server {
     /// A tenant's connection must be allowed to ask, and to reach the
@@ -18,8 +18,18 @@ impl Server {
         }
     }
 
+    /// A tenant's model questions are counted, and refused past its rate;
+    /// a local connection is not limited.
+    fn count_provider_call(&self) -> Result<(), ErrorObject> {
+        match &self.0.tenant {
+            Some(tenant) => tenant.provider_call(),
+            None => Ok(()),
+        }
+    }
+
     /// What the provider supports for the model. It sends nothing but the
-    /// one-time window probe of a self-hosted server, and needs no key.
+    /// one-time window probe of a self-hosted server, which carries no key
+    /// (the provider is built without reading one), and needs no key.
     pub(super) async fn provider_capabilities(
         &self,
         params: ProviderModelParams,
@@ -37,9 +47,10 @@ impl Server {
         params: ProviderParams,
     ) -> Result<JsonValue, ErrorObject> {
         self.admit_provider_info(&params.provider)?;
+        self.count_provider_call()?;
         let provider = (params.provider.build()).map_err(|error| ErrorObject::from(&error))?;
         let models = (provider.list_models().await).map_err(|error| ErrorObject::from(&error))?;
-        to_value(&ProviderModels { models })
+        to_value(&models)
     }
 
     /// One model of the list.
@@ -48,6 +59,7 @@ impl Server {
         params: ProviderModelParams,
     ) -> Result<JsonValue, ErrorObject> {
         self.admit_provider_info(&params.provider)?;
+        self.count_provider_call()?;
         let provider = (params.provider.build()).map_err(|error| ErrorObject::from(&error))?;
         let info = provider
             .model_info(&params.model)

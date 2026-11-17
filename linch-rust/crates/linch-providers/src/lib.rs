@@ -8,6 +8,7 @@
 
 pub mod anthropic;
 mod api_key;
+mod base_url;
 #[cfg(test)]
 mod capabilities_tests;
 mod context;
@@ -28,6 +29,7 @@ mod transport;
 
 pub use anthropic::{Anthropic, AnthropicOptions};
 pub use api_key::ApiKey;
+pub use base_url::{BaseUrlError, check_base_url};
 pub use deepseek::{DeepSeek, DeepSeekOptions};
 pub use gemini::{Gemini, GeminiOptions};
 pub use openai::{OpenAiChat, OpenAiChatOptions};

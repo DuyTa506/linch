@@ -305,6 +305,24 @@ pub enum ProviderConfig {
     },
 }
 
+impl ProviderConfig {
+    /// The paths a `base_url` may take on an origin an operator allowed
+    /// without naming a path: where this provider's own API root sits
+    /// (`/v1` for OpenAI's Chat Completions and Responses, none for
+    /// DeepSeek, Anthropic and Gemini, whose adapters add the version
+    /// themselves, `/v1` or none for a self-hosted server). A trailing
+    /// slash does not matter. A host that serves the API under another
+    /// prefix lists that prefix in full.
+    pub fn default_base_paths(&self) -> &'static [&'static str] {
+        match self {
+            Self::OpenAiChat { .. } | Self::OpenAiResponses { .. } => &["/v1"],
+            Self::Vllm { .. } | Self::SgLang { .. } | Self::LlamaCpp { .. } => &["/v1", ""],
+            Self::DeepSeek { .. } | Self::Anthropic { .. } | Self::Gemini { .. } => &[""],
+            Self::Scripted { .. } => &[],
+        }
+    }
+}
+
 fn native() -> bool {
     true
 }

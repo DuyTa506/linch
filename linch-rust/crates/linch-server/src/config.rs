@@ -183,7 +183,9 @@ pub struct AllowConfig {
     /// Memories the tenant may keep in each database, in all its
     /// namespaces, at least 1; required with `memory`.
     pub max_memories: Option<u64>,
-    /// Endpoints a provider `base_url` may name.
+    /// Endpoints a provider `base_url` may name, matched on origin and
+    /// path: an entry with a path allows that path alone, one with none
+    /// allows each provider's own path (`ProviderConfig::default_base_paths`).
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
     /// when absent. `auto_allow` and rules that allow need

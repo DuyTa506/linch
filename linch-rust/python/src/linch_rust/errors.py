@@ -66,7 +66,9 @@ class LimitReached(RpcError):
 
     @property
     def kind(self) -> str:
-        """`runs`, `agents`, `connections`, `logins`, `schedules` or `jobs`."""
+        """`runs`, `agents`, `connections`, `logins`, `schedules`, `jobs` or
+        `provider_calls` (a rate: `max` calls of `provider.models` and
+        `provider.model` per minute, so try again later)."""
         return _field(self.data, "kind")
 
     @property
@@ -299,16 +301,27 @@ class ModelNotFound(ProviderInfoError):
         """The model id asked for."""
         return _field(self.data, "model")
 
+    @property
+    def truncated(self) -> bool:
+        """The list was cut short, so the model may exist past the cut."""
+        try:
+            return bool(self.data["truncated"])
+        except (TypeError, KeyError):
+            return False
+
 
 class ProviderRequestFailed(ProviderInfoError):
     """The provider could not be asked, or answered with an error (-32037).
 
-    The message names neither the key nor the provider's URL.
+    The message is fixed text per `kind`: it names neither the key, the
+    provider's URL nor the vendor's own words.
     """
 
     @property
     def kind(self) -> str:
-        """`connect`, `transport`, `status`, `invalid_request` or `other`."""
+        """`unreachable` (a refused connection, a reset, a timeout and any
+        other transport failure look alike), `status`, `invalid_request` or
+        `other`."""
         return _field(self.data, "kind")
 
     @property

@@ -141,6 +141,7 @@ from .monitor import (
 )
 from .provider import (
     ModelInfo,
+    ModelList,
     ProviderCapabilities,
     ThinkingCaps,
     ToolChoiceCaps,
@@ -210,6 +211,7 @@ __all__ = [
     "LinchError",
     "LoopGuardEvent",
     "ModelInfo",
+    "ModelList",
     "ModelNotFound",
     "ModelsUnsupported",
     "ProviderCapabilities",

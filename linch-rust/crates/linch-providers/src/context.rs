@@ -20,6 +20,10 @@ use crate::ApiKey;
 /// How long a probe may take in all (Python's `context_window_timeout`).
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Most bytes of a probe's answer read: a window is a few hundred bytes, a
+/// server's `/props` a few KiB. A longer answer is dropped unread.
+const MAX_PROBE_BODY: usize = 64 * 1024;
+
 /// The key under which a server that serves one model files its window,
 /// so any model name finds it.
 const SOLE_MODEL: &str = "*";
@@ -105,11 +109,18 @@ async fn get_json(client: &reqwest::Client, url: &str, key: Option<&ApiKey>) -> 
     if let Some(key) = key {
         request = request.bearer_auth(key.expose());
     }
-    let response = request.send().await.ok()?;
+    let mut response = request.send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
-    response.json().await.ok()
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        body.extend_from_slice(&chunk);
+        if body.len() > MAX_PROBE_BODY {
+            return None;
+        }
+    }
+    serde_json::from_slice(&body).ok()
 }
 
 /// Each listed model's positive `max_model_len`; a list of one model also

@@ -360,18 +360,38 @@ info = await server.model_info(config["provider"], "qwen3.6-35b-a3b")
 `ProviderCapabilities` reads as in
 [Providers (architecture)](../architecture/providers.md#capabilities-and-model-lists):
 `context_window` with its `context_source` (`server`, `table`, `configured` or
-`default`, a guess), `native_output_schema`, `tool_choice` (with
+`default`, a guess), `output_schema`, `tool_choice` (with
 `forced_refused_with`), `thinking`, `vision`, `streams_tool_arguments`,
 `prompt_cache` and `stop_sequences`. A cloud provider's answer is the
 adapter's, not the vendor's; the model list is the vendor's, and a field it
 does not give (OpenAI gives no window) is `None`.
 
+`output_schema` says how a run with an `output_schema` gets its structured
+answer from this provider: `native` (the schema goes in the request, as for
+OpenAI, Anthropic and Gemini) or `final_tool` (the request carries no schema
+and the run offers a final tool whose input is the schema; DeepSeek, vLLM,
+SGLang and llama.cpp). `final_tool` does not mean the server cannot do
+structured output. vLLM takes a `response_format`, but with tools in the same
+request its guided decoding binds the whole answer to the schema and the
+model never calls a tool, so a run there uses the final tool. (SGLang and
+llama.cpp keep the same rule, not checked against a live server.)
+
+`list_models` returns a list that also has `.truncated`: true when the
+provider had more pages than the server follows (10), so a model that is not
+listed may still exist. `provider.capabilities` never sends the server's key,
+even when one is set for that provider; `list_models` and `model_info` do.
+
 Errors: `ModelsUnsupported` (-32035, the `scripted` provider),
-`ModelNotFound` (-32036), `ProviderRequestFailed` (-32037: `.kind` is
-`connect`, `transport` or `status`, with `.status`; the message names
-neither the key nor the URL), and `OpenError` (-32013) when the key is not
-set on the server. A remote tenant needs `allow.provider_info` and an
-allowed `base_url`.
+`ModelNotFound` (-32036; `.truncated` is true when the list was cut, so it
+proves nothing), `ProviderRequestFailed` (-32037: `.kind` is `unreachable`
+(a refused connection, a reset and a timeout look alike), `status` (with
+`.status`), `invalid_request` or `other`; the message is fixed text per
+kind, never the key, the URL or the vendor's own words), and `OpenError`
+(-32013) when the key is not set on the server. A remote tenant needs
+`allow.provider_info` and a `base_url` that is allowed in origin and path
+(`provider_base_urls`; see [Server](./server.md)), and may make 10
+`list_models` and `model_info` calls a minute, then gets `LimitReached`
+(`kind` `provider_calls`).
 
 ## Failures and retries
 

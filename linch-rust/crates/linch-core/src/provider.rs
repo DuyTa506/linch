@@ -20,8 +20,8 @@ pub mod scripted;
 
 pub use assembler::{Assembler, AssistantAssembly, StreamError, assemble};
 pub use capabilities::{
-    ContextSource, ModelInfo, ModelsError, PromptCache, ProviderCapabilities, Support,
-    ThinkingCaps, ThinkingState, ToolChoiceCaps,
+    ContextSource, ModelInfo, ModelList, ModelsError, OutputSchemaMode, PromptCache,
+    ProviderCapabilities, Support, ThinkingCaps, ThinkingState, ToolChoiceCaps,
 };
 pub use client::{DEFAULT_CONTEXT_WINDOW, Provider, ProviderError, ProviderStream};
 pub use event::{

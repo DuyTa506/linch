@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,14 +57,21 @@ class ProviderCapabilities:
         provider: The provider's id.
         model: The model asked about.
         declared: Whether the adapter declares the fields after
-            `native_output_schema`; false for a provider (such as a test
-            double) that declares nothing.
+            `output_schema`; false for a provider (such as a test double)
+            that declares nothing.
         context_window: The most tokens a request takes, as a run would
             use it.
         context_source: `configured`, `server` (the server said so),
             `table` (the adapter's own table) or `default` (a guess).
-        native_output_schema: The run's output schema goes in the request;
-            false: a run offers a final tool instead.
+        output_schema: How a run with an output schema gets its structured
+            answer. `native`: the schema goes in the request in the provider's
+            own structured-output form. `final_tool`: the request carries no
+            schema and the run offers a final tool whose input is the schema.
+            `final_tool` does not mean the server cannot do structured
+            output: vLLM takes a `response_format`, but with tools in the same
+            request its guided decoding binds the whole answer to the schema
+            and the model never calls a tool, so a run there uses the final
+            tool.
         tool_choice: The `tool_choice` forms taken.
         thinking: The reasoning controls.
         vision: Image input: `supported`, `unsupported`, `model_dependent`
@@ -80,7 +88,7 @@ class ProviderCapabilities:
     declared: bool
     context_window: int
     context_source: str
-    native_output_schema: bool
+    output_schema: str
     tool_choice: ToolChoiceCaps
     thinking: ThinkingCaps
     vision: str
@@ -99,7 +107,7 @@ class ProviderCapabilities:
             declared=bool(raw["declared"]),
             context_window=int(raw["context_window"]),
             context_source=str(raw["context_source"]),
-            native_output_schema=bool(raw["native_output_schema"]),
+            output_schema=str(raw["output_schema"]),
             tool_choice=ToolChoiceCaps(
                 auto=bool(choice["auto"]),
                 none=bool(choice["none"]),
@@ -152,3 +160,20 @@ class ModelInfo:
             max_output_tokens=None if output is None else int(output),
             input_modalities=tuple(str(m) for m in raw.get("input_modalities", [])),
         )
+
+
+class ModelList(list[ModelInfo]):
+    """The models a provider's server lists, in its order: a `list` of
+    `ModelInfo` that also says whether the list was cut.
+
+    Attributes:
+        truncated: The provider had more pages than `linch-server` follows
+            (10), so the list holds only the first of them. A model that is
+            not in a truncated list may still exist.
+    """
+
+    truncated: bool
+
+    def __init__(self, models: Iterable[ModelInfo] = (), truncated: bool = False) -> None:
+        super().__init__(models)
+        self.truncated = truncated

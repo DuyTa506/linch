@@ -190,14 +190,6 @@ pub struct ProviderModelParams {
     pub model: String,
 }
 
-/// Result of `provider.models`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderModels {
-    /// The models the provider's server lists, in its order.
-    pub models: Vec<linch::ModelInfo>,
-}
-
 /// Params of `session.close`. The result is `{}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

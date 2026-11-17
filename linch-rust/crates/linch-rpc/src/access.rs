@@ -5,7 +5,8 @@
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use linch::PgPools;
 use sha2::{Digest as _, Sha256};
@@ -13,10 +14,11 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 
-use crate::error::{ErrorObject, limit_reached};
+use crate::error::{ErrorObject, limit_reached, rate_limited};
 
 mod admit;
 mod allowlists;
+mod rate;
 
 pub use allowlists::{
     Allowlists, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
@@ -55,7 +57,13 @@ pub struct Tenant {
     agents: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     pools: Arc<PgPools>,
+    provider_calls: Mutex<rate::CallWindow>,
 }
+
+/// Most `provider.models` and `provider.model` calls a tenant makes in a
+/// minute, all its connections together: each asks the vendor for the whole
+/// list, several requests when it is paged, on the server's key.
+const PROVIDER_CALLS_PER_MINUTE: usize = 10;
 
 impl Tenant {
     /// A tenant named `name`, allowed what `allow` lists.
@@ -78,6 +86,7 @@ impl Tenant {
             agents: places(allow.max_agents),
             connections: places(allow.max_connections),
             pools: Arc::new(PgPools::new()),
+            provider_calls: Mutex::default(),
             allow,
         })
     }
@@ -90,6 +99,22 @@ impl Tenant {
     /// A place among the tenant's open agents, or `-32005`.
     pub(crate) fn agent_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
         take(&self.agents, "agents", self.allow.max_agents)
+    }
+
+    /// Count a `provider.models` or `provider.model` call against the
+    /// tenant's [`PROVIDER_CALLS_PER_MINUTE`], or `-32005` with
+    /// `data: {kind: "provider_calls", max, per_seconds}`.
+    pub(crate) fn provider_call(&self) -> Result<(), ErrorObject> {
+        let minute = Duration::from_secs(60);
+        let mut window = (self.provider_calls.lock()).unwrap_or_else(PoisonError::into_inner);
+        match window.take(Instant::now(), PROVIDER_CALLS_PER_MINUTE, minute) {
+            true => Ok(()),
+            false => Err(rate_limited(
+                "provider_calls",
+                PROVIDER_CALLS_PER_MINUTE,
+                minute,
+            )),
+        }
     }
 
     /// Take a place among the tenant's connections for a client that

@@ -387,8 +387,9 @@ assistant turn sends `reasoning_content`, `""` when it has none, or a request
 with tools fails with 400 (`deepseek.rs:147-153`). A forced `tool_choice`
 with thinking on, and any `output_schema`, fail locally as `InvalidRequest`:
 DeepSeek has no JSON-schema response format and `json_object` mode does not
-carry the schema. `native_output_schema` is `false`, so a run with a schema
-offers its final tool instead, and `tool_choice_refusal` (the same rule as
+carry the schema. `native_output_schema` is `false` (the capabilities say
+`output_schema: final_tool`), so a run with a schema offers its final tool
+instead, and `tool_choice_refusal` (the same rule as
 the payload's) refuses a forced choice unless thinking is `Disabled`.
 Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:184`).
 
@@ -415,8 +416,14 @@ left out (`profile.rs:144-154`). An `output_schema` is sent as
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` when the profile's `json_schema` rule is on, which only
 OpenAI's is; vLLM, SGLang and llama.cpp refuse it locally as `InvalidRequest`
-until each is checked against its server's docs, and report
-`native_output_schema` `false`, so a run offers its final tool there.
+and report `native_output_schema` `false` (`output_schema: final_tool`), so a
+run offers its final tool there. The reason is checked for vLLM only: with a
+`json_schema` `response_format` and tools in one request its guided decoding
+binds the whole answer to the schema and the model never calls a tool (a
+request that asked for a tool call still came back as schema JSON with zero
+tool calls, against a live server on 2026-11-17). So `final_tool` does not say
+vLLM cannot do structured output; it says a run that also has tools must not
+send the schema. SGLang and llama.cpp keep the same rule unchecked.
 `tool_choice_refusal` is the profile's `tool_choice` row, the rule
 `build_payload` checks.
 
@@ -648,7 +655,7 @@ each one.
 | Field | Meaning |
 |---|---|
 | `context_window`, `context_source` | The window a run would use, and whether it is `configured`, from the `server`, the adapter's `table` or a `default` guess |
-| `native_output_schema` | `Provider::native_output_schema` |
+| `output_schema` | `native` (`Provider::native_output_schema` is true: the schema goes in the request in the provider's own form) or `final_tool` (it is false: the request carries no schema and the run offers a final tool made from it). Not "can the server do structured output": vLLM takes a `response_format` and is still `final_tool`, since with tools in the same request it never calls them |
 | `tool_choice` | `auto`, `none`, `required`, `named`, and `forced_refused_with`: the thinking states (`unset`, `adaptive`, `budgeted`) in which a forced choice is refused. Read by probing `tool_choice_refusal`, so it is the agent's rule |
 | `thinking` | `disable` (`thinking: disabled` is sent), `budget`, `effort`, `reasoning_text` (the stream carries reasoning text; the Responses adapter has it only with a `reasoning_summary`) |
 | `vision` | `supported` (Anthropic, Gemini), `model_dependent` (the adapter sends images, the served model decides) |
@@ -668,13 +675,49 @@ DeepSeek `GET {base}/models`; vLLM and SGLang the same with `max_model_len`;
 llama.cpp the same with the window from `/props`; Anthropic `GET /v1/models`
 (limit 1000, paged by `after_id`) with `max_input_tokens`, `max_tokens` and
 `image_input`; Gemini `GET /v1beta/models` (page size 1000, `pageToken`),
-leaving out models without `generateContent`. At most 10 pages are read, one
-request takes at most 15 seconds and 4 MiB, a redirect is refused, and the
-model id is never put in a URL (`model_info` reads the list). A failure is a
-`ModelsError`: `Unsupported` (the scripted provider), `NotFound`, or a
-`ProviderError` whose message has fixed text for a failure to connect or a
-timeout and, for an error answer, only `error.message`, scrubbed of the key,
-so neither the key nor the URL can appear.
+leaving out models without `generateContent`. `list_models` returns a
+`ModelList`: `models`, and `truncated`, true (and left off the wire when
+false) when the vendor had more than the 10 pages that are read, so the list
+is only the first of them. One request takes at most 15 seconds and 4 MiB
+(an error answer is read to its first 8 KiB), a redirect is refused, and the
+model id is never put in a URL (`model_info` reads the list; a miss on a
+truncated list is `NotFound { truncated: true }`, inconclusive). A
+`display_name` is cleaned before it is returned: control and
+direction-changing characters are dropped and it is cut at 100 characters. A
+failure is a `ModelsError`: `Unsupported` (the scripted provider), `NotFound`,
+or a `ProviderError` whose message has fixed text for a failure to connect or
+a timeout and, for an error answer, only `error.message`, scrubbed of the key,
+reduced to ASCII printable characters and cut at 120, so neither the key nor
+the URL can appear.
+
+### The `base_url` rule
+
+An adapter builds each URL by appending to the base as written
+(`{base}/models`, `{base}/v1/models?limit=1000`), and sends its key there. So
+every adapter refuses, when it is built (`check_base_url`,
+`crates/linch-providers/src/base_url.rs`; `ProviderError::InvalidRequest`), a
+base that is not an absolute `http` or `https` URL with a host, or that has
+userinfo, a query or a fragment (`https://host/v1/files#` would make the
+request a `GET /v1/files`), a percent escape, a backslash, whitespace or a
+control character, or a path segment that is `.`, `..` or empty before the
+last. The check reads the text as written, because the URL parser resolves dot
+segments before anyone sees them. The message names no part of the URL.
+
+A host that takes provider configs from tenants adds the path rule
+(`linch-rpc`'s `provider_base_urls`, which `agent.open` and the provider
+questions share): the path must be the provider's own
+(`ProviderConfig::default_base_paths`: `/v1` for OpenAI Chat and Responses,
+none for DeepSeek, Anthropic and Gemini, `/v1` or none for vLLM, SGLang and
+llama.cpp), when the entry names an origin only; or, when the entry has a
+path, exactly that path. A local caller keeps any plain path, such as a
+gateway's prefix.
+
+### Keyless questions
+
+`ProviderConfig::build_keyless` never reads the key from the environment: the
+provider holds a placeholder (a self-hosted server's optional key is left
+unset), and `provider.capabilities`, which uses it, sends at most the one
+unauthenticated window probe. A probe answer is read to at most 64 KiB.
 
 ## Testing adapters
 

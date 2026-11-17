@@ -60,11 +60,13 @@ async fn a_provider_endpoint_must_share_an_allowed_origin() {
     let rpc = Rpc::remote(acme(|allow| allow.provider_base_urls(&urls).unwrap()));
     let vllm = |url: &str| config(json!({"provider": {"id": "vllm", "base_url": url}}));
     // The key of a self-hosted server is optional, so these open.
-    for allowed in ["http://127.0.0.1:9/v1", "http://127.0.0.1:9/other/v1/"] {
+    for allowed in ["http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1/"] {
         assert_eq!(refused(&rpc, vllm(allowed)).await, None, "{allowed}");
         rpc.open(vllm(allowed)).await;
     }
     let outside = [
+        // The entry names a path, so it is the one path allowed.
+        "http://127.0.0.1:9/other/v1/",
         "http://127.0.0.1:10/v1",
         "https://127.0.0.1:9/v1",
         "http://127.0.0.1:9@attacker.example/v1",

@@ -117,6 +117,40 @@ impl ToolChoiceCaps {
     }
 }
 
+/// How a run that has an output schema gets its structured answer from a
+/// provider ([`crate::Provider::native_output_schema`]).
+///
+/// `FinalTool` does not say the server cannot do structured output: a
+/// server may take a `response_format` of its own and still be better off
+/// without it here. vLLM does: with a `json_schema` `response_format` and
+/// tools in one request its guided decoding binds the whole answer to the
+/// schema, and the model never calls a tool (checked against a live
+/// server, 2026-11-17). The run therefore sends it no schema and offers a
+/// final tool made from the schema instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputSchemaMode {
+    /// The schema goes in the request in the provider's own structured
+    /// output form, and shapes the text answer only.
+    Native,
+    /// The request carries no schema; the run offers a final tool whose
+    /// input is the schema, and its call ends the run.
+    FinalTool,
+}
+
+impl OutputSchemaMode {
+    /// [`Self::Native`] when the provider's
+    /// [`native_output_schema`](crate::Provider::native_output_schema) is
+    /// true.
+    pub fn of(native: bool) -> Self {
+        if native {
+            Self::Native
+        } else {
+            Self::FinalTool
+        }
+    }
+}
+
 /// What the request's reasoning controls do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,9 +199,8 @@ pub struct ProviderCapabilities {
     /// Where `context_window` comes from; [`ContextSource::Default`] is a
     /// guess, not something the server told.
     pub context_source: ContextSource,
-    /// The run's output schema goes in the request; false: a run offers a
-    /// final tool instead ([`crate::Provider::native_output_schema`]).
-    pub native_output_schema: bool,
+    /// How a run with an output schema gets it ([`OutputSchemaMode`]).
+    pub output_schema: OutputSchemaMode,
     /// The `tool_choice` forms taken.
     pub tool_choice: ToolChoiceCaps,
     /// The reasoning controls.
@@ -193,13 +226,14 @@ impl ProviderCapabilities {
         native_output_schema: bool,
         tool_choice: ToolChoiceCaps,
     ) -> Self {
+        let output_schema = OutputSchemaMode::of(native_output_schema);
         Self {
             provider: provider.to_owned(),
             model: model.to_owned(),
             declared: false,
             context_window,
             context_source: ContextSource::Default,
-            native_output_schema,
+            output_schema,
             tool_choice,
             thinking: ThinkingCaps {
                 disable: false,
@@ -252,6 +286,28 @@ impl ModelInfo {
     }
 }
 
+/// The models a provider's server lists, in its order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelList {
+    /// The models read.
+    pub models: Vec<ModelInfo>,
+    /// The server had more pages than the adapter follows, so `models` is
+    /// only the first of them. Left off the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl ModelList {
+    /// A complete list.
+    pub fn new(models: Vec<ModelInfo>) -> Self {
+        Self {
+            models,
+            truncated: false,
+        }
+    }
+}
+
 /// Why [`crate::Provider::list_models`] or [`crate::Provider::model_info`] gave no model.
 ///
 /// Messages never carry the key or the endpoint's URL.
@@ -269,8 +325,46 @@ pub enum ModelsError {
     NotFound {
         /// The id asked for.
         model: String,
+        /// The list was cut short ([`ModelList::truncated`]), so the model
+        /// may exist past the cut.
+        truncated: bool,
     },
     /// The request failed or the answer was not a model list.
     #[error(transparent)]
     Provider(#[from] ProviderError),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_complete_list_has_no_truncated_member_and_a_cut_one_has() {
+        let complete = ModelList::new(vec![ModelInfo::new("m")]);
+        let wire = serde_json::to_value(&complete).unwrap();
+        assert_eq!(wire, json!({"models": [{"id": "m"}]}));
+        let cut = ModelList {
+            truncated: true,
+            ..complete
+        };
+        let wire = serde_json::to_value(&cut).unwrap();
+        assert_eq!(wire, json!({"models": [{"id": "m"}], "truncated": true}));
+        let back: ModelList = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, cut);
+    }
+
+    #[test]
+    fn the_output_schema_mode_names_how_the_answer_arrives() {
+        assert_eq!(OutputSchemaMode::of(true), OutputSchemaMode::Native);
+        assert_eq!(OutputSchemaMode::of(false), OutputSchemaMode::FinalTool);
+        let wire = serde_json::to_value([OutputSchemaMode::Native, OutputSchemaMode::FinalTool]);
+        assert_eq!(wire.unwrap(), json!(["native", "final_tool"]));
+        let caps = ToolChoiceCaps::probe(|_, _| None);
+        let undeclared = ProviderCapabilities::undeclared("p", "m", 1, false, caps);
+        let wire = serde_json::to_value(&undeclared).unwrap();
+        assert_eq!(wire["output_schema"], "final_tool");
+        assert!(wire.get("native_output_schema").is_none());
+    }
 }

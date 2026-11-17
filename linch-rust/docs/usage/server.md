@@ -109,14 +109,14 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `allow` field | When absent | What it allows |
 |---|---|---|
 | `scripted_provider` | `false` | The `scripted` provider, for tests and evals |
-| `provider_info` | `false` | `provider.capabilities`, `provider.models` and `provider.model`: the model calls send the server's key to the provider's `base_url`, which must be allowed too |
+| `provider_info` | `false` | `provider.capabilities`, `provider.models` and `provider.model`: the model calls send the server's key to the provider's `base_url`, which must be allowed too. `provider.models` and `provider.model` are limited to 10 a minute per tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` sends no key |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands through the agent's execution backend |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |
 | `max_pool_connections` | The server's default pool size: the number of cores, between 10 and 32 | The largest `stores.max_connections` a config may ask for; the tenant's pool on each target has at most this many connections |
 | `max_provider_concurrency` | none: no cap | The most provider calls the tenant's runs make at once on each provider key and endpoint; a config may ask for less ([Providers](./providers.md#limit-concurrent-calls)) |
-| `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host and port |
+| `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host, port and path. An entry with a path (`https://gw.example/openai/v1`) allows that path alone; one with none (`https://gw.example`) allows each provider's own path there (`/v1` for OpenAI, none for DeepSeek, Anthropic and Gemini, `/v1` or none for vLLM, SGLang and llama.cpp). A `base_url` with a query, fragment, userinfo, escape, backslash or a dot or empty path segment is refused whatever is listed |
 | `permission_modes` | `default`, `accept_edits` | The modes a config may choose |
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
 | `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
@@ -346,7 +346,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `namespace` | The namespace is not the tenant's | Stores are scoped by namespace |
 | `principal` | `principal.tenant` is another tenant | A client cannot act for another tenant |
 | `provider` | The `scripted` provider without `scripted_provider` | It is for tests and evals |
-| `provider_base_url` | A `base_url` outside `provider_base_urls`; vLLM, SGLang and llama.cpp always name one | The server's key would be sent there |
+| `provider_base_url` | A `base_url` outside `provider_base_urls` (origin or path), or one that is not plain (query, fragment, userinfo, escape, dot segments); vLLM, SGLang and llama.cpp always name one | The server's key would be sent there, or to another path of that origin |
 | `permission_mode` | A mode outside `permission_modes` | The mode decides what runs without asking |
 | `auto_allow` | `auto_allow` entries, `tasks: True` or a `deep_agent`, without `skip_dangerous` in `permission_modes` | They let calls run without asking, as `skip_dangerous` does; `tasks` and `deep_agent` add the four task tools to `auto_allow` |
 | `permission_rule` | A rule that allows, without `skip_dangerous` | The same; rules that ask or deny always pass |

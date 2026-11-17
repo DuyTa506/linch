@@ -26,8 +26,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linch_core::{
-    ContextSource, ModelInfo, ModelsError, PromptCache, Provider, ProviderCapabilities,
-    ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps, ToolChoiceCaps,
+    ContextSource, ModelList, ModelsError, OutputSchemaMode, PromptCache, Provider,
+    ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps,
+    ToolChoiceCaps,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -129,6 +130,7 @@ impl OpenAiResponses {
     ///
     /// [`ProviderError::Transport`] when the HTTP client cannot be built.
     pub fn new(options: ResponsesOptions) -> Result<Self, ProviderError> {
+        crate::base_url::require(&options.base_url)?;
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
@@ -161,7 +163,7 @@ impl Provider for OpenAiResponses {
             } else {
                 ContextSource::Default
             },
-            native_output_schema: true,
+            output_schema: OutputSchemaMode::Native,
             tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
                 self.tool_choice_refusal(choice, thinking)
             }),
@@ -179,7 +181,7 @@ impl Provider for OpenAiResponses {
     }
 
     /// `GET {base}/models`, as OpenAI's list.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelsError> {
+    async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
         let bearer = format!("Bearer {}", key.expose());
@@ -190,7 +192,7 @@ impl Provider for OpenAiResponses {
             output: None,
             modalities: false,
         };
-        Ok(crate::models::openai_list(&value, row))
+        Ok(ModelList::new(crate::models::openai_list(&value, row)))
     }
 
     async fn stream(

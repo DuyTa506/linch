@@ -470,9 +470,13 @@ impl ProviderConfig {
         provider(self.clone(), true)
     }
 
-    /// Like [`Self::build`], but a missing key is replaced by a placeholder
-    /// that no request may carry: for the questions a provider answers
-    /// without sending anything, such as [`Provider::capabilities`].
+    /// Like [`Self::build`], but the environment is never read for a key:
+    /// the provider holds a placeholder that no request may carry (a
+    /// self-hosted server's optional key is left unset), so a call that
+    /// would send the key sends nothing. For the questions a provider
+    /// answers without one, [`Provider::capabilities`], and
+    /// [`Provider::prepare`], which then probes a self-hosted server
+    /// unauthenticated.
     ///
     /// Raises:
     ///     OpenError: The HTTP client cannot be built.
@@ -534,7 +538,8 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             base_url,
             native_catalog_changes,
         } => {
-            let mut options = match AnthropicOptions::from_env() {
+            let from_env = AnthropicOptions::from_env().filter(|_| keyed);
+            let mut options = match from_env {
                 Some(options) => options,
                 None => AnthropicOptions::new(key("anthropic", anthropic::API_KEY_ENV, keyed)?),
             };
@@ -550,15 +555,33 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
         ProviderConfig::Vllm {
             base_url,
             context_window,
-        } => server(Server::Vllm, base_url, context_window, "VLLM_API_KEY")?,
+        } => server(
+            Server::Vllm,
+            base_url,
+            context_window,
+            "VLLM_API_KEY",
+            keyed,
+        )?,
         ProviderConfig::SgLang {
             base_url,
             context_window,
-        } => server(Server::SgLang, base_url, context_window, "SGLANG_API_KEY")?,
+        } => server(
+            Server::SgLang,
+            base_url,
+            context_window,
+            "SGLANG_API_KEY",
+            keyed,
+        )?,
         ProviderConfig::LlamaCpp {
             base_url,
             context_window,
-        } => server(Server::LlamaCpp, base_url, context_window, "LLAMA_API_KEY")?,
+        } => server(
+            Server::LlamaCpp,
+            base_url,
+            context_window,
+            "LLAMA_API_KEY",
+            keyed,
+        )?,
     };
     Ok(built)
 }
@@ -596,14 +619,14 @@ fn base_url(config: &ProviderConfig) -> Option<&str> {
     }
 }
 
-/// The key in `env`, or [`OpenError::MissingKey`]; unless `keyed` is
-/// false, when a missing key is a placeholder that is never sent.
+/// The key in `env`, or [`OpenError::MissingKey`]; when `keyed` is false
+/// the environment is not read and the key is a placeholder that is never
+/// sent.
 fn key(provider: &'static str, env: &'static str, keyed: bool) -> Result<ApiKey, OpenError> {
-    match ApiKey::from_env(env) {
-        Some(key) => Ok(key),
-        None if !keyed => Ok(ApiKey::new("unset").expect("a non-empty placeholder")),
-        None => Err(OpenError::MissingKey { provider, env }),
+    if !keyed {
+        return Ok(ApiKey::new("unset").expect("a non-empty placeholder"));
     }
+    ApiKey::from_env(env).ok_or(OpenError::MissingKey { provider, env })
 }
 
 fn override_url(target: &mut String, base_url: Option<String>) {
@@ -619,9 +642,10 @@ fn server(
     base_url: String,
     context_window: Option<u64>,
     env: &'static str,
+    keyed: bool,
 ) -> Result<Arc<dyn Provider>, OpenError> {
     let mut options = ServerOptions::new(server, base_url);
-    options.api_key = ApiKey::from_env(env);
+    options.api_key = ApiKey::from_env(env).filter(|_| keyed);
     options.context_window = context_window;
     Ok(Arc::new(
         OpenAiChat::server(options).map_err(OpenError::Provider)?,

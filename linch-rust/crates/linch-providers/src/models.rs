@@ -38,8 +38,15 @@ pub(crate) const MAX_PAGES: usize = 10;
 /// Most bytes of a list read.
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
-/// Longest error summary kept.
-const MAX_ERROR_CHARS: usize = 300;
+/// Most bytes of an error answer read, as the other adapters read.
+const MAX_ERROR_BODY: usize = 8 * 1024;
+
+/// Longest vendor error text kept. It is untrusted: a host may show it to
+/// a tenant, so it stays short.
+const MAX_ERROR_CHARS: usize = 120;
+
+/// Longest `display_name` kept.
+const MAX_NAME_CHARS: usize = 100;
 
 /// GET `url` with `headers` and decode the JSON body of a 2xx answer.
 ///
@@ -85,8 +92,14 @@ pub(crate) async fn get_json(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
+    // An error answer is read to its first bytes only.
+    let limit = if status.is_success() {
+        MAX_BODY
+    } else {
+        MAX_ERROR_BODY
+    };
     let mut body = Vec::new();
-    while body.len() < MAX_BODY {
+    while body.len() < limit {
         match response.chunk().await {
             Ok(Some(chunk)) => body.extend_from_slice(&chunk),
             Ok(None) => break,
@@ -101,7 +114,7 @@ pub(crate) async fn get_json(
         return Err(ProviderError::Status {
             status: status.as_u16(),
             retry_after,
-            message: error_summary(&body, key),
+            message: error_summary(&body[..body.len().min(limit)], key),
         });
     }
     if body.len() >= MAX_BODY {
@@ -115,15 +128,19 @@ pub(crate) async fn get_json(
 }
 
 /// `error.message` of a vendor's error body (OpenAI, Anthropic and Google
-/// all nest it so), scrubbed and cut; a body of any other shape gives no
-/// text, since it could echo the request.
+/// all nest it so), scrubbed, reduced to ASCII printable characters and
+/// cut to [`MAX_ERROR_CHARS`]; a body of any other shape gives no text,
+/// since it could echo the request.
 fn error_summary(body: &[u8], key: Option<&ApiKey>) -> String {
     let value = serde_json::from_slice::<JsonValue>(body).ok();
     let message = value
         .as_ref()
         .and_then(|value| value.get("error")?.get("message")?.as_str());
     match message {
-        Some(message) => scrub(key, message).chars().take(MAX_ERROR_CHARS).collect(),
+        Some(message) => (scrub(key, message).chars())
+            .filter(|c| c.is_ascii_graphic() || *c == ' ')
+            .take(MAX_ERROR_CHARS)
+            .collect(),
         None => "the provider refused the model list".into(),
     }
 }
@@ -139,6 +156,21 @@ fn rows<'a>(value: &'a JsonValue, field: &str) -> &'a [JsonValue] {
 fn text(row: &JsonValue, field: &str) -> Option<String> {
     let text = row.get(field)?.as_str()?;
     (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// A name for a person to read: no control or direction-changing
+/// characters, at most [`MAX_NAME_CHARS`], and `None` when nothing is left.
+fn display_name(row: &JsonValue, field: &str) -> Option<String> {
+    let hidden = |c: &char| {
+        c.is_control()
+            || matches!(*c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+    };
+    let name: String = (row.get(field)?.as_str()?.chars())
+        .filter(|c| !hidden(c))
+        .take(MAX_NAME_CHARS)
+        .collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 fn count(row: &JsonValue, field: &str) -> Option<u64> {
@@ -162,7 +194,7 @@ pub(crate) fn openai_list(value: &JsonValue, row: OpenAiRow) -> Vec<ModelInfo> {
         .iter()
         .filter_map(|item| {
             let mut info = ModelInfo::new(text(item, "id")?);
-            info.display_name = text(item, "name");
+            info.display_name = display_name(item, "name");
             info.context_window = row.context.and_then(|field| count(item, field));
             info.max_output_tokens = row.output.and_then(|field| count(item, field));
             if row.modalities {
@@ -181,7 +213,7 @@ pub(crate) fn anthropic_page(value: &JsonValue) -> (Vec<ModelInfo>, Option<Strin
         .iter()
         .filter_map(|item| {
             let mut info = ModelInfo::new(text(item, "id")?);
-            info.display_name = text(item, "display_name");
+            info.display_name = display_name(item, "display_name");
             info.context_window = count(item, "max_input_tokens");
             info.max_output_tokens = count(item, "max_tokens");
             let image = item
@@ -217,7 +249,7 @@ pub(crate) fn gemini_page(value: &JsonValue) -> (Vec<ModelInfo>, Option<String>)
         .filter_map(|item| {
             let name = text(item, "name")?;
             let mut info = ModelInfo::new(name.strip_prefix("models/").unwrap_or(&name));
-            info.display_name = text(item, "displayName");
+            info.display_name = display_name(item, "displayName");
             info.context_window = count(item, "inputTokenLimit");
             info.max_output_tokens = count(item, "outputTokenLimit");
             Some(info)
