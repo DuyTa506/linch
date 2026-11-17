@@ -47,6 +47,9 @@ pub struct NewSchedule {
     pub session_id: SessionId,
     /// The calling run.
     pub run_id: RunId,
+    /// The call's [`ToolContext::idempotency_key`]: the same for a retry
+    /// of the same call, so a backend can store it once.
+    pub call_key: String,
     /// The calling run's principal, which every fire acts for.
     pub principal: Option<Principal>,
 }
@@ -209,6 +212,7 @@ impl Tool for CreateSchedule {
         let schedule = NewSchedule {
             prompt: payload(&input)?.to_owned(),
             timing: timing(&input)?,
+            call_key: ctx.idempotency_key(),
             session_id: ctx.session_id,
             run_id: ctx.run_id,
             principal: ctx.principal,

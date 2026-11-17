@@ -144,6 +144,7 @@ async fn create_takes_the_calling_session_and_principal() {
     );
     assert_eq!(created[0].session_id, SessionId::from("chat"));
     assert_eq!(created[0].run_id, RunId::from("run-1"));
+    assert_eq!(created[0].call_key, "run-1:toolu_1");
     assert_eq!(created[0].principal, Some(principal));
     assert_eq!(
         created[1].timing,

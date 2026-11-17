@@ -504,3 +504,154 @@ async fn a_subagent_cannot_create_schedules() {
     assert_eq!(listed, json!({"schedules": []}));
     db.drop().await;
 }
+
+/// The same call again (a retry keeps its `tool_use_id`) finds the
+/// schedule it made instead of making a second one.
+#[tokio::test]
+async fn the_same_call_again_makes_one_schedule() {
+    let Some(db) = TestDb::empty("stools_retry").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db).max_schedules(Some(4));
+    let mut rpc = Rpc::remote(tenant("acme", allowed));
+    let input = json!({"payload": "p", "interval_s": 3600});
+    let turns = vec![
+        tool_turn("c1", "CreateSchedule", input.clone()),
+        tool_turn("c1", "CreateSchedule", input),
+        text_turn("done"),
+    ];
+    let agent = rpc
+        .open(on_postgres(config(turns, "acme", dir.path()), &db))
+        .await;
+    let ada = json!({"tenant": "acme", "user": "ada", "roles": []});
+    let envelopes = run(&mut rpc, &agent, "s", ada).await;
+    let said = results(&envelopes);
+    // Both calls ran and answered the same schedule.
+    assert_eq!(codes(&envelopes), [None, None], "{said:?}");
+    assert_eq!(said[0], said[1]);
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    assert_eq!(listed.schedules.len(), 1, "{said:?}");
+    assert!(listed.schedules[0].id.ends_with(":c1"), "{listed:?}");
+    db.drop().await;
+}
+
+/// In mode `default` the call asks; the approved call stores the
+/// principal the continuation acts for, as every call of it does.
+#[tokio::test]
+async fn an_approved_call_stores_the_principal_it_runs_for() {
+    let Some(db) = TestDb::empty("stools_approve").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db).max_schedules(Some(4));
+    let mut rpc = Rpc::remote(tenant("acme", allowed));
+    let turns = vec![
+        tool_turn(
+            "c1",
+            "CreateSchedule",
+            json!({"payload": "p", "interval_s": 3600}),
+        ),
+        text_turn("done"),
+    ];
+    let mut on = on_postgres(config(turns, "acme", dir.path()), &db);
+    on["permissions"]["mode"] = json!("default");
+    let agent = rpc.open(on).await;
+    let ada = json!({"tenant": "acme", "user": "ada", "roles": ["ops"]});
+    let params = json!({"agent": agent, "session_id": "s", "prompt": "Go.", "principal": ada});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(
+        matches!(ended.last(), Event::Suspended(_)),
+        "{:?}",
+        ended.last()
+    );
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed,
+        json!({"schedules": []}),
+        "nothing before the approval"
+    );
+    let approve = json!({"agent": agent, "run_id": run_id, "principal": ada,
+                         "decisions": {"c1": {"decision": "allow"}}});
+    rpc.accepted(method::RUN_APPROVE, approve).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert_eq!(codes(&ended.envelopes), [None]);
+    let pool = pool(&db).await;
+    let principal: Option<String> =
+        sqlx::query_scalar("SELECT principal FROM linch_worker_schedules")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&principal.unwrap()).unwrap(),
+        ada
+    );
+    db.drop().await;
+}
+
+/// A worker checks the definition again at every fire: a tenant whose
+/// allowlists lost `max_schedules` fails the fire of an agent with the
+/// schedule tools.
+#[tokio::test]
+async fn a_tenant_that_lost_its_schedules_fails_the_fire() {
+    let Some(db) = TestDb::empty("stools_readmit").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db)
+        .max_schedules(Some(1))
+        .min_schedule_interval(Duration::from_millis(100));
+    let rpc = Rpc::remote(tenant("acme", allowed));
+    let on = on_postgres(config(vec![text_turn("ok")], "acme", dir.path()), &db);
+    let agent = rpc.open(on).await;
+    let beat = json!({"agent": agent, "id": "beat", "prompt": "p", "interval_ms": 100,
+                      "session_id": "ops"});
+    rpc.call(method::SCHEDULE_CREATE, beat).await.unwrap();
+
+    let stricter = Arc::new(Tenant::new("acme", allow_pg(dir.path(), &db)).unwrap());
+    let pool = pool(&db).await;
+    let factory = BackgroundAgents::new(db.dsn.clone()).tenant(stricter);
+    let shutdown = CancellationToken::new();
+    let worker =
+        Worker::new(pool, worker_config("w1")).definitions(factory.roots(), Arc::new(factory));
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+    let mut failed = None;
+    for _ in 0..400 {
+        let listed = rpc
+            .call(
+                method::JOB_LIST,
+                json!({"agent": agent, "schedule_id": "beat"}),
+            )
+            .await
+            .unwrap();
+        let jobs: Vec<JobInfo> = serde_json::from_value(listed["jobs"].clone()).unwrap();
+        failed = jobs.into_iter().find(|job| job.state == "failed");
+        if failed.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    rpc.call(
+        method::SCHEDULE_DELETE,
+        json!({"agent": agent, "id": "beat"}),
+    )
+    .await
+    .unwrap();
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+    let failed = failed.expect("the fire failed");
+    assert!(
+        failed.error.as_deref().unwrap().contains("max_schedules"),
+        "{failed:?}"
+    );
+    assert!(failed.run_id.is_none(), "nothing ran");
+    db.drop().await;
+}

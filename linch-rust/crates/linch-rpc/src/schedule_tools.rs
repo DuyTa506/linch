@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use linch::postgres::{PgPool, PgRunStore};
 use linch::tools::{NewSchedule, ScheduleBackend, ScheduleEntry, ScheduleTiming, schedule_tools};
-use linch::{RunStore, StoreError, ToolOutputError, ToolRegistry};
+use linch::{RunStore, ToolOutputError, ToolRegistry};
 use linch_worker::{Schedule, ScheduleInfo};
 use tokio::sync::OnceCell;
 
@@ -96,9 +96,18 @@ impl Bound {
                 "a subagent cannot create schedules",
                 "not_allowed",
             )),
-            Ok(_) | Err(StoreError::NotFound { .. }) => Ok(()),
+            Ok(_) => Ok(()),
+            // Fail closed: a call's run is durable before the call starts.
             Err(error) => Err(tool_error(&error.to_string(), "store")),
         }
+    }
+
+    /// The schedule `id` of this agent, if it exists.
+    async fn own(&self, id: &str) -> Result<Option<ScheduleInfo>, ToolOutputError> {
+        let listed =
+            linch_worker::list_agent_schedules(&self.pool, &self.namespace, &self.definition).await;
+        let listed = listed.map_err(|error| refusal(&worker_error(&error)))?;
+        Ok(listed.into_iter().find(|schedule| schedule.id == id))
     }
 }
 
@@ -125,9 +134,14 @@ impl ScheduleBackend for Binding {
         let (timing, cap) =
             admit_create(tenant, asked, new.principal.as_ref()).map_err(|error| refusal(&error))?;
         bound.migrated().await?;
+        // The call's key as the id: a retry of the same call finds its
+        // schedule instead of making a second one.
+        if let Some(made) = bound.own(&new.call_key).await? {
+            return Ok(entry(made));
+        }
         let schedule = Schedule {
             namespace: bound.namespace.clone(),
-            id: uuid::Uuid::new_v4().to_string(),
+            id: new.call_key,
             queue: "default".into(),
             session_id: Some(new.session_id),
             prompt: new.prompt,
