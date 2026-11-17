@@ -268,15 +268,23 @@ pub(super) fn retry_message(response: &Message, feedback: &str) -> Message {
 /// Add request-only context to the tail of `messages`: after the blocks
 /// of the last user message, or as a new user message. The cached prefix
 /// (system, tools, every earlier message) stays byte-identical.
-pub(super) fn add_context(messages: &mut Vec<Message>, blocks: Vec<TextBlock>) {
+///
+/// Returns:
+///     How many blocks were added, which is
+///     [`ProviderRequest::context_tail`]: the last message's trailing
+///     blocks that are not in the log, so a provider's cache breakpoint
+///     stays before them.
+pub(super) fn add_context(messages: &mut Vec<Message>, blocks: Vec<TextBlock>) -> usize {
+    let added = blocks.len();
     if blocks.is_empty() {
-        return;
+        return 0;
     }
     let blocks = blocks.into_iter().map(ContentBlock::Text);
     match messages.last_mut() {
         Some(last) if last.role == Role::User => last.content.extend(blocks),
         _ => messages.push(Message::new(Role::User, blocks.collect())),
     }
+    added
 }
 
 impl Runner {
@@ -706,7 +714,10 @@ mod tests {
             ))],
         );
         let mut messages = vec![Message::user_text("hi"), results.clone()];
-        add_context(&mut messages, vec![block("today is Friday")]);
+        assert_eq!(
+            add_context(&mut messages, vec![block("today is Friday")]),
+            1
+        );
         assert_eq!(messages[0], Message::user_text("hi"));
         assert_eq!(messages[1].content[0], results.content[0]);
         assert_eq!(
@@ -719,13 +730,13 @@ mod tests {
     #[test]
     fn context_after_an_assistant_message_is_a_new_user_message() {
         let mut messages = vec![Message::assistant_text("hi")];
-        add_context(&mut messages, vec![block("a"), block("b")]);
+        assert_eq!(add_context(&mut messages, vec![block("a"), block("b")]), 2);
         let added = Message::new(
             Role::User,
             vec![ContentBlock::text("a"), ContentBlock::text("b")],
         );
         assert_eq!(messages, [Message::assistant_text("hi"), added]);
-        add_context(&mut messages, Vec::new());
+        assert_eq!(add_context(&mut messages, Vec::new()), 0);
         assert_eq!(messages.len(), 2, "no blocks add nothing");
     }
 }

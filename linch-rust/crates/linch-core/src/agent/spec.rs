@@ -240,6 +240,7 @@ impl AgentSpec {
             system: Vec::new(),
             tools,
             appended_tools: Vec::new(),
+            context_tail: 0,
             messages,
             max_output_tokens: self.max_output_tokens,
             temperature: None,

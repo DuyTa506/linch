@@ -47,7 +47,7 @@ pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue
         "model": request.model,
         "max_tokens": max_tokens,
         "stream": true,
-        "messages": messages(&request.messages, cache.as_ref(), catalog.as_mut())?,
+        "messages": messages(request, cache.as_ref(), catalog.as_mut())?,
     });
     let system = system(&request.system, cache.as_ref());
     if !system.is_empty() {
@@ -147,16 +147,36 @@ fn system(blocks: &[SystemBlock], cache: Option<&JsonValue>) -> Vec<JsonValue> {
     out
 }
 
-/// The conversation; with caching on, the last block of the last user
-/// message is the second breakpoint. A `native` catalog's tool blocks
-/// follow the message of their notice, in a `system` message before the
-/// next assistant turn or at the end.
+/// The conversation; with caching on, the last logged block of the last
+/// logged user message is the second breakpoint. The request's
+/// `context_tail` blocks (recalled memory, retrieval, other request-only
+/// context) are not logged, so the next turn's request has none of them:
+/// a breakpoint on one would make the cached message differ from the
+/// next turn's, and every conversation cache entry would be lost. The
+/// breakpoint goes before them, and when the last message is all context,
+/// on the user message before it. A `native` catalog's tool blocks follow
+/// the message of their notice, in a `system` message before the next
+/// assistant turn or at the end.
 fn messages(
-    conversation: &[Message],
+    request: &ProviderRequest,
     cache: Option<&JsonValue>,
     mut native: Option<&mut Native>,
 ) -> Result<Vec<JsonValue>, ProviderError> {
-    let last_user = conversation
+    let conversation = &request.messages;
+    let last = conversation.len().checked_sub(1);
+    // Blocks of the last message that are context; a count a hook left
+    // too large is the whole message.
+    let context = last.map_or(0, |at| {
+        request.context_tail.min(conversation[at].content.len())
+    });
+    let all_context =
+        last.is_some_and(|at| context == conversation[at].content.len() && context > 0);
+    let logged = if all_context {
+        conversation.len() - 1
+    } else {
+        conversation.len()
+    };
+    let last_user = conversation[..logged]
         .iter()
         .rposition(|message| message.role == Role::User);
     let mut out = Vec::with_capacity(conversation.len());
@@ -179,10 +199,20 @@ fn messages(
         if content.is_empty() {
             continue;
         }
-        if let (Some(cache), true, Some(last)) =
-            (cache, Some(index) == last_user, content.last_mut())
-        {
-            last["cache_control"] = cache.clone();
+        if let (Some(cache), true) = (cache, Some(index) == last_user) {
+            let keeps = if Some(index) == last && context > 0 {
+                // What the message holds without its context renders as the
+                // head of what it renders with it: tool results lead, then
+                // text, and the context is text.
+                let mut head = message.clone();
+                head.content.truncate(message.content.len() - context);
+                user(&head)?.len()
+            } else {
+                content.len()
+            };
+            if let Some(block) = keeps.checked_sub(1).and_then(|at| content.get_mut(at)) {
+                block["cache_control"] = cache.clone();
+            }
         }
         out.push(json!({"role": role, "content": content}));
     }

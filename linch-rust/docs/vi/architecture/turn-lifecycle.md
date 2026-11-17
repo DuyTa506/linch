@@ -65,7 +65,8 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    thúc run với trạng thái failed trước khi lời gọi được thực hiện (`turn.rs:271-284`).
 3. **Dựng request** từ provider view của session. Các hook `context_build` chỉ thêm
    block vào phần đuôi của request (`turn.rs:285-295`, `runner/hooks.rs:117-129`).
-   Chúng không bao giờ được ghi log.
+   Chúng không bao giờ được ghi log, và request mang số lượng của chúng trong
+   `context_tail`, nên cache breakpoint của provider vẫn ở block đã ghi log cuối cùng trước chúng.
    Khi `spec.context_budget` được đặt, `ContextBudget::apply` (`context_budget.rs`)
    bỏ cả block theo thứ tự đã khai báo cho đến khi chúng vừa: nó chỉ đếm các block
    này, bốn ký tự một token, không bao giờ đếm system, các tool hay log, và không

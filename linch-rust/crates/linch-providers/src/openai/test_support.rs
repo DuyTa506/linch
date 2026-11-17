@@ -19,6 +19,7 @@ pub(crate) fn request(model: &str) -> ProviderRequest {
         system: vec![],
         tools: vec![],
         appended_tools: vec![],
+        context_tail: 0,
         messages: vec![Message::user_text("hi")],
         max_output_tokens: None,
         temperature: None,

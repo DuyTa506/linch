@@ -243,6 +243,7 @@ async fn with_native_changes_off_the_marks_change_no_byte() {
         let unmarked: Vec<ProviderRequest> = (requests.iter())
             .map(|request| ProviderRequest {
                 appended_tools: Vec::new(),
+                context_tail: 0,
                 ..request.clone()
             })
             .collect();

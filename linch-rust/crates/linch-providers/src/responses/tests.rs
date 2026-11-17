@@ -371,3 +371,20 @@ async fn a_redirect_is_refused_and_never_followed() {
     server.join().unwrap();
     assert_redirect_refused(&err);
 }
+
+/// Request-only context stays at the tail of the last message, where
+/// automatic prefix caching leaves it out of the next turn's prefix: the
+/// body is the same with or without the count.
+#[test]
+fn request_only_context_does_not_change_the_body() {
+    let mut messages = vec![linch_core::Message::user_text("question")];
+    messages[0]
+        .content
+        .push(linch_core::ContentBlock::text("recalled memory"));
+    let with = |context_tail| ProviderRequest {
+        messages: messages.clone(),
+        context_tail,
+        ..request(MODEL)
+    };
+    assert_eq!(body(&with(1)), body(&with(0)));
+}

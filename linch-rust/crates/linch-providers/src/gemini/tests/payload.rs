@@ -372,3 +372,20 @@ fn misplaced_blocks_fail_locally() {
         assert!(invalid(&with_messages(vec![message])));
     }
 }
+
+/// Request-only context stays at the tail of the last message, where
+/// automatic prefix caching leaves it out of the next turn's prefix: the
+/// body is the same with or without the count.
+#[test]
+fn request_only_context_does_not_change_the_body() {
+    let mut messages = vec![linch_core::Message::user_text("question")];
+    messages[0]
+        .content
+        .push(linch_core::ContentBlock::text("recalled memory"));
+    let with = |context_tail| ProviderRequest {
+        messages: messages.clone(),
+        context_tail,
+        ..request()
+    };
+    assert_eq!(build(&with(1)), build(&with(0)));
+}

@@ -175,6 +175,7 @@ fn minimal_request(model: &str) -> crate::provider::ProviderRequest {
         system: vec![],
         tools: vec![],
         appended_tools: vec![],
+        context_tail: 0,
         messages: vec![],
         max_output_tokens: None,
         temperature: None,

@@ -104,6 +104,7 @@ và các điều khiển tùy chọn mà một adapter có thể bỏ qua hoặc
 | `cache_control` | Được đặt (không có TTL) trên mọi lời gọi chính của một run, như `cache_prompt=True` của Python; một lời gọi tóm tắt compaction không có (`crates/linch-core/src/agent.rs`). |
 | `output_schema`, `tool_choice` | Tùy chọn. |
 | `appended_tools` | Tên của các `tools` mà một session đã thêm sau prefix đã đóng băng của nó; rỗng ngoài catalog của session. Chỉ các thay đổi catalog gốc của adapter Anthropic và Responses đọc nó. |
+| `context_tail` | Số block cuối của message cuối là context chỉ dành cho request (memory được recall, retrieval, block của `context_build`), không bao giờ được ghi log; 0 và không có trên wire khi không có. Anthropic đặt breakpoint hội thoại ở block ngay trước chúng; adapter có prefix caching tự động bỏ qua, nên context vẫn ở cuối. |
 
 Request không có tín hiệu hủy, ngân sách retry hay công tắc catalog gốc; cancel token là
 đối số thứ hai của `stream`.
@@ -437,8 +438,10 @@ lịch sử. `ResponsesOptions::store` tắt sẽ gửi `store: false` và yêu 
 `temperature`, thứ `ProviderRequest` vẫn mang. `max_tokens` là
 bắt buộc và mặc định 8192 (`anthropic.rs:47`). Các block thinking được gửi
 lại với chữ ký không đổi. `cache_control` của một request đánh dấu
-block system cacheable cuối cùng và block cuối của message user cuối
-(`anthropic/payload.rs:39`).
+block system cacheable cuối cùng và block đã được ghi log cuối cùng của message user
+cuối: context chỉ dành cho request (`context_tail`) nằm sau nó, nên breakpoint
+nằm đúng chỗ message được cache của lượt sau cũng kết thúc
+(`anthropic/payload.rs`).
 Một `output_schema` được gửi dưới dạng `output_config.format: {"type": "json_schema",
 "schema": ...}`, bên cạnh `output_config.effort` (`anthropic/payload.rs`). Nó
 không cần beta header và hoạt động với tool, thinking và streaming; nó chỉ định hình

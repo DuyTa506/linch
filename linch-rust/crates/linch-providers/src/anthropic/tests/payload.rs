@@ -507,3 +507,156 @@ async fn an_agent_s_system_sections_carry_the_system_breakpoint() {
         ])
     );
 }
+
+fn cached_messages(messages: Vec<Message>, context_tail: usize) -> ProviderRequest {
+    ProviderRequest {
+        messages,
+        context_tail,
+        cache_control: Some(CacheControl { ttl: None }),
+        ..request()
+    }
+}
+
+/// Every `cache_control` a message block carries, as `(message, block)`.
+fn breakpoints(body: &serde_json::Value) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    for (m, message) in body["messages"].as_array().unwrap().iter().enumerate() {
+        for (b, block) in message["content"].as_array().unwrap().iter().enumerate() {
+            if block.get("cache_control").is_some() {
+                found.push((m, b));
+            }
+        }
+    }
+    found
+}
+
+fn without_cache_control(mut value: serde_json::Value) -> serde_json::Value {
+    match &mut value {
+        serde_json::Value::Object(map) => {
+            map.remove("cache_control");
+            map.values_mut()
+                .for_each(|v| *v = without_cache_control(v.take()));
+        }
+        serde_json::Value::Array(items) => {
+            items
+                .iter_mut()
+                .for_each(|v| *v = without_cache_control(v.take()));
+        }
+        _ => {}
+    }
+    value
+}
+
+/// Context the runtime added for this request only is not logged, so the
+/// breakpoint goes on the last block before it: the next turn's cached
+/// message then still ends there.
+#[test]
+fn the_cache_breakpoint_stays_before_request_only_context() {
+    let messages = vec![
+        Message::user_text("first"),
+        Message::assistant_text("ok"),
+        Message::new(
+            Role::User,
+            vec![
+                ContentBlock::text("question"),
+                ContentBlock::text("recalled memory"),
+            ],
+        ),
+    ];
+    let body = build(&cached_messages(messages.clone(), 1));
+    assert_eq!(breakpoints(&body), [(2, 0)], "on the last logged block");
+    // Without context the breakpoint is on the last block, as before.
+    let body = build(&cached_messages(messages, 0));
+    assert_eq!(breakpoints(&body), [(2, 1)]);
+}
+
+/// Tool results lead a user message on the wire, so the logged part is
+/// found by what it holds, not by counting from the end of the JSON.
+#[test]
+fn the_breakpoint_is_after_the_last_tool_result_when_context_follows() {
+    let results = Message::new(
+        Role::User,
+        vec![
+            ContentBlock::text("note"),
+            ContentBlock::ToolResult(ToolResultBlock::text("t1", "18C", false)),
+            ContentBlock::ToolResult(ToolResultBlock::text("t2", "ok", false)),
+            ContentBlock::text("recalled"),
+        ],
+    );
+    let messages = vec![Message::user_text("q"), results];
+    let body = build(&cached_messages(messages, 1));
+    // Wire order: t1, t2, then the logged text "note", then the context.
+    assert_eq!(breakpoints(&body), [(1, 2)]);
+    assert_eq!(body["messages"][1]["content"][2]["text"], "note");
+}
+
+#[test]
+fn a_message_that_is_all_context_leaves_the_breakpoint_on_the_last_logged_user_message() {
+    let messages = vec![
+        Message::user_text("first"),
+        Message::assistant_text("ok"),
+        Message::new(Role::User, vec![ContentBlock::text("recalled")]),
+    ];
+    let body = build(&cached_messages(messages, 1));
+    assert_eq!(breakpoints(&body), [(0, 0)], "not on the assistant turn");
+}
+
+/// A hook may have rewritten the messages; a count past what exists is read
+/// as the whole last message and never panics.
+#[test]
+fn a_context_tail_longer_than_the_message_is_clamped() {
+    let messages = vec![
+        Message::user_text("first"),
+        Message::new(Role::User, vec![ContentBlock::text("a")]),
+    ];
+    let body = build(&cached_messages(messages, 9));
+    assert_eq!(breakpoints(&body), [(0, 0)]);
+}
+
+/// What turn 1 caches (everything up to its breakpoint) is the same bytes
+/// at the head of turn 2's request, the recall of turn 1 being gone.
+#[test]
+fn the_cached_prefix_of_one_turn_is_a_prefix_of_the_next() {
+    let call = ToolUseBlock {
+        id: "toolu_1".into(),
+        name: "get_weather".into(),
+        input: json!({"city": "Hue"}).as_object().unwrap().clone(),
+    };
+    let ask = || Message::user_text("what is the weather");
+    let mut first_user = ask();
+    first_user
+        .content
+        .push(ContentBlock::text("recall for turn 1"));
+    let turn1 = build(&cached_messages(vec![first_user], 1));
+    let mut results = Message::new(
+        Role::User,
+        vec![ContentBlock::ToolResult(ToolResultBlock::text(
+            "toolu_1", "18C", false,
+        ))],
+    );
+    results
+        .content
+        .push(ContentBlock::text("recall for turn 2"));
+    let turn2 = build(&cached_messages(
+        vec![
+            ask(),
+            Message::new(Role::Assistant, vec![ContentBlock::ToolUse(call)]),
+            results,
+        ],
+        1,
+    ));
+    let (message, block) = breakpoints(&turn1)[0];
+    let cached = &turn1["messages"].as_array().unwrap()[..=message];
+    let mut cached = without_cache_control(json!(cached));
+    cached[message]["content"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(block + 1);
+    let head = &turn2["messages"].as_array().unwrap()[..=message];
+    let mut head = without_cache_control(json!(head));
+    head[message]["content"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(block + 1);
+    assert_eq!(cached, head, "turn 1's cached prefix is turn 2's head");
+}

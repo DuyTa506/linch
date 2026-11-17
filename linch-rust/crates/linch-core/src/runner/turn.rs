@@ -434,8 +434,9 @@ impl Runner {
             self.abort().await?;
             return Ok(None);
         };
-        add_context(&mut messages, std::mem::take(&mut context.blocks));
+        let context_tail = add_context(&mut messages, std::mem::take(&mut context.blocks));
         let mut request = self.request(messages);
+        request.context_tail = context_tail;
         if model.is_some() || self.standing.fallbacks > 0 {
             request.model = self.call_model(model);
         }
