@@ -34,6 +34,7 @@ per call; per-call data arrives in `ToolContext`.
 | `output_schema()` | `None` | When set, a successful value must satisfy it |
 | `validate(input)` | identity | Checks beyond the schema; runs after schema validation and again after a `pre_tool_use` hook rewrites the input |
 | `parallel(input)` | `scope().is_parallel_safe()` | Whether this call may run alongside other read calls |
+| `polls()` | `false` | Whether the tool polls something that runs on, so the loop guard never counts its calls as repeats ([turn lifecycle](./turn-lifecycle.md#the-loop-guard)); `BashOutput` says yes |
 | `summarize(input)` | the name | One line for events and approval prompts |
 | `execute(input, ctx)` | required | Run on validated input; return promptly once `ctx.cancel` fires |
 
@@ -265,7 +266,9 @@ never names a new process.
 - `BashOutput` (read scope, parallel) waits up to `wait_ms` (at most
   600 000, cut to the call's deadline) for the end, then returns the unread
   output; a running process is a success ending in `still running`, an ended
-  one renders as a foreground result. `BashKill` is exec scope like `Bash`.
+  one renders as a foreground result. It is a poll (`polls()`): the loop
+  guard never counts a read of a running command as a repeat. `BashKill` is
+  exec scope like `Bash`.
   Both are in `crates/linch-tools/src/bash/control.rs`.
 - **Restart.** Processes live in memory only and die with the server, so a
   resumed run's `BashOutput` or `BashKill` on an earlier id fails with code

@@ -205,13 +205,13 @@ is not made and the run fails with `TurnLimitError` (`runner/end.rs:138-154`).
 
 ### The loop guard
 
-`spec.loop_guard` (`loop_guard.rs:59`) ends a run that is stuck, with
+`spec.loop_guard` (`loop_guard.rs:66`) ends a run that is stuck, with
 `max_turns` unset as well. It is on by default; the default is left off the
 wire, so it does not change the contract of a spec that does not set it.
 
 | Check | Default | Trips | Checked |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | One tool called with the same input (canonical JSON) this many times in the run, each with a result that is not an error | At `Step::Results`, after the batch's results are appended (`turn.rs:303`) |
+| `max_identical_tool_calls` | 3 | The same call with the same result this many times in the run: one tool, the same input and the same result content (both canonical JSON), not an error, and not a tool that polls | At `Step::Results`, after the batch's results are appended (`turn.rs:303`) |
 | `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
 | `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:415`) |
 
@@ -227,20 +227,27 @@ an `Error` named `LoopGuardError` with the event's `detail`, and a failed
 after the results are in the session, so it stays paired; no `post_turn`
 runs for that turn.
 
-Python counts every call asked for as a repeat. Here a call whose result is
-an error does not count, because Linch itself asks the model to repeat some
-refused calls (a deferred tool: `call tool_search with select:X first`);
-calls that keep failing are the failure streak's. Python's
-`force_final_answer` (one more turn with no tools) is not ported: a trip
-stops.
+A repeat is the same call with the same result. A call whose result differs
+from every earlier identical call's made progress (a file read again after
+an edit, a status that moved on) and starts a count of its own; going back
+to an earlier result is a repeat of that result. An error result is never a
+repeat, because Linch itself asks the model to repeat some refused calls (a
+deferred tool: `call tool_search with select:X first`); calls that keep
+failing are the failure streak's. A tool whose `polls()` is true
+(`tool.rs:279`; `BashOutput`, which reads a background command until it
+ends) is never a repeat either; its failures still count toward the streak.
+Python counts identical inputs whatever the result, failed and refused
+calls included. Python's `force_final_answer` (one more turn with no tools)
+is not ported: a trip stops.
 
-Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:134`)
+Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:145`)
 folds the run's durable events: an `assistant` event names the calls of its
-response, the next `tool_result` user event counts those that did not fail
-and moves the failure streak, and a primary `model_call_delivery` records
-its turn. The live run folds the same events as it stages them
+response (less those of tools that poll, which the runner reads from the
+registry), the next `tool_result` user event counts those that did not fail
+by their result content and moves the failure streak, and a primary
+`model_call_delivery` records its turn. The live run folds the same events as it stages them
 (`Runner::stage_seen`, `turn.rs:350`), and a resume folds the stored ones
-(`start.rs:472`). Each is durable before the step that checks it (the
+(`start.rs:473`). Each is durable before the step that checks it (the
 results with the `ToolResults` checkpoint, a delivery before its call), and
 the turn comes from the checkpoint, so a crash at any write resumes with
 the counts the run had and trips at the same point

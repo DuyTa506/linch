@@ -206,7 +206,7 @@ absent, except `bash`.
 | `redaction` | none | Regex rules that scrub responses, tool results and optionally the prompt before anything logs, streams or sees them, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Security](./security.md#redaction)) |
 | `verification` | none | Checks the final answer must pass and the retry budget they share with `stop` callbacks, `{"max_retries"?, "verifiers"?}` ([Security](./security.md#verifiers)) |
 | `truncation_recovery` | none: a cut answer is final | Continue a text answer the output limit cut off, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
-| `loop_guard` | on: 3 identical calls, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
+| `loop_guard` | on: 3 identical calls with the same result, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
 
 ### System blocks
 
@@ -266,7 +266,7 @@ fields to change.
 
 | Field | Default | The run ends when |
 |---|---|---|
-| `max_identical_tool_calls` | `3` | One tool was called with the same input this many times, each with a result that is not an error. The call that reaches it runs first. `0` turns this check off |
+| `max_identical_tool_calls` | `3` | The same call got the same result this many times: one tool, the same input, the same result, not an error. The call that reaches it runs first. A call whose result changed (a file read again after an edit) is progress and does not count. `0` turns this check off |
 | `max_consecutive_failures` | `3` | This many tool batches in a row had every call fail. A batch with one success starts the count again. `0` turns this check off |
 | `max_idle_turns` | `25` | One more turn in a row would end without a provider call, which only a `before_provider_call` callback answering `force_continue` does. At least `1`: this check is always on |
 
@@ -280,10 +280,13 @@ reset them.
 spec = {"model": "deepseek-flash", "loop_guard": {"max_identical_tool_calls": 5}}
 ```
 
-Python Linch counts a failed call as a repeat too; here the failure count
-covers it, since Linch tells the model to repeat some refused calls (a
-deferred tool). Python's `force_final_answer` is not available. A remote
-tenant may not raise `max_idle_turns` above 25.
+Python Linch counts identical inputs whatever the result, failed calls
+included. Here a repeat must also return the same result, a failed call is
+the failure count's (Linch tells the model to repeat some refused calls, a
+deferred tool), and a tool that polls never repeats: `BashOutput` can read
+a running background command as often as the model needs. Python's
+`force_final_answer` is not available. A remote tenant may not raise
+`max_idle_turns` above 25.
 
 The default is not written into the spec, so leaving `loop_guard` out keeps
 the [run contract](#the-run-contract) of an agent from before the guard,

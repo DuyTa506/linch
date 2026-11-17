@@ -311,7 +311,8 @@ provider's refusal of a prompt as too long caused it
 The run hit its turn limit or the [loop guard](./agent.md#loop_guard)
 tripped: `reason` (`max_turns`, `repeated_tool_call`, `repeated_failures` or
 `idle_turns`), `detail` (for example `Maximum turns (20) reached.` or
-`Tool 'Read' called with identical inputs 3 time(s) (limit: 3).`) and
+`Tool 'Read' called with identical inputs and the same result 3 time(s)
+(limit: 3).`) and
 `action` (`stop`). An `error` event (`TurnLimitError` or `LoopGuardError`)
 and a `result` of subtype `error` follow.
 

@@ -295,14 +295,16 @@ class LoopGuard(TypedDict, total=False):
     `LoopGuardEvent` (its `reason` is `repeated_tool_call`,
     `repeated_failures` or `idle_turns`), an `ErrorEvent` named
     `LoopGuardError`, and a `ResultEvent` of subtype `error`, before its
-    next provider call. Unlike Python, a call whose result is an error is
-    not counted as a repeat (the failure streak counts it), and there is no
-    `force_final_answer`.
+    next provider call. Python counts identical inputs whatever the
+    result; here a repeat must also return the same result, an error result
+    is the failure streak's, a built-in tool that polls (`BashOutput`) never
+    repeats, and there is no `force_final_answer`.
 
     Attributes:
-        max_identical_tool_calls: Calls of one tool with the same input,
-            each with a result that is not an error, that end the run; the
-            one that reaches it runs first. 3 when absent, 0 never.
+        max_identical_tool_calls: Calls of one tool with the same input
+            and the same result, not an error, that end the run; the one
+            that reaches it runs first. A call whose result changed is
+            progress. 3 when absent, 0 never.
         max_consecutive_failures: Tool batches in a row whose every call
             failed that end the run. 3 when absent, 0 never.
         max_idle_turns: Most turns in a row that may end without a provider
