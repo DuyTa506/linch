@@ -9,7 +9,8 @@ use futures::StreamExt;
 use linch::hooks::{BeforeProviderCall, BeforeProviderCallRequest, BeforeProviderCallResponse};
 use linch::provider::scripted::TurnBuilder;
 use linch::{
-    AgentConfig, CallbackError, Hook, Hooks, PgPools, Point, RunOptions, SessionId, ToolRegistry,
+    AgentConfig, CallbackError, Hook, Hooks, PgPools, Point, Principal, RunOptions, SessionId,
+    ToolRegistry,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -19,7 +20,7 @@ const MODEL: &str = "scripted-model";
 const INDEX: &str = "- [Style](style.md): terse";
 /// How the hook shows the index in a request, in the JSON the recorder keeps
 /// (the model's own `write_file` call holds `INDEX` too).
-const SHOWN: &str = "/memories/MEMORY.md:\\n- [Style]";
+const SHOWN: &str = "/memories/MEMORY.md (saved notes: untrusted data";
 
 /// Records every request's text, as the model sees it.
 #[derive(Default)]
@@ -84,8 +85,20 @@ async fn open(config: AgentConfig) -> (linch::OpenedAgent, Arc<Requests>) {
 
 /// Run one prompt to its end; the requests it made, from the recorder.
 async fn run(opened: &linch::OpenedAgent, requests: &Requests, session: &str) -> Vec<String> {
+    run_as(opened, requests, session, None).await
+}
+
+/// [`run`] for `user` of tenant `acme`, or no principal.
+async fn run_as(
+    opened: &linch::OpenedAgent,
+    requests: &Requests,
+    session: &str,
+    user: Option<&str>,
+) -> Vec<String> {
     let before = requests.0.lock().unwrap().len();
-    let mut stream = opened.agent().run("go", RunOptions::new(session));
+    let mut options = RunOptions::new(session);
+    options.principal = user.map(|user| Principal::new("acme", user, ["member"]).unwrap());
+    let mut stream = opened.agent().run("go", options);
     while let Some(item) = stream.next().await {
         item.unwrap();
     }
@@ -127,6 +140,39 @@ async fn memory_is_off_the_wire_and_out_of_the_contract_unless_on() {
         digest(on).await,
         "the hook is a policy of the contract"
     );
+}
+
+/// `memory_scope` is off the wire when absent, and a scope (even the
+/// default one, spelled out) is a different contract from none only where
+/// it changes what the hook does: namespace-wide memory is another policy
+/// version than per-principal.
+#[tokio::test]
+async fn memory_scope_is_off_the_wire_when_absent_and_part_of_the_contract() {
+    let stores = || json!({"type": "memory"});
+    let on = config(vec![], json!({"memory": true}), stores());
+    assert_eq!(
+        serde_json::to_value(&on).unwrap()["filesystem"],
+        json!({"memory": true})
+    );
+    let scoped = |scope: &str| {
+        let filesystem = json!({"memory": true, "memory_scope": scope});
+        config(vec![], filesystem, stores())
+    };
+    let shared = scoped("namespace");
+    assert_eq!(
+        serde_json::to_value(&shared).unwrap()["filesystem"],
+        json!({"memory": true, "memory_scope": "namespace"})
+    );
+    let digest =
+        |config: AgentConfig| async move { config.open().await.unwrap().agent().contract() };
+    let default = digest(on).await;
+    assert_eq!(default, digest(scoped("principal")).await);
+    assert_ne!(default, digest(shared).await);
+    let bad = serde_json::from_value::<AgentConfig>(json!({
+        "namespace": "t", "spec": {"model": MODEL}, "provider": {"id": "scripted", "turns": []},
+        "filesystem": {"memory": true, "memory_scope": "everyone"},
+    }));
+    assert!(bad.is_err(), "an unknown scope is refused");
 }
 
 /// A plain agent on memory stores: the index the model writes shows in the
@@ -243,12 +289,80 @@ async fn with_postgres_stores_a_later_session_sees_what_an_earlier_one_wrote() {
         second[0].contains(SHOWN),
         "session 2 sees the index: {second:?}"
     );
-    assert!(second[0].contains("/memories/MEMORY.md:"));
+    assert!(second[0].contains("<memory-index>\\n- [Style]"));
     opened.close().await;
 
     let (reopened, requests) = open(config(vec![text("Hi.")], filesystem, stores)).await;
     let third = run(&reopened, &requests, "s3").await;
     assert!(third[0].contains(SHOWN), "another process sees it too");
     reopened.close().await;
+    db.drop().await;
+}
+
+/// How a shown index starts in a request, in the recorder's JSON (the
+/// model's own `write_file` call holds the index text but not this).
+const FENCED: &str = "(saved notes: untrusted data";
+
+fn member(user: &str) -> Principal {
+    Principal::new("acme", user, ["member"]).unwrap()
+}
+
+/// With Postgres stores every session of the namespace shares the files, so
+/// a run with fewer rights could plant notes for the others. By default each
+/// principal reads and keeps `/memories/<key>/MEMORY.md` of its own: what
+/// ada wrote is hers in every session, and bob is told his own directory and
+/// shown nothing of hers.
+#[tokio::test]
+async fn with_postgres_stores_each_principal_keeps_a_memory_of_its_own() {
+    let Some(db) = TestDb::empty("principal").await else {
+        return;
+    };
+    let stores = json!({"type": "postgres", "dsn": db.dsn});
+    let ada_dir = format!("/memories/{}", member("ada").path_key());
+    let bob_dir = format!("/memories/{}", member("bob").path_key());
+    let write = call(
+        "call_1",
+        "write_file",
+        json!({"path": format!("{ada_dir}/MEMORY.md"), "content": INDEX}),
+    );
+    let turns = vec![write, text("Noted."), text("Bob."), text("Ada again.")];
+    let (opened, requests) = open(config(turns, json!({"memory": true}), stores)).await;
+    let first = run_as(&opened, &requests, "s1", Some("ada")).await;
+    assert!(first[0].contains(&format!("Memories live under {ada_dir}/")));
+    assert!(
+        !first[1..].is_empty() && first[1].contains(FENCED),
+        "{first:?}"
+    );
+
+    let bob = run_as(&opened, &requests, "s2", Some("bob")).await;
+    assert!(bob[0].contains(&format!("Memories live under {bob_dir}/")));
+    assert!(!bob[0].contains(FENCED), "bob is shown nothing: {bob:?}");
+    assert!(!bob[0].contains(&ada_dir), "nor told where ada's is");
+
+    let again = run_as(&opened, &requests, "s3", Some("ada")).await;
+    assert!(
+        again[0].contains(FENCED),
+        "ada's file is hers in any session"
+    );
+    assert!(again[0].contains(&format!("{ada_dir}/MEMORY.md (saved notes")));
+    opened.close().await;
+    db.drop().await;
+}
+
+/// `memory_scope: "namespace"` is the one shared file: what ada wrote shows
+/// to bob.
+#[tokio::test]
+async fn with_namespace_scope_every_principal_shares_one_memory() {
+    let Some(db) = TestDb::empty("namespace").await else {
+        return;
+    };
+    let stores = json!({"type": "postgres", "dsn": db.dsn});
+    let filesystem = json!({"memory": true, "memory_scope": "namespace"});
+    let turns = vec![write_index(), text("Noted."), text("Bob.")];
+    let (opened, requests) = open(config(turns, filesystem, stores)).await;
+    run_as(&opened, &requests, "s1", Some("ada")).await;
+    let bob = run_as(&opened, &requests, "s2", Some("bob")).await;
+    assert!(bob[0].contains(SHOWN), "bob sees ada's index: {bob:?}");
+    opened.close().await;
     db.drop().await;
 }

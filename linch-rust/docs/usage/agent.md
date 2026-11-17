@@ -372,7 +372,8 @@ after the system prompt that teaches the model to use them.
 | Field | Default | What it controls |
 |---|---|---|
 | `offload_threshold_tokens` | none | Move a text tool result estimated above this many tokens (four bytes per token) into the filesystem, leaving its first lines and its path for the model to `read_file` |
-| `memory` | `False` | Show the model the instruction to keep memories under `/memories/` and the first 200 lines of `/memories/MEMORY.md`, read for each request ([Memory](./memory.md#file-memory)). A deep agent always has it |
+| `memory` | `False` | Show the model the instruction to keep memories under `/memories/` and the first 200 lines (at most 16 KiB) of its `MEMORY.md`, fenced as untrusted data and read for each request ([Memory](./memory.md#file-memory)). A deep agent always has it |
+| `memory_scope` | `"principal"` | Whose `/memories/` the model sees: `"principal"` gives each principal a directory of its own (`/memories/<key>/MEMORY.md`), `"namespace"` one file for every run of the namespace ([Memory](./memory.md#file-memory)) |
 | `offload_threshold_fraction` | none | Offload above this fraction of the provider's [context window](./providers.md#context-window), at least 1000 tokens; Python Linch uses 0.1. Used only without `offload_threshold_tokens`. With neither, results are never offloaded |
 
 With memory stores each session has its own files, gone with the server. With

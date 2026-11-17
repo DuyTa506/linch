@@ -221,9 +221,12 @@ config = {
 ```
 
 Trước mỗi lời gọi model, server thêm hai khối văn bản vào request đó: một chỉ dẫn (ký ức
-nằm dưới `/memories/`, `MEMORY.md` là chỉ mục, dùng các tool tệp để giữ chúng và bỏ các sự
-thật cũ) và, khi tệp tồn tại và không rỗng, 200 dòng đầu của nó (có ghi chú khi dài hơn).
-Các khối nằm ở đuôi request, như [bộ nhớ ngoài](#external-memory), và không bao giờ được
+nằm dưới thư mục nêu bên dưới, `MEMORY.md` là chỉ mục, dùng các tool tệp để giữ chúng và
+bỏ các sự thật cũ) và, khi tệp tồn tại và không rỗng, 200 dòng đầu của nó, tối đa 16 KiB,
+với một ghi chú cho mỗi lần cắt. Chỉ mục được hiển thị như dữ liệu, không phải chỉ thị: nó
+nằm giữa các thẻ `<memory-index>` dưới một dòng nói rõ điều đó, và một thẻ đóng nằm trong
+nội dung bị phá (`<\/memory-index>`) để nó không thể kết thúc khung sớm. Các khối nằm ở
+đuôi request, như [bộ nhớ ngoài](#external-memory), và không bao giờ được
 ghi log. Không gì ghi ký ức thay cho model: nó dùng `write_file` và `edit_file`, nên các
 quyền thông thường áp dụng.
 
@@ -233,14 +236,29 @@ quyền thông thường áp dụng.
   không được ghi log nên không thể cache qua các request. Đọc lại tốn một lần đọc tệp và
   cho model thấy chỉ mục nó vừa sửa ở lượt kế tiếp. Một run được resume ở tiến trình khác
   đọc lại tệp trong cả hai thiết kế.
-- **Tệp nằm ở đâu.** Với kho Postgres, mọi session của namespace dùng chung `/memories/`,
-  nên session 2 thấy những gì session 1 ghi, và tiến trình mới cũng vậy. Với kho memory,
+- **Tệp nằm ở đâu.** Với kho Postgres, mọi session của namespace dùng chung các tệp dưới
+  `/memories/`, nên session 2 thấy những gì session 1 ghi, và tiến trình mới cũng vậy. Với kho memory,
   mỗi session có tệp riêng, giữ trong handle của agent: không gì được chia sẻ giữa các
   session, và `close_session` xóa chúng, nên tệp không sống lâu hơn session của nó. Dùng
   kho Postgres cho ký ức bền.
+- **Tệp của ai: `memory_scope`.** Trên Postgres, các tệp được chia sẻ bởi mọi session *và
+  mọi principal* của namespace, và model tin các ghi chú của chính nó, nên một run có ít
+  quyền hơn có thể ghi những ghi chú mà một run nhiều quyền hơn rồi đọc như của mình. Mặc
+  định (`"principal"`), principal của mỗi run có một thư mục riêng,
+  `/memories/<key>/MEMORY.md`, trong đó `<key>` là 32 chữ số hex của SHA-256 trên
+  tenant, user và các role của nó (an toàn cho đường dẫn và không nêu tên ai). Chỉ dẫn nêu
+  thư mục đó, nên model giữ ghi chú ở đấy. Một run không có principal (kết nối cục bộ, hoặc
+  không truyền) dùng `/memories/MEMORY.md`. `filesystem: {"memory": True, "memory_scope":
+  "namespace"}` là hành vi cũ: một tệp cho mọi run của namespace, phù hợp khi mọi run đáng
+  tin như nhau. Scope thuộc hợp đồng của run. Đây là tách biệt theo đường dẫn, không phải
+  theo quyền: các tool hệ thống tệp không bị giới hạn scope, nên `ls /memories` liệt kê mọi
+  thư mục và một run có `write_file` có thể ghi vào thư mục của principal khác. Dùng các
+  luật permission để giữ một role tránh xa `/memories/` nếu điều đó quan trọng.
 - **Hợp đồng.** Tắt thì không được gửi và hợp đồng của run không đổi; bật thì hook thuộc
-  hợp đồng, nên một run không thể resume qua việc bật hay tắt nó. `deep_agent` luôn có,
-  bất kể `memory`.
+  hợp đồng, nên một run không thể resume qua việc bật hay tắt nó, hay đổi scope của nó.
+  `deep_agent` luôn có, bất kể `memory`, với cùng `memory_scope`. Văn bản của hook đã đổi
+  cùng phiên bản này (có khung, có giới hạn, theo principal), nên một run của deep agent
+  hay agent `memory` tạo trước đó không thể resume.
 - `memory` là một trường của `filesystem`, nên nó cần hệ thống tệp bật; không có cách xin
   nó khi hệ thống tệp tắt.
 

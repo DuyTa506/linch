@@ -226,9 +226,10 @@ mọi tool chúng liệt kê đều đã đăng ký và có scope read, điều 
 
 Trước mỗi lệnh gọi mô hình, agent thêm hai khối văn bản vào cuối request: một chỉ dẫn
 ngắn (bộ nhớ nằm dưới `/memories/`, mỗi sự kiện một tệp, với `MEMORY.md` là chỉ mục có
-một dòng cho mỗi tệp), và 200 dòng đầu của `/memories/MEMORY.md` khi tệp tồn tại và
-không rỗng. Chỉ mục được đọc lại cho mỗi request, nên thay đổi mà mô hình thực hiện
-sẽ hiện ra ở lượt kế tiếp.
+một dòng cho mỗi tệp), và 200 dòng đầu (tối đa 16 KiB) của chỉ mục đó khi tệp tồn tại và
+không rỗng, được bao khung như dữ liệu không đáng tin. Chỉ mục được đọc lại cho mỗi request,
+nên thay đổi mà mô hình thực hiện sẽ hiện ra ở lượt kế tiếp. Một run có principal giữ ký ức
+trong `/memories/<key>/` thay vì `/memories/`; xem [`memory_scope`](./memory.md#file-memory).
 
 Các khối này không được ghi vào nhật ký và không xuất hiện trong event stream; mô hình
 duy trì các tệp bằng các tool của hệ thống tệp ảo.

@@ -1,5 +1,6 @@
 //! [`FilesystemConfig`]: the virtual filesystem of an agent.
 
+use linch_ext::deep_agent::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Turns on the virtual filesystem of [`linch_tools::vfs`]: the `ls`,
@@ -31,8 +32,9 @@ pub struct FilesystemConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_threshold_fraction: Option<f64>,
     /// Show the model its file memory: the instruction to keep memories under
-    /// `/memories/`, and the first 200 lines of `/memories/MEMORY.md` when
-    /// the session's files hold it (Python's `FileMemoryContextBuilder`; see
+    /// `/memories/`, and the first 200 lines (at most 16 KiB) of its
+    /// `MEMORY.md`, fenced as untrusted data, when the session's files hold
+    /// it (Python's `FileMemoryContextBuilder`; see
     /// [`linch_ext::deep_agent::FileMemoryContext`]). Both ride the tail of
     /// each request, never the log, and the file is read again for each
     /// request, so a change the model made shows on its next turn. Nothing
@@ -41,9 +43,20 @@ pub struct FilesystemConfig {
     /// off the wire; turning it on adds the hook to the run contract. With
     /// memory stores the file lives and dies with its session, so it does
     /// not outlive [`Agent::close_session`](linch_core::Agent::close_session);
-    /// with Postgres stores every session of the namespace shares it.
+    /// with Postgres stores every session of the namespace shares the
+    /// files, and [`Self::memory_scope`] says whose `MEMORY.md` it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory: bool,
+    /// Whose `/memories/` the model sees: `principal` (the default when
+    /// absent) gives each run's principal a directory of its own,
+    /// `/memories/<key>/MEMORY.md`, so a run with fewer rights cannot plant
+    /// notes another principal's runs read; a run without a principal shares
+    /// `/memories/MEMORY.md`. `namespace` is that one file for every run
+    /// of the namespace. Used only when `memory` is on or the agent is a deep
+    /// agent; absent keeps it off the wire. The scope is part of the run
+    /// contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_scope: Option<MemoryScope>,
 }
 
 /// The least threshold a fraction gives (Python's floor).

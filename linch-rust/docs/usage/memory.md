@@ -217,10 +217,13 @@ config = {
 ```
 
 Before each model call the server adds two text blocks to that request: an
-instruction (memories live under `/memories/`, `MEMORY.md` is the index, use
-the file tools to keep them and drop stale facts) and, when the file exists
-and is not empty, its first 200 lines (a note says when it is longer). The
-blocks ride the tail of the request, like [external memory](#external-memory),
+instruction (memories live under the directory below, `MEMORY.md` is the
+index, use the file tools to keep them and drop stale facts) and, when the
+file exists and is not empty, its first 200 lines, at most 16 KiB, with a
+note for each cut. The index is shown as data, not as instructions: it sits
+between `<memory-index>` tags under a line that says so, and a closing tag
+inside the content is broken (`<\/memory-index>`) so it cannot end the fence
+early. The blocks ride the tail of the request, like [external memory](#external-memory),
 and are never logged. Nothing writes memory for the model: it uses
 `write_file` and `edit_file`, so the usual permissions apply.
 
@@ -232,14 +235,33 @@ and are never logged. Nothing writes memory for the model: it uses
   an index it edited on its next turn. A run resumed in another process
   reads the file again in both designs.
 - **Where the file lives.** With Postgres stores every session of the
-  namespace shares `/memories/`, so session 2 sees what session 1 wrote, and
-  so does a new process. With memory stores each session has its own files,
-  kept in the agent handle: nothing is shared between sessions, and
-  `close_session` drops them, so the file does not outlive its session. Use
-  Postgres stores for memory that lasts.
+  namespace shares the files under `/memories/`, so session 2 sees what
+  session 1 wrote, and so does a new process. With memory stores each session
+  has its own files, kept in the agent handle: nothing is shared between
+  sessions, and `close_session` drops them, so the file does not outlive its
+  session. Use Postgres stores for memory that lasts.
+- **Whose file it is: `memory_scope`.** On Postgres the files are shared by
+  every session *and every principal* of the namespace, and the model trusts
+  its own notes, so a run with fewer rights could write notes that a run with
+  more rights then reads as its own. By default (`"principal"`) each run's
+  principal gets a directory of its own, `/memories/<key>/MEMORY.md`, where
+  `<key>` is 32 hex digits of a SHA-256 of its tenant, user and roles (it is
+  path-safe and names no one). The instruction names that directory, so the
+  model keeps its notes there. A run with no principal (a local connection,
+  or none passed) uses `/memories/MEMORY.md`. `filesystem: {"memory": True,
+  "memory_scope": "namespace"}` is the old behaviour: one file for every run
+  of the namespace, right when all runs are equally trusted. The scope is
+  part of the run contract. This is separation by path, not by permission:
+  the filesystem tools are not scoped, so `ls /memories` lists every
+  directory and a run with `write_file` can write into another principal's.
+  Use permission rules to keep a role away from `/memories/` if that
+  matters.
 - **The contract.** Off, it is not sent and the run contract is unchanged;
   on, the hook is part of the contract, so a run cannot resume across turning
-  it on or off. A `deep_agent` always has it, whatever `memory` says.
+  it on or off or across changing its scope. A `deep_agent` always has it,
+  whatever `memory` says, with the same `memory_scope`. The text of the hook
+  changed with this version (fenced, capped, per principal), so a run of a
+  deep agent or a `memory` agent created before it cannot be resumed.
 - `memory` is a field of `filesystem`, so it needs the filesystem on; there
   is no way to ask for it with the filesystem off.
 

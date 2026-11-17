@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, TextBlock};
-use crate::policy::HookPoint;
+use crate::policy::{HookPoint, Principal};
 use crate::run::StopReason;
 
 use super::chain::{ChainResult, HookChain, HookRecord, Step};
@@ -118,6 +118,9 @@ pub struct ContextBuildRequest {
     pub run_id: RunId,
     /// The session's provider view at this point.
     pub messages: Arc<Vec<Arc<Message>>>,
+    /// Who the run acts for, when it has a principal. Not sent to RPC
+    /// callbacks.
+    pub principal: Option<Principal>,
 }
 
 /// A `context_build` hook's answer: context to add to this request only.

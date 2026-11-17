@@ -76,12 +76,23 @@ class Filesystem(TypedDict, total=False):
             each request and ride its tail, never the session. A
             `deep_agent` always has this. Off when absent. With memory
             stores the file is dropped when its session closes; with
-            Postgres stores every session of the namespace shares it.
+            Postgres stores every session of the namespace shares the
+            files, and `memory_scope` says whose `MEMORY.md` it is. The
+            index is cut to 200 lines and 16 KiB and shown as untrusted
+            data.
+        memory_scope: Whose `/memories/` the model sees: `"principal"`
+            (the default when absent) gives each run's principal a
+            directory of its own, `/memories/<key>/MEMORY.md`, so a run with
+            fewer rights cannot plant notes for others (a run without a
+            principal shares `/memories/MEMORY.md`); `"namespace"` is that
+            one file for every run of the namespace. It separates by path,
+            not by permission. Used only with `memory` or a `deep_agent`.
     """
 
     offload_threshold_tokens: int
     offload_threshold_fraction: float
     memory: bool
+    memory_scope: Literal["namespace", "principal"]
 
 
 class LocalExecution(TypedDict):

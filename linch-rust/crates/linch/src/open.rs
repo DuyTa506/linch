@@ -178,7 +178,10 @@ impl AgentConfig {
             window,
         )?;
         if deep.is_some() || self.filesystem.as_ref().is_some_and(|files| files.memory) {
-            files.remember(&hooks);
+            files.remember(
+                &hooks,
+                self.filesystem.as_ref().and_then(|f| f.memory_scope),
+            );
         }
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
         let config_dir = project::dir(self.config_dir, root.as_deref());

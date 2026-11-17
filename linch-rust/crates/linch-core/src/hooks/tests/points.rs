@@ -476,6 +476,7 @@ async fn context_blocks_accumulate_in_order_and_failures_add_nothing() {
         session_id: SessionId::from("s"),
         run_id: RunId::from("r"),
         messages: Arc::new(Vec::new()),
+        principal: None,
     };
     let done = hooks.context_build.run(&request).await;
     let texts: Vec<_> = (done.outcome.blocks.iter())

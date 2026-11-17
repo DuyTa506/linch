@@ -338,6 +338,10 @@ async def test_filesystem_memory_shows_a_plain_agent_its_memory_file() -> None:
     assert memory_hooks(plain) == []
     remembering = await run_once(config([text_turn("hi")], filesystem={"memory": True}))
     assert len(memory_hooks(remembering)) == 1
+    shared = await run_once(
+        config([text_turn("hi")], filesystem={"memory": True, "memory_scope": "namespace"})
+    )
+    assert len(memory_hooks(shared)) == 1
 
 
 DEEP_AGENT_TOOLS = sorted(
