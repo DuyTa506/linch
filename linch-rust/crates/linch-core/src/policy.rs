@@ -174,6 +174,9 @@ pub enum HookPoint {
     SubagentStop,
     /// An event is about to be delivered to the caller.
     EventEmit,
+    /// One attempt of a tool call is about to run: the middleware
+    /// waterfall around the tool body.
+    ToolExecute,
 }
 
 /// What happens when a callback errors or times out.
@@ -193,7 +196,7 @@ impl HookPoint {
     /// no blocking verdict to fail closed into.
     pub fn default_fail_mode(self) -> FailMode {
         match self {
-            Self::PreToolUse | Self::PermissionRequest => FailMode::Closed,
+            Self::PreToolUse | Self::PermissionRequest | Self::ToolExecute => FailMode::Closed,
             Self::UserPromptSubmit
             | Self::ContextBuild
             | Self::PostToolUse

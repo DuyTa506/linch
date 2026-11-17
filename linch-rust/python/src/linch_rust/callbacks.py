@@ -34,6 +34,7 @@ Point = Literal[
     "subagent_start",
     "subagent_stop",
     "event_emit",
+    "tool_execute",
 ]
 FailMode = Literal["open", "closed"]
 CallbackFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
@@ -138,6 +139,137 @@ def callback(
         )
 
     return wrap
+
+
+ToolResultWire = dict[str, Any]
+ToolNext = Callable[[], Awaitable[ToolResultWire]]
+ToolMiddlewareFn = Callable[[dict[str, Any], ToolNext], Awaitable[ToolResultWire]]
+
+
+def tool_middleware(
+    policy_id: str,
+    policy_version: int,
+    matcher: Sequence[str] | None = None,
+    timeout: float | None = None,
+    fail_mode: FailMode | None = None,
+    park_timeout: float = 600.0,
+) -> Callable[[ToolMiddlewareFn], Callback]:
+    """Declare a function as a layer of the `tool_execute` waterfall.
+
+    The function is `async def layer(call, next)` and works as Python
+    Linch's `tools/execute` listener: `call` is the request (`session_id`,
+    `run_id`, `tool_use_id`, `tool_name`, `input`, `attempt`), and awaiting
+    `next()` runs the layers after this one and the tool, then returns the
+    tool result as a wire result (`{"output": {"value": ...}}` or
+    `{"error": {"message": ...}}`). Return that result as it is to keep it,
+    or another wire result to replace it. Returning without awaiting
+    `next()` vetoes the call: the tool never runs and what you return is the
+    result. `next` can be awaited once.
+
+    The server asks the client twice for a layer that awaits `next()`, and
+    this decorator parks the coroutine between the two calls, so a layer
+    that waits longer than `park_timeout` for the result gets a
+    `TimeoutError` from `next()`. The first registered layer is the
+    outermost. An exception, a bad result or a timeout is handled by the
+    fail mode, `closed` by default: the call fails and the tool does not
+    run (or, after it ran, its result is withheld).
+
+    Args:
+        policy_id: Stable id of the policy; with the version it enters the
+            run contract.
+        policy_version: Bump it whenever the behaviour, matcher, timeout or
+            fail mode changes, so a resumed run notices.
+        matcher: Tool-name globs (`*`, `?`); evaluated in the server.
+        timeout: Seconds the server waits for each of the two calls.
+        fail_mode: `closed` (the default) or `open`.
+        park_timeout: Seconds the layer may wait for the tool's result.
+
+    Returns:
+        A decorator that turns the function into a `Callback`.
+
+    Raises:
+        ValueError: A timeout is not positive.
+    """
+    timeout_ms = None if timeout is None else to_millis(timeout, "timeout")
+    to_millis(park_timeout, "park_timeout")
+
+    def wrap(fn: ToolMiddlewareFn) -> Callback:
+        parked: dict[Any, _Parked] = {}
+
+        async def answer(request: dict[str, Any]) -> dict[str, Any]:
+            token = request.get("token")
+            if request.get("phase") == "after":
+                waiting = parked.pop(token, None)
+                if waiting is None:
+                    raise RuntimeError("tool_execute: no layer is waiting for this result")
+                waiting.result.set_result(request["result"])
+                return await waiting.final
+            waiting = _Parked(
+                result=asyncio.get_running_loop().create_future(),
+                first=asyncio.get_running_loop().create_future(),
+                final=asyncio.get_running_loop().create_future(),
+            )
+            parked[token] = waiting
+            task = asyncio.ensure_future(_run_layer(fn, request, waiting, park_timeout))
+            task.add_done_callback(lambda _: parked.pop(token, None))
+            try:
+                return await waiting.first
+            except BaseException:
+                parked.pop(token, None)
+                task.cancel()
+                raise
+
+        return Callback(
+            point="tool_execute",
+            policy_id=policy_id,
+            policy_version=policy_version,
+            matcher=None if matcher is None else tuple(matcher),
+            timeout_ms=timeout_ms,
+            fail_mode=fail_mode,
+            fn=answer,
+        )
+
+    return wrap
+
+
+@dataclass
+class _Parked:
+    """The three answers of one layer call: to `before`, to `after`, and the result between."""
+
+    result: asyncio.Future[ToolResultWire]
+    first: asyncio.Future[dict[str, Any]]
+    final: asyncio.Future[dict[str, Any]]
+
+
+async def _run_layer(
+    fn: ToolMiddlewareFn, request: dict[str, Any], waiting: _Parked, park_timeout: float
+) -> None:
+    called = False
+
+    async def next_() -> ToolResultWire:
+        nonlocal called
+        if called:
+            raise RuntimeError("next() can be awaited once")
+        called = True
+        waiting.first.set_result({"action": "next", "after": True})
+        return await asyncio.wait_for(waiting.result, park_timeout)
+
+    try:
+        returned = await fn(request, next_)
+        if not called:
+            waiting.first.set_result({"action": "veto", "result": returned})
+            return
+        if returned == waiting.result.result():
+            waiting.final.set_result({"action": "continue"})
+        else:
+            waiting.final.set_result({"action": "replace", "result": returned})
+    except BaseException as error:
+        for future in (waiting.first, waiting.final):
+            if not future.done():
+                future.set_exception(error)
+                future.exception()  # retrieved here, so an unawaited one stays quiet
+        if not isinstance(error, Exception):
+            raise
 
 
 def _threaded(fn: Callable[..., Any]) -> Any:

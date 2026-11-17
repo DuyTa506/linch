@@ -42,6 +42,7 @@
 mod assembly;
 mod call;
 mod chain;
+mod execute;
 mod hook;
 mod observe;
 mod tool;
@@ -65,6 +66,7 @@ pub use call::{
     BeforeProviderCallResponse,
 };
 pub use chain::{ChainResult, HookChain, HookRecord, HookStatus};
+pub use execute::{Next, ToolCall, ToolMiddleware, ToolPipeline};
 pub use hook::{CallbackError, Hook, HookError, Point, ToolMatcher};
 pub use observe::{
     AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, EventEmit, EventEmitRequest,
@@ -134,6 +136,9 @@ pub struct Hooks {
     pub subagent_stop: HookChain<SubagentStop>,
     /// Hooks at [`HookPoint::EventEmit`].
     pub event_emit: HookChain<EventEmit>,
+    /// The `tool_execute` waterfall: middleware around the tool body, at
+    /// [`HookPoint::ToolExecute`].
+    pub tool_execute: ToolPipeline,
 }
 
 impl Hooks {
@@ -146,7 +151,7 @@ impl Hooks {
     /// `before_provider_call`, `provider_call_start`, `provider_call_stop`,
     /// `after_provider_call`, `tool_use_start`, `tool_use_stop`,
     /// `post_tool_use_failure`, `pre_compact`, `post_compact`,
-    /// `subagent_start`, `subagent_stop`, `event_emit`) and in chain order
+    /// `subagent_start`, `subagent_stop`, `event_emit`, `tool_execute`) and in chain order
     /// within a point, duplicates kept. The order of a point's hooks decides
     /// what its chain does (a rewrite feeds the next hook, a block stops
     /// it), so reordering them, or registering one twice, changes the
@@ -176,6 +181,7 @@ impl Hooks {
             self.subagent_start.policies(),
             self.subagent_stop.policies(),
             self.event_emit.policies(),
+            self.tool_execute.policies(),
         ]
         .into_iter()
         .flatten()

@@ -20,6 +20,7 @@ from linch_rust import (
     UserEvent,
     callback,
     tool,
+    tool_middleware,
 )
 
 
@@ -273,3 +274,98 @@ async def test_points_that_do_not_honour_retry_refuse_it() -> None:
     assert "malformed hook answer" in hook.outcome["error"]
     [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
     assert end.is_error
+
+
+def _end_text(envelopes: list[Envelope]) -> str:
+    [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+    return "".join(part.get("text", "") for part in end.result["content"])
+
+
+async def test_a_tool_middleware_wraps_the_tool_and_replaces_its_result() -> None:
+    order: list[str] = []
+    ran: list[str] = []
+
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        ran.append(q)
+        order.append("tool")
+        return "found"
+
+    @tool_middleware("wrap", 1, matcher=["look*"])
+    async def wrap(call: dict[str, Any], next: Any) -> dict[str, Any]:
+        order.append(f"in {call['tool_name']}#{call['attempt']}")
+        result = await next()
+        order.append("out")
+        value = result["output"]["value"]
+        return {"output": {"value": f"[{value}]"}}
+
+    turns = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("Done.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup], callbacks=[wrap])
+        run = await agent.run("s1", "Look up x")
+        envelopes = [e async for e in run]
+
+    assert order == ["in lookup#1", "tool", "out"]
+    assert ran == ["x"]
+    assert _end_text(envelopes) == "[found]"
+
+
+async def test_a_tool_middleware_that_skips_next_vetoes_the_call() -> None:
+    ran: list[str] = []
+
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        ran.append(q)
+        return "found"
+
+    @tool_middleware("quota", 1)
+    async def quota(call: dict[str, Any], next: Any) -> dict[str, Any]:
+        return {"error": {"message": "over quota"}}
+
+    turns = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("Stopped.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup], callbacks=[quota])
+        run = await agent.run("s1", "Look up x")
+        envelopes = [e async for e in run]
+
+    assert ran == []
+    [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+    assert end.is_error and "over quota" in _end_text(envelopes)
+
+
+async def test_a_tool_middleware_cannot_await_next_twice() -> None:
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        return "found"
+
+    @tool_middleware("twice", 1)
+    async def twice(call: dict[str, Any], next: Any) -> dict[str, Any]:
+        await next()
+        return await next()
+
+    turns = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("Done.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup], callbacks=[twice])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+    assert end.is_error and "withheld" in _end_text(envelopes)
+
+
+async def test_a_post_tool_use_callback_mutates_the_result() -> None:
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        return "secret-token"
+
+    @callback("post_tool_use", "scrub", 1)
+    async def scrub(request: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "mutate", "content": "[scrubbed]"}
+
+    turns = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("Done.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup], callbacks=[scrub])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert _end_text(envelopes) == "[scrubbed]"

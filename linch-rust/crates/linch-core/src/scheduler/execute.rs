@@ -16,11 +16,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::canonical::to_canonical_string;
 use crate::events::Event;
-use crate::hooks::{HookRecord, Hooks, PostToolUseFailureRequest, PostToolUseRequest};
+use crate::hooks::{HookRecord, Hooks, PostToolUseFailureRequest, PostToolUseRequest, ToolCall};
 use crate::json::JsonValue;
 use crate::message::ToolResultBlock;
 use crate::redaction::Redactor;
-use crate::registry::OutputContractError;
+use crate::registry::{OutputContractError, RegisteredTool};
 use crate::tool::{Report, ToolContext, ToolOutputError, ToolProgress, ToolResult};
 
 use super::RunIdentity;
@@ -260,7 +260,7 @@ impl<S: ToolSink> Runner<'_, S> {
         .with_reports(progress)
         .with_deadline(deadline)
         .with_trace_id(self.run.trace_id.clone());
-        let execution = async { tool.tool().execute(call.input.clone(), ctx).await };
+        let execution = self.attempt(call, tool, ctx);
         let execution = self.timed(call, deadline, caught(&call.tool_name, execution));
         let result = {
             let forward = pin!(async {
@@ -278,6 +278,30 @@ impl<S: ToolSink> Runner<'_, S> {
             self.report(call, report);
         }
         result
+    }
+
+    /// One attempt: the tool body, behind the `tool_execute` layers when
+    /// any are registered, and called directly otherwise.
+    async fn attempt(
+        &self,
+        call: &PlannedCall,
+        tool: &Arc<RegisteredTool>,
+        ctx: ToolContext,
+    ) -> ToolResult {
+        let pipeline = &self.hooks.tool_execute;
+        if pipeline.is_empty() {
+            return tool.tool().execute(call.input.clone(), ctx).await;
+        }
+        let tool_call = ToolCall {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            tool_use_id: call.tool_use_id.clone(),
+            tool_name: call.tool_name.clone(),
+            input: call.input.clone(),
+            attempt: 1,
+        };
+        let body = Box::pin(async { tool.tool().execute(call.input.clone(), ctx).await });
+        pipeline.run(&tool_call, body).await
     }
 
     fn report(&self, call: &PlannedCall, report: Report) {

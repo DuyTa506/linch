@@ -26,7 +26,8 @@ pub struct CallbackSpec {
     /// matcher, timeout or fail mode changes, so a resumed run notices.
     pub policy_version: u32,
     /// Tool-name globs (`*`, `?`); only at the tool points `pre_tool_use`,
-    /// `permission_request` and `post_tool_use`. Absent: every tool.
+    /// `permission_request`, `post_tool_use` and `tool_execute`. Absent:
+    /// every tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matcher: Option<Vec<String>>,
     /// Longest wait for an answer. Absent: no limit, as in Python; the run
@@ -97,6 +98,49 @@ pub enum PostToolUseAnswer {
     /// No change.
     Continue {},
     /// Use this result from here on.
+    Replace {
+        /// The new result.
+        result: WireToolResult,
+    },
+    /// Change part of the result and keep the rest (its metadata and
+    /// error code): the content, the error flag, or both.
+    Mutate {
+        /// The new content: the output's `value`, or the error's
+        /// `message` (a string as it is, any other value as compact JSON).
+        /// Absent keeps it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<JsonValue>,
+        /// `true` turns an output into an error carrying its content as
+        /// the message; `false` turns an error into an output carrying its
+        /// message as a string value. Absent keeps the flag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
+}
+
+/// A `tool_execute` answer, by `action`. The point runs twice for a
+/// callback that wants the result: a `before` call asked whether to run
+/// what is inside, and an `after` call that carries the result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolExecuteAnswer {
+    /// `before` only: run what is inside the callback (the layers after it
+    /// and the tool). With `after`, the server then calls again with
+    /// `phase: "after"` and the result.
+    Next {
+        /// Whether to see the result in a second call.
+        #[serde(default)]
+        after: bool,
+    },
+    /// `before` only: do not run what is inside; this is the result.
+    /// Python's waterfall listener that does not call `next()`.
+    Veto {
+        /// The result the call gets.
+        result: WireToolResult,
+    },
+    /// `after` only: keep the result.
+    Continue {},
+    /// `after` only: use this result instead.
     Replace {
         /// The new result.
         result: WireToolResult,

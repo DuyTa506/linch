@@ -21,7 +21,7 @@ pub use call::{CancelRequestParams, ToolCallParams, tool_code};
 pub use hook::{
     AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
     HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer,
-    UserPromptAnswer, WireToolResult,
+    ToolExecuteAnswer, UserPromptAnswer, WireToolResult,
 };
 pub use monitor::{EvalReport, EvalRunParams, ReportParams, RunReportResult};
 pub use open::{HostToolSpec, OpenParams};

@@ -15,7 +15,7 @@ agent declared::
 
 from ._binary import find_server
 from .agent import Agent, Allow, Answer, Decision, Deny, Skipped
-from .callbacks import Callback, FailMode, Point, callback
+from .callbacks import Callback, FailMode, Point, callback, tool_middleware
 from .config import (
     DETAILED_COMPACTION_PROMPT,
     AgentConfig,
@@ -248,6 +248,7 @@ __all__ = [
     "WorkflowEvent",
     "Workers",
     "callback",
+    "tool_middleware",
     "find_server",
     "tool",
 ]
