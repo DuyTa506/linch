@@ -153,9 +153,10 @@ async fn pool(db: &TestDb) -> linch::postgres::PgPool {
     pool.unwrap()
 }
 
-/// The first `done` fire of schedule `id`.
+/// The first `done` fire of schedule `id`, within a minute: the worker's
+/// open may wait out other tests' migrations (30 s at most).
 async fn first_fire(rpc: &Rpc, agent: &str, id: &str) -> JobInfo {
-    for _ in 0..400 {
+    for _ in 0..1200 {
         let listed = rpc
             .call(method::JOB_LIST, json!({"agent": agent, "schedule_id": id}))
             .await
@@ -624,7 +625,8 @@ async fn a_tenant_that_lost_its_schedules_fails_the_fire() {
         Worker::new(pool, worker_config("w1")).definitions(factory.roots(), Arc::new(factory));
     let running = tokio::spawn(worker.run(shutdown.clone()));
     let mut failed = None;
-    for _ in 0..400 {
+    // A minute, as for `first_fire`.
+    for _ in 0..1200 {
         let listed = rpc
             .call(
                 method::JOB_LIST,
