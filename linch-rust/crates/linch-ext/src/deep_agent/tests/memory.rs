@@ -290,3 +290,74 @@ async fn namespace_scope_shares_one_file_whoever_asks() {
         assert_eq!(texts(response.blocks), [MEMORY_INSTRUCTION, &expected]);
     }
 }
+
+/// File memory counts against the context budget like any retrieval hook:
+/// with the file memory hook pinned, a hook that recalls memory is dropped
+/// first, and the event says so.
+#[tokio::test]
+async fn file_memory_and_recalled_memory_share_the_context_budget() {
+    use linch_core::hooks::ContextBuildResponse;
+    use linch_core::{ContextBudget, Event};
+
+    struct Recall;
+
+    #[async_trait]
+    impl Hook<ContextBuild> for Recall {
+        fn policy_id(&self) -> &str {
+            "memory"
+        }
+        fn policy_version(&self) -> u32 {
+            1
+        }
+        async fn call(
+            &self,
+            _: &ContextBuildRequest,
+        ) -> Result<ContextBuildResponse, linch_core::CallbackError> {
+            let text = format!("[doc:a]\n{}", "recalled ".repeat(40));
+            Ok(ContextBuildResponse {
+                blocks: vec![TextBlock { text }],
+                ..ContextBuildResponse::default()
+            })
+        }
+    }
+
+    let (hook, _) = hook();
+    let hooks = Arc::new(Hooks::default());
+    let _files = hooks.context_build.register(Arc::new(hook)).unwrap();
+    let _recall = hooks.context_build.register(Arc::new(Recall)).unwrap();
+    let mut spec = AgentSpec::new("m");
+    // The instruction alone is about 45 tokens: the recall does not fit
+    // beside it.
+    let mut budget = ContextBudget::new(60);
+    budget.pinned = vec!["linch.deep-agent.file-memory-context".into()];
+    spec.context_budget = Some(budget);
+    let provider = Arc::new(ScriptedProvider::new([TurnBuilder::new("m")
+        .text("hi")
+        .build()]));
+    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let agent = AgentBuilder::new(spec)
+        .provider(provider.clone())
+        .hooks(hooks)
+        .permissions(PermissionEngine::new(policy).unwrap())
+        .run_store(Arc::new(MemoryRunStore::default()))
+        .session_store(Arc::new(MemorySessionStore::default()))
+        .namespace("deep")
+        .build()
+        .unwrap();
+    let envelopes = drain(agent.run("go", RunOptions::new("s1"))).await;
+    let last = provider.requests()[0].messages.last().unwrap().clone();
+    let shown: Vec<_> = (last.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, ["go", MEMORY_INSTRUCTION], "the recall was dropped");
+    let report = envelopes.iter().find_map(|e| match &e.event {
+        Event::ContextBuild(build) => Some(build.budget.clone()),
+        _ => None,
+    });
+    let report = report.expect("a context_build event");
+    assert_eq!(report["trimmed"], true);
+    assert_eq!(report["dropped"][0]["source"], "memory");
+}

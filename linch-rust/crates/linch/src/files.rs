@@ -94,9 +94,10 @@ impl Files {
         self.registrations.push(registration);
     }
 
-    /// `spec` with [`PROMPT`] after its system prompt when the tools are on.
+    /// `spec` with [`PROMPT`] after its system prompt when the tools are on
+    /// and the spec does not replace the defaults.
     pub(crate) fn teach(&self, mut spec: AgentSpec) -> AgentSpec {
-        if self.on {
+        if self.on && !spec.replaces_defaults() {
             spec.system_prompt = match spec.system_prompt.is_empty() {
                 true => PROMPT.to_owned(),
                 false => format!("{}\n\n{PROMPT}", spec.system_prompt),

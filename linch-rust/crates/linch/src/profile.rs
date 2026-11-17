@@ -130,10 +130,11 @@ impl Profile {
     }
 
     /// `spec` under this profile: its system prompt, then a blank line and
-    /// the profile's when it has one, and the profile's `max_turns` when
-    /// set.
+    /// the profile's when it has one (unless the spec replaces the
+    /// defaults), and the profile's `max_turns` when set.
     pub fn spec(&self, mut spec: AgentSpec) -> AgentSpec {
-        if let Some(prompt) = self.system_prompt.as_deref().filter(|p| !p.is_empty()) {
+        let prompt = self.system_prompt.as_deref().filter(|p| !p.is_empty());
+        if let Some(prompt) = prompt.filter(|_| !spec.replaces_defaults()) {
             spec.system_prompt = match spec.system_prompt.is_empty() {
                 true => prompt.to_owned(),
                 false => format!("{}\n\n{prompt}", spec.system_prompt),
