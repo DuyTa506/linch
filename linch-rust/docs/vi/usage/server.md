@@ -438,7 +438,9 @@ khi server khởi động lại. Vì vậy listener HTTP:
 - đặt **TCP keepalive** trên mọi socket được chấp nhận và một **TCP user timeout** dài bằng thời
   gian keepalive mất để bỏ cuộc, nên kernel bỏ một peer không trả lời cả probe lẫn dữ liệu;
 - ping mỗi WebSocket cứ `ping_interval_ms` và kết thúc cái nào không gửi gì cả (không frame, không
-  pong) trong `pong_timeout_ms`. Một probe được kernel của peer trả lời, nên một client còn sống nhưng
+  pong) trong `pong_timeout_ms`. Sự im lặng được xét ngay khi nó kéo dài, không chỉ lúc một ping
+  được gửi: kết nối kết thúc `pong_timeout_ms` sau frame cuối cùng client gửi (60 giây với mặc
+  định), bất kể `ping_interval_ms` là bao nhiêu. Một probe được kernel của peer trả lời, nên một client còn sống nhưng
   bị treo vẫn qua được; một ping được code WebSocket của client trả lời, nên một client treo thì
   không.
 

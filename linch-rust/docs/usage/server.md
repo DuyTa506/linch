@@ -444,10 +444,12 @@ HTTP listener therefore:
   as long as the keepalive takes to give up, so the kernel drops a peer that
   answers neither probes nor data;
 - pings each WebSocket every `ping_interval_ms` and ends one that sent
-  nothing at all (no frame, no pong) for `pong_timeout_ms`. A probe is
-  answered by the peer's kernel, so a client that is alive but hung passes it;
-  a ping is answered by the client's WebSocket code, so a hung client does
-  not.
+  nothing at all (no frame, no pong) for `pong_timeout_ms`. Silence is judged
+  as it grows, not only when a ping goes out: the connection ends
+  `pong_timeout_ms` after the last frame the client sent (60 s with the
+  defaults), whatever `ping_interval_ms` is. A probe is answered by the peer's
+  kernel, so a client that is alive but hung passes it; a ping is answered by
+  the client's WebSocket code, so a hung client does not.
 
 Ending a connection is the same as its input ending: its runs are dropped (a
 Postgres run keeps its last durable state and can be resumed), its calls are

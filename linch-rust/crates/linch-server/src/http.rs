@@ -301,14 +301,24 @@ async fn ping(
     let mut tick = tokio::time::interval(live.ping_interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        tick.tick().await;
-        let sent = tokio::time::timeout(live.pong_timeout, async {
-            sink.lock()
-                .await
-                .send(Message::Ping(Vec::new().into()))
-                .await
-        });
-        if pulse.silence(started) >= live.pong_timeout || !matches!(sent.await, Ok(Ok(()))) {
+        // Wake for the next ping, or when the silence reaches the timeout,
+        // whichever comes first: a client is dropped `pong_timeout` after its
+        // last frame, not at the next ping after that.
+        let timeout_in = live.pong_timeout.saturating_sub(pulse.silence(started));
+        let due = tokio::select! {
+            _ = tick.tick() => true,
+            () = tokio::time::sleep(timeout_in) => false,
+        };
+        let ping_failed = async {
+            let sent = tokio::time::timeout(live.pong_timeout, async {
+                sink.lock()
+                    .await
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+            });
+            !matches!(sent.await, Ok(Ok(())))
+        };
+        if pulse.silence(started) >= live.pong_timeout || (due && ping_failed.await) {
             ended.cancel();
             // The connection ends on `ended`; wait for it to drop this task.
             std::future::pending::<()>().await;
