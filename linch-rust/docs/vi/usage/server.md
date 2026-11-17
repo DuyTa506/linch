@@ -131,7 +131,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
 | `memory` | `false`: không có bộ nhớ dài hạn | Config có được bật [`memory`](./memory.md#built-in-long-term-memory) hay không |
 | `max_memories` | không có, từ chối `memory` (server không nạp config có `memory` mà không có cap) | Số memory nó được giữ trong mọi namespace của một database; `max_memories` và `max_memories_per_scope` của agent bị giữ dưới mức này |
-| `required_policy` | không có | Một [`spec.policy`](./agent.md#policy) mà mọi agent của tenant đều mang; policy riêng của tenant được thêm vào nó và không thể gỡ bỏ hay làm yếu nó ([bên dưới](#những-gì-admission-từ-chối-và-lý-do)) |
+| `required_policy` | không có | Một [`spec.policy`](./agent.md#policy) mà mọi agent của tenant đều mang; policy riêng của tenant được thêm vào nó, và các rule của operator vẫn nằm trong run. Nó sắp thứ tự các lời gọi của model, đếm từ kết quả tool của chính agent; nó không ràng buộc những gì host của tenant làm (một host tool, hook hay cache có thể trả lời lời gọi bắt buộc), nên hãy giữ permission và sandbox cho bảo mật ([bên dưới](#những-gì-admission-từ-chối-và-lý-do)) |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không
@@ -391,8 +391,13 @@ chối:
   được xây dựng, nên nó là một phần của hợp đồng của run: một prerequisite lấy hợp của
   các yêu cầu của hai bên, các gate của operator được giữ nguyên (tenant có thể thêm
   gate dưới tên khác, hoặc lặp lại một gate y như cũ), và số lần sửa được phép là giá
-  trị nhỏ hơn trong hai mức trần. Một rule nêu một tool mà agent không có thì từ chối
-  open (`OpenError`), không bao giờ bị bỏ đi.
+  của operator khi tenant không đặt gì, còn không thì là giá trị nhỏ hơn trong hai mức
+  trần (tenant đặt `max_corrections` có thể hạ nó, không thể nâng). Một rule nêu một
+  tool mà agent không có thì từ chối open (`OpenError`), không bao giờ bị bỏ đi; lỗi
+  gửi cho tenant không nêu tên tool, vì rule do operator viết. Các rule chỉ ràng buộc
+  thứ tự lời gọi của model: một host tool của client dưới tên bắt buộc, một hook
+  `pre_tool_use`, một thay thế của `post_tool_use` hay một cache hit vẫn có thể thỏa
+  một prerequisite, nên đây không phải cưỡng chế đối với host của chính tenant.
 
 ---
 

@@ -130,7 +130,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
 | `memory` | `false`: no long-term memory | Whether a config may turn on [`memory`](./memory.md#built-in-long-term-memory) |
 | `max_memories` | none, which refuses `memory` (the server will not load a config with `memory` and no cap) | Memories it may keep in all its namespaces of a database; an agent's own `max_memories` and `max_memories_per_scope` are held to it |
-| `required_policy` | none | A [`spec.policy`](./agent.md#policy) every agent of the tenant carries; the tenant's own policy is added to it and cannot remove or weaken it ([below](#what-admission-refuses-and-why)) |
+| `required_policy` | none | A [`spec.policy`](./agent.md#policy) every agent of the tenant carries: the tenant's own policy is added to it, and the operator's rules stay in the run. It orders the model's calls, counted from the agent's own tool results; it does not bind what the tenant's host does (a host tool, hook or cache can answer a required call), so keep permissions and the sandbox for security ([below](#what-admission-refuses-and-why)) |
 | `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |
 
 The live providers at their public endpoints and the memory stores need no
@@ -391,9 +391,15 @@ silently instead:
   before the agent is built, so it is part of the run contract: a
   prerequisite takes the union of both sides' requirements, the operator's
   gates stand (the tenant may add gates under other names, or repeat one
-  as it is), and the corrections allowed are the lesser of the two caps. A
-  rule naming a tool the agent lacks refuses the open (`OpenError`), never
-  dropped.
+  as it is), and the corrections allowed are the operator's when the
+  tenant sets none, else the lesser of the two caps (a tenant that sets
+  `max_corrections` may lower it, not raise it). A rule naming a tool the
+  agent lacks refuses the open (`OpenError`), never dropped; the tenant's
+  error does not name the tool, as the operator wrote the rule.
+  The rules bind the model's call order only: a client's host tool under a
+  required name, a `pre_tool_use` hook, a `post_tool_use` replacement or a
+  cache hit can still satisfy a prerequisite, so this is not enforcement
+  against the tenant's own host.
 
 ---
 

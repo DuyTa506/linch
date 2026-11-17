@@ -460,14 +460,24 @@ impl Allowlists {
 
     /// The reliability policy every agent of the tenant must carry: the
     /// operator's prerequisites and completion gates, which a config's own
-    /// `spec.policy` may add to but not remove or weaken. `agent.open`
-    /// merges it into the config before the agent is built, so it is part
-    /// of the run contract: a prerequisite takes the union of both sides'
-    /// requirements, a gate the operator named cannot be redefined (the
-    /// same gate, or one of another name, may be added), and the
-    /// corrections allowed are the lesser of the two caps. A rule that
-    /// names a tool the agent lacks refuses the open rather than being
-    /// dropped. Absent (the default), the tenant's policy stands alone.
+    /// `spec.policy` may add to but whose rules it cannot remove or
+    /// redefine. `agent.open` merges it into the config before the agent is
+    /// built, so it is part of the run contract: a prerequisite takes the
+    /// union of both sides' requirements, a gate the operator named cannot
+    /// be redefined (the same gate, or one of another name, may be added),
+    /// and the corrections allowed are the operator's when the config sets
+    /// none, else the lesser of the two caps. A rule that names a tool the
+    /// agent lacks refuses the open rather than being dropped, with an error
+    /// that does not name the tool. Absent (the default), the tenant's
+    /// policy stands alone.
+    ///
+    /// What it enforces is the order of the model's calls, counted from the
+    /// agent's own tool results. It does not bind the tenant's host: a
+    /// client's host tool registered under a required name, a
+    /// `pre_tool_use` hook that answers the call, a `post_tool_use`
+    /// replacement or a cache hit can satisfy a prerequisite, as can any
+    /// tool that does the same work (`Bash`). It is not a security
+    /// boundary; keep permissions and the sandbox for that.
     pub fn required_policy(mut self, policy: Option<ReliabilityPolicy>) -> Self {
         self.required_policy = policy;
         self

@@ -224,8 +224,10 @@ gate fails the run when the model does not comply (a verifier accepts the
 answer once its retries are spent). It is a reliability aid: a refused call
 asks no approval and runs nothing, but a prerequisite is **not a security
 boundary**, since a tool that can start other work can do what a refused one
-would. Permissions, redaction and the [sandbox](./sandbox.md) are the
-guardrails.
+would, and a call counts by its tool name and its rendered result alone (a
+host tool of the same name, a hook that answers the call, or a cache hit
+counts too). Permissions, redaction and the [sandbox](./sandbox.md) are
+the guardrails.
 
 ## Related pages
 

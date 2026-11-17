@@ -30,7 +30,10 @@
 //!
 //! A call counts as a success when its result is not an error, after the
 //! hooks, and it did not start a background run (`run_in_background`),
-//! which only acknowledges. An interrupted call's placeholder is an
+//! which only acknowledges. Counted by tool name and rendered result
+//! alone, a host tool of that name, a `pre_tool_use` answer, a
+//! `post_tool_use` replacement or a cache hit counts too: the policy binds
+//! the model's call order, not whoever supplies the tools. An interrupted call's placeholder is an
 //! error. The final tool and tools the agent does not have cannot be
 //! named: the first never runs, so it could never succeed.
 //!

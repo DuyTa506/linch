@@ -386,11 +386,19 @@ error: an interrupted call, a denied one and a `run_in_background` start
 (which only acknowledges) do not. The refusal comes before the call's
 `pre_tool_use` callbacks and before permission, so a refused call asks
 nobody for approval. The run records a `policy` event (`rule`
-`prerequisite`, `action` `refuse`) once per refused call.
+`prerequisite`, `action` `refuse`) once per refused call (per response and
+`tool_use_id`, so a provider that reuses an id on a later turn gets a new
+event). The message to the model names the tools to run first only when the
+run offers them this turn; with one hidden by a skill's `allowed_tools`, or
+deferred by tool search, it says only that a prerequisite has not succeeded
+(the event's `missing` still lists them).
 
 A prerequisite is an ordering aid for the model, **not a security
 boundary**. It guards the calls of one run; a tool that can start other
-work (`Bash`, a subagent) can do what a refused tool would. Keep
+work (`Bash`, a subagent) can do what a refused tool would. A call counts
+by its name and its rendered result alone: a client's host tool of that
+name, a `pre_tool_use` callback that answers the call, a `post_tool_use`
+callback that replaces its result and a cache hit all count as a success. Keep
 [permissions and the sandbox](./security.md) for security. Python Linch's
 `ToolPrerequisite` is the same rule; here a subagent's own calls take the
 parent's prerequisites over its own run.
@@ -406,14 +414,33 @@ default) in the run, and the answer passes `check`, one of the
 [verifier checks](./security.md#verifiers). When a gate fails, the run goes
 on: the answer goes back to the model as a system reminder naming what is
 missing, one correction turn for the failure, answering every gate that
-failed at once (`feedback` replaces the default sentence). A correction is
+failed at once. A check gate's default sentence only says the answer
+does not satisfy the requirement: it does not show the pattern or the
+keywords, which are the operator's to keep. Set `feedback` to tell the
+model what to fix; it is shown as written. A correction is
 a `policy` event (`rule` `completion`, `action` `correct`, `attempt` the
-corrections spent). Once `max_corrections` (2 by default, in all, across
+corrections spent). Once `max_corrections` (2 when absent, in all, across
 the gates) are spent, the next failure ends the run `failed`: a `policy`
 event with `action` `stop`, an `error` named `PolicyGateError`, and a
 `result` of subtype `error` carrying the last answer. A gate never lets the
 answer through, unlike a verifier, which accepts it once its retries are
 spent. `max_corrections: 0` ends the run at the first failure.
+
+The input of the final tool is judged as its JSON text and as each string
+it holds (keys and values, at any depth), which the JSON text escapes: a
+`forbids` check fails when it matches any of them, a `matches` or
+`keywords` check when it passes on none. When a `stop` callback rewrites
+the answer, the gates judge the rewrite again; a failure there ends the
+run at once with a `policy` stop event and no correction, as a hook that
+rewrote once would rewrite the next answer too.
+
+A `tool_choice` that holds every turn cannot go with rules it keeps from
+being met: `none` or a named tool with a prerequisite or a gate that needs
+`succeeded` tools, `required` or a named tool with any rule unless the run
+has a final tool to end it with (`required` plus the final tool is fine;
+the final tool itself only with gates that check the answer). `agent.open`
+refuses the agent, and a run that brings its own `tool_choice` fails with
+`InvalidToolChoice` before anything is written.
 
 A correction turn has a provider call and runs no tool, so the loop guard
 counts it as neither an idle nor a repeated turn; `max_turns` and the
@@ -434,7 +461,8 @@ refusal twice. A subagent's runs take the prerequisites, not the gates (it
 answers its parent in text, with tools of its own). Policy is part of the
 [run contract](#the-run-contract): leaving it out keeps the contract of an
 agent from before policies, and any policy changes it. A remote tenant
-adds to the policy its operator requires and cannot remove it
+adds to the policy its operator requires; its rules stand, but they bind
+the model's call order, not the tenant's host
 ([Server](./server.md#what-admission-refuses-and-why)).
 
 ### `budget`

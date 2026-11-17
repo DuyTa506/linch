@@ -206,8 +206,11 @@ pub struct AllowConfig {
     pub system_sections: Vec<SystemSection>,
     /// The reliability policy (`{"prerequisites", "gates",
     /// "max_corrections"}`, as a spec's `policy`) every agent of the
-    /// tenant carries: its own `policy` may add to it, not remove or
-    /// weaken it. None when absent.
+    /// tenant carries: its own `policy` may add rules, and the operator's
+    /// stay. It orders the model's calls, counted from the agent's own
+    /// tool results; it does not bind the tenant's host (a host tool, hook
+    /// or cache can answer a required call), so it is not a security
+    /// boundary. None when absent.
     pub required_policy: Option<ReliabilityPolicy>,
 }
 

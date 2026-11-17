@@ -847,9 +847,10 @@ class PolicyGate(TypedDict, total=False):
         min_calls: How many successful calls each of `succeeded` needs.
             1 when absent.
         check: A `VerifierCheck` the answer text must pass (for a final
-            tool, its input as JSON text).
+            tool, its input as JSON text and as each string it holds).
         feedback: What the model is told when the gate fails; a sentence
-            naming the missing calls or the check when absent.
+            naming the missing calls, or saying only that the check is not
+            met (never its pattern or keywords) when absent.
     """
 
     name: Required[str]
@@ -872,7 +873,9 @@ class Policy(TypedDict, total=False):
     one batch never unlock each other, and only a successful foreground
     call counts (not an error, an interrupted call or a `run_in_background`
     start). It is an ordering aid for the model, not a security boundary:
-    keep permissions and the sandbox for that. A subagent's own calls take
+    a call counts by its tool name and result alone, so a host tool of that
+    name, a hook that answers the call or a cache hit counts too. Keep
+    permissions and the sandbox for security. A subagent's own calls take
     the prerequisites too.
 
     A **gate** holds a final answer (text, or the final tool's input) back
@@ -880,7 +883,9 @@ class Policy(TypedDict, total=False):
     one correction turn (`action` `correct`), up to `max_corrections` in
     the run, then the run ends failed with a `PolicyGateError` (`action`
     `stop`). Unlike a verifier, a gate never accepts the answer once its
-    corrections are spent. A correction is neither an idle nor a repeated
+    corrections are spent. A `tool_choice` that holds every turn and keeps
+    the rules from being met (`none`, a named tool, or `required` without a
+    final tool) is refused with the policy. A correction is neither an idle nor a repeated
     turn for the loop guard. A subagent's runs do not take the gates. The
     tools named must be the agent's own, and not its final tool, or the
     open is refused.
@@ -894,7 +899,9 @@ class Policy(TypedDict, total=False):
             all. 2 when absent; 0 ends the run at the first failure. A
             remote tenant may ask for at most 16, and its policy is added to
             the one its operator requires (`required_policy`), never
-            replacing it.
+            replacing it; a tenant that leaves it out keeps the operator's.
+            The operator's policy orders the model's calls, not the
+            tenant's host.
     """
 
     prerequisites: Sequence[PolicyPrerequisite]

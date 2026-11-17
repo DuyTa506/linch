@@ -386,11 +386,18 @@ một lời gọi bị ngắt, một lời gọi bị từ chối và một lầ
 (chỉ xác nhận) thì không. Việc từ chối diễn ra trước các callback `pre_tool_use` của
 lời gọi và trước permission, nên một lời gọi bị từ chối không hỏi ai phê duyệt. Run
 ghi một event `policy` (`rule` là `prerequisite`, `action` là `refuse`) một lần cho
-mỗi lời gọi bị từ chối.
+mỗi lời gọi bị từ chối (tính theo response và `tool_use_id`, nên một provider dùng lại
+một id ở lượt sau vẫn có event mới). Thông báo gửi model chỉ nêu tên các tool cần chạy
+trước khi run đang cung cấp chúng ở lượt này; với một tool bị `allowed_tools` của skill
+ẩn đi, hoặc bị tool search hoãn, nó chỉ nói rằng một prerequisite chưa thành công
+(`missing` của event vẫn liệt kê chúng).
 
 Một prerequisite là công cụ giúp model làm đúng thứ tự, **không phải ranh giới bảo
 mật**. Nó bảo vệ các lời gọi của một run; một tool có thể khởi động công việc khác
-(`Bash`, một subagent) làm được điều mà một tool bị từ chối sẽ làm. Hãy giữ
+(`Bash`, một subagent) làm được điều mà một tool bị từ chối sẽ làm. Một lời gọi được
+tính chỉ theo tên tool và kết quả đã render của nó: một host tool của client cùng tên,
+một callback `pre_tool_use` trả lời lời gọi, một callback `post_tool_use` thay kết quả
+và một cache hit đều được tính là thành công. Hãy giữ
 [permission và sandbox](./security.md) cho bảo mật. `ToolPrerequisite` của Python
 Linch là cùng một quy tắc; ở đây các lời gọi của chính một subagent nhận các
 prerequisite của parent trong run của nó.
@@ -405,14 +412,30 @@ mỗi tool trong `succeeded` đã thành công `min_calls` lần (mặc định 
 câu trả lời qua được `check`, một trong các [kiểm tra của verifier](./security.md#verifiers).
 Khi một gate không đạt, run tiếp tục: câu trả lời được gửi lại cho model dưới dạng một
 system reminder nêu những gì còn thiếu, một lượt sửa cho lần không đạt đó, trả lời
-cùng lúc mọi gate không đạt (`feedback` thay câu mặc định). Một lần sửa là một event
+cùng lúc mọi gate không đạt. Câu mặc định của một gate `check` chỉ nói câu trả lời
+không thỏa yêu cầu: nó không hiện pattern hay keyword, vốn thuộc về operator. Hãy đặt
+`feedback` để nói với model cần sửa gì; nó được hiện nguyên văn. Một lần sửa là một event
 `policy` (`rule` là `completion`, `action` là `correct`, `attempt` là số lần sửa đã
-dùng). Khi `max_corrections` (mặc định 2, tính chung cho mọi gate) đã dùng hết, lần
+dùng). Khi `max_corrections` (2 nếu vắng, tính chung cho mọi gate) đã dùng hết, lần
 không đạt kế tiếp kết thúc run `failed`: một event `policy` có `action` là `stop`, một
 `error` tên `PolicyGateError` và một `result` có subtype `error` mang câu trả lời cuối
 cùng. Một gate không bao giờ cho câu trả lời đi qua, khác với một verifier, thứ chấp
 nhận câu trả lời khi các retry của nó đã hết. `max_corrections: 0` kết thúc run ở lần
 không đạt đầu tiên.
+
+Input của final tool được xét như văn bản JSON của nó và như từng chuỗi nó chứa (key và
+value, ở mọi độ sâu), vì văn bản JSON escape những gì một pattern có thể nêu: một check
+`forbids` không đạt khi nó khớp bất kỳ cái nào, một check `matches` hay `keywords` khi
+nó không đạt trên cái nào. Khi một callback `stop` viết lại câu trả lời, các gate xét
+lại bản viết lại; không đạt ở đó kết thúc run ngay với một event `policy` stop và không
+có lần sửa nào, vì hook đã viết lại một lần sẽ viết lại cả câu trả lời kế tiếp.
+
+Một `tool_choice` có hiệu lực mọi lượt không đi cùng được với các rule mà nó khiến không
+bao giờ thỏa: `none` hoặc một tool được nêu tên với prerequisite hay gate cần tool
+`succeeded`, `required` hoặc một tool được nêu tên với bất kỳ rule nào trừ khi run có
+final tool để kết thúc (`required` cùng final tool thì được; chính final tool chỉ với
+các gate kiểm tra câu trả lời). `agent.open` từ chối agent đó, và một run mang
+`tool_choice` riêng thất bại với `InvalidToolChoice` trước khi ghi gì.
 
 Một lượt sửa có một lời gọi provider và không chạy tool nào, nên loop guard không đếm
 nó là lượt rảnh hay lượt lặp; `max_turns` và budget giới hạn nó như mọi lượt khác. Gate
@@ -432,7 +455,8 @@ lần. Các run của một subagent nhận các prerequisite, không nhận gat
 bằng văn bản, với các tool riêng của nó). Policy là một phần của
 [hợp đồng của run](#hợp-đồng-của-run): bỏ nó đi thì giữ nguyên hợp đồng của một agent
 từ trước khi có policy, và mọi policy đều đổi hợp đồng. Một tenant từ xa được thêm vào
-policy mà operator của nó yêu cầu và không thể gỡ bỏ nó
+policy mà operator của nó yêu cầu; các rule đó được giữ, nhưng chúng ràng buộc thứ tự
+lời gọi của model, không ràng buộc host của tenant
 ([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)).
 
 ### `budget`

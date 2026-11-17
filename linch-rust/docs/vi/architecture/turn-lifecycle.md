@@ -281,7 +281,10 @@ không có vòng lặp, mọi gate đều đòi một điều gì đó, mọi ch
   hook hay approval callback nào thấy nó, và bản ghi `plan_decisions` của nó là không
   có, nên một lần re-plan quyết định lại từ log. Event `policy` của mỗi lời gọi bị từ
   chối được stage ngay sau plan (`runner/gates.rs`), nên nó commit cùng lần ghi
-  `ToolBatch` của batch, và chỉ khi `Gates` chưa giữ nó (một sự cố làm re-plan batch).
+  `ToolBatch` của batch, và chỉ khi `Gates` chưa giữ nó, khóa theo response (`Gates`
+  đếm các event `assistant`) và `tool_use_id`, nên một lần re-plan sau sự cố không báo
+  nó hai lần còn một id dùng lại ở lượt sau thì có. Thông báo chỉ nêu tên một tool còn
+  thiếu khi `Runner::snapshot`, tập tool được cung cấp ở lượt này, phân giải được nó.
 - **Gate** được kiểm tra trên cả hai đường hoàn tất: `check_answer` cho câu trả lời văn
   bản (sau `hear_back`) và `final_call` cho final tool, mỗi cái trước schema, các
   verifier và chuỗi `stop`. Một lần không đạt stage một event `policy` (`correct`) và
@@ -290,7 +293,13 @@ không có vòng lặp, mọi gate đều đòi một điều gì đó, mọi ch
   dừng là một lần ghi terminal: event `policy` (`stop`), một `Error` tên
   `PolicyGateError`, và một `Result` failed với `stop_reason` `error`. Một lời gọi final
   tool đang được quyết định được trả lời bằng feedback như kết quả lỗi của nó, hoặc
-  `Final answer not taken` khi dừng, nên session vẫn được ghép cặp.
+  `Final answer not taken` khi dừng, nên session vẫn được ghép cặp. Input của final
+  tool được xét như văn bản JSON của nó và như từng chuỗi nó chứa (`gates::leaves`),
+  vì văn bản JSON escape những gì một pattern có thể nêu; một bản viết lại của `stop`
+  được xét lại (`gate_rewrite`), và không đạt ở đó là một `policy` stop terminal không
+  có lần sửa. Một `tool_choice` có hiệu lực mọi lượt bị từ chối khi nó đi cùng một
+  policy mà nó khiến không thỏa (`ReliabilityPolicy::choice_problem`), lúc build và lúc
+  bắt đầu run.
 
 State là `Gates` (`gates.rs`), được gộp như `Watch`: một event `assistant` nêu tên các
 lời gọi của response đó (của các tool mà một rule đếm), event user `tool_result` kế tiếp

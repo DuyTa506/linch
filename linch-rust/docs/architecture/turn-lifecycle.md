@@ -296,8 +296,11 @@ and compiled once into `Rules`.
   `plan_decisions` record is none, so a re-plan decides it again from the
   log. The `policy` event of each refused call is staged right after the
   plan (`runner/gates.rs`), so it commits with the batch's `ToolBatch`
-  write, and only when `Gates` does not hold it already (a crash re-plans
-  the batch).
+  write, and only when `Gates` does not hold it already, keyed by the
+  response (`Gates` counts `assistant` events) and the `tool_use_id`, so a
+  crash re-plan does not report it twice and a reused id on a later turn
+  does. The message names a missing tool only when `Runner::snapshot`,
+  this turn's offered set, resolves it.
 - **Gates** are checked on both completing routes: `check_answer` for a
   text answer (after `hear_back`) and `final_call` for the final tool, each
   before the schema, the verifiers and the `stop` chain. A failure stages a
@@ -308,7 +311,13 @@ and compiled once into `Rules`.
   named `PolicyGateError`, and a failed `Result` with `stop_reason`
   `error`. A final tool call being decided on is answered with the
   feedback as its error result, or `Final answer not taken` on the stop, so
-  the session stays paired.
+  the session stays paired. The final tool's input is judged as its JSON
+  text and as each string it holds (`gates::leaves`), since the JSON text
+  escapes what a pattern may name; a `stop` rewrite is judged again
+  (`gate_rewrite`), and a failure there is a terminal `policy` stop
+  without a correction. A `tool_choice` that holds every turn is refused
+  with a policy it defeats (`ReliabilityPolicy::choice_problem`), at build
+  and at run start.
 
 State is `Gates` (`gates.rs`), folded as `Watch` is: an `assistant` event
 names the calls of its response (those of tools a rule counts), the next
@@ -328,7 +337,7 @@ failed batch, and counts toward `max_consecutive_failures`.
 A subagent's `AgentInner` takes the prerequisites and none of the gates
 (`agent/child.rs`). Tests: `tests/e2e_policy.rs`, with a crash at every
 write of a prerequisite run, a gate that passes after a correction, a gate
-that never passes, and the same through a final tool.
+that never passes, a rewritten answer, and the same through a final tool.
 
 ## Barriers and group commit
 
