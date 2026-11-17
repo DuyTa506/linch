@@ -81,14 +81,17 @@ async def test_output_past_the_cap_is_delayed_not_lost(host: SubprocessHost) -> 
 
 
 async def test_a_marker_after_more_than_the_cap_arrives_before_the_exit(
-    host: SubprocessHost,
+    host: SubprocessHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    size = host_module._BUFFER_CAP + 1024 * 1024
+    # The shell finishes (the rest fits in the pipe) while the pump still waits
+    # for room: the exit must wait for the pump, not for the drain timeout.
+    size = host_module._BUFFER_CAP + 10 * 1024
     await host.start(request(f"head -c {size} /dev/zero | tr '\\0' x; echo MARKER"))
     command = host._commands["c1/agent-1", "exec-1"]
     await until(lambda: command.stalled > 0, "the pump never waited for room")
-    # The shell is long done; its output must still all be delivered.
     await asyncio.sleep(1.5)
+    # One read empties the whole buffer, with the marker still in the pipe.
+    monkeypatch.setattr(host_module, "_READ_LIMIT", 2 * host_module._BUFFER_CAP)
     out, exit_ = "", None
     while exit_ is None:
         chunk = await host.read("c1/agent-1", "exec-1", 5.0)
@@ -137,11 +140,12 @@ async def test_a_command_nobody_reads_is_killed(host: SubprocessHost) -> None:
 
 
 async def test_a_command_that_is_read_is_not_killed() -> None:
-    host = SubprocessHost(idle_timeout=0.4)
+    host = SubprocessHost(idle_timeout=1.0)
     await host.start(request("sleep 300"))
     pid = pid_of(host)
-    # A long read in flight counts as use, and so does each short one.
-    await host.read("c1/agent-1", "exec-1", 1.0)
+    # A read in flight longer than the idle timeout counts as use, and so
+    # does each short one after it.
+    await host.read("c1/agent-1", "exec-1", 1.5)
     for _ in range(6):
         await host.read("c1/agent-1", "exec-1", 0.1)
     assert alive(pid)
