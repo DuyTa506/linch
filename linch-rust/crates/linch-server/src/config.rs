@@ -171,6 +171,11 @@ pub struct AllowConfig {
     /// Background runs (`job.enqueue`) it may have unfinished at once in
     /// each database, at least 1; absent, it may queue none.
     pub max_queued_jobs: Option<u64>,
+    /// Whether a config may turn on long-term `memory`; off when absent.
+    pub memory: bool,
+    /// Memories the tenant may keep in each database, in all its
+    /// namespaces, at least 1; absent, no cap.
+    pub max_memories: Option<u64>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
@@ -279,6 +284,7 @@ impl ServerConfig {
                     "max_tool_cache_bytes",
                     allow.max_tool_cache_bytes.map(|max| max as usize),
                 ),
+                ("max_memories", allow.max_memories.map(|max| max as usize)),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
@@ -382,7 +388,9 @@ impl AllowConfig {
             .mcp_urls(&self.mcp_urls)?
             .max_schedules(self.max_schedules)
             .max_queued_jobs(self.max_queued_jobs)
-            .system_sections(&self.system_sections)?;
+            .system_sections(&self.system_sections)?
+            .memory(self.memory)
+            .max_memories(self.max_memories);
         if let Some(ms) = self.min_schedule_interval_ms {
             allow = allow.min_schedule_interval(Duration::from_millis(ms));
         }

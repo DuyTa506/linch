@@ -126,6 +126,20 @@ fn bad_configs_are_refused_without_echoing_tokens() {
 }
 
 #[test]
+fn memory_is_denied_by_default_and_its_cap_is_read() {
+    let text = json!({"http": "127.0.0.1:1",
+                      "tenants": {"plain": {"tokens": [{"value": "t"}]},
+                                  "acme": {"tokens": [{"value": "u"}],
+                                           "allow": {"memory": true, "max_memories": 50}}}});
+    let config = ServerConfig::from_json(&text.to_string()).unwrap();
+    assert!(!config.tenants["plain"].allow.memory);
+    assert_eq!(config.tenants["plain"].allow.max_memories, None);
+    let allow = &config.tenants["acme"].allow;
+    assert_eq!((allow.memory, allow.max_memories), (true, Some(50)));
+    assert!(allow.build().is_ok());
+}
+
+#[test]
 fn a_cap_of_zero_is_refused_when_the_config_loads() {
     for field in [
         "max_runs",
@@ -135,6 +149,7 @@ fn a_cap_of_zero_is_refused_when_the_config_loads() {
         "max_provider_concurrency",
         "max_schedules",
         "max_queued_jobs",
+        "max_memories",
     ] {
         let text = json!({"http": "127.0.0.1:1",
                           "tenants": {"acme": {"tokens": [{"value": "t"}],

@@ -26,7 +26,9 @@ impl Tenant {
     /// directory are replaced by the paths that were checked, `bash` is
     /// turned off unless the tenant may run exec tools, the execution
     /// backend must be one of the tenant's (absent: its first),
-    /// `schedule_tools` is refused unless the tenant may hold schedules, and
+    /// `schedule_tools` is refused unless the tenant may hold schedules,
+    /// `memory` unless it allows memory (its `max_memories` bounded by the
+    /// tenant's cap), and
     /// a Postgres
     /// store that names no pool size gets the default size or the tenant's
     /// `max_pool_connections`, whichever is smaller.
@@ -90,6 +92,18 @@ impl Tenant {
             let message = "schedule_tools needs schedules in the tenant's allowlists \
                            (max_schedules)";
             return Err(refused("schedule_tools", message.into()));
+        }
+        if let Some(memory) = &mut config.memory {
+            if !allow.memory {
+                let message = "memory needs `memory` in the tenant's allowlists";
+                return Err(refused("memory", message.into()));
+            }
+            // The smaller cap holds, and the tenant's applies when the config
+            // names none; a stored definition meets a lowered cap the same way.
+            memory.max_memories = match (memory.max_memories, allow.max_memories) {
+                (Some(asked), Some(cap)) => Some(asked.min(cap)),
+                (asked, cap) => asked.or(cap),
+            };
         }
         if let StoreConfig::Postgres {
             dsn,
