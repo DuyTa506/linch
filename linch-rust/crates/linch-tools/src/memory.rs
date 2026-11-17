@@ -80,6 +80,16 @@ struct Bound {
 }
 
 impl Bound {
+    /// `what` and whose memories these are: the scope is part of the tool
+    /// definition, so it is part of the run contract.
+    fn describe(&self, what: &str) -> String {
+        let whose = match self.scope {
+            MemoryScope::Agent => "Memories are shared by every session of this agent.",
+            MemoryScope::Principal => "Memories belong to the user this run acts for.",
+        };
+        format!("{what} {whose}")
+    }
+
     fn scope_of(&self, ctx: &ToolContext) -> Result<Option<String>, ToolOutputError> {
         self.scope.key(ctx.principal.as_ref()).map_err(|_| {
             coded(
@@ -126,6 +136,7 @@ fn new_memory(input: &JsonObject, key: &str) -> Result<NewMemory, ToolOutputErro
 pub struct MemorySave {
     bound: Bound,
     schema: JsonObject,
+    description: String,
 }
 
 impl MemorySave {
@@ -149,7 +160,14 @@ impl MemorySave {
             "required": ["content"],
             "additionalProperties": false,
         }));
-        Self { bound, schema }
+        let description = bound.describe(
+            "Save a fact to long-term memory so that later runs can find it with MemorySearch. Save what stays useful: preferences, decisions, names, outcomes.",
+        );
+        Self {
+            bound,
+            schema,
+            description,
+        }
     }
 }
 
@@ -160,8 +178,7 @@ impl Tool for MemorySave {
     }
 
     fn description(&self) -> &str {
-        "Save a fact to long-term memory so that later runs can find it with MemorySearch. \
-         Save what stays useful: preferences, decisions, names, outcomes."
+        &self.description
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -198,6 +215,7 @@ impl Tool for MemorySave {
 pub struct MemorySearch {
     bound: Bound,
     schema: JsonObject,
+    description: String,
 }
 
 impl MemorySearch {
@@ -222,7 +240,13 @@ impl MemorySearch {
             "required": ["query"],
             "additionalProperties": false,
         }));
-        Self { bound, schema }
+        let description = bound
+            .describe("Search long-term memory for facts saved earlier, in this or a past run.");
+        Self {
+            bound,
+            schema,
+            description,
+        }
     }
 }
 
@@ -258,7 +282,7 @@ impl Tool for MemorySearch {
     }
 
     fn description(&self) -> &str {
-        "Search long-term memory for facts saved earlier, in this or a past run."
+        &self.description
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -298,6 +322,7 @@ impl Tool for MemorySearch {
 pub struct MemoryDelete {
     bound: Bound,
     schema: JsonObject,
+    description: String,
 }
 
 impl MemoryDelete {
@@ -315,7 +340,13 @@ impl MemoryDelete {
             "required": ["id"],
             "additionalProperties": false,
         }));
-        Self { bound, schema }
+        let description = bound
+            .describe("Delete a fact from long-term memory when it is wrong or no longer true.");
+        Self {
+            bound,
+            schema,
+            description,
+        }
     }
 }
 
@@ -326,7 +357,7 @@ impl Tool for MemoryDelete {
     }
 
     fn description(&self) -> &str {
-        "Delete a fact from long-term memory when it is wrong or no longer true."
+        &self.description
     }
 
     fn input_schema(&self) -> &JsonObject {

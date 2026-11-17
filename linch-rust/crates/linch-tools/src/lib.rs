@@ -34,6 +34,7 @@ mod glob;
 mod grep;
 mod input;
 mod memory;
+mod memory_recall;
 mod read;
 mod schedules;
 mod tasks;
@@ -56,6 +57,7 @@ pub use memory::{
     MEMORY_TOOL_NAMES, MemoryDelete, MemorySave, MemoryScope, MemorySearch, NoPrincipal,
     memory_tools,
 };
+pub use memory_recall::{MAX_RECALL, MemoryRecall};
 pub use read::Read;
 pub use schedules::{
     CancelSchedule, CreateSchedule, ListSchedules, NewSchedule, SCHEDULE_TOOL_NAMES,
