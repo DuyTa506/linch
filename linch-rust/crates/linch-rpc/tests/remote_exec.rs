@@ -335,15 +335,14 @@ async fn an_agent_without_bash_can_be_scheduled_whatever_backend_it_names() {
     };
     let dir = tempfile::tempdir().unwrap();
     let (rpc, _calls) = host(Script::Quick);
-    let bash_off = |config: &mut Value| config["bash"] = json!(false);
-    let no_workspace = |config: &mut Value| {
-        config.as_object_mut().unwrap().remove("workspace");
-    };
-    let variants: [(&str, &dyn Fn(&mut Value)); 2] =
-        [("bash off", &bash_off), ("no workspace", &no_workspace)];
-    for (name, change) in variants {
+    for name in ["bash off", "no workspace"] {
         let mut config = on_postgres(&db, dir.path(), remote());
-        change(&mut config);
+        match name {
+            "bash off" => config["bash"] = json!(false),
+            _ => {
+                config.as_object_mut().unwrap().remove("workspace");
+            }
+        }
         let agent = rpc.open(config).await;
         let created = rpc
             .call(
