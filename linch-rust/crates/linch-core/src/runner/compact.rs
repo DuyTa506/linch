@@ -97,19 +97,29 @@ impl Runner {
         let view = self.log.provider_view();
         let keep = spec.keep_recent_turns;
         let tokens_before = estimate_tokens(&view);
+        // The trigger's measure (see `Anchor`); the size checks and the hold
+        // stay on the estimate, both sides of each in one unit.
+        let measured = self.anchor.measure(&view, tokens_before);
+        let measured_tokens = (measured > tokens_before).then_some(measured);
         let keep_from = if forced {
             compaction::forced_keep_from(&view, keep)
         } else {
             let window = agent.context_window();
             let limit = agent.spec.max_output_tokens;
-            if !compaction::due(spec, limit, window, tokens_before) {
+            if !compaction::due(spec, limit, window, measured) {
                 return Ok(Some(next));
             }
             // The cheaper step first: enough when it brings the view back
             // under the trigger.
             if spec.micro
                 && let Some((before, cleared)) = compaction::clear_tool_results(&view, keep)
-                && !compaction::due(spec, limit, window, estimate_tokens(&cleared))
+                && !compaction::due(
+                    spec,
+                    limit,
+                    window,
+                    measured
+                        .saturating_sub(tokens_before.saturating_sub(estimate_tokens(&cleared))),
+                )
             {
                 return self.clear(&view, before, cleared, 1, false).await.map(Some);
             }
@@ -230,7 +240,7 @@ impl Runner {
                 let (messages, tokens) = (view.len() as u64, tokens_before);
                 let holds = self.rejections.will_hold();
                 self.rejections.rejected(tokens);
-                self.journal.stage(Event::Compaction(CompactionEvent {
+                self.stage_compaction(CompactionEvent {
                     messages_before: messages,
                     messages_after: messages,
                     tokens_before: tokens,
@@ -249,7 +259,8 @@ impl Runner {
                     } else {
                         format!("{reason}: the next due turn asks again")
                     }),
-                }));
+                    measured_tokens,
+                });
             }
             if forced {
                 // One terminal write: the receipt, usage, error and result.
@@ -266,10 +277,8 @@ impl Runner {
         // at the next turn: that is no help, and counts toward the hold.
         let window = agent.context_window();
         let limit = agent.spec.max_output_tokens;
-        let still_due = compaction::due(spec, limit, window, tokens_after);
-        self.rejections.applied(tokens_after, still_due);
         let (messages_before, messages_after) = (view.len() as u64, compacted.len() as u64);
-        self.journal.stage(Event::Compaction(CompactionEvent {
+        let event = CompactionEvent {
             messages_before,
             messages_after,
             tokens_before,
@@ -278,7 +287,13 @@ impl Runner {
             duration_ms: super::end::millis(started.elapsed()),
             forced,
             rejected: None,
-        }));
+            measured_tokens,
+        };
+        // Judged on the trigger's measure less what the summary removed, as
+        // a resume reads it back from the event.
+        let still_due = compaction::due(spec, limit, window, compaction::measure_after(&event));
+        self.rejections.applied(tokens_after, still_due);
+        self.stage_compaction(event);
         let keep_from = keep_from as u64;
         self.save(Phase::Compacted {
             summary: summary.clone(),
@@ -358,6 +373,13 @@ impl Runner {
         }))
     }
 
+    /// Stage the `compaction` event, which also moves the anchor.
+    fn stage_compaction(&mut self, event: CompactionEvent) {
+        let event = Event::Compaction(event);
+        self.anchor.observe(&event);
+        self.journal.stage(event);
+    }
+
     /// Micro-compaction: record `cleared`, the view with its tool results
     /// before `before` cleared, as a logged projection, then go on to
     /// primary call `attempt`. The `compaction` event rides the held
@@ -377,7 +399,8 @@ impl Runner {
         self.pre_compact(self.turn, messages, tokens_before, strategy)
             .await;
         let tokens_after = estimate_tokens(&cleared);
-        self.journal.stage(Event::Compaction(CompactionEvent {
+        let measured = self.anchor.measure(view, tokens_before);
+        self.stage_compaction(CompactionEvent {
             messages_before: messages,
             messages_after: messages,
             tokens_before,
@@ -386,7 +409,8 @@ impl Runner {
             duration_ms: super::end::millis(started.elapsed()),
             forced,
             rejected: None,
-        }));
+            measured_tokens: (measured > tokens_before).then_some(measured),
+        });
         let before = before as u64;
         self.save(Phase::Cleared { before, attempt }).await?;
         self.project(cleared, compaction::MICRO_REASON).await?;

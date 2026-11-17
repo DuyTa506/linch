@@ -1,7 +1,10 @@
 //! Compaction: fold the older part of a long provider view into a summary.
 //!
-//! When the estimated provider view reaches [`CompactionSpec::threshold_tokens`],
-//! or without one comes near the provider's context window,
+//! When the provider view's measure reaches [`CompactionSpec::threshold_tokens`],
+//! or without one comes near the provider's context window (the measure is
+//! the estimate, or once the provider has reported usage the prompt tokens it
+//! counted for its last call plus the estimate of what followed, whichever is
+//! larger: see `Anchor`),
 //! the run asks the model for a summary of everything older than the last
 //! [`CompactionSpec::keep_recent_turns`] assistant turns, in an auxiliary
 //! call with its own delivery and receipt (kind `compaction`). The new view
@@ -24,7 +27,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::model_call::ModelCallKind;
+use crate::events::kinds::CompactionEvent;
+use crate::events::model_call::{CallDisposition, ModelCallKind};
 use crate::events::{Envelope, Event};
 use crate::message::{ContentBlock, Message, Role, TextBlock, ToolResultPart};
 use crate::provider::{CacheControl, ProviderRequest, ToolChoice};
@@ -141,10 +145,13 @@ fn is_default_keep_user_tokens(value: &u32) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionSpec {
-    /// Compact before a turn whose provider view is estimated at this many
-    /// tokens or more (about four characters per token, 1000 per image).
-    /// `None` (the default) follows the provider's context window instead,
-    /// as Python does: compact once the estimate plus an output reserve
+    /// Compact before a turn whose provider view is measured at this many
+    /// tokens or more: the estimate (about four characters per token, 1000
+    /// per image), or, once the provider has reported usage, the prompt
+    /// tokens it counted for its last call (system prompt and tools
+    /// included) plus the estimate of what the view gained since, whichever
+    /// is larger. `None` (the default) follows the provider's context window
+    /// instead, as Python does: compact once the measure plus an output reserve
     /// (the spec's `max_output_tokens`, else a fifth of the window, at
     /// least 1 and at most 32768) reaches 80% of the window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,7 +267,8 @@ pub(crate) fn estimate_tokens(messages: &[Arc<Message>]) -> u64 {
     chars as u64 / 4 + images * IMAGE_TOKENS
 }
 
-/// Whether a provider view estimated at `tokens` is due for a summary.
+/// Whether a provider view measured at `tokens` (see `Anchor::measure`) is
+/// due for a summary.
 ///
 /// With `threshold_tokens` set, at that many tokens. Without it, Python's
 /// rule: when the estimate plus an output reserve reaches 80% of the
@@ -282,6 +290,71 @@ pub(crate) fn due(
     };
     let projected = u128::from(tokens) + u128::from(reserve);
     projected * 5 >= u128::from(window) * 4
+}
+
+/// What a provider last reported of the prompt its run sent: the tokens it
+/// counted for the latest accepted primary call, the system prompt and tools
+/// included, which the estimate leaves out and counts 20% to 2x too low on
+/// live text. It is folded from the run's events (so a resumed run measures
+/// as the first one did), by the one [`Anchor::observe`] the runner calls
+/// as it stages events and a resume calls over what is durable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Anchor(Option<u64>);
+
+impl Anchor {
+    /// The anchor after the events `events`.
+    pub(crate) fn of(events: &[Envelope]) -> Self {
+        let mut anchor = Self::default();
+        for envelope in events {
+            anchor.observe(&envelope.event);
+        }
+        anchor
+    }
+
+    /// Fold in one event. An accepted primary call replaces the anchor with
+    /// its reported prompt tokens, or none when it reported none: a stale
+    /// value under a later assistant message would undercount by whole
+    /// turns. A compaction that changed the view (applied, micro included)
+    /// clears it, since the reported prompt is the replaced view's; a rejected
+    /// one left the view as it was.
+    pub(crate) fn observe(&mut self, event: &Event) {
+        match event {
+            Event::ModelCallReceipt(receipt)
+                if receipt.kind == ModelCallKind::Primary
+                    && receipt.disposition == CallDisposition::Accepted =>
+            {
+                self.0 = (receipt.usage.as_ref())
+                    .map(|usage| usage.total_input_tokens())
+                    .filter(|&tokens| tokens > 0);
+            }
+            Event::Compaction(event) if event.rejected.is_none() => self.0 = None,
+            _ => {}
+        }
+    }
+
+    /// What the trigger compares to its threshold for `view`, estimated at
+    /// `estimate` tokens: the larger of that, and the reported prompt plus
+    /// the estimate of the view from the last assistant message on (the
+    /// response and what answered it, which the report predates). Never
+    /// below the estimate, so a provider that reports less than the view
+    /// weighs delays nothing.
+    pub(crate) fn measure(&self, view: &[Arc<Message>], estimate: u64) -> u64 {
+        let Some(reported) = self.0 else {
+            return estimate;
+        };
+        let Some(at) = view.iter().rposition(|m| m.role == Role::Assistant) else {
+            return estimate;
+        };
+        estimate.max(reported.saturating_add(estimate_tokens(&view[at..])))
+    }
+}
+
+/// What the trigger would measure of the view a compaction left: its
+/// `measured_tokens` (else the estimate) less the estimated tokens it
+/// removed. Equal to `tokens_after` when no usage anchored the trigger.
+pub(crate) fn measure_after(event: &CompactionEvent) -> u64 {
+    let before = event.measured_tokens.unwrap_or(0).max(event.tokens_before);
+    before.saturating_sub(event.tokens_before.saturating_sub(event.tokens_after))
 }
 
 /// The `keep_recent_turns`-th assistant message from the end; `None` when
@@ -457,7 +530,8 @@ pub(crate) struct Rejections {
 
 impl Rejections {
     /// What the summary `compaction` events of `events` say; `due` tells
-    /// whether a view of that many tokens is due for a summary.
+    /// whether a view measured at that many tokens (see [`measure_after`])
+    /// is due for a summary.
     pub(crate) fn of(events: &[Envelope], due: impl Fn(u64) -> bool) -> Self {
         let mut rejections = Self::default();
         for envelope in events {
@@ -466,7 +540,7 @@ impl Rejections {
             {
                 match event.rejected {
                     Some(_) => rejections.rejected(event.tokens_after),
-                    None => rejections.applied(event.tokens_after, due(event.tokens_after)),
+                    None => rejections.applied(event.tokens_after, due(measure_after(event))),
                 }
             }
         }

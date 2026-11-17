@@ -181,6 +181,10 @@ pub(super) struct Runner {
     /// [`crate::compaction::Rejections`]), counted from its durable events on a
     /// resume.
     pub(super) rejections: crate::compaction::Rejections,
+    /// What the provider last reported of the prompt (see
+    /// [`crate::compaction::Anchor`]), folded from the run's events as they
+    /// are staged and rebuilt from the durable ones on a resume.
+    pub(super) anchor: crate::compaction::Anchor,
     /// Cut answers the run continued (see [`crate::truncation`]), counted
     /// from its durable log on a resume.
     pub(super) truncations: u32,
@@ -254,6 +258,7 @@ impl Runner {
             forced: 0,
             summary_calls: 0,
             rejections: crate::compaction::Rejections::default(),
+            anchor: crate::compaction::Anchor::default(),
             truncations: 0,
             truncated: String::new(),
             watch,
@@ -548,7 +553,9 @@ impl Runner {
         if empty {
             receipt.disposition = CallDisposition::Rejected;
         }
-        self.journal.stage(Event::ModelCallReceipt(receipt));
+        let receipt = Event::ModelCallReceipt(receipt);
+        self.anchor.observe(&receipt);
+        self.journal.stage(receipt);
         // An `after_provider_call` hook may never return (a client callback
         // with no timeout): the paid receipt and its usage are made durable
         // before the hooks run (`provider_call_stop` included), the response

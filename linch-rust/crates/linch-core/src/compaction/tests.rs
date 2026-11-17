@@ -814,3 +814,118 @@ mod forced {
         assert_eq!(at(2, 7), forced(1, 1, 0, false));
     }
 }
+
+fn receipt(kind: ModelCallKind, disposition: CallDisposition, input: u64) -> Event {
+    Event::ModelCallReceipt(crate::events::model_call::ModelCallReceiptEvent {
+        run_id: crate::ids::RunId::new("r"),
+        logical_call_id: "r:primary:0".into(),
+        delivery_attempt_id: "r:primary:0:1".into(),
+        kind,
+        actual_model: None,
+        disposition,
+        usage: Some(crate::usage::Usage {
+            input_tokens: input,
+            output_tokens: 7,
+            cache_read_tokens: 30,
+            cache_creation_tokens: 20,
+        }),
+        cost_usd: None,
+        duration_ms: 0,
+    })
+}
+
+fn compaction_event(rejected: Option<&str>) -> Event {
+    Event::Compaction(CompactionEvent {
+        messages_before: 5,
+        messages_after: 3,
+        tokens_before: 100,
+        tokens_after: 40,
+        strategy: STRATEGY.into(),
+        duration_ms: 0,
+        forced: false,
+        rejected: rejected.map(Into::into),
+        measured_tokens: Some(250),
+    })
+}
+
+/// The anchor is the last accepted primary call's whole prompt (every input
+/// bucket), replaced by each one, kept across a rejected compaction and
+/// cleared by an applied one; other receipts never move it.
+#[test]
+fn the_anchor_follows_accepted_primary_receipts_and_applied_compactions() {
+    use CallDisposition::{Accepted, Failed, Rejected};
+    let primary = |disposition, input| receipt(ModelCallKind::Primary, disposition, input);
+    let mut anchor = Anchor::default();
+    assert_eq!(anchor, Anchor(None));
+    anchor.observe(&primary(Accepted, 100));
+    assert_eq!(
+        anchor,
+        Anchor(Some(150)),
+        "100 uncached, 30 read, 20 written"
+    );
+    anchor.observe(&receipt(ModelCallKind::Compaction, Accepted, 9000));
+    anchor.observe(&primary(Failed, 9000));
+    anchor.observe(&primary(Rejected, 9000));
+    assert_eq!(
+        anchor,
+        Anchor(Some(150)),
+        "only accepted primary calls count"
+    );
+    anchor.observe(&compaction_event(Some(
+        "empty: the next due turn asks again",
+    )));
+    assert_eq!(
+        anchor,
+        Anchor(Some(150)),
+        "a rejected summary left the view"
+    );
+    anchor.observe(&primary(Accepted, 300));
+    assert_eq!(anchor, Anchor(Some(350)), "the latest report replaces it");
+    anchor.observe(&compaction_event(None));
+    assert_eq!(anchor, Anchor(None), "the report predates the view it left");
+    // A call that reported nothing drops a value that would be stale.
+    anchor.observe(&primary(Accepted, 100));
+    let mut silent = primary(Accepted, 0);
+    if let Event::ModelCallReceipt(receipt) = &mut silent {
+        receipt.usage = None;
+    }
+    anchor.observe(&silent);
+    assert_eq!(anchor, Anchor(None));
+}
+
+/// The measure is the reported prompt plus the estimate from the last
+/// assistant message on, and never below the estimate itself.
+#[test]
+fn the_measure_adds_what_followed_the_report_and_never_drops_below_the_estimate() {
+    let view = view(3);
+    let estimate = estimate_tokens(&view);
+    let tail = estimate_tokens(&view[5..]);
+    assert_eq!(tail, 5, "the last turn: its call and its result");
+    assert_eq!(Anchor(None).measure(&view, estimate), estimate);
+    assert_eq!(Anchor(Some(1000)).measure(&view, estimate), 1000 + tail);
+    assert_eq!(
+        Anchor(Some(1)).measure(&view, estimate),
+        estimate,
+        "a report under the view's weight delays nothing"
+    );
+    let bare = [Arc::new(Message::user_text("go"))];
+    assert_eq!(
+        Anchor(Some(1000)).measure(&bare, 1),
+        1,
+        "no assistant message"
+    );
+}
+
+/// What a compaction left is measured on its event alone, so a resume reads
+/// it back as the run judged it.
+#[test]
+fn the_measure_after_a_compaction_comes_from_its_event() {
+    let Event::Compaction(mut event) = compaction_event(None) else {
+        unreachable!()
+    };
+    assert_eq!(measure_after(&event), 250 - 60, "less what it removed");
+    event.measured_tokens = None;
+    assert_eq!(measure_after(&event), 40, "the estimate when unanchored");
+    event.measured_tokens = Some(50);
+    assert_eq!(measure_after(&event), 40, "never below the estimate");
+}
