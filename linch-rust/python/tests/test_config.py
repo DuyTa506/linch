@@ -14,6 +14,7 @@ from linch_rust import (
     BudgetEvent,
     Envelope,
     ErrorEvent,
+    HookEvent,
     InitEvent,
     LoopGuard,
     LoopGuardEvent,
@@ -320,6 +321,23 @@ async def test_the_filesystem_tools_keep_files_for_the_session() -> None:
 
     assert tools_of(envelopes) == ["ls", "read_file", "write_file", "edit_file"]
     assert results(envelopes)[1] == "remember this"
+
+
+MEMORY_HOOK = "linch.deep-agent.file-memory-context"
+
+
+async def test_filesystem_memory_shows_a_plain_agent_its_memory_file() -> None:
+    def memory_hooks(envelopes: list[Envelope]) -> list[Any]:
+        return [
+            e.event
+            for e in envelopes
+            if isinstance(e.event, HookEvent) and e.event.policy_id == MEMORY_HOOK
+        ]
+
+    plain = await run_once(config([text_turn("hi")], filesystem={}))
+    assert memory_hooks(plain) == []
+    remembering = await run_once(config([text_turn("hi")], filesystem={"memory": True}))
+    assert len(memory_hooks(remembering)) == 1
 
 
 DEEP_AGENT_TOOLS = sorted(

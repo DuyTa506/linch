@@ -12,6 +12,7 @@ Một agent ghi nhớ ở ba nơi:
 |---|---|---|
 | Cuộc hội thoại của một session | Log của session, trong store của nó; model nhìn thấy một view của log | Không cần gì: session nào cũng có |
 | Một view ngắn hơn của một cuộc hội thoại dài | Một bản tóm tắt (hoặc các kết quả tool đã xóa) được ghi log trong session | [`spec.compaction`](#compaction) |
+| Các sự thật agent giữ trong tệp của chính nó | `/memories/MEMORY.md` trong hệ thống tệp ảo | [`filesystem.memory`](#file-memory) |
 | Các sự thật giữ qua nhiều session | Store của chính bạn: tệp, một vector index, Notion, một database | Một [callback `context_build`](#external-memory) để đọc nó, một host tool để ghi nó |
 
 Hai trường spec nữa khôi phục một lời gọi model đi sai vì kích thước:
@@ -197,6 +198,51 @@ Câu trả lời cuối cùng của run là mọi phần theo thứ tự, và to
 callback `stop` nhìn thấy. Chỉ một câu trả lời có văn bản và không có lời gọi tool mới
 được tiếp tục; một lượt gọi tool bắt đầu một câu trả lời mới. Mỗi lần tiếp tục là một
 lượt, nên `max_turns` giới hạn nó.
+
+---
+
+<a id="file-memory"></a>
+
+## Bộ nhớ dạng tệp
+
+`filesystem: {"memory": true}` cho một agent thường bộ nhớ mà [deep agent](./deep-agent.md)
+có: model ghi chú trong [hệ thống tệp ảo](./tools.md#hệ-thống-tệp-ảo) dưới `/memories/`,
+mỗi sự thật một tệp, với `/memories/MEMORY.md` là chỉ mục một dòng cho mỗi tệp. Không cần
+preset; đó là `FileMemoryContextBuilder` của Python Linch.
+
+```python
+config = {
+    "namespace": "support",
+    "spec": {"model": "deepseek-flash"},
+    "provider": {"id": "deepseek"},
+    "stores": {"type": "postgres", "dsn": "postgres://..."},
+    "filesystem": {"memory": True},
+}
+```
+
+Trước mỗi lời gọi model, server thêm hai khối văn bản vào request đó: một chỉ dẫn (ký ức
+nằm dưới `/memories/`, `MEMORY.md` là chỉ mục, dùng các tool tệp để giữ chúng và bỏ các sự
+thật cũ) và, khi tệp tồn tại và không rỗng, 200 dòng đầu của nó (có ghi chú khi dài hơn).
+Các khối nằm ở đuôi request, như [bộ nhớ ngoài](#external-memory), và không bao giờ được
+ghi log. Không gì ghi ký ức thay cho model: nó dùng `write_file` và `edit_file`, nên các
+quyền thông thường áp dụng.
+
+- **Đọc cho mỗi request, không phải một lần cho mỗi run.** Python Linch đọc chỉ mục một
+  lần cho mỗi run và giữ lại, để prompt không đổi giữa run. Ở đây các khối không bao giờ
+  thuộc phần prefix được cache, vốn giữ nguyên trong cả hai cách, và đuôi của lượt trước
+  không được ghi log nên không thể cache qua các request. Đọc lại tốn một lần đọc tệp và
+  cho model thấy chỉ mục nó vừa sửa ở lượt kế tiếp. Một run được resume ở tiến trình khác
+  đọc lại tệp trong cả hai thiết kế.
+- **Tệp nằm ở đâu.** Với kho Postgres, mọi session của namespace dùng chung `/memories/`,
+  nên session 2 thấy những gì session 1 ghi, và tiến trình mới cũng vậy. Với kho memory,
+  mỗi session có tệp riêng, giữ trong handle của agent: không gì được chia sẻ giữa các
+  session, và `close_session` xóa chúng, nên tệp không sống lâu hơn session của nó. Dùng
+  kho Postgres cho ký ức bền.
+- **Hợp đồng.** Tắt thì không được gửi và hợp đồng của run không đổi; bật thì hook thuộc
+  hợp đồng, nên một run không thể resume qua việc bật hay tắt nó. `deep_agent` luôn có,
+  bất kể `memory`.
+- `memory` là một trường của `filesystem`, nên nó cần hệ thống tệp bật; không có cách xin
+  nó khi hệ thống tệp tắt.
 
 ---
 

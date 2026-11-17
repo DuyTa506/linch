@@ -372,6 +372,7 @@ prompt để dạy model cách dùng chúng.
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `offload_threshold_tokens` | không có | Chuyển một kết quả tool dạng văn bản được ước tính trên số token này (bốn byte mỗi token) vào hệ thống tệp, để lại vài dòng đầu và đường dẫn của nó cho model `read_file` |
+| `memory` | `False` | Cho model thấy chỉ dẫn lưu ký ức dưới `/memories/` và 200 dòng đầu của `/memories/MEMORY.md`, đọc lại cho mỗi request ([Memory](./memory.md#file-memory)). Deep agent luôn có |
 | `offload_threshold_fraction` | không có | Offload khi vượt tỷ lệ này của [context window](./providers.md#context-window) của provider, tối thiểu 1000 token; Python Linch dùng 0.1. Chỉ dùng khi không có `offload_threshold_tokens`. Không có cả hai thì kết quả không bao giờ bị offload |
 
 Với kho memory, mỗi session có tệp riêng, mất cùng với server. Với kho Postgres,

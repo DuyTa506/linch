@@ -30,6 +30,20 @@ pub struct FilesystemConfig {
     /// `offload_threshold_tokens` is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_threshold_fraction: Option<f64>,
+    /// Show the model its file memory: the instruction to keep memories under
+    /// `/memories/`, and the first 200 lines of `/memories/MEMORY.md` when
+    /// the session's files hold it (Python's `FileMemoryContextBuilder`; see
+    /// [`linch_ext::deep_agent::FileMemoryContext`]). Both ride the tail of
+    /// each request, never the log, and the file is read again for each
+    /// request, so a change the model made shows on its next turn. Nothing
+    /// is written for the model: it keeps the file with the filesystem
+    /// tools. A deep agent always has this. Off when absent, which keeps it
+    /// off the wire; turning it on adds the hook to the run contract. With
+    /// memory stores the file lives and dies with its session, so it does
+    /// not outlive [`Agent::close_session`](linch_core::Agent::close_session);
+    /// with Postgres stores every session of the namespace shares it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory: bool,
 }
 
 /// The least threshold a fraction gives (Python's floor).

@@ -69,10 +69,19 @@ class Filesystem(TypedDict, total=False):
             provider's context window for the spec's model, at least 1000
             tokens (Python Linch's `threshold_fraction`, 0.1 there). Used
             only when `offload_threshold_tokens` is absent.
+        memory: Show the model its file memory: an instruction to keep
+            memories under `/memories/`, and the first 200 lines of
+            `/memories/MEMORY.md` when the session's files hold it (Python
+            Linch's `FileMemoryContextBuilder`). Both are read again for
+            each request and ride its tail, never the session. A
+            `deep_agent` always has this. Off when absent. With memory
+            stores the file is dropped when its session closes; with
+            Postgres stores every session of the namespace shares it.
     """
 
     offload_threshold_tokens: int
     offload_threshold_fraction: float
+    memory: bool
 
 
 class LocalExecution(TypedDict):

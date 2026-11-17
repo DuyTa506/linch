@@ -12,6 +12,7 @@ An agent remembers in three places:
 |---|---|---|
 | The conversation of a session | The session's log, in its store; the model sees a view of it | Nothing: every session has it |
 | A shorter view of a long conversation | A summary (or cleared tool results) logged in the session | [`spec.compaction`](#compaction) |
+| Facts the agent keeps in its own files | `/memories/MEMORY.md` in the virtual filesystem | [`filesystem.memory`](#file-memory) |
 | Facts kept across sessions | Your own store: files, a vector index, Notion, a database | A [`context_build` callback](#external-memory) to read it, a host tool to write it |
 
 Two more spec fields recover a model call that went wrong because of size:
@@ -194,6 +195,53 @@ and that whole text is what the [output schema](./structured-output.md),
 the [verifiers](./security.md#verifiers) and `stop` callbacks see. Only an
 answer with text and no tool call is continued; a turn that calls tools
 starts a new answer. Each continuation is a turn, so `max_turns` bounds it.
+
+---
+
+## File memory
+
+`filesystem: {"memory": true}` gives a plain agent the memory a
+[deep agent](./deep-agent.md) has: the model keeps notes in the
+[virtual filesystem](./tools.md#virtual-filesystem) under `/memories/`, one
+file per fact, with `/memories/MEMORY.md` as a one-line-per-file index. It
+needs no preset; it is Python Linch's `FileMemoryContextBuilder`.
+
+```python
+config = {
+    "namespace": "support",
+    "spec": {"model": "deepseek-flash"},
+    "provider": {"id": "deepseek"},
+    "stores": {"type": "postgres", "dsn": "postgres://..."},
+    "filesystem": {"memory": True},
+}
+```
+
+Before each model call the server adds two text blocks to that request: an
+instruction (memories live under `/memories/`, `MEMORY.md` is the index, use
+the file tools to keep them and drop stale facts) and, when the file exists
+and is not empty, its first 200 lines (a note says when it is longer). The
+blocks ride the tail of the request, like [external memory](#external-memory),
+and are never logged. Nothing writes memory for the model: it uses
+`write_file` and `edit_file`, so the usual permissions apply.
+
+- **Read for each request, not once per run.** Python Linch reads the index
+  once per run and keeps it, so the prompt does not change mid-run. Here the
+  blocks are never part of the cached prefix, which stays the same either
+  way, and the tail of the last turn is not logged, so it cannot be cached
+  across requests. Reading again costs one file read and lets the model see
+  an index it edited on its next turn. A run resumed in another process
+  reads the file again in both designs.
+- **Where the file lives.** With Postgres stores every session of the
+  namespace shares `/memories/`, so session 2 sees what session 1 wrote, and
+  so does a new process. With memory stores each session has its own files,
+  kept in the agent handle: nothing is shared between sessions, and
+  `close_session` drops them, so the file does not outlive its session. Use
+  Postgres stores for memory that lasts.
+- **The contract.** Off, it is not sent and the run contract is unchanged;
+  on, the hook is part of the contract, so a run cannot resume across turning
+  it on or off. A `deep_agent` always has it, whatever `memory` says.
+- `memory` is a field of `filesystem`, so it needs the filesystem on; there
+  is no way to ask for it with the filesystem off.
 
 ---
 

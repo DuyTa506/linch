@@ -177,7 +177,7 @@ impl AgentConfig {
             &self.namespace,
             window,
         )?;
-        if deep.is_some() {
+        if deep.is_some() || self.filesystem.as_ref().is_some_and(|files| files.memory) {
             files.remember(&hooks);
         }
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
