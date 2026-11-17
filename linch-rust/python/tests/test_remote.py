@@ -11,6 +11,7 @@ import shutil
 import signal
 import socket
 import tempfile
+import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from test_resume import pg_dsn
 from linch_rust import (
     AgentConfig,
     Allow,
+    ConnectionClosed,
     HookEvent,
     InitEvent,
     LimitReached,
@@ -63,7 +65,10 @@ class Listening:
 
 @asynccontextmanager
 async def listening(
-    *, max_connections: int = 4, postgres_dsns: Sequence[str] = ()
+    *,
+    max_connections: int = 4,
+    postgres_dsns: Sequence[str] = (),
+    liveness: dict[str, int] | None = None,
 ) -> AsyncIterator[Listening]:
     """Run `linch-server --config` with tenants `acme` (token `TOKEN`) and `beta`."""
     # Short: a socket path is at most about 100 bytes.
@@ -79,6 +84,8 @@ async def listening(
         "http": "127.0.0.1:0",
         "tenants": {"acme": {"tokens": [{"value": TOKEN}], "allow": allow}, "beta": beta},
     }
+    if liveness is not None:
+        config["liveness"] = liveness
     path = directory / "server.json"
     path.write_text(json.dumps(config))
     process = await asyncio.create_subprocess_exec(
@@ -334,3 +341,31 @@ async def test_a_remote_server_has_no_process_here() -> None:
     async with listening() as at, Server.connect(at.socket, token=TOKEN) as server:
         with pytest.raises(LinchError, match="no process"):
             _ = server.pid
+
+
+@pytest.mark.parametrize(
+    ("how", "stays"),
+    [("awaits", True), ("in_a_thread", True), ("blocks_the_loop", False)],
+)
+async def test_a_websocket_client_whose_loop_is_blocked_past_the_pong_timeout_is_cut(
+    how: str, stays: bool
+) -> None:
+    # The server's defaults (a ping every 30 s, a cut after 60 s of silence)
+    # at a hundredth of their size; the client is busy for 1 s, 2.5 timeouts.
+    liveness = {"ping_interval_ms": 100, "pong_timeout_ms": 400}
+    async with (
+        listening(liveness=liveness) as at,
+        Server.connect(at.websocket, token=TOKEN) as server,
+    ):
+        if how == "awaits":
+            await asyncio.sleep(1)
+        elif how == "in_a_thread":
+            await asyncio.to_thread(time.sleep, 1)
+        else:
+            time.sleep(1)  # a synchronous host tool run on the event loop
+        await asyncio.sleep(0.2)  # let the client's reader see the close
+        if stays:
+            await server.open_agent(acme([text_turn("unused")]))
+        else:
+            with pytest.raises(ConnectionClosed):
+                await server.open_agent(acme([text_turn("unused")]))

@@ -452,6 +452,18 @@ Ending a connection is the same as its input ending: its runs are dropped (a
 Postgres run keeps its last durable state and can be resumed), its calls are
 answered, and its places are freed.
 
+**A client that is busy but alive must keep its event loop running.** The
+pong comes from the client's WebSocket code, which runs on its event loop. A
+Python client whose loop is blocked for longer than `pong_timeout_ms` (60 s by
+default) by a synchronous host tool answers no ping, so the server ends the
+connection; the client's next call raises `ConnectionClosed`, and its runs are
+dropped as above. A tool that waits (`await`) or runs in a thread
+(`asyncio.to_thread`) leaves the loop free and the connection stays. So run a
+long blocking host tool in a thread. This applies to the WebSocket only: the
+Python client spawns a server over stdio and a Unix socket has no liveness
+check, so neither cuts a busy client. `test_remote.py` pins the rule with the
+two times shortened (a 400 ms timeout and a client blocked for 1 s).
+
 | `liveness` field | Default | Meaning |
 |---|---|---|
 | `keepalive_idle_ms` | 30000 | Idle time before the first probe |

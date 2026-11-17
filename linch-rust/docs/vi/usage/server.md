@@ -445,6 +445,16 @@ Kết thúc một kết nối giống như input của nó kết thúc: các run
 trạng thái bền vững cuối cùng và có thể resume), các lời gọi của nó được trả lời, và các chỗ của nó
 được giải phóng.
 
+**Một client đang bận nhưng còn sống phải giữ cho event loop của nó chạy.** Pong đến từ code
+WebSocket của client, chạy trên event loop của nó. Một client Python có loop bị chặn lâu hơn
+`pong_timeout_ms` (mặc định 60 giây) bởi một host tool đồng bộ sẽ không trả lời ping nào, nên
+server kết thúc kết nối; lời gọi kế tiếp của client ném `ConnectionClosed`, và các run của nó bị
+bỏ như trên. Một tool chờ bằng `await` hoặc chạy trong một thread (`asyncio.to_thread`) để loop
+rảnh, và kết nối vẫn còn. Vì vậy hãy chạy một host tool chặn lâu trong một thread. Điều này chỉ áp
+dụng cho WebSocket: client Python khởi động server qua stdio và một Unix socket không có kiểm tra
+liveness, nên cả hai đều không cắt một client đang bận. `test_remote.py` ghim quy tắc này với hai
+mốc thời gian được rút ngắn (timeout 400 ms và một client bị chặn 1 giây).
+
 | Trường `liveness` | Mặc định | Ý nghĩa |
 |---|---|---|
 | `keepalive_idle_ms` | 30000 | Thời gian nhàn rỗi trước probe đầu tiên |
