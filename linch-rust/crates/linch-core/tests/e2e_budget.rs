@@ -10,12 +10,15 @@ use common::subagents::{Dying, Family, spawn_turn};
 use common::*;
 use linch_core::events::kinds::{BudgetEvent, BudgetKind, ResultSubtype};
 use linch_core::events::model_call::{CallDisposition, ModelCallReceiptEvent};
+use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::FaultTiming;
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, BuildError, Envelope, Event, PermissionMode, Provider,
     RunBudget, RunId, RunOptions, RunStatus, RunStore, SessionStore, StopReason, StoreError,
     ToolScope, Usage,
 };
+
+use serde_json::json;
 
 const SKIP: PermissionMode = PermissionMode::SkipDangerous;
 
@@ -200,34 +203,97 @@ async fn a_cost_cap_counts_the_priced_cost() {
     assert_eq!(message, "run budget exhausted (45 tokens, $0.0600 spent)");
 }
 
-/// A cost cap on a model with no price must not pass in silence: every call
-/// costs "nothing", so the cap could never trip. The agent is refused when
-/// it is built, or its run ends in an error before it spends past the cap.
+/// A cost cap on a model with no price could never trip: every call costs
+/// "nothing". The agent is refused when it is built, naming the model and
+/// the two ways out.
 #[tokio::test]
-async fn a_cost_cap_on_an_unpriced_model_does_not_pass_in_silence() {
+async fn a_cost_cap_on_an_unpriced_model_is_refused_at_build() {
     let stores = Arc::new(Stores::default());
-    let replay = Arc::new(Replay::new(script(3, 1, "Echo")));
+    let build = |with_price: bool| {
+        let builder = AgentBuilder::new(capped(None, Some(0.05), 0.9))
+            .provider(Arc::new(Replay::new(script(0, 0, "Echo"))))
+            .permissions(policy(SKIP))
+            .run_store(stores.clone())
+            .session_store(stores.clone())
+            .namespace(NS);
+        match with_price {
+            true => builder.pricing(|_, _| Some(0.0)).build(),
+            false => builder.build(),
+        }
+    };
+    for error in [build(false).err(), unpriced_model().err()] {
+        let Some(BuildError::Invalid(message)) = error else {
+            panic!("a cost cap with no price built: {error:?}");
+        };
+        assert!(message.contains(MODEL), "{message}");
+        assert!(message.contains("pricing"), "{message}");
+        assert!(message.contains("max_tokens"), "{message}");
+    }
+    // A price, or a token cap alone, builds.
+    assert!(build(true).is_ok());
+    let tokens_only = AgentBuilder::new(capped(Some(100), None, 0.9))
+        .provider(Arc::new(Replay::new(script(0, 0, "Echo"))))
+        .permissions(policy(SKIP))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .build();
+    assert!(tokens_only.is_ok());
+}
+
+/// A pricing that has no rate for the model.
+fn unpriced_model() -> Result<Agent, BuildError> {
+    let stores = Arc::new(Stores::default());
+    AgentBuilder::new(capped(None, Some(0.05), 0.9))
+        .provider(Arc::new(Replay::new(script(0, 0, "Echo"))))
+        .permissions(policy(SKIP))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .pricing(|_, _| None)
+        .build()
+}
+
+/// The price lookup succeeded at build, but the provider served another
+/// model that has no rate: the run ends in the accounting error before its
+/// next call, not in success with a cap that never counted.
+#[tokio::test]
+async fn a_call_served_by_an_unpriced_model_ends_a_cost_capped_run() {
+    let stores = Arc::new(Stores::default());
+    let turns = vec![
+        TurnBuilder::new("served-model")
+            .text("working")
+            .tool_call("call_0_0", "Echo", &json!({"value": "v"}))
+            .usage(usage(10, 5))
+            .build(),
+        text_turn("done"),
+    ];
+    let replay = Arc::new(Replay::new(turns));
     let runs = Runs::default();
-    let built = AgentBuilder::new(capped(None, Some(0.05), 0.9))
+    let agent = AgentBuilder::new(capped(None, Some(0.05), 0.9))
         .provider(replay.clone())
         .tools(registry(vec![Echo::new("Echo", ToolScope::Read, &runs)]))
         .permissions(policy(SKIP))
         .run_store(stores.clone())
         .session_store(stores)
         .namespace(NS)
-        .build();
-    let Ok(agent) = built else {
-        return;
-    };
+        .pricing(|model, _| (model == MODEL).then_some(0.0))
+        .build()
+        .unwrap();
     let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+
+    assert_eq!(
+        replay.calls().get(&1),
+        None,
+        "no call after an unpriced one"
+    );
+    let (name, message) = error(&envelopes).unwrap();
+    assert_eq!(name, "BudgetAccountingError");
+    assert!(message.contains("price"), "{message}");
     let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
         panic!("no result");
     };
-    assert_eq!(
-        result.subtype,
-        ResultSubtype::Error,
-        "the run ended in success under a cost cap and no price"
-    );
+    assert_eq!(result.subtype, ResultSubtype::Error);
 }
 
 fn tree() -> Arc<Family> {
