@@ -273,6 +273,51 @@ fn an_offloaded_result_repeats_whatever_its_file_name() {
     assert!(trip.detail.contains("'Bash'"), "{}", trip.detail);
 }
 
+/// The window arithmetic, pinned: a cycle of 5 calls whose results change
+/// every time trips the input count (10 of one call in the latest 50
+/// results); a cycle of 6 never reaches 10 in 50 and is left to
+/// `max_turns` and the budget, which are unset by default.
+#[test]
+fn a_cycle_of_six_changing_calls_is_beyond_the_input_window() {
+    let cycle = |kinds: usize| {
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+        for n in 0..500 {
+            once(
+                &mut watch,
+                "Date",
+                json!({"call": n % kinds}),
+                &format!("t{n}"),
+            );
+            if watch.tool_trip().is_some() {
+                return Some(n + 1);
+            }
+        }
+        None
+    };
+    assert_eq!(cycle(5), Some(46), "the 10th call of the first kind");
+    assert_eq!(cycle(6), None, "500 calls and the run is still going");
+}
+
+/// A declared poll whose answer changes on every call (an elapsed time in
+/// a status line) is never "the same answer in a row" and is kept out of
+/// the input count: only the tool's own end (`poll_done`, a process
+/// timeout) or `max_turns` / the budget end such a run. Pinned as the
+/// documented limit.
+#[test]
+fn a_poll_whose_answer_changes_every_time_is_never_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), polling());
+    let poll = json!({"process_id": "job_1"});
+    for n in 0..500 {
+        once(
+            &mut watch,
+            "BashOutput",
+            poll.clone(),
+            &format!("elapsed {n}s"),
+        );
+    }
+    assert!(watch.tool_trip().is_none());
+}
+
 #[test]
 fn a_poll_that_runs_on_is_not_a_repeat_until_the_idle_bound() {
     let guard = LoopGuard {
