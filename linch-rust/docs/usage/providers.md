@@ -507,9 +507,12 @@ config = {
   summary after a context-length refusal and the hooks around a call do not
   hold a place, so a limit of 1 does not deadlock a run on itself.
 - **Scope.** All runs of the agent. Agents opened on one server that use the
-  same provider key and `base_url` share one limit, so `openai-chat` and
-  `openai-responses` on one `OPENAI_API_KEY` count together; a different key
-  variable or endpoint counts apart. Agents that ask for different numbers on
+  same provider key and `base_url` origin (scheme, host and port, as the
+  tenant's `provider_base_urls` match it) share one limit, so `openai-chat`
+  and `openai-responses` on one `OPENAI_API_KEY` count together, and so do
+  two `base_url`s that differ only in path or query; a different key variable
+  or origin counts apart. A config that leaves `base_url` unset and one that
+  spells out the provider's default are two origins to this count. Agents that ask for different numbers on
   one key share the limit of the first, which lasts until no open agent
   uses it. For a remote tenant that is every agent and run of the tenant
   ([the tenant's cap](./server.md#what-admission-refuses-and-why)). The

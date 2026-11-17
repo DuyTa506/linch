@@ -14,6 +14,7 @@ use linch_postgres::PgPool;
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use tokio::sync::OnceCell;
+use url::Url;
 
 use crate::error::OpenError;
 
@@ -37,8 +38,9 @@ use crate::error::OpenError;
 ///
 /// It also holds the provider gates of the agents opened with it. A config
 /// with `max_provider_concurrency` gets the gate for its provider key and
-/// endpoint (the key variable and the `base_url`, so `openai-chat` and
-/// `openai-responses` on one `OPENAI_API_KEY` share it), and agents
+/// endpoint (the key variable and the origin of the `base_url`, so
+/// `openai-chat` and `openai-responses` on one `OPENAI_API_KEY` share it,
+/// and so do two `base_url`s that differ in path or query only), and agents
 /// asking for the same one share a gate: all their runs together make at
 /// most that many provider calls at once. A gate has the size of the open
 /// that created it, as a pool does, and goes once no open agent uses it. So
@@ -56,22 +58,27 @@ pub struct PgPools {
 }
 
 /// What a provider gate is shared by: the variable the provider reads its
-/// key from, and the endpoint it was told to call. The size is not part of
-/// it, or two agents' limits would add up.
+/// key from, and the origin (scheme, host and port) of the endpoint it was
+/// told to call, which is what tenant admission matches `base_url` by: a
+/// path, a query or a spelling of the same origin never makes a gate of its
+/// own. The size is not part of it, or two agents' limits would add up.
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct GateKey {
     /// Empty for a provider with no key of its own (the scripted one).
     key_env: &'static str,
+    /// The endpoint's serialized origin; the text itself, without trailing
+    /// slashes, when no URL reads it.
     endpoint: String,
 }
 
 impl GateKey {
     pub(crate) fn new(key_env: &'static str, endpoint: Option<&str>) -> Self {
-        let endpoint = endpoint.unwrap_or_default().trim_end_matches('/');
-        Self {
-            key_env,
-            endpoint: endpoint.to_owned(),
-        }
+        let endpoint = endpoint.unwrap_or_default();
+        let endpoint = match Url::parse(endpoint) {
+            Ok(url) if url.origin().is_tuple() => url.origin().ascii_serialization(),
+            _ => endpoint.trim_end_matches('/').to_owned(),
+        };
+        Self { key_env, endpoint }
     }
 }
 
@@ -279,6 +286,30 @@ mod tests {
         // Another `PgPools` shares nothing.
         let other = PgPools::new().gate(key("OPENAI_API_KEY", "http://a/v1"), two);
         assert_eq!(other.max(), two);
+    }
+
+    #[test]
+    fn path_and_query_variants_of_one_origin_share_a_gate() {
+        let two = NonZeroU32::new(2).unwrap();
+        let nine = NonZeroU32::new(9).unwrap();
+        let pools = PgPools::new();
+        let key = |url| GateKey::new("OPENAI_API_KEY", Some(url));
+        let _first = pools.gate(key("https://x/v1"), two);
+        for same in [
+            "https://x/v1?a",
+            "https://x/v1//",
+            "https://x:443/other?b=1#c",
+            "HTTPS://X",
+            "https://user:pw@x/v1",
+        ] {
+            assert_eq!(pools.gate(key(same), nine).max(), two, "{same}");
+        }
+        for other in ["http://x/v1", "https://x:8443/v1", "https://y/v1"] {
+            assert_eq!(pools.gate(key(other), nine).max(), nine, "{other}");
+        }
+        // A string no URL reads is its own key, trailing slashes aside.
+        let _odd = pools.gate(key("not a url/"), two);
+        assert_eq!(pools.gate(key("not a url"), nine).max(), two);
     }
 
     #[test]

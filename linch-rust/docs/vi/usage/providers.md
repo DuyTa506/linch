@@ -507,8 +507,11 @@ config = {
   thử lại, bản tóm tắt sau khi bị từ chối vì độ dài ngữ cảnh và các hook quanh một
   lời gọi không giữ chỗ, nên giới hạn 1 không làm một run tự kẹt.
 - **Phạm vi.** Mọi run của agent. Các agent mở trên cùng một server và dùng cùng key
-  provider và `base_url` chia sẻ một giới hạn, nên `openai-chat` và `openai-responses`
-  trên một `OPENAI_API_KEY` được đếm chung; biến key hoặc endpoint khác thì đếm riêng.
+  provider và origin của `base_url` (scheme, host và port, đúng như `provider_base_urls`
+  của tenant khớp) chia sẻ một giới hạn, nên `openai-chat` và `openai-responses`
+  trên một `OPENAI_API_KEY` được đếm chung, hai `base_url` chỉ khác path hoặc query cũng
+  vậy; biến key hoặc origin khác thì đếm riêng. Một config để trống `base_url` và một
+  config ghi rõ URL mặc định của provider được tính là hai origin.
   Các agent xin số khác nhau trên một key dùng giới hạn của agent đầu tiên, giữ đến khi
   không agent nào đang mở còn dùng nó. Với tenant từ xa, đó là mọi agent và run của
   tenant ([mức trần của tenant](./server.md#những-gì-admission-từ-chối-và-lý-do)). Giới hạn

@@ -175,6 +175,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A stored agent definition (which holds the config's MCP env and header values) is deleted once no schedule and no unfinished job names it: `linch_worker::prune_definitions`, which a worker runs with the history pruning, from its first poll and every 10 minutes after.
 - `linch-worker`: `Timing` (cron in a time zone, or an interval), `create_schedule` with an optional `Cap`, `get_schedule`, `pause_schedule`, `resume_schedule`, `delete_schedule`, `enqueue` with a stored agent definition, `AgentFactory` and `Worker::definitions`, `job`, `jobs` and `prune_history`, and `WorkerConfig::history_retention` (7 days). A job that ends moves to `linch_worker_history` instead of being deleted.
 
+### Fixed
+
+- A provider gate is keyed by the origin (scheme, host, port) of `base_url` plus the key variable, as tenant admission matches it, so `https://x/v1`, `https://x/v1?a` and `https://x/v1//` share one gate instead of each getting its own.
+
 ### Changed
 
 - A worker's history pruning also deletes failed jobs that failed more than `history_retention` ago (`prune_history` counts them); they stayed in `linch_worker_jobs` forever.
