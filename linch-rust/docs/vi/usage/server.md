@@ -131,6 +131,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
 | `memory` | `false`: không có bộ nhớ dài hạn | Config có được bật [`memory`](./memory.md#built-in-long-term-memory) hay không |
 | `max_memories` | không có, từ chối `memory` (server không nạp config có `memory` mà không có cap) | Số memory nó được giữ trong mọi namespace của một database; `max_memories` và `max_memories_per_scope` của agent bị giữ dưới mức này |
+| `required_policy` | không có | Một [`spec.policy`](./agent.md#policy) mà mọi agent của tenant đều mang; policy riêng của tenant được thêm vào nó và không thể gỡ bỏ hay làm yếu nó ([bên dưới](#những-gì-admission-từ-chối-và-lý-do)) |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không
@@ -365,11 +366,12 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `context_budget` | Hơn 32 id trong `drop_order` hoặc `pinned`, hoặc một id dài quá 128 byte | Server giữ chúng cho từng agent |
 | `tool_cache` | `spec.tool_cache` mà không có `allow.tool_cache`; không có `spec.redaction` bao phủ kết quả tool; với `scope: "namespace"` mà không có `allow.tool_cache_shared`; hoặc vượt giới hạn của nó (`max_entries` 1024, `ttl_ms` 3600000, `max_value_bytes` 1048576, 32 tool) | Các mục do server lưu, nên thứ một tool trả về phải được redact trước, và một kết quả chỉ được phục vụ cho session khác khi operator cho phép. Bảng hoặc bộ nhớ chúng chiếm thuộc về operator |
 | `tool_retry` | `spec.tool_retry.max_attempts` lớn hơn 5, `max_delay_ms` lớn hơn 60000, hoặc một danh sách dài quá 32 tên | Mỗi lần retry là một lần ghi bền và một khoảng chờ mà run giữ một slot suốt thời gian đó. Không có `allow.tool_retry`: một lần retry chỉ lặp lại một tool mà agent vốn đã gọi được, nên các mức trần là toàn bộ cơ chế kiểm soát |
+| `policy` | Hơn 32 prerequisite hoặc gate, hơn 32 tool hoặc keyword trong một mục, một văn bản dài quá 1024 byte, `max_corrections` lớn hơn 16, hoặc một gate định nghĩa lại gate của `required_policy` | Server kiểm tra từng rule trên mọi batch tool và mọi câu trả lời cuối cùng, và mỗi lần sửa là một lời gọi provider mà policy yêu cầu; các gate của operator không thuộc quyền thay đổi của tenant |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
 | `tool_choice` | Một `tool_choice` bị ép (`required`, hoặc một tool không phải final tool), trong spec hoặc trong `run.start`, trên một agent không có `max_turns` và không có `final_tool_name` (riêng output schema không kết thúc run trên mọi provider) | Model bị ép gọi một tool mỗi lượt sẽ không bao giờ trả lời, và không budget nào kết thúc run |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
-không thể dò hệ thống tệp của server. Sáu thay đổi được thực hiện âm thầm thay vì từ
+không thể dò hệ thống tệp của server. Bảy thay đổi được thực hiện âm thầm thay vì từ
 chối:
 
 - Khi không có `exec_tools`, `bash` của cấu hình bị tắt và agent mở mà không có
@@ -385,6 +387,12 @@ chối:
   section của cấu hình có cùng tên bị thay bằng section của operator
   (`allow.system_sections`). Chúng không được tính vào giới hạn ở trên, và
   `replace_defaults` để chúng lại.
+- Với `required_policy`, `spec.policy` của cấu hình được gộp với nó trước khi agent
+  được xây dựng, nên nó là một phần của hợp đồng của run: một prerequisite lấy hợp của
+  các yêu cầu của hai bên, các gate của operator được giữ nguyên (tenant có thể thêm
+  gate dưới tên khác, hoặc lặp lại một gate y như cũ), và số lần sửa được phép là giá
+  trị nhỏ hơn trong hai mức trần. Một rule nêu một tool mà agent không có thì từ chối
+  open (`OpenError`), không bao giờ bị bỏ đi.
 
 ---
 

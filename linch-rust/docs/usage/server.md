@@ -130,6 +130,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
 | `memory` | `false`: no long-term memory | Whether a config may turn on [`memory`](./memory.md#built-in-long-term-memory) |
 | `max_memories` | none, which refuses `memory` (the server will not load a config with `memory` and no cap) | Memories it may keep in all its namespaces of a database; an agent's own `max_memories` and `max_memories_per_scope` are held to it |
+| `required_policy` | none | A [`spec.policy`](./agent.md#policy) every agent of the tenant carries; the tenant's own policy is added to it and cannot remove or weaken it ([below](#what-admission-refuses-and-why)) |
 | `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |
 
 The live providers at their public endpoints and the memory stores need no
@@ -364,11 +365,12 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `context_budget` | More than 32 ids in `drop_order` or `pinned`, or an id over 128 bytes | The server keeps them per agent |
 | `tool_cache` | `spec.tool_cache` without `allow.tool_cache`; without `spec.redaction` over tool results; with `scope: "namespace"` and no `allow.tool_cache_shared`; or past its bounds (`max_entries` 1024, `ttl_ms` 3600000, `max_value_bytes` 1048576, 32 tools) | Entries are stored by the server, so what a tool returned must be redacted first, and a result is served to another session only when the operator allows. The table or memory they take is the operator's |
 | `tool_retry` | `spec.tool_retry.max_attempts` above 5, `max_delay_ms` above 60000, or a list over 32 names | Every retry is a durable write and a wait the run holds a slot through. There is no `allow.tool_retry`: a retry only repeats a tool the agent could already call, so the caps are the whole control |
+| `policy` | More than 32 prerequisites or gates, more than 32 tools or keywords in one, a text over 1024 bytes, `max_corrections` above 16, or a gate that redefines one of `required_policy`'s | The server checks each rule on every tool batch and final answer, and each correction is a provider call the policy asks for; the operator's gates are not the tenant's to change |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
 | `tool_choice` | A forced `tool_choice` (`required`, or a tool that is not the final tool), in the spec or in `run.start`, on an agent with no `max_turns` and no `final_tool_name` (an output schema alone does not end the run on every provider) | A model forced to call a tool every turn never answers, and no budget ends the run |
 
 A path that does not exist is refused like one outside the roots, so a
-client cannot probe the server's file system. Six changes are made
+client cannot probe the server's file system. Seven changes are made
 silently instead:
 
 - Without `exec_tools`, the config's `bash` is turned off and the agent opens
@@ -385,6 +387,13 @@ silently instead:
   section of the config with the same name is replaced by the operator's
   (`allow.system_sections`). They are not counted against the bound
   above, and `replace_defaults` leaves them in.
+- With `required_policy`, the config's `spec.policy` is merged with it
+  before the agent is built, so it is part of the run contract: a
+  prerequisite takes the union of both sides' requirements, the operator's
+  gates stand (the tenant may add gates under other names, or repeat one
+  as it is), and the corrections allowed are the lesser of the two caps. A
+  rule naming a tool the agent lacks refuses the open (`OpenError`), never
+  dropped.
 
 ---
 

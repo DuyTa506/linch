@@ -212,6 +212,7 @@ absent, except `bash`.
 | `verification` | none | Checks the final answer must pass and the retry budget they share with `stop` callbacks, `{"max_retries"?, "verifiers"?}` ([Security](./security.md#verifiers)) |
 | `truncation_recovery` | none: a cut answer is final | Continue a text answer the output limit cut off, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
 | `loop_guard` | on: 3 identical calls with the same result, 10 identical inputs, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_identical_inputs"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
+| `policy` | none: nothing is checked | Tools that may only run after others succeeded, and what a final answer must satisfy, `{"prerequisites"?, "gates"?, "max_corrections"?}` ([below](#policy)) |
 
 ### System blocks
 
@@ -356,6 +357,85 @@ say a poll is done with the metadata `{"poll_done": true}`. Python's
 The default is not written into the spec, so leaving `loop_guard` out keeps
 the [run contract](#the-run-contract) of an agent from before the guard,
 and its runs still resume; any other value changes the contract.
+
+### `policy`
+
+`spec.policy` states what a run must do in order: which tools may only run
+after others succeeded (prerequisites), and what a run must have done
+before it may end (completion gates). Unset, nothing is checked.
+
+```python
+spec = {
+    "model": "deepseek-flash",
+    "policy": {
+        "prerequisites": [{"tool": "Edit", "requires": ["Read"]}],
+        "gates": [
+            {"name": "tested", "succeeded": ["Test"]},
+            {"name": "cites", "check": {"type": "matches", "pattern": "\\[\\d+\\]"}},
+        ],
+        "max_corrections": 2,
+    },
+}
+```
+
+**Prerequisites.** A call of `tool` is answered with an error result that
+names what to run first, and does not run, until every tool in `requires`
+has succeeded in an earlier tool batch of the run. Calls of one batch never
+unlock each other. A call counts as a success when its result is not an
+error: an interrupted call, a denied one and a `run_in_background` start
+(which only acknowledges) do not. The refusal comes before the call's
+`pre_tool_use` callbacks and before permission, so a refused call asks
+nobody for approval. The run records a `policy` event (`rule`
+`prerequisite`, `action` `refuse`) once per refused call.
+
+A prerequisite is an ordering aid for the model, **not a security
+boundary**. It guards the calls of one run; a tool that can start other
+work (`Bash`, a subagent) can do what a refused tool would. Keep
+[permissions and the sandbox](./security.md) for security. Python Linch's
+`ToolPrerequisite` is the same rule; here a subagent's own calls take the
+parent's prerequisites over its own run.
+
+A refused batch fails like any other: the [loop guard](#loop_guard) counts a
+batch in which every call was refused as a failed batch, so a model that
+ignores the message three times in a row ends the run.
+
+**Gates.** A final answer (text, or the input of the final tool) is checked
+before the output schema, the verifiers and the `stop` callbacks. A gate
+holds when each tool in `succeeded` has succeeded `min_calls` times (1 by
+default) in the run, and the answer passes `check`, one of the
+[verifier checks](./security.md#verifiers). When a gate fails, the run goes
+on: the answer goes back to the model as a system reminder naming what is
+missing, one correction turn for the failure, answering every gate that
+failed at once (`feedback` replaces the default sentence). A correction is
+a `policy` event (`rule` `completion`, `action` `correct`, `attempt` the
+corrections spent). Once `max_corrections` (2 by default, in all, across
+the gates) are spent, the next failure ends the run `failed`: a `policy`
+event with `action` `stop`, an `error` named `PolicyGateError`, and a
+`result` of subtype `error` carrying the last answer. A gate never lets the
+answer through, unlike a verifier, which accepts it once its retries are
+spent. `max_corrections: 0` ends the run at the first failure.
+
+A correction turn has a provider call and runs no tool, so the loop guard
+counts it as neither an idle nor a repeated turn; `max_turns` and the
+budget bound it like any turn. Gates are not checked on runs that end
+another way (the turn limit, the budget, a failure).
+
+`agent.open` refuses a policy that cannot run (`OpenError`, code -32011): a
+tool the agent does not have, the final tool (its call never runs, so it
+could never succeed), a prerequisite cycle, two entries for one tool, a
+gate with neither `succeeded` nor `check`, a repeated or blank gate name, or
+a `check` that does not compile. `policy: {}` is allowed and does nothing,
+but it is set, so it changes the contract.
+
+Nothing is checkpointed. The successes, the refusals made and the
+corrections spent are read back from the run's log on a resume, so a crash
+at any write cannot skip a gate, spend a correction twice or report a
+refusal twice. A subagent's runs take the prerequisites, not the gates (it
+answers its parent in text, with tools of its own). Policy is part of the
+[run contract](#the-run-contract): leaving it out keeps the contract of an
+agent from before policies, and any policy changes it. A remote tenant
+adds to the policy its operator requires and cannot remove it
+([Server](./server.md#what-admission-refuses-and-why)).
 
 ### `budget`
 

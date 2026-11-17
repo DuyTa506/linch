@@ -218,6 +218,16 @@ dịch được hoặc khớp văn bản rỗng, và một keyword rỗng hoặc
 -32011). Một tenant từ xa được đưa tối đa 32 verifier, mỗi verifier có một pattern tối
 đa 1024 byte hoặc tối đa 32 keyword (`NotAllowed`, `kind` là `verification`).
 
+## Thứ tự tool và completion gate
+
+[`spec.policy`](./agent.md#policy) từ chối một lời gọi cho tới khi các tool nó cần đã
+thành công, và giữ một câu trả lời cuối cùng lại cho tới khi run đã làm xong điều nó
+phải làm. Một gate làm run thất bại khi model không tuân theo (một verifier chấp nhận câu
+trả lời khi các retry của nó đã hết). Nó là công cụ về độ tin cậy: một lời gọi bị từ
+chối không hỏi phê duyệt và không chạy gì, nhưng một prerequisite **không phải ranh giới
+bảo mật**, vì một tool có thể khởi động công việc khác làm được điều mà một tool bị từ
+chối sẽ làm. Permission, redaction và [sandbox](./sandbox.md) mới là các hàng rào.
+
 ## Các trang liên quan
 
 - [Tool](./tools.md): quy tắc quyền, phê duyệt.
