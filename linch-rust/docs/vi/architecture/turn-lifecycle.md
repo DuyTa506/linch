@@ -19,8 +19,10 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   checkpoint bền vững và chọn bước; nó không phát lại vòng lặp.
 - Run chỉ tiến lên khi stream của nó được poll. Drop stream là drop run ngay tại chỗ nó
   đang đứng, giống như một sự cố (`runner.rs:83-87`).
-- Loop guard của Python (lời gọi lặp lại, lỗi lặp lại) không nằm trong runner. Runner
-  chỉ phát `loop_guard` cho `max_turns` (`runner/end.rs:93-108`).
+- Loop guard kết thúc một run bị kẹt trước lời gọi provider kế tiếp
+  ([bên dưới](#loop-guard)): các kiểm tra lời gọi lặp lại và lỗi lặp lại của Python,
+  bật mặc định, cùng một giới hạn cho số lượt không có lời gọi provider luôn bật
+  (`loop_guard.rs`, `runner/end.rs:156-170`).
 - Các hook point là hai mươi hai point trong [kernel](./kernel.md#chuỗi-hook), trong đó
   mười ba point chỉ quan sát. `before_provider_call` có thể viết lại hoặc block
   request sắp được gửi, và `after_provider_call` có thể viết lại hoặc block response
@@ -32,7 +34,8 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   một lần cho mỗi lần gọi run (`retry` của `before_final_answer` trong Python);
   `continue` của nó là `force_continue` của stop trong Python. `force_continue` của
   Python tại `before_provider_call` bỏ qua lời gọi: feedback được ghi log như một
-  stop feedback và run chạy thêm một lượt, chỉ bị giới hạn bởi `max_turns`. Python
+  stop feedback và run chạy thêm một lượt, bị giới hạn bởi `max_turns` và bởi
+  `max_idle_turns` của loop guard. Python
   cũng chạy point đó trên một response được resume mà các lời gọi tool của nó chưa
   có kết quả, và trả lời chúng bằng feedback (`src/linch/loop/runner.py:767-783`);
   một lần resume response đó trong Rust đi tiếp tới các lời gọi tool của nó và không
@@ -190,7 +193,47 @@ ghép các phần lại
   `structured_output` của result (`turn.rs:441-448`).
 
 `max_turns` là điều kiện dừng của vòng lặp: lời gọi sẽ vượt quá giới hạn này không được
-thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:93-108`).
+thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:138-154`).
+
+### Loop guard
+
+`spec.loop_guard` (`loop_guard.rs:59`) kết thúc một run bị kẹt, kể cả khi `max_turns`
+chưa đặt. Nó bật mặc định; giá trị mặc định không được ghi lên wire, nên hợp đồng của
+một spec không đặt nó không đổi.
+
+| Kiểm tra | Mặc định | Kích hoạt | Kiểm tra khi |
+|---|---|---|---|
+| `max_identical_tool_calls` | 3 | Một tool được gọi với cùng input (JSON chuẩn tắc) chừng này lần trong run, mỗi lần có kết quả không phải lỗi | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:303`) |
+| `max_consecutive_failures` | 3 | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi; một batch có một lời gọi thành công thì đếm lại từ đầu | Như trên |
+| `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:415`) |
+
+0 tắt một trong hai kiểm tra đầu; `max_idle_turns` tối thiểu là 1, nên giới hạn số
+lượt không có lời gọi provider luôn bật. Một lượt như vậy không bao giờ chạm tới budget và lần nào cũng
+nối vào session, nên nếu không có giới hạn này, một hook luôn bỏ qua lời gọi sẽ lặp
+cho đến khi run bị hủy.
+
+Một lần kích hoạt là một lần ghi terminal: event `loop_guard` (`reason`
+`repeated_tool_call`, `repeated_failures` hoặc `idle_turns`, `action` `stop`), một
+`Error` tên `LoopGuardError` mang `detail` của event, và một `Result` failed với
+`stop_reason` `error` (`end.rs:156-170`). Một lần kích hoạt do tool xảy ra sau khi kết
+quả đã nằm trong session, nên chúng vẫn được ghép cặp; không có `post_turn` nào chạy
+cho lượt đó.
+
+Python đếm mọi lời gọi được yêu cầu là một lần lặp. Ở đây một lời gọi có kết quả là
+lỗi thì không được đếm, vì chính Linch yêu cầu model lặp lại một số lời gọi bị từ chối
+(một tool bị hoãn: `call tool_search with select:X first`); các lời gọi cứ lỗi mãi
+thuộc về chuỗi lỗi. `force_final_answer` của Python (thêm một lượt không có tool)
+không được port: kích hoạt là dừng.
+
+Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:134`) gộp các
+event bền vững của run: một event `assistant` nêu tên các lời gọi của response đó,
+event user `tool_result` kế tiếp đếm những lời gọi không lỗi và cập nhật chuỗi lỗi,
+và một `model_call_delivery` chính ghi lại lượt của nó. Run đang chạy gộp cùng các
+event này khi stage chúng (`Runner::stage_seen`, `turn.rs:350`), và một lần resume gộp
+các event đã lưu (`start.rs:472`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
+quả cùng checkpoint `ToolResults`, một delivery trước lời gọi của nó), và lượt lấy từ
+checkpoint, nên một sự cố ở bất kỳ lần ghi nào cũng resume với đúng các con số mà run
+đã có và kích hoạt tại cùng điểm (`tests/e2e_loop_guard.rs`).
 
 ## Barrier và group commit
 
@@ -500,7 +543,8 @@ thái cuối của chúng, dựng `Result` và gọi `Journal::finish` (`runner/
 | Abort | `aborted` | Cancel token đã kích hoạt (`end.rs:61-64`), hoặc `Agent::cancel` đã kết thúc một run bị suspend (`runner/cancel.rs`) |
 | Hook fail closed | `failed` | Một hook `stop` fail closed (`end.rs:66-74`) |
 | Giới hạn đầu ra | `failed` | Response không có văn bản hoặc lời gọi tool trọn vẹn (`end.rs:76-90`) |
-| Giới hạn lượt | `failed` | Đạt `max_turns`, kèm một event `loop_guard` (`end.rs:92-108`) |
+| Giới hạn lượt | `failed` | Đạt `max_turns`, kèm một event `loop_guard` (`end.rs:138-154`) |
+| Loop guard | `failed` | Loop guard kích hoạt, kèm một event `loop_guard` và một `LoopGuardError` (`end.rs:156-170`, [ở trên](#loop-guard)) |
 | Budget | `failed` | Budget không cho phép thêm lời gọi nào (`end.rs:110-122`) |
 | Lỗi provider | `failed` | Lời gọi thất bại, và không có retry hay model fallback nào nhận nó (`turn.rs:343-346`, `runner/retry.rs`) |
 

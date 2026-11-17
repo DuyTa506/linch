@@ -351,6 +351,7 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `execution` | Một `execution` không bằng mục `allow.execution` nào, hoặc có một cái khi danh sách đó rỗng | Backend quyết định `Bash` chạm tới được gì; policy của nó thuộc về operator |
 | `redaction` | Hơn 32 rule trong `spec.redaction`, hoặc một pattern dài quá 1024 byte | Server biên dịch từng pattern và chạy nó trên mọi response và kết quả tool |
 | `verification` | Hơn 32 verifier trong `spec.verification`, một pattern dài quá 1024 byte, hoặc hơn 32 keyword trong một verifier | Tương tự, cho mọi câu trả lời cuối cùng |
+| `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
 không thể dò hệ thống tệp của server. Bốn thay đổi được thực hiện âm thầm thay vì từ
