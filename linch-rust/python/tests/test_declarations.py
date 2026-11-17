@@ -118,7 +118,7 @@ async def test_a_plain_function_is_a_tool_and_a_callback_run_in_a_thread() -> No
 
     assert sync.input_schema["required"] == ["q"]
     assert await sync.fn(q="a") == "a:False"
-    assert (await stop.fn({}))["thread"] is True  # type: ignore[misc]
+    assert (await stop.fn({}))["thread"] is True
 
 
 def test_an_unsupported_hint_asks_for_an_explicit_schema() -> None:
