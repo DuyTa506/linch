@@ -292,3 +292,42 @@ fn a_tenant_may_have_a_required_policy() {
     let error = config.build(no_env).unwrap_err();
     assert!(error.to_string().contains("required_policy"), "{error}");
 }
+
+#[test]
+fn every_tenant_of_a_server_claims_runs_under_one_opaque_server_id() {
+    let text = |extra: serde_json::Value| {
+        let mut config = json!({"http": "127.0.0.1:1",
+            "tenants": {"acme": {"tokens": [{"value": "tok-acme-inline-0001"}]},
+                        "beta": {"tokens": [{"value": "tok-beta-inline-0001"}]}}});
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        config.to_string()
+    };
+    // Absent: 8 random hex characters, shared, and different per build.
+    let config = ServerConfig::from_json(&text(json!({}))).unwrap();
+    let built = config.build(no_env).unwrap();
+    let id = &built.server_id;
+    assert!(
+        id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{id}"
+    );
+    assert!(built.tenants.iter().all(|tenant| tenant.server_id() == id));
+    assert_ne!(config.build(no_env).unwrap().server_id, *id);
+    // Set: that name, for every tenant.
+    let named = ServerConfig::from_json(&text(json!({"server_id": "ops-a.1"}))).unwrap();
+    let built = named.build(no_env).unwrap();
+    assert_eq!(built.server_id, "ops-a.1");
+    assert!(
+        built
+            .tenants
+            .iter()
+            .all(|tenant| tenant.server_id() == "ops-a.1")
+    );
+    // A name that is blank, too long or not plain ASCII is refused at load.
+    for bad in ["", "a b", "host/name", &"x".repeat(65)] {
+        let error = ServerConfig::from_json(&text(json!({"server_id": bad}))).unwrap_err();
+        assert!(error.to_string().contains("server_id"), "{bad:?}: {error}");
+    }
+}

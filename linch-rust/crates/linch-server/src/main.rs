@@ -151,13 +151,14 @@ async fn listen(path: &PathBuf) -> Result<(Listeners, Option<BackgroundWorker>),
     let built = config.build(env).map_err(|error| fail(error.to_string()))?;
     let worker = match &config.worker {
         Some(section) => Some(
-            (BackgroundWorker::start(section, &built.tenants, env).await)
+            (BackgroundWorker::start(section, &built.tenants, &built.server_id, env).await)
                 .map_err(|error| fail(error.to_string()))?,
         ),
         None => None,
     };
     let listeners = (Listeners::bind(&config, built.tokens).await)
         .map_err(|error| fail(format!("cannot listen: {error}")))?;
+    eprintln!("linch-server: server id {}", built.server_id);
     if let Some(socket) = listeners.socket_path() {
         eprintln!("linch-server: listening on unix:{}", socket.display());
     }

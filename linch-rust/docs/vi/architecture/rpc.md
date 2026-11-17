@@ -137,7 +137,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32030 | `SESSION_BUSY` | `SessionBusy` | Session đã có một run chưa kết thúc; `data: {session_id, run_id}` |
 | -32031 | `INVALID_OUTPUT_SCHEMA` | `InvalidOutputSchema` | `output_schema` của `run.start` không compile, hoặc root của nó không phải object; `data.reason` |
 | -32032 | `INVALID_ANSWER` | `InvalidAnswer` | Một `run.answer` không khớp các yêu cầu input đang chờ; `data.reason`. Run vẫn chờ input |
-| -32033 | `RUN_LEASED` | `RunLeased` | Một process khác điều khiển run và giữ lease còn sống; `data: {run_id, owner, expires_in_ms}` |
+| -32033 | `RUN_LEASED` | `RunLeased` | Một process khác điều khiển run và giữ lease còn sống; `data: {run_id, owner, expires_in_ms}`; `owner` là id của server đó (`Tenant::server_id` của tenant: 8 ký tự hex ngẫu nhiên, hoặc `server_id` của config), không bao giờ là tên host, đường dẫn hay pid |
 | -32034 | `INVALID_TOOL_CHOICE` | `InvalidToolChoice` | `tool_choice` của `run.start` nêu một tool mà run không cung cấp, hoặc provider từ chối nó; `data.reason` |
 | -32035 | `MODELS_UNSUPPORTED` | `ModelsUnsupported` | `provider.models` hay `provider.model` nêu một provider không có danh sách model (`scripted`); `data.provider` |
 | -32036 | `MODEL_NOT_FOUND` | `ModelNotFound` | `provider.model` nêu một model mà danh sách không có; `data.model`, và `data.truncated` khi danh sách bị cắt ngắn |

@@ -46,7 +46,7 @@ worker (không có `socket` hay `http`); khi đó các tenant của nó không c
 | Trường `worker` | Khi không có | Ý nghĩa |
 |---|---|---|
 | `dsn` | bắt buộc | `{"env": "VAR"}` hoặc `{"value": "..."}`: cơ sở dữ liệu và schema có hàng đợi mà nó phục vụ. Các run nền lưu qua nó |
-| `owner` | `linch-server-<pid>-<start time>` | Tên mà các job và claim run của nó mang; duy nhất cho mỗi worker |
+| `owner` | `server_id` của server | Tên mà các job và claim run của nó mang; duy nhất cho mỗi worker |
 | `queues` | `["default"]` | Các hàng đợi mà nó nhận job, lần lượt một job từ mỗi hàng đợi |
 | `max_jobs` | 32 | Số job nó chạy cùng lúc |
 | `max_connections` | kích thước pool mặc định | Pool riêng của nó cho hàng đợi; mỗi run dùng pool của tenant của nó |

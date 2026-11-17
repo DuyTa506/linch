@@ -551,7 +551,7 @@
 //! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |
 //! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
 //! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
-//! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
+//! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}` (`owner` is that server's opaque id, never a host name, path or pid); try again once that holder stops, at the latest after `expires_in_ms` |
 //! | -32034 | invalid tool choice | `RunError::InvalidToolChoice`: the `tool_choice` of `run.start` names a tool the run does not offer, or the provider refuses it, so nothing was written; `data: {reason}` |
 //! | -32035 | models unsupported | `provider.models` or `provider.model` on a provider with no model list; `data: {provider}` |
 //! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model, truncated?}` |
@@ -598,6 +598,7 @@ pub use access::{
     DEFAULT_MAX_RUNS, DEFAULT_MAX_WORKFLOW_FAN_OUT, DEFAULT_MAX_WORKFLOW_RECORD_BYTES,
     DEFAULT_MAX_WORKFLOW_RECORDS, DEFAULT_MAX_WORKFLOWS, DEFAULT_MIN_SCHEDULE_INTERVAL,
     DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens, WorkflowCaps,
+    new_server_id,
 };
 pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};

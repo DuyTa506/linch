@@ -190,8 +190,10 @@ resumes, approves or answers a run holds its lease and renews it every third
 of the lease's length while it drives the run, so a long model call or tool
 keeps it. Until that run stops, ends, or waits for an approval or an
 answer, another agent's `resume`, `approve` or `answer` is refused with
-`RunLeased` (code -32033) and writes nothing; `.owner` names the holder's
-owner and `.expires_in` the seconds its lease has left.
+`RunLeased` (code -32033) and writes nothing; `.owner` is the id of the server
+that holds it (opaque: 8 random hex characters, or the server's `server_id`;
+[Which server drives a run](./server.md#which-server-drives-a-run)) and
+`.expires_in` the seconds its lease has left.
 
 - A run whose stream ended with an error, or whose connection dropped, is
   released at once: another server can resume it right away. So are the

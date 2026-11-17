@@ -251,7 +251,8 @@ class RunLeased(RunError):
 
     @property
     def owner(self) -> str:
-        """The owner name the holder claimed the run under."""
+        """The id of the server that holds the run: opaque (8 hex characters, or
+        the server's configured `server_id`), the same for all its runs."""
         return _field(self.data, "owner")
 
     @property

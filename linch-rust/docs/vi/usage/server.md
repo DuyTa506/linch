@@ -429,6 +429,18 @@ nào và không mang key nào mà server tự đọc. Dưới systemd hoặc run
 thu thập; với `Server()` của client Python, thứ khởi động binary cho bạn, nó là stderr của
 process cha.
 
+## Server nào điều khiển một run
+
+Một run trên Postgres chỉ do một server điều khiển tại một thời điểm. Một resume, approve
+hay answer gửi tới server khác bị từ chối với `RunLeased` (-32033), mà `owner` của nó nêu tên
+server đang giữ run, để operator biết nên xem server nào. Tên đó là id của server: 8 ký tự hex
+ngẫu nhiên tạo lúc khởi động và in ra stderr (`linch-server: server id 3fa91c0b`), hoặc
+`server_id` của config (1 đến 64 chữ cái ASCII, chữ số, `.`, `_` hoặc `-`). Nó giống nhau cho
+mọi tenant và kết nối của process server đó và cho các hàng run mà nó claim, và đổi sau mỗi
+lần khởi động trừ khi được đặt. Tenant thấy nó trong lời từ chối, nên nó không chứa tên host,
+đường dẫn hay pid: một giá trị cấu hình cũng không nên. Hãy cho mỗi process server một id riêng;
+`worker.owner` mặc định là nó. Qua stdio mỗi process có một kết nối và id là của kết nối đó.
+
 ## Liveness
 
 Một client biến mất mà không đóng kết nối (mất điện, đứt route, một VM bị kill) sẽ giữ chỗ

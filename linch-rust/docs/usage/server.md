@@ -433,6 +433,21 @@ systemd or a container runtime stderr is already collected; with the
 Python client's `Server()`, which starts the binary for you, it is the
 parent's stderr.
 
+## Which server drives a run
+
+A run on Postgres is driven by one server at a time. A resume, approve or
+answer sent to another server is refused with `RunLeased` (-32033), whose
+`owner` names the server that holds the run, so an operator can tell which
+one to look at. The name is the server's id: 8 random hex characters made at
+startup and printed on stderr (`linch-server: server id 3fa91c0b`), or the
+`server_id` of the config (1 to 64 ASCII letters, digits, `.`, `_` or `-`).
+It is the same for every tenant and connection of that server process and
+for the run rows it claims, and it changes at each restart unless it is set.
+A tenant sees it in the refusal, so it holds no host name, path or pid: a
+configured one should not either. Give each server process its own;
+`worker.owner` defaults to it. Over stdio there is one connection per
+process and the id is that connection's.
+
 ## Liveness
 
 A client that vanishes without closing its connection (a power cut, a dropped

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use linch::{ExecutionConfig, PermissionMode, ReliabilityPolicy, SystemSection};
-use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens, WorkflowCaps};
+use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens, WorkflowCaps, new_server_id};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -39,6 +39,14 @@ pub struct ServerConfig {
     /// has a default.
     #[serde(default)]
     pub liveness: crate::liveness::LivenessConfig,
+    /// The name this server claims runs under: a refused resume (`-32033`)
+    /// shows it as the holder's `owner`, and an operator reads which server
+    /// drives the run from it. 1 to 64 ASCII letters, digits, `.`, `_` or
+    /// `-`; 8 random hex characters when absent, printed at startup. Make it
+    /// unique per server process, and not a host name or a pid, since a
+    /// tenant sees it.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
 /// The `worker` section: where the worker's queue is and how it runs.
@@ -53,7 +61,7 @@ pub struct WorkerSection {
     /// through the DSN of the agent that scheduled them.
     pub dsn: TokenSource,
     /// The owner name of its job holds and run claims; unique per worker.
-    /// `linch-server-<pid>-<start time>` when absent.
+    /// The server's `server_id` when absent.
     #[serde(default)]
     pub owner: Option<String>,
     /// The queues it serves, one job from each in turn; `["default"]`.
@@ -307,6 +315,9 @@ pub enum ConfigError {
         /// The field.
         field: &'static str,
     },
+    /// `server_id` is empty, too long or has other characters.
+    #[error("server_id must be 1-64 ASCII letters, digits, '.', '_' or '-'")]
+    ServerId,
     /// A keepalive field is over what the kernel's TCP options take, which
     /// would fail on every connection.
     #[error("liveness.{field} is over {max}, the most the kernel takes")]
@@ -352,6 +363,15 @@ impl ServerConfig {
         }
         if let Some((field, max)) = config.liveness.oversized_field() {
             return Err(ConfigError::OversizedLiveness { field, max });
+        }
+        if let Some(id) = &config.server_id {
+            let valid = (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+            if !valid {
+                return Err(ConfigError::ServerId);
+            }
         }
         for (name, tenant) in &config.tenants {
             let allow = &tenant.allow;
@@ -432,13 +452,14 @@ impl ServerConfig {
     pub fn build(&self, env: impl Fn(&str) -> Option<String>) -> Result<Built, ConfigError> {
         let mut tokens = Tokens::new();
         let mut tenants = Vec::new();
+        let server_id = self.server_id.clone().unwrap_or_else(new_server_id);
         for (name, tenant) in &self.tenants {
             let access = |source| ConfigError::Access {
                 tenant: name.clone(),
                 source,
             };
-            let built =
-                Arc::new(Tenant::new(name, tenant.allow.build().map_err(access)?).map_err(access)?);
+            let made = Tenant::new(name, tenant.allow.build().map_err(access)?).map_err(access)?;
+            let built = Arc::new(made.with_server_id(&server_id));
             for source in &tenant.tokens {
                 let token = match source {
                     TokenSource::Value(token) => token.clone(),
@@ -455,7 +476,11 @@ impl ServerConfig {
         if listens && tokens.is_empty() {
             return Err(ConfigError::NoToken);
         }
-        Ok(Built { tokens, tenants })
+        Ok(Built {
+            tokens,
+            tenants,
+            server_id,
+        })
     }
 }
 
@@ -466,6 +491,9 @@ pub struct Built {
     pub tokens: Tokens,
     /// Every tenant, each shared by its tokens.
     pub tenants: Vec<Arc<Tenant>>,
+    /// The name this server claims runs under: the config's `server_id`,
+    /// or a random one.
+    pub server_id: String,
 }
 
 impl WorkflowAllow {

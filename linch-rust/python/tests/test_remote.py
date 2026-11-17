@@ -21,7 +21,7 @@ from typing import Any, cast
 
 import pytest
 from scripted import MODEL, text_turn, tool_turn
-from test_resume import pg_dsn
+from test_resume import blocking_tool, pg_dsn
 
 from linch_rust import (
     AgentConfig,
@@ -354,7 +354,9 @@ async def test_a_leased_runs_refusal_names_the_server_that_drives_it(
             agent = await remote.open_agent(held, tools=[wait])
             await agent.run("s1", "Wait", run_id="held-1")
             await asyncio.wait_for(started.wait(), 10)
-            probe = await local.open_agent(acme([text_turn("Taken.")], stores=stores))
+            probe = await local.open_agent(
+                acme([text_turn("Taken.")], stores=stores), tools=[blocking_tool()[0]]
+            )
             with pytest.raises(RunLeased) as refused:
                 await (await probe.resume("held-1")).result()
 

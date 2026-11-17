@@ -48,7 +48,7 @@ no token.
 | `worker` field | When absent | Meaning |
 |---|---|---|
 | `dsn` | required | `{"env": "VAR"}` or `{"value": "..."}`: the database and schema whose queue it serves. Background runs store through it |
-| `owner` | `linch-server-<pid>-<start time>` | The name its job holds and run claims carry; unique per worker |
+| `owner` | the server's `server_id` | The name its job holds and run claims carry; unique per worker |
 | `queues` | `["default"]` | The queues it takes jobs from, one from each in turn |
 | `max_jobs` | 32 | Jobs it runs at once |
 | `max_connections` | the default pool size | Its own pool for the queue; each run uses its tenant's pool |
