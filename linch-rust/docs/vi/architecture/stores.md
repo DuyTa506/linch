@@ -90,8 +90,8 @@ holder, không theo tên owner, vì `RunOptions::owner` mặc định là `linch
 - **Release.** Một run dừng mà không suspend hay kết thúc (một lỗi, một stream bị drop)
   release lease của nó từ `Drop` của `Held`, trong một task sinh ra ghi một lần, để
   process khác không phải chờ hết TTL (`lease.rs:108-125`). Agent giữ từng task release
-  đó, và `Agent::released` (`crates/linch-core/src/agent.rs:452`) chờ chúng;
-  `OpenedAgent::close` chờ tối đa `RELEASE_WAIT` (5 s, `crates/linch/src/open.rs:348`)
+  đó, và `Agent::released` (`crates/linch-core/src/agent.rs:473`) chờ chúng;
+  `OpenedAgent::close` chờ tối đa `RELEASE_WAIT` (5 s, `crates/linch/src/open.rs:375`)
   trước khi ngắt kết nối, nên một `linch-server` thoát sau khi drop các run của nó vẫn
   giải phóng chúng. Một sự cố sập không release gì; lease tự hết hạn.
 - **Store trong bộ nhớ** không có TTL: chúng không bao giờ từ chối một claim, không

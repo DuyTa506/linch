@@ -65,7 +65,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Security](./security.md) | Permission modes and auto-allow, redaction of responses, tool results and prompts, final-answer verifiers and their budget, tool order and completion gates |
 | [Stores](./stores.md) | Memory and Postgres stores, DSNs, schemas, migrations, namespaces, pools |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
-| [Troubleshooting](./troubleshooting.md) | Errors from the server binary to runs and tools, with causes and fixes |
+| [Troubleshooting](./troubleshooting.md) | Errors from the server binary to runs, tools, schedules, workflows and provider questions, with causes and fixes |
 | [Skills](./skills.md) | The `Skill` tool, the built-in `verify` skill, skills in `config_dir/skills` |
 | [Subagents](./subagents.md) | The `Subagent` tool: foreground and background workers, continue, stop, fork, the mailbox |
 | [Tasks](./tasks.md) | The session task tools, and the task ledger shared by sessions |
@@ -74,7 +74,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Profiles](./profiles.md) | Versioned domain profiles for an agent's runs |
 | [Observability](./observability.md) | OpenTelemetry spans and metrics from the client |
 | [Monitoring](./monitoring.md) | What is traced, how cost is computed and priced, running an eval, reading a run report |
-| [Server](./server.md) | Running `linch-server` for remote tenants, and `Server.connect`: tokens, allowlists, limits |
+| [Server](./server.md) | Running `linch-server` for remote tenants, and `Server.connect`: tokens, allowlists, what admission refuses, limits, logging (`LINCH_LOG`), liveness checks for vanished clients |
 | [Workflows](./workflows.md) | A Python function that directs a known sequence of agent calls: fan-out, pipeline, steps, interrupts; journaled in Postgres so a crash resumes without repeating finished calls; handoff between steps; `run_or_resume` |
 | [Scheduler](./scheduler.md) | Cron and interval schedules in a time zone, heartbeats on one session, one-off background runs, schedule tools the model calls, job status, the worker that runs them |
 

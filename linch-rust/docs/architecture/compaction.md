@@ -32,7 +32,7 @@ What differs in Rust:
   image (`compaction.rs:193-226`). There is no pluggable token estimator.
 - A paid summary is kept whole in the `Compacted` checkpoint, not as a
   hash-only recipe. A resume appends it without another provider call
-  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:245-266`).
+  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:256-278`).
 - The projection is always written to the session store as a log entry
   (`runner/write.rs:83-98`). There is no store detection and no opt-in.
 
@@ -57,7 +57,7 @@ defaults, so the contract digest of a spec written before they existed is
 unchanged. `CompactionSpec::new(n)` sets the threshold and leaves the rest
 at their defaults (`compaction.rs:168-173`). `AgentBuilder::build` refuses a
 zero threshold, a zero `keep_recent_turns` or a zero `max_output_tokens`
-with `BuildError::Invalid` (`compaction.rs:176-191`, `agent/builder.rs:237`).
+with `BuildError::Invalid` (`compaction.rs:176-191`, `agent/builder.rs:240`).
 
 The spec is part of the run contract, so changing it makes agents with the old
 and the new setting incompatible: a resume of an old run is refused
@@ -66,9 +66,9 @@ and the new setting incompatible: a resume of an old run is refused
 ## When a run compacts
 
 A turn starts at `Step::Compact` when the spec has compaction, and at
-`Step::Dispatch` otherwise (`runner/turn.rs:313`). `compact` goes to the
+`Step::Dispatch` otherwise (`runner/turn.rs:319`). `compact` goes to the
 primary call without doing anything when any of these hold
-(`runner/compact.rs:72-127`):
+(`runner/compact.rs:72-132`):
 
 1. The run was cancelled: it aborts instead.
 2. `max_turns` or the budget already allows no more calls. The primary call
@@ -105,7 +105,7 @@ already no longer than the placeholder and holds no image (Python's test,
 that do not change are shared, not copied.
 
 If the cleared view is no longer due, `clear` records it and the turn goes
-on with its primary call (`runner/compact.rs:301-342`):
+on with its primary call (`runner/compact.rs:313-354`):
 
 1. `pre_compact` runs with strategy `micro`.
 2. The `compaction` event (strategy `micro`, `messages_before` equal to
@@ -118,7 +118,7 @@ on with its primary call (`runner/compact.rs:301-342`):
 That is one run write and one session write, and no provider call. If the
 cleared view is still due, the summary follows, and it reads the folded part
 with its tool results already cleared, as Python's does after its micro step
-(`runner/compact.rs:128-135`).
+(`runner/compact.rs:133-140`).
 
 Clearing changes messages in the middle of the view, so the provider's cached
 prefix ends at the first cleared result. That is why `micro` is off by
@@ -258,12 +258,12 @@ An accepted summary becomes a user message and a replacement view:
 
 The run then stages the `compaction` event (message and token counts before
 and after, the strategy, the duration, `forced`) and saves `Compacted` with
-the summary and `keep_from` (`runner/compact.rs:219-243`,
+the summary and `keep_from` (`runner/compact.rs:222-254`,
 `crates/linch-core/src/events/kinds/control.rs`). `Compacted` writes through
 with the receipt and `usage`, so a paid summary is never lost.
 
 Next, `compacted` writes the projection to the session
-(`runner/compact.rs:245-266`). `project` flushes the held checkpoint, appends
+(`runner/compact.rs:256-278`). `project` flushes the held checkpoint, appends
 a `LogEntry::Projection` to the session store in one write, records it in the
 in-memory log, then runs the agent's `on_compact` callbacks
 (`runner/write.rs:83-98`). The `Compacted` checkpoint is already durable, so
@@ -276,10 +276,10 @@ append (`runner/compact.rs:1-13`).
 ### `on_compact`
 
 `AgentBuilder::on_compact` registers a host callback run after every
-compaction projection, summary or micro (`agent/builder.rs:132`). It is not a
+compaction projection, summary or micro (`agent/builder.rs:135`). It is not a
 hook: it is not in the run contract and leaves no record. The `linch` facade
 uses it to forget the session's read evidence (`ReadTracker::forget`,
-`crates/linch/src/open.rs:191`), as Python's `reset_read_tracker` does: the
+`crates/linch/src/open.rs:218`), as Python's `reset_read_tracker` does: the
 model must read a file again before `Edit` or `Write` changes it, since what
 it read may have been folded away. On a resume that appends a projection, the
 callbacks run again; forgetting twice is harmless.
@@ -293,7 +293,7 @@ event is free, like any such refusal (`provider/call.rs:257`). The error
 event's `kind` is `context_length`.
 
 `dispatch` asks `overflow` before it treats the failure as final
-(`runner/turn.rs:464`, `runner/compact.rs:268-295`):
+(`runner/turn.rs:470`, `runner/compact.rs:280-307`):
 
 1. With `micro`, if any old tool result is worth clearing, `clear` records
    the cleared view (with `forced` set on the event) and goes to the next
@@ -408,7 +408,7 @@ When a response with text, no tool call and stop reason `max_tokens` arrives,
 and fewer than `max_attempts` were continued in the run, `received` keeps its
 text as a part and stages the feedback (the spec's, or `DEFAULT_FEEDBACK`, in
 a `<system-reminder>`) as the next user message, the same path a `stop`
-callback's `continue` takes (`runner/turn.rs:532-608`). The cut answer is
+callback's `continue` takes (`runner/turn.rs:538-614`). The cut answer is
 appended to the session like any response. The run's final text is the
 parts, in order, then the last response's text; that whole text is what the
 output schema, the verifiers and `stop` see. With redaction scrubbing

@@ -91,4 +91,4 @@ What differs from Python ([kernel](./kernel.md)): there is no IoC `Context` or
 event bus; the tool pipeline is three hook points ([kernel](./kernel.md#hook-chains)); extension points are traits (`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) and hook chains
 (`crates/linch-core/src/hooks.rs`) given to `AgentBuilder::hooks`
-(`crates/linch-core/src/agent/builder.rs:85-86`).
+(`crates/linch-core/src/agent/builder.rs:88-89`).

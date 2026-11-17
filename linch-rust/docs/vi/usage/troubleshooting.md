@@ -16,6 +16,10 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 | `OpenError` | -32010 đến -32015 | `open_agent`: cấu hình, provider, kho lưu trữ hoặc một MCP server bị lỗi |
 | `RunError` và các lớp con | -32020 đến -32034 và -32038 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
+| `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | Token, các kiểm tra tenant và giới hạn của server từ xa ([Server từ xa](#server-từ-xa-serverconnect)) |
+| `ProviderInfoError` và các lớp con | -32035 đến -32037 | `provider.models` và `provider.model`, hỏi trước khi mở agent |
+| `SchedulerError` và các lớp con | -32040 đến -32044 | Lời gọi schedule và job ([Scheduler](#lịch-và-run-nền)) |
+| `WorkflowError` và các lớp con | -32045 đến -32049 | Lời gọi workflow ([Workflow](#workflow)) |
 | `ConnectionClosed` | không có | Mọi lệnh gọi hoặc stream, khi server đã biến mất |
 | `LinchError` | không có | Lớp cơ sở của tất cả các lớp trên, và việc dùng sai `Server` |
 
@@ -95,6 +99,9 @@ Việc từ chối `open_agent` và `run` trên server từ xa là `NotAllowed` 
 | `invalid agent: the model must not be blank` | -32011 | `spec.model` để trống | Đặt một model |
 | `invalid agent: the namespace must not be blank` | -32011 | `namespace` để trống | Đặt một namespace |
 | `invalid agent: workers need subagents` | -32011 | Có `workers` mà không có `subagents: True` | Bật `subagents` |
+| `budget.max_cost_usd needs a price for the model "<model>", which has none: set ...` | -32011 | Một trần USD trên model không có giá, cả trong bảng có sẵn lẫn trong `pricing`: model chính hoặc một mục `fallback_models` (vLLM, DeepSeek, SGLang và llama.cpp không có giá có sẵn). Trước khi bị từ chối, trần này không bao giờ kích hoạt | Đặt [`pricing`](./agent.md#budget) cho model, hoặc giới hạn `max_tokens` |
+| `call_timeout_ms must be at least 100 (milliseconds)` | -32011 | `spec.call_timeout_ms` dưới 100 (`0` làm mọi lời gọi tool hết hạn ngay) | Dùng 100 trở lên, hoặc bỏ nó đi |
+| `a tenant agent needs a bound on its runs: set spec.max_turns or a spec.budget cap (max_tokens or max_cost_usd), ...` (`NotAllowed`, `kind == "run_bound"`) | -32004 | Agent của tenant không có `max_turns` lẫn trần token hay USD, kể cả `profile` và profile `deep_agent` | Đặt `max_turns` hoặc một trần budget ([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)) |
 | `profile unusable: profile id must not be blank` | -32011 | `profile.id` để trống (hoặc `version`, hoặc `max_turns` nhỏ hơn 1) | Sửa [profile](./profiles.md) |
 | `deep agent unusable: a durable deep agent needs durable stores; use the Postgres stores, or set durable to false for ephemeral use` | -32011 | Một profile deep agent tích hợp sẵn chạy trên kho lưu trữ trong bộ nhớ | Dùng kho Postgres, hoặc `"deep_agent": {"durable": False}` |
 | `deep agent unusable: unknown deep-agent profile "<name>"; choose one of: balanced, coordinator, unbounded` | -32011 | Tên profile sai chính tả | Dùng tên tích hợp sẵn hoặc một dict profile đầy đủ |
@@ -141,6 +148,10 @@ raise chúng.
 | `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Một server khác (một agent handle khác) đang điều khiển run trên Postgres, hoặc đã crash chưa đầy một lease trước; từ `agent.cancel`, một approve ở nơi khác vừa claim run bị tạm dừng | Chờ run đó dừng, hoặc thử lại sau `.expires_in` giây ([Kho lưu trữ](./stores.md#run-leases)) |
 | `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Một server khác đã tiếp quản run (server này đứng quá lease của nó) hoặc đã fail nó; từ `agent.cancel`, một approve hoặc answer đã claim run sau cancel, và nó tiếp tục | Ở đây không có gì để sửa: bên điều khiển mới của run đang giữ nó. Nếu server này bị tạm dừng, hãy kiểm tra các lần dừng GC hay mạng kéo dài, hoặc tăng `stores.lease_ttl_ms` |
 | `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (lý do nằm trong `.reason`) | `agent.answer` nêu tên một request không đang chờ, bỏ sót một câu hỏi chưa trả lời, hoặc đưa danh sách cho câu hỏi chọn một | Không có gì được ghi và run vẫn chờ; hãy trả lời lại ([Tool](./tools.md#hỏi-người-dùng)) |
+| `InvalidToolChoice` (-32034) | `run <id> was not started: its tool_choice is unusable: <reason>` | `agent.run(..., tool_choice=...)` nêu một tool mà run không cung cấp, hoặc provider từ chối nó | Chưa ghi gì; sửa lựa chọn ([Structured output](./structured-output.md)) |
+| `InvalidSteer` (-32038) | `run <id> cannot take this steer: <reason>` (`.reason`) | `agent.steer` với text trống, quá 16 KiB, id không dùng được, hoặc một run đang rảnh (xếp hàng, hoặc đang chạy mà không server nào điều khiển) | Chưa ghi gì; sửa text, hoặc resume run trước ([Run](./runs.md#steer)) |
+| `LimitReached` (-32005), `kind == "steers"` | `at most 16 steers at once; try again once one ends` | Run có 16 steer mà nó chưa đọc | Chờ bước kế tiếp của run, rồi steer lại |
+| `RunError` (-32020, -32024, -32028) | chính text của store hay journal | Một lỗi store, một lần ghi journal thất bại, hoặc trạng thái bền vững không khớp nhau; connection rớt giữa run là -32020 | Run ở trạng thái bền vững cuối: hãy resume nó; báo cáo -32028 |
 
 Do chính lệnh gọi raise:
 
@@ -160,12 +171,44 @@ một `result` có subtype `error`:
 | `error["message"]` | Nguyên nhân | Cách khắc phục |
 |---|---|---|
 | `max turns exceeded` (sau một event `loop_guard`) | Run đã đạt `spec.max_turns` | Tăng giới hạn, hoặc bắt đầu một run mới để tiếp tục |
+| `max_cost_usd cannot count a call the pricing has no price for; set a price for the model that served it or cap max_tokens` (`BudgetAccountingError`) | Một run có trần chi phí mà provider phục vụ một model không có trong pricing (id mà provider báo, không phải `spec.model`) | Đặt khóa `pricing` theo các id mà provider báo, hoặc giới hạn `max_tokens` ([Cấu hình agent](./agent.md#budget)) |
 | fragment: `provider returned HTTP <status>:` | Provider từ chối lệnh gọi; `error["retryable"]` cho biết thử lại có thể giúp hay không | Kiểm tra khóa và model với 401, 403 hoặc 404; với 408, 429 và 5xx thì run đã tự thử lại tới `max_attempts` của [`spec.provider_retry`](./providers.md#lỗi-và-thử-lại); hãy thêm `fallback_models` hoặc thử lại sau |
 | fragment: `prompt exceeds the model's context window:` (`kind` `context_length`) | Provider từ chối prompt vì dài hơn context window của model. Trước khi lỗi này được nhận diện, nó hiện là `provider returned HTTP 400:` | Đặt [`spec.compaction`](./memory.md#when-the-prompt-does-not-fit): run khi đó rút gọn view và gọi lại |
 | `the prompt exceeds the model's context window, and the compaction it forced could not shorten it` | Có `spec.compaction` nhưng không còn gì để gộp, `max_forced` đã dùng hết, hoặc bản tóm tắt bắt buộc thất bại | Giảm `keep_recent_turns`, bật `micro`, tăng `max_forced`, hoặc giữ tool result và block `context_build` nhỏ hơn |
 | fragment: `provider connect error:` (`kind` `connect`) | Kết nối chưa bao giờ được thiết lập (bị từ chối, DNS, TLS, hết thời gian kết nối), nên request chưa được gửi đi | Kiểm tra `base_url` của provider và mạng; run đã tự thử lại rồi |
 | fragment: `provider transport error:` (`kind` `transport`) | Request đã gửi đi nhưng không có câu trả lời nào về, hoặc stream bị đứt | Run đã tự thử lại rồi; dưới một `budget` có giới hạn thì không thể, vì lời gọi có thể đã bị tính tiền |
 | `invalid provider request: scripted provider ran out of turns after <n>` | Một bài kiểm thử scripted cần nhiều lượt hơn số lượt đã có | Thêm các lượt còn thiếu |
+
+## Lịch và run nền
+
+| Raise | Nguyên nhân | Cách khắc phục |
+|---|---|---|
+| `NotBackground` (-32040) | `schedule.create` hay `job.enqueue` cho một agent không chạy nền được; `.reason` là `memory_store`, `host_tools`, `callbacks` hoặc `remote_execution` (backend thực thi `remote` trả lời trên connection của client) | Dùng store Postgres, không host tool hay callback, và một backend `local`, `sandbox` hay `docker` ([Scheduler](./scheduler.md#agent-nào-chạy-nền-được)) |
+| `ScheduleNotFound` (-32041), `ScheduleExists` (-32042), `JobNotFound` (-32043) | Một schedule không biết, một id schedule đã dùng, một job không biết hoặc đã bị dọn | Kiểm tra id và namespace của agent |
+| `InvalidSchedule` (-32044) | Một mẫu cron không parse được hoặc không bao giờ kích hoạt, múi giờ không biết, interval ngoài khoảng, hoặc có cả hai hay không có `cron` lẫn `interval_ms`; `.reason` | Sửa thời gian |
+| Một job thất bại với lý do nêu `max_turns` và budget | Một định nghĩa đã lưu từ trước khi tenant phải giới hạn run (`run_bound`); mỗi lần kích hoạt của schedule cũng thất bại như vậy, và `job.list` hiển thị lý do | Đặt `max_turns` hoặc một trần budget, mở lại agent và lập lịch lại |
+| Một job thất bại với `the agent definition does not decode` | Định nghĩa đã lưu không còn decode được; nguyên nhân nằm trong log của server (`LINCH_LOG`) | Mở lại agent và lập lịch lại |
+
+## Workflow
+
+| Raise | Nguyên nhân | Cách khắc phục |
+|---|---|---|
+| `WorkflowHeld` (-32045) | Một client, connection hay server khác điều khiển workflow, hoặc một client đã crash mà chưa bị phát hiện (khoảng một phút: [liveness](./server.md#liveness)) | Thử lại sau một phút |
+| `WorkflowBudgetExceeded` (-32046) | `budget` đã hết; hoặc `data["kind"] == "unpriced"`: budget `max_cost_usd` trên model không có giá | Tăng budget và bắt đầu lại cùng `run_id`; đặt `pricing` hoặc giới hạn `max_tokens` |
+| `WorkflowCallFailed` (-32047) | Run của một lời gọi `wf.agent` thất bại, bị hủy, hết hạn hoặc chờ phê duyệt; `.kind` | Đọc `.kind`; các lời gọi đã xong nằm trong journal |
+| `WorkflowNotFound` (-32048) | Một lời gọi cho workflow mà connection này không điều khiển | Gửi `workflow.start` trước (`run_workflow` làm việc đó) |
+| `WorkflowNoJournal` (-32049) | Câu trả lời `resume` cho workflow mà journal trống, như với agent memory-store trên connection mới | Bắt đầu mà không có `resume`, hoặc dùng store Postgres |
+| `NotAllowed` (-32004), `kind == "workflow_principal"` | Id được bắt đầu cho một principal khác | Truyền cùng principal, hoặc bắt đầu một `run_id` mới ([Workflow](./workflows.md#hành-động-thay-cho-một-principal)) |
+| `NotAllowed` (-32004), `kind == "workflow"` | Tenant không có `allow.workflow` | Hỏi operator ([Workflow](./workflows.md#admission)) |
+| `ConnectionClosed` sau một host tool đồng bộ chạy lâu | Một client WebSocket có event loop bị chặn quá 60 giây không trả lời ping, nên server kết thúc connection | Chạy tool chặn lâu trong một thread (`asyncio.to_thread`) ([Liveness](./server.md#liveness)) |
+
+## Câu hỏi về provider
+
+| Raise | Nguyên nhân | Cách khắc phục |
+|---|---|---|
+| `ModelsUnsupported` (-32035) | `provider.models` hay `provider.model` cho provider không có danh sách model (`scripted`); `.provider` | Hỏi provider khác |
+| `ModelNotFound` (-32036) | Danh sách của provider không có model; `.truncated` cho biết danh sách bị cắt ngắn | Kiểm tra id; với `.truncated` model có thể nằm sau chỗ cắt |
+| `ProviderRequestFailed` (-32037) | `.kind` là `unreachable`, `status` (kèm `.status`), `invalid_request` hoặc `other`; thông báo cố định cho từng kind và không bao giờ có key, URL hay lời của vendor | Kiểm tra `base_url`, key và mạng; log của server có thêm với `LINCH_LOG=info` |
 
 ## Tool
 

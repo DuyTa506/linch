@@ -17,7 +17,7 @@ Linch bản Python dựng cùng các bảo đảm này trên một IoC container
 - Không có `Context`, không tra cứu service theo tên và không có event bus. Một agent
   được gắn bằng các giá trị truyền vào `AgentBuilder`, và `build` từ chối khi thiếu
   một giá trị bằng `BuildError::Missing` (`crates/linch-core/src/agent.rs:1-8`,
-  `crates/linch-core/src/agent/builder.rs:318-332`).
+  `crates/linch-core/src/agent/builder.rs:333-347`).
 - `Disposable` là `Registration`. `dispose` của nó là đồng bộ và chạy phần hoàn tác
   một lần; hoàn tác thất bại sẽ không được thử lại (`crates/linch-core/src/registration.rs:38-48`).
 - Các dispatcher `emit`, `serial` và `waterfall` của Python không có tương đương trong
@@ -45,7 +45,7 @@ binding (`agent.rs:167-171`). `AgentInner` giữ những gì một run đọc t�
 
 | Trường | Là gì |
 |---|---|
-| `spec` | `AgentSpec` serde: model, prompt, giới hạn, compaction, budget, provider retry và fallback model (`agent/spec.rs:36-203`) |
+| `spec` | `AgentSpec` serde: model, prompt, giới hạn, compaction, budget, provider retry và fallback model (`agent/spec.rs:36-204`) |
 | `provider`, `permissions`, `runs`, `sessions` | Các binding mà builder yêu cầu |
 | `tools` | `ToolRegistry` của agent này |
 | `hooks` | Các chuỗi `Hooks` của agent này |
@@ -54,20 +54,20 @@ binding (`agent.rs:167-171`). `AgentInner` giữ những gì một run đọc t�
 | `families`, `worker_registry` | Các run con của subagent và các worker thuộc về các run và session của agent này |
 | `registrations`, `reloads` | Các đăng ký mà chính agent này đã thực hiện, được hoàn tác khi drop |
 
-`AgentBuilder::build` (`agent/builder.rs:262-507`) kiểm tra rằng provider,
+`AgentBuilder::build` (`agent/builder.rs:267-522`) kiểm tra rằng provider,
 permission engine, cả hai store và một namespace đều có mặt, và model cùng namespace
 không để trống. Nó đăng ký các tool tích hợp sẵn mà cài đặt yêu cầu
 (`Skill`, `send_message`, `Subagent`, `SubagentContinue`, `TaskStop`,
 `tool_search`) vào registry của agent, rồi tính digest của contract. Không có gì trong
-`build` thực hiện I/O (`builder.rs:29-31`).
+`build` thực hiện I/O (`builder.rs:32-34`).
 
 ### Run contract
 
 `contract_digest` băm spec, các tool được đăng ký lúc build cùng scope của chúng,
 digest chính sách hook và các tính năng khác
-(`builder.rs:455-461`). Mỗi run lưu digest này. `resume` và `approve`
+(`builder.rs:470-476`). Mỗi run lưu digest này. `resume` và `approve`
 từ chối một run có digest khác với digest của agent bằng
-`RunError::ContractMismatch` (`runner/start.rs:763-769`). Digest chính sách hook
+`RunError::ContractMismatch` (`runner/start.rs:765-771`). Digest chính sách hook
 bao gồm point, `policy_id` và `policy_version` của từng hook, theo thứ tự trong chuỗi
 (`hooks.rs:145-192`), nên đổi hành vi của một hook nghĩa là phải tăng
 `policy_version` của nó (`hooks/hook.rs:76-78`). Điều đó bao gồm cả thứ một hook
@@ -125,7 +125,7 @@ registry của nó sẽ không làm gì.
 
 Agent dispose các đăng ký của chính nó khi bị drop: các reload trước, mới nhất trước,
 rồi đến các tool tích hợp sẵn (`agent.rs:314-330`). Một lần build thất bại giữa chừng
-sẽ dispose các tool tích hợp sẵn mà nó đã đăng ký (`builder.rs:510-539`).
+sẽ dispose các tool tích hợp sẵn mà nó đã đăng ký (`builder.rs:525-554`).
 
 ## Chuỗi hook
 
@@ -137,7 +137,7 @@ tool, một timeout và một fail mode. Chuỗi đọc các giá trị này m�
 (`hooks/hook.rs:63-99`). Một hook phục vụ nhiều point implement trait một lần cho mỗi point.
 
 `Hooks` giữ một `HookChain` cho mỗi point trừ `tool_execute`, vốn là một `ToolPipeline` (`hooks.rs:92-142`) và được đưa cho
-builder (`builder.rs:96-100`). Một chuỗi được dùng chung giữa các run. Mỗi `run` làm việc
+builder (`builder.rs:99-103`). Một chuỗi được dùng chung giữa các run. Mỗi `run` làm việc
 trên một snapshot của các mục được lấy khi nó bắt đầu, nên một đăng ký diễn ra trong
 lúc đó chỉ có hiệu lực từ run kế tiếp (`hooks/chain.rs:61-65`, `188-191`).
 `register` từ chối một policy id để trống, một bộ khớp tại point không liên quan đến
@@ -210,7 +210,7 @@ panic cho ra một kết quả lỗi
 - Một wrapper `Tool` được đăng ký bằng `ToolRegistry::replace`, thứ ẩn tool được bọc
   và được hoàn tác bằng `Registration` của nó.
 - `call_timeout_ms` và `max_tool_concurrency` trong spec cho timeout và
-  giới hạn song song (`agent/spec.rs:87-92`).
+  giới hạn song song (`agent/spec.rs:87-93`).
 
 Đừng sửa `scheduler/` hay `runner/` cho một cổng kiểm soát mới. Redaction của spec là
 ngoại lệ chứng minh quy tắc: nó không phải một hook vì nó phải chạy sau mọi hook, kể cả
@@ -225,14 +225,14 @@ Một `Agent` không có tra cứu theo tên và không có trạng thái toàn 
 một giá trị mà host truyền vào (`agent.rs:6-8`). Trạng thái theo từng agent nằm trong
 `AgentInner`: registry, hook, store, các family và worker của subagent
 (`agent.rs:173-252`). Trạng thái theo từng run nằm trong `Runner` của run
-(`runner/turn.rs:123-203`). Handle dùng chung duy nhất, từ một worker tool trở lại
+(`runner/turn.rs:123-207`). Handle dùng chung duy nhất, từ một worker tool trở lại
 agent của nó, là một `OnceLock<Weak<AgentInner>>` theo từng agent được đặt ở cuối
-`build` (`subagents/control.rs:17-19`, `builder.rs:351`, `504-505`). Nó là `Weak`, nên
+`build` (`subagents/control.rs:17-19`, `builder.rs:366`, `504-505`). Nó là `Weak`, nên
 registry giữ tool không giữ agent sống.
 
 Các tenant được tách theo namespace, không theo process. Namespace của một agent là
 một phần của mọi khóa store, nên hai agent có namespace khác nhau không bao giờ dùng
-chung run hay session, kể cả trên cùng một cơ sở dữ liệu (`builder.rs:114-118`,
+chung run hay session, kể cả trên cùng một cơ sở dữ liệu (`builder.rs:117-121`,
 [stores](./stores.md#khóa-và-đa-tenant)). Nhiều agent chạy trên một Tokio runtime.
 Một run chỉ tiến lên khi stream của nó được poll (`runner.rs:39-40`), và lõi chỉ spawn
 một loại task: task điều khiển các subagent chạy nền của một run đang suspend

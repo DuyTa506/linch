@@ -60,11 +60,11 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 1. **Compact** khi `spec.compaction` được đặt và provider view đến hạn
    ([thu gọn ngữ cảnh](./compaction.md)): xóa các kết quả tool cũ khi `micro` được đặt
    và như vậy là đủ, nếu không thì tóm tắt. Khi tắt, một lượt bắt đầu ở bước dispatch
-   (`turn.rs:395-398`).
+   (`turn.rs:401-404`).
 2. **Kiểm tra giới hạn.** Một token đã bị hủy sẽ abort run. `max_turns` và budget kết
-   thúc run với trạng thái failed trước khi lời gọi được thực hiện (`turn.rs:436-449`).
+   thúc run với trạng thái failed trước khi lời gọi được thực hiện (`turn.rs:442-455`).
 3. **Dựng request** từ provider view của session. Các hook `context_build` chỉ thêm
-   block vào phần đuôi của request (`turn.rs:451-461`, `runner/hooks.rs:278-289`).
+   block vào phần đuôi của request (`turn.rs:457-467`, `runner/hooks.rs:278-289`).
    Chúng không bao giờ được ghi log, và request mang số lượng của chúng trong
    `context_tail`, nên cache breakpoint của provider vẫn ở block đã ghi log cuối cùng trước chúng.
    Khi `spec.context_budget` được đặt, `ContextBudget::apply` (`context_budget.rs`)
@@ -83,14 +83,14 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    session, như sau một feedback của `stop`.
 4. **Stage và flush delivery.** Event `context_build` và delivery của lời gọi model được
    stage. Checkpoint `ProviderPending` được giữ lại, rồi `flush` ghi các event và
-   checkpoint trong một lần commit (`turn.rs:508-514`). Đây là barrier trước khi gọi provider.
+   checkpoint trong một lần commit (`turn.rs:514-520`). Đây là barrier trước khi gọi provider.
 5. **Điều khiển lời gọi.** Các delta của stream được chuyển ngay cho bên gọi dưới dạng
-   event chỉ có trong stream (`turn.rs:517-534`), trừ khi redaction của spec bao gồm response:
+   event chỉ có trong stream (`turn.rs:523-540`), trừ khi redaction của spec bao gồm response:
    khi đó không có delta nào được gửi, vì một match có thể nằm vắt qua hai delta. Lời gọi kết thúc với một receipt, dù nó
    được chấp nhận, thất bại hay bị hủy (`provider/call.rs:1-9`, `43-55`).
    Khi có một hook `after_provider_call` được gắn, một receipt được chấp nhận và `Usage`
    của nó được ghi ngay, với `ProviderPending` được lưu lại ở các tổng đã tính chúng,
-   trước khi các hook chạy, kể cả `provider_call_stop` (`turn.rs:550-557`,
+   trước khi các hook chạy, kể cả `provider_call_stop` (`turn.rs:556-563`,
    `runner/hooks.rs`, `checks_responses`). Một hook có thể là callback của client không
    có timeout; một lần crash trong lúc nó chạy vẫn giữ usage đã trả phí
    ([bên dưới](#một-lần-crash-giữa-receipt-và-response-của-nó)). Bản thân response chưa được ghi: một rewrite của
@@ -104,14 +104,14 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    trạng thái failed và không gì được stage (`hooks/assembly.rs`, `runner/hooks.rs`).
    Khi thành công, run sau đó stage event `Assistant`, và event `Usage` trừ khi bước 5 đã
    ghi nó, rồi lưu `AssistantReceived`, thứ được ghi write-through cùng receipt khi bước 5
-   chưa làm vậy (`turn.rs:611-644`, `journal.rs:209-212`). Một lần retry của hook đi cùng lần ghi đó dưới dạng
+   chưa làm vậy (`turn.rs:617-650`, `journal.rs:209-212`). Một lần retry của hook đi cùng lần ghi đó dưới dạng
    `retry_feedback` của checkpoint, nên response đã trả tiền và việc phải làm với
    nó bền vững cùng nhau. Bên gọi chỉ thấy các event đó sau lần commit này
    (`journal.rs:27-30`).
-7. **Nối response vào session** (`turn.rs:671-673`).
+7. **Nối response vào session** (`turn.rs:677-679`).
 8. **Rẽ nhánh theo các lời gọi tool** của response (bên dưới).
 9. **Nối các kết quả tool**, chạy `post_turn`, và bắt đầu lượt kế tiếp
-   (`turn.rs:338-361`).
+   (`turn.rs:344-367`).
 
 Các point chỉ quan sát chạy xuyên suốt các bước này: `agent_start` chạy một lần,
 ngay sau khi prompt được chấp nhận và trước lượt đầu tiên (`runner/start.rs`);
@@ -127,7 +127,7 @@ run con của subagent (`subagents/run.rs`, `subagents/background.rs`). Không p
 trong số này có thể thay đổi thứ nó quan sát.
 
 Một lời gọi thất bại kết thúc run với trạng thái failed bằng một lần ghi terminal duy nhất
-mang theo receipt, usage, `Error`, trạng thái và `Result` (`turn.rs:594-598`), trừ khi `provider_retry` hoặc `fallback_models` của spec
+mang theo receipt, usage, `Error`, trạng thái và `Result` (`turn.rs:600-604`), trừ khi `provider_retry` hoặc `fallback_models` của spec
 nhận một lỗi có thể thử lại: khi đó run quay lại bước 4 với `attempt` của delivery
 kế tiếp, sau một lần ghi `provider_retry` và một lúc chờ, hoặc chuyển ngay sang một
 model fallback cùng một event `model_fallback`
@@ -138,20 +138,20 @@ model, không bao giờ được retry; khi `spec.compaction` được đặt, `
 bước 4 với `attempt` của delivery kế tiếp của lượt và không có event `provider_retry`;
 khi không còn gì để rút ngắn, run kết thúc ở trạng thái failed
 ([khôi phục theo độ dài ngữ cảnh](./compaction.md#context-length-recovery),
-`turn.rs:584-588`, `runner/compact.rs:308-341`). Một
+`turn.rs:590-594`, `runner/compact.rs:320-353`). Một
 response bị giới hạn đầu ra cắt trước khi có bất kỳ văn bản hay một lời gọi tool trọn vẹn
 nào thì không phải là một câu trả lời: session không nhận gì, và run kết thúc theo cách
-tương tự (`turn.rs:541-543, 562-566`, `runner/end.rs:128-142, 214-223`).
+tương tự (`turn.rs:547-549, 562-566`, `runner/end.rs:128-142, 214-223`).
 
 Với `spec.truncation_recovery`, một câu trả lời văn bản bị giới hạn đầu ra cắt (stop
 reason `max_tokens`, không có lời gọi tool) được nối vào và được đáp bằng một message
 phản hồi thay vì kết thúc run, chừng nào `max_attempts` còn; văn bản cuối cùng của run
 ghép các phần lại
-([câu trả lời bị cắt](./compaction.md#cut-off-answers), `turn.rs:677-694, 736-743`).
+([câu trả lời bị cắt](./compaction.md#cut-off-answers), `turn.rs:683-700, 736-743`).
 
 ### Vòng lặp tiếp tục khi response có lời gọi tool
 
-`received` thu thập các block `tool_use` của response (`turn.rs:660-664`).
+`received` thu thập các block `tool_use` của response (`turn.rs:666-670`).
 
 - **Bị `after_provider_call` retry**, response được nối vào nhưng không nhánh nào
   bên dưới chạy: không lời gọi tool nào của nó được lập kế hoạch, và `stop` không
@@ -163,11 +163,11 @@ ghép các phần lại
   (`runner/hooks.rs`, `retry_message`). Nó được stage như một `notification` và
   giữ dưới dạng `ToolResults`, rồi lượt kế tiếp bắt đầu. Chỉ `max_turns` giới hạn
   các lần retry này, như trong Python.
-- **Có lời gọi tool**, run chuyển sang `Step::Batch` (`turn.rs:728-733`).
+- **Có lời gọi tool**, run chuyển sang `Step::Batch` (`turn.rs:734-739`).
   Sau đó `Step::Results` nối các kết quả và bắt đầu lượt kế tiếp. `stop_reason` của
   provider không quyết định điều này; các block mới quyết định.
 - **Không có**, trước hết run chờ mọi subagent chạy nền mà nó có, việc này có thể thêm
-  một thông báo và một lượt nữa (`turn.rs:700-702`, `runner/inbox.rs:145-154, 175-213`). Với một output schema (`spec.output_schema`,
+  một thông báo và một lượt nữa (`turn.rs:706-708`, `runner/inbox.rs:145-154, 175-213`). Với một output schema (`spec.output_schema`,
   hoặc schema riêng của run từ event `init` đầu tiên) câu trả lời được kiểm tra tiếp theo
   (`runner/structured.rs`, `structured.rs`). Một câu trả lời không đạt, khi
   `structured_output_retries` còn, stage một event `verification`
@@ -192,14 +192,14 @@ ghép các phần lại
   hook; quá giới hạn thì được tính như allow và các hook
   phía sau quyết định), viết lại văn bản trả lời cuối cùng (giá trị mà `post_turn` và
   `Result` cuối cùng sẽ thấy), hoặc block việc dừng lại, khiến run thất bại
-  (`turn.rs:708-712`, `runner/hooks.rs`). Phản hồi của cả hai đến model như của
+  (`turn.rs:714-718`, `runner/hooks.rs`). Phản hồi của cả hai đến model như của
   Python, trong một message user `<system-reminder>` được stage như một
   `notification`, và một lượt khác bắt đầu. Với một output schema, một bản viết lại được kiểm tra lại,
   và bản không đạt kết thúc run thất bại mà không hỏi lại model;
   câu trả lời sau một `retry` hoặc `continue` được kiểm tra từ đầu, với
   ngân sách riêng của nó. Khi mọi hook cho phép dừng, `post_turn`
   chạy và run kết thúc với trạng thái `completed` cùng văn bản đó, và giá trị đã parse làm
-  `structured_output` của result (`turn.rs:721-726`).
+  `structured_output` của result (`turn.rs:727-732`).
 
 `max_turns` là điều kiện dừng của vòng lặp: lời gọi sẽ vượt quá giới hạn này không được
 thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:161-177`).
@@ -212,10 +212,10 @@ một spec không đặt nó không đổi.
 
 | Kiểm tra | Mặc định | Kích hoạt | Kiểm tra khi |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc, đã bỏ tên file offload), không phải lỗi. Một tool poll chỉ lặp khi một lệnh đã xong bị đọc lại | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:326`) |
+| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc, đã bỏ tên file offload), không phải lỗi. Một tool poll chỉ lặp khi một lệnh đã xong bị đọc lại | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:350-354`) |
 | `max_identical_inputs` | 10 | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và lỗi; một tool poll không được đếm. Một lời gọi write hay exec (tool bất kỳ thuộc scope đó) thành công với input mới trong 50 lời gọi như vậy gần nhất xóa bộ đếm của mọi lời gọi khác, không bao giờ xóa của chính nó. Không có trên wire khi bằng 10 | Như trên |
 | `max_consecutive_failures` | 3 | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi; một batch có một lời gọi thành công thì đếm lại từ đầu | Như trên |
-| `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:483-486`) |
+| `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:489-492`) |
 
 0 tắt một trong ba kiểm tra đầu; `max_idle_turns` tối thiểu là 1, nên giới hạn số
 lượt không có lời gọi provider luôn bật. Một lượt như vậy không bao giờ chạm tới budget và lần nào cũng
@@ -270,9 +270,9 @@ metadata của nó, với các tool poll mà runner đọc từ registry), event
 `tool_result` kế tiếp đếm các lời gọi theo nội dung kết quả của chúng (cái lời gọi
 trả về, đã bỏ tên file offload) và cập nhật chuỗi lỗi, và một `model_call_delivery`
 chính ghi lại lượt của nó. Run đang chạy gộp cùng các event này khi stage chúng
-(`Runner::stage_seen`, `turn.rs:405-411`; các event `tool_call_end` của tool khi journal
+(`Runner::stage_seen`, `turn.rs:411-417`; các event `tool_call_end` của tool khi journal
 sink stage chúng, `runner/sink.rs`), và một lần resume gộp các event đã lưu
-(`start.rs:520`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
+(`start.rs:519-521`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
 quả cùng checkpoint `ToolResults`, một delivery trước lời gọi của nó), và lượt lấy từ
 checkpoint, nên một sự cố ở bất kỳ lần ghi nào cũng resume với đúng các con số mà run
 đã có và kích hoạt tại cùng điểm (`tests/e2e_loop_guard.rs`).
@@ -356,10 +356,10 @@ Bên gọi đặt các barrier, và run làm điều đó ở những chỗ sau:
 
 | Barrier | Lời gọi | Vị trí |
 |---|---|---|
-| Trước khi gửi tới provider | `Journal::flush` | `turn.rs:511-514` |
-| Sau một lời gọi được chấp nhận, trước các hook theo sau nó (chỉ khi có hook `after_provider_call`) | `flush`, với `ProviderPending` được lưu lại | `turn.rs:551-557` |
+| Trước khi gửi tới provider | `Journal::flush` | `turn.rs:517-520` |
+| Sau một lời gọi được chấp nhận, trước các hook theo sau nó (chỉ khi có hook `after_provider_call`) | `flush`, với `ProviderPending` được lưu lại | `turn.rs:557-563` |
 | Trước lúc chờ của một lần retry | `flush`, với `ProviderPending` được lưu lại | `runner/retry.rs:69-72` |
-| Quanh lời gọi tóm tắt của compaction | `flush` trước lời gọi; `flush` hoặc write-through `Compacted` sau lời gọi | `runner/compact.rs:159-162, 245-248, 265-269` |
+| Quanh lời gọi tóm tắt của compaction | `flush` trước lời gọi; `flush` hoặc write-through `Compacted` sau lời gọi | `runner/compact.rs:164-167, 245-248, 265-269` |
 | Trước mỗi tool thực sự chạy | `ToolSink::tool_starting` flush | `scheduler/execute.rs:46-52`, `runner/sink.rs:219-224` |
 | Sau mỗi tool thực sự đã chạy | `tool_finished` flush | `sink.rs:246-289` |
 | Trước mọi lần ghi session store | `Journal::flush_checkpoint` | `runner/write.rs:98-103`, `journal.rs:251-262` |
@@ -371,10 +371,10 @@ event và checkpoint đang chờ đã bền vững. Đừng bao giờ hoãn mộ
 Ba loại ghi không chờ barrier kế tiếp:
 
 - Một receipt đã trả phí. Một lời gọi được chấp nhận ghi write-through cùng
-  `AssistantReceived` (`turn.rs:644`), hoặc, khi có một hook `after_provider_call` được gắn, tự
+  `AssistantReceived` (`turn.rs:650`), hoặc, khi có một hook `after_provider_call` được gắn, tự
   ghi riêng với `ProviderPending` được lưu lại ở các tổng đã tính nó, trước các hook
-  (`turn.rs:551-557`). Một bản tóm tắt compaction ghi write-through
-  cùng `Compacted` (`compact.rs:254-269`). Một lời gọi tóm tắt không trả về văn bản sẽ
+  (`turn.rs:557-563`). Một bản tóm tắt compaction ghi write-through
+  cùng `Compacted` (`compact.rs:266-281`). Một lời gọi tóm tắt không trả về văn bản sẽ
   lưu `CompactionPending` và flush ngay, nên một lần resume không mua lại nó
   (`compact.rs:23-29, 245-248`). Một lời gọi thất bại mà run thử lại sẽ lưu lại
   `ProviderPending`, ở tổng đã tính receipt của nó, và flush cùng event
@@ -430,7 +430,7 @@ cũng không bao giờ thấy chúng: nó chỉ chạy cho event vừa được 
 3. **Thu thập.** Các kết quả, mọi ghi chú từ peer và thông báo catalog trở thành một
    message của user, được stage dưới dạng event `user` với subtype `tool_result`. Run lưu
    `ToolResults` (được giữ lại). Sau đó `Step::Results` nối message đó, việc này trước
-   hết flush checkpoint ấy (`batch.rs:129-148`, `turn.rs:338-341`).
+   hết flush checkpoint ấy (`batch.rs:129-148`, `turn.rs:344-347`).
 
 ### Chỉ công việc đọc mới chạy song song
 
@@ -480,15 +480,15 @@ nó bị từ chối bằng một kết quả lỗi trước khi batch chạy (`
 
 `Agent::resume` tiếp tục một run sau sự cố, mất lease hoặc stream bị drop.
 `Agent::approve` trả lời các lời gọi đang chờ của một run đã suspend và tiếp tục nó, và `Agent::answer` trả lời các lời gọi `AskUser` đang chờ của nó
-(`agent.rs:365-438`). Cả ba đều vào `continue_run`
-(`runner/start.rs:250-550`):
+(`agent.rs:386-459`). Cả ba đều vào `continue_run`
+(`runner/start.rs:250-552`):
 
 1. Một token đã bị hủy từ trước thì không làm gì: không claim, không ghi
    (`start.rs:261-263`).
 2. `check` từ chối một run đã ở terminal, một run thuộc contract khác, một approve
    trên run không ở trạng thái chờ phê duyệt, và một answer trên run không ở trạng thái
-   chờ input (`start.rs:755-786`). `check_answers` từ chối một câu trả lời không khớp
-   với các câu hỏi `input_request` mới nhất bằng `InvalidAnswer` (`start.rs:791`). Nó
+   chờ input (`start.rs:757-788`). `check_answers` từ chối một câu trả lời không khớp
+   với các câu hỏi `input_request` mới nhất bằng `InvalidAnswer` (`start.rs:793`). Nó
    chạy trước claim, để một lời gọi nhầm
    không fence một owner đang sống, và chạy lại sau claim
    (`start.rs:269-276`, `366-373`).
@@ -545,7 +545,7 @@ Một allow đã ghi chỉ bao phủ input mà host đã thấy, và một deny 
 
 Một approve hoặc answer được thử lại nhận `NotSuspended`: khi nó đã commit thì run ở
 `ToolBatch`, và host tiếp tục nó bằng `resume`
-(`agent.rs:385-388, 419-421`, `start.rs:780-784`).
+(`agent.rs:406-409, 419-421`, `start.rs:782-786`).
 
 <a id="cancel-a-suspended-run"></a>
 
@@ -682,7 +682,7 @@ thái cuối của chúng, dựng `Result` và gọi `Journal::finish` (`runner/
 
 | Terminal | Trạng thái | Khi nào |
 |---|---|---|
-| `Result` success | `completed` | Một response chỉ có văn bản, sau `stop` và `post_turn` (`turn.rs:721-726`) |
+| `Result` success | `completed` | Một response chỉ có văn bản, sau `stop` và `post_turn` (`turn.rs:727-732`) |
 | Abort | `aborted` | Cancel token đã kích hoạt (`end.rs:112-116`), hoặc `Agent::cancel` đã kết thúc một run bị suspend (`runner/cancel.rs`) |
 | Hook fail closed | `failed` | Một hook `stop` fail closed (`end.rs:118-126`) |
 | Giới hạn đầu ra | `failed` | Response không có văn bản hoặc lời gọi tool trọn vẹn (`end.rs:128-142`) |
@@ -690,11 +690,11 @@ thái cuối của chúng, dựng `Result` và gọi `Journal::finish` (`runner/
 | Policy gate | `failed` | Một completion gate vẫn không đạt sau `max_corrections`, kèm một event `policy` (`stop`) và một `PolicyGateError` ([ở trên](#reliability-policy)) |
 | Loop guard | `failed` | Loop guard kích hoạt, kèm một event `loop_guard` và một `LoopGuardError` (`end.rs:179-192`, [ở trên](#loop-guard)) |
 | Budget | `failed` | Budget không cho phép thêm lời gọi nào (`end.rs:194-206`) |
-| Lỗi provider | `failed` | Lời gọi thất bại, và không có retry hay model fallback nào nhận nó (`turn.rs:594-598`, `runner/retry.rs`) |
+| Lỗi provider | `failed` | Lời gọi thất bại, và không có retry hay model fallback nào nhận nó (`turn.rs:600-604`, `runner/retry.rs`) |
 
 Một trạng thái terminal là cuối cùng trong store ([stores](./stores.md#run-store)).
 `Agent::fail` đánh dấu một run không bao giờ có thể tiếp tục (contract không khớp, một
-trạng thái không reconcile được) là `failed` (`agent.rs:497-536`).
+trạng thái không reconcile được) là `failed` (`agent.rs:518-557`).
 
 ## Ví dụ về trace
 

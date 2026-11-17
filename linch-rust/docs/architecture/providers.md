@@ -113,7 +113,7 @@ the adapter and must never hold credentials or request headers.
 
 | Variant | Meaning | `retryable()` |
 |---|---|---|
-| `Connect { message }` | The connection was never made (refused, DNS, TLS handshake, connect timeout), so the request never went out. Each adapter's `transport` maps reqwest's `is_connect()` to it (`anthropic/http.rs:66`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | yes |
+| `Connect { message }` | The connection was never made (refused, DNS, TLS handshake, connect timeout), so the request never went out. Each adapter's `transport` maps reqwest's `is_connect()` to it (`anthropic/http.rs:69`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | yes |
 | `Transport { message }` | The request went out but no response came back (reset, read timeout), or the stream broke after it began | yes |
 | `Status { status, retry_after, message }` | Non-success HTTP status | 408, 429 and >= 500 only |
 | `ContextLength { status, message }` | The provider refused the prompt as longer than the model's context window. `status` is `None` for an error inside a stream. Each adapter maps its own provider's refusal ([below](#context-length-refusals)) | no |
@@ -123,7 +123,7 @@ the adapter and must never hold credentials or request headers.
 
 Adapters never retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
 and `retry_after` are advice for the caller (`client.rs:1-5`). The runner is
-that caller. Its `dispatch` (`crates/linch-core/src/runner/turn.rs:289`)
+that caller. Its `dispatch` (`crates/linch-core/src/runner/turn.rs:295`)
 ends the run `failed` with an `Error` event on any failure that it does not
 retry or fail over (below), and aborts the run on `Cancelled`. The error
 event carries `kind`, `retryable` and `status`
@@ -201,10 +201,10 @@ unknown (`None`) when it may have been billed (`costs_nothing`,
 
 `Option<Usage>` already tells a zero from unknown, so the receipt format does
 not change, and a binary from before this reads `Some(zero)` as a call that
-cost nothing. A free failure sends no `usage` event (`runner/turn.rs:399`,
+cost nothing. A free failure sends no `usage` event (`runner/turn.rs:405`,
 and the same in `runner/compact.rs`), as Python sends none for a failed call,
 and leaves `usage_complete` true. A capped `budget` only refuses the next
-call after an unknown usage (`budget.rs:110`), so a free failure is retried
+call after an unknown usage (`budget.rs:118`), so a free failure is retried
 under a cap; one that may have been billed still ends the run with the
 provider's error. A 500, 502 or 504 is therefore not retried under a cap,
 though it is retryable and is retried without one. Python marks every failed call's usage `unknown`
@@ -312,14 +312,14 @@ run's token to stop a call sooner.
 ## Shared HTTP mechanics
 
 Every adapter builds its client with `transport::client`
-(`crates/linch-providers/src/transport.rs:23`):
+(`crates/linch-providers/src/transport.rs:24`):
 
 - **No redirects.** reqwest strips only `Authorization` on a cross-origin
   hop, so `x-api-key` and `x-goog-api-key` would follow a redirect. A 3xx
-  answer becomes `Status` with a fixed message (`transport.rs:57`); it is
+  answer becomes `Status` with a fixed message (`transport.rs:64`); it is
   not retryable.
 - **Bounded error bodies.** At most 8 KiB of a non-2xx body is read
-  (`transport.rs:16`, `transport.rs:34`). The summary prefers the vendor's
+  (`transport.rs:17`, `transport.rs:41`). The summary prefers the vendor's
   error message, is redacted, then cut to 500 characters
   (`crates/linch-providers/src/openai_compat/http.rs:73`).
 - **`Retry-After`** is read as whole seconds; an HTTP date is ignored. Gemini
@@ -400,20 +400,20 @@ the date; read it before changing the adapter.
 
 `crates/linch-providers/src/deepseek.rs`. `thinking` is always sent, because
 DeepSeek thinks by default; `Thinking::Disabled` turns it off and every other
-state turns it on (`deepseek.rs:129`). With thinking on, every earlier
+state turns it on (`deepseek.rs:137`). With thinking on, every earlier
 assistant turn sends `reasoning_content`, `""` when it has none, or a request
-with tools fails with 400 (`deepseek.rs:147-153`). A forced `tool_choice`
+with tools fails with 400 (`deepseek.rs:155-161`). A forced `tool_choice`
 with thinking on, and any `output_schema`, fail locally as `InvalidRequest`:
 DeepSeek has no JSON-schema response format and `json_object` mode does not
 carry the schema. `native_output_schema` is `false` (the capabilities say
 `output_schema: final_tool`), so a run with a schema offers its final tool
 instead, and `tool_choice_refusal` (the same rule as
 the payload's) refuses a forced choice unless thinking is `Disabled`.
-Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:184`).
+Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:197`).
 
 ### OpenAI Chat Completions and server profiles
 
-One type, `OpenAiChat` (`crates/linch-providers/src/openai.rs:98`), serves
+One type, `OpenAiChat` (`crates/linch-providers/src/openai.rs:102`), serves
 OpenAI and each OpenAI-compatible server. The difference is a `ChatProfile`
 (`crates/linch-providers/src/openai/profile.rs:19`), a static table with no
 defaults: every target states every rule, so a server never inherits OpenAI's
@@ -427,7 +427,7 @@ behavior by accident.
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | yes | no (fails locally) | `max_tokens` | `enable_thinking: false` |
 
 A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:76`), which fills the
+(`crates/linch-providers/src/servers.rs:80`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
 left out (`profile.rs:144-154`). The profile's `reasoning_effort` writes the
@@ -464,9 +464,9 @@ parameter. An `output_schema` is sent as `text.format: {"type":
 ### Anthropic
 
 `crates/linch-providers/src/anthropic.rs`. `anthropic-version` is pinned to
-`2023-06-01` (`anthropic.rs:44`) because the newer version removes
+`2023-06-01` (`anthropic.rs:47`) because the newer version removes
 `temperature`, which `ProviderRequest` still carries. `max_tokens` is
-required and defaults to 8192 (`anthropic.rs:47`). Thinking blocks are sent
+required and defaults to 8192 (`anthropic.rs:50`). Thinking blocks are sent
 back with their signatures unchanged. A request's `cache_control` marks
 the last cacheable system block and the last logged block of the last user
 message: request-only context (`context_tail`) stays after it, so the
@@ -514,10 +514,10 @@ llama.cpp window skips the probe rather than serving as its fallback.
 Linch's `Usage` (`crates/linch-core/src/usage.rs:13`) counts uncached input,
 output, cache reads and cache writes in four separate buckets; `input_tokens`
 excludes both cache buckets. Each adapter subtracts what its vendor folds
-into the prompt count: DeepSeek its cache hits (`deepseek.rs:193`), OpenAI
+into the prompt count: DeepSeek its cache hits (`deepseek.rs:217`), OpenAI
 cached and cache-write tokens (`profile.rs:89`), vLLM cached and created
 cache tokens (`servers/vllm.rs:54`), SGLang and llama.cpp cached tokens
-(`servers.rs:89`).
+(`servers.rs:95`).
 
 ## Pricing
 
@@ -530,9 +530,9 @@ model, including every OpenAI, DeepSeek, Gemini and local model, prices to
 supplies.
 
 Pricing is opt-in on the agent: `AgentBuilder::pricing`
-(`crates/linch-core/src/agent/builder.rs:121`) takes any
+(`crates/linch-core/src/agent/builder.rs:124`) takes any
 `Fn(&str, &Usage) -> Option<f64>`. The `linch` crate passes
-`linch_providers::cost` (`crates/linch/src/open.rs:143`). When a receipt has
+`linch_providers::cost` (`crates/linch/src/open.rs:170`). When a receipt has
 usage, the runner prices it by the model that served the call, else the
 agent's model (`crates/linch-core/src/runner/write.rs:107`). `AgentBuilder::build` refuses a
 `budget.max_cost_usd` when pricing has no finite price for the spec's model

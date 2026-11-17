@@ -268,7 +268,7 @@ and are never logged. Nothing writes memory for the model: it uses
   path-safe and names no one). The instruction names that directory, so the
   model keeps its notes there. A run with no principal (a local connection,
   or none passed) uses `/memories/MEMORY.md`. `filesystem: {"memory": True,
-  "memory_scope": "namespace"}` is the old behaviour: one file for every run
+  "memory_scope": "namespace"}` keeps one file for every run
   of the namespace, right when all runs are equally trusted. The scope is
   part of the run contract. This is separation by path, not by permission:
   the filesystem tools are not scoped, so `ls /memories` lists every

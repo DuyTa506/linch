@@ -20,7 +20,7 @@ mô tả cùng những ý tưởng. Điểm khác trong Rust:
   tác dụng phụ chạy mà không được phê duyệt và chạy song song (issue #99,
   `crates/linch-core/src/tool.rs:4-7`).
 - Kết quả luôn là `Result<ToolOutput, ToolOutputError>`. Không có đối tượng
-  `ToolResult` kiểu cũ; `output_schema` là tùy chọn.
+  `ToolResult`; `output_schema` là tùy chọn.
 
 ## Trait Tool
 
@@ -29,7 +29,7 @@ giữa các lời gọi; dữ liệu theo từng lời gọi đến qua `ToolCon
 
 | Method | Mặc định | Hợp đồng |
 |---|---|---|
-| `name()` | bắt buộc | 1 đến 64 chữ cái ASCII, chữ số, `_` hoặc `-`: những gì Anthropic, OpenAI và Gemini đều chấp nhận (`crates/linch-core/src/registry.rs:278-281`) |
+| `name()` | bắt buộc | 1 đến 64 chữ cái ASCII, chữ số, `_` hoặc `-`: những gì Anthropic, OpenAI và Gemini đều chấp nhận (`crates/linch-core/src/registry.rs:288-291`) |
 | `description()` | bắt buộc | Hiển thị cho model |
 | `input_schema()` | bắt buộc | JSON Schema draft 2020-12 với `"type": "object"` ở cấp cao nhất |
 | `scope()` | bắt buộc | `Read`, `Write` hoặc `Exec` |
@@ -148,7 +148,7 @@ qua các bước này. Mỗi bước vắng mặt, và không tốn gì, khi tr�
 
 1. **Tra cache** (`spec.tool_cache`). Một tool phạm vi read, không `polls`,
    không `asks_user`, có `Tool::cache_safe` mà policy nêu tên sẽ tra khóa
-   `[session?, tool_name, input]` trong namespace của agent (`tool_cache.rs`,
+   `[session?, principal?, tool_name, input]` trong namespace của agent (`tool_cache.rs`,
    `cache_key`; session nằm trong khóa trừ khi `scope` là `namespace`). Lần tra trả về
    mục và epoch của namespace. Một mục còn sống trở thành kết quả: không có durable
    start trước nó, không chạy tool, `cache_hit` nằm trên `tool_call_end`; start và end
@@ -229,7 +229,7 @@ phần bắt đầu và kết thúc được stage và ghi cùng barrier kế ti
 
 ## Tool workspace
 
-`workspace_tools(backend, reads, processes)` (`crates/linch-tools/src/lib.rs:60`)
+`workspace_tools(backend, reads, processes)` (`crates/linch-tools/src/lib.rs:63`)
 trả về `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` và
 `BashKill` trên một `ExecutionBackend` (`LocalFs` của nó cho các tool tệp, shell của
 nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
@@ -276,28 +276,28 @@ và lúc dùng. Công việc tệp chặn chạy trên blocking pool của Tokio
 
 ### Bash
 
-`Bash` (`crates/linch-tools/src/bash.rs:68`) không bị `LocalFs` giới hạn: với
+`Bash` (`crates/linch-tools/src/bash.rs:79`) không bị `LocalFs` giới hạn: với
 backend `local` mặc định nó bắt đầu trong thư mục gốc, nhưng lệnh có thể chạm tới mọi
 thứ mà user của process truy cập được. Hãy dùng permission engine (mặc định nó hỏi cho
 `exec`) hoặc backend `sandbox` hay `docker` khi điều đó quan trọng.
 Những gì nó bảo đảm dưới mọi backend:
 
 - stdin bị đóng và lệnh dẫn đầu một process group mới
-  (`crates/linch-tools/src/bash/process.rs:106-142`);
+  (`crates/linch-tools/src/bash/process.rs:159-195`);
 - cả group nhận `SIGKILL` khi timeout, khi hủy, khi future của lời gọi
   bị drop, và khi shell thoát, nên các job nền không bao giờ sống lâu hơn
-  lời gọi (`process.rs:146-200`);
+  lời gọi (`process.rs:199-271`);
 - chỉ chín biến của host được truyền qua (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), nên thông tin xác thực của host
-  nằm ngoài môi trường (`bash.rs:41`); `with_env` thêm các biến khác (`bash.rs:142`);
+  nằm ngoài môi trường (`bash.rs:51`); `with_env` thêm các biến khác (`bash.rs:153`);
 - timeout mặc định là 120 s (30 phút khi chạy nền) và bị chặn ở 30 phút
-  (`bash.rs:30-33`);
+  (`bash.rs:38-41`);
   khi có deadline của lời gọi, nó kết thúc 100 ms trước deadline đó, để đầu ra cho đến lúc
-  đó đến được model thay vì một timeout chung chung (`bash.rs:198`);
+  đó đến được model thay vì một timeout chung chung (`bash.rs:209`);
 - mỗi stream giữ 4000 byte đầu và 26 000 byte cuối
   (`bash/capture.rs:5-8`);
 - mọi exit status khác 0 là một kết quả lỗi mang cùng văn bản, với mã
-  `exit_status`, `timeout` hoặc `aborted` (`bash.rs:281`).
+  `exit_status`, `timeout` hoặc `aborted` (`bash.rs:309-326`).
 
 ### Bash chạy nền
 
@@ -317,7 +317,7 @@ tới một process mới.
   (nối với `Agent::close_session`), `Processes::close` và `Drop` của registry
   (agent đóng). Mỗi cách đều kill cả group và chờ reap.
 - **Lifeline.** Một lệnh chạy nền chạy dưới một wrapper `/bin/sh` nhỏ
-  (`process.rs:35`) có stdin là một pipe do server giữ. Một watchdog trong group của
+  (`process.rs:36`) có stdin là một pipe do server giữ. Một watchdog trong group của
   lệnh chặn trên pipe đó bằng builtin `read` và kill group khi nó đóng, việc kernel làm
   khi server chết, kể cả bằng `SIGKILL`. Nó không cần gì trên `PATH` của lệnh. Một lệnh
   foreground không có lifeline: nó chết cùng lời gọi của nó, nhưng một server bị kill
@@ -337,16 +337,16 @@ tới một process mới.
 
 ### Execution backend
 
-`ExecutionBackend` (`crates/linch-tools/src/exec.rs:120`) là một thế giới thực thi,
+`ExecutionBackend` (`crates/linch-tools/src/exec.rs:141`) là một thế giới thực thi,
 `ExecutionBackend` của Python: `LocalFs` mà các tool tệp dùng và một shell mà `Bash`
 dùng để khởi động lệnh. Mỗi cái thuộc về một agent đã mở, agent này gọi
 `close_session` của nó từ `Agent::close_session`. `ExecutionBackend::open`
-(`exec.rs:149`) dựng nó từ một `ExecutionConfig` (`exec.rs:49`), được gắn tag bởi
+(`exec.rs:171`) dựng nó từ một `ExecutionConfig` (`exec.rs:59`), được gắn tag bởi
 `backend`; nó chặn và thất bại với `ExecutionError` khi backend không thể giới hạn
 những gì policy của nó nói, nên facade mở nó trên một blocking task và từ chối agent
 thay vì chạy `Bash` không bị giới hạn.
 
-Seam của shell là trait `Shell` riêng của crate (`exec.rs:248`): `spawn` khởi động một
+Seam của shell là trait `Shell` riêng của crate (`exec.rs:308`): `spawn` khởi động một
 `Launch` (lệnh, root, môi trường của `Bash`, session, có cần lifeline hay không) làm
 leader của một process group mới với stdout và stderr được pipe, và trả về `Child`
 cùng một `Cleanup` tùy chọn để chạy sau khi kill. Mọi thứ sau spawn, `supervise` với
@@ -356,13 +356,13 @@ các lệnh nền qua cùng shell đó.
 
 | Backend | Shell | Thay đổi gì |
 |---|---|---|
-| `local` | `LocalShell` (`exec.rs:264`) | Không gì cả: `process::spawn`, từng byte giống `Bash` cũ (golden test trong `crates/linch-tools/tests/execution_golden.rs` và `crates/linch/tests/execution_golden.rs`) |
+| `local` | `LocalShell` (`exec.rs:326`) | Không gì cả: `process::spawn`, từng byte giống `Bash` cũ (golden test trong `crates/linch-tools/tests/execution_golden.rs` và `crates/linch/tests/execution_golden.rs`) |
 | `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp và `prlimit` bao quanh shell; một `HOME`/`TMPDIR` riêng cho mỗi session |
 | `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` cho mỗi lệnh; `docker rm -f` làm cleanup |
 | `remote` | `RemoteShell` (`exec/remote.rs`) | Không có process cục bộ: một host chạy lệnh (xem bên dưới) |
 
 Một backend không phải local kết thúc mô tả của `Bash` bằng
-`ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): model biết cái gì bị
+`ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:102`): model biết cái gì bị
 giới hạn, và vì mô tả là một phần định nghĩa của mỗi tool, backend cùng toàn bộ policy
 của nó là một phần của hợp đồng run. Backend local không thêm gì, nên các định nghĩa
 và hợp đồng của nó là những cái có từ trước khi có backend.
@@ -692,7 +692,7 @@ fn main() {
 ```
 
 Run contract digest bao phủ các tool được đăng ký khi
-`AgentBuilder::build` chạy (`crates/linch-core/src/agent/builder.rs:216`). Một
+`AgentBuilder::build` chạy (`crates/linch-core/src/agent/builder.rs:219`). Một
 tool được đăng ký sau đó, chẳng hạn một tool MCP sau một lần relist, được đưa ra từ
 snapshot của lượt kế tiếp nhưng không thuộc contract.
 

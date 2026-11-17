@@ -116,7 +116,7 @@ giờ được chứa thông tin xác thực hay header của request.
 
 | Variant | Ý nghĩa | `retryable()` |
 |---|---|---|
-| `Connect { message }` | Kết nối chưa bao giờ được tạo (bị từ chối, DNS, TLS handshake, connect timeout), nên request chưa bao giờ được gửi đi. Mỗi adapter ánh xạ `is_connect()` của reqwest sang nó trong `transport` (`anthropic/http.rs:66`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | có |
+| `Connect { message }` | Kết nối chưa bao giờ được tạo (bị từ chối, DNS, TLS handshake, connect timeout), nên request chưa bao giờ được gửi đi. Mỗi adapter ánh xạ `is_connect()` của reqwest sang nó trong `transport` (`anthropic/http.rs:69`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | có |
 | `Transport { message }` | Request đã gửi đi nhưng không có response nào về (reset, read timeout), hoặc stream bị đứt sau khi đã bắt đầu | có |
 | `Status { status, retry_after, message }` | Mã trạng thái HTTP không thành công | chỉ 408, 429 và >= 500 |
 | `ContextLength { status, message }` | Provider từ chối prompt vì dài hơn cửa sổ ngữ cảnh của model. `status` là `None` với lỗi bên trong một stream. Mỗi adapter ánh xạ lần từ chối của provider của nó ([bên dưới](#context-length-refusals)) | không |
@@ -126,7 +126,7 @@ giờ được chứa thông tin xác thực hay header của request.
 
 Các adapter không bao giờ retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
 và `retry_after` là lời khuyên cho bên gọi (`client.rs:1-5`). Runner chính là bên gọi
-đó. `dispatch` của nó (`crates/linch-core/src/runner/turn.rs:289`) kết thúc run với
+đó. `dispatch` của nó (`crates/linch-core/src/runner/turn.rs:295`) kết thúc run với
 trạng thái `failed` cùng một event `Error` ở mọi lỗi mà nó không retry hay failover
 (bên dưới), và abort run ở `Cancelled`. Event lỗi mang `kind`, `retryable` và `status`
 (`crates/linch-core/src/provider/call.rs:325`).
@@ -200,10 +200,10 @@ dụng ở `call.rs:169`):
 
 `Option<Usage>` đã phân biệt số không với không rõ, nên định dạng receipt không đổi, và
 một binary trước thay đổi này đọc `Some(zero)` như một lời gọi không tốn gì. Một lỗi
-free không gửi event `usage` (`runner/turn.rs:399`, và tương tự trong
+free không gửi event `usage` (`runner/turn.rs:405`, và tương tự trong
 `runner/compact.rs`), như Python không gửi cho một lời gọi thất bại, và để
 `usage_complete` là true. Một `budget` có giới hạn chỉ từ chối lời gọi kế tiếp sau một
-usage không rõ (`budget.rs:110`), nên một lỗi free được retry dưới giới hạn; một lỗi có
+usage không rõ (`budget.rs:118`), nên một lỗi free được retry dưới giới hạn; một lỗi có
 thể đã bị tính tiền vẫn kết thúc run với lỗi của provider. Vì vậy một 500, 502 hoặc 504 không được retry dưới
 giới hạn, dù nó có thể retry và được retry khi không có giới hạn. Python đánh dấu usage của
 mọi lời gọi thất bại là `unknown` (`src/linch/loop/streaming.py:412-415`) rồi từ chối
@@ -309,14 +309,14 @@ token của run để dừng một lời gọi sớm hơn.
 ## Cơ chế HTTP dùng chung
 
 Mọi adapter dựng client của nó bằng `transport::client`
-(`crates/linch-providers/src/transport.rs:23`):
+(`crates/linch-providers/src/transport.rs:24`):
 
 - **Không redirect.** reqwest chỉ bỏ `Authorization` khi chuyển hướng sang origin khác,
   nên `x-api-key` và `x-goog-api-key` sẽ đi theo một redirect. Một phản hồi 3xx
-  trở thành `Status` với một thông báo cố định (`transport.rs:57`); nó không
+  trở thành `Status` với một thông báo cố định (`transport.rs:64`); nó không
   retry được.
 - **Giới hạn thân lỗi.** Tối đa 8 KiB của một thân không phải 2xx được đọc
-  (`transport.rs:16`, `transport.rs:34`). Bản tóm tắt ưu tiên thông báo lỗi của vendor,
+  (`transport.rs:17`, `transport.rs:41`). Bản tóm tắt ưu tiên thông báo lỗi của vendor,
   được che dữ liệu nhạy cảm, rồi cắt còn 500 ký tự
   (`crates/linch-providers/src/openai_compat/http.rs:73`).
 - **`Retry-After`** được đọc dưới dạng số giây nguyên; một ngày HTTP bị bỏ qua. Gemini
@@ -394,22 +394,22 @@ hãy đọc nó trước khi đổi adapter.
 
 `crates/linch-providers/src/deepseek.rs`. `thinking` luôn được gửi, vì
 DeepSeek mặc định suy nghĩ; `Thinking::Disabled` tắt nó và mọi trạng thái khác
-bật nó (`deepseek.rs:129`). Khi thinking bật, mọi lượt assistant trước đó gửi
+bật nó (`deepseek.rs:137`). Khi thinking bật, mọi lượt assistant trước đó gửi
 `reasoning_content`, là `""` khi nó không có, nếu không một request có tool sẽ
-thất bại với 400 (`deepseek.rs:147-153`). Một `tool_choice` bắt buộc khi thinking bật,
+thất bại với 400 (`deepseek.rs:155-161`). Một `tool_choice` bắt buộc khi thinking bật,
 và mọi `output_schema`, thất bại ngay tại chỗ với `InvalidRequest`:
 DeepSeek không có response format JSON-schema và chế độ `json_object` không
 mang schema. `native_output_schema` là `false` (capabilities báo
 `output_schema: final_tool`), nên một run có schema đưa ra
 final tool của nó thay thế, và `tool_choice_refusal` (cùng quy tắc với của
 payload) từ chối một lựa chọn bị ép trừ khi thinking là `Disabled`.
-Effort ánh xạ `medium` và `xhigh` sang `high` (`deepseek.rs:184`).
+Effort ánh xạ `medium` và `xhigh` sang `high` (`deepseek.rs:197`).
 
 <a id="openai-chat-completions-and-server-profiles"></a>
 
 ### OpenAI Chat Completions và các server profile
 
-Một kiểu duy nhất, `OpenAiChat` (`crates/linch-providers/src/openai.rs:98`), phục vụ
+Một kiểu duy nhất, `OpenAiChat` (`crates/linch-providers/src/openai.rs:102`), phục vụ
 OpenAI và từng server tương thích OpenAI. Điểm khác biệt là một `ChatProfile`
 (`crates/linch-providers/src/openai/profile.rs:19`), một bảng tĩnh không có mặc định:
 mỗi đích nêu mọi quy tắc, nên một server không bao giờ vô tình kế thừa hành vi của OpenAI.
@@ -422,7 +422,7 @@ mỗi đích nêu mọi quy tắc, nên một server không bao giờ vô tình 
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | có | không (thất bại tại chỗ) | `max_tokens` | `enable_thinking: false` |
 
 Một server được chọn bằng `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:76`), thứ điền
+(`crates/linch-providers/src/servers.rs:80`), thứ điền
 `chat_template_kwargs` mà tài liệu của server đó nêu để tắt thinking. Khi
 một request yêu cầu `Thinking::Disabled`, các kwargs đó được gửi và effort bị
 bỏ ra (`profile.rs:144-154`). `reasoning_effort` của profile quyết định cách
@@ -458,9 +458,9 @@ lịch sử. `ResponsesOptions::store` tắt sẽ gửi `store: false` và yêu 
 ### Anthropic
 
 `crates/linch-providers/src/anthropic.rs`. `anthropic-version` được ghim ở
-`2023-06-01` (`anthropic.rs:44`) vì phiên bản mới hơn bỏ
+`2023-06-01` (`anthropic.rs:47`) vì phiên bản mới hơn bỏ
 `temperature`, thứ `ProviderRequest` vẫn mang. `max_tokens` là
-bắt buộc và mặc định 8192 (`anthropic.rs:47`). Các block thinking được gửi
+bắt buộc và mặc định 8192 (`anthropic.rs:50`). Các block thinking được gửi
 lại với chữ ký không đổi. `cache_control` của một request đánh dấu
 block system cacheable cuối cùng và block đã được ghi log cuối cùng của message user
 cuối: context chỉ dành cho request (`context_tail`) nằm sau nó, nên breakpoint
@@ -508,10 +508,10 @@ cửa sổ llama.cpp đã cấu hình bỏ qua lần thăm dò thay vì dùng l�
 `Usage` của Linch (`crates/linch-core/src/usage.rs:13`) đếm input chưa cache,
 output, cache read và cache write trong bốn bucket riêng; `input_tokens`
 không gồm cả hai bucket cache. Mỗi adapter trừ đi những gì vendor của nó gộp
-vào số đếm prompt: DeepSeek trừ các cache hit của nó (`deepseek.rs:193`), OpenAI trừ
+vào số đếm prompt: DeepSeek trừ các cache hit của nó (`deepseek.rs:217`), OpenAI trừ
 token cached và cache-write (`profile.rs:89`), vLLM trừ token cached và token cache được
 tạo (`servers/vllm.rs:54`), SGLang và llama.cpp trừ token cached
-(`servers.rs:89`).
+(`servers.rs:95`).
 
 <a id="pricing"></a>
 
@@ -526,9 +526,9 @@ kể cả mọi model OpenAI, DeepSeek, Gemini và cục bộ, được tính gi
 host cung cấp.
 
 Tính giá là opt-in trên agent: `AgentBuilder::pricing`
-(`crates/linch-core/src/agent/builder.rs:121`) nhận bất kỳ
+(`crates/linch-core/src/agent/builder.rs:124`) nhận bất kỳ
 `Fn(&str, &Usage) -> Option<f64>`. Crate `linch` truyền
-`linch_providers::cost` (`crates/linch/src/open.rs:143`). Khi một receipt có
+`linch_providers::cost` (`crates/linch/src/open.rs:170`). Khi một receipt có
 usage, runner tính giá theo model đã phục vụ lời gọi, nếu không thì theo model của
 agent (`crates/linch-core/src/runner/write.rs:107`). `AgentBuilder::build` từ chối một
 `budget.max_cost_usd` khi pricing không có giá hữu hạn cho model của spec

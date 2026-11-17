@@ -91,4 +91,4 @@ Các điều này đúng trên mọi trang ở trên, giống như
 (`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) và các chuỗi hook
 (`crates/linch-core/src/hooks.rs`) được đưa vào `AgentBuilder::hooks`
-(`crates/linch-core/src/agent/builder.rs:85-86`).
+(`crates/linch-core/src/agent/builder.rs:88-89`).

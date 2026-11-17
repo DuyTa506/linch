@@ -92,9 +92,9 @@ process.
   dropped stream) releases its lease from `Held`'s `Drop`, in a spawned
   one-write task, so another process need not wait out the TTL
   (`lease.rs:108-125`). The agent keeps each release task, and
-  `Agent::released` (`crates/linch-core/src/agent.rs:452`) waits for them;
+  `Agent::released` (`crates/linch-core/src/agent.rs:473`) waits for them;
   `OpenedAgent::close` waits up to `RELEASE_WAIT` (5 s,
-  `crates/linch/src/open.rs:348`) before it disconnects, so a
+  `crates/linch/src/open.rs:375`) before it disconnects, so a
   `linch-server` that exits after dropping its runs still frees them. A
   crash releases nothing; the lease runs out.
 - **Memory stores** have no TTL: they never refuse a claim, start no timer

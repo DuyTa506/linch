@@ -264,7 +264,7 @@ quyền thông thường áp dụng.
   tenant, user và các role của nó (an toàn cho đường dẫn và không nêu tên ai). Chỉ dẫn nêu
   thư mục đó, nên model giữ ghi chú ở đấy. Một run không có principal (kết nối cục bộ, hoặc
   không truyền) dùng `/memories/MEMORY.md`. `filesystem: {"memory": True, "memory_scope":
-  "namespace"}` là hành vi cũ: một tệp cho mọi run của namespace, phù hợp khi mọi run đáng
+  "namespace"}` giữ một tệp cho mọi run của namespace, phù hợp khi mọi run đáng
   tin như nhau. Scope thuộc hợp đồng của run. Đây là tách biệt theo đường dẫn, không phải
   theo quyền: các tool hệ thống tệp không bị giới hạn scope, nên `ls /memories` liệt kê mọi
   thư mục và một run có `write_file` có thể ghi vào thư mục của principal khác. Dùng các

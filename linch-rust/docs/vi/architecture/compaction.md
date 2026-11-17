@@ -34,7 +34,7 @@ Linch bản Python có cùng cấu trúc ([compaction](../../../../docs/architec
 - Một bản tóm tắt đã trả phí được giữ nguyên vẹn trong checkpoint `Compacted`, không
   phải dưới dạng một công thức chỉ chứa hash. Một lần resume nối nó vào mà không cần
   lời gọi provider nào nữa
-  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:245-266`).
+  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:256-278`).
 - Projection luôn được ghi vào session store dưới dạng một log entry
   (`runner/write.rs:83-98`). Không có phát hiện store và không có opt-in.
 
@@ -59,7 +59,7 @@ digest của một spec viết trước khi chúng tồn tại không đổi. `C
 ngưỡng và để phần còn lại ở giá trị mặc định (`compaction.rs:168-173`).
 `AgentBuilder::build` từ chối ngưỡng bằng 0, `keep_recent_turns` bằng 0 hoặc
 `max_output_tokens` bằng 0 với `BuildError::Invalid` (`compaction.rs:176-191`,
-`agent/builder.rs:237`).
+`agent/builder.rs:240`).
 
 Spec là một phần của run contract, nên thay đổi nó khiến các agent có cài đặt cũ và mới
 không tương thích: một lần resume run cũ bị từ chối
@@ -68,9 +68,9 @@ không tương thích: một lần resume run cũ bị từ chối
 ## Khi nào một run compact
 
 Một lượt bắt đầu ở `Step::Compact` khi spec có compaction, và ở
-`Step::Dispatch` nếu không (`runner/turn.rs:313`). `compact` quay về lời gọi chính
+`Step::Dispatch` nếu không (`runner/turn.rs:319`). `compact` quay về lời gọi chính
 mà không làm gì khi một trong các điều sau đúng
-(`runner/compact.rs:72-127`):
+(`runner/compact.rs:72-132`):
 
 1. Run đã bị hủy: nó abort thay vì tiếp tục.
 2. `max_turns` hoặc budget đã không cho phép thêm lời gọi nào. Lời gọi chính kết thúc
@@ -108,7 +108,7 @@ placeholder và không chứa ảnh (phép thử của Python, `compaction.rs:27
 sao chép.
 
 Nếu view đã xóa không còn đến hạn, `clear` ghi lại nó và lượt tiếp tục với lời gọi chính
-(`runner/compact.rs:301-342`):
+(`runner/compact.rs:313-354`):
 
 1. `pre_compact` chạy với strategy `micro`.
 2. Event `compaction` (strategy `micro`, `messages_before` bằng `messages_after`) được
@@ -119,7 +119,7 @@ Nếu view đã xóa không còn đến hạn, `clear` ghi lại nó và lượt
 
 Đó là một lần ghi run và một lần ghi session, và không có lời gọi provider nào. Nếu view
 đã xóa vẫn đến hạn, bản tóm tắt theo sau, và nó đọc phần được gộp với kết quả tool đã
-được xóa, như Python làm sau bước micro của nó (`runner/compact.rs:128-135`).
+được xóa, như Python làm sau bước micro của nó (`runner/compact.rs:133-140`).
 
 Việc xóa thay đổi các message ở giữa view, nên prefix đã cache của provider kết thúc ở
 kết quả bị xóa đầu tiên. Đó là lý do `micro` mặc định tắt.
@@ -250,11 +250,11 @@ Một bản tóm tắt được chấp nhận trở thành một message của u
 
 Sau đó run stage event `compaction` (số message và token trước và sau, chiến lược, thời
 lượng, `forced`) và lưu `Compacted` cùng bản tóm tắt và `keep_from`
-(`runner/compact.rs:219-243`, `crates/linch-core/src/events/kinds/control.rs`).
+(`runner/compact.rs:222-254`, `crates/linch-core/src/events/kinds/control.rs`).
 `Compacted` ghi write-through cùng receipt và `usage`, nên một bản tóm tắt đã trả phí
 không bao giờ bị mất.
 
-Tiếp theo, `compacted` ghi projection vào session (`runner/compact.rs:245-266`).
+Tiếp theo, `compacted` ghi projection vào session (`runner/compact.rs:256-278`).
 `project` flush checkpoint đang giữ, nối một `LogEntry::Projection` vào session store
 trong một lần ghi, ghi nó vào log trong bộ nhớ, rồi chạy các callback `on_compact` của
 agent (`runner/write.rs:83-98`). Checkpoint `Compacted` đã bền vững, nên lần flush
@@ -267,9 +267,9 @@ Một lượt có compact thêm hai lần ghi run và một lần ghi session: d
 ### `on_compact`
 
 `AgentBuilder::on_compact` đăng ký một callback của host chạy sau mỗi projection
-compaction, summary hay micro (`agent/builder.rs:132`). Nó không phải một hook: nó không
+compaction, summary hay micro (`agent/builder.rs:135`). Nó không phải một hook: nó không
 nằm trong run contract và không để lại bản ghi nào. Facade `linch` dùng nó để quên bằng
-chứng đọc của session (`ReadTracker::forget`, `crates/linch/src/open.rs:191`), như
+chứng đọc của session (`ReadTracker::forget`, `crates/linch/src/open.rs:218`), như
 `reset_read_tracker` của Python: model phải `Read` lại một tệp trước khi `Edit` hoặc
 `Write` thay đổi nó, vì những gì nó đã đọc có thể đã bị gộp đi. Ở một lần resume nối thêm
 một projection, các callback chạy lại; quên hai lần thì vô hại.
@@ -285,7 +285,7 @@ phí, như mọi lần từ chối kiểu đó (`provider/call.rs:257`). `kind` 
 `context_length`.
 
 `dispatch` hỏi `overflow` trước khi coi lỗi là cuối cùng
-(`runner/turn.rs:464`, `runner/compact.rs:268-295`):
+(`runner/turn.rs:470`, `runner/compact.rs:280-307`):
 
 1. Với `micro`, nếu có kết quả tool cũ nào đáng xóa, `clear` ghi lại view đã xóa (với
    `forced` được đặt trên event) và chuyển sang attempt chính kế tiếp của lượt.
@@ -394,7 +394,7 @@ Khi một response có văn bản, không có lời gọi tool và stop reason `
 số lần đã tiếp tục trong run ít hơn `max_attempts`, `received` giữ văn bản của nó như một
 phần và stage phản hồi (của spec, hoặc `DEFAULT_FEEDBACK`, trong một `<system-reminder>`)
 làm message user kế tiếp, cùng đường đi mà `continue` của một callback `stop` dùng
-(`runner/turn.rs:532-608`). Câu trả lời bị cắt được nối vào session như mọi response.
+(`runner/turn.rs:538-614`). Câu trả lời bị cắt được nối vào session như mọi response.
 Văn bản cuối cùng của run là các phần, theo thứ tự, rồi đến văn bản của response cuối;
 toàn bộ văn bản đó là thứ mà output schema, các verifier và `stop` nhìn thấy. Khi
 redaction scrub response, văn bản ghép được scrub lại, vì một match bị cắt đôi qua hai

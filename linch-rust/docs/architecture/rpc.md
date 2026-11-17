@@ -12,7 +12,7 @@ the server; it calls back into the client only for host tools and for the
 callbacks the client declared.
 
 The protocol itself is specified in the crate docs of `linch-rpc`
-(`crates/linch-rpc/src/lib.rs:1-374`): framing, every method, server
+(`crates/linch-rpc/src/lib.rs:1-573`): framing, every method, server
 request and notification, and the error table. This page explains how the
 code implements it, where its limits and checks live, and how to change
 it. The [server usage page](../usage/server.md) shows how to run it and
@@ -48,25 +48,25 @@ package `linch_rust` (`python/src/linch_rust/`) is a client of this server.
 
 ## Methods and messages
 
-Every method name is a `method::` constant (`crates/linch-rpc/src/protocol.rs:25-55`),
-and `Server::dispatch` (`crates/linch-rpc/src/server.rs:294-312`) maps each
+Every method name is a `method::` constant (`crates/linch-rpc/src/protocol.rs:28-66`),
+and `Server::dispatch` (`crates/linch-rpc/src/server.rs:304-322`) maps each
 to its handler. Params types refuse unknown fields; `OpenParams` takes
 `tools` and `callbacks` out and reads the rest as a strict `AgentConfig`
 (`crates/linch-rpc/src/protocol/open.rs:13-28`).
 
 | Method | Params | Handler | Result |
 |---|---|---|---|
-| `connection.auth` | `AuthParams` (`protocol.rs:62`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), first message on the socket only; elsewhere `-32600` | `Authenticated` `{tenant}` |
-| `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:19-48`) | `AgentOpened` `{agent, contract, skipped?}` |
-| `agent.close` | `CloseParams` | `agents.rs:51-75`; `-32002` while the connection drives a run of it | `{}` once its MCP servers are gone |
-| `session.close` | `SessionCloseParams` | `agents.rs:76-86`: `Agent::close_session` (forgets the session's reads, kills its background `Bash` commands) | `{}` |
-| `run.start` | `StartParams` (`protocol.rs:154`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, then notifications |
-| `run.resume` | `ResumeParams` (`protocol.rs:178`) | `run.rs:45-50`, through `claim` | the same |
-| `run.approve` | `ApproveParams` (`protocol.rs:191`) | `run.rs:52-58`, through `claim` | the same |
-| `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |
+| `connection.auth` | `AuthParams` (`protocol.rs:73`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), first message on the socket only; elsewhere `-32600` | `Authenticated` `{tenant}` |
+| `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
+| `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` while the connection drives a run of it | `{}` once its MCP servers are gone |
+| `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (forgets the session's reads, kills its background `Bash` commands) | `{}` |
+| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, then notifications |
+| `run.resume` | `ResumeParams` (`protocol.rs:215`) | `run.rs:45-50`, through `claim` | the same |
+| `run.approve` | `ApproveParams` (`protocol.rs:228`) | `run.rs:52-58`, through `claim` | the same |
+| `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |
 | `run.steer` | `SteerParams` `{agent, run_id, text, id?, principal?}` | `Server::steer_run` (`run.rs`): `Agent::steer`. A run this process drives takes it through its inbox and answers after its next step's flush; a suspended run is claimed, written to and put back in its suspension; a run another process leases is `-32033` | `Steered` `{queued: true, id}` |
 | `run.cancel` | `CancelParams` `{run_id, agent?}` | `Server::cancel` (`run.rs`): cancels a run this connection drives with its token; else, given `agent`, ends a suspended run with `Agent::cancel`, the run counted as driven meanwhile so an approve here gets `-32002` | `{cancelled}` |
-| `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, the durable envelopes after `after_seq` |
+| `run.events` | `EventsParams` | `agents.rs:93-100`: `Agent::events` | `{events}`, the durable envelopes after `after_seq` |
 | `provider.capabilities` | `ProviderModelParams` `{provider, model}`: a `provider` as in an agent config (`protocol.rs`) | `server/provider.rs`: `ProviderConfig::build_keyless`, `Provider::prepare`, `Provider::capabilities`; no key needed | `ProviderCapabilities` |
 | `provider.models` | `ProviderParams` `{provider}` | `server/provider.rs`: `ProviderConfig::build`, `Provider::list_models`; needs the key | `{models}`, `ModelInfo` per model |
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` when the list lacks it |
@@ -88,8 +88,8 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `job.list` | `JobListParams` | `server/schedule.rs` | `{jobs}` |
 
 The server sends three notifications. `workflow.event` `{run_id, event}` carries each `WorkflowEvent` of a workflow the connection drives, in order, before the answer of the call that made it. The other two: `run.event` `{run_id, envelopes}`
-(`RunEvent`, `protocol.rs:256`) carries one or more consecutive envelopes
-of one run; `run.end` `{run_id, error?}` (`RunEnd`, `protocol.rs:266`) is
+(`RunEvent`, `protocol.rs:293`) carries one or more consecutive envelopes
+of one run; `run.end` `{run_id, error?}` (`RunEnd`, `protocol.rs:303`) is
 the last message of a run. It also sends requests of its own: `tool.call`
 for a host tool (`crates/linch-rpc/src/protocol/call.rs:12`,
 `crates/linch-rpc/src/server/host.rs:70`) and `hook.call` for a callback
@@ -102,27 +102,62 @@ they never equal a client's numeric ids; a call that stops waiting sends
 ### Errors
 
 `ErrorObject` is `{code, message, data?}`; the full table is in the crate
-docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
+docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 
-| Codes | From |
-|---|---|
-| -32700, -32600, -32601, -32602, -32603 | JSON-RPC: the line, the request object, the method, the params; a panic |
-| -32001, -32002 | An unknown agent handle; a run the connection already drives, or `agent.close` of an agent with one |
-| -32003 | A socket's first message is not `connection.auth` with a known token |
-| -32004 | A tenant check refused; `data.kind` names it |
-| -32005 | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins` (`limit_reached`), or `provider_calls`, a rate: at most `max` `provider.models` and `provider.model` calls per `per_seconds` (60) for the tenant (`rate_limited`) |
-| -32010 to -32015 | `agent.open`: `BuildError`s, provider, store and MCP server unavailable |
-| -32020 to -32034, -32038 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema` or `tool_choice` (`-32034`), an answer that does not fit (`-32032`, `data.reason`), a lost lease (`-32022`, from a claim or a fenced journal write), a run another process leases (`-32033`, `data: {run_id, owner, expires_in_ms}`), a steer that is blank, too long or has an unusable id (`-32038`, `data.reason`) |
-| -32035 to -32037 | The provider methods: a provider with no model list (`-32035`, `data.provider`), a model its list lacks (`-32036`, `data.model`, and `data.truncated` when the list was cut), a request that failed or an error answer (`-32037`, `data: {kind, status?}`, `kind` one of `unreachable` (connect, reset and timeout alike), `status`, `invalid_request`, `other`; the message is one fixed text per kind, never the key, the URL or the vendor's words). A missing key is `-32013` with `data.env`. A tenant needs `allow.provider_info` and an allowed `base_url` (`-32004`, `kind` `provider_info` or `provider_base_url`) |
-| -32040 to -32044 | The scheduler methods: an agent that cannot run in the background (`-32040`, `data.reason` `memory_store`, `host_tools` or `callbacks`), an unknown schedule (`-32041`), a taken schedule id (`-32042`), an unknown job (`-32043`), an unusable timing (`-32044`, `data.reason`) |
-| -32045 to -32049 | The workflow methods: another client drives the workflow (`-32045`), the budget is spent (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`, or `data: {kind: "unpriced", model}` when `max_cost_usd` cannot count a model with no price), an agent call did not produce a result (`-32047`, `data.kind` `failed`, `aborted`, `timeout`, `approval` or `invalid`), a call for a workflow this connection does not drive (`-32048`), `resume` answers for a workflow whose journal holds nothing (`-32049`); `workflow.status` of an id the agent's namespace does not hold is `-32021`, and `workflow.start` of an existing id with another principal (or none, or one where it had none) is `-32004`, `kind: workflow_principal`. A tenant needs `allow.workflow` (`-32004`, `kind: workflow`, or `workflow_budget` above its ceiling) and meets `-32005` with `kind` `workflows`, `agent_calls_in_flight` or `journal_records` |
+| Code | Constant | Python | Meaning |
+|---|---|---|---|
+| -32700 | `PARSE_ERROR` | `ProtocolError` | The line is not JSON |
+| -32600 | `INVALID_REQUEST` | `ProtocolError` | Not a valid request object, or a batch |
+| -32601 | `METHOD_NOT_FOUND` | `ProtocolError` | No such method |
+| -32602 | `INVALID_PARAMS` | `ProtocolError` | The params do not fit the method: an unknown or missing field, a bad type |
+| -32603 | `INTERNAL_ERROR` | `ProtocolError` | A bug in the server, a panic included |
+| -32001 | `AGENT_NOT_FOUND` | `AgentNotFound` | No open agent has that handle |
+| -32002 | `RUN_BUSY` | `RunBusy` | The connection already drives that run, or `agent.close` named an agent with a run in progress |
+| -32003 | `UNAUTHENTICATED` | `Unauthenticated` | A socket's first message is not `connection.auth` with a known token; the server closes the connection |
+| -32004 | `NOT_ALLOWED` | `NotAllowed` | A tenant check refused; `data.kind` names it (the table in [Server](../usage/server.md#what-admission-refuses-and-why)), among them `run_bound` and `workflow_principal` |
+| -32005 | `LIMIT_REACHED` | `LimitReached` | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` or `steers` (a run with 16 steers waiting), or `provider_calls`, a rate: at most `max` `provider.models` and `provider.model` calls per `per_seconds` (60) for the tenant |
+| -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: a required binding was not set |
+| -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: an invalid config, or a workspace, policy or tool error. Among them: `budget.max_cost_usd` on a model with no price (the primary or a `fallback_models` entry; the message names the model), `spec.call_timeout_ms` under 100, and `workflow.start` with a `max_cost_usd` for an agent with an unpriced model |
+| -32012 | `BUILD_CONTRACT` | `OpenError` | `agent.open`: the run contract could not be digested |
+| -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | The provider key is unset (`data.env` names its variable), or the provider client could not be built |
+| -32014 | `STORE_UNAVAILABLE` | `OpenError` | Postgres could not be reached or migrated |
+| -32015 | `MCP_UNAVAILABLE` | `OpenError` | An MCP server of the config could not be connected; `data.server` names it |
+| -32020 | `STORE` | `RunError` | A store failure not listed below (also a dropped connection in the middle of a run) |
+| -32021 | `NOT_FOUND` | `RunNotFound` | No such run or session; also `run.report` and `workflow.status` of an id the agent's namespace does not hold |
+| -32022 | `LEASE_LOST` | `LeaseLost` | From a claim or a fenced journal write: another process took the run over, or failed it. The run stopped here without writing |
+| -32023 | `CONFLICT` | `RunExists` | A chosen run id that is already stored |
+| -32024 | `JOURNAL` | `RunError` | A journal write failed |
+| -32025 | `CONTRACT_MISMATCH` | `ContractMismatch` | The agent's contract differs from the run's; `data.expected` is the contract the run started under and `data.found` this agent's |
+| -32026 | `TERMINAL` | `RunTerminal` | The run has finished; `data.status` is its final status |
+| -32027 | `NOT_SUSPENDED` | `NotSuspended` | `run.approve` on a run not awaiting approval, or `run.answer` on one not awaiting input; a host that retried one continues the run with `run.resume` |
+| -32028 | `RECONCILE` | `RunError` | Durable state does not fit together |
+| -32029 | `PROMPT_BLOCKED` | `PromptBlocked` | A `user_prompt_submit` hook refused the prompt; `data.reason` says why. Nothing was written |
+| -32030 | `SESSION_BUSY` | `SessionBusy` | The session already has a run that is not terminal; `data: {session_id, run_id}` |
+| -32031 | `INVALID_OUTPUT_SCHEMA` | `InvalidOutputSchema` | The `output_schema` of `run.start` does not compile, or its root is not an object; `data.reason` |
+| -32032 | `INVALID_ANSWER` | `InvalidAnswer` | A `run.answer` that does not fit the pending input requests; `data.reason`. The run still awaits input |
+| -32033 | `RUN_LEASED` | `RunLeased` | Another process drives the run and keeps its lease alive; `data: {run_id, owner, expires_in_ms}` |
+| -32034 | `INVALID_TOOL_CHOICE` | `InvalidToolChoice` | The `tool_choice` of `run.start` names a tool the run does not offer, or the provider refuses it; `data.reason` |
+| -32035 | `MODELS_UNSUPPORTED` | `ModelsUnsupported` | `provider.models` or `provider.model` named a provider with no model list (`scripted`); `data.provider` |
+| -32036 | `MODEL_NOT_FOUND` | `ModelNotFound` | `provider.model` named a model the list lacks; `data.model`, and `data.truncated` when the list was cut short |
+| -32037 | `PROVIDER_REQUEST_FAILED` | `ProviderRequestFailed` | The provider could not be asked, or answered with an error; `data: {kind, status?}`, `kind` one of `unreachable` (connect, reset and timeout alike), `status`, `invalid_request`, `other`. One fixed message per kind: never the key, the URL or the vendor's words |
+| -32038 | `INVALID_STEER` | `InvalidSteer` | `run.steer` with text that is blank or over 16 KiB, an unusable id, or a run that is idle (queued, or running with no server driving it: resume it first); `data.reason`. Nothing was written |
+| -32040 | `NOT_BACKGROUND` | `NotBackground` | `schedule.create` or `job.enqueue` for an agent that cannot run in the background; `data.reason` is `memory_store`, `host_tools`, `callbacks` or `remote_execution` |
+| -32041 | `SCHEDULE_NOT_FOUND` | `ScheduleNotFound` | The agent's namespace has no schedule with that id |
+| -32042 | `SCHEDULE_EXISTS` | `ScheduleExists` | The namespace already has a schedule with that id |
+| -32043 | `JOB_NOT_FOUND` | `JobNotFound` | The namespace has no job with that id, or its history was pruned |
+| -32044 | `INVALID_SCHEDULE` | `InvalidSchedule` | The schedule's timing is unusable; `data.reason` |
+| -32045 | `WORKFLOW_HELD` | `WorkflowHeld` | Another client drives the workflow: this connection, another connection or another server. `workflow.start` wrote nothing |
+| -32046 | `WORKFLOW_BUDGET` | `WorkflowBudgetExceeded` | The budget is spent (`data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), or `data: {kind: "unpriced", model}` when `max_cost_usd` cannot count a call of a model with no price. No further agent call starts |
+| -32047 | `WORKFLOW_CALL_FAILED` | `WorkflowCallFailed` | A `workflow.agent` call produced no result; `data.kind` is `failed`, `aborted`, `timeout`, `approval` or `invalid` |
+| -32048 | `WORKFLOW_NOT_FOUND` | `WorkflowNotFound` | This connection drives no workflow with that id: it never sent `workflow.start` for it, or already finished it |
+| -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` with `resume` answers for a workflow whose journal holds nothing (it never ran here, or a memory-store agent's journal lived in another connection). Nothing was claimed |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to
 continue the run, `found` the one stored with the run. The wire turns them
 around, so that `data.expected` is the run's contract and `data.found` the
-agent's, as the message text reads (`error.rs:157-165`, tested at
-`error.rs:222-242`).
+agent's, as the message text reads (`error.rs:260-269`, tested at
+`error.rs:407-428`).
 
 The socket login answers its refusals under different ids
 (`login.rs:33-85`): `-32005` `kind: logins` under a null id before anything
@@ -132,8 +167,8 @@ The Python client reads the first line it gets as its login's answer,
 whatever the id (`python/src/linch_rust/_remote.py:112-142`).
 
 The Python client maps codes to exceptions in `_BY_CODE`
-(`python/src/linch_rust/errors.py:158-170`), with ranges for the rest
-(`errors.py:173-186`); `python/tests/test_protocol.py:196` pins the map.
+(`python/src/linch_rust/errors.py:166-178`), with ranges for the rest
+(`errors.py:181-194`); `python/tests/test_protocol.py:202` pins the map.
 
 ### Workflow methods
 
@@ -159,7 +194,7 @@ journal failed`; the cause goes to the server's log.
 
 ## Inside a connection
 
-Each connection is one `Server` (`server.rs:53-79`): its tables of open
+Each connection is one `Server` (`server.rs:55-83`): its tables of open
 agents, driven runs and parked runs under one lock, so `agent.close` cannot
 miss a run that starts while it checks; its outbox; its peer for server
 requests; and its tenant, `None` for a local client.
@@ -170,15 +205,15 @@ requests; and its tenant, `None` for a local client.
    to `connection` (`connection.rs:148-211`), which spawns the writer task,
    runs the login when access is `Login`, and reads until the input ends
    or `stop` fires.
-2. **Read loop.** `Server::receive` (`server.rs:171-207`) parses a line,
+2. **Read loop.** `Server::receive` (`server.rs:181-217`) parses a line,
    hands a client's answer to the server request it names, and reads
    anything else as a request (`Request::from_value`,
    `crates/linch-rpc/src/message.rs:108`). A request without an `id` is a
    notification and is dropped. Each call then takes one of 64 permits
-   (`MAX_REQUESTS`, `server.rs:49`); the loop awaits it, so the 65th
+   (`MAX_REQUESTS`, `server.rs:51`); the loop awaits it, so the 65th
    request stops reading until a call ends. The call runs in its own task,
    so a slow `agent.open` never holds up a `run.cancel`.
-3. **Dispatch.** `Server::handle` (`server.rs:265-292`) catches a panic as
+3. **Dispatch.** `Server::handle` (`server.rs:275-302`) catches a panic as
    `-32603`. A run method returns its stream: the `RunAccepted` result is
    queued first, then a task drives the stream.
 4. **A run.** `Server::drive` (`run.rs:159-196`) encodes each envelope once,
@@ -193,7 +228,7 @@ requests; and its tenant, `None` for a local client.
 6. **Server requests.** `Peer::call` (`peer.rs:92-139`) queues the request
    and waits for its answer, its timeout or its cancel; waiting for room in
    the outbox counts against both.
-7. **End of input.** `Server::stop` (`server.rs:150-169`) lets the calls
+7. **End of input.** `Server::stop` (`server.rs:159-178`) lets the calls
    already read finish, drops every run where it stands (a durable run stays
    resumable), fails the waiting server requests, then closes every agent's
    MCP servers. The writer drains the queue and the connection returns.
@@ -201,10 +236,10 @@ requests; and its tenant, `None` for a local client.
 ### Ordering
 
 - A run's `RunAccepted` is queued before the task that drives it is
-  spawned (`server.rs:278-289`), so it reaches the client before any
+  spawned (`server.rs:288-299`), so it reaches the client before any
   notification of that run. The Python client relies on it: it files a
   run's notifications under the run id it read from that result
-  (`python/src/linch_rust/_rpc.py:254-265`).
+  (`python/src/linch_rust/_rpc.py:306-317`).
 - Every message goes through one queue to one writer, so the wire keeps the
   queue's order. A batch joins only what is already queued, and any other
   message or another run's envelope closes it (`outgoing.rs:1-10`): a
@@ -234,10 +269,10 @@ There is no buffer that grows without bound on the server:
    (`NOTIFICATION_CAPACITY`, `crates/linch-rpc/src/client.rs:29`), then
    stops reading, so answers wait behind them too (`client.rs:103-110`).
    The Python client does the same with its own 1024
-   (`NOTIFICATION_CAPACITY`, `python/src/linch_rust/_rpc.py:46`): each
+   (`NOTIFICATION_CAPACITY`, `python/src/linch_rust/_rpc.py:48`): each
    unread `run.event` holds a place across the connection's runs, and the
    reader waits for one before it queues the next (`RunQueue`,
-   `_rpc.py:60-96`). `Run.cancel` keeps reading its run while it waits for
+   `_rpc.py:62-98`). `Run.cancel` keeps reading its run while it waits for
    its answer (`python/src/linch_rust/run.py:102-121`); a run nobody reads
    while its events keep coming stalls the connection.
 
@@ -248,22 +283,22 @@ hands a message to a task when the queue is full.
 
 | Transport | Entry | Access | Runtime |
 |---|---|---|---|
-| stdio | `linch-server` with no arguments; `linch_rpc::serve` (`connection.rs:43-50`) | `Access::Local`: no login, no tenant, no caps | Current-thread (`crates/linch-server/src/main.rs:49-55`): one client, so handing an envelope between its tasks wakes no other thread |
-| Unix socket | `--config FILE` with `socket`; `Listeners` (`crates/linch-server/src/listen.rs:41-98`) | `Access::Login`: the first message is `connection.auth` | Multi-thread |
-| HTTP with WebSocket | `--config FILE` with `http`; `crates/linch-server/src/http.rs:74-113` | `Access::Tenant`: the bearer header is checked before the upgrade | Multi-thread |
+| stdio | `linch-server` with no arguments; `linch_rpc::serve` (`connection.rs:43-50`) | `Access::Local`: no login, no tenant, no caps | Current-thread (`crates/linch-server/src/main.rs:55-61`): one client, so handing an envelope between its tasks wakes no other thread |
+| Unix socket | `--config FILE` with `socket`; `Listeners` (`crates/linch-server/src/listen.rs:43-102`) | `Access::Login`: the first message is `connection.auth` | Multi-thread |
+| HTTP with WebSocket | `--config FILE` with `http`; `crates/linch-server/src/http.rs:80-121` | `Access::Tenant`: the bearer header is checked before the upgrade | Multi-thread |
 
 **stdio.** On Linux the server reopens its pipes through
 `/proc/self/fd/0` and `/proc/self/fd/1` and drives those in non-blocking
-mode (`main.rs:88-123`). Non-blocking is a flag of the open file
+mode (`main.rs:94-129`). Non-blocking is a flag of the open file
 description, which fds 0 and 1 share with every process holding the same
 pipe; new descriptions keep it from leaking into a shell's or a
 supervisor's other readers. Anything that is not a pipe uses tokio's
 `stdin()` and `stdout()`.
 
 **Unix socket.** A socket file left by a stopped server is replaced, and
-one a server answers on is refused (`bind_socket`, `listen.rs:102-119`).
+one a server answers on is refused (`bind_socket`, `listen.rs:106-123`).
 Each connection waits for its login with one of 32 places
-(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:137-141`): each may
+(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:162-166`): each may
 buffer a 16 MiB line for 10 s, so the places bound that to 512 MiB. One
 more gets `-32005` at once. A login has 10 s (`LOGIN_TIMEOUT`,
 `login.rs:17`); silence past it gets `-32003` and the connection closes
@@ -292,15 +327,15 @@ tenant and uses the tenant's pools (below).
 
 ## Tenants and allowlists
 
-`ServerConfig::from_json` (`crates/linch-server/src/config.rs:153`) reads the
+`ServerConfig::from_json` (`crates/linch-server/src/config.rs:186`) reads the
 config, refusing unknown fields and a cap of 0; `tokens`
 (`config.rs:187`) reads each token inline or from the environment;
 `AllowConfig::build` (`config.rs:220`) makes the `Allowlists`.
 
-- A `Tenant` (`access.rs:43-127`) has a name of 1 to 64 ASCII letters,
+- A `Tenant` (`access.rs:45-152`) has a name of 1 to 64 ASCII letters,
   digits, `.`, `_` or `-` (never `/`), its allowlists, and one semaphore
   each for runs, agents and connections, shared by all its connections.
-- `Tokens` (`access.rs:143-208`) keep each token as a SHA-256 digest and
+- `Tokens` (`access.rs:168-233`) keep each token as a SHA-256 digest and
   compare a presented one with every digest in constant time. No token is
   logged or echoed.
 - `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-136`) checks an
@@ -332,17 +367,17 @@ row (`linch_ext_workflows.principal`): a claim naming another is
 without one acts for the principal stored with the run when it started
 (core's `continue_run`, from `RunRecord::principal`).
 
-**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:137-174`)
+**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:185-222`)
 reads a DSN the way the store connects with it, through sqlx's
 `PgConnectOptions`, so a `?host=` or `?user=` override counts and a missing
 user or `sslmode` takes the server's default. An entry allows a DSN with
 the same host, port, socket, database, user, startup `options` and TLS
 files, and an `sslmode` at least as strict as its own, ranked from
-`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:176-197`).
+`disable` (0) to `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:224-245`).
 
 The facade shares one pool per target among the agents opened with one
 `PgPools` (`crates/linch/src/pools.rs:19-39`). A `Tenant` owns one
-(`access.rs:56`, `access.rs:79`) and `connection` gives a tenant's
+(`access.rs:58`, `access.rs:82`) and `connection` gives a tenant's
 connection that one (`connection.rs:163-179`), so pools
 are keyed by tenant and target: two tenants on one target never share a
 pool, and one tenant cannot set the size of another's (R3 front 5). Every
@@ -355,9 +390,9 @@ order or in settings sqlx ignores share a pool. A pool takes its size from
 the open that connected it (`pools.rs:94-112`); the connect gives up after
 5 s and the migrations after 30 s (`pools.rs:146-164`).
 
-**MCP commands.** An `McpCommand` (`allowlists.rs:54-74`) may not list
+**MCP commands.** An `McpCommand` (`allowlists.rs:100-122`) may not list
 `PATH`, `HOME` or the variables known to choose what code a program loads
-(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:76-113`). The list is
+(`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:124-161`). The list is
 best effort.
 
 ## Background runs
@@ -418,14 +453,14 @@ jobs, scaled apart from the listening servers.
 
 | Limit | Value | Where | Past it |
 |---|---|---|---|
-| `max_pool_connections` per tenant | `linch_postgres::default_max_connections()` unless set (`allowlists.rs:275-278`) | `Tenant::admit` (`admit.rs:90-105`), before anything connects | `-32004`, `kind: pool_connections`, `max` the cap |
-| `max_connections` per tenant | 8 unless set (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:94-111`); the connection holds the place until it ends (`connection.rs:161-180`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
+| `max_pool_connections` per tenant | `linch_postgres::default_max_connections()` unless set (`allowlists.rs:325-328`) | `Tenant::admit` (`admit.rs:90-105`), before anything connects | `-32004`, `kind: pool_connections`, `max` the cap |
+| `max_connections` per tenant | 8 unless set (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:103-136`); the connection holds the place until it ends (`connection.rs:161-180`) | Socket: `-32005` under the `connection.auth` id; HTTP: `429` |
 | `max_runs` per tenant | 16 unless set (`allowlists.rs:17`) | `run_place`, taken in `start` and `claim` (`run.rs:152-157`) and held by the driven run | `-32005`, nothing starts |
-| `max_agents` per tenant | 16 unless set (`allowlists.rs:29`) | Taken in `open` after the checks (`agents.rs:19-26`), freed once the agent's MCP servers are gone (`server.rs:104-111`) | `-32005`, before any MCP server starts |
-| Calls in flight per connection | 64 | `server.rs:49` | Reading waits |
-| Logins waiting | 32 per `Tokens` | `access.rs:137-141` | `-32005` `kind: logins`, then close |
+| `max_agents` per tenant | 16 unless set (`allowlists.rs:29`) | Taken in `open` after the checks (`agents.rs:20-27`), freed once the agent's MCP servers are gone (`server.rs:110-119`) | `-32005`, before any MCP server starts |
+| Calls in flight per connection | 64 | `server.rs:51` | Reading waits |
+| Logins waiting | 32 per `Tokens` | `access.rs:162-166` | `-32005` `kind: logins`, then close |
 | HTTP upgrades waiting | 32 per server | `http.rs:38-43` | Closed unread |
-| One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:232-251`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
+| One line or message | 16 MiB (`connection.rs:28`); its first 64 KiB are kept to find its `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:242-261`) | `-32600`, under the request's id when the head shows it; an answer fails its server request |
 | Login wait, HTTP head | 10 s each | `login.rs:17`, `http.rs:36` | The login gets `-32003`, then the connection closes; the HTTP connection closes |
 
 A local (stdio) connection has none of the tenant caps.
@@ -448,11 +483,11 @@ The Rust `Client` (`client.rs:97-101`) has one generic method,
 `RequestHandler` (`client.rs:57`); `Client::in_process` (`client.rs:174`)
 starts a server on in-memory pipes, as the tests do.
 
-The Python client's `Connection` (`python/src/linch_rust/_rpc.py:160`) has
+The Python client's `Connection` (`python/src/linch_rust/_rpc.py:189`) has
 one reader task. It resolves answers by id, files `run.event` envelopes and
-`run.end` under their run (`_rpc.py:232-252`), runs `tool.call` and
+`run.end` under their run (`_rpc.py:280-304`), runs `tool.call` and
 `hook.call` in a task each and cancels one on `$/cancelRequest`
-(`_rpc.py:267-310`). `Agent` (`python/src/linch_rust/agent.py:50`) wraps the
+(`_rpc.py:319-362`). `Agent` (`python/src/linch_rust/agent.py:50`) wraps the
 methods: `run`, `resume` and `approve` through `_start` (`agent.py:203`),
 and `close`, `close_session` and `events` (`agent.py:159-201`).
 
@@ -460,19 +495,19 @@ and `close`, `close_session` and `events` (`agent.py:159-201`).
 
 | Step | Where | What catches a miss |
 |---|---|---|
-| 1. Name it | A `method::` constant in `protocol.rs:25-55` | Nothing; every other step uses it |
+| 1. Name it | A `method::` constant in `protocol.rs:28-66` | Nothing; every other step uses it |
 | 2. Its params and result | `protocol.rs` or a `protocol/` file, with `deny_unknown_fields` and doc comments | `-32602` for an unknown field only if the type refuses them |
 | 3. The handler | An `impl Server` method in `server/agents.rs` or `server/run.rs`. Run the tenant checks (`admit_principal`, a place) before anything else, and return `Reply::Run` for a run | Tests in `crates/linch-rpc/tests/tenants.rs` and `limits.rs` for its checks |
-| 4. Dispatch | An arm in `Server::dispatch` (`server.rs:294-312`) | `-32601` at run time |
+| 4. Dispatch | An arm in `Server::dispatch` (`server.rs:304-322`) | `-32601` at run time |
 | 5. Errors | A new code in `error.rs` with its conversion | `crates/linch-rpc/tests/wire.rs` for the wire shape |
-| 6. The protocol document | The method in the crate docs' Methods section, a new code in its table (`lib.rs:118-246`, `lib.rs:328-364`) | Review only |
+| 6. The protocol document | The method in the crate docs' Methods section, a new code in its table (`lib.rs:120-369`, `lib.rs:518-569`) | Review only |
 | 7. The Rust client | Nothing: `Client::call` is generic. A typed helper in `crates/linch-rpc/tests/common/mod.rs` if tests need one | Compilation of the tests |
 | 8. The Python client | A method on `Agent` (`agent.py`), and for a new code an exception in `errors.py` and its `_BY_CODE` entry | `python/tests/test_protocol.py` |
 | 9. Usage docs | `docs/usage/server.md` and the Python pages that call it | Review only |
 | 10. Tests | `crates/linch-rpc/tests/<area>.rs` end to end through `Client::in_process` or the raw wire (`wire.rs`); a Python test against the built server | `cargo test -p linch-rpc`, `pytest` |
 
 A field added to `AgentConfig` reaches `agent.open` with no change here;
-`python/tests/test_config.py:52` checks that the Python typed config names
+`python/tests/test_config.py:53` checks that the Python typed config names
 every field the server reads.
 
 ## Example

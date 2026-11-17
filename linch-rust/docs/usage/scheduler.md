@@ -95,10 +95,12 @@ A stdio client has no tenant and no caps.
 
 ## Which agents can run in the background
 
-The agent you schedule needs Postgres stores and no host tools or
-callbacks: a background run has no client to call back. Otherwise the call
-raises `NotBackground` with `reason` `memory_store`, `host_tools` or
-`callbacks`. Give the agent workspace or MCP tools instead.
+The agent you schedule needs Postgres stores, no host tools or callbacks,
+and no `remote` execution backend for `Bash` (its commands run on the
+client's machine): a background run has no client to call back. Otherwise the
+call raises `NotBackground` with `reason` `memory_store`, `host_tools`,
+`callbacks` or `remote_execution`. Give the agent workspace or MCP tools, and
+a `local`, `sandbox` or `docker` backend, instead.
 
 A schedule always runs the config it was created with; open the agent again
 and create a new schedule to change it.
@@ -345,7 +347,7 @@ List them with `agent.schedules()` and remove them with
 | Refusal | When |
 |---|---|
 | `NotAllowed`, `kind == "schedule_tools"` | The tenant's allowlists have no `max_schedules` (deny by default), or the connection is local: a stdio server runs no worker, and a local client has no caps |
-| `NotBackground`, `.reason` | Memory stores, host tools or callbacks: the fires could not run the same agent |
+| `NotBackground`, `.reason` | Memory stores, host tools, callbacks or a remote execution backend: the fires could not run the same agent |
 
 A worker must serve the agent's database ([Run a worker](#run-a-worker));
 the server cannot see a worker in another process, so `max_schedules` is
@@ -388,7 +390,7 @@ events skips it. The OpenTelemetry spans of the run carry `linch.schedule.id`
 
 | Raised | When |
 |---|---|
-| `NotBackground` (-32040) | The agent has memory stores, host tools or callbacks; `.reason` |
+| `NotBackground` (-32040) | The agent has memory stores, host tools, callbacks or a `remote` execution backend; `.reason` |
 | `ScheduleNotFound` (-32041) | `pause_schedule` or `resume_schedule` of an id the namespace lacks |
 | `ScheduleExists` (-32042) | `create_schedule` with an id the namespace has |
 | `JobNotFound` (-32043) | `job` of an id the namespace lacks, or whose history was pruned |

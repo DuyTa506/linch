@@ -39,6 +39,7 @@ Take the first row that fits. Move down only for a reason you can state.
 |---|---|---|
 | The model picks tools until the job is done | One agent with host tools | `usage/agent.md`, `usage/tools.md` |
 | Known steps, one after another | Your Python code calls `agent.run` once per step, each with a `run_id` you choose | `usage/runs.md` |
+| Known steps, fan-out or a signing step, that must resume after a crash without repeating paid work | `run_workflow` (Postgres) | `usage/workflows.md` |
 | Two roles on the same provider and stores | Two agents whose configs differ only in `profile` | `usage/profiles.md` |
 | The model hands focused tasks to helpers it picks | `subagents`, with definitions in `<config_dir>/agents/` | `usage/subagents.md` |
 | Independent subtasks the model runs side by side | `subagents` with `workers: {"background": True}` | `usage/subagents.md` |
@@ -48,11 +49,14 @@ Take the first row that fits. Move down only for a reason you can state.
 
 Tradeoffs to keep in view:
 
-- The Python client has no workflow engine, eval harness or job queue. Those are Rust crates
-  (`architecture/ext.md`, `architecture/worker.md`). For known steps your own code owns the order,
-  and nothing journals it: each step is a durable run on Postgres, so record which steps finished
-  and make each one safe to run twice. A queue or a cron trigger is the host's, calling
-  `agent.run` and `agent.resume`.
+- For known steps your own code owns the order. `run_workflow` journals each `wf.agent`, `wf.step`
+  and `wf.interrupt` in Postgres, so a restart replays the finished calls without a model call;
+  the function runs again from the top, so code outside those calls must be deterministic, and
+  an irreversible step goes through `wf.step` after a `wf.interrupt` with an idempotency key. It
+  needs Postgres to resume, one driver at a time per `run_id`, and a `principal` if the calls act
+  for someone (the same one on every start). Without it, record which steps finished and make
+  each run safe to run twice. A queue or a cron trigger is the host's (`run_or_resume`, or
+  `agent.create_schedule` with a worker); the eval harness is `agent.eval` (`usage/monitoring.md`).
 - A deep agent means the model owns the order, which is flexible but not deterministic, and
   nothing records the orchestration beyond the runs and sessions. Its built-in profiles are
   durable and need Postgres stores.
@@ -89,7 +93,9 @@ deny by tool, path or shell command, and can match the roles of the run's `princ
 Give a workspace only to agents that need files, and turn off `Bash` with `bash: False` unless
 the job needs commands. Deny what must never run with a deny rule or a profile's `tool_deny`,
 which no mode overrides. Cost is priced only for the models in the built-in table
-(`usage/events.md`); for others, track tokens from `UsageEvent` yourself.
+(`usage/events.md`); vLLM, DeepSeek, SGLang and llama.cpp models are not in it. A `max_cost_usd`
+cap needs a price for the primary and every fallback model, or the agent does not open: set
+`pricing`, or cap `max_tokens`. `spec.call_timeout_ms` must be at least 100.
 
 **Tenants.** Give each tenant or product area its own `namespace`, since stores are keyed by it.
 Pass a `principal` to every `run`, `resume` and `approve` that acts for someone. A shared
@@ -99,7 +105,11 @@ server's environment. A tenant's agent needs `max_turns` or a `budget` cap (toke
 not opened. Admission denies by default what a tenant could abuse: `Bash`
 (`exec_tools`), execution backends, tool cache, long-term memory, schedules, the task ledger and
 provider lookups each need their `allow` entry, and the operator may add `system_sections` and a
-`required_policy` every agent of the tenant carries. List which of these each tenant needs.
+`required_policy` every agent of the tenant carries. List which of these each tenant needs. A
+tenant's workflows (`allow.workflow`, with caps) and provider request settings
+(`allow.provider_request`) are denied the same way. A client that vanishes is noticed by TCP
+keepalive and WebSocket pings (`liveness`); a Python client whose event loop a blocking tool holds
+for over 60 s is cut, so run such tools in a thread.
 
 **Context.** Prefer host tools, MCP servers or a `context_build` callback that adds retrieved
 blocks over stuffing data into the prompt (`usage/agent.md`). Long sessions need
@@ -111,7 +121,11 @@ its definition of "done" to the model's optimism. Keep outside the conversation:
 `spec.system` section (compaction cannot rewrite it), progress as `tasks` with `task_ledger`
 shared by every session, results in `filesystem` files, and the verdict in your code, which reads
 the ledger, the files and `agent.events` after the run (`usage/long-running.md`). Steer with
-`agent.steer` for what a person would say mid-run. Test it the way it fails: low compaction
+`agent.steer` for what a person would say mid-run (16 unread steers at most; an idle run must be
+resumed first). A compaction summary the model fails to give (a tool call, nothing, or a
+checkpoint no smaller than what it replaces) is rejected and the view stays as it was; after two in
+a row the run waits until the view has grown by a tenth of the window before asking again, so
+size the window and `threshold_tokens` for the summary to fit. Test it the way it fails: low compaction
 threshold, SIGKILL the sidecar, resume on Postgres, start a fresh session, assert on the durable
 state and not on the model's words.
 
@@ -138,7 +152,10 @@ Your own corpus: a `context_build` retrieval callback. Memories are untrusted da
 **Commands.** `Bash` runs as the server's user unless `execution` says otherwise. Choose `sandbox`
 (Landlock and seccomp, Linux 6.12 or later, no daemon) when the model runs commands in a workspace,
 `docker` when you need an image's tools, and a shared server's `allow.execution` to pin tenants to
-one. Neither replaces permission rules.
+one. Neither replaces permission rules. `remote` runs commands on the client's machine with that
+machine's privileges (the server's confinement does not apply), gives the model only `Bash` and its
+two companions by default, and cannot be scheduled or run by a worker; a tenant needs it in
+`allow.execution`.
 
 **Provider fit.** Before settling on a self-hosted model, ask `server.provider_capabilities(config)`
 (keyless) and `server.list_models(provider)`: context window and its source, whether structured

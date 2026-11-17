@@ -307,6 +307,29 @@ result = await run_or_resume(agent, "job-7", "Reconcile the ledger")
 Hãy dùng nó từ task của một job queue, hoặc từ một node LangGraph hay Prefect:
 node có thể được thử lại bao nhiêu lần tùy ý và run chỉ xảy ra một lần.
 
+## Lỗi
+
+| Raise | Khi nào |
+|---|---|
+| `WorkflowHeld` (-32045) | Một client khác điều khiển workflow ([ở trên](#một-driver-cho-mỗi-workflow)); chưa ghi gì |
+| `WorkflowBudgetExceeded` (-32046) | `budget` đã hết (`.spent_tokens`, `.spent_usd`), hoặc `data["kind"] == "unpriced"` (`data["model"]`): budget `max_cost_usd` trên model không có giá. Các lời gọi đã xong vẫn nằm trong journal |
+| `WorkflowCallFailed` (-32047) | Một lời gọi `wf.agent` không cho kết quả; `.kind` là `failed`, `aborted`, `timeout`, `approval` (run con dừng để chờ phê duyệt) hoặc `invalid` (subagent không biết) |
+| `WorkflowNotFound` (-32048) | Một lời gọi cho id workflow mà connection này không điều khiển: chưa gửi `workflow.start` cho nó, hoặc nó đã xong |
+| `WorkflowNoJournal` (-32049) | Câu trả lời `resume` cho một workflow mà journal trống |
+| `NotAllowed` (-32004) | `kind` là `workflow` (không có `allow.workflow`), `workflow_budget` (budget vượt trần) hoặc `workflow_principal` (principal khác với principal lúc workflow bắt đầu); một `principal` của tenant khác |
+| `LimitReached` (-32005) | `kind` là `workflows`, `agent_calls_in_flight` hoặc `journal_records` ([Admission](#admission)) |
+| `OpenError` (-32011) | `workflow.start` với budget `max_cost_usd` cho agent có model chưa có giá |
+| `RunNotFound` (-32021) | `workflow_status` của một id mà namespace của agent không có |
+| `WorkflowSuspended` | Không phải lỗi của server: một interrupt chưa có câu trả lời, và `run_workflow` raise nó (một `BaseException`) sau khi workflow được lưu là `awaiting_input` |
+| `WorkflowTimeoutError` | Một lần thử của step vượt giới hạn, hoặc `deadline_ms` đã qua (phía client) |
+
+Mọi lỗi của server đều là `WorkflowError` trừ `NotAllowed`, `LimitReached`,
+`OpenError` và `RunNotFound`. `workflow_status(agent, run_id)` trả về một
+`WorkflowStatus` (`status`, `records`, `interrupt_key`, `interrupt_payload`)
+mà không điều khiển workflow. `Retry(max_attempts, base_delay_ms,
+max_delay_ms)` truyền qua `retry=` lặp lại một `wf.agent` hay `wf.step` thất bại
+hoặc quá hạn; chỉ lần thử thắng được ghi vào journal.
+
 ## Khác biệt so với Python Linch
 
 | | Python | Ở đây |

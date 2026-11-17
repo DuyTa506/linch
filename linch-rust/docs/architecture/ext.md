@@ -112,7 +112,7 @@ cache and need no fold (`crates/linch-ext/src/workflow/journal.rs:1-8`).
 
 ### Calls
 
-`run_workflow(options, f)` (`crates/linch-ext/src/workflow/engine.rs:99`)
+`run_workflow(options, f)` (`crates/linch-ext/src/workflow/engine.rs:265`)
 claims the workflow, then runs `f` on a `WorkflowContext` seeded with the
 stored records. The journaled calls:
 
@@ -156,7 +156,7 @@ replay, journaled calls return at once, so branches reach a shared name in
 another order than they did live; a count shared across branches would hand
 one branch another's record and run a journaled step again. The path is a
 task-local that each branch is polled under
-(`crates/linch-ext/src/workflow/context.rs:110`, `context.rs:161-183`).
+(`crates/linch-ext/src/workflow/context.rs:154`, `context.rs:229-251`).
 Concurrency built some other way (`join!` or `select!`, or a spawned task,
 which does not inherit the path) gets no path of its own, so calls there need
 distinct names or keys. Python counts one occurrence per key across the whole
@@ -171,7 +171,7 @@ a cancelled workflow are not.
 
 An `agent` call runs on its own session with a run id derived from the
 workflow, the call's key, its occurrence and a generation
-(`crates/linch-ext/src/workflow/agent.rs:138`). After a crash, the next
+(`crates/linch-ext/src/workflow/agent.rs:456`). After a crash, the next
 `run_workflow` continues that run instead of starting over, so a model call is
 never paid twice. If the run is still leased to the runner that crashed
 (Postgres, less than a lease ago), the call waits until the lease runs out
@@ -180,23 +180,23 @@ call fails, and the next resume starts a fresh run with the next generation.
 A run that stops for approval fails the call; approve it with `Agent::approve`,
 then resume the workflow, which reads the finished run's text. Step timeouts
 and retries do not apply to an agent call; the workflow deadline and cancel
-token do (`agent.rs:17-45`). Once the run has ended (succeeded with its text
+token do (`agent.rs:19-165`). Once the run has ended (succeeded with its text
 journaled, failed or aborted), the call closes its session with
 `Agent::close_session`, which frees what the agent keeps for that session in
 this process, such as its memory files and retained subagent workers; a run
-waiting for approval keeps its session for the approve (`agent.rs:117-130`).
+waiting for approval keeps its session for the approve (`agent.rs:432-445`).
 
 An interrupt without an answer returns `WorkflowError::Suspended`;
 `run_workflow` then stores the workflow as `awaiting_input` with the question,
 even if the function dropped that error. Answers go in
 `WorkflowOptions::resume` by key, each used once, so interrupts in a loop need
-distinct keys (`crates/linch-ext/src/workflow/interrupt.rs:14-40`).
+distinct keys (`crates/linch-ext/src/workflow/interrupt.rs:14-49`).
 
 ### Ending
 
 At the end `run_workflow` writes the status: `awaiting_input` with the
 interrupt, else `completed` or `failed`. A lost lease writes nothing, since
-another process owns the workflow (`engine.rs:75-82`). `deadline` drops the
+another process owns the workflow (`engine.rs:241-248`). `deadline` drops the
 function and fails the run with `Timeout`; finished steps stay journaled.
 `cancel` stops the workflow at its next call that would run live work, while
 replays still return. Dropping the future is a crash: the status stays
@@ -204,14 +204,20 @@ replays still return. Dropping the future is a crash: the status stays
 
 ### Journal stores and leases
 
-`JournalStore` (`journal.rs:123`) has `claim`, `load`, `append` and
+`JournalStore` (`journal.rs:178`) has `claim`, `load`, `append` and
 `set_status`. Leases follow the core's model: `claim` always wins, creates the
 workflow when new, and adds 1 to the epoch; every write under an older epoch
 fails with `LeaseLost`. There is no expiry and no heartbeat, so keep one
 runner per workflow, for example with a job queue. Any status can be claimed
 again: a failed workflow resumes from its journal and a completed one replays
 to the end (`journal.rs:44-59`). A suspended workflow holds no process; any
-process can read its question with `load`.
+process can read its question with `load`. `claim` also takes the principal
+the workflow's calls act for: the first claim stores it (the
+`linch_ext_workflows.principal` column, migration `0002_workflow_principal`),
+and a later claim must name the same one, whole, or it fails with
+`JournalStoreError::PrincipalMismatch` and changes nothing (the conformance
+suite's `claims_keep_the_principal`). A workflow stored before the column
+exists reads as having none.
 
 | Store | Notes |
 |---|---|
@@ -219,7 +225,7 @@ process can read its question with `load`.
 | `PgJournalStore` (feature `postgres`) | Tables `linch_ext_workflows` and `linch_ext_workflow_records`; migrations recorded in `linch_ext_migrations` (`crates/linch-ext/src/postgres.rs:14`). Every write is one statement; a record append locks the workflow row `FOR SHARE` under the lease's epoch, so it lands before a competing claim or writes nothing (`crates/linch-ext/src/workflow/postgres.rs:1-7`). Writes run at the pool's default isolation; above `READ COMMITTED` a write that waited on a claim fails with a serialization error (`40001`) once the claim commits, wrote nothing, and runs again, up to three tries in all, so a claim still wins and a fenced write is `LeaseLost` (`postgres.rs:45-74`). JSON is `TEXT` so a replayed value reads back exactly |
 
 Every store passes `workflow::conformance::journal_store_suite`
-(`crates/linch-ext/src/workflow/conformance.rs:25`).
+(`crates/linch-ext/src/workflow/conformance.rs:33`).
 
 ### Workflows over RPC
 

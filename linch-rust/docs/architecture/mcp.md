@@ -11,7 +11,7 @@ mapping, or a limit.
 Python Linch documents its MCP tools for users in
 [usage/tools](../../../docs/usage/tools.md#mcp-tools). The Rust client is built
 on `rmcp`, the official Rust SDK, and speaks protocol 2026-07-28 with a
-fallback to the 2025-11-25 `initialize` handshake. Legacy SSE, resources,
+fallback to the 2025-11-25 `initialize` handshake. The HTTP+SSE transport, resources,
 prompts, sampling, elicitation and OAuth are not supported
 (`crates/linch-mcp/src/lib.rs:22-24`). The crate is Unix-only: a stdio server
 leads its own process group.

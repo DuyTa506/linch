@@ -16,7 +16,7 @@ Python Linch builds the same guarantees on a scoped IoC container
 - There is no `Context`, no service lookup by name and no event bus. An agent
   is bound with values passed to `AgentBuilder`, and `build` refuses a missing
   one with `BuildError::Missing` (`crates/linch-core/src/agent.rs:1-8`,
-  `crates/linch-core/src/agent/builder.rs:318-332`).
+  `crates/linch-core/src/agent/builder.rs:333-347`).
 - `Disposable` is `Registration`. Its `dispose` is synchronous and runs its
   undo once; a failed undo is not retried (`crates/linch-core/src/registration.rs:38-48`).
 - Python's `emit`, `serial` and `waterfall` dispatchers have no Rust
@@ -44,7 +44,7 @@ binding (`agent.rs:167-171`). `AgentInner` holds what a run reads from it
 
 | Field | What it is |
 |---|---|
-| `spec` | The serde `AgentSpec`: model, prompts, limits, compaction, budget, provider retry and fallback models (`agent/spec.rs:36-203`) |
+| `spec` | The serde `AgentSpec`: model, prompts, limits, compaction, budget, provider retry and fallback models (`agent/spec.rs:36-204`) |
 | `provider`, `permissions`, `runs`, `sessions` | The bindings the builder requires |
 | `tools` | The `ToolRegistry` of this agent |
 | `hooks` | The `Hooks` chains of this agent |
@@ -53,20 +53,20 @@ binding (`agent.rs:167-171`). `AgentInner` holds what a run reads from it
 | `families`, `worker_registry` | The subagent child runs and workers of this agent's runs and sessions |
 | `registrations`, `reloads` | The registrations this agent made itself, undone on drop |
 
-`AgentBuilder::build` (`agent/builder.rs:262-507`) checks that the provider,
+`AgentBuilder::build` (`agent/builder.rs:267-522`) checks that the provider,
 permission engine, both stores and a namespace are present and that the model
 and namespace are not blank. It registers the built-in tools the settings ask
 for (`Skill`, `send_message`, `Subagent`, `SubagentContinue`, `TaskStop`,
 `tool_search`) in the agent's registry, then digests the contract. Nothing in
-`build` does I/O (`builder.rs:29-31`).
+`build` does I/O (`builder.rs:32-34`).
 
 ### The run contract
 
 `contract_digest` hashes the spec, the tools registered at build with their
 scopes, the hook policy digest and the other features
-(`builder.rs:455-461`). Every run stores the digest. `resume` and `approve`
+(`builder.rs:470-476`). Every run stores the digest. `resume` and `approve`
 refuse a run whose digest differs from the agent's with
-`RunError::ContractMismatch` (`runner/start.rs:763-769`). The hook policy
+`RunError::ContractMismatch` (`runner/start.rs:765-771`). The hook policy
 digest covers each hook's point, `policy_id` and `policy_version`, in chain
 order (`hooks.rs:145-192`), so changing a hook's behavior means bumping its
 `policy_version` (`hooks/hook.rs:76-78`). That covers what a hook answers,
@@ -125,7 +125,7 @@ its registry does nothing.
 The agent disposes its own registrations when it is dropped: reloads first,
 newest first, then the built-in tools (`agent.rs:314-330`). A build that
 fails part-way disposes the built-in tools it had registered
-(`builder.rs:510-539`).
+(`builder.rs:525-554`).
 
 ## Hook chains
 
@@ -138,7 +138,7 @@ timeout and a fail mode. The chain reads these once, at registration
 trait once per point.
 
 `Hooks` holds one `HookChain` per point but `tool_execute`, which is a `ToolPipeline` (`hooks.rs:92-142`) and is given to the
-builder (`builder.rs:96-100`). A chain is shared across runs. Each `run` works
+builder (`builder.rs:99-103`). A chain is shared across runs. Each `run` works
 on a snapshot of the entries taken when it starts, so a registration made
 meanwhile applies from the next run on (`hooks/chain.rs:61-65`, `188-191`).
 `register` refuses a blank policy id, a matcher at a point that is not about a
@@ -212,7 +212,7 @@ To add behavior to tool execution, use one of these:
 - A `Tool` wrapper registered with `ToolRegistry::replace`, which hides the
   wrapped tool and is undone with its `Registration`.
 - `call_timeout_ms` and `max_tool_concurrency` in the spec for timeouts and
-  the parallel limit (`agent/spec.rs:87-92`).
+  the parallel limit (`agent/spec.rs:87-93`).
 
 Do not edit `scheduler/` or `runner/` for a new gate. The spec's redaction
 is the exception that proves the rule: it is not a hook because it must run
@@ -226,15 +226,15 @@ at fixed places in the existing seams (`after_provider_call` and `stop` in
 An `Agent` has no name lookup and no global state: every binding is a value
 the host passes in (`agent.rs:6-8`). Per-agent state is in `AgentInner`:
 registry, hooks, stores, subagent families and workers (`agent.rs:173-252`).
-Per-run state is in the run's `Runner` (`runner/turn.rs:123-203`). The one
+Per-run state is in the run's `Runner` (`runner/turn.rs:123-207`). The one
 shared handle, from a worker tool back to its agent, is a per-agent
 `OnceLock<Weak<AgentInner>>` set at the end of `build`
-(`subagents/control.rs:17-19`, `builder.rs:351`, `504-505`). It is `Weak`, so
+(`subagents/control.rs:17-19`, `builder.rs:366`, `504-505`). It is `Weak`, so
 the registry that holds the tool does not keep the agent alive.
 
 Tenants separate by namespace, not by process. An agent's namespace is part of
 every store key, so two agents with different namespaces never share runs or
-sessions even on one database (`builder.rs:114-118`,
+sessions even on one database (`builder.rs:117-121`,
 [stores](./stores.md#keys-and-tenancy)). Many agents run on one Tokio runtime.
 A run advances only while its stream is polled (`runner.rs:39-40`), and the
 core spawns one kind of task: the one that drives the background subagents of

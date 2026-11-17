@@ -18,10 +18,10 @@ show them from the Python client.
 
 ## Skills
 
-`AgentBuilder::skills` (`crates/linch-core/src/agent/builder.rs:152`) turns
+`AgentBuilder::skills` (`crates/linch-core/src/agent/builder.rs:155`) turns
 skills on with the host's `Skill` values (`crates/linch-core/src/skills.rs:49`);
 the `linch` facade loads them from `.linch/skills/*/SKILL.md`. At build
-(`builder.rs:235-245`):
+(`builder.rs:238-248`):
 
 - the built-in `verify` skill joins them unless one has its name,
   case-insensitively, and the set is sorted by lowercase name
@@ -107,7 +107,7 @@ durable: a session's later runs never send it, after a restart either.
 
 ## Subagents
 
-`AgentBuilder::subagents` (`builder.rs:164`) turns subagents on with the
+`AgentBuilder::subagents` (`builder.rs:167`) turns subagents on with the
 host's `SubagentDefinition`s (`crates/linch-core/src/subagents.rs:146`);
 the facade loads them from `.linch/agents/*.md`. The `Roster`
 (`subagents.rs:236-278`) adds the built-in `verification` agent unless one
@@ -116,7 +116,7 @@ with no `subagent_type` (or a blank one, `general-purpose` or `_default`).
 The roster enters the contract as the `subagents` feature, and the
 `Workers` setting, when given, as `workers`.
 
-The build registers (`builder.rs:261-277`):
+The build registers (`builder.rs:266-282`):
 
 | Tool | When | Scope |
 |---|---|---|
@@ -124,7 +124,7 @@ The build registers (`builder.rs:261-277`):
 | `SubagentContinue` | `workers.background` or `workers.retain` | `Exec` |
 | `TaskStop` | `workers.background` | `Exec` |
 
-`workers` without `subagents` fails the build (`builder.rs:252-254`).
+`workers` without `subagents` fails the build (`builder.rs:366-370`).
 
 ### The `Subagent` tool
 
@@ -250,14 +250,14 @@ resolves a worker of the calling session by id or unique display name
 (`crates/linch-core/src/subagents/workers.rs:74-105`), refuses one that
 still runs, and runs it again on its own session, history intact, as a new
 foreground child run of the calling run, named after the continue call.
-`TaskStop` (`control.rs:168-252`) cancels a running background worker and
+`TaskStop` (`control.rs:169-258`) cancels a running background worker and
 marks it stopped, so its end is recorded with no notification; the worker
 stays addressable.
 
 The worker registry (`workers.rs:26-130`) keeps, per parent session and in
 process memory, each worker's display name (its definition's name, or
 `Agent #N` for the N-th general-purpose worker) and whether it is
-addressable. `Agent::close_session` (`crates/linch-core/src/agent.rs:329-345`)
+addressable. `Agent::close_session` (`crates/linch-core/src/agent.rs:329-366`)
 closes the session's suspended families, its workers' sessions, then the
 session.
 
@@ -289,7 +289,7 @@ outlive a stream that ends with the run suspended.
 - **Any other stop** (a dropped stream, a failed run) drops the children
   with the family, like a crash.
 
-`Agent::parked_children` (`agent.rs:348-368`) gives a future that resolves
+`Agent::parked_children` (`agent.rs:369-389`) gives a future that resolves
 once a suspended run's children are done. The RPC server uses it to keep a
 suspended run's place under `max_runs` while its workers run
 ([RPC](./rpc.md#limits)).
@@ -365,7 +365,7 @@ The facade turns the preset on from `AgentConfig.deep_agent`: `deep::expand`
 workers (unless the config sets them) and the spec; `deep::add_roster`
 (`deep.rs:35-45`) turns skills on, so the built-in `verify` skill joins, and
 adds the roster after the config directory's subagents, at open
-(`crates/linch/src/open.rs:156`) and at each reload. Two parts of Python's preset have no kernel support yet
+(`crates/linch/src/open.rs:183`) and at each reload. Two parts of Python's preset have no kernel support yet
 (`deep_agent.rs:33-39`): a coordinator keeps the workspace tools
 (`COORDINATOR_EXCLUDED_TOOLS` is only named), and the profile's
 `max_tokens` is not enforced.

@@ -65,7 +65,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Bảo mật](./security.md) | Permission mode và auto-allow, redact response, kết quả tool và prompt, verifier của câu trả lời cuối cùng và ngân sách của chúng, thứ tự tool và cổng hoàn thành |
 | [Kho lưu trữ](./stores.md) | Kho memory và Postgres, DSN, schema, migration, namespace, pool |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
-| [Khắc phục sự cố](./troubleshooting.md) | Các lỗi từ server binary đến run và tool, cùng nguyên nhân và cách khắc phục |
+| [Khắc phục sự cố](./troubleshooting.md) | Các lỗi từ server binary đến run, tool, lịch, workflow và câu hỏi về provider, cùng nguyên nhân và cách khắc phục |
 | [Skill](./skills.md) | Tool `Skill`, skill `verify` tích hợp sẵn, các skill trong `config_dir/skills` |
 | [Subagent](./subagents.md) | Tool `Subagent`: worker foreground và background, continue, stop, fork, mailbox |
 | [Task](./tasks.md) | Các tool task của session, và ledger task dùng chung giữa các session |
@@ -74,7 +74,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Profile](./profiles.md) | Domain profile có phiên bản cho các run của một agent |
 | [Observability](./observability.md) | Span và metric OpenTelemetry từ client |
 | [Monitoring](./monitoring.md) | Cái gì được trace, cách tính và đặt giá chi phí, chạy eval, đọc run report |
-| [Server](./server.md) | Chạy `linch-server` cho các tenant từ xa, và `Server.connect`: token, allowlist, giới hạn |
+| [Server](./server.md) | Chạy `linch-server` cho các tenant từ xa, và `Server.connect`: token, allowlist, những gì admission từ chối, giới hạn, log (`LINCH_LOG`), kiểm tra liveness cho client đã biến mất |
 | [Workflows](./workflows.md) | Một hàm Python điều hướng một chuỗi lời gọi agent đã biết: fan-out, pipeline, step, interrupt; có journal trong Postgres nên một lần crash resume mà không lặp lại các lời gọi đã xong; handoff giữa các step; `run_or_resume` |
 | [Scheduler](./scheduler.md) | Lịch cron và interval theo múi giờ, heartbeat trên một session, run nền một lần, tool lập lịch mà model gọi, trạng thái job, worker chạy chúng |
 

@@ -18,7 +18,7 @@ describes the same ideas. What differs in Rust:
   side-effecting functions run unapproved and in parallel (issue #99,
   `crates/linch-core/src/tool.rs:4-7`).
 - A result is always `Result<ToolOutput, ToolOutputError>`. There is no
-  legacy `ToolResult` object; `output_schema` is optional.
+  `ToolResult` object; `output_schema` is optional.
 
 ## The tool trait
 
@@ -27,7 +27,7 @@ per call; per-call data arrives in `ToolContext`.
 
 | Method | Default | Contract |
 |---|---|---|
-| `name()` | required | 1 to 64 ASCII letters, digits, `_` or `-`: what Anthropic, OpenAI and Gemini all accept (`crates/linch-core/src/registry.rs:278-281`) |
+| `name()` | required | 1 to 64 ASCII letters, digits, `_` or `-`: what Anthropic, OpenAI and Gemini all accept (`crates/linch-core/src/registry.rs:288-291`) |
 | `description()` | required | Shown to the model |
 | `input_schema()` | required | JSON Schema draft 2020-12 with `"type": "object"` at the top |
 | `scope()` | required | `Read`, `Write` or `Exec` |
@@ -146,7 +146,7 @@ these steps. Each one is absent, and costs nothing, when its field is unset:
 
 1. **Cache lookup** (`spec.tool_cache`). A read-scope, non-`polls`,
    non-`asks_user`, `Tool::cache_safe` tool named by the policy looks up the
-   key `[session?, tool_name, input]` in the agent's namespace
+   key `[session?, principal?, tool_name, input]` in the agent's namespace
    (`tool_cache.rs`, `cache_key`; the session is in the key unless
    `scope` is `namespace`). The lookup returns the entry and the namespace's
    epoch. A live entry becomes the result: no durable start before it, no
@@ -231,7 +231,7 @@ its start and end staged and written with the next barrier. See
 
 ## Workspace tools
 
-`workspace_tools(backend, reads, processes)` (`crates/linch-tools/src/lib.rs:60`)
+`workspace_tools(backend, reads, processes)` (`crates/linch-tools/src/lib.rs:63`)
 returns `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
 `BashKill` over one `ExecutionBackend` (its `LocalFs` for the file tools, its
 shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
@@ -278,28 +278,28 @@ and use. Blocking file work runs on Tokio's blocking pool.
 
 ### Bash
 
-`Bash` (`crates/linch-tools/src/bash.rs:68`) is not confined by `LocalFs`:
+`Bash` (`crates/linch-tools/src/bash.rs:79`) is not confined by `LocalFs`:
 with the default `local` backend it starts in the root, but the command can
 reach anything the process user can. Use the permission engine (it asks for
 `exec` by default) or the `sandbox` or `docker` backend when that matters.
 What it guarantees under every backend:
 
 - stdin is closed and the command leads a new process group
-  (`crates/linch-tools/src/bash/process.rs:106-142`);
+  (`crates/linch-tools/src/bash/process.rs:159-195`);
 - the whole group gets `SIGKILL` on timeout, on cancel, when the call's future
   is dropped, and when the shell exits, so background jobs never outlive the
-  call (`process.rs:146-200`);
+  call (`process.rs:199-271`);
 - only nine host variables pass through (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), so host credentials stay
-  out of the environment (`bash.rs:41`); `with_env` adds more (`bash.rs:142`);
+  out of the environment (`bash.rs:51`); `with_env` adds more (`bash.rs:153`);
 - the timeout defaults to 120 s (30 min in the background) and is capped at
-  30 min (`bash.rs:30-33`);
+  30 min (`bash.rs:38-41`);
   with a call deadline it ends 100 ms before it, so the output so far reaches
-  the model instead of a generic timeout (`bash.rs:198`);
+  the model instead of a generic timeout (`bash.rs:209`);
 - each stream keeps its first 4000 and last 26 000 bytes
   (`bash/capture.rs:5-8`);
 - any exit status but 0 is an error result carrying the same text, with code
-  `exit_status`, `timeout` or `aborted` (`bash.rs:281`).
+  `exit_status`, `timeout` or `aborted` (`bash.rs:309-326`).
 
 ### Background Bash
 
@@ -319,7 +319,7 @@ never names a new process.
   to `Agent::close_session`), `Processes::close` and the registry's `Drop`
   (the agent closing). Each kills the whole group and waits for the reap.
 - **The lifeline.** A background command runs under a small `/bin/sh` wrapper
-  (`process.rs:35`) whose stdin is a pipe the server holds. A watchdog in the
+  (`process.rs:36`) whose stdin is a pipe the server holds. A watchdog in the
   command's group blocks on that pipe with the `read` builtin and kills the
   group when it closes, which the kernel does when the server dies, even by
   `SIGKILL`. It needs nothing on the command's `PATH`. A foreground command
@@ -340,16 +340,16 @@ never names a new process.
 
 ### Execution backends
 
-`ExecutionBackend` (`crates/linch-tools/src/exec.rs:120`) is one execution
+`ExecutionBackend` (`crates/linch-tools/src/exec.rs:141`) is one execution
 world, Python's `ExecutionBackend`: the `LocalFs` the file tools use and a
 shell `Bash` starts commands with. One belongs to one opened agent, which
 calls its `close_session` from `Agent::close_session`. `ExecutionBackend::open`
-(`exec.rs:149`) builds it from an `ExecutionConfig` (`exec.rs:49`), tagged by
+(`exec.rs:171`) builds it from an `ExecutionConfig` (`exec.rs:59`), tagged by
 `backend`; it is blocking and fails with `ExecutionError` when the backend
 cannot confine what its policy says, so the facade opens it on a blocking
 task and refuses the agent rather than run `Bash` unconfined.
 
-The shell seam is the crate-private `Shell` trait (`exec.rs:248`): `spawn`
+The shell seam is the crate-private `Shell` trait (`exec.rs:308`): `spawn`
 starts a `Launch` (command, root, `Bash`'s environment, session, whether it
 needs the lifeline) as the leader of a new process group with stdout and
 stderr piped, and returns the `Child` with an optional `Cleanup` to run after
@@ -360,13 +360,13 @@ background commands through the same shell.
 
 | Backend | Shell | What changes |
 |---|---|---|
-| `local` | `LocalShell` (`exec.rs:264`) | Nothing: `process::spawn`, byte for byte the old `Bash` (golden tests in `crates/linch-tools/tests/execution_golden.rs` and `crates/linch/tests/execution_golden.rs`) |
+| `local` | `LocalShell` (`exec.rs:326`) | Nothing: `process::spawn`, byte for byte the old `Bash` (golden tests in `crates/linch-tools/tests/execution_golden.rs` and `crates/linch/tests/execution_golden.rs`) |
 | `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp and `prlimit` around the shell; a private `HOME`/`TMPDIR` per session |
 | `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` per command; `docker rm -f` as the cleanup |
 | `remote` | `RemoteShell` (`exec/remote.rs`) | No local process: a host runs the command (see below) |
 
 A non-local backend ends `Bash`'s description with
-`ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): the model
+`ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:102`): the model
 learns what is confined, and since the description is part of each tool's
 definition, the backend and its whole policy are part of the run contract.
 The local backend adds nothing, so its definitions and contract are the ones
@@ -706,7 +706,7 @@ fn main() {
 ```
 
 The run contract digest covers the tools registered when
-`AgentBuilder::build` runs (`crates/linch-core/src/agent/builder.rs:216`). A
+`AgentBuilder::build` runs (`crates/linch-core/src/agent/builder.rs:219`). A
 tool registered later, such as an MCP tool after a relist, is offered from the
 next turn's snapshot but is not part of the contract.
 

@@ -60,12 +60,12 @@ What differs in Rust:
 1. **Compact** when `spec.compaction` is set and the provider view is due
    ([compaction](./compaction.md)): clear old tool results when `micro` is
    set and that is enough, else summarize. With it off, a turn starts at
-   dispatch (`turn.rs:395-398`).
+   dispatch (`turn.rs:401-404`).
 2. **Check limits.** A cancelled token aborts the run. `max_turns` and the
-   budget end it as failed before the call is made (`turn.rs:436-449`).
+   budget end it as failed before the call is made (`turn.rs:442-455`).
 3. **Build the request** from the session's provider view. The
    `context_build` hooks add blocks to the tail of the request only
-   (`turn.rs:451-461`, `runner/hooks.rs:278-289`). They are never logged, and the request carries their count as
+   (`turn.rs:457-467`, `runner/hooks.rs:278-289`). They are never logged, and the request carries their count as
    `context_tail`, so a provider's cache breakpoint stays on the last logged block before them.
    With `spec.context_budget` set, `ContextBudget::apply` (`context_budget.rs`)
    then drops whole blocks by the declared order until they fit: it counts
@@ -84,15 +84,15 @@ What differs in Rust:
 4. **Stage and flush the delivery.** The `context_build` event and the
    model-call delivery are staged. The `ProviderPending` checkpoint is held,
    then `flush` writes the events and the checkpoint in one commit
-   (`turn.rs:508-514`). This is the barrier before the provider is called.
+   (`turn.rs:514-520`). This is the barrier before the provider is called.
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
-   events (`turn.rs:517-534`), unless the spec's redaction covers responses:
+   events (`turn.rs:523-540`), unless the spec's redaction covers responses:
    then none are sent, since a match can span two deltas. The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
    When an `after_provider_call` hook is attached, an accepted receipt and
    its `Usage` are written at once, with `ProviderPending` re-saved at the
    totals that count them, before the hooks run, `provider_call_stop`
-   included (`turn.rs:550-557`, `runner/hooks.rs`, `checks_responses`).
+   included (`turn.rs:556-563`, `runner/hooks.rs`, `checks_responses`).
    A hook may be a client callback with no timeout; a crash while it runs
    keeps the paid usage ([below](#a-crash-between-a-receipt-and-its-response)).
    The response itself is not written yet: an `after_provider_call` rewrite
@@ -108,14 +108,14 @@ What differs in Rust:
    `runner/hooks.rs`). On success the run then stages the `Assistant` event,
    and the `Usage` event unless step 5 already wrote it, and saves
    `AssistantReceived`, which writes through with the receipt when step 5
-   did not (`turn.rs:611-644`, `journal.rs:209-212`). A hook's retry
+   did not (`turn.rs:617-650`, `journal.rs:209-212`). A hook's retry
    rides that same write as the checkpoint's `retry_feedback`, so the paid
    response and what to do with it are durable together. The caller sees
    those events only after this commit (`journal.rs:27-30`).
-7. **Append the response to the session** (`turn.rs:671-673`).
+7. **Append the response to the session** (`turn.rs:677-679`).
 8. **Branch on the tool calls** of the response (below).
 9. **Append the tool results**, run `post_turn`, and start the next turn
-   (`turn.rs:338-361`).
+   (`turn.rs:344-367`).
 
 The observe-only points thread through these same steps: `agent_start` fires
 once, right after the prompt is accepted and before the first turn
@@ -133,7 +133,7 @@ None of them can change what they observe.
 
 A call that fails ends the run as failed with one terminal write that carries
 the receipt, the usage, the `Error`, the status and the `Result`
-(`turn.rs:594-598`), unless the spec's `provider_retry` or `fallback_models`
+(`turn.rs:600-604`), unless the spec's `provider_retry` or `fallback_models`
 take a retryable failure: then the run goes back to step 4 with the next
 delivery `attempt`, after a `provider_retry` write and a wait, or at once to
 a fallback model with a `model_fallback` event
@@ -144,19 +144,19 @@ the model's context window, is never retried; with `spec.compaction` set,
 `max_forced`) and the run goes back to step 4 with the turn's next delivery
 `attempt` and no `provider_retry` event; when nothing can shorten it, the run
 ends failed ([context-length recovery](./compaction.md#context-length-recovery),
-`turn.rs:584-588`, `runner/compact.rs:308-341`). A response the output limit cut off before it held any
+`turn.rs:590-594`, `runner/compact.rs:320-353`). A response the output limit cut off before it held any
 text or a whole tool call is not an answer: the session gets nothing, and the
-run ends the same way (`turn.rs:541-543, 562-566`, `runner/end.rs:128-142, 214-223`).
+run ends the same way (`turn.rs:547-549, 562-566`, `runner/end.rs:128-142, 214-223`).
 
 With `spec.truncation_recovery`, a text answer the output limit cut off
 (stop reason `max_tokens`, no tool call) is appended and answered with a
 feedback message instead of ending the run, while `max_attempts` lasts; the
 run's final text joins the parts
-([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:677-694, 736-743`).
+([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:683-700, 736-743`).
 
 ### The loop continues while a response has tool calls
 
-`received` collects the `tool_use` blocks of the response (`turn.rs:660-664`).
+`received` collects the `tool_use` blocks of the response (`turn.rs:666-670`).
 
 - **Retried by `after_provider_call`**, the response is appended but neither
   of the branches below runs: none of its tool calls is planned, and `stop`
@@ -168,11 +168,11 @@ run's final text joins the parts
   (`runner/hooks.rs`, `retry_message`). It is staged as a `notification`
   and held as `ToolResults`, then the next turn starts. Only `max_turns`
   bounds these retries, as in Python.
-- **With tool calls**, the run goes to `Step::Batch` (`turn.rs:728-733`).
+- **With tool calls**, the run goes to `Step::Batch` (`turn.rs:734-739`).
   Then `Step::Results` appends the results and starts the next turn. The
   provider's `stop_reason` does not decide this; the blocks do.
 - **Without**, the run first waits for any background subagent it has, which
-  can add a notification and another turn (`turn.rs:700-702`,
+  can add a notification and another turn (`turn.rs:706-708`,
   `runner/inbox.rs:145-154, 175-213`). With an output schema (`spec.output_schema`,
   or the run's own from its first `init` event) the answer is checked next
   (`runner/structured.rs`, `structured.rs`). A failing one, while
@@ -199,7 +199,7 @@ run's final text joins the parts
   `verification` event under the hook's policy id; past the bound it
   counts as an allow and the later hooks decide), rewrite the final-answer
   text (the value `post_turn` and the terminal `Result` see next), or block
-  the stop outright, ending the run failed (`turn.rs:708-712`,
+  the stop outright, ending the run failed (`turn.rs:714-718`,
   `runner/hooks.rs`). Feedback from either reaches the model as Python's
   does, in a `<system-reminder>` user message staged as a `notification`,
   and another turn starts. With an output schema a rewrite is checked again,
@@ -207,7 +207,7 @@ run's final text joins the parts
   the answer after a `retry` or `continue` is checked from the start, on its
   own budget. When every hook lets it stop, `post_turn` runs and the run
   ends `completed` with that text, and the parsed value as the result's
-  `structured_output` (`turn.rs:721-726`).
+  `structured_output` (`turn.rs:727-732`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
 is not made and the run fails with `TurnLimitError` (`runner/end.rs:161-177`).
@@ -220,10 +220,10 @@ wire, so it does not change the contract of a spec that does not set it.
 
 | Check | Default | Trips | Checked |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again | At `Step::Results`, after the batch's results are appended (`turn.rs:326`) |
+| `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again | At `Step::Results`, after the batch's results are appended (`turn.rs:350-354`) |
 | `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. A write or exec call (any tool of that scope) that succeeds with an input new among the latest 50 such calls clears the count of every other call, never its own. Off the wire at 10 | Same |
 | `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
-| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:483-486`) |
+| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:489-492`) |
 
 0 turns one of the first three off; `max_idle_turns` is at least 1, so the
 idle bound is always on. Such a turn never reaches the budget and appends
@@ -284,9 +284,9 @@ from the registry), the next `tool_result` user event counts the calls by
 their result content (what a call returned, an offload file name removed)
 and moves the failure streak, and a primary `model_call_delivery` records its
 turn. The live run folds the same events as it stages them
-(`Runner::stage_seen`, `turn.rs:405-411`; the tools' `tool_call_end` events as
+(`Runner::stage_seen`, `turn.rs:411-417`; the tools' `tool_call_end` events as
 the journal sink stages them, `runner/sink.rs`), and a resume folds the
-stored ones (`start.rs:520`). Each is durable before the step that checks it
+stored ones (`start.rs:519-521`). Each is durable before the step that checks it
 (the results with the `ToolResults` checkpoint, a delivery before its call),
 and the turn comes from the checkpoint, so a crash at any write resumes with
 the counts the run had and trips at the same point
@@ -377,10 +377,10 @@ The caller places the barriers, and the run does it in these places:
 
 | Barrier | Call | Where |
 |---|---|---|
-| Before a provider dispatch | `Journal::flush` | `turn.rs:511-514` |
-| After an accepted call, before the hooks that follow it (only with an `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:551-557` |
+| Before a provider dispatch | `Journal::flush` | `turn.rs:517-520` |
+| After an accepted call, before the hooks that follow it (only with an `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:557-563` |
 | Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:69-72` |
-| Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:159-162, 245-248, 265-269` |
+| Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:164-167, 245-248, 265-269` |
 | Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:46-52`, `runner/sink.rs:219-224` |
 | After each tool that really ran | `tool_finished` flushes | `sink.rs:246-289` |
 | Before every session-store write | `Journal::flush_checkpoint` | `runner/write.rs:98-103`, `journal.rs:251-262` |
@@ -392,10 +392,10 @@ ends only after every pending event and checkpoint is durable. Never defer a
 write past a barrier. Three kinds of write do not wait for the next barrier:
 
 - A paid receipt. An accepted call writes through with `AssistantReceived`
-  (`turn.rs:644`), or, when an `after_provider_call` hook is attached, on
+  (`turn.rs:650`), or, when an `after_provider_call` hook is attached, on
   its own with `ProviderPending` re-saved at the totals that count it,
-  before the hooks (`turn.rs:551-557`). A compaction summary writes through with `Compacted`
-  (`compact.rs:254-269`). A summary call that gave no text saves
+  before the hooks (`turn.rs:557-563`). A compaction summary writes through with `Compacted`
+  (`compact.rs:266-281`). A summary call that gave no text saves
   `CompactionPending` and flushes at once, so a resume does not buy it again
   (`compact.rs:23-29, 245-248`). A failed call the run retries saves
   `ProviderPending` again, at the totals that count its receipt, and flushes
@@ -451,7 +451,7 @@ both staged for the caller and just made durable.
 3. **Collect.** The results, any peer notes and catalog notices become one
    user message, staged as a `user` event with subtype `tool_result`. The run
    saves `ToolResults` (held). `Step::Results` then appends the message,
-   which first flushes that checkpoint (`batch.rs:129-148`, `turn.rs:338-341`).
+   which first flushes that checkpoint (`batch.rs:129-148`, `turn.rs:344-347`).
 
 ### Only read work runs in parallel
 
@@ -504,16 +504,16 @@ result before the batch runs (`batch.rs:86`).
 `Agent::resume` continues a run after a crash, a lost lease or a dropped
 stream. `Agent::approve` answers the pending calls of a suspended run and
 continues it, and `Agent::answer` answers its pending `AskUser` calls
-(`agent.rs:365-438`). All three enter `continue_run`
-(`runner/start.rs:250-550`):
+(`agent.rs:386-459`). All three enter `continue_run`
+(`runner/start.rs:250-552`):
 
 1. A token that is already cancelled does nothing: no claim, no write
    (`start.rs:261-263`).
 2. `check` refuses a terminal run, a run of another contract, an approve
    on a run that is not awaiting approval, and an answer on one that is not
-   awaiting input (`start.rs:755-786`). `check_answers` refuses an answer
+   awaiting input (`start.rs:757-788`). `check_answers` refuses an answer
    that does not fit the latest `input_request` questions with
-   `InvalidAnswer` (`start.rs:791`). It runs before the claim, so a
+   `InvalidAnswer` (`start.rs:793`). It runs before the claim, so a
    mistaken call does not fence a live owner, and again after it
    (`start.rs:269-276`, `366-373`).
 3. `claim` takes the lease and adds 1 to the epoch, which fences out the
@@ -572,7 +572,7 @@ does not fit the checkpoint (`journal/reconcile/session.rs:9-22`).
 
 A retried approve or answer gets `NotSuspended`: once it has committed the
 run is in `ToolBatch`, and the host continues it with `resume`
-(`agent.rs:385-388, 419-421`, `start.rs:780-784`).
+(`agent.rs:406-409, 419-421`, `start.rs:782-786`).
 
 ### Cancel a suspended run
 
@@ -724,7 +724,7 @@ child runs, stages their final status, builds the `Result` and calls
 
 | Terminal | Status | When |
 |---|---|---|
-| `Result` success | `completed` | A text-only response, after `stop` and `post_turn` (`turn.rs:721-726`) |
+| `Result` success | `completed` | A text-only response, after `stop` and `post_turn` (`turn.rs:727-732`) |
 | Abort | `aborted` | The cancel token fired (`end.rs:112-116`), or `Agent::cancel` ended a suspended run (`runner/cancel.rs`) |
 | Hook failed closed | `failed` | A `stop` hook failed closed (`end.rs:118-126`) |
 | Output limit | `failed` | The response held no text or whole tool call (`end.rs:128-142`) |
@@ -732,11 +732,11 @@ child runs, stages their final status, builds the `Result` and calls
 | Policy gate | `failed` | A completion gate still failed after `max_corrections`, with a `policy` event (`stop`) and a `PolicyGateError` ([above](#the-reliability-policy)) |
 | Loop guard | `failed` | The loop guard tripped, with a `loop_guard` event and a `LoopGuardError` (`end.rs:179-192`, [above](#the-loop-guard)) |
 | Budget | `failed` | The budget admits no more calls (`end.rs:194-206`) |
-| Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:594-598`, `runner/retry.rs`) |
+| Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:600-604`, `runner/retry.rs`) |
 
 A terminal status is final in the store ([stores](./stores.md#run-store)).
 `Agent::fail` marks a run that can never continue (a contract mismatch, a
-state that does not reconcile) as `failed` (`agent.rs:497-536`).
+state that does not reconcile) as `failed` (`agent.rs:518-557`).
 
 ## Example trace
 
