@@ -39,7 +39,7 @@ encoding.
 
 | `type` | Payload, in `events/` | Stored | Delivered | Notes |
 |---|---|---|---|---|
-| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in. The start's carries the run's own `output_schema`, which a resume reads back |
+| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in. The start's carries the run's own `output_schema` and `tool_choice`, and its final tool's name (`final_tool`), which a resume reads back |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |

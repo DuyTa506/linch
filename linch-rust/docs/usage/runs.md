@@ -11,7 +11,7 @@ the run's events then stream in as `Envelope`s.
 
 | Call | Does |
 |---|---|
-| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None)` | Start a run; the session is created when missing. `trace_id` is yours, echoed on the run's `init` and `result` events ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` replaces the agent's for this run ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
+| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None, tool_choice=None)` | Start a run; the session is created when missing. `trace_id` is yours, echoed on the run's `init` and `result` events ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` and `tool_choice` replace the agent's for this run ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
 | `await agent.resume(run_id, *, principal=None)` | Continue a run after a crash or a dropped stream |
 | `await agent.approve(run_id, decisions, *, principal=None)` | Answer a suspended run's pending calls and continue it |
 | `await agent.answer(run_id, answers, *, principal=None)` | Answer a suspended run's `AskUser` questions and continue it |
@@ -121,6 +121,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `PromptBlocked` | -32029 | A `user_prompt_submit` callback refused the prompt; `.reason` says why. No run or session was created |
 | `SessionBusy` | -32030 | The session has a live run |
 | `InvalidOutputSchema` | -32031 | The run's `output_schema` does not compile or its root is not an object; `.reason` says why. No run or session was created |
+| `InvalidToolChoice` | -32034 | The run's `tool_choice` names a tool the run does not offer, or the provider refuses it; `.reason` says why. No run or session was created |
 | `InvalidAnswer` | -32032 | The answers do not fit the pending `AskUser` questions; `.reason` says why. Nothing was written: the run still waits ([below](#answer)) |
 | `RunLeased` | -32033 | Another server drives the run (Postgres); `.owner` and `.expires_in` (seconds) say whose lease and for how long. Nothing was written ([Stores](./stores.md#run-leases)) |
 | `LeaseLost` | -32022 | Another server took the run over, or failed it, while this one drove it; the run stopped here without writing |
