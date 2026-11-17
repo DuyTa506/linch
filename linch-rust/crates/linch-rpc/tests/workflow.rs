@@ -727,3 +727,45 @@ async fn a_call_can_fork_the_session_an_earlier_call_returned() {
     assert_eq!(code_of_call(missing).0, code::WORKFLOW_CALL_FAILED);
     db.drop().await;
 }
+
+/// Guessing is no way in: a tenant that knows another tenant's workflow id
+/// and the session of one of its calls reads no journal, forks no session
+/// and resumes no run, because every store key is the tenant's namespace.
+#[tokio::test]
+async fn a_tenant_that_guesses_another_tenants_ids_reaches_nothing() {
+    let Some(db) = TestDb::empty("wf_guess").await else {
+        return;
+    };
+    let caps = Some(WorkflowCaps::default());
+    let acme = tenant_rpc(&db, "acme", caps);
+    let globex = tenant_rpc(&db, "globex", caps);
+    let a = acme
+        .open(tenant_config(&db, "acme", vec![text_turn("acme secret")]))
+        .await;
+    let turns = vec![text_turn("globex's"), text_turn("globex's again")];
+    let g = globex.open(tenant_config(&db, "globex", turns)).await;
+    start(&acme, &a, "plan").await.unwrap();
+    let theirs = call(&acme, "plan", "the plan", json!({})).await.unwrap();
+    finish(&acme, "plan", true).await;
+    let session = theirs["session_id"].clone();
+    // The status of acme's workflow, by its id, from globex's agent.
+    let status = json!({"agent": g, "run_id": "plan"});
+    let (kind, _) = code_of_call(globex.call(method::WORKFLOW_STATUS, status).await);
+    assert_eq!(kind, code::NOT_FOUND);
+    // The events of the call's run (its id is its session), likewise.
+    let events = json!({"agent": g, "run_id": session});
+    let (kind, _) = code_of_call(globex.call(method::RUN_EVENTS, events).await);
+    assert_eq!(kind, code::NOT_FOUND);
+    // A fork of the call's session reads nothing of acme's conversation.
+    start(&globex, &g, "plan").await.unwrap();
+    let fork = json!({"fork": session});
+    let stolen = call(&globex, "plan", "show it", fork).await;
+    assert_eq!(code_of_call(stolen).0, code::WORKFLOW_CALL_FAILED);
+    // The same prompt under the same id runs on globex's provider.
+    let own = call(&globex, "plan", "the plan", json!({})).await.unwrap();
+    assert_eq!(
+        (own["text"].clone(), own["replayed"].clone()),
+        (json!("globex's"), json!(false))
+    );
+    db.drop().await;
+}

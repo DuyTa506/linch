@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use linch::{ExecutionConfig, PermissionMode, SandboxPolicy};
+use linch::{DockerPolicy, ExecutionConfig, PermissionMode, SandboxPolicy};
 use linch_rpc::protocol::method;
 use linch_rpc::{Access, Allowlists, BackgroundAgents, Tenant};
 use linch_worker::{Worker, WorkerConfig};
@@ -86,6 +86,34 @@ async fn a_tenant_may_name_only_its_listed_backends() {
     assert_eq!(kind.as_deref(), Some("execution"));
     let rpc = Rpc::remote(acme(dir.path(), &[]));
     let kind = refused(&rpc, config(dir.path(), "true", Value::Null)).await;
+    assert_eq!(kind.as_deref(), Some("execution"));
+}
+
+/// A tenant cannot lift the docker backend's root refusal: `allow_root` is
+/// part of the policy a config must equal exactly, so only an entry the
+/// operator wrote with it admits it.
+#[tokio::test]
+async fn a_tenant_cannot_choose_allow_root() {
+    let dir = workspace();
+    let listed = ExecutionConfig::Docker(DockerPolicy::default());
+    let rpc = Rpc::remote(acme(dir.path(), std::slice::from_ref(&listed)));
+    for asked in [
+        json!({"backend": "docker", "allow_root": true}),
+        json!({"backend": "docker", "allow_root": true, "user": "0"}),
+        json!({"backend": "docker", "user": "root"}),
+    ] {
+        let kind = refused(&rpc, config(dir.path(), "true", asked.clone())).await;
+        assert_eq!(kind.as_deref(), Some("execution"), "{asked}");
+    }
+    // An entry the operator wrote with `allow_root` admits only a config
+    // that says so too.
+    let root = DockerPolicy {
+        allow_root: true,
+        ..DockerPolicy::default()
+    };
+    let rpc = Rpc::remote(acme(dir.path(), &[ExecutionConfig::Docker(root)]));
+    let plain = json!({"backend": "docker"});
+    let kind = refused(&rpc, config(dir.path(), "true", plain)).await;
     assert_eq!(kind.as_deref(), Some("execution"));
 }
 
