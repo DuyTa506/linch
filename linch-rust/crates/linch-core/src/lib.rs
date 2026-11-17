@@ -28,6 +28,7 @@ pub mod hooks;
 pub mod ids;
 pub mod journal;
 pub mod json;
+pub mod loop_guard;
 pub mod message;
 pub mod permissions;
 pub mod policy;
@@ -69,6 +70,7 @@ pub use hooks::{
 pub use ids::{RunId, SessionId};
 pub use journal::{Journal, JournalError, ReconcileError, Recovery, ToolRecovery, reconcile};
 pub use json::{JsonObject, JsonValue};
+pub use loop_guard::LoopGuard;
 pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,
     Role, SkillStamp, SystemBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultPart,

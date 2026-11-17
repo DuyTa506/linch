@@ -231,6 +231,7 @@ pub(super) fn loop_guard_event() -> impl Strategy<Value = LoopGuardEvent> {
             Just(LoopGuardReason::RepeatedToolCall),
             Just(LoopGuardReason::RepeatedFailures),
             Just(LoopGuardReason::MaxTurns),
+            Just(LoopGuardReason::IdleTurns),
         ],
         short_string(),
         prop_oneof![

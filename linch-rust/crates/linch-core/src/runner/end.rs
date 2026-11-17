@@ -153,6 +153,21 @@ impl Runner {
         self.end(RunStatus::Failed, subtype, stop, None).await
     }
 
+    /// The terminal for a loop guard that tripped: its `loop_guard` event,
+    /// a `LoopGuardError` and a failed result, in one write.
+    pub(super) async fn loop_guard(&mut self, trip: LoopGuardEvent) -> Result<(), RunError> {
+        let error = json!({
+            "name": "LoopGuardError",
+            "message": trip.detail,
+            "retryable": false,
+        });
+        let error = error.as_object().cloned().unwrap_or_default();
+        self.journal.stage(Event::LoopGuard(trip));
+        self.journal.stage(Event::Error(ErrorEvent { error }));
+        let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
+        self.end(RunStatus::Failed, subtype, stop, None).await
+    }
+
     /// The terminal for a budget that admits no more calls, as Python's
     /// `_budget_exhausted_tail` emits it: the `exceeded` event when a cap
     /// was reached, then the error and a failed result. A capped budget

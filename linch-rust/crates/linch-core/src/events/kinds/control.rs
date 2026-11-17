@@ -92,6 +92,8 @@ pub enum LoopGuardReason {
     RepeatedFailures,
     /// The run reached its configured turn limit.
     MaxTurns,
+    /// Too many turns in a row ended without a provider call.
+    IdleTurns,
 }
 
 /// What the loop did after a [`LoopGuardEvent`] tripped.
@@ -104,7 +106,8 @@ pub enum LoopGuardAction {
     ForceFinal,
 }
 
-/// Emitted when the loop guard trips or `max_turns` is reached.
+/// Emitted when the loop guard (see [`crate::loop_guard`]) trips or
+/// `max_turns` is reached.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopGuardEvent {

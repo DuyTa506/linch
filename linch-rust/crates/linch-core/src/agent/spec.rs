@@ -10,6 +10,7 @@ use crate::budget::RunBudget;
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
+use crate::loop_guard::LoopGuard;
 use crate::message::SystemBlock;
 use crate::provider::{OutputSchema, ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
 use crate::redaction::RedactionSpec;
@@ -115,6 +116,16 @@ pub struct AgentSpec {
     /// [`crate::truncation`]). `None` (the default) takes it as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncation_recovery: Option<TruncationRecovery>,
+    /// When a stuck run ends `failed` with a `loop_guard` event (Python's
+    /// `LoopGuard`; see [`crate::loop_guard`]): on by default with
+    /// Python's limits of 3 identical tool calls and 3 failed batches in a
+    /// row, and at most 25 turns in a row without a provider call. 0 turns
+    /// a tool-call check off; the idle-turn bound is always on. The default
+    /// is left off the wire, so a spec that does not set it keeps the
+    /// contract of a spec written before the guard existed. A subagent's
+    /// runs take it too.
+    #[serde(default, skip_serializing_if = "LoopGuard::is_default")]
+    pub loop_guard: LoopGuard,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -143,6 +154,7 @@ impl AgentSpec {
             redaction: None,
             verification: None,
             truncation_recovery: None,
+            loop_guard: LoopGuard::default(),
         }
     }
 
@@ -353,6 +365,50 @@ mod tests {
         let none = JsonObject::new();
         let on = contract_digest(&unset, &[], hooks, &none).unwrap();
         assert_ne!(on, contract_digest(&off, &[], hooks, &none).unwrap());
+    }
+
+    /// The guard is on unless the spec changes it: unset, `{}` and the
+    /// defaults spelled out are one spec, with the wire shape and the
+    /// contract digest of a spec written before the guard existed, so
+    /// in-flight runs still resume. Any other guard is on the wire and a
+    /// contract of its own.
+    #[test]
+    fn the_loop_guard_is_on_by_default_and_off_the_wire() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let unset = AgentSpec::new("m");
+        assert_eq!(unset.loop_guard, LoopGuard::default());
+        let golden = "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300";
+        for on in [
+            json!({}),
+            serde_json::to_value(LoopGuard::default()).unwrap(),
+        ] {
+            let read: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "loop_guard": on})).unwrap();
+            assert_eq!(read, unset);
+            let wire = serde_json::to_value(&read).unwrap();
+            assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+            let digest = contract_digest(&read, &[], hooks, &none).unwrap();
+            assert_eq!(digest.to_string(), golden);
+        }
+        let base = contract_digest(&unset, &[], hooks, &none).unwrap();
+        for changed in [
+            json!({"max_identical_tool_calls": 0}),
+            json!({"max_consecutive_failures": 5}),
+            json!({"max_idle_turns": 10}),
+        ] {
+            let read: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "loop_guard": changed})).unwrap();
+            let wire = serde_json::to_value(&read).unwrap();
+            assert!(wire.get("loop_guard").is_some(), "{wire}");
+            assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), read);
+            let digest = contract_digest(&read, &[], hooks, &none).unwrap();
+            assert_ne!(base, digest, "{changed}");
+        }
+        for refused in [json!(null), json!({"force_final_answer": true})] {
+            let spec = json!({"model": "m", "loop_guard": refused});
+            assert!(serde_json::from_value::<AgentSpec>(spec).is_err());
+        }
     }
 
     #[test]

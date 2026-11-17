@@ -22,6 +22,7 @@ use crate::events::Event;
 use crate::events::kinds::{AssistantEvent, ResultSubtype};
 use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
 use crate::journal::{Journal, ToolRecovery};
+use crate::loop_guard::Watch;
 use crate::message::Message;
 use crate::provider::call::ModelCall;
 use crate::provider::{AssistantAssembly, ProviderError};
@@ -167,6 +168,9 @@ pub(super) struct Runner {
     /// The cut parts the next text answer continues; its final answer
     /// starts with them.
     pub(super) truncated: String,
+    /// What the loop guard counted of the run, read back from its durable
+    /// log on a resume.
+    pub(super) watch: Watch,
 }
 
 impl Runner {
@@ -182,6 +186,7 @@ impl Runner {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
         let output = agent.output.clone();
+        let watch = Watch::new(&agent.spec.loop_guard);
         let mut runner = Self {
             snapshot: agent.snapshot(),
             narrowed: false,
@@ -212,6 +217,7 @@ impl Runner {
             summary_calls: 0,
             truncations: 0,
             truncated: String::new(),
+            watch,
         };
         runner.narrow();
         runner
@@ -292,12 +298,22 @@ impl Runner {
                     if !appended {
                         self.append(message).await?;
                     }
-                    // A cancel that cut it short aborts at the next turn's
-                    // start.
-                    self.post_turn(self.stop_reason).await;
-                    self.turn += 1;
-                    self.summary_calls = 0;
-                    Some(self.turn_start().await)
+                    // The batch's results are logged, so the session stays
+                    // paired when the guard ends the run here.
+                    match self.watch.tool_trip() {
+                        Some(trip) => {
+                            self.loop_guard(trip).await?;
+                            None
+                        }
+                        None => {
+                            // A cancel that cut it short aborts at the next
+                            // turn's start.
+                            self.post_turn(self.stop_reason).await;
+                            self.turn += 1;
+                            self.summary_calls = 0;
+                            Some(self.turn_start().await)
+                        }
+                    }
                 }
                 Step::Abort(unpaired) => {
                     self.cancelled(unpaired).await?;
@@ -327,6 +343,13 @@ impl Runner {
                 abandoned: None,
             },
         }
+    }
+
+    /// Stage `event` and count it for the loop guard: the live counts are
+    /// those [`Watch::of`] reads back from the durable log.
+    pub(super) fn stage_seen(&mut self, event: Event) {
+        self.watch.see(&event);
+        self.journal.stage(event);
     }
 
     /// Whether `max_turns` allows no more provider calls.
@@ -387,6 +410,12 @@ impl Runner {
             // user message here (a resumed response goes to `received`,
             // never back to `dispatch`), so no tool call is left unanswered.
             BeforeCall::ForceContinue(feedback) => {
+                // Bounded even with `max_turns` unset: such a turn never
+                // reaches the budget, and appends to the session.
+                if let Some(trip) = self.watch.idle_trip(self.turn) {
+                    self.loop_guard(trip).await?;
+                    return Ok(None);
+                }
                 let message = Message::user_text(skills::system_reminder(&feedback));
                 return Ok(Some(self.feedback(message).await?));
             }
@@ -401,8 +430,7 @@ impl Runner {
         };
         self.stage_context(&request, context.metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
-        self.journal
-            .stage(Event::ModelCallDelivery(call.delivery().clone()));
+        self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
         let ready = self.journal.flush().await?;
         self.event_emit(&ready).await;
@@ -523,7 +551,7 @@ impl Runner {
         // The turn's call is answered: the next turn has its own retries.
         self.standing.retries = 0;
         self.standing.failed_over = false;
-        self.journal.stage(Event::Assistant(AssistantEvent {
+        self.stage_seen(Event::Assistant(AssistantEvent {
             message: message.clone(),
             stop_reason,
         }));
