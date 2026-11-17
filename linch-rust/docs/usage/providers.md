@@ -47,8 +47,8 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 
 | Field | Meaning |
 |---|---|
-| `request.extra_body` | Fields merged into every request body. They replace what the adapter set, except `model`, `stream`, `temperature` and the conversation (`messages`, `tools`, `input`, `contents`, `system`, `instructions`), which the session owns. `chat_template_kwargs` merges per field |
-| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key` or `x-goog-api-key` replaces the provider key: the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te` and `trailer` are refused at open. Values are hidden when a config is printed or logged |
+| `request.extra_body` | Fields merged into every request body. They replace what the adapter set, except `model`, `stream`, `temperature`, the conversation (`messages`, `input`, `contents`, `system`, `instructions`, `systemInstruction`, `system_instruction`), the tools and how they are chosen (`tools`, `tool_choice`, `toolConfig`, `tool_config`) and the vendor-side state fields (`store`, `previous_response_id`, `conversation`), which the session owns. `chat_template_kwargs` merges per field, and so does Gemini's `generationConfig`, where the request's own fields win |
+| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key`, `x-goog-api-key` or `api-key` replaces the provider key for every call (a turn, a model list, a window probe): the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` and `proxy-connection` are refused at open. Values are hidden when a config is printed or logged, and removed (8 bytes or longer) from a provider's error text |
 | `request.timeout_ms` | Longest silence between two chunks of a response before the call fails; absent: the adapter's own limit |
 | `chat.parallel_tool_calls` | Sent when the request has tools; absent: the server's default |
 | `chat.include_stream_options` | `false` drops `stream_options`, for servers that reject it. On when absent |
@@ -56,8 +56,16 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 | `chat.sampling_params` | Native sampling fields (`top_k`, `min_p`, ...), under `extra_body` |
 
 `chat` applies to `deepseek`, `openai-chat`, `vllm`, `sglang` and `llamacpp`.
-On a remote server, `request` is admitted with the `base_url` that carries it;
-it cannot widen `provider_base_urls`.
+A remote tenant may set neither `request` nor `chat` unless its allowlists
+say `provider_request` ([Server](./server.md)). Even then it cannot set
+a header that carries a credential or reroutes a request (`authorization` and
+the other key headers, `cookie`, `proxy-*`, `forwarded`, `x-forwarded-*`), may
+set at most 16 headers of 1 KiB, 16 KiB of body fields (`extra_body`,
+`sampling_params` and `chat_template_kwargs` together) and a `timeout_ms` of at
+most 600000, and `request` rides with the `base_url` that carries it: it cannot
+widen `provider_base_urls`. `provider.capabilities` sends the headers too (never
+the provider's key), and `provider.models` and `provider.model` send them with
+the key to the same allowed endpoint.
 
 Where Python Linch has the same knob (`deepseek`, `openai-chat`, `vllm`,
 `sglang`, `llamacpp`, through the OpenAI SDK's own `extra_body`), two things
@@ -68,10 +76,15 @@ excludes. Python's `timeout` is one number applied to every phase of the call
 (connect, read, write, the pool); `request.timeout_ms` only replaces the read
 timeout above, and the 30 s connect timeout stays fixed.
 
-A `default_headers` value is hidden only when a config is echoed or logged
-(above); it is not scrubbed from a provider's own error text. A gateway that
-quotes a rejected header back in its response body sends that value straight
-into the failed run's `error` event.
+A `default_headers` value is hidden when a config is echoed or logged, and
+removed from a provider's error text when it is 8 bytes or longer (a gateway
+that quotes a rejected header back in its response body shows `[redacted]`).
+A shorter value is left in the text, since it would mangle the message. Put a
+secret in the server's environment where you can; a value in the config is
+stored with the config (a scheduled run keeps it in the store, as the MCP
+header values are kept), and `extra_body` values are not hidden at all. None of
+`request` or `chat` is part of the run contract, like `base_url`: resuming a
+run with other settings is not a contract mismatch.
 
 ### Context window
 
