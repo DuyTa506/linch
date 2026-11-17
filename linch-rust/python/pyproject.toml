@@ -68,7 +68,10 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-markers = ["source: reads the repository checkout (Rust sources, the skill, pyproject); the installed-wheel test skips it"]
+markers = [
+    "source: reads the repository checkout (Rust sources, the skill, pyproject); the installed-wheel test skips it",
+    "live: needs a real model and Postgres (tests/live); skips without LINCH_LIVE_VLLM_URL, DEEPSEEK_API_KEY or LINCH_TEST_PG_DSN",
+]
 
 [tool.ruff]
 line-length = 100
