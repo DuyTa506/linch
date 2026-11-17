@@ -68,7 +68,8 @@ class LimitReached(RpcError):
     def kind(self) -> str:
         """`runs`, `agents`, `connections`, `logins`, `schedules`, `jobs` or
         `provider_calls` (a rate: `max` calls of `provider.models` and
-        `provider.model` per minute, so try again later)."""
+        `provider.model` per minute, so try again later); for a workflow,
+        `workflows` (at once), `agent_calls_in_flight` or `journal_records`."""
         return _field(self.data, "kind")
 
     @property
@@ -95,6 +96,13 @@ class OpenError(RpcError):
 class RunError(RpcError):
     """The run could not continue durably (-32020 to -32034 and -32038), or failed
     inside the server (-32603 in `run.end`); it stays resumable."""
+
+
+class RunExists(RunError):
+    """A run with that id is already stored (-32023); nothing was written.
+
+    `Agent.run` reports it when the run ends. `run_or_resume` handles it.
+    """
 
 
 class RunNotFound(RunError):
@@ -256,6 +264,54 @@ class RunLeased(RunError):
             return None
 
 
+class WorkflowError(RpcError):
+    """A workflow call was refused or failed (-32045 to -32048)."""
+
+
+class WorkflowHeld(WorkflowError):
+    """Another client drives the workflow (-32045): this connection, another
+    connection or another server. `workflow.start` wrote nothing; try again
+    once that client finishes or its connection ends."""
+
+
+class WorkflowBudgetExceeded(WorkflowError):
+    """The workflow's budget is spent, so no further agent call starts (-32046).
+
+    The calls that finished stay journaled; raise the budget and start the
+    workflow again to continue.
+    """
+
+    @property
+    def spent_tokens(self) -> int | None:
+        """Tokens the workflow's agent calls have spent, replays included."""
+        try:
+            return int(self.data["spent_tokens"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    @property
+    def spent_usd(self) -> float | None:
+        """The priced cost of those calls in USD."""
+        try:
+            return float(self.data["spent_usd"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+
+class WorkflowCallFailed(WorkflowError):
+    """A `wf.agent` call did not produce a result (-32047)."""
+
+    @property
+    def kind(self) -> str:
+        """`failed`, `aborted`, `timeout`, `approval` (the child run stopped
+        for an approval) or `invalid` (an unknown subagent)."""
+        return _field(self.data, "kind")
+
+
+class WorkflowNotFound(WorkflowError):
+    """This connection drives no workflow with that id (-32048)."""
+
+
 class SchedulerError(RpcError):
     """A schedule or background-run call was refused (-32040 to -32044)."""
 
@@ -363,6 +419,11 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32004: NotAllowed,
     -32005: LimitReached,
     -32021: RunNotFound,
+    -32023: RunExists,
+    -32045: WorkflowHeld,
+    -32046: WorkflowBudgetExceeded,
+    -32047: WorkflowCallFailed,
+    -32048: WorkflowNotFound,
     -32022: LeaseLost,
     -32025: ContractMismatch,
     -32026: RunTerminal,
@@ -390,6 +451,8 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = RunError
         elif -32037 <= code <= -32035:
             cls = ProviderInfoError
+        elif -32048 <= code <= -32045:
+            cls = WorkflowError
         else:
             cls = RpcError
     return cls(code, str(obj.get("message", "")), obj.get("data"))

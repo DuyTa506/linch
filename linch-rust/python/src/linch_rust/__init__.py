@@ -80,6 +80,7 @@ from .errors import (
     RpcError,
     RunBusy,
     RunError,
+    RunExists,
     RunLeased,
     RunNotFound,
     RunTerminal,
@@ -88,6 +89,11 @@ from .errors import (
     SchedulerError,
     SessionBusy,
     Unauthenticated,
+    WorkflowBudgetExceeded,
+    WorkflowCallFailed,
+    WorkflowError,
+    WorkflowHeld,
+    WorkflowNotFound,
 )
 from .events import (
     AssistantEvent,
@@ -153,8 +159,38 @@ from .run import Run
 from .schedule import CHECK_IN, Job, JobState, Schedule
 from .server import Server
 from .tools import HostTool, Scope, ToolContext, ToolError, ToolOutput, tool
+from .workflow import (
+    AgentResult,
+    Budget,
+    Retry,
+    StepOutcome,
+    WorkflowContext,
+    WorkflowStatus,
+    WorkflowSuspended,
+    WorkflowTimeoutError,
+    run_or_resume,
+    run_workflow,
+    workflow_status,
+)
 
 __all__ = [
+    "AgentResult",
+    "Budget",
+    "Retry",
+    "RunExists",
+    "StepOutcome",
+    "WorkflowBudgetExceeded",
+    "WorkflowCallFailed",
+    "WorkflowContext",
+    "WorkflowError",
+    "WorkflowHeld",
+    "WorkflowNotFound",
+    "WorkflowStatus",
+    "WorkflowSuspended",
+    "WorkflowTimeoutError",
+    "run_or_resume",
+    "run_workflow",
+    "workflow_status",
     "Usage",
     "ToolCallRecord",
     "Scorer",
