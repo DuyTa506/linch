@@ -31,6 +31,7 @@ thời điểm đều là đồng hồ của cơ sở dữ liệu (`now()`), kh�
 | `0004_queue_limits.sql` | `linch_worker_queues` (`name`, `max_held`) |
 | `0005_scheduler.sql` | `linch_worker_agents` (định nghĩa agent đã lưu, theo digest); các cột interval, múi giờ và session cố định trên lịch, cùng `fires`, `skips` và `last_fire`; `agent`, `schedule_id`, `fire_at` và `created_at` trên job; `linch_worker_history` |
 | `0006_background_principal.sql` | `principal` (một `Principal` dạng JSON) trên lịch và job; các chỉ mục một phần trên cột `agent` của chúng |
+| `0007_history_agent.sql` | `agent` trên `linch_worker_history`, cùng các chỉ mục một phần trên `(namespace, run_id)` và `(namespace, agent)` |
 
 Một job bắt đầu một run (`session_id` và `prompt`), tiếp tục một run (`run_id`), hoặc
 approve một run (`run_id` và `approvals`); các check constraint giữ những hình dạng đó
@@ -44,8 +45,8 @@ heartbeat), nên hãy chạy `linch_postgres::migrate` trên cùng schema.
 | Lời gọi | Job | Ghi chú |
 |---|---|---|
 | `enqueue_run(pool, queue, namespace, session_id, prompt)` | start | Worker ghi run id vào job trước lần ghi đầu tiên của run, nên một lần retry sau sự cố tiếp tục run đó (`crates/linch-worker/src/job.rs:129-163`) |
-| `enqueue_resume(pool, queue, namespace, run_id)` | continue | Khi run đã có một job đang hoạt động, id của job đó được trả về thay vì một job mới (`job.rs:164-196`) |
-| `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Các approval được lưu ở dạng wire `ApprovalResponse` của lõi. `WorkerError::RunBusy` khi run có một job đang hoạt động, job này có thể kết thúc mà không đọc chúng; hãy đưa vào hàng đợi lại khi nó đã kết thúc (`job.rs:197-239`) |
+| `enqueue_resume(pool, queue, namespace, run_id)` | continue | Khi run đã có một job đang hoạt động, id của job đó được trả về thay vì một job mới. Job gọi tên định nghĩa đã lưu mà job mới nhất của run đã chạy cùng (từ `linch_worker_jobs` hoặc `linch_worker_history`), nên worker đã phục vụ run sẽ phục vụ lại nó; `WorkerError::Invalid` khi định nghĩa đó đã bị dọn. Nó không gọi tên principal nào: core tiếp tục run cho principal lúc start của nó (`job.rs`, `enqueue_continuation`) |
+| `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Các approval được lưu ở dạng wire `ApprovalResponse` của lõi. Cùng định nghĩa và principal như `enqueue_resume`. `WorkerError::RunBusy` khi run có một job đang hoạt động, job này có thể kết thúc mà không đọc chúng; hãy đưa vào hàng đợi lại khi nó đã kết thúc (`job.rs`) |
 | `enqueue(pool, &RunRequest, cap)` | start | `enqueue_run` kèm một định nghĩa agent đã lưu (tùy chọn) và một [cap](#cap) tùy chọn cho số job chưa xong của root (`crates/linch-worker/src/job.rs`) |
 
 Mỗi lần chèn và `pg_notify` của nó trên kênh `linch_worker` (`lib.rs:76`) chạy trong một
@@ -90,7 +91,7 @@ một kết nối `LISTEN` cộng với các truy vấn job.
    hàng đợi đều rỗng, và chạy mỗi job trong task riêng của nó (`worker.rs:173-212`);
 4. chờ một thông báo, một job vừa xong, khoảng poll hoặc `shutdown`.
 
-Nó cũng dọn lịch sử của các job đã kết thúc cũ hơn `history_retention` (mặc định 7 ngày),
+Nó cũng dọn lịch sử của các job đã kết thúc, và các job thất bại, cũ hơn `history_retention` (mặc định 7 ngày),
 tối đa mỗi 10 phút một lần.
 
 `Worker::definitions(roots, factory)` phục vụ các job mang một định nghĩa agent đã lưu: một
@@ -188,7 +189,8 @@ session đang bận không bao giờ được tính, nên một job start không
 
 Một job thất bại là dead letter: `failed_at` và `error` được đặt, nó không bao giờ được
 dequeue lại, và nó không còn được tính vào chỉ mục một-job-cho-mỗi-run hay
-giới hạn của hàng đợi (`lease.rs:288-302`). `error` giữ cả chuỗi lỗi
+giới hạn của hàng đợi (`lease.rs:288-302`). Nó nằm lại trong `linch_worker_jobs` đến khi
+`prune_history` xóa nó, `history_retention` sau khi nó thất bại. `error` giữ cả chuỗi lỗi
 (`crates/linch-worker/src/error.rs:40-49`). Khi một run bị đánh dấu thất bại cùng job của
 nó, run đi trước: một sự cố ở giữa để lại một run terminal, mà lần thử kế tiếp của job
 sẽ ack (`settle.rs:46-56`).
@@ -207,7 +209,8 @@ trong hai bảng. `job(pool, namespace, id)` và `jobs(pool, namespace, schedule
 (`crates/linch-worker/src/status.rs`) đọc cả hai, giới hạn theo namespace chính xác (id job
 là toàn cục), và nêu một `JobState`: `queued`, `running` (có chủ và vẫn đang ẩn),
 `retrying` (được release kèm lỗi), `failed`, `done` hoặc `superseded`.
-`prune_history(pool, older_than)` xóa các hàng lịch sử; job thất bại không bao giờ bị dọn.
+`prune_history(pool, older_than)` xóa các hàng lịch sử đã kết thúc, và các job thất bại đã thất bại,
+quá `older_than` trước.
 
 ## Lịch chạy
 
@@ -225,9 +228,9 @@ sau thời điểm hiện tại của cơ sở dữ liệu; `ScheduleExists` cho
 tính từ bây giờ: các lần bị lỡ khi đang tạm dừng không được thực hiện) và `delete_schedule`
 (các job đang chờ và đang chạy được để nguyên) hoàn tất bộ này.
 
-`fire_due_schedules(pool)` khóa tối đa 64 hàng đến hạn bằng `FOR UPDATE SKIP LOCKED` và, với
-mỗi hàng, đưa một job start vào hàng đợi rồi dời `next_fire` tới tick đầu tiên sau **lần
-kích hoạt này** (không phải sau bây giờ), tất cả trong một transaction:
+`fire_due_schedules(pool, caps)` khóa tối đa 64 hàng đến hạn bằng `FOR UPDATE SKIP LOCKED` và, với
+mỗi hàng, đưa một job start vào hàng đợi rồi dời `next_fire` tới tick đầu tiên sau lần
+kích hoạt này, hoặc sau bây giờ khi tick đó cũng đã qua, tất cả trong một transaction:
 
 - **Đúng một lần.** Một worker sập trước khi commit không để lại job cũng không dời gì, nên
   lần poll kế tiếp thực hiện lần kích hoạt; các poller cùng lúc bỏ qua các hàng đã bị khóa.
@@ -235,14 +238,24 @@ kích hoạt này** (không phải sau bây giờ), tất cả trong một trans
   `tests/pg/scheduler.rs` hủy một lần kích hoạt ngay trong lúc insert, kill backend đang
   kích hoạt bằng `pg_terminate_backend` giữa transaction, và cho tám bộ kích hoạt đua nhau
   trên hai mươi lịch.
-- **Bù lần lỡ.** Vì lần kích hoạt kế tiếp đi theo lần vừa thực hiện, một lịch lỡ nhiều tick
-  sẽ kích hoạt từng lần, theo thứ tự, mỗi lời gọi một lần, như các lịch của Python Linch.
+- **Bù lần lỡ có gộp.** Một lịch lỡ nhiều tick (mọi worker đều ngừng hoạt động) kích hoạt
+  một lần, ở `next_fire` đã lưu của nó, cộng các tick bị lỡ sau đó đến bây giờ vào `skips`,
+  và dời `next_fire` tới tick đầu tiên sau bây giờ (`after_missed` trong `schedule.rs`; một
+  interval vẫn nằm trên lưới của nó). Các tick bị lỡ của một interval được đếm bằng phép
+  chia; của một mẫu cron được duyệt từng tick, tối đa 10.000 (`MISSED_COUNTED`). Python
+  Linch kích hoạt từng tick bị lỡ, theo thứ tự; việc gộp giữ cho một thời gian ngừng hoạt
+  động dài không xếp hàng một run cho mỗi tick bị lỡ.
+- **Bỏ qua.** Một lần kích hoạt bị bỏ qua (`skips` + 1, `next_fire` được dời như khi đã
+  thực hiện) khi một job của lịch chưa thất bại và chưa kết thúc, với mọi lịch; có
+  `session_id` thì cũng khi session có một run chưa terminal trong `linch_runs` (kể cả run
+  đang suspend chờ approval hoặc input); và khi root của nó đang ở `Cap` về job chưa xong mà
+  caller truyền vào (`fire_due_schedules(pool, caps)`, `Worker::job_caps` của worker, mà
+  `linch-server` điền bằng `max_queued_jobs` của từng tenant). Các root bị giới hạn của batch
+  được khóa trước theo thứ tự đã sắp xếp, nên hai bộ kích hoạt không bao giờ chờ nhau. Các
+  lần kích hoạt không bao giờ chồng chất sau một hàng đợi tồn đọng hay một run đang chờ một
+  người, và không bao giờ thất bại ở mức trần.
 - **Session.** Không có `session_id`, mỗi lần kích hoạt bắt đầu session
-  `schedule:{id}:{fire time}`. Có `session_id`, lần kích hoạt bị bỏ qua (`skips` + 1) khi một
-  job của lịch chưa thất bại và chưa kết thúc, hoặc khi session có một run chưa terminal
-  trong `linch_runs` (kể cả run đang suspend chờ approval hoặc input). Vì vậy phần bù lần lỡ
-  của một heartbeat gộp thành một run, và các lần kích hoạt không bao giờ chồng chất sau một
-  run đang chờ một người.
+  `schedule:{id}:{fire time}`; có `session_id`, mỗi lần kích hoạt là một run mới trong đó.
 - Một timing đã lưu mà không còn parse được sẽ tạm dừng lịch của nó (có ghi log) thay vì
   chặn các lịch khác.
 
@@ -250,9 +263,10 @@ kích hoạt này** (không phải sau bây giờ), tất cả trong một trans
 
 `Cap { root, max }` (`crates/linch-worker/src/definition.rs`) giới hạn những gì các
 namespace dưới một root (đoạn đầu tiên phân tách bằng `/` của một namespace, tên của một
-tenant) được giữ: số lịch cho `create_schedule`, số job chưa xong cho `enqueue`. Việc đếm
+tenant) được giữ: số lịch cho `create_schedule`, số job chưa xong cho `enqueue` và cho lần kích hoạt của một lịch. Việc đếm
 chạy trong transaction của lần insert sau một advisory lock phạm vi transaction trên root,
-nên các writer trên mọi server đếm các hàng của nhau; vượt quá thì `LimitReached`.
+nên các writer trên mọi server đếm các hàng của nhau; vượt quá thì `LimitReached`, hoặc với
+một lần kích hoạt thì bỏ qua.
 
 ## Định nghĩa agent
 
@@ -267,8 +281,11 @@ admit lại theo tenant của nó ở mỗi lần thử ([RPC](./rpc.md#run-nề
 
 Một định nghĩa giữ các secret của cấu hình dưới dạng văn bản thuần, nên
 `prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) xóa những định nghĩa mà
-không lịch nào và không job chưa xong nào gọi tên, sau khi đặt `agent` thành NULL trên các job
-đã thất bại (không bao giờ chạy lại). Một worker chạy nó cùng việc dọn history, từ lần poll
+không lịch nào, không job chưa xong nào và không hàng history nào của một run chưa terminal
+gọi tên, sau khi đặt `agent` thành NULL trên các job đã thất bại (không bao giờ chạy lại).
+Vì vậy một run suspend chờ approval hoặc câu trả lời giữ định nghĩa của nó cho job tiếp tục
+nó, đến khi hàng history của nó bị dọn (`history_retention`); sau đó `enqueue_resume` và
+`enqueue_approve` từ chối nó. Một worker chạy nó cùng việc dọn history, từ lần poll
 đầu tiên và cứ 10 phút một lần sau đó, dù có giữ history hay không. Một writer lưu một định
 nghĩa khóa hàng của nó (`ON CONFLICT ... DO UPDATE`) đến khi commit, và prune khóa các ứng cử
 viên của nó bằng `FOR UPDATE SKIP LOCKED`, nên một định nghĩa sắp được gọi tên sẽ bị bỏ qua;
@@ -280,8 +297,10 @@ foreign key của lệnh xóa thất bại, và lần prune đó không xóa gì
 Một lịch và một job có thể mang một principal (`Schedule::principal`,
 `RunRequest::principal`), được lưu dưới dạng JSON; một lần kích hoạt sao chép principal của
 lịch của nó sang job của nó. Worker giải mã nó ở mỗi lần thử và đặt nó vào `RunOptions` của
-lệnh start, resume hoặc approve (`execute.rs`), vì core không giữ principal nào cùng run (một
-resume lấy nó từ options của nó). Một hàng có principal không giải mã được làm job của nó thất
+lệnh start, resume hoặc approve (`execute.rs`). Core lưu principal lúc start cùng run
+(`RunRecord::principal`), và một resume hoặc approve có options không nêu principal nào sẽ
+hành động thay cho nó, nên một job tiếp tục (`enqueue_resume`, `enqueue_approve`) không mang
+principal riêng. Một hàng có principal không giải mã được làm job của nó thất
 bại. Worker của Python khôi phục `RunRequest.principal` theo cách tương tự
 (`linch/worker/runtime.py`).
 
