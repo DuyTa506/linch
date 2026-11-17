@@ -388,7 +388,8 @@ impl AllowConfig {
     ///
     /// Raises:
     ///     AccessError: If a URL or DSN is invalid, a root cannot be
-    ///         resolved, or an MCP entry lists a refused variable.
+    ///         resolved, an MCP entry lists a refused variable, or the
+    ///         required policy has a check that cannot be used.
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
@@ -425,8 +426,11 @@ impl AllowConfig {
         if let Some(backends) = &self.execution {
             allow = allow.execution(backends);
         }
-        if self.required_policy.is_some() {
-            allow = allow.required_policy(self.required_policy.clone());
+        if let Some(policy) = &self.required_policy {
+            if let Some(reason) = policy.compile_problem() {
+                return Err(AccessError::RequiredPolicy { reason });
+            }
+            allow = allow.required_policy(Some(policy.clone()));
         }
         Ok(allow)
     }

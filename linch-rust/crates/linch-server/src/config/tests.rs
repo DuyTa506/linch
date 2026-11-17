@@ -283,4 +283,12 @@ fn a_tenant_may_have_a_required_policy() {
                       "tenants": {"acme": {"tokens": [{"value": "t"}],
                                            "allow": {"required_policy": {"gate": []}}}}});
     assert!(ServerConfig::from_json(&typo.to_string()).is_err());
+    let broken = json!({"http": "127.0.0.1:1",
+                        "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                             "allow": {"required_policy": {"gates": [
+                                                 {"name": "g", "check":
+                                                  {"type": "matches", "pattern": "("}}]}}}}});
+    let config = ServerConfig::from_json(&broken.to_string()).unwrap();
+    let error = config.build(no_env).unwrap_err();
+    assert!(error.to_string().contains("required_policy"), "{error}");
 }

@@ -1338,3 +1338,52 @@ async fn a_crash_at_any_write_still_gates_a_rewritten_answer() {
         assert_eq!(errors(&run.events), ["PolicyGateError"], "{context}");
     }
 }
+
+/// The rewrite is judged as the strings it holds too: a hook that writes a
+/// JSON answer with an escaped quote does not dodge a `forbids` pattern
+/// naming the quote.
+#[tokio::test]
+async fn a_rewrite_is_not_dodged_by_json_escaping() {
+    let mut spec = with_policy(json!({"gates": [{"name": "clean", "check":
+        {"type": "forbids", "pattern": "say \"hi\""}}]}));
+    spec.output_schema = Some(noted());
+    let stores = Arc::new(Stores::default());
+    let turns = vec![report("f1", "all good")];
+    let provider = Arc::new(Replay::new(turns).without_native_output_schema());
+    let hooks = rewriting("{\"note\": \"say \\\"hi\\\"\"}");
+    let agent = agent_with(spec, provider, hooks, &Runs::default(), stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(actions(&events, PolicyAction::Stop), 1);
+    assert_eq!(actions(&events, PolicyAction::Correct), 0);
+}
+
+/// And through the final tool: no crash point lets a rewritten answer
+/// through, and every call stays answered.
+#[tokio::test]
+async fn a_crash_at_any_write_still_gates_a_rewritten_final_tool_answer() {
+    let mut spec = with_policy(json!({"gates": [{"name": "clean", "check":
+        {"type": "forbids", "pattern": "SECRET"}}]}));
+    spec.output_schema = Some(noted());
+    let turns = || vec![report("f1", "all good")];
+    let hooks = || rewriting("{\"note\": \"SECRET\"}");
+    let (crashed, clean) = crash_everywhere_with(spec, turns, false, hooks).await;
+    assert_eq!(clean.status, RunStatus::Failed);
+    for run in &crashed {
+        let context = &run.context;
+        assert_eq!(run.status, RunStatus::Failed, "{context}");
+        assert_eq!(actions(&run.events, PolicyAction::Stop), 1, "{context}");
+        assert_eq!(actions(&run.events, PolicyAction::Correct), 0, "{context}");
+        assert_eq!(errors(&run.events), ["PolicyGateError"], "{context}");
+        for (at, message) in run.session.iter().enumerate() {
+            for call in message.tool_uses() {
+                let next = &run.session[at + 1];
+                let paired = results_of(next).iter().any(|(id, ..)| *id == call.id);
+                assert!(paired, "{context}: {} unanswered", call.id);
+            }
+        }
+    }
+}

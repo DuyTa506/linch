@@ -13,7 +13,7 @@ use linch::{AgentConfig, Hooks, PgPools, StoreConfig, ToolRegistry};
 use linch_worker::{AgentFactory, FactoryError, JobAgent};
 
 use crate::access::Tenant;
-use crate::error::chain;
+use crate::error::ErrorObject;
 use crate::schedule_tools::{Binding, Bound};
 
 /// Opens the agent of a job that carries a stored agent definition (an
@@ -165,7 +165,14 @@ impl BackgroundAgents {
         let opened = (config
             .open_with(tools, Arc::new(Hooks::default()), &pools)
             .await)
-            .map_err(|error| FactoryError::Unavailable(chain(&error)))?;
+            .map_err(|error| {
+                let object = ErrorObject::from(&error);
+                let object = match self.tenants.get(root) {
+                    Some(tenant) => tenant.open_error(object),
+                    None => object,
+                };
+                FactoryError::Unavailable(object.message)
+            })?;
         if let (Some(binding), Some(tenant)) = (binding, scheduling) {
             binding.bind(Bound {
                 pool: (opened.pool().cloned()).expect("a background agent has Postgres stores"),

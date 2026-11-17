@@ -129,6 +129,13 @@ impl ReliabilityPolicy {
         self.max_corrections.unwrap_or(DEFAULT_MAX_CORRECTIONS)
     }
 
+    /// Why a gate's `check` cannot be used, if it cannot: a pattern that
+    /// does not compile, or a keyword list that is empty or holds a blank
+    /// keyword. The reason echoes the pattern.
+    pub fn compile_problem(&self) -> Option<String> {
+        Rules::new(self.clone()).err()
+    }
+
     /// Why this policy cannot run on an agent, if it cannot.
     ///
     /// Args:
@@ -514,16 +521,21 @@ impl Gates {
 
     /// How the final answer `text` fails the gates; `None` when it meets
     /// them all.
+    ///
+    /// A `text` that is a JSON object (a final tool's input, a structured
+    /// answer, a hook's rewrite of either) is also judged as the strings it
+    /// holds, as they read: the JSON text escapes what a pattern may name (a
+    /// quote, a newline). A `forbids` check fails when it matches any of
+    /// the texts, any other check when it passes on none.
     pub(crate) fn check(&self, text: &str) -> Option<Failure> {
-        self.check_texts(&[text])
-    }
-
-    /// How the final answer fails the gates, which judge it as every one of
-    /// `texts`: a `forbids` check fails when it matches any of them, any
-    /// other check when it passes on none. A final tool's input is its JSON
-    /// text, which escapes what a pattern may name (a quote, a newline),
-    /// together with the strings the input holds, as they read.
-    pub(crate) fn check_texts(&self, texts: &[&str]) -> Option<Failure> {
+        let object = (self.rules.checks.iter().any(Option::is_some) && text.starts_with('{'))
+            .then(|| serde_json::from_str::<JsonObject>(text).ok())
+            .flatten();
+        let decoded = object.as_ref().map(leaves).unwrap_or_default();
+        let texts: Vec<&str> = [text]
+            .into_iter()
+            .chain(decoded.iter().map(String::as_str))
+            .collect();
         let policy = &self.rules.policy;
         let (mut gates, mut missing, mut lines) = (Vec::new(), Vec::new(), Vec::new());
         for (gate, check) in policy.gates.iter().zip(&self.rules.checks) {
@@ -634,7 +646,7 @@ impl Gates {
 }
 
 /// The strings in `input`, keys and values, at any depth, as they read.
-pub(crate) fn leaves(input: &JsonObject) -> Vec<String> {
+fn leaves(input: &JsonObject) -> Vec<String> {
     fn walk(value: &JsonValue, found: &mut Vec<String>) {
         match value {
             JsonValue::String(text) => found.push(text.clone()),

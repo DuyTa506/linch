@@ -20,17 +20,19 @@ use super::{Allowlists, Tenant};
 use crate::error::{ErrorObject, code};
 
 impl Tenant {
-    /// `error`, an `agent.open` failure, without the tool names of a policy
-    /// the operator required: a rule naming a tool the tenant's agent lacks
-    /// would otherwise tell the tenant what the operator's policy holds.
+    /// `error`, an `agent.open` failure, without what the operator's
+    /// required policy holds: a rule naming a tool the tenant's agent lacks,
+    /// or a check that does not compile (its message echoes the pattern),
+    /// would otherwise tell the tenant.
     pub(crate) fn open_error(&self, error: ErrorObject) -> ErrorObject {
         let unmet = error.code == code::BUILD_INVALID
             && error.message.contains("policy:")
-            && error.message.contains("not a tool the agent has");
+            && (error.message.contains("not a tool the agent has")
+                || error.message.contains("verifier \""));
         match (&self.allow.required_policy, unmet) {
             (Some(_), true) => ErrorObject::new(
                 error.code,
-                "policy: the agent lacks a tool that the policy required for this tenant names",
+                "policy: the policy required for this tenant cannot run on this agent",
             ),
             _ => error,
         }
@@ -551,6 +553,12 @@ fn admit_policy(
     required: Option<&ReliabilityPolicy>,
 ) -> Result<(), ErrorObject> {
     if let Some(policy) = &spec.policy {
+        // The tenant's own checks are its to get right; a check that fails
+        // to compile after the merge is then the operator's, which the open
+        // error does not echo.
+        if let Some(reason) = policy.compile_problem() {
+            return Err(refused("policy", reason));
+        }
         let too_long = |text: &str| text.len() > MAX_PATTERN_BYTES;
         let oversized = |check: &Check| match check {
             Check::Matches { pattern } | Check::Forbids { pattern } => too_long(pattern),

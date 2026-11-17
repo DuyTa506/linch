@@ -75,23 +75,14 @@ impl Runner {
         }
     }
 
-    /// Check the final answer `text` against the completion gates, which
-    /// also judge it as each of `decoded` (see `Gates::check_texts`).
+    /// Check the final answer `text` against the completion gates.
     /// `None`: it meets them, or the policy has none; otherwise the answer
     /// went back to the model, or the run ended failed.
-    pub(super) async fn gate_answer(
-        &mut self,
-        text: &str,
-        decoded: &[String],
-    ) -> Result<Option<Checked>, RunError> {
+    pub(super) async fn gate_answer(&mut self, text: &str) -> Result<Option<Checked>, RunError> {
         let Some(gates) = &self.gates else {
             return Ok(None);
         };
-        let texts: Vec<&str> = [text]
-            .into_iter()
-            .chain(decoded.iter().map(String::as_str))
-            .collect();
-        let Some(failure) = gates.check_texts(&texts) else {
+        let Some(failure) = gates.check(text) else {
             return Ok(None);
         };
         if gates.can_correct() {

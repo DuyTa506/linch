@@ -284,6 +284,13 @@ pub enum AccessError {
         /// The tenant of the second occurrence.
         tenant: String,
     },
+    /// The `required_policy` has a gate check that cannot be used (a
+    /// pattern that does not compile, a blank keyword).
+    #[error("required_policy: {reason}")]
+    RequiredPolicy {
+        /// What is wrong with it.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
