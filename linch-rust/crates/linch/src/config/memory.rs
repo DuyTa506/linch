@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 /// `MemoryDelete` tools over a store the open picks from the stores
 /// config, and optionally an automatic search before each request.
 ///
-/// The store is Postgres (`linch_memories`, found with full-text search)
-/// with Postgres stores, so memory outlives the process and every worker of
+/// The store is Postgres (`linch_memories`, found by the words a memory
+/// holds) with Postgres stores, so memory outlives the process and every worker of
 /// the namespace sees it, and in-process memory otherwise (for tests and
 /// development). The tools need no host callback, so a scheduled or
 /// background agent has them too. The namespace and the scope are the
@@ -20,10 +20,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryConfig {
-    /// Whose memories the agent reads and writes: `agent` (shared by every
-    /// session of the namespace) when absent, or `principal` (one memory
-    /// per tenant and user; a run with no principal has none).
-    #[serde(default, skip_serializing_if = "is_agent")]
+    /// Whose memories the agent reads and writes: `principal` when absent
+    /// (one memory per tenant and user; a run with no principal has none),
+    /// or `agent` (shared by every session of the namespace, so text one
+    /// user saves reaches every other user: name it only for a
+    /// single-user agent).
+    #[serde(default, skip_serializing_if = "is_principal")]
     pub scope: MemoryScope,
     /// Search memory with the user's latest message before each request and
     /// show the model what it finds. Off when absent. It joins the run
@@ -35,10 +37,17 @@ pub struct MemoryConfig {
     /// server's tenant allowlist bounds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memories: Option<u64>,
+    /// The most memories one scope (one principal, or the shared memory)
+    /// may keep, so a single user, or a model that was told to save
+    /// everything, cannot fill the tenant's `max_memories`. A quarter of
+    /// `max_memories`, at least 1, when absent. It needs `max_memories`
+    /// and may not pass it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memories_per_scope: Option<u64>,
 }
 
-fn is_agent(scope: &MemoryScope) -> bool {
-    *scope == MemoryScope::Agent
+fn is_principal(scope: &MemoryScope) -> bool {
+    *scope == MemoryScope::Principal
 }
 
 /// Automatic recall (see [`MemoryConfig::recall`]).

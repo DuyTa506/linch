@@ -421,11 +421,11 @@ async def test_memory_is_off_unless_the_config_turns_it_on() -> None:
 async def test_a_memory_saved_in_one_session_is_recalled_in_another() -> None:
     save = {"content": "Ann's favourite tea is oolong", "tags": ["tea"]}
     turns = [tool_turn("c1", "MemorySave", save), text_turn("saved"), text_turn("oolong")]
-    memory = {"recall": {"k": 3}}
+    memory = {"scope": "agent", "recall": {"k": 3}}
     async with Server() as server:
         agent = await server.open_agent(config(turns, mode="accept_edits", memory=memory))
-        first = [e async for e in await agent.run("s1", "Remember my tea.")]
-        second = [e async for e in await agent.run("s2", "Which tea do I like?")]
+        first = [e async for e in await agent.run("s1", "Remember my favourite tea.")]
+        second = [e async for e in await agent.run("s2", "Which tea is Ann's favourite?")]
 
     [saved] = results(first)
     assert saved.startswith("Saved memory ")
@@ -436,6 +436,15 @@ async def test_a_memory_saved_in_one_session_is_recalled_in_another() -> None:
     ]
     assert recalled == [[saved.removeprefix("Saved memory ")]]
     assert final(second).final_text == "oolong"
+
+
+async def test_memory_is_per_principal_unless_the_config_says_agent() -> None:
+    turns = [tool_turn("c1", "MemorySearch", {"query": "tea"}), text_turn("denied")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns, memory={}))
+        events = [e async for e in await agent.run("s1", "search")]
+    [shown] = results(events)
+    assert "per principal" in shown
 
 
 async def test_an_invalid_memory_config_does_not_open() -> None:

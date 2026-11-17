@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::{Memory, MemoryError, MemoryStore, NewMemory, index_words, search_terms};
+use super::{
+    Memory, MemoryError, MemoryStore, NewMemory, default_scope_cap, index_words, search_terms,
+};
 
 struct Row {
     scope: Option<String>,
@@ -23,6 +25,7 @@ struct Row {
 pub struct InMemoryMemoryStore {
     rows: Mutex<Vec<Row>>,
     cap: Option<u64>,
+    scope_cap: Option<u64>,
 }
 
 impl InMemoryMemoryStore {
@@ -32,9 +35,17 @@ impl InMemoryMemoryStore {
     }
 
     /// This store refusing a new memory once it holds `max`, in every
-    /// scope.
+    /// scope. Each scope is held to [`default_scope_cap`] of it, unless
+    /// [`Self::with_scope_cap`] names another.
     pub fn with_cap(mut self, max: u64) -> Self {
         self.cap = Some(max);
+        self
+    }
+
+    /// This store refusing a new memory once its scope holds `max` of its
+    /// own. It counts only with [`Self::with_cap`].
+    pub fn with_scope_cap(mut self, max: u64) -> Self {
+        self.scope_cap = Some(max);
         self
     }
 }
@@ -54,10 +65,21 @@ impl MemoryStore for InMemoryMemoryStore {
         if let Some(row) = rows.iter().find(held) {
             return Ok(row.memory.clone());
         }
-        if let Some(max) = self.cap
-            && rows.len() as u64 >= max
-        {
-            return Err(MemoryError::LimitReached { max });
+        if let Some(max) = self.cap {
+            let own = rows.iter().filter(|row| row.scope.as_deref() == scope);
+            let each = self.scope_cap.unwrap_or_else(|| default_scope_cap(max));
+            if own.count() as u64 >= each {
+                return Err(MemoryError::LimitReached {
+                    max: each,
+                    per_scope: true,
+                });
+            }
+            if rows.len() as u64 >= max {
+                return Err(MemoryError::LimitReached {
+                    max,
+                    per_scope: false,
+                });
+            }
         }
         let mut words = index_words(&memory.content)
             .into_iter()
@@ -83,15 +105,17 @@ impl MemoryStore for InMemoryMemoryStore {
         scope: Option<&str>,
         query: &str,
         limit: usize,
+        min_match: usize,
     ) -> Result<Vec<Memory>, MemoryError> {
         let terms = search_terms(query);
         let rows = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        let needed = min_match.max(1);
         // Row order is save order, so a later row is newer among equals.
         let mut scored: Vec<(usize, usize, &Memory)> = (rows.iter().enumerate())
             .filter(|(_, row)| row.scope.as_deref() == scope)
             .filter_map(|(at, row)| {
                 let score = terms.iter().filter(|t| row.words.contains(*t)).count();
-                (score > 0).then_some((score, at, &row.memory))
+                (score >= needed).then_some((score, at, &row.memory))
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
@@ -107,5 +131,12 @@ impl MemoryStore for InMemoryMemoryStore {
         let before = rows.len();
         rows.retain(|row| !(row.scope.as_deref() == scope && row.memory.id == id));
         Ok(rows.len() < before)
+    }
+
+    async fn purge(&self, scope: Option<&str>) -> Result<u64, MemoryError> {
+        let mut rows = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = rows.len();
+        rows.retain(|row| row.scope.as_deref() != scope);
+        Ok((before - rows.len()) as u64)
     }
 }

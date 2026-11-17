@@ -27,8 +27,8 @@ impl Tenant {
     /// turned off unless the tenant may run exec tools, the execution
     /// backend must be one of the tenant's (absent: its first),
     /// `schedule_tools` is refused unless the tenant may hold schedules,
-    /// `memory` unless it allows memory (its `max_memories` bounded by the
-    /// tenant's cap), and
+    /// `memory` unless it allows memory and caps it (its `max_memories` and
+    /// `max_memories_per_scope` bounded by the tenant's cap), and
     /// a Postgres
     /// store that names no pool size gets the default size or the tenant's
     /// `max_pool_connections`, whichever is smaller.
@@ -98,12 +98,18 @@ impl Tenant {
                 let message = "memory needs `memory` in the tenant's allowlists";
                 return Err(refused("memory", message.into()));
             }
+            // Memory without a cap is a table the model can fill: the
+            // tenant names its budget, as it does for schedules.
+            let Some(cap) = allow.max_memories else {
+                let message = "memory needs a cap in the tenant's allowlists (max_memories)";
+                return Err(refused("memory", message.into()));
+            };
             // The smaller cap holds, and the tenant's applies when the config
             // names none; a stored definition meets a lowered cap the same way.
-            memory.max_memories = match (memory.max_memories, allow.max_memories) {
-                (Some(asked), Some(cap)) => Some(asked.min(cap)),
-                (asked, cap) => asked.or(cap),
-            };
+            let max = memory.max_memories.map_or(cap, |asked| asked.min(cap));
+            memory.max_memories = Some(max);
+            memory.max_memories_per_scope =
+                (memory.max_memories_per_scope).map(|each| each.min(max));
         }
         if let StoreConfig::Postgres {
             dsn,

@@ -130,7 +130,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
 | `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
 | `memory` | `false`: không có bộ nhớ dài hạn | Config có được bật [`memory`](./memory.md#built-in-long-term-memory) hay không |
-| `max_memories` | không có: không giới hạn | Số memory nó được giữ trong mọi namespace của một database; `max_memories` của agent bị giữ dưới mức này |
+| `max_memories` | không có, từ chối `memory` (server không nạp config có `memory` mà không có cap) | Số memory nó được giữ trong mọi namespace của một database; `max_memories` và `max_memories_per_scope` của agent bị giữ dưới mức này |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không

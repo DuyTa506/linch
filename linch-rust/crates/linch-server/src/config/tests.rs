@@ -140,6 +140,23 @@ fn memory_is_denied_by_default_and_its_cap_is_read() {
 }
 
 #[test]
+fn memory_without_a_cap_is_refused_when_the_config_loads() {
+    let text = json!({"http": "127.0.0.1:1",
+                      "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                           "allow": {"memory": true}}}});
+    let error = ServerConfig::from_json(&text.to_string()).unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::MemoryNeedsCap { tenant } if tenant == "acme"),
+        "{error}"
+    );
+    // A cap without the allowance is harmless: memory stays denied.
+    let text = json!({"http": "127.0.0.1:1",
+                      "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                           "allow": {"max_memories": 5}}}});
+    assert!(ServerConfig::from_json(&text.to_string()).is_ok());
+}
+
+#[test]
 fn a_cap_of_zero_is_refused_when_the_config_loads() {
     for field in [
         "max_runs",

@@ -73,8 +73,13 @@ async fn a_tenant_needs_the_allowance_and_local_clients_do_not() {
     off.as_object_mut().unwrap().remove("memory");
     rpc.open(off).await;
 
-    // Allowed.
+    // Allowed, but with no cap a model could fill the table: refused too.
     let rpc = Rpc::remote(tenant("acme", allow(dir.path()).memory(true)));
+    assert_eq!(refused(&rpc, on.clone()).await.as_deref(), Some("memory"));
+
+    // Allowed and capped.
+    let capped = allow(dir.path()).memory(true).max_memories(Some(8));
+    let rpc = Rpc::remote(tenant("acme", capped));
     assert_eq!(refused(&rpc, on.clone()).await, None);
 
     // A local client has no tenant to hold it.
@@ -93,15 +98,39 @@ async fn the_tenants_cap_bounds_the_config() {
             save("c1", "one"),
             save("c2", "two"),
             save("c3", "three"),
+            save("c4", "four"),
             text_turn("done"),
         ]
     };
-    let allowed = || allow(dir.path()).memory(true).max_memories(Some(2));
-    for asked in [
-        json!({}),
-        json!({"max_memories": 5}),
-        json!({"max_memories": 1}),
-    ] {
+    // The tenant's 8 gives the one (shared) scope 2, unless the config asks
+    // for more of it, which the tenant's 8 bounds again.
+    let allowed = || allow(dir.path()).memory(true).max_memories(Some(8));
+    let ok = None;
+    let full = Some("limit_reached".to_owned());
+    let cases = [
+        (
+            json!({}),
+            [ok.clone(), ok.clone(), full.clone(), full.clone()],
+        ),
+        (
+            json!({"max_memories": 20}),
+            [ok.clone(), ok.clone(), full.clone(), full.clone()],
+        ),
+        (
+            json!({"max_memories": 4}),
+            [ok.clone(), full.clone(), full.clone(), full.clone()],
+        ),
+        (
+            json!({"max_memories_per_scope": 3}),
+            [ok.clone(), ok.clone(), ok.clone(), full.clone()],
+        ),
+        (
+            json!({"max_memories_per_scope": 100}),
+            [ok.clone(), ok.clone(), ok.clone(), ok.clone()],
+        ),
+    ];
+    for (mut asked, expected) in cases {
+        asked["scope"] = json!("agent");
         let mut rpc = Rpc::remote(tenant("acme", allowed()));
         let config = config(turns(), "acme", dir.path(), asked.clone());
         let agent = rpc.open(config).await;
@@ -111,11 +140,6 @@ async fn the_tenants_cap_bounds_the_config() {
             .into_iter()
             .map(|(code, _)| code)
             .collect();
-        let limit = Some("limit_reached".to_owned());
-        let expected = match asked.get("max_memories") {
-            Some(cap) if cap == &json!(1) => vec![None, limit.clone(), limit],
-            _ => vec![None, None, limit],
-        };
         assert_eq!(codes, expected, "asked {asked}");
     }
 }
@@ -170,7 +194,7 @@ async fn a_background_run_saves_a_memory_and_a_later_run_recalls_it() {
         config["stores"] = json!({"type": "postgres", "dsn": db.dsn});
         config
     };
-    let memory = json!({"recall": {"k": 3}});
+    let memory = json!({"scope": "agent", "recall": {"k": 3}});
     let writer_turns = vec![
         tool_turn(
             "c1",

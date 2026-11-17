@@ -3,9 +3,15 @@
 //!
 //! The model chooses only the text, the tags, the query and the id of what
 //! to delete. The host chooses everything else: the store (so the
-//! namespace) and the scope, which is the agent's shared memory or the
-//! calling run's principal ([`MemoryScope`]). Neither is a tool input, so
+//! namespace) and the scope, which is the calling run's principal or the
+//! agent's shared memory ([`MemoryScope`]). Neither is a tool input, so
 //! no input reaches another agent's or another principal's memories.
+//!
+//! What a memory says is data, not an instruction: a model, or a user in
+//! an earlier run, wrote it. Every memory the model reads, in a search
+//! result or in the recall block, passes through [`escape`] first, so its
+//! text cannot close the data block, forge a `system-reminder` or pose as
+//! another memory.
 //!
 //! A store failure never reaches the model as the store worded it, because
 //! a backend's message can name its address: the model sees a fixed text and
@@ -31,14 +37,20 @@ use crate::input::{coded, invalid, optional_count, schema, string};
 pub const MEMORY_TOOL_NAMES: [&str; 3] = ["MemorySave", "MemorySearch", "MemoryDelete"];
 
 /// Whose memories an agent reads and writes.
+///
+/// `Principal` is the default: an agent that names no scope keeps one
+/// memory per user, and a run without a user has none. The shared scope
+/// lets one user's saved text (or text a prompt injection made the model
+/// save) reach every other user of the agent, so it is something a host
+/// chooses, never something it gets by leaving a field out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
     /// One memory every session of the agent's namespace shares.
-    #[default]
     Agent,
     /// One memory per principal (tenant and user): a run reads and writes
     /// only its own principal's, and a run without a principal has none.
+    #[default]
     Principal,
 }
 
@@ -102,10 +114,13 @@ impl Bound {
 
 fn store_error(error: MemoryError) -> ToolOutputError {
     match error {
-        MemoryError::LimitReached { max } => coded(
-            format!("the memory limit of {max} is reached; delete a memory first"),
-            "limit_reached",
-        ),
+        MemoryError::LimitReached { max, per_scope } => {
+            let whose = if per_scope { " for this user" } else { "" };
+            coded(
+                format!("the memory limit of {max}{whose} is reached; delete a memory first"),
+                "limit_reached",
+            )
+        }
         MemoryError::Backend(_) => coded("the memory store is unavailable", "store"),
     }
 }
@@ -128,8 +143,9 @@ fn tags(input: &JsonObject) -> Result<Vec<String>, ToolOutputError> {
     }
 }
 
-fn new_memory(input: &JsonObject, key: &str) -> Result<NewMemory, ToolOutputError> {
-    NewMemory::new(key, string(input, "content")?, &tags(input)?).map_err(|error| invalid(error.0))
+fn new_memory(input: &JsonObject, call_key: &str) -> Result<NewMemory, ToolOutputError> {
+    let memory = NewMemory::for_call(call_key, string(input, "content")?, &tags(input)?);
+    memory.map_err(|error| invalid(error.0))
 }
 
 /// Save a fact for later runs. Scope `write`.
@@ -266,13 +282,45 @@ fn query(input: &JsonObject) -> Result<&str, ToolOutputError> {
     Ok(query)
 }
 
-/// A memory as the model reads it in a search result.
+/// `text` made safe to show the model as data: a `<` that opens or closes a
+/// tag (`<system-reminder>`, `</memory-data>`, `<!--`) becomes `&lt;`, and a
+/// `[memory:` that would pose as the start of another memory gets a space
+/// after its bracket. Nothing else changes, so ordinary text, `x < y`
+/// included, reads as written.
+///
+/// One pass is enough: the escapes add no character that makes a marker, so
+/// an escaped text has nothing left to escape.
+pub(crate) fn escape(text: &str) -> String {
+    const MARKER: &str = "memory:";
+    let mut out = String::with_capacity(text.len());
+    for (at, c) in text.char_indices() {
+        let rest = &text[at + c.len_utf8()..];
+        match c {
+            '<' if rest.starts_with(|n: char| {
+                n == '/' || n == '!' || n == '?' || n.is_ascii_alphabetic()
+            }) =>
+            {
+                out.push_str("&lt;");
+            }
+            '[' if rest
+                .get(..MARKER.len())
+                .is_some_and(|w| w.eq_ignore_ascii_case(MARKER)) =>
+            {
+                out.push_str("[ ");
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A memory as the model reads it, in a search result or the recall block.
 pub(crate) fn render(memory: &Memory) -> String {
     let tags = match memory.tags.is_empty() {
         true => String::new(),
-        false => format!(" (tags: {})", memory.tags.join(", ")),
+        false => format!(" (tags: {})", escape(&memory.tags.join(", "))),
     };
-    format!("[memory:{}] {}{tags}", memory.id, memory.content)
+    format!("[memory:{}] {}{tags}", memory.id, escape(&memory.content))
 }
 
 #[async_trait]
@@ -308,7 +356,7 @@ impl Tool for MemorySearch {
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let scope = self.bound.scope_of(&ctx)?;
         let found = (self.bound.store)
-            .search(scope.as_deref(), query(&input)?, limit(&input)?)
+            .search(scope.as_deref(), query(&input)?, limit(&input)?, 1)
             .await;
         let found = found.map_err(store_error)?;
         if found.is_empty() {

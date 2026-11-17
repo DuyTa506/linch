@@ -27,8 +27,9 @@ impl Memory {
     /// memory. Nothing when `config` is `None`.
     ///
     /// Raises:
-    ///     OpenError: `Memory` for a `k` outside 1 to 20 or a `max_memories`
-    ///         of 0; `Tools` when a tool name is taken.
+    ///     OpenError: `Memory` for a `k` outside 1 to 20, a `max_memories`
+    ///         of 0, or a `max_memories_per_scope` without `max_memories`,
+    ///         of 0, or above it; `Tools` when a tool name is taken.
     pub(crate) fn wire(
         config: Option<&MemoryConfig>,
         tools: &ToolRegistry,
@@ -47,13 +48,37 @@ impl Memory {
         {
             return Err(OpenError::Memory("memory.recall.k must be 1 to 20"));
         }
+        match (config.max_memories, config.max_memories_per_scope) {
+            (None, Some(_)) => {
+                return Err(OpenError::Memory(
+                    "memory.max_memories_per_scope needs memory.max_memories",
+                ));
+            }
+            (Some(max), Some(each)) if each == 0 || each > max => {
+                return Err(OpenError::Memory(
+                    "memory.max_memories_per_scope must be 1 to max_memories",
+                ));
+            }
+            _ => {}
+        }
+        let each = config.max_memories_per_scope;
         let store: Arc<dyn MemoryStore> = match (pool, config.max_memories) {
             (Some(pool), None) => Arc::new(PgMemoryStore::new(pool.clone(), namespace)),
             (Some(pool), Some(max)) => {
-                Arc::new(PgMemoryStore::new(pool.clone(), namespace).with_cap(max))
+                let mut store = PgMemoryStore::new(pool.clone(), namespace).with_cap(max);
+                if let Some(each) = each {
+                    store = store.with_scope_cap(each);
+                }
+                Arc::new(store)
             }
             (None, None) => Arc::new(InMemoryMemoryStore::new()),
-            (None, Some(max)) => Arc::new(InMemoryMemoryStore::new().with_cap(max)),
+            (None, Some(max)) => {
+                let mut store = InMemoryMemoryStore::new().with_cap(max);
+                if let Some(each) = each {
+                    store = store.with_scope_cap(each);
+                }
+                Arc::new(store)
+            }
         };
         let mut wired = Self::default();
         for tool in memory_tools(Arc::clone(&store), config.scope) {

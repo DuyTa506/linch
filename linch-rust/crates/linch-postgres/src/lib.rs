@@ -52,7 +52,7 @@ mod tool_cache;
 pub use codec::CodecError;
 pub use files::PgFileBackend;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
-pub use memory::PgMemoryStore;
+pub use memory::{DEFAULT_STATEMENT_TIMEOUT, PgMemoryStore};
 pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};
 pub use run::{DEFAULT_RUN_LEASE_TTL, PgRunStore};
 pub use session::PgSessionStore;

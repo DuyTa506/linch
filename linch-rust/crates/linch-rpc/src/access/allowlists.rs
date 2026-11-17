@@ -373,7 +373,9 @@ impl Allowlists {
 
     /// Whether a config may turn on long-term `memory`, which stores what
     /// the model saves in the tenant's database, namespaces and scope
-    /// included; off (the default) refuses it (`kind: memory`).
+    /// included; off (the default) refuses it (`kind: memory`). It also
+    /// needs [`Self::max_memories`]: a config that turns memory on for a
+    /// tenant with no cap is refused too.
     pub fn memory(mut self, allowed: bool) -> Self {
         self.memory = allowed;
         self
@@ -382,8 +384,10 @@ impl Allowlists {
     /// How many memories the tenant may keep, in all its namespaces of a
     /// database. A config's `memory.max_memories` is bounded by it (the
     /// smaller holds, and a config that names none gets it), so a save past
-    /// it fails for the model with `limit_reached`. `None` (the default)
-    /// sets no cap; it matters only with [`Self::memory`].
+    /// it fails for the model with `limit_reached`. A config's
+    /// `max_memories_per_scope` is bounded by the cap the same way, and a
+    /// config that names none gives each scope a quarter of it. `None` (the
+    /// default) is no cap, which refuses every config with `memory`.
     pub fn max_memories(mut self, max: Option<u64>) -> Self {
         self.max_memories = max;
         self

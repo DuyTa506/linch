@@ -79,7 +79,7 @@ pub use json::{JsonObject, JsonValue};
 pub use loop_guard::LoopGuard;
 pub use memory::{
     InMemoryMemoryStore, InvalidMemory, Memory, MemoryError, MemoryStore, NewMemory,
-    principal_scope, search_terms,
+    default_scope_cap, principal_scope, recall_terms, search_terms,
 };
 pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,

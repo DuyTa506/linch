@@ -7,15 +7,26 @@
 //! (see [`principal_scope`]). A scope never reads or writes another's rows.
 //! The scope comes from the host, never from model input.
 //!
-//! Search is full text over content and tags, language neutral (no stemming
-//! or stop words), and any matching word counts: a row that matches more of
-//! the query's words ranks higher. [`search_terms`] is the one definition of
-//! those words, so every backend reads a query the same way. Backends pass
-//! [`conformance::memory_store_suite`]; [`InMemoryMemoryStore`] is for tests
-//! and development, linch-postgres' `PgMemoryStore` is the durable one.
+//! Search is full text over content and tags, language neutral (no stemming),
+//! and any matching word counts: a row that matches more of the query's
+//! words ranks higher. A caller may ask for at least `min_match` of them.
+//! [`search_terms`] is the one definition of those words, so every backend
+//! reads a query the same way; [`recall_terms`] is the same without the
+//! words too common to select anything, for the automatic recall. Text is
+//! read in Unicode normal form C, so a decomposed query finds composed text.
+//! Backends pass [`conformance::memory_store_suite`];
+//! [`InMemoryMemoryStore`] is for tests and development, linch-postgres'
+//! `PgMemoryStore` is the durable one.
+//!
+//! A store may cap its memories: one number for all its scopes, and one per
+//! scope so a single principal (or a model that was told to save everything)
+//! cannot fill the whole budget. [`default_scope_cap`] is the per-scope
+//! number when none is named.
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::policy::Principal;
 
@@ -120,21 +131,66 @@ impl NewMemory {
             tags: kept,
         })
     }
+
+    /// A memory saved by one tool call, keyed by the call and by what it
+    /// saves.
+    ///
+    /// The call's idempotency key alone is not enough: a provider that
+    /// reuses a tool-use id for a later turn of the same run would have its
+    /// second save silently answered with the first. With the text in the
+    /// key, a replay of the same call (after a crash, or a kernel retry)
+    /// still finds its row, and a different fact never does.
+    ///
+    /// Args:
+    ///     call_key: The call's idempotency key (`run:tool_use_id`).
+    ///     content: The text to remember.
+    ///     tags: Labels, possibly empty.
+    ///
+    /// Raises:
+    ///     InvalidMemory: As [`Self::new`].
+    pub fn for_call(call_key: &str, content: &str, tags: &[String]) -> Result<Self, InvalidMemory> {
+        let mut memory = Self::new(call_key, content, tags)?;
+        let mut digest = Sha256::new();
+        digest.update(memory.content.as_bytes());
+        for tag in &memory.tags {
+            digest.update([0]);
+            digest.update(tag.as_bytes());
+        }
+        let digest = digest.finalize();
+        let hex: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
+        memory.key = format!("{call_key}:{hex}");
+        Ok(memory)
+    }
 }
 
 /// Why a store call failed.
 #[derive(Debug, Error)]
 pub enum MemoryError {
-    /// The save would pass the store's cap on memories.
-    #[error("the memory limit of {max} is reached")]
+    /// The save would pass one of the store's caps.
+    #[error("{}", limit_text(*.max, *.per_scope))]
     LimitReached {
-        /// The cap.
+        /// The cap that stopped the save.
         max: u64,
+        /// Whether it is the cap of the one scope, not of the whole store.
+        per_scope: bool,
     },
     /// The backend failed. The message may name the backend's address, so a
     /// host shows the model a fixed text instead.
     #[error("memory store failed: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+fn limit_text(max: u64, per_scope: bool) -> String {
+    match per_scope {
+        true => format!("the memory limit of {max} for this scope is reached"),
+        false => format!("the memory limit of {max} is reached"),
+    }
+}
+
+/// The per-scope cap of a store capped at `max` that names none: a quarter
+/// of it, and at least 1.
+pub fn default_scope_cap(max: u64) -> u64 {
+    (max / 4).max(1)
 }
 
 /// Where long-term memories are kept, for one agent's namespace.
@@ -145,25 +201,32 @@ pub enum MemoryError {
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Store `memory` in `scope`, or return the memory already stored under
-    /// its key (which does not count against the cap).
+    /// its key (which does not count against the caps).
     ///
     /// Raises:
-    ///     MemoryError: `LimitReached` when the store's cap is full.
+    ///     MemoryError: `LimitReached` when the store's cap or the scope's
+    ///         is full.
     async fn save(&self, scope: Option<&str>, memory: NewMemory) -> Result<Memory, MemoryError>;
 
-    /// Up to `limit` memories of `scope` that match any word of `query`
-    /// ([`search_terms`]), best match first, newer first among equals. A
-    /// query with no words matches nothing.
+    /// Up to `limit` memories of `scope` that match at least `min_match`
+    /// words of `query` ([`search_terms`]; 0 and 1 both mean any word),
+    /// best match first, newer first among equals. A query with no words
+    /// matches nothing.
     async fn search(
         &self,
         scope: Option<&str>,
         query: &str,
         limit: usize,
+        min_match: usize,
     ) -> Result<Vec<Memory>, MemoryError>;
 
     /// Delete memory `id` of `scope`. Returns whether it existed there; an
     /// id of another scope or namespace is not found.
     async fn delete(&self, scope: Option<&str>, id: &str) -> Result<bool, MemoryError>;
+
+    /// Delete every memory of `scope`, for a host that forgets a principal.
+    /// Returns how many there were. Other scopes are untouched.
+    async fn purge(&self, scope: Option<&str>) -> Result<u64, MemoryError>;
 }
 
 /// The scope key of a principal's memories.
@@ -175,40 +238,76 @@ pub fn principal_scope(principal: &Principal) -> String {
     format!("{}:{tenant}:{}", tenant.len(), principal.user())
 }
 
-/// The words a search reads in `query`: runs of letters and digits,
-/// lower-cased, without repeats, at most [`MAX_SEARCH_TERMS`] words of
-/// [`MAX_TERM_CHARS`] characters each, and not `or`.
-///
-/// Nothing else of the query survives, so no backend ever sees an operator,
-/// a quote or SQL from it.
-pub fn search_terms(query: &str) -> Vec<String> {
+/// The lower-cased runs of letters and digits of `text` in normal form C,
+/// each cut at [`MAX_TERM_CHARS`] characters, repeats kept. Normalizing
+/// first matters: a decomposed letter is a base and a combining mark, and
+/// the mark is not alphanumeric, so the word would split in two.
+fn words(text: &str) -> Vec<String> {
+    let text: String = text.nfc().collect();
+    (text.split(|c: char| !c.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_lowercase().chars().take(MAX_TERM_CHARS).collect())
+        .collect()
+}
+
+fn distinct(words: Vec<String>, keep: impl Fn(&str) -> bool, most: usize) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
-    let words = query.split(|c: char| !c.is_alphanumeric());
-    for word in words.filter(|word| !word.is_empty()) {
-        let word: String = word.to_lowercase().chars().take(MAX_TERM_CHARS).collect();
-        if word != "or" && !terms.contains(&word) {
+    for word in words {
+        if keep(&word) && !terms.contains(&word) {
             terms.push(word);
         }
-        if terms.len() == MAX_SEARCH_TERMS {
+        if terms.len() == most {
             break;
         }
     }
     terms
 }
 
+/// The words a search reads in `query`: runs of letters and digits,
+/// lower-cased, in normal form C, without repeats, at most
+/// [`MAX_SEARCH_TERMS`] words of [`MAX_TERM_CHARS`] characters each, and
+/// not `or`.
+///
+/// Nothing else of the query survives, so no backend ever sees an operator,
+/// a quote or SQL from it.
+pub fn search_terms(query: &str) -> Vec<String> {
+    distinct(words(query), |word| word != "or", MAX_SEARCH_TERMS)
+}
+
+/// A few English function words, which match most memories and so select
+/// none, and the Vietnamese particles that are not also content words.
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "are", "but", "not", "you", "was", "our", "has", "his", "her", "how",
+    "its", "who", "did", "she", "can", "with", "that", "this", "have", "from", "they", "will",
+    "would", "could", "should", "there", "their", "what", "about", "which", "when", "where",
+    "your", "been", "were", "than", "then", "them", "these", "those", "some", "into", "does",
+    "just", "also", "please", "và", "của", "là", "những", "các", "một", "này", "thì", "mà",
+];
+
+/// Whether `word` is too common to select a memory: a stop word, or an
+/// ASCII word of letters under 3 characters. A short word with a diacritic
+/// (`ăn`, `mẹ`) is a real Vietnamese word and stays.
+fn is_noise(word: &str) -> bool {
+    let short = word.chars().count() < 3 && word.chars().all(|c| c.is_ascii_alphabetic());
+    short || STOP_WORDS.contains(&word)
+}
+
+/// The words the automatic recall searches with: [`search_terms`] without
+/// the stop words and the short ASCII words, so a message like "what is the
+/// plan for it" selects on `plan` and not on every memory that has an `is`.
+/// The cap of [`MAX_SEARCH_TERMS`] counts the words that remain.
+pub fn recall_terms(text: &str) -> Vec<String> {
+    let keep = |word: &str| word != "or" && !is_noise(word);
+    distinct(words(text), keep, MAX_SEARCH_TERMS)
+}
+
 /// Every word of `text` a search can find it by: the lower-cased runs of
-/// letters and digits, without repeats, each cut at [`MAX_TERM_CHARS`]
-/// characters. A backend indexes these, so what [`search_terms`] asks for is
-/// what was stored, whatever its own tokenizer would have made of the text.
+/// letters and digits in normal form C, without repeats, each cut at
+/// [`MAX_TERM_CHARS`] characters. A backend indexes these, so what
+/// [`search_terms`] asks for is what was stored, whatever its own tokenizer
+/// would have made of the text.
 pub fn index_words(text: &str) -> Vec<String> {
-    let mut words: Vec<String> = Vec::new();
-    for word in text.split(|c: char| !c.is_alphanumeric()) {
-        let word: String = word.to_lowercase().chars().take(MAX_TERM_CHARS).collect();
-        if !word.is_empty() && !words.contains(&word) {
-            words.push(word);
-        }
-    }
-    words
+    distinct(words(text), |_| true, usize::MAX)
 }
 
 #[cfg(test)]

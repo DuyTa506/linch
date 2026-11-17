@@ -2,10 +2,13 @@
 //! kept apart, hostile queries, a cap that concurrent saves cannot pass, and
 //! text in more than one language.
 
+use std::time::Duration;
+
 use linch_core::memory::conformance::{memory_cap_suite, memory_store_suite};
 use linch_core::{MemoryError, MemoryStore, NewMemory};
 use linch_postgres::PgMemoryStore;
 use tokio::task::JoinSet;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::common::TestDb;
 
@@ -15,7 +18,7 @@ async fn save(store: &PgMemoryStore, scope: Option<&str>, key: &str, text: &str)
 }
 
 async fn texts(store: &PgMemoryStore, scope: Option<&str>, query: &str) -> Vec<String> {
-    let found = store.search(scope, query, 20).await.unwrap();
+    let found = store.search(scope, query, 20, 1).await.unwrap();
     found.into_iter().map(|memory| memory.content).collect()
 }
 
@@ -33,7 +36,14 @@ async fn a_capped_store_passes_the_cap_suite() {
     let Some(db) = TestDb::migrated("memory_cap_suite").await else {
         return;
     };
-    memory_cap_suite(&PgMemoryStore::new(db.pool.clone(), "ns").with_cap(3), 3).await;
+    memory_cap_suite(
+        &PgMemoryStore::new(db.pool.clone(), "ns")
+            .with_cap(5)
+            .with_scope_cap(2),
+        5,
+        2,
+    )
+    .await;
     db.finish().await;
 }
 
@@ -87,7 +97,7 @@ async fn hostile_queries_are_only_words() {
         "$1 $2 %s {} ${x}",
         "\u{1F600} \u{202E}",
     ] {
-        let found = store.search(None, query, 20).await;
+        let found = store.search(None, query, 20, 1).await;
         assert!(found.is_ok(), "query {query:?}: {found:?}");
         let found = found.unwrap();
         assert!(
@@ -145,15 +155,24 @@ async fn the_cap_counts_the_whole_root() {
     let Some(db) = TestDb::migrated("memory_root_cap").await else {
         return;
     };
-    let a = PgMemoryStore::new(db.pool.clone(), "acme/a").with_cap(2);
-    let b = PgMemoryStore::new(db.pool.clone(), "acme/b").with_cap(2);
-    let other = PgMemoryStore::new(db.pool.clone(), "other/a").with_cap(2);
+    let a = PgMemoryStore::new(db.pool.clone(), "acme/a")
+        .with_cap(2)
+        .with_scope_cap(5);
+    let b = PgMemoryStore::new(db.pool.clone(), "acme/b")
+        .with_cap(2)
+        .with_scope_cap(5);
+    let other = PgMemoryStore::new(db.pool.clone(), "other/a")
+        .with_cap(2)
+        .with_scope_cap(5);
     save(&a, None, "1", "one").await;
     save(&b, None, "2", "two").await;
     let third = NewMemory::new("3", "three", &[]).unwrap();
     assert!(matches!(
         a.save(None, third).await,
-        Err(MemoryError::LimitReached { max: 2 })
+        Err(MemoryError::LimitReached {
+            max: 2,
+            per_scope: false
+        })
     ));
     save(&other, None, "1", "another tenant is not counted").await;
     db.finish().await;
@@ -167,7 +186,9 @@ async fn concurrent_saves_cannot_pass_the_cap() {
     };
     let mut saves = JoinSet::new();
     for n in 0..12 {
-        let store = PgMemoryStore::new(db.pool.clone(), format!("acme/{}", n % 3)).with_cap(5);
+        let store = PgMemoryStore::new(db.pool.clone(), format!("acme/{}", n % 3))
+            .with_cap(5)
+            .with_scope_cap(5);
         saves.spawn(async move {
             let memory = NewMemory::new(format!("k{n}"), &format!("word {n}"), &[]).unwrap();
             store.save(None, memory).await.is_ok()
@@ -224,8 +245,138 @@ async fn a_closed_pool_is_a_backend_error() {
         Err(MemoryError::Backend(_))
     ));
     assert!(matches!(
-        store.search(None, "text", 5).await,
+        store.search(None, "text", 5, 1).await,
         Err(MemoryError::Backend(_))
     ));
+    db.finish().await;
+}
+
+/// A save that waits on the cap's lock ends at the statement timeout with
+/// a backend error, and a held lock does not hold the connection forever.
+#[tokio::test]
+async fn a_save_waiting_on_the_cap_lock_times_out() {
+    let Some(db) = TestDb::migrated("memory_lock_timeout").await else {
+        return;
+    };
+    let mut holder = db.admin.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('linch_memory_cap:acme', 0))")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let store = PgMemoryStore::new(db.pool.clone(), "acme/a")
+        .with_cap(8)
+        .with_statement_timeout(Duration::from_millis(300));
+    let memory = NewMemory::new("k", "waits", &[]).unwrap();
+    let saved = tokio::time::timeout(Duration::from_secs(10), store.save(None, memory)).await;
+    assert!(
+        matches!(saved, Ok(Err(MemoryError::Backend(_)))),
+        "the wait ends in a backend error: {saved:?}"
+    );
+    holder.rollback().await.unwrap();
+    let memory = NewMemory::new("k", "waits", &[]).unwrap();
+    store.save(None, memory).await.expect("saves once free");
+    db.finish().await;
+}
+
+/// The timeout is a transaction-local setting: it does not leak into the
+/// pooled connection the next caller gets.
+#[tokio::test]
+async fn the_statement_timeout_does_not_outlive_the_call() {
+    let Some(db) = TestDb::migrated("memory_timeout_local").await else {
+        return;
+    };
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(db.options.clone())
+        .await
+        .unwrap();
+    let before: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&one)
+        .await
+        .unwrap();
+    let store =
+        PgMemoryStore::new(one.clone(), "ns").with_statement_timeout(Duration::from_millis(321));
+    save(&store, None, "k", "something").await;
+    texts(&store, None, "something").await;
+    let after: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&one)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    one.close().await;
+    db.finish().await;
+}
+
+/// A scope fills at its own cap, naming it, and leaves room for others.
+#[tokio::test]
+async fn one_scope_cannot_fill_the_tenants_budget() {
+    let Some(db) = TestDb::migrated("memory_scope_cap").await else {
+        return;
+    };
+    // 12 for the tenant, a quarter (3) for each scope.
+    let store = PgMemoryStore::new(db.pool.clone(), "acme/a").with_cap(12);
+    for n in 0..3 {
+        save(&store, Some("1:t:ann"), &format!("a{n}"), "ann fact").await;
+    }
+    let more = NewMemory::new("a3", "ann again", &[]).unwrap();
+    assert!(matches!(
+        store.save(Some("1:t:ann"), more).await,
+        Err(MemoryError::LimitReached {
+            max: 3,
+            per_scope: true
+        })
+    ));
+    // Another namespace of the tenant counts the same scope.
+    let sibling = PgMemoryStore::new(db.pool.clone(), "acme/b").with_cap(12);
+    let more = NewMemory::new("b0", "ann elsewhere", &[]).unwrap();
+    assert!(matches!(
+        sibling.save(Some("1:t:ann"), more).await,
+        Err(MemoryError::LimitReached {
+            per_scope: true,
+            ..
+        })
+    ));
+    save(&store, Some("1:t:bob"), "b0", "bob fact").await;
+    save(&store, None, "s0", "shared fact").await;
+    db.finish().await;
+}
+
+/// A purge reaches its own namespace and scope only.
+#[tokio::test]
+async fn a_purge_leaves_other_namespaces_alone() {
+    let Some(db) = TestDb::migrated("memory_purge").await else {
+        return;
+    };
+    let a = PgMemoryStore::new(db.pool.clone(), "tenant-a");
+    let b = PgMemoryStore::new(db.pool.clone(), "tenant-b");
+    save(&a, Some("1:t:ann"), "1", "purgeword of a").await;
+    save(&b, Some("1:t:ann"), "1", "purgeword of b").await;
+    assert_eq!(a.purge(Some("1:t:ann")).await.unwrap(), 1);
+    assert!(texts(&a, Some("1:t:ann"), "purgeword").await.is_empty());
+    assert_eq!(texts(&b, Some("1:t:ann"), "purgeword").await.len(), 1);
+    db.finish().await;
+}
+
+/// A recall query of two Vietnamese words finds the text, a decomposed
+/// spelling included, and a row with one of the words alone does not match.
+#[tokio::test]
+async fn vietnamese_recall_needs_two_words_and_reads_either_spelling() {
+    let Some(db) = TestDb::migrated("memory_vietnamese").await else {
+        return;
+    };
+    let store = PgMemoryStore::new(db.pool.clone(), "ns");
+    save(&store, None, "1", "Người dùng thích uống cà phê sữa đá").await;
+    save(&store, None, "2", "Người dùng sống ở Hà Nội").await;
+    let both = store.search(None, "thích cà phê", 5, 2).await.unwrap();
+    assert_eq!(both.len(), 1);
+    let shared = store.search(None, "người dùng", 5, 2).await.unwrap();
+    assert_eq!(shared.len(), 2, "both words are in both rows");
+    let split = store.search(None, "thích hà", 5, 2).await.unwrap();
+    assert!(split.is_empty(), "no row has both");
+    let decomposed: String = "cà phê".nfd().collect();
+    assert_eq!(
+        store.search(None, &decomposed, 5, 2).await.unwrap().len(),
+        1
+    );
     db.finish().await;
 }

@@ -57,7 +57,7 @@ pub use memory::{
     MEMORY_TOOL_NAMES, MemoryDelete, MemorySave, MemoryScope, MemorySearch, NoPrincipal,
     memory_tools,
 };
-pub use memory_recall::{MAX_RECALL, MemoryRecall};
+pub use memory_recall::{MAX_RECALL, MAX_RECALL_BYTES, MemoryRecall, RECALL_TIMEOUT};
 pub use read::Read;
 pub use schedules::{
     CancelSchedule, CreateSchedule, ListSchedules, NewSchedule, SCHEDULE_TOOL_NAMES,

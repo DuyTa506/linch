@@ -76,12 +76,14 @@ async fn off_is_the_default_and_is_not_stored() {
     assert_eq!(stored["memory"], json!({}));
     let full = config(
         vec![],
-        json!({"memory": {"scope": "principal", "recall": {"k": 3}, "max_memories": 10}}),
+        json!({"memory": {"scope": "agent", "recall": {"k": 3}, "max_memories": 10,
+                              "max_memories_per_scope": 4}}),
     );
     let stored = full.to_value_with_secrets().unwrap();
     assert_eq!(
         stored["memory"],
-        json!({"scope": "principal", "recall": {"k": 3}, "max_memories": 10})
+        json!({"scope": "agent", "recall": {"k": 3}, "max_memories": 10,
+               "max_memories_per_scope": 4})
     );
     let again: AgentConfig = serde_json::from_value(stored).unwrap();
     assert_eq!(again, full);
@@ -141,6 +143,9 @@ async fn an_invalid_memory_config_does_not_open() {
         json!({"recall": {"k": 0}}),
         json!({"recall": {"k": 21}}),
         json!({"max_memories": 0}),
+        json!({"max_memories_per_scope": 2}),
+        json!({"max_memories": 4, "max_memories_per_scope": 0}),
+        json!({"max_memories": 4, "max_memories_per_scope": 5}),
     ] {
         let refused = config(vec![], json!({"memory": memory}))
             .open()
@@ -219,11 +224,11 @@ async fn a_memory_saved_in_one_session_is_recalled_in_another() {
         text("saved"),
         text("oolong"),
     ];
-    let opened = memory_agent(turns, json!({"recall": {"k": 3}}))
+    let opened = memory_agent(turns, json!({"scope": "agent", "recall": {"k": 3}}))
         .open()
         .await
         .unwrap();
-    let first = run(&opened, "s1", "Remember my tea.", None).await;
+    let first = run(&opened, "s1", "Remember my favourite tea.", None).await;
     assert!(
         first.results[0].starts_with("Saved memory "),
         "{:?}",
@@ -232,7 +237,7 @@ async fn a_memory_saved_in_one_session_is_recalled_in_another() {
     // The run's second request already finds what its first turn saved.
     assert_eq!(first.recalled.len(), 1);
 
-    let second = run(&opened, "s2", "Which tea do I like?", None).await;
+    let second = run(&opened, "s2", "Which tea is Ann's favourite?", None).await;
     assert_eq!(second.final_text.as_deref(), Some("oolong"));
     let ids = second.recalled[0]["ids"].as_array().unwrap();
     assert_eq!(ids.len(), 1, "{:?}", second.recalled);
@@ -257,14 +262,14 @@ async fn principal_memory_is_recalled_only_for_its_principal() {
     ];
     let memory = json!({"scope": "principal", "recall": {"k": 3}});
     let opened = memory_agent(turns, memory).open().await.unwrap();
-    run(&opened, "s1", "Remember my tea.", Some(ann())).await;
+    run(&opened, "s1", "Remember my favourite tea.", Some(ann())).await;
 
-    let bobs = run(&opened, "s2", "Which tea?", Some(bob())).await;
+    let bobs = run(&opened, "s2", "Which tea is Ann's favourite?", Some(bob())).await;
     assert!(bobs.recalled.is_empty(), "bob recalls nothing of ann's");
-    let anns = run(&opened, "s3", "Which tea?", Some(ann())).await;
+    let anns = run(&opened, "s3", "Which tea is Ann's favourite?", Some(ann())).await;
     assert_eq!(anns.recalled.len(), 1);
     // No principal: no recall, and the tools fail closed.
-    let nobody = run(&opened, "s4", "Which tea?", None).await;
+    let nobody = run(&opened, "s4", "Which tea is Ann's favourite?", None).await;
     assert!(nobody.recalled.is_empty(), "no principal recalls nothing");
     let denied = run(&opened, "s5", "Search tea.", None).await;
     assert!(
@@ -296,7 +301,7 @@ async fn on_postgres_the_memories_outlive_the_agent_and_obey_the_cap() {
     let separator = if dsn.contains('?') { '&' } else { '?' };
     let dsn = format!("{dsn}{separator}options=-c%20search_path%3D{schema}");
     let stores = json!({"type": "postgres", "dsn": dsn});
-    let memory = json!({"recall": {"k": 3}, "max_memories": 1});
+    let memory = json!({"scope": "agent", "recall": {"k": 3}, "max_memories": 1});
     let extra = json!({
         "memory": memory,
         "stores": stores,
@@ -321,7 +326,13 @@ async fn on_postgres_the_memories_outlive_the_agent_and_obey_the_cap() {
 
     // Another agent on the same database and namespace finds it.
     let reopened = config(vec![text("oolong")], extra).open().await.unwrap();
-    let second = run(&reopened, "other-session", "Which tea?", None).await;
+    let second = run(
+        &reopened,
+        "other-session",
+        "Which tea is Ann's favourite?",
+        None,
+    )
+    .await;
     assert_eq!(second.recalled[0]["ids"].as_array().unwrap().len(), 1);
     reopened.close().await;
     let drop = format!("DROP SCHEMA {schema} CASCADE");
