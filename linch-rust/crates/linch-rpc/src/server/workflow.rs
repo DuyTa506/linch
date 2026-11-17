@@ -346,6 +346,9 @@ impl Server {
         params: WorkflowStatusParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let run_id = workflow_id(&params.run_id)?;
+        if let Some(tenant) = &self.0.tenant {
+            tenant.workflow_caps()?;
+        }
         let (_, store, namespace) = self.workflow_store(&params.agent).await?;
         let stored = store
             .load(&namespace, &run_id)
@@ -581,13 +584,11 @@ fn live_gate(tenant: Option<Arc<Tenant>>, caps: Option<WorkflowCaps>) -> LiveGat
             count: Arc::clone(&count),
             _place: None,
         };
-        if let Some(caps) = &caps {
-            if before >= caps.max_fan_out {
-                return Err(WorkflowError::LimitExceeded {
-                    what: "agent calls in flight",
-                    max: caps.max_fan_out as u64,
-                });
-            }
+        if let Some(caps) = caps.as_ref().filter(|caps| before >= caps.max_fan_out) {
+            return Err(WorkflowError::LimitExceeded {
+                what: "agent calls in flight",
+                max: caps.max_fan_out as u64,
+            });
         }
         if let Some(tenant) = &tenant {
             let place = tenant

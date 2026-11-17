@@ -340,8 +340,8 @@ class WorkflowContext:
         idempotency key in `key` and pass it to the system you call.
 
         Args:
-            name: The step's durable identity; renaming it makes its old
-                record miss.
+            name: The step's durable identity; renaming it makes the record it had
+                miss.
             fn: A zero-argument callable, sync or async; it runs in this
                 process.
             key: JSON that identifies the step's inputs, so one name over

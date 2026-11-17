@@ -178,13 +178,12 @@ impl WorkflowContext {
         value: &JsonValue,
     ) -> Result<(), WorkflowError> {
         self.check_room()?;
-        if let Some(max) = self.inner.max_record_bytes {
-            if value.to_string().len() > max {
-                return Err(WorkflowError::LimitExceeded {
-                    what: "bytes in a journal record",
-                    max: max as u64,
-                });
-            }
+        let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
+        if let Some(max) = too_big {
+            return Err(WorkflowError::LimitExceeded {
+                what: "bytes in a journal record",
+                max: max as u64,
+            });
         }
         let record = JournalRecord {
             call_key: call_key.to_owned(),

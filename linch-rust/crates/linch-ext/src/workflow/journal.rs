@@ -260,8 +260,8 @@ pub fn agent_key(name: &str, prompt: &str) -> String {
 /// left out, and the caller must change `key` when they should miss. Else
 /// `options` (the tool filter, the output schema, the host session a call
 /// forks) is hashed with the name and prompt, so editing one makes that
-/// call miss its old record. With neither this is exactly [`agent_key`],
-/// so a call that sets nothing new keeps its key.
+/// call miss the record it had. With neither this is exactly [`agent_key`],
+/// so a call that sets nothing extra keeps its key.
 ///
 /// Raises:
 ///     CanonicalError: If `options` nests too deeply to encode.

@@ -250,7 +250,7 @@ async fn an_edited_prompt_reruns_only_that_call() {
         (json!("b"), json!(true))
     );
     // The same prompt under another name or another key is another call.
-    let named = call(&rpc, "w", "second", json!({"key": "v2"})).await;
+    let named = call(&rpc, "w", "second", json!({"key": "other-key"})).await;
     assert_eq!(
         code_of_call(named).0,
         code::WORKFLOW_CALL_FAILED,

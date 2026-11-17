@@ -264,24 +264,24 @@ async def test_an_interrupt_parks_the_workflow_until_it_is_answered_after_a_rest
         return "signed"
 
     async with Server() as server:
-        agent = await server.open_agent(config([text_turn("v1")], stores=stores))
+        agent = await server.open_agent(config([text_turn("draft-a")], stores=stores))
         with pytest.raises(WorkflowSuspended) as parked:
             await run_workflow(agent, flow, run_id="w")
         parked_status = await workflow_status(agent, "w")
-    assert (parked.value.key, parked.value.payload) == ("approve", {"draft": "v1"})
+    assert (parked.value.key, parked.value.payload) == ("approve", {"draft": "draft-a"})
     assert parked_status.status == "awaiting_input"
-    assert parked_status.interrupt_payload == {"draft": "v1"}
+    assert parked_status.interrupt_payload == {"draft": "draft-a"}
     assert signed == []
 
     async with Server() as server:
         agent = await server.open_agent(config([], stores=stores))
         result = await run_workflow(agent, flow, run_id="w", resume={"approve": True})
-    assert (result, signed) == ("signed", ["v1"])
+    assert (result, signed) == ("signed", ["draft-a"])
 
     async with Server() as server:
         agent = await server.open_agent(config([], stores=stores))
         again = await when_free(lambda: run_workflow(agent, flow, run_id="w"))
-    assert (again, signed) == ("signed", ["v1"]), "the answer and the signature replay"
+    assert (again, signed) == ("signed", ["draft-a"]), "the answer and the signature replay"
 
 
 async def test_an_irreversible_step_is_rerun_with_the_same_idempotency_key(pg_dsn: str) -> None:
