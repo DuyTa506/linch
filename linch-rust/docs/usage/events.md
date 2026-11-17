@@ -139,6 +139,11 @@ that take seqs and are never sent to clients. In the stream above, 4 and 5 are
 the first call's records and the `partial_assistant` at 12 carries seq 12, the
 second call's dispatch record.
 
+The gaps are by design: a seq the client never sees is not a lost event, so
+**a gap alone does not tell you an event was lost**. To check, replay from the
+last seq you hold (below) and compare; the stores are the record, the stream is
+a live view of it.
+
 Replay with `await agent.events(run_id, after_seq=n)`: it returns the run's
 durable envelopes with a seq above `n`, in order, from the stores. It never
 returns stream-only events. So a client that saw seq `n` and lost its stream
@@ -175,7 +180,11 @@ The run started.
 | `final_tool` | The name of the run's [final tool](./structured-output.md#the-final-tool), on the first `init` of a run that has one; `None` otherwise |
 
 Every `run`, `resume` and `approve` stream starts with `init`. A resumed one
-is durable, so replayed events show each call's start.
+is durable, so replayed events show each call's start: a run that was
+resumed once holds two `init` events, the first with `resumed=False` and the
+resume's with `resumed=True` (and the `turn` it continues in). A tool call a
+resume finds interrupted is closed with a `tool_call_end` whose result has
+`is_error` set, so a replay of the run reads a start and an end for each call.
 
 ### `UserEvent` (`user`)
 

@@ -141,6 +141,11 @@ chúng chiếm seq và không bao giờ được gửi cho client. Trong stream 
 là các bản ghi của lời gọi đầu tiên, và `partial_assistant` ở dòng 12 mang seq 12,
 là bản ghi dispatch của lời gọi thứ hai.
 
+Các khoảng trống là có chủ đích: một seq mà client không bao giờ thấy không phải
+là event bị mất, nên **chỉ nhìn khoảng trống thì không biết có event nào bị mất**.
+Để kiểm tra, replay từ seq cuối cùng bạn có (bên dưới) và so sánh; kho lưu trữ là
+bản ghi, stream chỉ là góc nhìn trực tiếp vào nó.
+
 Replay bằng `await agent.events(run_id, after_seq=n)`: nó trả về các envelope bền
 vững của run có seq lớn hơn `n`, theo thứ tự, từ các kho lưu trữ. Nó không bao giờ
 trả về các event chỉ có trong stream. Vì vậy một client đã thấy seq `n` và mất
@@ -178,7 +183,11 @@ Run đã bắt đầu.
 
 Mọi stream `run`, `resume` và `approve` đều bắt đầu bằng `init`. Một `init` được
 resume là bền vững, nên các event được replay cho thấy điểm bắt đầu của mỗi lời
-gọi.
+gọi: một run đã được resume một lần có hai event `init`, event đầu với
+`resumed=False` và event của lần resume với `resumed=True` (cùng `turn` mà nó
+tiếp tục). Một tool call mà resume thấy đang bị gián đoạn được đóng bằng một
+`tool_call_end` có result mang `is_error`, nên replay của run đọc được một điểm
+bắt đầu và một điểm kết thúc cho mỗi lời gọi.
 
 ### `UserEvent` (`user`)
 

@@ -23,6 +23,7 @@ from linch_rust import (
     Allow,
     Answer,
     ConnectionClosed,
+    InitEvent,
     NotSuspended,
     ResultEvent,
     Run,
@@ -112,7 +113,12 @@ async def test_a_run_resumes_on_a_new_server_after_a_kill(pg_dsn: str) -> None:
     assert result.final_text == "Recovered."
     events = [e.event for e in replayed]
     assert [e.tool_use_id for e in events if isinstance(e, ToolCallStartEvent)] == ["call_1"]
-    # The interrupted call gets a placeholder result, not a tool_call_end.
+    # The interrupted call is closed with a `tool_call_end` that is an error,
+    # and the same result is paired in the session.
+    [ended] = [e for e in events if isinstance(e, ToolCallEndEvent)]
+    assert ended.tool_use_id == "call_1" and ended.result["is_error"]
+    # Each call of the run starts with an `init`; the resume's says so.
+    assert [e.resumed for e in events if isinstance(e, InitEvent)] == [False, True]
     [placeholder] = [e for e in events if isinstance(e, UserEvent) and e.subtype == "tool_result"]
     [block] = placeholder.message["content"]
     assert block["tool_use_id"] == "call_1" and block["is_error"]
