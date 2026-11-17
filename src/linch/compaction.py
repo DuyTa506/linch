@@ -353,12 +353,12 @@ def _summary_request_messages(prompt: str, older: list[Message]) -> list[Message
     return [*older, instruction]
 
 
-def _estimate_history_tokens(messages: Sequence[Message]) -> int:
-    """Estimate *messages* as linch-rust's ``estimate_tokens`` does, for the "not smaller" check.
+def _content_size(messages: Sequence[Message]) -> tuple[int, int]:
+    """Count the content of *messages* as linch-rust's ``estimate_tokens`` does.
 
-    Four characters (UTF-8 bytes) per token over the content: text, thinking, a tool call's
-    name and compact JSON input, tool result text; a fixed cost per image. The framing of the
-    serialized message is not counted.
+    Returns:
+        The UTF-8 bytes of text, thinking, a tool call's name and compact JSON input, and tool
+        result text (the framing of the serialized message is not counted), and the images.
     """
     chars = images = 0
     for message in messages:
@@ -383,20 +383,31 @@ def _estimate_history_tokens(messages: Sequence[Message]) -> int:
                         images += 1
                     else:
                         chars += len(part.text.encode())
+    return chars, images
+
+
+def _estimate_history_tokens(messages: Sequence[Message]) -> int:
+    """Estimate *messages* as linch-rust does: 4 bytes a token, 1000 an image."""
+    chars, images = _content_size(messages)
     return chars // 4 + images * 1000
 
 
-def _summary_text_limit(older: Sequence[Message]) -> int:
+def _summary_text_limit(older: Sequence[Message], kept: Sequence[Message] = ()) -> int:
     """Bytes at which a summary of *older* is rejected as not smaller.
 
-    The checkpoint that replaces *older* is the header and the summary; it is rejected when
-    its estimate, four bytes per token, reaches that of *older* (as linch-rust measures it).
+    linch-rust rejects a summary unless the view after it is estimated strictly smaller than
+    the view before. Here the view before is *older* and *kept* (the turns that stay after
+    the summary), the view after is the header, the summary and *kept*; the kept images and the
+    kept bytes that round alike on both sides drop out, leaving the limit in bytes.
     """
-    return 4 * _estimate_history_tokens(older) - len(_SUMMARY_HEADER.encode())
+    folded_chars, folded_images = _content_size(older)
+    kept_chars, _ = _content_size(kept)
+    before = (folded_chars + kept_chars) // 4 + folded_images * 1000
+    return 4 * before - kept_chars - len(_SUMMARY_HEADER.encode())
 
 
-def _not_smaller(text: str, older: Sequence[Message]) -> bool:
-    return len(text.encode()) >= _summary_text_limit(older)
+def _not_smaller(text: str, older: Sequence[Message], kept: Sequence[Message] = ()) -> bool:
+    return len(text.encode()) >= _summary_text_limit(older, kept)
 
 
 async def summarize_with_provider(
@@ -406,6 +417,7 @@ async def summarize_with_provider(
     signal: AbortContext,
     prompt: str = _SUMMARY_PROMPT,
     max_output_tokens: int = 4096,
+    kept: Sequence[Message] = (),
 ) -> str:
     """Summarise *older* messages using *provider* and return the summary text.
 
@@ -422,9 +434,14 @@ async def summarize_with_provider(
         prompt: System prompt instructing how to summarize; defaults to the
             built-in coding-oriented summary prompt.
         max_output_tokens: Cap forwarded to the provider request.
+        kept: Messages that stay after the summary; a summary is rejected unless the view of
+            the summary and *kept* is estimated smaller than that of *older* and *kept*.
 
     Returns:
         The summary text, stripped of leading/trailing whitespace.
+
+    Raises:
+        ProviderError: If the summary does not make the view smaller.
     """
     from .types import ProviderRequest
 
@@ -449,7 +466,7 @@ async def summarize_with_provider(
                 break
 
     text = text.strip()
-    if text and _not_smaller(text, older):
+    if text and _not_smaller(text, older, kept):
         raise ProviderError(
             "compaction summary is not smaller than the history it replaces", retryable=False
         )
@@ -463,6 +480,7 @@ async def _summarize_context(
     *,
     prompt: str,
     max_output_tokens: int = 4096,
+    kept: Sequence[Message] = (),
 ) -> str:
     if ctx.auxiliary_caller is None:
         return await summarize_with_provider(
@@ -472,6 +490,7 @@ async def _summarize_context(
             ctx.signal,
             prompt=prompt,
             max_output_tokens=max_output_tokens,
+            kept=kept,
         )
     result = await ctx.auxiliary_caller.text(
         logical_call_id=ctx.logical_call_id or str(uuid4()),
@@ -480,7 +499,7 @@ async def _summarize_context(
         messages=_summary_request_messages(prompt, older),
         max_output_tokens=max_output_tokens,
         signal=ctx.signal,
-        reject_text_bytes_at=_summary_text_limit(older),
+        reject_text_bytes_at=_summary_text_limit(older, kept),
     )
     if result.receipt.disposition != "accepted" or result.text is None:
         raise ProviderError("compaction provider returned an unusable summary", retryable=False)
@@ -580,7 +599,9 @@ class DefaultCompaction:
         if not older:
             return ctx.messages
 
-        summary_text = await _summarize_context(ctx, provider, older, prompt=self.prompt)
+        summary_text = await _summarize_context(
+            ctx, provider, older, prompt=self.prompt, kept=recent
+        )
 
         summary_msg = Message(
             role="user",
@@ -643,7 +664,12 @@ class DetailedCompaction:
             return ctx.messages
 
         summary_text = await _summarize_context(
-            ctx, provider, older, prompt=self.prompt, max_output_tokens=self.max_output_tokens
+            ctx,
+            provider,
+            older,
+            prompt=self.prompt,
+            max_output_tokens=self.max_output_tokens,
+            kept=recent,
         )
 
         summary_msg = Message(

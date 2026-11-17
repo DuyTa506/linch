@@ -17,6 +17,7 @@ from test_compaction_accounting import _events, _Provider, _setup
 from linch.abort import AbortContext
 from linch.compaction import (
     CompactionContext,
+    DefaultCompaction,
     DetailedCompaction,
     _estimate_history_tokens,
     _summary_text_limit,
@@ -91,6 +92,55 @@ async def test_the_rejection_counts_the_header_and_the_folded_content_like_linch
         assert await call == "s" * length
 
 
+# The shared rule (linch-rust `compaction::rejection`): a summary is rejected unless the view
+# after it is estimated strictly smaller than the view before it, four bytes per token over
+# the whole view (the folded part and the turns kept after it), the header counted. Each row
+# is (folded characters, kept characters, summary bytes, rejected), worked out by hand from
+# the Rust arithmetic: floor((kept + 35 + summary) / 4) >= floor((kept + folded) / 4).
+_SHARED_RULE = [
+    # a folded part of 5 characters (1 token) cannot fit the 35-byte header
+    (5, 0, 1, True),
+    (5, 3, 1, True),
+    # 100 characters: 65 bytes is the first rejected summary when nothing is kept
+    (100, 0, 64, False),
+    (100, 0, 65, True),
+    (100, 1, 64, True),  # one kept character rounds the saving away
+    (100, 1, 63, False),
+    (100, 3, 61, False),
+    (100, 3, 62, True),
+    (100, 4, 64, False),  # four kept characters are one whole token: as with none
+    # 400 characters: 364 accepted and 365 rejected with nothing kept
+    (400, 0, 364, False),
+    (400, 0, 365, True),
+    (400, 1, 364, True),
+    (400, 2, 362, False),
+    (400, 2, 363, True),
+    (400, 3, 364, True),
+    (400, 4, 364, False),
+    # 4000 characters
+    (4000, 0, 3964, False),
+    (4000, 0, 3965, True),
+    (4000, 2, 3964, True),
+    (4000, 2, 3962, False),
+]
+
+
+@pytest.mark.parametrize(("folded", "kept", "summary", "rejected"), _SHARED_RULE)
+async def test_the_rejection_is_decided_on_the_whole_view_like_linch_rust(
+    folded: int, kept: int, summary: int, rejected: bool
+) -> None:
+    older = [_user("f" * folded)]
+    recent = [_user("k" * kept)] if kept else []
+    provider = _Provider(_events("s" * summary))
+    call = summarize_with_provider(provider, "m", older, AbortContext(), kept=recent)
+    if rejected:
+        with pytest.raises(ProviderError, match="not smaller"):
+            await call
+    else:
+        assert await call == "s" * summary
+    assert (summary >= _summary_text_limit(older, recent)) is rejected
+
+
 async def test_the_accounted_rejection_counts_the_header_too() -> None:
     for length, reason in [(364, None), (365, "not_smaller")]:
         provider = _Provider(_events("s" * length, usage=Usage(1, 1)))
@@ -150,3 +200,29 @@ async def test_a_strategy_asks_for_a_summary_that_updates_the_checkpoint() -> No
     instruction = provider.requests[0].messages[-1].content[0].text
     assert instruction == summary_instruction("recap", messages[:4])
     assert "Update that summary" in instruction
+
+
+@pytest.mark.parametrize(
+    ("strategy", "kept", "limit"),
+    [
+        (DefaultCompaction(), 10, 363),
+        (DetailedCompaction(keep_recent_turns=2), 2, 363),
+        (DetailedCompaction(keep_recent_turns=1), 1, 364),
+    ],
+    ids=["default-10", "detailed-2", "detailed-1"],
+)
+@pytest.mark.parametrize("below", [True, False])
+async def test_a_strategy_counts_the_turns_it_keeps_in_the_rejection(
+    strategy: Any, kept: int, limit: int, below: bool
+) -> None:
+    # 400 folded characters, one kept character a turn: the limit is 400 - kept - 35 rounded
+    # as linch-rust rounds the whole view, not the 365 of an empty tail.
+    messages = [_user("f" * 400), *[Message("assistant", [TextBlock("g")])] * kept]
+    summary = limit - 1 if below else limit
+    provider = _Provider(_events("s" * summary))
+    ctx = CompactionContext(messages=messages, model="m", signal=AbortContext())
+    if below:
+        await strategy.compact(ctx, provider)
+    else:
+        with pytest.raises(ProviderError, match="not smaller"):
+            await strategy.compact(ctx, provider)
