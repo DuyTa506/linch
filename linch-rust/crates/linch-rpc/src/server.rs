@@ -39,7 +39,7 @@ mod monitor;
 mod outgoing;
 mod peer;
 mod run;
-mod schedule;
+pub(crate) mod schedule;
 
 use crate::lines::Head;
 use connection::Outbox;

@@ -1,9 +1,11 @@
 //! The agent methods: `agent.open`, `agent.close`, `session.close` and
 //! `run.events`, and the handle lookup the run methods share.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use linch::{Agent, JsonObject, JsonValue};
+use serde_json::json;
 
 use super::schedule::Background;
 use super::{Opened, Server, Tables, callback, host, lock, to_value};
@@ -11,6 +13,7 @@ use crate::error::{ErrorObject, code};
 use crate::protocol::{
     AgentOpened, CloseParams, Events, EventsParams, OpenParams, SessionCloseParams, Skipped,
 };
+use crate::schedule_tools::{Binding, Bound};
 
 impl Server {
     /// Open an agent whose host tools and callbacks call back over this
@@ -33,13 +36,33 @@ impl Server {
             !params.tools.is_empty(),
             !params.callbacks.is_empty(),
         );
+        let scheduling = match (params.config.schedule_tools, &self.0.tenant) {
+            (false, _) => None,
+            (true, Some(tenant)) => Some((Arc::clone(tenant), background.for_tools(&handle)?)),
+            (true, None) => return Err(local_schedule_tools()),
+        };
         let tools = host::registry(params.tools, &handle, &self.0.peer)?;
+        // After the host tools, of which such an agent has none: first in
+        // the registry, as a worker's open of its definition puts them.
+        let binding = match &scheduling {
+            Some(_) => Some(Binding::register(&tools)?),
+            None => None,
+        };
         let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
         let opened = params
             .config
             .open_with(tools, hooks, &self.0.pools)
             .await
             .map_err(|error| ErrorObject::from(&error))?;
+        if let (Some(binding), Some((tenant, (definition, migrated)))) = (binding, scheduling) {
+            binding.bind(Bound {
+                pool: (opened.pool().cloned()).expect("schedule_tools opened on Postgres"),
+                namespace: opened.agent().namespace().to_owned(),
+                definition,
+                tenant,
+                migrated,
+            });
+        }
         let contract = opened.agent().contract().to_string();
         let skipped = opened.skipped().iter().map(Skipped::from).collect();
         let opened = Opened {
@@ -102,6 +125,15 @@ impl Server {
             .map_err(|error| ErrorObject::from(&error))?;
         to_value(&Events { events })
     }
+}
+
+/// A local client's agent may not have the schedule tools: it has no
+/// tenant caps to hold the model to, and a stdio server runs no worker.
+fn local_schedule_tools() -> ErrorObject {
+    let message = "schedule_tools needs a tenant whose allowlists give it schedules \
+                   (max_schedules), served by linch-server with a worker; a local \
+                   connection has no caps";
+    ErrorObject::new(code::NOT_ALLOWED, message).with_data(json!({ "kind": "schedule_tools" }))
 }
 
 impl Tables {

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use linch::postgres::PgPool;
-use linch::{AgentConfig, JsonValue, StoreConfig};
+use linch::{AgentConfig, JsonValue, Principal, StoreConfig};
 use linch_worker::{Cap, RunRequest, Schedule, Timing, WorkerError};
 use serde_json::json;
 use tokio::sync::OnceCell;
@@ -46,6 +46,26 @@ impl Background {
             migrated: Arc::default(),
         }
     }
+
+    /// What the schedule tools of agent `handle` store with each schedule:
+    /// its definition, and the cell that migrates its database once. An
+    /// agent that cannot run in the background cannot have them.
+    pub(super) fn for_tools(
+        &self,
+        handle: &str,
+    ) -> Result<(String, Arc<OnceCell<()>>), ErrorObject> {
+        let definition = self.definition.clone();
+        let definition = definition.map_err(|reason| not_background(handle, reason))?;
+        Ok((definition, Arc::clone(&self.migrated)))
+    }
+}
+
+fn not_background(handle: &str, reason: &str) -> ErrorObject {
+    let message = format!(
+        "agent {handle:?} cannot run in the background ({reason}): it needs \
+         Postgres stores and no host tools or callbacks"
+    );
+    ErrorObject::new(code::NOT_BACKGROUND, message).with_data(json!({ "reason": reason }))
 }
 
 impl Default for Background {
@@ -91,14 +111,8 @@ impl Server {
         let (pool, namespace, definition, migrated) = {
             let tables = lock(&self.0.tables);
             let opened = tables.opened(handle)?;
-            let definition = opened.background.definition.clone().map_err(|reason| {
-                let message = format!(
-                    "agent {handle:?} cannot run in the background ({reason}): it needs \
-                     Postgres stores and no host tools or callbacks"
-                );
-                ErrorObject::new(code::NOT_BACKGROUND, message)
-                    .with_data(json!({ "reason": reason }))
-            })?;
+            let definition = (opened.background.definition.clone())
+                .map_err(|reason| not_background(handle, reason))?;
             let pool = opened.agent.pool().cloned();
             let pool = pool.expect("an agent with Postgres stores has a pool");
             let namespace = opened.agent.agent().namespace().to_owned();
@@ -124,12 +138,13 @@ impl Server {
         &self,
         params: ScheduleCreateParams,
     ) -> Result<JsonValue, ErrorObject> {
-        let timing = timing(&params)?;
-        self.admit_principal(params.principal.as_ref())?;
-        let cap = match &self.0.tenant {
-            Some(tenant) => Some(admit_schedule(tenant, &timing)?),
-            None => None,
+        let asked = Asked {
+            cron: params.cron.as_deref(),
+            timezone: params.timezone.as_deref(),
+            interval_ms: params.interval_ms,
         };
+        let (timing, cap) =
+            admit_create(self.0.tenant.as_deref(), asked, params.principal.as_ref())?;
         let agent = self.scheduled(&params.agent).await?;
         let id = (params.id).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let schedule = Schedule {
@@ -142,10 +157,8 @@ impl Server {
             agent: Some(agent.definition),
             principal: params.principal,
         };
-        let created = linch_worker::create_schedule(&agent.pool, &schedule, cap.as_ref()).await;
-        to_value(&schedule_info(
-            created.map_err(|error| worker_error(&error))?,
-        ))
+        let created = store_schedule(&agent.pool, &schedule, cap.as_ref()).await?;
+        to_value(&schedule_info(created))
     }
 
     pub(super) async fn list_schedules(
@@ -242,19 +255,63 @@ impl Server {
     }
 }
 
-/// The timing `params` asks for: exactly one of `cron` and `interval_ms`,
-/// and a time zone only with `cron`.
-fn timing(params: &ScheduleCreateParams) -> Result<Timing, ErrorObject> {
+/// The timing fields of a schedule create, from `schedule.create` or the
+/// `CreateSchedule` tool.
+#[derive(Clone, Copy)]
+pub(crate) struct Asked<'a> {
+    pub(crate) cron: Option<&'a str>,
+    pub(crate) timezone: Option<&'a str>,
+    pub(crate) interval_ms: Option<u64>,
+}
+
+/// Admit a schedule create, as `schedule.create` and the `CreateSchedule`
+/// tool both do: a valid timing, a principal of the tenant, and the
+/// tenant's schedule rights and interval floor. Store it with
+/// [`store_schedule`] under the cap returned.
+///
+/// Returns:
+///     The timing, and the tenant's cap (`None` for a local client).
+///
+/// Raises:
+///     ErrorObject: `-32044` for a bad timing, `-32004` for a principal of
+///         another tenant, no schedule rights or a schedule too fast.
+pub(crate) fn admit_create(
+    tenant: Option<&Tenant>,
+    asked: Asked<'_>,
+    principal: Option<&Principal>,
+) -> Result<(Timing, Option<Cap>), ErrorObject> {
+    let timing = timing(asked)?;
+    let Some(tenant) = tenant else {
+        return Ok((timing, None));
+    };
+    tenant.admit_principal(principal)?;
+    let cap = admit_schedule(tenant, &timing)?;
+    Ok((timing, Some(cap)))
+}
+
+/// Store an admitted schedule under `cap`.
+pub(crate) async fn store_schedule(
+    pool: &PgPool,
+    schedule: &Schedule,
+    cap: Option<&Cap>,
+) -> Result<linch_worker::ScheduleInfo, ErrorObject> {
+    let created = linch_worker::create_schedule(pool, schedule, cap).await;
+    created.map_err(|error| worker_error(&error))
+}
+
+/// The timing `asked` for: exactly one of `cron` and `interval_ms`, and a
+/// time zone only with `cron`.
+fn timing(asked: Asked<'_>) -> Result<Timing, ErrorObject> {
     let invalid = |reason: &str| {
         ErrorObject::new(code::INVALID_SCHEDULE, reason.to_owned())
             .with_data(json!({ "reason": reason }))
     };
-    let timing = match (&params.cron, params.interval_ms) {
+    let timing = match (asked.cron, asked.interval_ms) {
         (Some(pattern), None) => Timing::Cron {
-            pattern: pattern.clone(),
-            timezone: params.timezone.clone().unwrap_or_else(|| "UTC".into()),
+            pattern: pattern.to_owned(),
+            timezone: asked.timezone.unwrap_or("UTC").to_owned(),
         },
-        (None, Some(ms)) if params.timezone.is_none() => Timing::Every(Duration::from_millis(ms)),
+        (None, Some(ms)) if asked.timezone.is_none() => Timing::Every(Duration::from_millis(ms)),
         (None, Some(_)) => return Err(invalid("timezone is only for a cron schedule")),
         _ => return Err(invalid("give exactly one of cron and interval_ms")),
     };
@@ -326,7 +383,7 @@ fn job_not_found(id: i64) -> ErrorObject {
 }
 
 /// The wire error of a scheduler call.
-fn worker_error(error: &WorkerError) -> ErrorObject {
+pub(crate) fn worker_error(error: &WorkerError) -> ErrorObject {
     match error {
         WorkerError::ScheduleExists { id } => ErrorObject::new(
             code::SCHEDULE_EXISTS,
@@ -346,7 +403,7 @@ fn worker_error(error: &WorkerError) -> ErrorObject {
     }
 }
 
-fn time(at: DateTime<Utc>) -> String {
+pub(crate) fn time(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 

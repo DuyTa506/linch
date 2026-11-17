@@ -14,6 +14,7 @@ use linch_worker::{AgentFactory, FactoryError, JobAgent};
 
 use crate::access::Tenant;
 use crate::error::chain;
+use crate::schedule_tools::{Binding, Bound};
 
 /// Opens the agent of a job that carries a stored agent definition (an
 /// agent config serialized by `schedule.create` or `job.enqueue`).
@@ -29,6 +30,11 @@ use crate::error::chain;
 ///   stdio client is: no checks, no caps.
 /// - Any other namespace is refused; the worker does not even take such
 ///   jobs, since it serves only [`Self::roots`].
+///
+/// A definition with `schedule_tools` gets them bound as `agent.open`
+/// binds them (same registry position, so the same contract), to the
+/// definition text as stored and the tenant's caps; under a local root it
+/// is refused, as a local connection's open is.
 ///
 /// The definition's store DSN is replaced by this factory's DSN: the
 /// worker's database and schema, where the job was found. The tenant's
@@ -99,6 +105,15 @@ impl BackgroundAgents {
             ));
         };
         let root = namespace.split('/').next().unwrap_or_default();
+        let scheduling = match (config.schedule_tools, self.tenants.get(root)) {
+            (false, _) => None,
+            (true, Some(tenant)) => Some(Arc::clone(tenant)),
+            (true, None) => {
+                return Err(refused(
+                    "schedule_tools needs a tenant whose allowlists give it schedules".into(),
+                ));
+            }
+        };
         let (pools, place, max_connections) = if let Some(tenant) = self.tenants.get(root) {
             // The store is the worker's, not the client's, so the DSN check
             // does not apply; everything else does.
@@ -125,10 +140,26 @@ impl BackgroundAgents {
             lease_ttl_ms,
         };
         let tools = Arc::new(ToolRegistry::new());
+        // First in the registry, as `agent.open` puts them, so the contract
+        // is the one the definition was made with.
+        let binding = match &scheduling {
+            Some(_) => Some(Binding::register(&tools).map_err(|error| refused(error.message))?),
+            None => None,
+        };
         let opened = (config
             .open_with(tools, Arc::new(Hooks::default()), &pools)
             .await)
             .map_err(|error| FactoryError::Unavailable(chain(&error)))?;
+        if let (Some(binding), Some(tenant)) = (binding, scheduling) {
+            binding.bind(Bound {
+                pool: (opened.pool().cloned()).expect("a background agent has Postgres stores"),
+                namespace: namespace.to_owned(),
+                // As stored, not encoded again: its digest names its schedules.
+                definition: definition.to_owned(),
+                tenant,
+                migrated: Arc::default(),
+            });
+        }
         let agent = opened.agent().clone();
         let close = async move {
             opened.close().await;
