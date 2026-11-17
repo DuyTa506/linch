@@ -133,7 +133,7 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | Exception | Message | Cause | Fix |
 |---|---|---|---|
 | `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | The session has a run that is running or waiting for an approval or an answer | Resume, approve, answer or cancel `busy.run_id` first, or queue the prompt ([Runs](./runs.md#one-live-run-per-session)) |
-| `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
+| `RunExists` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | No such run in the agent's stores; with memory stores, a different `Agent` handle started it, or the server restarted | With memory stores use the handle that started the run; with Postgres check the namespace and DSN |
 | `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` or `answer` of a finished run, a cancelled one included (`data["status"]` is `aborted`); `data["status"]` is its status | Start a new run in the session |
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (the names of `data`'s keys) | The agent's spec, tools, callbacks or (when it is not the default) permission policy differ from the ones the run started with; after an upgrade, a run started by an older binary under a non-default policy | Reopen with the original config, or let the run finish first; a suspended run can still be ended with `agent.cancel` ([The run contract](./agent.md#the-run-contract)) |
@@ -146,7 +146,7 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | `InvalidToolChoice` (-32034) | `run <id> was not started: its tool_choice is unusable: <reason>` | `agent.run(..., tool_choice=...)` names a tool the run does not offer, or the provider refuses it | Nothing was written; fix the choice ([Structured output](./structured-output.md)) |
 | `InvalidSteer` (-32038) | `run <id> cannot take this steer: <reason>` (`.reason`) | `agent.steer` with blank text, text over 16 KiB, an unusable id, or a run that is idle (queued, or running with no server driving it) | Nothing was written; fix the text, or resume the run first ([Runs](./runs.md#steer)) |
 | `LimitReached` (-32005), `kind == "steers"` | `at most 16 steers at once; try again once one ends` | The run has 16 steers it has not read yet | Wait for the run's next step, then steer again |
-| `RunError` (-32020, -32024, -32028) | the store's or the journal's own text | A store failure, a failed journal write, or durable state that does not fit together; a dropped connection mid-run is -32020 | The run is at its last durable state: resume it; report -32028 |
+| `RunError` (-32020, -32024, -32028) | the store's or the journal's own text | A store failure, a failed journal write, or durable state that does not fit together; a dropped database connection mid-run is -32020 | The run is at its last durable state: resume it; report -32028 |
 
 Raised by the call itself:
 

@@ -122,7 +122,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | The provider key is unset (`data.env` names its variable), or the provider client could not be built |
 | -32014 | `STORE_UNAVAILABLE` | `OpenError` | Postgres could not be reached or migrated |
 | -32015 | `MCP_UNAVAILABLE` | `OpenError` | An MCP server of the config could not be connected; `data.server` names it |
-| -32020 | `STORE` | `RunError` | A store failure not listed below (also a dropped connection in the middle of a run) |
+| -32020 | `STORE` | `RunError` | A store failure not listed below (also a dropped database connection in the middle of a run) |
 | -32021 | `NOT_FOUND` | `RunNotFound` | No such run or session; also `run.report` and `workflow.status` of an id the agent's namespace does not hold |
 | -32022 | `LEASE_LOST` | `LeaseLost` | From a claim or a fenced journal write: another process took the run over, or failed it. The run stopped here without writing |
 | -32023 | `CONFLICT` | `RunExists` | A chosen run id that is already stored |

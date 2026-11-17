@@ -64,9 +64,7 @@ The summary request is the request the turn's own call would send (the same
 system blocks, tools, thinking settings and messages, byte for byte, so the
 provider's prompt cache serves it) plus one last user message that asks for
 the summary. The summary is applied as a checkpoint message that also carries
-the folded user messages verbatim, up to `keep_user_tokens`. A reply that
-called a tool, is empty or is no smaller than what it replaces is rejected:
-the view stays as it was and the `compaction` event says why
+the folded user messages verbatim, up to `keep_user_tokens`
 ([Architecture](../architecture/compaction.md#the-summary-call)).
 
 A summary the model gives back as a tool call, as nothing, or as a text no
@@ -75,7 +73,8 @@ messages and reminders included) is rejected: the view stays as it was and a
 `compaction` event with `rejected` says why. After two rejections in a row
 the run stops asking at every due turn: it asks again once the view has grown
 by a tenth of the context window, or when the provider refuses the prompt (a
-forced summary is never held); an accepted summary clears the count.
+forced summary is never held); an accepted summary clears the count
+([Architecture](../architecture/compaction.md#the-summary-call)).
 
 The compaction spec is part of the [run contract](./agent.md#the-run-contract):
 a run started under one setting is not resumed under another.

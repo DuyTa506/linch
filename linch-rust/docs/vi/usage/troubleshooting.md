@@ -138,7 +138,7 @@ raise chúng.
 | Exception | Thông báo | Nguyên nhân | Cách khắc phục |
 |---|---|---|---|
 | `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | Session có một run đang chạy hoặc đang chờ phê duyệt hay câu trả lời | Resume, phê duyệt, trả lời hoặc hủy `busy.run_id` trước, hoặc xếp prompt vào hàng đợi ([Run](./runs.md#one-live-run-per-session)) |
-| `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` dùng lại một id | Dùng id mới, hoặc `resume` run hiện có |
+| `RunExists` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` dùng lại một id | Dùng id mới, hoặc `resume` run hiện có |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | Không có run đó trong kho lưu trữ của agent; với kho trong bộ nhớ, một handle `Agent` khác đã bắt đầu nó, hoặc server đã khởi động lại | Với kho trong bộ nhớ, dùng handle đã bắt đầu run; với Postgres, kiểm tra namespace và DSN |
 | `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` hoặc `answer` một run đã kết thúc, kể cả run đã bị hủy (`data["status"]` là `aborted`); `data["status"]` là trạng thái của nó | Bắt đầu một run mới trong session |
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (tên các khóa của `data`) | Spec, tool, callback hoặc (khi không phải mặc định) permission policy của agent khác với những gì run đã bắt đầu; sau một lần nâng cấp, một run do binary cũ hơn bắt đầu dưới một policy không mặc định | Mở lại với cấu hình gốc, hoặc để run kết thúc trước; một run bị tạm dừng vẫn có thể được kết thúc bằng `agent.cancel` ([Hợp đồng của run](./agent.md#the-run-contract)) |
@@ -151,7 +151,7 @@ raise chúng.
 | `InvalidToolChoice` (-32034) | `run <id> was not started: its tool_choice is unusable: <reason>` | `agent.run(..., tool_choice=...)` nêu một tool mà run không cung cấp, hoặc provider từ chối nó | Chưa ghi gì; sửa lựa chọn ([Structured output](./structured-output.md)) |
 | `InvalidSteer` (-32038) | `run <id> cannot take this steer: <reason>` (`.reason`) | `agent.steer` với text trống, quá 16 KiB, id không dùng được, hoặc một run đang rảnh (xếp hàng, hoặc đang chạy mà không server nào điều khiển) | Chưa ghi gì; sửa text, hoặc resume run trước ([Run](./runs.md#steer)) |
 | `LimitReached` (-32005), `kind == "steers"` | `at most 16 steers at once; try again once one ends` | Run có 16 steer mà nó chưa đọc | Chờ bước kế tiếp của run, rồi steer lại |
-| `RunError` (-32020, -32024, -32028) | chính text của store hay journal | Một lỗi store, một lần ghi journal thất bại, hoặc trạng thái bền vững không khớp nhau; connection rớt giữa run là -32020 | Run ở trạng thái bền vững cuối: hãy resume nó; báo cáo -32028 |
+| `RunError` (-32020, -32024, -32028) | chính text của store hay journal | Một lỗi store, một lần ghi journal thất bại, hoặc trạng thái bền vững không khớp nhau; connection database rớt giữa run là -32020 | Run ở trạng thái bền vững cuối: hãy resume nó; báo cáo -32028 |
 
 Do chính lệnh gọi raise:
 

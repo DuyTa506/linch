@@ -55,7 +55,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Quickstart](./quickstart.md) | Install, an offline run, a live provider, a host tool, an approval, Postgres |
 | [Agent config](./agent.md) | Every `AgentConfig` field with its default, `spec`, the run contract, system sections and the context budget, loop guard, reliability policy, intercept callbacks, sessions |
 | [Providers](./providers.md) | Each provider id, keys from the server's environment, self-hosted server profiles, the scripted provider, what a provider supports and which models it serves, temperature, retries and fallback, the concurrency limit |
-| [Sandbox](./sandbox.md) | Where `Bash` runs: `local`, `sandbox` (Landlock, seccomp, rlimits) or `docker`; what each confines |
+| [Sandbox](./sandbox.md) | Where `Bash` runs: `local`, `sandbox` (Landlock, seccomp, rlimits), `docker` or `remote` (the client runs the commands); what each confines |
 | [Remote execution](./remote-execution.md) | `Bash` on a host your client supplies: what runs where, interrupted calls, the file tools, the protocol |
 | [Tools](./tools.md) | Host tools, the workspace tools, scopes, permission modes and rules, approvals, retries and the result cache, schedule tools, the virtual filesystem, MCP tools |
 | [Runs](./runs.md) | Start, stream, resume, approve, cancel, steer a run that is going on; errors at the end of a stream; what is durable and when |
@@ -98,6 +98,9 @@ Coming later:
 | `session.align(text)` | `agent.steer(run_id, text)` ([Runs](./runs.md#steer)) |
 | `ToolPipeline` listeners (retry, cache), `register_schedule_tools` | `spec.tool_retry`, `spec.tool_cache`, a `tool_execute` callback, `schedule_tools` ([Tools](./tools.md#retries-and-the-cache)) |
 | `LoopGuard`, `ContextBudget`, `SystemPromptConfig` | `spec.loop_guard`, `spec.context_budget`, `spec.system` ([Agent config](./agent.md#spec)) |
+| `run_workflow`, `WorkflowContext`, the workflow journal | `run_workflow` runs in the client, and the server keeps the journal in Postgres ([Workflows](./workflows.md)) |
+| `RemoteExecutionBackend` | `execution: {"backend": "remote"}` with a client `ExecutionHost`, `Bash` only unless the workspace is shared ([Remote execution](./remote-execution.md)) |
+| `default_headers`, `extra_body`, `timeout` of the OpenAI SDK | the provider's `request` and `chat` settings, which a tenant needs `allow.provider_request` to set ([Providers](./providers.md#request-settings)) |
 | `linch` CLI | `linch-rust` CLI |
 | `CompactionLadder`, `TruncationRecovery`, `RagConnector` | `spec.compaction`, `spec.truncation_recovery`, a `context_build` callback ([Memory](./memory.md)) |
 

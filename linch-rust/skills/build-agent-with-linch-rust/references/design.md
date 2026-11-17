@@ -189,9 +189,10 @@ Before writing code, list:
 
 - The failure each part exists to handle, such as a crash mid-run, a denied action, an empty
   retrieval, or a run that hits `max_turns`. Each one becomes a test under step 4 of `SKILL.md`.
-- A small set of real tasks with checkable results. The client has no eval harness, so run them
-  as pytest cases: scripted turns for the plumbing, and a live suite, skipped without
-  credentials, for the model. Run it on every prompt, model, or architecture change, and keep a
+- A small set of real tasks with checkable results. Run them as pytest cases, or through
+  `agent.eval` with scorers (`usage/monitoring.md`; eval suites and benchmarks as files are
+  crate-only): scripted turns for the plumbing, and a live suite, skipped without credentials,
+  for the model. Run it on every prompt, model, or architecture change, and keep a
   one-agent baseline when you chose something more complex.
 
 ## 6. Write it down and get approval

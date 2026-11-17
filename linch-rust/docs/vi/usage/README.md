@@ -55,7 +55,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Bắt đầu nhanh](./quickstart.md) | Cài đặt, một run ngoại tuyến, provider trực tuyến, một host tool, một lần phê duyệt, Postgres |
 | [Config của agent](./agent.md) | Mọi trường của `AgentConfig` cùng giá trị mặc định, `spec`, hợp đồng của run, system section và context budget, loop guard, reliability policy, intercept callback, session |
 | [Provider](./providers.md) | Từng provider id, key lấy từ môi trường của server, profile cho server tự triển khai, provider scripted, provider hỗ trợ gì và phục vụ model nào, temperature, retry và fallback, giới hạn đồng thời |
-| [Sandbox](./sandbox.md) | Nơi `Bash` chạy: `local`, `sandbox` (Landlock, seccomp, rlimit) hoặc `docker`; mỗi loại giới hạn những gì |
+| [Sandbox](./sandbox.md) | Nơi `Bash` chạy: `local`, `sandbox` (Landlock, seccomp, rlimit), `docker` hoặc `remote` (client chạy lệnh); mỗi loại giới hạn những gì |
 | [Thực thi từ xa](./remote-execution.md) | `Bash` chạy trên máy mà client cung cấp: chạy ở đâu, lệnh bị gián đoạn, công cụ tệp, giao thức |
 | [Tool](./tools.md) | Host tool, workspace tool, scope, permission mode và rule, phê duyệt, retry và cache kết quả, tool lập lịch, hệ thống tệp ảo, MCP tool |
 | [Run](./runs.md) | Bắt đầu, stream, resume, phê duyệt, hủy, steer một run đang chạy; lỗi ở cuối stream; cái gì được lưu bền vững và khi nào |
@@ -98,6 +98,9 @@ Sẽ có sau:
 | `session.align(text)` | `agent.steer(run_id, text)` ([Run](./runs.md#steer)) |
 | Listener `ToolPipeline` (retry, cache), `register_schedule_tools` | `spec.tool_retry`, `spec.tool_cache`, callback `tool_execute`, `schedule_tools` ([Tool](./tools.md#retry-và-cache)) |
 | `LoopGuard`, `ContextBudget`, `SystemPromptConfig` | `spec.loop_guard`, `spec.context_budget`, `spec.system` ([Config của agent](./agent.md#spec)) |
+| `run_workflow`, `WorkflowContext`, journal của workflow | `run_workflow` chạy trong client, còn server giữ journal trong Postgres ([Workflows](./workflows.md)) |
+| `RemoteExecutionBackend` | `execution: {"backend": "remote"}` với một `ExecutionHost` của client, chỉ có `Bash` trừ khi workspace được chia sẻ ([Thực thi từ xa](./remote-execution.md)) |
+| `default_headers`, `extra_body`, `timeout` của OpenAI SDK | các cài đặt `request` và `chat` của provider; tenant cần `allow.provider_request` để đặt chúng ([Providers](./providers.md#cài-đặt-request)) |
 | CLI `linch` | CLI `linch-rust` |
 | `CompactionLadder`, `TruncationRecovery`, `RagConnector` | `spec.compaction`, `spec.truncation_recovery`, một callback `context_build` ([Memory](./memory.md)) |
 

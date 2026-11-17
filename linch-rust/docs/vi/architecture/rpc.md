@@ -124,7 +124,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | Key của provider chưa đặt (`data.env` nêu biến của nó), hoặc không dựng được client của provider |
 | -32014 | `STORE_UNAVAILABLE` | `OpenError` | Không kết nối hay migrate được Postgres |
 | -32015 | `MCP_UNAVAILABLE` | `OpenError` | Không kết nối được một MCP server trong config; `data.server` nêu tên nó |
-| -32020 | `STORE` | `RunError` | Một lỗi store không nằm trong danh sách dưới (cả một connection rớt giữa run) |
+| -32020 | `STORE` | `RunError` | Một lỗi store không nằm trong danh sách dưới (cả một connection database rớt giữa run) |
 | -32021 | `NOT_FOUND` | `RunNotFound` | Không có run hay session như vậy; cũng là `run.report` và `workflow.status` của một id mà namespace của agent không có |
 | -32022 | `LEASE_LOST` | `LeaseLost` | Từ một claim hoặc một lần ghi journal bị fence: một process khác đã nhận run, hoặc làm nó thất bại. Run dừng ở đây mà không ghi |
 | -32023 | `CONFLICT` | `RunExists` | Một run id tự chọn đã được lưu |

@@ -168,7 +168,7 @@ absent, except `bash`.
 | `stores` | `{"type": "memory"}` | Where runs and sessions live ([Stores](./stores.md)) |
 | `workspace` | none: no workspace tools | An existing directory, the root of `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and `BashKill` ([Tools](./tools.md#workspace-tools)). A relative path resolves against the server's working directory, which is this process's |
 | `bash` | `True` | Whether the workspace tools include `Bash`, `BashOutput` and `BashKill`. Unused without a workspace |
-| `execution` | `local`: `Bash` runs as the server's user | Where `Bash` runs: a `SandboxExecution` (Landlock, seccomp, rlimits) or a `DockerExecution` ([Sandbox](./sandbox.md)). Part of the run contract unless `local` |
+| `execution` | `local`: `Bash` runs as the server's user | Where `Bash` runs: a `SandboxExecution` (Landlock, seccomp, rlimits), a `DockerExecution` ([Sandbox](./sandbox.md)) or a `RemoteExecution` that runs the commands in your client ([Remote execution](./remote-execution.md)). Part of the run contract unless `local` |
 | `ask_user` | `False` | Whether the model has `AskUser`, which suspends the run until you answer ([Tools](./tools.md#ask-the-user)) |
 | `schedule_tools` | `False` | Whether the model has `CreateSchedule`, `ListSchedules` and `CancelSchedule`, which schedule runs of this agent; needs a tenant with `max_schedules` ([Scheduler](./scheduler.md#let-the-model-schedule)) |
 | `memory` | none | Long-term memory in the stores: the model gets `MemorySave`, `MemorySearch` and `MemoryDelete`, and may be shown the best matches before each request, `{"scope"?, "recall"?, "max_memories"?, "max_memories_per_scope"?}` ([Memory](./memory.md#built-in-long-term-memory)) |
