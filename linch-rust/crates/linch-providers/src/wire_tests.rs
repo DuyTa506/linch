@@ -156,6 +156,24 @@ async fn chat_options_reach_the_body_of_a_server() {
     );
 }
 
+/// A model whose chat template takes other efforts than vLLM's Qwen map
+/// states its own: `extra_body` replaces the adapter's `reasoning_effort`.
+#[tokio::test]
+async fn extra_body_replaces_the_vllm_effort_map() {
+    let (url, handle) = serve_once(bad_request());
+    let mut o = ServerOptions::new(Server::Vllm, url);
+    o.request.extra_body = json!({"reasoning_effort": "high"})
+        .as_object()
+        .cloned()
+        .unwrap();
+    let req = ProviderRequest {
+        effort: Some(linch_core::ReasoningEffort::High),
+        ..request("m")
+    };
+    let (_, body) = sent(&OpenAiChat::server(o).unwrap(), handle, req).await;
+    assert_eq!(body["reasoning_effort"], "high", "the map would send xhigh");
+}
+
 #[tokio::test]
 async fn without_options_the_body_is_what_it_was() {
     let (url, handle) = serve_once(bad_request());
