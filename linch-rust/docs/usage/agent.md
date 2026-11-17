@@ -482,7 +482,7 @@ the model's call order, not the tenant's host
 | Field | Default | What it controls |
 |---|---|---|
 | `max_tokens` | none: no token cap | Most tokens the run and its subagents may spend, all four usage buckets summed |
-| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); the model needs a price (the built-in table or the agent's `pricing`), or `agent.open` fails with an invalid-agent error (`-32011`) that names the model; cap `max_tokens` instead for a model without one |
+| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); every model that can serve a call (`model` and each of `fallback_models`) needs a price (the built-in table or the agent's `pricing`), or `agent.open` fails with an invalid-agent error (`-32011`) that names the model without one; cap `max_tokens` instead for a model without one |
 | `warn_ratio` | `0.9` | Fraction of either cap at which one `budget` event of kind `warning` fires |
 
 As in Python Linch, every provider call is charged once it ends, and the run

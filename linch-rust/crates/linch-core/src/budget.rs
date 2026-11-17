@@ -44,8 +44,9 @@ pub struct RunBudget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     /// Most USD the tree may spend, by the agent's pricing. The agent does
-    /// not build when its model has no price, and a run ends with a
-    /// `BudgetAccountingError` on a call served by a model that has none.
+    /// not build when its model or one of its fallback models has no price,
+    /// and a run ends with a `BudgetAccountingError` on a call served by a
+    /// model that has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost_usd: Option<f64>,
     /// Fraction of either cap at which the one warning fires (default 0.9).

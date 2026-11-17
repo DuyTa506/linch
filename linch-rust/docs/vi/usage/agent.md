@@ -475,7 +475,7 @@ lời gọi của model, không ràng buộc host của tenant
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `max_tokens` | không có: không giới hạn token | Số token nhiều nhất mà run và các subagent của nó được tiêu, cộng cả bốn nhóm usage |
-| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); model cần có giá (bảng tích hợp sẵn hoặc `pricing` của agent), nếu không `agent.open` thất bại với lỗi agent không hợp lệ (`-32011`) nêu tên model; với model không có giá, hãy đặt giới hạn `max_tokens` |
+| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); mọi model có thể phục vụ một lời gọi (`model` và từng model trong `fallback_models`) cần có giá (bảng tích hợp sẵn hoặc `pricing` của agent), nếu không `agent.open` thất bại với lỗi agent không hợp lệ (`-32011`) nêu tên model không có giá; với model không có giá, hãy đặt giới hạn `max_tokens` |
 | `warn_ratio` | `0.9` | Tỷ lệ của một trong hai giới hạn mà tại đó một event `budget` loại `warning` được phát ra |
 
 Giống Python Linch, mỗi lời gọi provider được tính phí một lần khi nó kết thúc, và
