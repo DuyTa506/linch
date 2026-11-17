@@ -178,6 +178,7 @@ impl AgentInner {
             tool_cache: None,
             mailbox: self.mailbox.clone(),
             families: Default::default(),
+            steering: Default::default(),
             releases: self.releases.clone(),
             session_close: self.session_close.clone(),
             compact: self.compact.clone(),

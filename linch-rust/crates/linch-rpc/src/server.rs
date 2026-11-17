@@ -314,6 +314,7 @@ impl Server {
             method::RUN_RESUME => self.resume(parse(params)?),
             method::RUN_APPROVE => self.approve(parse(params)?),
             method::RUN_ANSWER => self.answer_run(parse(params)?),
+            method::RUN_STEER => self.steer_run(parse(params)?).await.map(Reply::Value),
             method::RUN_CANCEL => to_value(&self.cancel(parse(params)?).await?).map(Reply::Value),
             method::RUN_EVENTS => self.events(parse(params)?).await.map(Reply::Value),
             crate::protocol::monitor::EVAL_RUN => {

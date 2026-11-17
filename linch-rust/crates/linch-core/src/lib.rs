@@ -58,7 +58,10 @@ pub mod usage;
 pub mod verification;
 pub mod vfs;
 
-pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, ForkError, RunError, RunOptions};
+pub use agent::{
+    Agent, AgentBuilder, AgentSpec, BuildError, ForkError, MAX_PENDING_STEERS, MAX_STEER_BYTES,
+    RunError, RunOptions,
+};
 pub use budget::RunBudget;
 pub use canonical::{
     CanonicalError, Digest, JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth, digest,

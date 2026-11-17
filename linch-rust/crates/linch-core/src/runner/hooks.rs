@@ -160,6 +160,7 @@ pub(super) async fn submit(
         session_id: session_id.clone(),
         run_id: run_id.clone(),
         content: vec![ContentBlock::text(prompt)],
+        source: None,
     };
     let result = chain.run(request).await;
     push_records(outbox, run_id, 0, result.records, None);
@@ -442,6 +443,7 @@ impl Runner {
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::Notification,
+            steer_id: None,
         }));
         self.save(Phase::ToolResults {
             message: message.clone(),

@@ -42,6 +42,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
         Event::User(UserEvent {
             message: crate::message::Message::user_text("hi"),
             subtype: UserEventSubtype::Prompt,
+            steer_id: None,
         }),
         Event::Assistant(AssistantEvent {
             message: crate::message::Message::assistant_text("hi"),

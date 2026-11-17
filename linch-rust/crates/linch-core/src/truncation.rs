@@ -196,6 +196,7 @@ mod tests {
         Event::User(UserEvent {
             message: Message::user_text(text),
             subtype: UserEventSubtype::Notification,
+            steer_id: None,
         })
     }
 

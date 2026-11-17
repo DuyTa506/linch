@@ -49,7 +49,11 @@ pub(super) fn user_event() -> impl Strategy<Value = UserEvent> {
             Just(UserEventSubtype::Notification),
         ],
     )
-        .prop_map(|(message, subtype)| UserEvent { message, subtype })
+        .prop_map(|(message, subtype)| UserEvent {
+            message,
+            subtype,
+            steer_id: None,
+        })
 }
 
 pub(super) fn assistant_event() -> impl Strategy<Value = AssistantEvent> {

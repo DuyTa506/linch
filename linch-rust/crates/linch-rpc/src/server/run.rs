@@ -72,6 +72,21 @@ impl Server {
         })
     }
 
+    /// Queue the text of a steer for a live run of the agent. It goes
+    /// through the agent's stores, so it reaches a run any server drives.
+    pub(super) async fn steer_run(
+        &self,
+        params: crate::protocol::SteerParams,
+    ) -> Result<serde_json::Value, ErrorObject> {
+        self.admit_principal(params.principal.as_ref())?;
+        let agent = lock(&self.0.tables).agent(&params.agent)?;
+        let id = agent
+            .steer(params.run_id, params.text, params.id)
+            .await
+            .map_err(|error| ErrorObject::from(&error))?;
+        to_value(&crate::protocol::Steered { queued: true, id })
+    }
+
     /// Cancel a run this connection drives with its token; else, given an
     /// agent, a suspended run through the agent's stores. The run counts
     /// as driven meanwhile, so an approve on this connection cannot claim

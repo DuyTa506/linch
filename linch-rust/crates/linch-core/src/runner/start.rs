@@ -149,6 +149,7 @@ pub(super) async fn new_run(
     journal.stage(Event::User(UserEvent {
         message: prompt.clone(),
         subtype: UserEventSubtype::Prompt,
+        steer_id: None,
     }));
     let checkpoint = Checkpoint {
         turn: 0,
@@ -216,6 +217,7 @@ pub(super) async fn new_run(
         runner.output = output;
     }
     runner.final_tool = final_tool;
+    runner.attach_steering(&[]);
     if options.tool_choice.is_some() {
         runner.tool_choice = options.tool_choice;
     }
@@ -535,6 +537,9 @@ pub(super) async fn continue_run(
         runner.tool_choice = Some(choice);
     }
     runner.final_tool = recorded_final_tool(&runner, &events)?;
+    if !cancelling {
+        runner.attach_steering(&events);
+    }
     held.drive(async move {
         if let Some(decisions) = commit {
             runner.commit_decisions(decisions, assistant_seq).await?;

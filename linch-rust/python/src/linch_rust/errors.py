@@ -93,7 +93,7 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32034), or failed
+    """The run could not continue durably (-32020 to -32034 and -32038), or failed
     inside the server (-32603 in `run.end`); it stays resumable."""
 
 
@@ -167,6 +167,21 @@ class InvalidOutputSchema(RunError):
     @property
     def reason(self) -> str:
         """What is wrong with the schema."""
+        try:
+            return str(self.data["reason"])
+        except (TypeError, KeyError):
+            return ""
+
+
+class InvalidSteer(RunError):
+    """`Agent.steer` with text that is blank or too long, or an unusable id (-32038).
+
+    Nothing was queued.
+    """
+
+    @property
+    def reason(self) -> str:
+        """What is wrong with the steer."""
         try:
             return str(self.data["reason"])
         except (TypeError, KeyError):
@@ -358,6 +373,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32032: InvalidAnswer,
     -32033: RunLeased,
     -32034: InvalidToolChoice,
+    -32038: InvalidSteer,
 }
 
 

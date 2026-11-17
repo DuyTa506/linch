@@ -719,6 +719,7 @@ mod tests {
         Event::User(UserEvent {
             message: Message::new(Role::User, blocks.collect()),
             subtype: UserEventSubtype::ToolResult,
+            steer_id: None,
         })
     }
 

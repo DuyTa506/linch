@@ -109,6 +109,8 @@ pub enum Event {
     Error(ErrorEvent),
     /// The terminal outcome of a run.
     Result(ResultEvent),
+    /// A steer the run accepted, not yet delivered. Journal-only.
+    SteerReceived(SteerReceivedEvent),
     /// A model-call delivery attempt was dispatched. Journal-only.
     ModelCallDelivery(ModelCallDeliveryEvent),
     /// The outcome of one model-call delivery attempt. Journal-only.
@@ -247,6 +249,7 @@ impl Event {
             "hook" => Ok(Event::Hook(payload("hook", obj)?)),
             "error" => Ok(Event::Error(payload("error", obj)?)),
             "result" => Ok(Event::Result(payload("result", obj)?)),
+            "steer_received" => Ok(Event::SteerReceived(payload("steer_received", obj)?)),
             "model_call_delivery" => Ok(Event::ModelCallDelivery(payload(
                 "model_call_delivery",
                 obj,
@@ -301,6 +304,7 @@ impl Event {
             Event::ToolProgress(_) => StreamOnly,
             Event::PartialAssistant(_) => StreamOnly,
             Event::Hook(_) => StreamOnly,
+            Event::SteerReceived(_) => JournalOnly,
             Event::ModelCallDelivery(_) => JournalOnly,
             Event::ModelCallReceipt(_) => JournalOnly,
             Event::ModelCallUsageSettlement(_) => JournalOnly,
@@ -408,6 +412,7 @@ impl Serialize for Event {
             Event::Hook(e) => tagged("hook", e).serialize(serializer),
             Event::Error(e) => tagged("error", e).serialize(serializer),
             Event::Result(e) => tagged("result", e).serialize(serializer),
+            Event::SteerReceived(e) => tagged("steer_received", e).serialize(serializer),
             Event::ModelCallDelivery(e) => tagged("model_call_delivery", e).serialize(serializer),
             Event::ModelCallReceipt(e) => tagged("model_call_receipt", e).serialize(serializer),
             Event::ModelCallUsageSettlement(e) => {

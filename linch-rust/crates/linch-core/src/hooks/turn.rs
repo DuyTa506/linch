@@ -26,6 +26,9 @@ pub struct UserPromptRequest {
     pub run_id: RunId,
     /// Prompt content as it stands: the user's, or the last rewrite.
     pub content: Vec<ContentBlock>,
+    /// Where the content comes from when it is not a new run's prompt:
+    /// `steer` for text sent to a live run ([`crate::Agent::steer`]).
+    pub source: Option<&'static str>,
 }
 
 /// A `user_prompt_submit` hook's answer.

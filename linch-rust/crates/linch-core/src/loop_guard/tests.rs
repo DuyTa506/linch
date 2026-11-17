@@ -44,6 +44,7 @@ fn answered(answers: &[(&str, bool)]) -> Event {
     Event::User(UserEvent {
         message: Message::new(Role::User, blocks.collect()),
         subtype: UserEventSubtype::ToolResult,
+        steer_id: None,
     })
 }
 
@@ -238,6 +239,7 @@ fn an_offloaded_result_repeats_whatever_its_file_name() {
         watch.see(&Event::User(UserEvent {
             message: Message::new(Role::User, vec![ContentBlock::ToolResult(result)]),
             subtype: UserEventSubtype::ToolResult,
+            steer_id: None,
         }));
     }
     let trip = watch.tool_trip().unwrap();
