@@ -228,11 +228,10 @@ fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     assert!(tokens > 9);
     let sized = |chars: usize| "x".repeat(chars);
     let check = |called, text: &str| {
-        let summary = summary_message(text);
+        let summary = Message::user_text(text);
         rejection(called, text, &summary, folded)
     };
-    // The header the summary message adds counts: 35 characters, 8 tokens.
-    assert_eq!(check(false, &sized(tokens * 4 - 32 - 4)), None);
+    assert_eq!(check(false, &sized(tokens * 4 - 4)), None);
     assert_eq!(check(false, &sized(tokens * 4)), Some("not_smaller"));
     assert_eq!(check(false, ""), Some("empty"));
     assert_eq!(check(true, "Let me look."), Some("tool_call"));

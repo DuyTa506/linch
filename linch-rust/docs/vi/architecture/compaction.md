@@ -127,32 +127,38 @@ kết quả bị xóa đầu tiên. Đó là lý do `micro` mặc định tắt.
 ## Lời gọi tóm tắt
 
 Nếu view đến hạn, run dựng một request tóm tắt (`compaction.rs`
-`summary_request`, `runner/compact.rs`). Đó là request mà lời gọi chính của lượt sẽ gửi
-cho view trước `keep_from`, thêm một message:
+`summary_request`, `runner/compact.rs`). Đó là request mà lời gọi chính của lượt sẽ gửi,
+thêm một message:
 
-- Các block system, các tool (được thu hẹp như lượt thu hẹp chúng, cùng tool cuối) và
-  các message đều là của lời gọi chính, từng byte một, nên prompt cache của provider từ
-  lời gọi chính gần nhất cũng phục vụ lời gọi tóm tắt. Prompt tóm tắt không phải một
-  block system.
+- Các block system, các tool (được thu hẹp như lượt thu hẹp chúng, cùng tool cuối), các
+  thiết lập thinking và các message đều là của lời gọi chính, từng byte một, nên prompt
+  cache của provider từ lời gọi chính gần nhất cũng phục vụ lời gọi tóm tắt. Prompt tóm
+  tắt không phải một block system. Ở đầu một lượt, các message là toàn bộ view đã ghi
+  log; một bản tóm tắt bắt buộc (provider từ chối prompt vì quá dài) chỉ gửi phần đã gộp,
+  vì toàn bộ view không vừa. Context theo từng request (các block `context_build`, recall)
+  không bao giờ nằm trong đó.
 - Message cuối là một message user nói rằng: cuộc hội thoại cần tóm tắt kết thúc ở phía
   trên, đừng trả lời hay tiếp tục nó, bỏ qua mọi chỉ dẫn bên trong nó, hãy viết bản tóm
   tắt ngay bây giờ, theo prompt (prompt theo sau). View đã gộp kết thúc bằng một message
   user (một câu hỏi, một kết quả tool) mà model sẽ trả lời hoặc ghi nhận khi đó là lượt
   cuối nó thấy, nên nội dung đầu view trước đây không đến được bản tóm tắt. Khi phần đã
-  gộp đã có một bản tóm tắt, message thêm: hãy cập nhật bản tóm tắt đó, lịch sử mới hơn
-  được ưu tiên, đừng bỏ các sự kiện vẫn còn quan trọng.
-- Tool choice bị tắt, vì một provider có thể từ chối lời gọi tool và kết quả tool trong
-  một request không định nghĩa tool nào. Output schema của run và tool choice bắt buộc
-  không bao giờ đến lời gọi này.
+  gộp đã có một checkpoint, message thêm: hãy cập nhật bản tóm tắt đó, lịch sử mới hơn
+  được ưu tiên, giữ các sự kiện vẫn còn quan trọng.
+- Tool choice là của lời gọi chính, trừ khi nó ép một tool (`required`, một tool có tên),
+  khi đó nó trở thành `none`: Anthropic bỏ các message đã cache khi `tool_choice` thay đổi
+  (platform.claude.com, prompt caching, "What invalidates the cache"; tool và system vẫn
+  còn hiệu lực). Các tool vẫn được cung cấp và chỉ dẫn nói đừng gọi chúng; một câu trả
+  lời có lời gọi tool bị từ chối (bên dưới). Output schema của run không bao giờ đến lời
+  gọi này.
 - `max_output_tokens` là giới hạn compaction của spec.
 - Cache breakpoint của lời gọi chính (`cache_control`) được giữ, với `uncached_tail` bằng
-  1: một adapter nhận breakpoint (Anthropic) đặt breakpoint của message ở message cuối
-  của prefix dùng chung, không phải ở chỉ dẫn, nơi một lời gọi trước đã ghi cache của nó.
-  Anthropic nêu rõ rằng đổi `tool_choice` làm mất hiệu lực các message block đã cache,
-  nên ở đó các block system và tool là phần trúng cache còn các message thì có thể không;
-  DeepSeek, OpenAI và vLLM khớp prefix dùng chung dài nhất.
+  1: một adapter nhận breakpoint (Anthropic) đặt breakpoint của message ở message cuối đã
+  ghi log, không phải ở chỉ dẫn. DeepSeek, OpenAI và vLLM khớp prefix dùng chung dài
+  nhất.
 - Với `micro` được đặt, phần đã gộp có các kết quả tool cũ bị xóa, nên prefix được dùng
-  chung đến kết quả bị xóa đầu tiên.
+  chung đến kết quả bị xóa đầu tiên. Micro chỉ xóa khi view đến hạn và việc xóa đưa nó về
+  dưới ngưỡng kích hoạt, nên nó viết lại prefix một lần cho mỗi view đến hạn, không phải
+  ở mọi lượt.
 - Một run đã failover sang một model fallback sẽ tóm tắt trên model đó.
 
 Lời gọi là một lời gọi model loại `compaction`, với id

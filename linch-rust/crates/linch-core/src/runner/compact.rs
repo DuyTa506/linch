@@ -202,8 +202,9 @@ impl Runner {
         // A reply that called a tool, is empty, or is no smaller than the
         // part it replaces is rejected: the view stays as it was, and the
         // receipt and the `compaction` event say why. The model's text is
-        // what is measured, not the reminders added to it.
-        let plain = compaction::summary_message(text);
+        // what is measured, not the header, the verbatim user messages or
+        // the reminders added to it.
+        let plain = Message::user_text(text);
         let rejection = answered
             .then(|| compaction::rejection(called, text, &plain, &view[1..keep_from]))
             .flatten();

@@ -289,7 +289,7 @@ async fn a_refused_prompt_is_summarized_and_called_again() {
     // part (same system blocks, tools and bytes, so a prompt cache holds),
     // then one instruction message; only the tool choice and limits differ.
     let requests = provider.requests.lock().unwrap().clone();
-    let at = requests.iter().position(|r| is_summary_call(r)).unwrap();
+    let at = requests.iter().position(is_summary_call).unwrap();
     let (primary, summary) = (&requests[at - 1], &requests[at]);
     assert_eq!(primary.system, summary.system);
     assert_eq!(primary.tools, summary.tools);
