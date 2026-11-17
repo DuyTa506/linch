@@ -590,9 +590,10 @@ pub(crate) fn summary_message(text: &str) -> Message {
 /// The rule that keeps it from outgrowing what it replaces: the verbatim
 /// blocks take at most `keep_user_tokens`, at most half of the folded
 /// part's estimate, and no more than what is left of the folded part after
-/// the header, the `text` and the `tail`, markers included. So the whole
-/// message is estimated smaller than the folded part whenever those three
-/// alone are; when they are not, [`rejection`] measures the whole view
+/// the header, the `text` and the `tail`, markers included, and a whole
+/// token short of it, so the view around it cannot round the saving away.
+/// So the whole message is estimated smaller than the folded part whenever
+/// those three alone are; when they are not, [`rejection`] measures the whole view
 /// and rejects the summary as `not_smaller`. The first message that does
 /// not fit is cut with `[truncated]` and the older ones are dropped. A
 /// checkpoint of an earlier compaction in `folded` hands over its blocks,
@@ -606,12 +607,14 @@ pub(crate) fn checkpoint(
 ) -> Message {
     let mut message = summary_message(text);
     let replaced = estimate_tokens(folded);
-    // The estimate is characters / 4: under 4 * replaced characters is
-    // under `replaced` tokens.
+    // The estimate is characters / 4: a whole token under `replaced` is
+    // 4 * replaced - 4 characters at most, which leaves the view smaller
+    // whatever its other messages add (one character fewer could round to
+    // the same estimate, and [`rejection`] would discard the paid summary).
     let fit = usize::try_from(replaced)
         .unwrap_or(usize::MAX)
         .saturating_mul(4)
-        .saturating_sub(1);
+        .saturating_sub(4);
     let rest = (message.content.iter().chain(&tail))
         .map(counted_chars)
         .sum::<usize>();

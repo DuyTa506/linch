@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from scripted import config, text_turn, tool_turn
 
+import linch_rust
 from linch_rust import (
     Agent,
     AgentConfig,
@@ -329,8 +330,11 @@ def group_alive(pgid: int) -> bool:
 async def test_a_command_does_not_outlive_a_killed_client(tmp_path: Path) -> None:
     pidfile = tmp_path / "pid"
     command = f"echo $$ > {pidfile}; sleep 300"
+    # The package is on pytest's path, not on the child's: hand it over.
+    source = str(Path(linch_rust.__file__).parents[1])
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([source, os.environ.get("PYTHONPATH", "")])}
     client = subprocess.Popen(
-        [sys.executable, "-c", CLIENT, command], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", CLIENT, command], stdout=subprocess.PIPE, text=True, env=env
     )
     pid = 0
     try:

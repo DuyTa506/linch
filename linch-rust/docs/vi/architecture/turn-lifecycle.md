@@ -249,7 +249,10 @@ giữ nguyên bộ đếm và kích hoạt ở 10, còn cùng một lời gọi 
 Cửa sổ không nhìn thấy gì: một chu trình hơn 5 lời gọi khác nhau mà kết quả đổi mỗi lần
 không bao giờ có 10 lần của một lời gọi trong 50, nên chỉ `max_turns` và budget (cả hai mặc
 định đều không đặt) kết thúc nó; một tool poll mà câu trả lời đổi mỗi lần nằm ngoài cả hai
-bộ đếm và chỉ bị hai giới hạn đó chặn.
+bộ đếm và chỉ bị hai giới hạn đó chặn. Guard cũng không phân biệt được một bản vá với một lệnh
+shell chỉ đọc: mọi lời gọi `Bash` thành công với input mới đều xóa bộ đếm của các lời gọi khác,
+nên một `Read` trả lời giống nhau giữa các lệnh shell luôn khác nhau nằm ngoài cả hai bộ đếm,
+và chỉ `max_turns` và budget kết thúc nó.
 
 Một tool có `polls()` là true (`tool.rs:279`; `BashOutput`, một host tool có `polls`,
 một MCP tool trong `polls` của server) chờ một thứ đang chạy. Các câu trả lời của nó

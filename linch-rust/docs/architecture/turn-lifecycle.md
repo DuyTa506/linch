@@ -260,7 +260,11 @@ trip at 10, and the same call with the same result and no patch between trips at
 What the window cannot see: a cycle of more than 5 distinct calls whose results
 change every time never puts 10 of one call in 50, so only `max_turns` and the
 budget (both unset by default) end it; a polling tool whose answer changes every
-time is kept out of both counts and is bounded by those two alone.
+time is kept out of both counts and is bounded by those two alone. The
+guard cannot tell a patch from a read-only shell command either: every `Bash` call
+that succeeds with a new input clears the other calls' counts, so a `Read` that
+answers the same between ever-different shell commands is in neither count, and
+only `max_turns` and the budget end it.
 
 A tool whose `polls()` is true (`tool.rs:279`; `BashOutput`, a host tool
 with `polls`, an MCP tool in the server's `polls`) waits on something that

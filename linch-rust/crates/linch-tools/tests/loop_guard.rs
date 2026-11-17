@@ -266,7 +266,7 @@ async fn identical_test_results_between_patches_are_not_a_loop() {
         vec![
             Arc::new(Read::new(fs.clone(), reads.clone())),
             Arc::new(Edit::new(fs, reads)),
-            Arc::new(Bash::new(&workspace.root())),
+            Arc::new(Bash::new(workspace.root())),
         ]
     };
     let test = json!({"command": "echo '3 tests failing'"});

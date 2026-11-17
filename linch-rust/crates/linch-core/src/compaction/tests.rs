@@ -464,8 +464,7 @@ fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
 fn an_accepted_checkpoint_shrinks_the_view_by_the_measure_the_event_reports() {
     let text = |chars: usize| Message::user_text("x".repeat(chars));
     let first = Arc::new(Message::user_text("a"));
-    let folded = vec![Arc::new(text(40))];
-    let view = vec![first, folded[0].clone(), Arc::new(text(2))];
+    let view = vec![first, Arc::new(text(40)), Arc::new(text(2))];
     let before = estimate_tokens(&view);
     assert_eq!(before, 10);
     for chars in 30..=39 {
@@ -479,6 +478,32 @@ fn an_accepted_checkpoint_shrinks_the_view_by_the_measure_the_event_reports() {
             expected,
             "{chars}"
         );
+    }
+}
+
+/// The builder fills the room a summary leaves with the user's words, so the
+/// checkpoint can be as big as the fit allows. Whatever the messages around
+/// it add, the view it leaves must then still be smaller by the estimate:
+/// the harness's own padding must not make [`rejection`] discard a paid summary.
+#[test]
+fn a_checkpoint_filled_to_the_fit_still_shrinks_the_view() {
+    for around in 0..8 {
+        for chars in 400..420 {
+            let folded = vec![Arc::new(Message::user_text("u".repeat(chars)))];
+            let replaced = estimate_tokens(&folded) as usize;
+            // A summary that takes half the part: the verbatim blocks fill the rest.
+            let text = "s".repeat(replaced * 2);
+            let made = checkpoint(&text, &folded, 15_000, Vec::new());
+            let first = Arc::new(Message::user_text("a".repeat(around)));
+            let view = vec![first, folded[0].clone(), Arc::new(Message::user_text("k"))];
+            let compacted = replacement(&view, made, 2);
+            let (before, after) = (estimate_tokens(&view), estimate_tokens(&compacted));
+            let verdict = rejection(false, &text, before, after);
+            assert_eq!(
+                verdict, None,
+                "{around}+{chars}: {after} tokens for {before}"
+            );
+        }
     }
 }
 
