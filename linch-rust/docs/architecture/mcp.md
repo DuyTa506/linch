@@ -144,6 +144,13 @@ For a stdio server:
   grace period. `KillGroup` sends `SIGKILL` to the whole group as soon as the
   server has exited, so a server that exits on stdin EOF leaves no children
   (`connector.rs:190-232`).
+- **Lifeline.** A small `/bin/sh` watchdog per server reads its own stdin, a
+  pipe whose write end only the client holds, and kills the server's group
+  when it reaches end of file. The kernel closes that pipe when the client
+  dies, `SIGKILL` included, so a server that ignores stdin EOF and `SIGTERM`
+  does not outlive it, as with the `Bash` tool's lifeline. The watchdog
+  stands outside the server's group, uses only builtins, and is killed when
+  the connection is dropped (`connector.rs`, `start_lifeline`).
 - **Bounded close.** rmcp's own close takes about 6 s at most (3 s after
   stdin closes, 3 s more after `SIGTERM`). When the server has stopped
   reading and a write has filled its stdin, that close would wait forever;

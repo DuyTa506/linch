@@ -156,15 +156,49 @@ impl Connector for Stdio {
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader()).wrap(KillGroup);
         let transport = TokioChildProcess::new(command).map_err(ConnectError::Spawn)?;
-        handler.serve(BoundedClose(transport)).await
+        let lifeline = start_lifeline(transport.id()).map_err(ConnectError::Spawn)?;
+        handler
+            .serve(BoundedClose {
+                transport,
+                _lifeline: lifeline,
+            })
+            .await
     }
+}
+
+/// Run by [`start_lifeline`]: `read` returns at end of file, when the write
+/// end of its stdin is closed, and the whole group `$1` is then killed.
+const LIFELINE: &str = r#"read -r _; kill -s KILL -- "-$1""#;
+
+/// Start the watchdog that kills a stdio server's process group when this
+/// process dies, even by `SIGKILL`, which no destructor survives. The
+/// watchdog's stdin is a pipe whose write end only this process holds (the
+/// returned child owns it), so the kernel closing it on exit is the signal;
+/// as with the `Bash` tool's lifeline, only builtins run, so it works
+/// whatever the `PATH`. It stands outside the server's group, and is killed
+/// when the returned child is dropped.
+fn start_lifeline(group: Option<u32>) -> std::io::Result<tokio::process::Child> {
+    let group = group.ok_or_else(|| std::io::Error::other("the MCP server has no pid"))?;
+    tokio::process::Command::new("/bin/sh")
+        .args(["-c", LIFELINE, "linch-mcp", &group.to_string()])
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
 }
 
 /// rmcp's child-process transport with a bound on closing. When the server
 /// has stopped reading and a write has filled its stdin, rmcp's close waits
 /// for that write forever. After [`CLOSE_GRACE`] the close gives up instead,
-/// and dropping the transport sends `SIGKILL` to the server's group.
-struct BoundedClose(TokioChildProcess);
+/// and dropping the transport sends `SIGKILL` to the server's group. It
+/// also owns the server's [`start_lifeline`] watchdog.
+struct BoundedClose {
+    transport: TokioChildProcess,
+    _lifeline: tokio::process::Child,
+}
 
 impl Transport<RoleClient> for BoundedClose {
     type Error = std::io::Error;
@@ -173,15 +207,15 @@ impl Transport<RoleClient> for BoundedClose {
         &mut self,
         item: TxJsonRpcMessage<RoleClient>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        self.0.send(item)
+        self.transport.send(item)
     }
 
     fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleClient>>> + Send {
-        self.0.receive()
+        self.transport.receive()
     }
 
     async fn close(&mut self) -> Result<(), Self::Error> {
-        tokio::time::timeout(CLOSE_GRACE, self.0.close())
+        tokio::time::timeout(CLOSE_GRACE, self.transport.close())
             .await
             .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
     }
