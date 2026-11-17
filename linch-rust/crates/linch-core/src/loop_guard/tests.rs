@@ -214,6 +214,33 @@ fn repeats_spaced_far_apart_do_not_trip_and_close_ones_do() {
     assert!(watch.tool_trip().is_some(), "three in the latest 19");
 }
 
+/// A long healthy run that reads one file now and then (20 times in 500
+/// turns) is never a loop, whatever the results look like.
+#[test]
+fn one_file_read_twenty_times_over_five_hundred_turns_is_not_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    for n in 0..500 {
+        let (input, text) = match n % 25 {
+            0 => (json!({"path": "src/lib.rs"}), "same text".to_string()),
+            _ => (json!({"n": n}), format!("text {n}")),
+        };
+        once(&mut watch, "Read", input, &text);
+        assert!(watch.tool_trip().is_none(), "turn {n}");
+    }
+}
+
+/// A fix-and-test loop: an edit, then the same test command, ten times.
+#[test]
+fn ten_test_runs_between_ten_edits_are_not_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    for n in 0..10 {
+        once(&mut watch, "Edit", json!({"n": n}), "ok");
+        let test = json!({"command": "cargo test"});
+        once(&mut watch, "Bash", test, &format!("{n} failed"));
+    }
+    assert!(watch.tool_trip().is_none(), "{:?}", watch.tool_trip());
+}
+
 /// `ResultOffload` replaces a long result with a preview that names a file
 /// made from the call's id, so identical results would never look alike.
 #[test]
