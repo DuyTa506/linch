@@ -272,7 +272,7 @@ async def test_connection_end_and_client_death_with_a_background_command() -> No
                 assert gone is not None
                 assert descendants(proc.pid) == []
 
-                # client process killed with SIGKILL: no host code can run
+                # client killed with SIGKILL: no host code runs, the lifeline ends the command
                 model.requests.clear()
                 model.handler = plan_model([bash("sleep 302", run_in_background=True)]).handler
                 config = remote_config(model, root, namespace="acme")
@@ -292,6 +292,8 @@ async def test_connection_end_and_client_death_with_a_background_command() -> No
                         sleeper_gone_after_s=gone,
                         survivors=survivors,
                     )
+                    # the host's lifeline ends the command with the client, SIGKILL included
+                    assert gone is not None, survivors
                 finally:
                     client.kill()
                     for pid in marker_pids("sleep 302"):
