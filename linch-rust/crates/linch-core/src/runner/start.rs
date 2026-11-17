@@ -521,6 +521,7 @@ pub(super) async fn continue_run(
     runner.gates = (runner.agent.gates.clone()).map(|rules| Gates::of(rules, &events));
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
+    runner.rejections = crate::compaction::Rejections::of(&events);
     if let Some(truncation) = &runner.agent.spec.truncation_recovery {
         let spent = Truncated::of(&events, &truncation.reminder());
         runner.truncations = spent.attempts;

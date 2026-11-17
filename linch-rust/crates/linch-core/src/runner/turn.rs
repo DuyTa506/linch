@@ -177,6 +177,10 @@ pub(super) struct Runner {
     /// Summary deliveries of the current turn, so the next one takes the
     /// next attempt id.
     pub(super) summary_calls: u32,
+    /// The summaries the run asked for and had rejected in a row (see
+    /// [`crate::compaction::Rejections`]), counted from its durable events on a
+    /// resume.
+    pub(super) rejections: crate::compaction::Rejections,
     /// Cut answers the run continued (see [`crate::truncation`]), counted
     /// from its durable log on a resume.
     pub(super) truncations: u32,
@@ -248,6 +252,7 @@ impl Runner {
             verify_retries: 0,
             forced: 0,
             summary_calls: 0,
+            rejections: crate::compaction::Rejections::default(),
             truncations: 0,
             truncated: String::new(),
             watch,

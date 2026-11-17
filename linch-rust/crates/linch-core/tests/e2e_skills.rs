@@ -176,12 +176,14 @@ async fn the_skill_tool_lives_as_long_as_its_agent() {
 async fn a_compaction_puts_the_loaded_body_back_in_the_view_only() {
     // Turn 0 loads the skill, turn 1 reads, turn 2 compacts turn 0 away.
     let summary = TurnBuilder::new(MODEL).text("they formatted a.rs").build();
-    let turns = [
-        skill_turn(),
-        tool_turn(1, 1, "Read"),
-        summary,
-        text_turn("done"),
-    ];
+    // The folded turns are longer than the checkpoint with the body in it (a
+    // summary that does not shorten the view is rejected).
+    let read = TurnBuilder::new(MODEL)
+        .text("working ".repeat(80))
+        .tool_call("call_1_0", "Read", &json!({"value": "v1.0"}))
+        .usage(usage(10, 5))
+        .build();
+    let turns = [skill_turn(), read, summary, text_turn("done")];
     let provider = Arc::new(ScriptedProvider::new(turns));
     let mut spec = spec();
     spec.compaction = Some(CompactionSpec {
