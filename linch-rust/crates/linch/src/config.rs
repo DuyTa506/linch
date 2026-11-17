@@ -5,7 +5,10 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, ToolSearch, Workers};
-pub use linch_tools::{DockerPolicy, ExecutionConfig, SandboxPolicy};
+pub use linch_tools::{
+    DockerPolicy, ExecutionConfig, RemoteChunk, RemoteCommand, RemoteError, RemoteExec,
+    RemotePolicy, SandboxPolicy,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::profile::Profile;
@@ -79,8 +82,11 @@ pub struct AgentConfig {
     pub bash: bool,
     /// Where `Bash` runs its commands (see [`ExecutionConfig`]): `local`,
     /// directly as the process's user, when absent; `sandbox` (Landlock,
-    /// seccomp and rlimits) or `docker`. A non-local backend is part of the
-    /// run contract, through `Bash`'s description. Unused without `bash`.
+    /// seccomp and rlimits), `docker`, or `remote` (a host the agent's
+    /// client supplies, which only a host that serves it can open: see
+    /// [`AgentConfig::open_with_remote`]). A non-local backend is part of
+    /// the run contract, through `Bash`'s description. Unused without
+    /// `bash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionConfig>,
     /// Permission rules. Absent: mode `default` (read tools run, write and
@@ -195,6 +201,17 @@ pub struct AgentConfig {
     /// process (a worker, a second server) count separately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_provider_concurrency: Option<NonZeroU32>,
+}
+
+impl AgentConfig {
+    /// Whether this agent's `Bash` runs its commands on a remote host: a
+    /// `remote` backend, with `Bash` registered (a `workspace`, and `bash`
+    /// on). Only such an agent needs a live client connection; one without
+    /// `Bash` never starts a command, whatever backend its config names.
+    pub fn runs_bash_remotely(&self) -> bool {
+        let remote = matches!(self.execution, Some(ExecutionConfig::Remote(_)));
+        remote && self.bash && self.workspace.is_some()
+    }
 }
 
 fn is_false(value: &bool) -> bool {

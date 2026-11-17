@@ -6,7 +6,6 @@ mod control;
 pub(crate) mod process;
 
 use std::collections::BTreeMap;
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +17,7 @@ use linch_core::{
 use serde_json::json;
 use tokio::time::Instant;
 
-use crate::exec::{ExecutionBackend, Launch, LocalShell, Shell};
+use crate::exec::{ExecutionBackend, Exit, Launch, LocalShell, Shell};
 use crate::input::{coded, flag, optional_count, schema, string};
 use background::StartError;
 use process::{End, Finished};
@@ -26,15 +25,26 @@ use process::{End, Finished};
 pub use background::{MAX_RUNNING, Processes};
 pub use control::{BashKill, BashOutput, NO_SUCH_PROCESS_CODE};
 
+/// The status line of a remote command whose end is unknown: its host went
+/// quiet, or did not confirm a kill.
+pub(crate) const INTERRUPTED: &str = "[interrupted: the remote host stopped answering, so the \
+     command's outcome is unknown; it may still be running]";
+
+/// The status line of a remote command that printed more than the server
+/// takes (`exec::remote::OUTPUT_BUDGET`) and was killed.
+pub(crate) const OUTPUT_LIMIT: &str = "[output limit reached (256 MiB); the command was killed]";
+
 /// Timeout when the call gives none, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 /// Longest timeout a call may ask for, in milliseconds.
 const MAX_TIMEOUT_MS: u64 = 1_800_000;
 
-/// How long before the call's deadline the command is killed, so the kill,
-/// the pipe drain and the result fit before the scheduler drops the call.
-const DEADLINE_MARGIN: Duration = Duration::from_millis(100);
+/// How long before the call's deadline a local command is killed, so the
+/// kill, the pipe drain and the result fit before the scheduler drops the
+/// call. A remote command's kill is a round trip: see
+/// [`Shell::deadline_margin`].
+pub(crate) const DEADLINE_MARGIN: Duration = Duration::from_millis(100);
 
 /// Host variables passed through to the shell; nothing else is inherited,
 /// so the host's credentials stay out of the command's environment.
@@ -51,8 +61,9 @@ const ALLOWED_ENV: [&str; 9] = [
 /// call). Each stream keeps its first 4000 and last 26000 bytes.
 ///
 /// A call with a [`ToolContext::deadline`] (the scheduler's call timeout)
-/// cuts its timeout to end 100 ms before it, so the output so far reaches
-/// the model instead of a generic timeout.
+/// cuts its timeout to end 100 ms before it (about 6 s for a `remote`
+/// command, whose kill is a round trip to its host), so the output so far
+/// reaches the model instead of a generic timeout.
 ///
 /// With [`Bash::with_processes`], `run_in_background` starts the command
 /// in that registry and returns its id at once; [`BashOutput`] reads it and
@@ -201,11 +212,14 @@ impl Tool for Bash {
                 .start(command, Duration::from_millis(timeout_ms), &ctx)
                 .await;
         }
-        let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline);
         let spawned = (self.shell)
             .spawn(self.launch(command, &ctx, false))
             .await
             .map_err(|error| self.spawn_failed(error))?;
+        // After the spawn, which a remote host may take seconds to answer:
+        // the margin counts from when the command runs.
+        let margin = |left| self.shell.deadline_margin(left);
+        let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline, margin);
         let finished = process::run(spawned, timeout, &ctx.cancel)
             .await
             .map_err(|error| self.spawn_failed(error))?;
@@ -271,14 +285,18 @@ impl Bash {
     }
 }
 
-/// `timeout`, cut to end [`DEADLINE_MARGIN`] before `deadline` (at least
-/// 1 ms).
-fn fit(timeout: Duration, deadline: Option<Instant>) -> Duration {
+/// `timeout`, cut to end `margin` (given the time left) before `deadline`
+/// (at least 1 ms).
+fn fit(
+    timeout: Duration,
+    deadline: Option<Instant>,
+    margin: impl FnOnce(Duration) -> Duration,
+) -> Duration {
     let Some(deadline) = deadline else {
         return timeout;
     };
     let left = deadline.saturating_duration_since(Instant::now());
-    let left = left.saturating_sub(DEADLINE_MARGIN);
+    let left = left.saturating_sub(margin(left));
     timeout.min(left.max(Duration::from_millis(1)))
 }
 
@@ -288,17 +306,15 @@ fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
     let (stdout, out_cut) = finished.stdout.render();
     let (stderr, err_cut) = finished.stderr.render();
     let (status, failure): (String, Option<(&str, JsonValue)>) = match finished.end {
-        End::Exited(status) => match (status.code(), status.signal()) {
-            (Some(0), _) => ("[exit code 0]".into(), None),
-            (Some(code), _) => (
-                format!("[exit code {code}]"),
-                Some(("exit_status", json!({"exit_code": code}))),
-            ),
-            (None, signal) => (
-                format!("[killed by signal {}]", signal.unwrap_or(0)),
-                Some(("exit_status", json!({"signal": signal}))),
-            ),
-        },
+        End::Exited(Exit::Code(0)) => ("[exit code 0]".into(), None),
+        End::Exited(Exit::Code(code)) => (
+            format!("[exit code {code}]"),
+            Some(("exit_status", json!({"exit_code": code}))),
+        ),
+        End::Exited(Exit::Signal(signal)) => (
+            format!("[killed by signal {signal}]"),
+            Some(("exit_status", json!({"signal": signal}))),
+        ),
         End::TimedOut => (
             format!("[timed out after {timeout_ms} ms; process group killed]"),
             Some(("timeout", JsonValue::Null)),
@@ -307,6 +323,8 @@ fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
             "[aborted; process group killed]".into(),
             Some(("aborted", JsonValue::Null)),
         ),
+        End::OutputLimit => (OUTPUT_LIMIT.into(), Some(("output_limit", JsonValue::Null))),
+        End::Interrupted => (INTERRUPTED.into(), Some(("interrupted", JsonValue::Null))),
     };
     let mut parts = Vec::new();
     if !stdout.is_empty() {

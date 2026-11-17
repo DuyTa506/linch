@@ -155,6 +155,15 @@ impl BackgroundAgents {
                 "no tenant or local root serves {namespace:?}"
             )));
         };
+        // After the tenant's admission, which may have held it to a remote
+        // host: that host is a client connection, which a worker lacks.
+        if config.runs_bash_remotely() {
+            return Err(refused(
+                "the remote execution backend runs its commands in a live client \
+                 connection, which a worker does not have; a worker cannot run this agent"
+                    .into(),
+            ));
+        }
         config.stores = StoreConfig::Postgres {
             dsn: self.dsn.clone(),
             max_connections,

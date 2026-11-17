@@ -141,8 +141,9 @@ pub mod code {
     pub const INVALID_STEER: i64 = -32038;
     /// The agent cannot run in the background, so `schedule.create` and
     /// `job.enqueue` refuse it: `data.reason` is `memory_store` (its runs
-    /// would live in this connection only), `host_tools` or `callbacks`
-    /// (they answer on this connection, which a background run has not).
+    /// would live in this connection only), `host_tools`, `callbacks` or
+    /// `remote_execution` (they answer on this connection, which a
+    /// background run has not).
     pub const NOT_BACKGROUND: i64 = -32040;
     /// The agent's namespace has no schedule with that id.
     pub const SCHEDULE_NOT_FOUND: i64 = -32041;

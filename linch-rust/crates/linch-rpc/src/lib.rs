@@ -321,9 +321,9 @@
 //! These methods queue runs that a worker runs in the background, never
 //! this connection: `linch-server` with a `worker` section, on the same
 //! database and schema (a stdio server never runs them). Each names an
-//! open `agent` with Postgres stores and no host tools or callbacks
-//! (else `-32040`, `data.reason` `memory_store`, `host_tools` or
-//! `callbacks`). Its namespace scopes the schedules and jobs, and its
+//! open `agent` with Postgres stores, no host tools or callbacks and no
+//! `remote` execution backend for its `Bash` (else `-32040`, `data.reason`
+//! `memory_store`, `host_tools`, `callbacks` or `remote_execution`). Its namespace scopes the schedules and jobs, and its
 //! config as opened, without its store DSN, is stored with each one: the
 //! worker opens it again for every attempt and checks it against the
 //! tenant's allowlists again. Its secrets stay in that stored config,
@@ -392,6 +392,38 @@
 //! as details; when `data.code` is a string it is the error's `code`, the
 //! class `spec.tool_retry` matches. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
+//!
+//! **`exec.start`**, **`exec.read`** and **`exec.kill`** run the commands of
+//! an agent whose config says `"execution": {"backend": "remote"}` in the
+//! client that opened it ([`ExecStartParams`](protocol::ExecStartParams),
+//! [`ExecReadParams`](protocol::ExecReadParams),
+//! [`ExecKillParams`](protocol::ExecKillParams)); the config is all the
+//! declaration there is. `exec.start` `{agent, exec_id, command, cwd?,
+//! env?, background?, session_id}` starts a command: `cwd` is the policy's
+//! (the host's choice when absent) and `env` is the server's allowlisted
+//! variables without its `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR`, so
+//! no server secret or identity crosses. `exec.read` `{agent, exec_id,
+//! wait_ms}` is a long poll: the host answers at once when the command
+//! printed something or ended, else after `wait_ms`, with
+//! `{"stdout"?, "stderr"?, "exit"?}`, `exit` being `{"code": n}` or
+//! `{"signal": n}` and coming once, after the output it follows; the host
+//! forgets the command then. `exec.kill` `{agent, exec_id}` kills the
+//! command and what it started, and the host answers once it is dead with
+//! the same chunk. The server enforces the timeout and the cancel: it sends
+//! `exec.kill`, and reports the command as timed out or killed only when
+//! the host answered with the command's `exit`. A host that stops
+//! answering reads, errors, closes its connection, does not confirm a kill
+//! (an answer without `exit`) or leaves a start unanswered, unreadable or
+//! late (only an error answer proves the command did not start) makes the
+//! call `interrupted`
+//! (`[interrupted ...]`, code `interrupted`): the command's outcome is
+//! unknown and none is invented. A command still running when its
+//! connection closes belongs to a host that is gone, so the host must kill
+//! its commands then. The commands run wherever the host runs them, with
+//! the host's own isolation; the server's `execution` allowlist for a
+//! tenant must list the remote entry exactly. The agent cannot run in a
+//! worker or on a schedule (unless it has no `Bash`), and with a policy that does not set
+//! `shared_workspace` it has no file tools.
 //!
 //! **`hook.call`** `{agent, point, policy_id, request}`
 //! ([`HookCallParams`](protocol::HookCallParams)) asks a callback about one
@@ -522,7 +554,7 @@
 //! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model, truncated?}` |
 //! | -32037 | provider request failed | the provider could not be reached or answered with an error; `data: {kind, status?}`, `kind` `unreachable`, `status`, `invalid_request` or `other`; the message is one fixed text per kind: no key, URL or vendor words |
 //! | -32038 | invalid steer | `RunError::InvalidSteer`: the text of a `run.steer` is blank or over 16 KiB, its `id` is not usable, or the run is idle (queued, or running with no server driving it); nothing was written; `data: {reason}` |
-//! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
+//! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools`, `callbacks` or `remote_execution` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |
 //! | -32043 | job not found | no job with that id in the agent's namespace, or its history was pruned |

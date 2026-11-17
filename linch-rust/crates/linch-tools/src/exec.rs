@@ -12,12 +12,16 @@
 //! | `local` | Directly as the process's user (`LocalShell`) |
 //! | `sandbox` | Under Landlock, a seccomp filter and rlimits, with a private home per session ([`SandboxPolicy`]) |
 //! | `docker` | In a fresh container per command, the workspace mounted at the same path ([`DockerPolicy`]) |
+//! | `remote` | On a host the agent's client supplies ([`RemotePolicy`], [`RemoteExec`]) |
 //!
 //! The file tools stay in this process for every backend: the workspace is
 //! the same directory on the host (bind-mounted at its own path in a
-//! container), so a file `Bash` writes is the file `Read` reads.
+//! container), so a file `Bash` writes is the file `Read` reads. A remote
+//! host is somewhere else, so its backend registers no file tools unless
+//! its policy says the host shares the workspace.
 
 mod docker;
+mod remote;
 mod sandbox;
 
 use std::collections::BTreeMap;
@@ -34,16 +38,22 @@ use thiserror::Error;
 use tokio::process::Command;
 
 pub use docker::DockerPolicy;
+pub(crate) use remote::RemoteRun;
+pub use remote::{
+    Exit, READ_WAIT, RemoteChunk, RemoteCommand, RemoteError, RemoteExec, RemotePolicy,
+};
 pub use sandbox::SandboxPolicy;
 
 use crate::LocalFs;
-use crate::bash::process::{self, Spawned};
+use crate::bash::DEADLINE_MARGIN;
+use crate::bash::process::{self, Spawned, Started};
 
 /// Which execution backend an agent's tools use, as config data.
 ///
 /// `{"backend": "local"}` is the default. The others carry their policy:
 /// `{"backend": "sandbox", "network": false, ...}` (see [`SandboxPolicy`])
-/// and `{"backend": "docker", "image": "...", ...}` (see [`DockerPolicy`]).
+/// `{"backend": "docker", "image": "...", ...}` (see [`DockerPolicy`]) and
+/// `{"backend": "remote", ...}` (see [`RemotePolicy`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionConfig {
@@ -53,6 +63,8 @@ pub enum ExecutionConfig {
     Sandbox(SandboxPolicy),
     /// Commands run in a Docker container.
     Docker(DockerPolicy),
+    /// Commands run on a host the agent's client supplies.
+    Remote(RemotePolicy),
 }
 
 impl Default for ExecutionConfig {
@@ -67,12 +79,13 @@ impl ExecutionConfig {
         matches!(self, Self::Local {})
     }
 
-    /// The backend's name: `local`, `sandbox` or `docker`.
+    /// The backend's name: `local`, `sandbox`, `docker` or `remote`.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Local {} => "local",
             Self::Sandbox(_) => "sandbox",
             Self::Docker(_) => "docker",
+            Self::Remote(_) => "remote",
         }
     }
 }
@@ -95,6 +108,14 @@ pub enum ExecutionError {
         /// The program.
         program: String,
     },
+    /// The `remote` backend was opened with no host to run the commands:
+    /// it needs a live connection, which a worker or a schedule has none of.
+    #[error(
+        "the remote backend needs a connected host to run its commands: open the agent over a \
+         client connection that serves exec.start, exec.read and exec.kill; it cannot run in a \
+         worker or from a schedule"
+    )]
+    NoHost,
     /// The backend does not run on this platform.
     #[error("the {0} backend is not supported on this platform")]
     Unsupported(&'static str),
@@ -140,7 +161,8 @@ impl ExecutionBackend {
         }
     }
 
-    /// The backend `config` names over `fs`.
+    /// The backend `config` names over `fs`, with no host: the `remote`
+    /// backend fails (see [`Self::open_with_host`]).
     ///
     /// Blocks on the file system and, for the sandbox, starts a thread that
     /// checks the kernel enforces the whole policy, so call it from a
@@ -149,8 +171,22 @@ impl ExecutionBackend {
     /// Raises:
     ///     ExecutionError: If the backend cannot confine what its policy
     ///         says on this host (no Landlock ABI 6, no `prlimit`, no
-    ///         `docker`), or its policy is invalid.
+    ///         `docker`), its policy is invalid, or it is `remote`.
     pub fn open(fs: Arc<LocalFs>, config: &ExecutionConfig) -> Result<Self, ExecutionError> {
+        Self::open_with_host(fs, config, None)
+    }
+
+    /// The backend `config` names over `fs`; a `remote` one runs its
+    /// commands through `host`.
+    ///
+    /// Raises:
+    ///     ExecutionError: As for [`Self::open`], and [`ExecutionError::NoHost`]
+    ///         when `config` is `remote` and `host` is `None`.
+    pub fn open_with_host(
+        fs: Arc<LocalFs>,
+        config: &ExecutionConfig,
+        host: Option<Arc<dyn RemoteExec>>,
+    ) -> Result<Self, ExecutionError> {
         let (shell, describe): (Arc<dyn Shell>, _) = match config {
             ExecutionConfig::Local {} => return Ok(Self::local(fs)),
             ExecutionConfig::Sandbox(policy) => {
@@ -159,6 +195,11 @@ impl ExecutionBackend {
             ExecutionConfig::Docker(policy) => {
                 let shell = docker::DockerShell::open(policy.clone(), fs.root())?;
                 shell.reap_stale();
+                (Arc::new(shell), policy.describe())
+            }
+            ExecutionConfig::Remote(policy) => {
+                let host = host.ok_or(ExecutionError::NoHost)?;
+                let shell = remote::RemoteShell::new(host, policy.clone());
                 (Arc::new(shell), policy.describe())
             }
         };
@@ -188,6 +229,17 @@ impl ExecutionBackend {
     /// Whether commands run confined: `false` for the local backend.
     pub fn sandboxed(&self) -> bool {
         !self.config.is_local()
+    }
+
+    /// Whether the file tools may act in this backend's world: `false`
+    /// for a `remote` backend whose host does not share the workspace,
+    /// since the file tools would read and write the server's directory
+    /// while commands run somewhere else.
+    pub fn has_file_tools(&self) -> bool {
+        match &self.config {
+            ExecutionConfig::Remote(policy) => policy.shared_workspace,
+            _ => true,
+        }
     }
 
     /// What the backend confines, in one sentence for the model; `None` for
@@ -244,19 +296,27 @@ pub(crate) struct Launch<'a> {
     pub lifeline: bool,
 }
 
-/// The shell half of an execution backend: how a command is started. The
-/// command must lead a new process group with stdout and stderr piped, and
-/// with `lifeline` read a pipe on stdin whose end of file kills the group
-/// ([`process::LIFELINE`]); `supervise` does the rest the same way for
-/// every backend.
+/// The shell half of an execution backend: how a command is started. A
+/// local command must lead a new process group with stdout and stderr
+/// piped, and with `lifeline` read a pipe on stdin whose end of file kills
+/// the group ([`process::LIFELINE`]); `supervise` does the rest the same
+/// way for every backend. A remote command is run by its host, and
+/// supervised through the host's answers.
 #[async_trait]
 pub(crate) trait Shell: Send + Sync + fmt::Debug {
     /// Start `launch`.
-    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned>;
+    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started>;
 
     /// What a spawn error names as the program that did not start.
     fn program(&self) -> &str {
         "/bin/sh"
+    }
+
+    /// How long before a call's deadline (`left` away) a command of this
+    /// shell must end, so its kill and the result fit before the scheduler
+    /// drops the call.
+    fn deadline_margin(&self, _left: Duration) -> Duration {
+        DEADLINE_MARGIN
     }
 
     /// Drop what the shell keeps for `session`.
@@ -270,12 +330,12 @@ pub(crate) struct LocalShell;
 
 #[async_trait]
 impl Shell for LocalShell {
-    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned> {
+    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started> {
         let child = process::spawn(launch.command, launch.cwd, launch.env, launch.lifeline)?;
-        Ok(Spawned {
+        Ok(Started::Process(Spawned {
             child,
             cleanup: None,
-        })
+        }))
     }
 }
 

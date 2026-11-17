@@ -4,8 +4,8 @@ The transport is the child's stdin and stdout or a Unix socket, one message
 per line (`StreamTransport`), or a WebSocket, one per text frame. One reader
 task reads every server message: responses resolve pending calls,
 `run.event` (consecutive envelopes of one run, as one list) and `run.end`
-go to the run's queue, and `tool.call` and `hook.call` run as tasks that
-`$/cancelRequest` cancels.
+go to the run's queue, and `tool.call`, `hook.call` and the `exec.*` requests of a remote execution
+host run as tasks that `$/cancelRequest` cancels.
 
 At most `NOTIFICATION_CAPACITY` `run.event` notifications wait unread
 across the connection's runs, as in the Rust client. Past that the reader
@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -35,6 +36,7 @@ import orjson
 
 from .callbacks import Callback
 from .errors import ConnectionClosed, LinchError, error_from, run_end_error
+from .exec_host import ExecStart, ExecutionHost
 from .tools import HostTool, ToolContext, ToolError, ToolOutput
 
 JsonObject = dict[str, Any]
@@ -105,6 +107,32 @@ class _Pending:
 class _Handlers:
     tools: Mapping[str, HostTool]
     callbacks: Mapping[tuple[str, str], Callback]
+    execution: ExecutionHost | None = None
+
+
+_EXEC_METHODS = ("exec.start", "exec.read", "exec.kill")
+
+
+async def _exec(host: ExecutionHost, method: str, params: JsonObject, agent: str) -> JsonObject:
+    """Answer one `exec.*` request with `host`; `agent` is the connection's name for it."""
+    exec_id = str(params.get("exec_id", ""))
+    if method == "exec.start":
+        await host.start(
+            ExecStart(
+                agent=agent,
+                exec_id=exec_id,
+                command=str(params.get("command", "")),
+                cwd=params.get("cwd"),
+                env=dict(params.get("env") or {}),
+                background=bool(params.get("background", False)),
+                session_id=str(params.get("session_id", "")),
+            )
+        )
+        return {}
+    if method == "exec.read":
+        wait = int(params.get("wait_ms", 0)) / 1000
+        return (await host.read(agent, exec_id, wait)).wire()
+    return (await host.kill(agent, exec_id)).wire()
 
 
 class _Refused(Exception):
@@ -171,6 +199,9 @@ class Connection:
         self._room = asyncio.Semaphore(NOTIFICATION_CAPACITY)
         self._agents: dict[str, _Handlers] = {}
         self._workflows: dict[str, Callable[[JsonObject], None]] = {}
+        # Tells this connection's agents from another's: handles are numbered
+        # per connection, and one execution host may serve several.
+        self._tag = uuid.uuid4().hex[:8]
         self._served: dict[Any, asyncio.Task[None]] = {}
         self._closed: str | None = None
         self._task = asyncio.create_task(self._read())
@@ -180,9 +211,10 @@ class Connection:
         agent: str,
         tools: Mapping[str, HostTool],
         callbacks: Mapping[tuple[str, str], Callback],
+        execution: ExecutionHost | None = None,
     ) -> None:
-        """Route the server's `tool.call` and `hook.call` for `agent` to these."""
-        self._agents[agent] = _Handlers(tools, callbacks)
+        """Route the server's `tool.call`, `hook.call` and `exec.*` for `agent` to these."""
+        self._agents[agent] = _Handlers(tools, callbacks, execution)
 
     def watch_workflow(self, run_id: str, sink: Callable[[JsonObject], None]) -> None:
         """Pass each `workflow.event` of workflow `run_id` to `sink`, in order."""
@@ -193,8 +225,14 @@ class Connection:
         self._workflows.pop(run_id, None)
 
     def unbind(self, agent: str) -> None:
-        """Forget the handlers of a closed agent."""
-        self._agents.pop(agent, None)
+        """Forget the handlers of a closed agent, and kill its remote commands."""
+        handlers = self._agents.pop(agent, None)
+        if handlers is not None and handlers.execution is not None:
+            handlers.execution.close(self._scoped(agent))
+
+    def _scoped(self, agent: str) -> str:
+        """The name an execution host knows `agent` by: unique across connections."""
+        return f"{self._tag}/{agent}"
 
     async def request(self, method: str, params: JsonObject) -> JsonObject:
         """Call `method` and return its result object."""
@@ -325,6 +363,11 @@ class Connection:
             if found is None:
                 raise _Refused(_METHOD_NOT_FOUND, f"no callback {key!r}")
             return await found.fn(params.get("request", {}))
+        if method in _EXEC_METHODS:
+            host = handlers.execution if handlers else None
+            if host is None:
+                raise _Refused(_METHOD_NOT_FOUND, "this agent has no execution host")
+            return await _exec(host, method, params, self._scoped(str(params.get("agent", ""))))
         raise _Refused(_METHOD_NOT_FOUND, f"unknown method {method!r}")
 
     def _shutdown(self, reason: str) -> None:
@@ -336,5 +379,9 @@ class Connection:
         for queue in self._runs.values():
             queue.end(RunEnd(ConnectionClosed(reason)))
         self._runs.clear()
+        for agent, handlers in self._agents.items():
+            if handlers.execution is not None:
+                # The server is gone: no command may outlive it.
+                handlers.execution.close(self._scoped(agent))
         for task in self._served.values():
             task.cancel()

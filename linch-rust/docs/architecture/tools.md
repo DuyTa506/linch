@@ -363,6 +363,7 @@ background commands through the same shell.
 | `local` | `LocalShell` (`exec.rs:264`) | Nothing: `process::spawn`, byte for byte the old `Bash` (golden tests in `crates/linch-tools/tests/execution_golden.rs` and `crates/linch/tests/execution_golden.rs`) |
 | `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp and `prlimit` around the shell; a private `HOME`/`TMPDIR` per session |
 | `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` per command; `docker rm -f` as the cleanup |
+| `remote` | `RemoteShell` (`exec/remote.rs`) | No local process: a host runs the command (see below) |
 
 A non-local backend ends `Bash`'s description with
 `ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): the model
@@ -410,6 +411,31 @@ at its own path) with the environment passed by name. A background command
 runs under `DOCKER_LIFELINE` (`docker.rs:118`), whose watchdog runs
 `docker rm -f` before killing the group. Not verified against a daemon in CI
 here; `crates/linch-tools/tests/docker.rs` skips without one.
+
+**Remote.** `spawn` returns a `Started` (`bash/process.rs`): a local
+`Spawned` child, or a `RemoteRun` whose `supervise` (`exec/remote.rs`) polls
+its host instead of a pipe. The host is the public `RemoteExec` trait
+(`start`, `read` as a long poll, `kill`); `linch-rpc` implements it over the
+connection's `Peer` as `exec.start`, `exec.read` and `exec.kill`
+(`server/exec.rs`), and `AgentConfig::open_with_remote` takes it, so without
+one (a worker, a schedule, the Python extension) `ExecutionBackend::open`
+fails with `ExecutionError::NoHost`. `End::Exited` carries an `Exit` (code or
+signal) instead of an `ExitStatus`, and `End::Interrupted` means the result
+is unknown: the server reports a command as timed out or aborted only after
+the host confirmed `kill` with an exit, and otherwise as interrupted (also
+after a lost read, or a start whose answer was lost: only `Rejected` proves
+the command never ran), so it never reports a result that did not come
+back. Reads that answer next to nothing at once are paced, a command past
+256 MiB of output is killed and ends `End::OutputLimit` (`interrupted` if the
+host does not confirm the kill), and a remote command ends `KILL_MARGIN`
+(6.1 s, at most half of a deadline under about 12 s, `Shell::deadline_margin`)
+before the scheduler's deadline. A dropped call sends a detached kill. The
+server's `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR` are not sent, and
+`workspace_tools` registers no file tools unless the policy's
+`shared_workspace` is on (`ExecutionBackend::has_file_tools`): they would act
+on the server's directory while the commands run elsewhere. The policy is in
+`Bash`'s description, so in the contract. See
+[Remote execution](../usage/remote-execution.md).
 
 ## Virtual filesystem and result offload
 

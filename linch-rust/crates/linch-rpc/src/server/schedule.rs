@@ -63,7 +63,7 @@ impl Background {
 fn not_background(handle: &str, reason: &str) -> ErrorObject {
     let message = format!(
         "agent {handle:?} cannot run in the background ({reason}): it needs \
-         Postgres stores and no host tools or callbacks"
+         Postgres stores, no host tools or callbacks and no remote execution"
     );
     ErrorObject::new(code::NOT_BACKGROUND, message).with_data(json!({ "reason": reason }))
 }
@@ -86,6 +86,10 @@ fn definition(config: &AgentConfig, tools: bool, callbacks: bool) -> Result<Stri
     }
     if callbacks {
         return Err("callbacks");
+    }
+    // Its commands run in a live client connection, which a worker lacks.
+    if config.runs_bash_remotely() {
+        return Err("remote_execution");
     }
     if !matches!(config.stores, StoreConfig::Postgres { .. }) {
         return Err("memory_store");

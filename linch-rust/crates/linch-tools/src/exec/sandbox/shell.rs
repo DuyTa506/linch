@@ -28,7 +28,7 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use super::{ETC_READ_PATHS, SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
-use crate::bash::process::{self, Spawned};
+use crate::bash::process::{self, Spawned, Started};
 use crate::exec::{ExecutionError, Launch, Shell};
 
 /// Devices a command may read and write.
@@ -226,7 +226,7 @@ fn limits(policy: &SandboxPolicy, tasks: u64) -> Vec<String> {
 
 #[async_trait]
 impl Shell for SandboxShell {
-    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned> {
+    async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started> {
         let home = self.home(launch.session);
         let mut env = launch.env.clone();
         for key in ["HOME", "TMPDIR"] {
@@ -258,10 +258,10 @@ impl Shell for SandboxShell {
         let child = received
             .await
             .map_err(|_| io::Error::other("the sandbox spawner thread ended early"))??;
-        Ok(Spawned {
+        Ok(Started::Process(Spawned {
             child,
             cleanup: None,
-        })
+        }))
     }
 
     fn close_session(&self, session: &SessionId) {
@@ -418,7 +418,7 @@ mod tests {
             session: &session,
             lifeline: true,
         };
-        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap();
+        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap().into_process();
         let mut held = child.stdin.take();
         let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
         assert!(
@@ -444,7 +444,7 @@ mod tests {
             session: &session,
             lifeline: false,
         };
-        let child = shell.spawn(launch).await.unwrap().child;
+        let child = shell.spawn(launch).await.unwrap().into_process().child;
         let out = child.wait_with_output().await.unwrap();
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
