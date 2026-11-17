@@ -11,7 +11,7 @@ use crate::events::kinds::SteerReceivedEvent;
 use crate::ids::RunId;
 use crate::journal::Journal;
 use crate::run::RunStatus;
-use crate::runner::{Arrival, steers_of};
+use crate::runner::{Arrival, Unsent, steers_of};
 use crate::store::StoreError;
 
 /// Longest steer text, in bytes.
@@ -59,7 +59,8 @@ impl Agent {
     ///         for an unknown run, (`RunLeased`) when another process drives
     ///         it, or when a read or write fails; `Terminal` for a finished
     ///         run; `SteerQueueFull` at [`MAX_PENDING_STEERS`] undelivered
-    ///         steers; `Journal` when the write failed; `Store` (`Conflict`)
+    ///         steers, counting those still waiting for the run's next step,
+    ///         which is answered at once; `Journal` when the write failed; `Store` (`Conflict`)
     ///         when the run stopped before it took the steer (send it again
     ///         with the same id).
     pub async fn steer(
@@ -107,7 +108,11 @@ impl Agent {
                 Ok(answered) => answered?,
                 Err(_) => return Err(self.stopped(run_id).await),
             },
-            Err(arrival) => self.steer_stored(run_id, arrival, record.status).await?,
+            Err(Unsent::Idle(arrival)) => self.steer_stored(run_id, arrival, record.status).await?,
+            Err(Unsent::Full) => {
+                let max = MAX_PENDING_STEERS;
+                return Err(RunError::SteerQueueFull { run_id, max });
+            }
         }
         Ok(id)
     }

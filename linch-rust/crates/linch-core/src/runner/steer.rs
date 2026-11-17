@@ -31,30 +31,45 @@ pub(crate) struct Arrival {
     pub(crate) reply: oneshot::Sender<Result<(), RunError>>,
 }
 
-/// The inbox of each run this process drives.
+/// The inbox of each run this process drives: at most
+/// [`MAX_PENDING_STEERS`] arrivals wait in it for the run's next step, so
+/// steers waiting on a long tool do not pile up behind their callers.
 #[derive(Default)]
-pub(crate) struct Steering(Mutex<HashMap<RunId, mpsc::UnboundedSender<Arrival>>>);
+pub(crate) struct Steering(Mutex<HashMap<RunId, mpsc::Sender<Arrival>>>);
+
+/// Why a steer did not reach the inbox of a run this process drives.
+pub(crate) enum Unsent {
+    /// The run has no inbox here: the steer comes back to be written under
+    /// a claim.
+    Idle(Arrival),
+    /// The inbox already holds [`MAX_PENDING_STEERS`] arrivals.
+    Full,
+}
 
 impl Steering {
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, mpsc::UnboundedSender<Arrival>>> {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, mpsc::Sender<Arrival>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Hand `arrival` to the run `run_id` that this process drives; it comes
-    /// back when there is none.
-    pub(crate) fn send(&self, run_id: &RunId, arrival: Arrival) -> Result<(), Arrival> {
+    /// Hand `arrival` to the run `run_id` that this process drives, or say
+    /// why not.
+    pub(crate) fn send(&self, run_id: &RunId, arrival: Arrival) -> Result<(), Unsent> {
         let sender = self.map().get(run_id).cloned();
-        match sender {
-            Some(sender) => sender.send(arrival).map_err(|error| error.0),
-            None => Err(arrival),
+        let Some(sender) = sender else {
+            return Err(Unsent::Idle(arrival));
+        };
+        match sender.try_send(arrival) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(Unsent::Full),
+            Err(mpsc::error::TrySendError::Closed(arrival)) => Err(Unsent::Idle(arrival)),
         }
     }
 }
 
 /// A driven run's registration: removed when the run stops being driven.
 pub(super) struct Inbox {
-    receiver: mpsc::UnboundedReceiver<Arrival>,
-    sender: mpsc::UnboundedSender<Arrival>,
+    receiver: mpsc::Receiver<Arrival>,
+    sender: mpsc::Sender<Arrival>,
     agent: Arc<AgentInner>,
     run_id: RunId,
 }
@@ -105,7 +120,7 @@ impl Runner {
     /// Take steers for this run: register its inbox, and read what its
     /// durable `events` already hold. Called once the run holds its lease.
     pub(super) fn attach_steering(&mut self, events: &[Envelope]) {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(MAX_PENDING_STEERS);
         let run_id = self.run.run_id.clone();
         self.agent
             .steering
