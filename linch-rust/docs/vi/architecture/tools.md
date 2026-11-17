@@ -169,7 +169,7 @@ qua các bước này. Mỗi bước vắng mặt, và không tốn gì, khi tr�
    `code` của lỗi hoặc `timeout` có trong danh sách, còn lần thử) đi tới
    `ToolSink::tool_retrying`, nơi ghi và flush một event `tool_retry`,
    rồi chờ (`base_delay_ms` nhân đôi đến `max_delay_ms`, cắt còn phần còn lại của
-   `RETRY_BUDGET`, 5 phút kể từ lần thử đầu; hết thì không retry) và chạy lại.
+   `RETRY_BUDGET`, 5 phút retry cho cả run, mọi lời gọi cộng lại, và về 0 khi resume; hết thì không retry) và chạy lại.
    `error` của event đi qua redactor, rồi bị cắt còn `ERROR_BYTES`. Một host tool hết
    thời gian bị bỏ bằng `$/cancelRequest`, vốn không có xác nhận trong giao thức, nên
    một lần retry có thể chồng lên handler cũ.

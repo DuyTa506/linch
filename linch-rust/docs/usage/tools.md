@@ -904,8 +904,9 @@ agent.
 **What is never cached.** A tool that is not `read` scope, polls or asks the
 user, and a tool whose run keeps state for the session: the built-in `Read`
 records what the session saw so `Edit` and `Write` may follow, and a hit
-would skip that. Naming such a tool in `tools` is refused when the agent
-opens. Cache `Grep`, `Glob` and your own host tools.
+would skip that; `Skill` and `tool_search` change what the session is
+offered, so a hit would skip that too. Naming such a tool in `tools` is
+refused when the agent opens. Cache `Grep`, `Glob` and your own host tools.
 
 **A hit never skips a check, and skips only the tool's run.** The call has
 already passed validation, the `pre_tool_use` callbacks and permissions, so

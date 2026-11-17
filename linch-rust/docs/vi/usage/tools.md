@@ -899,7 +899,8 @@ memory chúng nằm trong agent.
 
 **Điều gì không bao giờ được cache.** Một tool không phải scope `read`, có polling hoặc hỏi
 người dùng, và một tool mà lần chạy giữ trạng thái cho session: `Read` có sẵn ghi lại điều
-session đã thấy để `Edit` và `Write` có thể theo sau, và một lần hit sẽ bỏ qua việc đó.
+session đã thấy để `Edit` và `Write` có thể theo sau, và một lần hit sẽ bỏ qua việc đó;
+`Skill` và `tool_search` thay đổi những gì session được cung cấp, nên một lần hit cũng bỏ qua điều đó.
 Nêu một tool như vậy trong `tools` bị từ chối khi agent mở. Hãy cache `Grep`, `Glob` và
 các host tool của bạn.
 

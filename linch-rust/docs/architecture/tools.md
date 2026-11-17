@@ -170,8 +170,8 @@ these steps. Each one is absent, and costs nothing, when its field is unset:
    the error `code` or `timeout` is listed, attempts are left) goes to
    `ToolSink::tool_retrying`, which writes and flushes a `tool_retry` event,
    then waits (`base_delay_ms` doubling up to `max_delay_ms`, cut to what is
-   left of `RETRY_BUDGET`, 5 minutes from the first attempt; no retry once
-   it is spent) and runs again. The event's `error` goes through the
+   left of `RETRY_BUDGET`, 5 minutes of retrying for the whole run, all its
+   calls together, and zero again on a resume; no retry once it is spent) and runs again. The event's `error` goes through the
    redactor, then is cut to `ERROR_BYTES`. A timed-out host tool is
    abandoned with `$/cancelRequest`, which has no acknowledgement in the
    protocol, so a retry may overlap the old handler.

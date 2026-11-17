@@ -174,6 +174,9 @@ def tool_middleware(
     fail mode, `closed` by default: the call fails and the tool does not
     run (or, after it ran, its result is withheld).
 
+    A `tool_cache` hit skips the layers: a call served from the cache never
+    reaches this function, so a fail-closed layer does not see it either.
+
     Args:
         policy_id: Stable id of the policy; with the version it enters the
             run contract.
