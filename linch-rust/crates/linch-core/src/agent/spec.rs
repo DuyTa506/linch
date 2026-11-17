@@ -301,7 +301,9 @@ impl AgentSpec {
 /// requests beyond the spec (the skills, a subagent's definition). A run
 /// stores it at creation; resume and approve refuse an agent whose
 /// contract differs. With no features the digest is the one an agent
-/// without them always had.
+/// without them always had. The tool cache's `quota` is left out: it is a
+/// resource cap the operator sets at every admission, not behaviour the run
+/// was made under, so changing it must not strand a stored run.
 pub(crate) fn contract_digest(
     spec: &AgentSpec,
     tools: &[(ToolDefinition, ToolScope)],
@@ -311,6 +313,13 @@ pub(crate) fn contract_digest(
     let tools: Vec<_> = (tools.iter())
         .map(|(definition, scope)| json!({"definition": definition, "scope": scope}))
         .collect();
+    let mut spec = json!(spec);
+    if let Some(cache) = spec
+        .get_mut("tool_cache")
+        .and_then(|cache| cache.as_object_mut())
+    {
+        cache.remove("quota");
+    }
     let mut value = json!({
         "spec": spec,
         "tools": tools,
