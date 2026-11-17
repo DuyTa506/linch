@@ -620,7 +620,12 @@ async fn a_background_subagent_cannot_create_schedules() {
     let run_id = rpc.accepted(method::RUN_START, params).await;
     let ended = rpc.until_end(&run_id).await;
     assert!(ended.error.is_none(), "{:?}", ended.error);
-    assert_eq!(child_codes(&rpc, &agent, &db).await, ["not_allowed"]);
+    // The child may take one or both of the create turns: each is refused.
+    let refused = child_codes(&rpc, &agent, &db).await;
+    assert!(
+        !refused.is_empty() && refused.iter().all(|c| c == "not_allowed"),
+        "{refused:?}"
+    );
     let listed = rpc
         .call(method::SCHEDULE_LIST, json!({"agent": agent}))
         .await

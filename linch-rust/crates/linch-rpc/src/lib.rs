@@ -301,8 +301,10 @@
 //! `session_id` every fire is a new run in that session (a heartbeat), and
 //! a fire is skipped while an earlier fire's job is unfinished or the
 //! session has a live run; without one each fire starts the session
-//! `schedule:<id>:<fire time>`. Missed fires are caught up in order after
-//! downtime. A tenant needs `max_schedules` (`-32004`, `kind: schedules`;
+//! `schedule:<id>:<fire time>`, and a fire is skipped while an earlier
+//! fire's job is unfinished or the tenant holds its `max_queued_jobs`.
+//! Fires missed while every worker was down coalesce into one; the rest
+//! count in `skips`. A tenant needs `max_schedules` (`-32004`, `kind: schedules`;
 //! `-32005` at the cap, counted over its namespaces) and fires at least
 //! `min_schedule_interval_ms` apart (`-32004`, `kind: schedule_interval`).
 //! A taken `id` is `-32042`.

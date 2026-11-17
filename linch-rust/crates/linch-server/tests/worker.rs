@@ -268,7 +268,7 @@ async fn each_fire_runs_once_across_a_killed_server() {
     let created: ScheduleInfo = a.call(method::SCHEDULE_CREATE, &create).await.unwrap();
     assert_eq!(created.fires, 0);
     sleep(Duration::from_millis(1300)).await;
-    // Down for a while: the fires it misses are caught up by the next.
+    // Down for a while: the fires it misses coalesce into the next one.
     crash(first).await;
     sleep(Duration::from_millis(700)).await;
     let (second, socket) = server(dir.path(), "b", &config).await;
@@ -281,7 +281,8 @@ async fn each_fire_runs_once_across_a_killed_server() {
     all_ended(&pool).await;
     terminate(second).await;
 
-    // Every tick from the first fire to the last, each once, no gaps.
+    // Each fire once, on the schedule's grid; the ticks missed while it
+    // was down (or while a fire's job was unfinished) are skips, not runs.
     let fires: Vec<i64> = sqlx::query_scalar(
         "SELECT (extract(epoch FROM fire_at) * 1000)::bigint FROM linch_worker_history \
          WHERE schedule_id = 'tick' ORDER BY fire_at",
@@ -289,11 +290,14 @@ async fn each_fire_runs_once_across_a_killed_server() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert!(fires.len() >= 8, "{fires:?}");
+    assert!(fires.len() >= 4, "{fires:?}");
     assert_eq!(u64::try_from(fires.len()).unwrap(), paused.fires);
     for pair in fires.windows(2) {
-        assert_eq!(pair[1] - pair[0], 250, "{fires:?}");
+        let gap = pair[1] - pair[0];
+        assert!(gap > 0 && gap % 250 == 0, "{fires:?}");
     }
+    // The downtime alone spans at least two ticks.
+    assert!(paused.skips >= 2, "{paused:?}");
     // Each fire is one run in its own session, run to its end.
     let runs = scalar(&pool, "SELECT count(*) FROM linch_runs").await;
     let completed = scalar(
