@@ -23,15 +23,24 @@ Servers: debug binary for correctness, release binary for every measurement.
   so docker behaviour is NOT RUN. The `allow_root` refusal for a tenant is admission only and needs no daemon.
 - B5. No `mcp` package: the MCP server is a minimal JSON-RPC stdio server (extends live/mcp_tiny_server.py).
 
-## Addendum (still before the MCP, tenant and measurement runs)
+## Addendum (written AFTER the first full debug run; the original expectations above were committed first at dac27d4c)
+Rows are judged against the original text. A1 and A2 are corrections of my reading made while writing the MCP and
+BashOutput tests; A3 was found by a failing run and is recorded as a MISMATCH (RED test
+`test_a_background_flood_reads_output_limit_status`), not folded into the expectation.
 - A1. 4.3 corrected after reading agent.md#loop_guard: an MCP tool answering the same text repeatedly ends by loop guard
   at the 3rd identical call+result (`max_identical_tool_calls` 3, reason `repeated_tool_call`); listed in `polls` it is waited on
   until `max_idle_turns` (25) identical answers in a row: 12 calls succeed, 40 calls end by loop guard near call 26.
 - A2. The scripted provider cannot know a random `process_id`, so BashOutput/BashKill scenarios and everything needing a
   dynamic reply use a local programmable OpenAI-compatible gateway (vLLM wire format, no LLM): `ts_fakemodel.py`.
   The scripted provider is still used for the measurements.
-- A3. 3.3: `BashOutput` for an error result carries no metadata to the event stream (events.py docstring), so the
-  documented `status: output_limit` is checked through `error_code` and the text only.
+- A3. 3.3 (found by a failing run): the doc says a background process reads `status: output_limit`; the event stream gives
+  `error_code` and text only (metadata is None for errors, per events.py). Original expectation stands; verdict MISMATCH.
+- A4. 3.5 original text "client SIGKILLed -> expect the command to SURVIVE" is kept: that observation is a MATCH with
+  the expectation, reported as a gap (no host-side lifeline). The brief's "dropped connection reaps the command" is
+  tested separately as 3.5b: server SIGKILLed, client alive, expect the command dead within ~5 s.
+- A5. Controls added after review: the sandbox probes also run on the local backend and only rows that differ count; the
+  LINCH_LOG=debug scan also covers a Postgres-stored agent with a worker and a schedule; the tool cache is also checked
+  across two tenants on Postgres.
 
 ## 1. Bash tool (local backend, scripted provider)
 | id | expected observable | basis |

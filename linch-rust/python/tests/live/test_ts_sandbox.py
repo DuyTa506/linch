@@ -72,8 +72,8 @@ async def open_sandbox(model: Any, server: Server, root: Path, **policy: Any) ->
     )
 
 
-@needs_server
-async def test_sandbox_confines_files_network_syscalls_and_environment() -> None:
+async def probes(execution: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the whole probe list under `execution`; returns (results by name, side effects)."""
     outside = Path(tempfile.mkdtemp(prefix="ts-outside-", dir="/tmp"))
     home_file = Path.home() / ".ts-sbx-probe"
     home_file.write_text("secret-in-home")
@@ -83,6 +83,7 @@ async def test_sandbox_confines_files_network_syscalls_and_environment() -> None
         "2.1-home-write",
         "2.1-home-read",
         "2.1-server-environ",
+        "2.1-test-process-environ",
         "2.2-inet",
         "2.2-unix",
         "2.2-socketpair",
@@ -104,6 +105,7 @@ async def test_sandbox_confines_files_network_syscalls_and_environment() -> None
         bash(f"echo x > {home_file}.new; echo rc=$?"),
         bash(f"cat {home_file}; echo rc=$?"),
         lambda _: bash(f"cat /proc/{box['pid']}/environ; echo rc=$?"),
+        bash(f"head -c 40 /proc/{os.getpid()}/environ | wc -c; echo rc=$?"),
         bash(sock("AF_INET")),
         bash(sock("AF_UNIX")),
         bash(
@@ -126,9 +128,16 @@ async def test_sandbox_confines_files_network_syscalls_and_environment() -> None
         with workspace() as root:
             async with Server(env=server_env()) as server:
                 box["pid"] = server.pid
-                agent = await open_sandbox(model, server, root)
+                config = fake_config(
+                    model,
+                    workspace=str(root),
+                    permissions=skip_dangerous(root),
+                    execution=execution,
+                )
+                agent = await server.open_agent(config)
                 envelopes = await finish(agent, await agent.run("s1", "go"))
                 done = ends(envelopes, "Bash")
+                root_s = str(root)
                 outside_exists = (outside / "outside.txt").exists()
                 home_new = Path(f"{home_file}.new").exists()
                 ok_txt = (root / "ok.txt").read_text() if (root / "ok.txt").exists() else None
@@ -139,8 +148,48 @@ async def test_sandbox_confines_files_network_syscalls_and_environment() -> None
         Path(f"{home_file}.new").unlink(missing_ok=True)
     assert len(done) == len(names), [text_of(d)[:80] for d in done]
     out = dict(zip(names, done, strict=True))
+    side = {
+        "ok_txt": ok_txt,
+        "outside_exists": outside_exists,
+        "home_new": home_new,
+        "root": root_s,
+    }
+    return out, side
+
+
+@needs_server
+async def test_sandbox_confines_files_network_syscalls_and_environment() -> None:
+    controls, _ = await probes({"backend": "local"})
+    out, side = await probes({"backend": "sandbox"})
+    ok_txt, outside_exists, home_new = side["ok_txt"], side["outside_exists"], side["home_new"]
+    differs = []
     for name, end in out.items():
-        record(AREA, name, is_error=end.is_error, code=end.error_code, text=text_of(end)[:700])
+        control = text_of(controls[name])
+        record(
+            AREA,
+            name,
+            is_error=end.is_error,
+            code=end.error_code,
+            text=text_of(end)[:700],
+            local_control=control[:300],
+        )
+        if text_of(end).replace(side["root"], "") != control.replace(side["root"], ""):
+            differs.append(name)
+    # only rows whose result differs from the unconfined local backend count as sandbox evidence
+    record(AREA, "differs-from-local-control", rows=differs)
+    for name in (
+        "2.1-outside-write",
+        "2.1-home-write",
+        "2.1-home-read",
+        "2.1-test-process-environ",
+        "2.2-inet",
+        "2.2-unix",
+        "2.4-clone3",
+        "2.4-io_uring_setup",
+        "2.4-mount-syscall",
+        "2.6-env",
+    ):
+        assert name in differs, f"{name}: the sandbox result equals the unconfined local result"
 
     assert ok_txt == "inside\n"
     assert not outside_exists and "Permission denied" in text_of(out["2.1-outside-write"])

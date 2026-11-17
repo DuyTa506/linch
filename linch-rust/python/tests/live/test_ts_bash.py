@@ -58,7 +58,7 @@ def process_id(text: str) -> str:
 async def test_foreground_timeout_truncation_and_env() -> None:
     steps = [
         bash("echo hi; pwd"),  # 1.1
-        bash("sleep 60", timeout_ms=1500),  # 1.2
+        bash("sleep 3174 & sleep 3175", timeout_ms=1500),  # 1.2: two members of the group
         bash(
             "python3 -c \"import sys; sys.stdout.write('H'*4000 + 'M'*20000 + 'T'*26000)\""
         ),  # 1.3
@@ -76,10 +76,12 @@ async def test_foreground_timeout_truncation_and_env() -> None:
                 )
                 run = await agent.run("s1", "go")
                 envelopes = await finish(agent, run)
+                group_left = descendants(server.pid)
     finally:
         await model.stop()
     done = ends(envelopes, "Bash")
     assert len(done) == len(steps)
+    assert group_left == [], f"the timed-out command's group is still running: {group_left}"
     hello, slept, big, env_out, self_env, ppid_env, failing = done
 
     assert not hello.is_error and str(root) in text_of(hello) and "[exit code 0]" in text_of(hello)

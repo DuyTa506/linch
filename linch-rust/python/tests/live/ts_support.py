@@ -65,7 +65,13 @@ CANARY = "TSCANARY-" + uuid.uuid4().hex
 def record(area: str, name: str, **data: Any) -> None:
     """Append one observation to `$TOOLSEC_RESULTS/<area>.jsonl`."""
     RESULTS.mkdir(parents=True, exist_ok=True)
-    row = {"t": round(time.time(), 3), "test": name, "load1": os.getloadavg()[0], **data}
+    row = {
+        "t": round(time.time(), 3),
+        "test": name,
+        "binary": os.path.basename(os.environ.get("LINCH_SERVER_BIN", "")),
+        "load1": os.getloadavg()[0],
+        **data,
+    }
     with (RESULTS / f"{area}.jsonl").open("a") as handle:
         handle.write(json.dumps(row, default=str) + "\n")
 

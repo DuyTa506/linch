@@ -7,6 +7,7 @@ Expectations are in `toolsec/expectations.md` section 6.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -331,7 +332,7 @@ async def test_tenants_cannot_see_each_others_runs_sessions_workflows_schedules_
 
                     acme = await one.open_agent(cfg("acme"))
                     beta = await two.open_agent(cfg("beta"))
-                    run = await acme.run("shared-session-name", "go")
+                    run = await acme.run("shared-session-name", "acme-secret-prompt-71")
                     await run.result()
                     schedule = await acme.create_schedule("go", interval_ms=120_000, id="mine")
                     job = await acme.enqueue("s2", "go")
@@ -366,7 +367,7 @@ async def test_tenants_cannot_see_each_others_runs_sessions_workflows_schedules_
 
                     probes["workflow_same_id"] = await run_workflow(beta, beta_flow, run_id="wf-1")
                     # a session guess: beta's run in a session of the same name does not see acme's
-                    beta_run = await beta.run("shared-session-name", "go")
+                    beta_run = await beta.run("shared-session-name", "beta-prompt-29")
                     await beta_run.result()
                     probes["acme_events_after"] = len(await acme.events(run.id))
                     record(AREA, "6-isolation", **{k: v for k, v in probes.items()})
@@ -377,6 +378,16 @@ async def test_tenants_cannot_see_each_others_runs_sessions_workflows_schedules_
                     assert probes["workflow_same_id"] == "beta-own-result"
                     assert [s["id"] for s in await acme.schedules()] == ["mine"]
                     assert schedule["id"] == "mine"
+                    # what the model of beta's run was sent: its own prompt, never acme's history
+                    beta_requests = [
+                        json.dumps(r.body["messages"])
+                        for r in model.requests
+                        if "beta-prompt-29" in json.dumps(r.body["messages"])
+                    ]
+                    record(AREA, "6-session-guess", beta_requests=len(beta_requests))
+                    assert beta_requests and all(
+                        "acme-secret-prompt-71" not in r for r in beta_requests
+                    )
     finally:
         await model.stop()
 

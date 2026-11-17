@@ -6,6 +6,7 @@ Expectations are in `toolsec/expectations.md` section 3 (ids 3.1 to 3.7).
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import signal
 import subprocess
@@ -79,7 +80,7 @@ async def test_subprocess_host_runs_commands_times_out_and_serves_background() -
 
     steps: list[Any] = [
         bash("echo remote-hi; pwd"),
-        bash("sleep 60", timeout_ms=1500),
+        bash("sleep 3172 & sleep 3173", timeout_ms=1500),
         bash("sh -c 'sleep 1; echo bg-remote-done'", run_in_background=True),
         output,
     ]
@@ -107,7 +108,17 @@ async def test_subprocess_host_runs_commands_times_out_and_serves_background() -
     }
     assert str(host_dir) in text_of(done[0]) and "[exit code 0]" in text_of(done[0])
     assert done[1].is_error and done[1].error_code == "timeout" and done[1].duration_ms < 8000
-    record(AREA, "3.2", code=done[1].error_code, duration_ms=done[1].duration_ms)
+    leftovers = marker_pids("sleep 3172") + marker_pids("sleep 3173")
+    record(
+        AREA,
+        "3.2",
+        code=done[1].error_code,
+        duration_ms=done[1].duration_ms,
+        group_members_left=leftovers,
+    )
+    for pid in leftovers:
+        os.kill(pid, signal.SIGKILL)
+    assert not leftovers, "the timed-out command's process group is still running"
     out = ends(envelopes, "BashOutput")[0]
     record(AREA, "3.1-background", text=text_of(out), elapsed_s=round(elapsed, 2))
     assert "bg-remote-done" in text_of(out)
@@ -165,14 +176,24 @@ async def test_a_background_flood_reads_output_limit_status() -> None:
         AREA,
         "3.3-background",
         metadata=end.metadata,
+        canonical_output=str(end.canonical_output)[-300:],
+        result_keys=sorted(end.result),
+        result_tail=str({k: v for k, v in end.result.items() if k != "content"})[:400],
         code=end.error_code,
         text=text_of(end)[-200:],
         took_s=round(took, 2),
     )
-    # an error result carries no metadata to the event stream (events.py): the code and text are
-    # what a client can read; the doc's `status: output_limit` is not observable there.
     assert end.is_error and end.error_code == "output_limit"
     assert "[output limit reached (256 MiB); the command was killed]" in text_of(end)
+    # Doc claim (remote-execution.md): "a background process reads `status: output_limit`".
+    # Observed: the status is in none of metadata, canonical_output or the result block.
+    found = "output_limit" in str(end.metadata) + str(end.canonical_output) + str(
+        {k: v for k, v in end.result.items() if k != "content"}
+    )
+    record(AREA, "3.3-background-status-claim", status_field_reachable=found)
+    assert found, (
+        "BashOutput's `status: output_limit` is not reachable from the tool_call_end event"
+    )
 
 
 @needs_server
@@ -277,9 +298,8 @@ async def test_connection_end_and_client_death_with_a_background_command() -> No
                     )
                 finally:
                     client.kill()
-                    subprocess.run(
-                        ["pkill", "-f", "-x", "sleep 302"], check=False
-                    )  # my own sleeper
+                    for pid in marker_pids("sleep 302"):
+                        os.kill(pid, signal.SIGKILL)  # the orphan this test caused
     finally:
         await model.stop()
 
@@ -287,6 +307,56 @@ async def test_connection_end_and_client_death_with_a_background_command() -> No
 def _sleepers() -> list[str]:
     done = subprocess.run(["pgrep", "-af", "^sleep 30[12]$"], capture_output=True, text=True)
     return [line.split(" ", 1)[1] for line in done.stdout.splitlines() if " " in line]
+
+
+def marker_pids(command: str) -> list[int]:
+    """Pids whose whole command line is exactly `command` (detection only)."""
+    done = subprocess.run(["pgrep", "-fx", command], capture_output=True, text=True)
+    return [int(p) for p in done.stdout.split()]
+
+
+@needs_server
+async def test_server_sigkill_with_a_live_client_reaps_the_remote_command() -> None:
+    """Brief: a dropped connection reaps the command. The client stays alive, the server is killed."""
+    marker = "sleep 3303"
+    model = await plan_model([bash(marker, run_in_background=True)]).start()
+    try:
+        with workspace() as root:
+            tenants = {
+                "acme": tenant(
+                    "tok-acme-0001",
+                    exec_tools=True,
+                    permission_modes=["default", "skip_dangerous"],
+                    workspace_roots=[str(root)],
+                    provider_base_urls=[model.url],
+                    execution=[REMOTE],
+                )
+            }
+            async with serving(tenants) as proc:
+                config = remote_config(model, root, namespace="acme")
+                client = drop_client(proc.address, "tok-acme-0001", config, root, "remote")
+                try:
+                    await wait_line(client, "RUN_ENDED")
+                    await asyncio.sleep(0.5)
+                    started = marker_pids(marker)
+                    proc.kill()
+                    gone = await until_async(lambda: not marker_pids(marker), 8)
+                    record(
+                        AREA,
+                        "3.5-server-sigkill-client-alive",
+                        started=started,
+                        command_gone_after_s=gone,
+                        client_alive=client.poll() is None,
+                    )
+                finally:
+                    client.kill()
+                    for pid in marker_pids(marker):
+                        os.kill(pid, signal.SIGKILL)
+                assert started and gone is not None, (
+                    "the host kept the command after the server died"
+                )
+    finally:
+        await model.stop()
 
 
 @needs_server
