@@ -233,7 +233,7 @@ async fn a_host_that_answers_reads_at_once_with_nothing_is_paced() {
 }
 
 /// A host cannot make a command's output run on forever: past a budget the
-/// command is killed and the call is interrupted.
+/// command is killed and the call says so, not that the host went quiet.
 #[tokio::test]
 async fn a_host_that_sends_endless_output_is_cut_off() {
     let ws = Workspace::new();
@@ -246,12 +246,48 @@ async fn a_host_that_sends_endless_output_is_cut_off() {
     let error = run(&bash, "yes", 5_000).await.unwrap_err();
     assert_eq!(
         error.code.as_deref(),
-        Some("interrupted"),
+        Some("output_limit"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("output limit reached (256 MiB); the command was killed"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("still be running"),
         "{}",
         error.message
     );
     assert_eq!(count(&host.kills), 1);
     assert!(count(&host.reads) < 400);
+}
+
+/// An output flood whose kill the host does not confirm stays `interrupted`:
+/// the command may still be running.
+#[tokio::test]
+async fn a_flood_whose_kill_is_not_confirmed_is_interrupted() {
+    let ws = Workspace::new();
+    let chunk = RemoteChunk {
+        stdout: "x".repeat(1 << 20),
+        ..RemoteChunk::default()
+    };
+    let host = Arc::new(Fake::new(
+        StartMode::Ok,
+        ReadMode::Now(chunk),
+        Ok(RemoteChunk::default()),
+    ));
+    let (bash, _) = bash_on(&ws, &host);
+    let error = run(&bash, "yes", 5_000).await.unwrap_err();
+    assert_eq!(
+        error.code.as_deref(),
+        Some("interrupted"),
+        "{}",
+        error.message
+    );
 }
 
 /// The kill round trip to a remote host takes longer than a local kill, so
