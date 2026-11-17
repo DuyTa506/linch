@@ -448,6 +448,28 @@ Xem [Subagent](./subagents.md).
 Run con của một worker nền đổi trạng thái: `child_run_id` và `status` (`running`,
 rồi `completed`, `failed` hoặc `aborted`).
 
+### `ScheduleFireEvent` (`schedule_fire`)
+
+Một worker đã bắt đầu run này cho một lần chạy của [lịch](./scheduler.md): có
+`schedule_id` và `fire_at_ms`, thời điểm lần chạy đến hạn tính bằng mili giây
+Unix. Event nằm ngay sau `init` đầu tiên của run, trong cùng một lần ghi; run
+không do lịch bắt đầu, job xếp hàng và run được resume đều không có nó.
+
+### Các loại chỉ có trong journal
+
+`ModelCallDeliveryEvent` (`model_call_delivery`), `ModelCallReceiptEvent`
+(`model_call_receipt`) và `ModelCallUsageSettlementEvent`
+(`model_call_usage_settlement`) là bản ghi của journal kế toán. Server ghi
+chúng vào journal, không stream và cũng không trả về từ `Agent.events`, nên
+client chỉ giải mã chúng từ các envelope đọc ra từ journal.
+`ModelCallDeliveryEvent` có `logical_call_id`, `delivery_attempt_id`, `kind`
+(`primary` hoặc `compaction`), `requested_model` và `turn_index`;
+`ModelCallReceiptEvent` có cùng các id và `kind` cùng `disposition`
+(`accepted`, `rejected`, `cancelled`, `failed` hoặc `not_dispatched`),
+`duration_ms`, `actual_model`, `usage` và `cost_usd`;
+`ModelCallUsageSettlementEvent` có `logical_call_id`, `usage`,
+`budget_owner_id` và `cost_usd`.
+
 ### Các loại mà server chưa phát
 
 Phần lõi khai báo các loại này và client giải mã mỗi loại thành class của nó,
