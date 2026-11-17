@@ -232,7 +232,7 @@ Request cho lời gọi model kế tiếp đã được lắp ráp; lời gọi 
 | `messages` | Số message hội thoại được gửi |
 | `selected_tools` | Tên các tool được cấp trong request này |
 | `budget` | Quyết định của [context budget](./memory.md#context-budget) cho request này: `{}` khi không có `spec.context_budget`; khi có thì gồm `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (một danh sách `{source, index, tokens}`) và `over_by` khi các block pinned vượt mức trần. `ContextBuildEvent.dropped` trong Python đọc danh sách đó |
-| `metadata` | Những gì các callback `context_build` trả về trong `metadata`, được gộp lại, key của callback đến sau thắng; `{}` nếu không có. Ở lượt mà `tool_choice` có tên không được request đưa ra, `tool_choice_dropped` chứa tên tool |
+| `metadata` | Những gì các callback `context_build` trả về trong `metadata`, được gộp lại, key của callback đến sau thắng; `{}` nếu không có. Ở lượt mà `tool_choice` có tên không được request đưa ra, hoặc lựa chọn `required` bị một hook để lại không còn tool nào, `tool_choice_dropped` chứa tên tool (`required` cho lựa chọn đó) |
 
 ### `UsageEvent` (`usage`)
 
@@ -323,7 +323,9 @@ dài ([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` được �
 tóm tắt không được áp dụng và view không đổi (các số đếm bằng nhau). Nó bắt đầu bằng một
 mã, `tool_call` (câu trả lời gọi một tool), `empty`, hoặc `not_smaller` (không nhỏ hơn phần
 nó sẽ thay thế), rồi nói điều xảy ra tiếp theo: ở đầu một lượt run tiếp tục và lượt đến hạn
-kế tiếp hỏi lại; một bản tóm tắt bắt buộc thì kết thúc run.
+kế tiếp hỏi lại (từ lần từ chối thứ hai liên tiếp: khi view đã lớn thêm một phần mười
+context window hoặc provider từ chối prompt); một bản tóm tắt bắt buộc thì kết thúc run.
+`not_smaller` được xét trên toàn bộ checkpoint, không phải văn bản của model.
 
 ### `LoopGuardEvent` (`loop_guard`)
 

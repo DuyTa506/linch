@@ -246,7 +246,9 @@ Tool có tên được kiểm tra với request của chính từng lượt, sau
 `before_provider_call`: ở lượt không đưa tool đó ra (một skill đã thu hẹp tool, tool
 search đã hoãn nó) request đi với `auto` thay vì bị provider trả 400, và sự kiện
 `context_build` của lượt đó có `metadata.tool_choice_dropped` mang tên tool. `required`
-không bao giờ bị bỏ: một lượt có ít nhất một tool thì thoả được nó.
+chỉ bị bỏ ở lượt mà một hook đã để lại không còn tool nào (khi đó không thể thoả được nó):
+request đi mà không có lựa chọn, và `tool_choice_dropped` là `"required"`. Một tool có tên
+bị bỏ ở lượt không có tool nào cũng đi mà không có lựa chọn, không phải `auto`.
 `agent.open` từ chối một tool có tên mà agent không đưa ra (final tool được tính),
 `required` khi agent không đưa ra tool nào, và một lựa chọn mà provider của nó từ chối; lựa chọn riêng của một run bị từ chối
 với `InvalidToolChoice` (mã -32034) trước khi có gì được ghi.

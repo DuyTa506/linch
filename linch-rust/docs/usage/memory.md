@@ -53,12 +53,20 @@ compacts. The fields, typed as `Compaction`:
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
 | `micro` | `False` | Clear old tool results before summarizing ([below](#micro-compaction)) |
 | `max_forced` | `3` | Most summaries one run makes because the provider refused a prompt as too long ([below](#when-the-prompt-does-not-fit)); `0` never |
-| `keep_user_tokens` | `15000` | Tokens of the user messages a summary folds that the checkpoint carries verbatim, newest first, copied by the harness; `0` carries none |
+| `keep_user_tokens` | `15000` | Tokens of the user messages a summary folds that the checkpoint carries verbatim, newest first, copied by the harness; `0` carries none. The verbatim blocks also shrink to fit: the whole checkpoint is smaller than the part it replaces, or the summary is rejected |
 
 A summary is one extra provider call on the agent's provider and model, with
 its own usage, charged to the [budget](./agent.md#budget). It is reported by
 a `compaction` [event](./events.md#compactionevent-compaction) with
 `strategy` `summary`. The `pre_compact` and `post_compact` callbacks see it.
+
+A summary the model gives back as a tool call, as nothing, or as a text no
+smaller than the part it replaces (measured on the whole checkpoint, verbatim
+messages and reminders included) is rejected: the view stays as it was and a
+`compaction` event with `rejected` says why. After two rejections in a row
+the run stops asking at every due turn: it asks again once the view has grown
+by a tenth of the context window, or when the provider refuses the prompt (a
+forced summary is never held); an accepted summary clears the count.
 
 The compaction spec is part of the [run contract](./agent.md#the-run-contract):
 a run started under one setting is not resumed under another.

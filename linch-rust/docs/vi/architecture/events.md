@@ -54,19 +54,19 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Kết thúc stream của một run đã suspend thay cho `result`; trạng thái `awaiting_approval` hoặc `awaiting_input` |
 | `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | `budget` là `{}` trừ khi `spec.context_budget` được đặt |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
-| `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:113` | yes | yes | |
+| `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:123` | yes | yes | |
 | `policy` | `PolicyEvent`, `kinds/policy.rs` | yes | yes | Một `policy` của spec (`crates/linch-core/src/gates.rs`): một lần từ chối cùng lần ghi `ToolBatch` của batch của nó, một lần sửa cùng notification và checkpoint của nó, một lần dừng trong lần ghi terminal |
-| `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó |
+| `budget` | `BudgetEvent`, `kinds/control.rs:145` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó |
 | `provider_retry` | `ProviderRetryEvent`, `kinds/reliability.rs:13` | yes | yes | Một `provider_retry` của spec (`crates/linch-core/src/reliability.rs`): trước lúc chờ, trong cùng một lần ghi với receipt thất bại |
 | `model_fallback` | `ModelFallbackEvent`, `kinds/reliability.rs:31` | yes | yes | `fallback_models` của một spec: cùng receipt thất bại, trên barrier dispatch của model fallback |
-| `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:168` | yes | yes | Chưa được phát ở revision này |
+| `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:186` | yes | yes | Chưa được phát ở revision này |
 | `skills_loaded` | `SkillsLoadedEvent`, `kinds/skills.rs:10` | yes | yes | |
 | `skill_invoked` | `SkillInvokedEvent`, `kinds/skills.rs:18` | yes | yes | |
 | `skill_completed` | `SkillCompletedEvent`, `kinds/skills.rs:35` | yes | yes | |
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | như event được bọc | như event được bọc | Xem [bọc subagent](#bọc-subagent) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Không bao giờ nằm trong log của run: các workflow của `linch-ext` chuyển nó cho event sink của chúng ([extensions](./ext.md)) |
-| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | Các cổng kiểm tra câu trả lời (`runner/structured.rs`): việc kiểm tra output schema, `verifier` là `output_schema`; một verifier tích hợp sẵn, `name` của nó; một lần retry của hook `stop` dưới `spec.verification`, `policy_id` của nó (`runner/hooks.rs`). `retry` được stage với phản hồi bên cạnh, `stop` trong lần ghi terminal, `exhausted` với câu trả lời được chấp nhận. Một lần resume đếm các lần retry đã dùng từ những event này, của schema tách riêng khỏi phần còn lại |
+| `verification` | `VerificationEvent`, `kinds/control.rs:209` | yes | yes | Các cổng kiểm tra câu trả lời (`runner/structured.rs`): việc kiểm tra output schema, `verifier` là `output_schema`; một verifier tích hợp sẵn, `name` của nó; một lần retry của hook `stop` dưới `spec.verification`, `policy_id` của nó (`runner/hooks.rs`). `retry` được stage với phản hồi bên cạnh, `stop` trong lần ghi terminal, `exhausted` với câu trả lời được chấp nhận. Một lần resume đếm các lần retry đã dùng từ những event này, của schema tách riêng khỏi phần còn lại |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | Kết quả terminal |

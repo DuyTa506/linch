@@ -229,7 +229,7 @@ The request for the next model call was assembled; the call starts.
 | `messages` | Number of conversation messages sent |
 | `selected_tools` | Tool names offered in this request |
 | `budget` | The [context budget](./memory.md#context-budget)'s decision for this request: `{}` without `spec.context_budget`; with it `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (a list of `{source, index, tokens}`) and `over_by` when pinned blocks exceed the cap. `ContextBuildEvent.dropped` in Python reads the list |
-| `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any. On a turn whose named `tool_choice` the request did not offer, `tool_choice_dropped` holds the tool's name |
+| `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any. On a turn whose named `tool_choice` the request did not offer, or whose `required` choice a hook left with no tool, `tool_choice_dropped` holds the tool's name (`required` for that choice) |
 
 ### `UsageEvent` (`usage`)
 
@@ -321,8 +321,10 @@ provider's refusal of a prompt as too long caused it
 the summary was not applied and the view is unchanged (the counts agree). It
 starts with a code, `tool_call` (the reply called a tool), `empty`, or
 `not_smaller` (no smaller than the part it would replace), then says what
-follows: at a turn's start the run goes on and the next due turn asks again; a
-forced summary ends the run.
+follows: at a turn's start the run goes on and the next due turn asks again (from
+the second rejection in a row, once the view has grown by a tenth of the
+context window or the provider refuses the prompt); a forced summary ends the
+run. `not_smaller` is judged on the whole checkpoint, not the model's text.
 
 ### `LoopGuardEvent` (`loop_guard`)
 
