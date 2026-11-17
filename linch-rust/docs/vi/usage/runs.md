@@ -13,7 +13,7 @@ của run sau đó được stream về dưới dạng `Envelope`.
 
 | Lời gọi | Làm gì |
 |---|---|
-| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None)` | Bắt đầu một run; session được tạo nếu chưa có. `trace_id` là của bạn, được lặp lại trên các event `init` và `result` của run ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` thay thế schema của agent cho run này ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
+| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None, tool_choice=None)` | Bắt đầu một run; session được tạo nếu chưa có. `trace_id` là của bạn, được lặp lại trên các event `init` và `result` của run ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` và `tool_choice` thay thế của agent cho run này ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
 | `await agent.resume(run_id, *, principal=None)` | Tiếp tục một run sau crash hoặc sau khi stream bị rớt |
 | `await agent.approve(run_id, decisions, *, principal=None)` | Trả lời các lời gọi đang chờ của một run bị tạm dừng và tiếp tục nó |
 | `await agent.answer(run_id, answers, *, principal=None)` | Trả lời các câu hỏi `AskUser` của một run bị tạm dừng và tiếp tục nó |
@@ -125,6 +125,7 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | `PromptBlocked` | -32029 | Một callback `user_prompt_submit` đã từ chối prompt; `.reason` cho biết lý do. Không có run hay session nào được tạo |
 | `SessionBusy` | -32030 | Session có một run đang chạy |
 | `InvalidOutputSchema` | -32031 | `output_schema` của run không compile được hoặc root của nó không phải object; `.reason` nêu lý do. Không có run hay session nào được tạo |
+| `InvalidToolChoice` | -32034 | `tool_choice` của run nêu một tool mà run không đưa ra, hoặc provider từ chối nó; `.reason` nêu lý do. Không có run hay session nào được tạo |
 | `InvalidAnswer` | -32032 | Các câu trả lời không khớp với các câu hỏi `AskUser` đang chờ; `.reason` nêu lý do. Không có gì được ghi: run vẫn chờ ([bên dưới](#answer)) |
 | `RunLeased` | -32033 | Một server khác đang điều khiển run (Postgres); `.owner` và `.expires_in` (giây) cho biết lease của ai và còn bao lâu. Không có gì được ghi ([Kho lưu trữ](./stores.md#run-leases)) |
 | `LeaseLost` | -32022 | Một server khác đã tiếp quản run, hoặc đã fail nó, trong khi server này điều khiển; run dừng ở đây mà không ghi gì |

@@ -122,10 +122,11 @@ object, beside `text`.
 
 ## What each provider receives
 
-Every request of the run, the summary call of a compaction excluded, carries
-the schema. Each adapter sends it in the vendor's own structured-output form,
-which shapes only the text answer, so the model can still call tools on any
-turn:
+On a provider with native structured output, every request of the run, the
+summary call of a compaction excluded, carries the schema. Each adapter sends
+it in the vendor's own structured-output form, which shapes only the text
+answer, so the model can still call tools on any turn. The others get a
+[final tool](#the-final-tool) instead:
 
 | Provider | Sent as |
 |---|---|
@@ -218,17 +219,18 @@ for one run, and the run stores it in its first `init` event
 | `{"type": "tool", "name": "Read"}` | Calls `Read` |
 
 It is sent with every request but on a turn that offers no tool (Python's
-rule). A forced choice holds every turn, so such a run can end only through
+rule: a skill that narrows a turn to no tool, for example). A forced choice holds every turn, so such a run can end only through
 its final tool, or `max_turns` and the [loop guard](./agent.md#loop_guard).
 `agent.open` refuses a named tool the agent does not offer (the final tool
-counts) and a choice its provider refuses; a run's own one is refused with
+counts), `required` when it offers no tool at all, and a choice its provider
+refuses; a run's own one is refused with
 `InvalidToolChoice` (code -32034) before anything is written.
 
 | Provider | Refuses |
 |---|---|
 | `deepseek` | `required` and a named tool while thinking is on, which is any `spec.thinking` but `{"type": "disabled"}` ([API reference](https://api-docs.deepseek.com/api/create-chat-completion)) |
 | `anthropic` | `required` and a named tool with budgeted thinking (`{"type": "enabled", "budget_tokens": ...}`) |
-| `llamacpp` | A named tool, which the server would treat as `auto` (`common/chat.cpp` parses only `auto`, `none` and `required`) |
+| `llamacpp` | A named tool, which the server does not honour (`common/chat.cpp` parses only `auto`, `none` and `required`) |
 | `vllm`, `sglang` | Nothing ([vLLM tool calling](https://docs.vllm.ai/en/latest/features/tool_calling/), [SGLang tool parser](https://docs.sglang.io/advanced_features/tool_parser.html)); a forced choice needs the server's tool-call parser |
 | `openai-chat`, `openai-responses`, `gemini` | Nothing |
 

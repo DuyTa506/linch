@@ -103,7 +103,7 @@ docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32004 | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó |
 | -32005 | Đạt một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 đến -32015 | `agent.open`: `BuildError`, provider, store và MCP server không khả dụng |
-| -32020 đến -32033 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` không dùng được, một câu trả lời không khớp (`-32032`, `data.reason`), một lease đã mất (`-32022`, từ một claim hoặc một lần ghi journal bị fence), một run mà process khác đang giữ lease (`-32033`, `data: {run_id, owner, expires_in_ms}`) |
+| -32020 đến -32034 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` hoặc `tool_choice` không dùng được (`-32034`), một câu trả lời không khớp (`-32032`, `data.reason`), một lease đã mất (`-32022`, từ một claim hoặc một lần ghi journal bị fence), một run mà process khác đang giữ lease (`-32033`, `data: {run_id, owner, expires_in_ms}`) |
 | -32040 đến -32044 | Các method của scheduler: một agent không thể chạy nền (`-32040`, `data.reason` là `memory_store`, `host_tools` hoặc `callbacks`), một lịch không biết (`-32041`), một id lịch đã dùng (`-32042`), một job không biết (`-32043`), một timing không dùng được (`-32044`, `data.reason`) |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
