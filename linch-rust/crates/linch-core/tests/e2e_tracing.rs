@@ -87,7 +87,7 @@ impl Provider for SlowSummaries {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        if request.tool_choice == Some(ToolChoice::Disabled {}) {
+        if summarizing(&request) {
             tokio::time::sleep(self.delay).await;
         }
         self.script.stream(request, cancel).await

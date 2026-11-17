@@ -72,7 +72,7 @@ impl Provider for Summaries {
         request: ProviderRequest,
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let summarizing = request.tool_choice == Some(ToolChoice::Disabled {});
+        let summarizing = summarizing(&request);
         let kind = if summarizing { "summary" } else { "primary" };
         *self.calls.lock().unwrap().entry(kind).or_default() += 1;
         if !summarizing {

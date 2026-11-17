@@ -63,7 +63,7 @@ async fn host_blocks_go_before_the_system_prompt_with_their_flags() {
     assert!(
         asked
             .into_iter()
-            .all(|c| c == Some(CacheControl { ttl: None }))
+            .all(|c| c == Some(CacheControl::default()))
     );
 }
 

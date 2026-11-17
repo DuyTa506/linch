@@ -42,12 +42,15 @@ pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue
         return Err(invalid(refusal));
     }
     let cache = request.cache_control.map(cache_block);
+    let skipped = request
+        .cache_control
+        .map_or(0, |control| control.uncached_tail);
     let mut catalog = native.then(|| Native::new(request));
     let mut body = json!({
         "model": request.model,
         "max_tokens": max_tokens,
         "stream": true,
-        "messages": messages(request, cache.as_ref(), catalog.as_mut())?,
+        "messages": messages(request, cache.as_ref(), catalog.as_mut(), skipped)?,
     });
     let system = system(&request.system, cache.as_ref());
     if !system.is_empty() {
@@ -154,28 +157,33 @@ fn system(blocks: &[SystemBlock], cache: Option<&JsonValue>) -> Vec<JsonValue> {
 /// a breakpoint on one would make the cached message differ from the
 /// next turn's, and every conversation cache entry would be lost. The
 /// breakpoint goes before them, and when the last message is all context,
-/// on the user message before it. A `native` catalog's tool blocks follow
-/// the message of their notice, in a `system` message before the next
-/// assistant turn or at the end.
+/// on the user message before it. The `skipped` trailing messages (a
+/// compaction summary's instruction) are left out of the choice, so the
+/// breakpoint lands on the last message before them; such a request is
+/// built from the logged view alone and has no `context_tail`. A `native`
+/// catalog's tool blocks follow the message of their notice, in a `system`
+/// message before the next assistant turn or at the end.
 fn messages(
     request: &ProviderRequest,
     cache: Option<&JsonValue>,
     mut native: Option<&mut Native>,
+    skipped: usize,
 ) -> Result<Vec<JsonValue>, ProviderError> {
     let conversation = &request.messages;
-    let last = conversation.len().checked_sub(1);
+    let counted = conversation.len().saturating_sub(skipped);
+    let last = counted.checked_sub(1);
     // Blocks of the last message that are context; a count a hook left
-    // too large is the whole message.
-    let context = last.map_or(0, |at| {
-        request.context_tail.min(conversation[at].content.len())
-    });
+    // too large is the whole message. A request with a skipped tail holds
+    // the logged view only, so it has none.
+    let context = match skipped {
+        0 => last.map_or(0, |at| {
+            request.context_tail.min(conversation[at].content.len())
+        }),
+        _ => 0,
+    };
     let all_context =
         last.is_some_and(|at| context == conversation[at].content.len() && context > 0);
-    let logged = if all_context {
-        conversation.len() - 1
-    } else {
-        conversation.len()
-    };
+    let logged = if all_context { counted - 1 } else { counted };
     let last_user = conversation[..logged]
         .iter()
         .rposition(|message| message.role == Role::User);

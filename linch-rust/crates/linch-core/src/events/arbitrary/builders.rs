@@ -231,6 +231,7 @@ pub(super) fn compaction_event() -> impl Strategy<Value = CompactionEvent> {
         short_string(),
         any::<u64>(),
         any::<bool>(),
+        option::of(short_string()),
     )
         .prop_map(
             |(
@@ -241,6 +242,7 @@ pub(super) fn compaction_event() -> impl Strategy<Value = CompactionEvent> {
                 strategy,
                 duration_ms,
                 forced,
+                rejected,
             )| {
                 CompactionEvent {
                     messages_before,
@@ -250,6 +252,7 @@ pub(super) fn compaction_event() -> impl Strategy<Value = CompactionEvent> {
                     strategy,
                     duration_ms,
                     forced,
+                    rejected,
                 }
             },
         )

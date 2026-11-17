@@ -22,6 +22,7 @@ use linch_core::{
     RunId, RunOptions, RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolChoice,
     ToolScope, Usage,
 };
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 /// Answers by the request: a summary request (tool use disabled) gets
@@ -35,6 +36,21 @@ struct Keyed {
     failing_summaries: bool,
     /// The context window the provider reports.
     window: u64,
+    /// What a summary request is answered with.
+    summary: Summary,
+}
+
+/// A reply to a summary request.
+#[derive(Clone, Copy)]
+enum Summary {
+    /// `summary of {n} messages`, which is smaller than what it folds.
+    Fits,
+    /// Far bigger than the part it would replace.
+    Long,
+    /// Only whitespace.
+    Blank,
+    /// A call of `Read`, as a model that ignores "do not call any tools".
+    Tool,
 }
 
 impl Keyed {
@@ -44,13 +60,31 @@ impl Keyed {
 
     fn answering() -> Self {
         Self {
-            turns: script(3, 1, "Read"),
+            turns: big_script(3),
             calls: Mutex::default(),
             requests: Mutex::default(),
             failing_summaries: false,
             window: 128_000,
+            summary: Summary::Fits,
         }
     }
+}
+
+/// `n` turns that each call `Read` once with an input far bigger than a
+/// summary, then an answer: a summary smaller than what it folds is applied.
+fn big_script(n: usize) -> Vec<linch_core::ScriptedTurn> {
+    let mut turns: Vec<_> = (0..n)
+        .map(|t| {
+            let value = serde_json::json!({"value": format!("v{t}{}", "x".repeat(400))});
+            TurnBuilder::new(MODEL)
+                .text("working")
+                .tool_call(&format!("call_{t}_0"), "Read", &value)
+                .usage(usage(10, 5))
+                .build()
+        })
+        .collect();
+    turns.push(text_turn("done"));
+    turns
 }
 
 /// The primary turn a request asks for: 0 for the prompt, `t + 1` after
@@ -82,7 +116,7 @@ impl Provider for Keyed {
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         self.requests.lock().unwrap().push(request.clone());
-        let summarizing = request.tool_choice == Some(ToolChoice::Disabled {});
+        let summarizing = summarizing(&request);
         if summarizing && self.failing_summaries {
             return Err(ProviderError::Status {
                 status: 503,
@@ -92,11 +126,14 @@ impl Provider for Keyed {
         }
         let (key, turn) = if summarizing {
             let n = request.messages.len();
-            let summary = TurnBuilder::new(MODEL)
-                .text(format!("summary of {n} messages"))
-                .usage(usage(3, 2))
-                .build();
-            (format!("summary:{n}"), summary)
+            let builder = TurnBuilder::new(MODEL).usage(usage(3, 2));
+            let summary = match self.summary {
+                Summary::Fits => builder.text(format!("summary of {n} messages")),
+                Summary::Long => builder.text("y".repeat(8000)),
+                Summary::Blank => builder.text("  \n "),
+                Summary::Tool => builder.tool_call("call_s_0", "Read", &json!({"value": "x"})),
+            };
+            (format!("summary:{n}"), summary.build())
         } else {
             let turn = primary_turn(&request);
             (format!("primary:{turn}"), self.turns[turn].clone())
@@ -162,7 +199,7 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
         .count();
     assert_eq!(projections, 2, "turns 2 and 3 compact");
     let compacted = view(log);
-    let summary = Message::user_text("<summary of earlier conversation>\n\nsummary of 4 messages");
+    let summary = Message::user_text("<summary of earlier conversation>\n\nsummary of 5 messages");
     assert_eq!(compacted[..2], [Message::user_text("go"), summary]);
     assert_eq!(
         compacted.len(),
@@ -171,8 +208,7 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
     );
 
     let requests = provider.requests.lock().unwrap().clone();
-    let (summaries, primaries): (Vec<_>, Vec<_>) =
-        (requests.iter()).partition(|r| r.tool_choice == Some(ToolChoice::Disabled {}));
+    let (summaries, primaries): (Vec<_>, Vec<_>) = (requests.iter()).partition(|r| summarizing(r));
     assert_eq!((summaries.len(), primaries.len()), (2, 4));
     let bytes = |m: &Message| serde_json::to_string(m).unwrap();
     for request in &primaries {
@@ -185,6 +221,21 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
     assert_eq!(primaries[2].messages[1].role, Role::User);
     assert!(primaries[2].messages[1].text().starts_with("<summary"));
     assert_eq!(summaries[0].messages[0], Message::user_text("go"));
+    // The summary call is the last primary call's request, kept as it was
+    // (system blocks, tools, tool choice, messages), with the view's newer
+    // messages and the instruction after it: the whole view, not only the
+    // folded part, so a prompt cache of that call serves it.
+    let earlier = primaries[1];
+    assert_eq!(summaries[0].system, earlier.system);
+    assert_eq!(summaries[0].tools, earlier.tools);
+    assert_eq!(summaries[0].tool_choice, earlier.tool_choice);
+    let shared = earlier.messages.len();
+    assert_eq!(summaries[0].messages[..shared], earlier.messages[..]);
+    assert_eq!(
+        summaries[0].messages.len(),
+        shared + 3,
+        "the last turn and its result, then the instruction"
+    );
 
     let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
     let paid: Vec<_> = (events.iter())
@@ -365,7 +416,7 @@ async fn without_a_threshold_compaction_follows_the_context_window() {
         let agent = agent_with(spec, provider.clone(), tools, permissions, stores.clone());
         finish(agent.run("go", RunOptions::new("s1"))).await;
         let requests = provider.requests.lock().unwrap();
-        let summarizing = |r: &&ProviderRequest| r.tool_choice == Some(ToolChoice::Disabled {});
+        let summarizing = |r: &&ProviderRequest| summarizing(r);
         let made = requests.iter().filter(summarizing).count();
         assert_eq!(made, summaries, "window {window}");
     }
@@ -560,4 +611,58 @@ async fn a_summary_is_redacted_before_it_is_logged() {
     let compacted = view(entries(&stores).await);
     let summary = Message::user_text("<summary of earlier conversation>\n\n[SUMMARY]");
     assert_eq!(compacted[1], summary);
+}
+
+/// A reply that is not a summary leaves the view as it was, once per turn
+/// that was due, and the run goes on: each is a rejected receipt and a
+/// `compaction` event that says why.
+#[tokio::test]
+async fn a_reply_that_is_not_a_summary_is_rejected_and_the_run_goes_on() {
+    for (summary, why) in [
+        (Summary::Long, "not_smaller"),
+        (Summary::Blank, "empty"),
+        (Summary::Tool, "tool_call"),
+    ] {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Keyed {
+            summary,
+            ..Keyed::answering()
+        });
+        let agent = compacting_agent(provider.clone(), &Runs::default(), stores.clone());
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        let envelopes = finish(stream).await;
+        assert_eq!(status(&stores, &run_id).await, RunStatus::Completed, "{why}");
+        let log = entries(&stores).await;
+        assert!(!log.iter().any(|e| matches!(e, LogEntry::Projection(_))));
+        let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+        let rejected = (events.iter())
+            .filter(|e| {
+                matches!(&e.event, Event::ModelCallReceipt(r)
+                if r.kind == ModelCallKind::Compaction && r.disposition == CallDisposition::Rejected)
+            })
+            .count();
+        assert_eq!(rejected, 2, "{why}: each due turn asked once, no retry");
+        let calls: u32 = (provider.calls.lock().unwrap().iter())
+            .filter(|(key, _)| key.starts_with("summary"))
+            .map(|(_, n)| n)
+            .sum();
+        assert_eq!(calls, 2, "{why}");
+        let reports: Vec<_> = (envelopes.iter())
+            .filter_map(|e| match &e.event {
+                Event::Compaction(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reports.len(), 2, "{why}");
+        for report in reports {
+            assert_eq!(report.rejected.as_deref(), Some(why));
+            assert_eq!(report.messages_before, report.messages_after);
+            assert_eq!(report.tokens_before, report.tokens_after);
+        }
+    }
+}
+
+async fn status(stores: &Stores, run_id: &RunId) -> RunStatus {
+    stores.runs.load(NS, run_id).await.unwrap().status
 }

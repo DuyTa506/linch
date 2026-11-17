@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common::*;
 use futures::StreamExt;
-use linch_core::compaction::CLEARED_RESULT;
+use linch_core::compaction::{CLEARED_RESULT, DEFAULT_PROMPT};
 use linch_core::events::kinds::CompactionEvent;
 use linch_core::events::model_call::{CallDisposition, ModelCallKind};
 use linch_core::provider::scripted::TurnBuilder;
@@ -41,6 +41,8 @@ struct Window {
     failing_summaries: bool,
     calls: Mutex<HashMap<String, u32>>,
     summary_requests: Mutex<Vec<ProviderRequest>>,
+    /// Every request in the order it came, summaries included.
+    requests: Mutex<Vec<ProviderRequest>>,
 }
 
 impl Window {
@@ -51,6 +53,7 @@ impl Window {
             failing_summaries: false,
             calls: Mutex::default(),
             summary_requests: Mutex::default(),
+            requests: Mutex::default(),
         })
     }
 
@@ -140,7 +143,8 @@ impl Provider for Window {
         request: ProviderRequest,
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let turn = if request.tool_choice == Some(ToolChoice::Disabled {}) {
+        self.requests.lock().unwrap().push(request.clone());
+        let turn = if summarizing(&request) {
             self.count("summary".into());
             self.summary_requests.lock().unwrap().push(request.clone());
             if self.failing_summaries {
@@ -281,6 +285,24 @@ async fn a_refused_prompt_is_summarized_and_called_again() {
     assert!(reports.iter().all(|c| c.forced && c.strategy == "summary"));
     assert_eq!(count(&events, "provider_retry"), 0, "not a provider retry");
     check_unique_deliveries(&events, "clean");
+    // The summary call is the refused primary call's request up to the folded
+    // part (same system blocks, tools and bytes, so a prompt cache holds),
+    // then one instruction message; only the tool choice and limits differ.
+    let requests = provider.requests.lock().unwrap().clone();
+    let at = requests.iter().position(|r| summarizing(r)).unwrap();
+    let (primary, summary) = (&requests[at - 1], &requests[at]);
+    assert_eq!(primary.system, summary.system);
+    assert_eq!(primary.tools, summary.tools);
+    assert_eq!(primary.cache_control.map(|c| c.uncached_tail), Some(0));
+    assert_eq!(summary.cache_control.map(|c| c.uncached_tail), Some(1));
+    let shared = summary.messages.len() - 1;
+    assert_eq!(primary.messages[..shared], summary.messages[..shared]);
+    let last = summary.messages.last().unwrap();
+    assert!(last.text().contains(DEFAULT_PROMPT));
+    assert!(
+        primary.messages.len() > shared,
+        "the kept turn is not in the summary call"
+    );
     // The refused call is settled, free: a 400 before any event.
     let refused: Vec<_> = (events.iter())
         .filter_map(|e| match &e.event {

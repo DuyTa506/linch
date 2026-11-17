@@ -205,7 +205,10 @@ fn cache_breakpoints_go_on_the_last_cacheable_system_block_and_last_user_block()
             system("volatile", false),
         ],
         messages: conversation.clone(),
-        cache_control: Some(CacheControl { ttl }),
+        cache_control: Some(CacheControl {
+            ttl,
+            ..CacheControl::default()
+        }),
         ..request()
     };
     let body = build(&cached(Some(CacheTtl::OneHour)));
@@ -240,6 +243,44 @@ fn cache_breakpoints_go_on_the_last_cacheable_system_block_and_last_user_block()
         ..cached(None)
     });
     assert!(!uncached.to_string().contains("cache_control"));
+}
+
+#[test]
+fn an_uncached_tail_leaves_the_message_breakpoint_on_the_last_message_before_it() {
+    let tail = ProviderRequest {
+        messages: vec![
+            Message::user_text("first"),
+            Message::assistant_text("ok"),
+            Message::user_text("shared"),
+            Message::user_text("summarize"),
+        ],
+        cache_control: Some(CacheControl {
+            uncached_tail: 1,
+            ..CacheControl::default()
+        }),
+        ..request()
+    };
+    let body = build(&tail);
+    let breakpoint = json!({"type": "ephemeral"});
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"],
+        breakpoint
+    );
+    assert!(
+        body["messages"][3]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    // The bytes of the shared prefix equal a request that ends there.
+    let ends_there = ProviderRequest {
+        messages: tail.messages[..3].to_vec(),
+        cache_control: Some(CacheControl::default()),
+        ..request()
+    };
+    assert_eq!(
+        build(&ends_there)["messages"],
+        json!(body["messages"].as_array().unwrap()[..3])
+    );
 }
 
 #[test]
@@ -428,7 +469,7 @@ async fn an_agent_s_host_blocks_carry_the_system_breakpoint() {
         provider.requests().remove(0)
     }
 
-    let cache = Some(CacheControl { ttl: None });
+    let cache = Some(CacheControl::default());
     let body = build(&ProviderRequest {
         cache_control: cache,
         ..sent(false).await
@@ -492,7 +533,7 @@ async fn an_agent_s_system_sections_carry_the_system_breakpoint() {
     while stream.next().await.is_some() {}
     let sent = provider.requests().remove(0);
     let body = build(&ProviderRequest {
-        cache_control: Some(CacheControl { ttl: None }),
+        cache_control: Some(CacheControl::default()),
         ..sent
     });
     let breakpoint = json!({"type": "ephemeral"});
@@ -512,7 +553,7 @@ fn cached_messages(messages: Vec<Message>, context_tail: usize) -> ProviderReque
     ProviderRequest {
         messages,
         context_tail,
-        cache_control: Some(CacheControl { ttl: None }),
+        cache_control: Some(CacheControl::default()),
         ..request()
     }
 }

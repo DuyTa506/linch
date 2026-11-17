@@ -268,7 +268,7 @@ fn explicit_caching_is_the_only_one_a_request_controls() {
         let caps = adapter.provider.capabilities(adapter.model);
         let plain = (adapter.build)(&base(adapter.model)).unwrap();
         let cached = (adapter.build)(&with(adapter.model, |r| {
-            r.cache_control = Some(linch_core::CacheControl { ttl: None });
+            r.cache_control = Some(linch_core::CacheControl::default());
         }))
         .unwrap();
         assert_eq!(

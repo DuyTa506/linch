@@ -270,6 +270,8 @@ class CompactionEvent:
     `strategy` is `summary`, or `micro` when old tool results were cleared
     with no model call. `forced` is true when the provider's refusal of a
     prompt as too long caused it, rather than the view reaching the trigger.
+    `rejected` is set when a summary was not applied (the counts then show an
+    unchanged view): `tool_call`, `empty` or `not_smaller`.
     """
 
     type: ClassVar[str] = "compaction"
@@ -280,6 +282,7 @@ class CompactionEvent:
     strategy: str
     duration_ms: int
     forced: bool = False
+    rejected: str | None = None
 
 
 @dataclass(frozen=True)

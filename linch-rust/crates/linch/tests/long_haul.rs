@@ -16,7 +16,7 @@ use linch::{
     Agent, AgentBuilder, AgentSpec, CompactionSpec, Event, Hooks, LogEntry, MemoryRunStore,
     MemorySessionStore, PermissionEngine, PermissionMode, PermissionPolicy, Provider, Role,
     RunOptions, RunStore, ScriptedTurn, SessionId, SessionStore, SystemSection, TaskStore,
-    ToolChoice, ToolRegistry,
+    ToolRegistry,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -61,7 +61,7 @@ impl Provider for Scripts {
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         self.requests.lock().unwrap().push(request.clone());
-        let turn = if request.tool_choice == Some(ToolChoice::Disabled {}) {
+        let turn = if is_summary(&request) {
             TurnBuilder::new(MODEL).text("summary").build()
         } else {
             let (open, done, first_open) = ledger_counts(&request);
@@ -82,6 +82,12 @@ impl Provider for Scripts {
         };
         Ok(stream(&turn))
     }
+}
+
+/// The compaction call ends with the summary instruction, as a user message.
+fn is_summary(request: &ProviderRequest) -> bool {
+    let last = request.messages.last().unwrap();
+    last.role == Role::User && last.text().contains("Summarize the conversation so far")
 }
 
 fn stream(turn: &ScriptedTurn) -> ProviderStream {
@@ -231,9 +237,7 @@ async fn the_contract_and_the_ledger_outlive_compaction_a_cut_run_and_new_sessio
 
     // What the provider was sent.
     let requests = scripts.requests.lock().unwrap().clone();
-    let primary: Vec<_> = (requests.iter())
-        .filter(|r| r.tool_choice != Some(ToolChoice::Disabled {}))
-        .collect();
+    let primary: Vec<_> = (requests.iter()).filter(|r| !is_summary(r)).collect();
     assert!(primary.len() >= 8, "{} primary requests", primary.len());
     for request in &primary {
         let goal = request.system.iter().filter(|b| b.text == GOAL).count();
