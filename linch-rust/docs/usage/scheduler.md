@@ -286,6 +286,9 @@ had:
   tenant's `max_schedules` (counting the schedules the client made) and
   `min_schedule_interval_ms`. A refusal is the tool's error, with code
   `not_allowed`, `limit_reached` or `invalid_schedule`; the run goes on.
+  A failure of the store is the error `the schedule store failed; try
+  again later` (code `store`): its cause, which can name the database
+  host, goes to the server's `tracing` log, never to the model.
 - **Its own session's schedules only.** `ListSchedules` and
   `CancelSchedule` see the schedules of the agent's namespace that run this
   same config in the calling run's session, as Python's tools see one
