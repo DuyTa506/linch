@@ -197,13 +197,13 @@ thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:138-15
 
 ### Loop guard
 
-`spec.loop_guard` (`loop_guard.rs:59`) kết thúc một run bị kẹt, kể cả khi `max_turns`
+`spec.loop_guard` (`loop_guard.rs:66`) kết thúc một run bị kẹt, kể cả khi `max_turns`
 chưa đặt. Nó bật mặc định; giá trị mặc định không được ghi lên wire, nên hợp đồng của
 một spec không đặt nó không đổi.
 
 | Kiểm tra | Mặc định | Kích hoạt | Kiểm tra khi |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | Một tool được gọi với cùng input (JSON chuẩn tắc) chừng này lần trong run, mỗi lần có kết quả không phải lỗi | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:303`) |
+| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong run: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc), không phải lỗi, và không phải tool poll | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:303`) |
 | `max_consecutive_failures` | 3 | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi; một batch có một lời gọi thành công thì đếm lại từ đầu | Như trên |
 | `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:415`) |
 
@@ -219,18 +219,25 @@ Một lần kích hoạt là một lần ghi terminal: event `loop_guard` (`reas
 quả đã nằm trong session, nên chúng vẫn được ghép cặp; không có `post_turn` nào chạy
 cho lượt đó.
 
-Python đếm mọi lời gọi được yêu cầu là một lần lặp. Ở đây một lời gọi có kết quả là
-lỗi thì không được đếm, vì chính Linch yêu cầu model lặp lại một số lời gọi bị từ chối
-(một tool bị hoãn: `call tool_search with select:X first`); các lời gọi cứ lỗi mãi
-thuộc về chuỗi lỗi. `force_final_answer` của Python (thêm một lượt không có tool)
-không được port: kích hoạt là dừng.
+Một lần lặp là cùng một lời gọi với cùng kết quả. Một lời gọi có kết quả khác với
+kết quả của mọi lời gọi giống hệt trước đó là đã có tiến triển (một file đọc lại sau
+khi sửa, một trạng thái đã đổi) và bắt đầu một bộ đếm riêng; quay lại một kết quả cũ
+là một lần lặp của kết quả đó. Một kết quả lỗi không bao giờ là lần lặp, vì chính Linch
+yêu cầu model lặp lại một số lời gọi bị từ chối (một tool bị hoãn: `call tool_search
+with select:X first`); các lời gọi cứ lỗi mãi thuộc về chuỗi lỗi. Một tool có `polls()`
+là true (`tool.rs:279`; `BashOutput`, đọc một lệnh chạy nền cho đến khi nó kết thúc)
+cũng không bao giờ là lần lặp; các lần lỗi của nó vẫn được tính vào chuỗi lỗi. Python
+đếm các input giống nhau bất kể kết quả, kể cả lời gọi lỗi và bị từ chối.
+`force_final_answer` của Python (thêm một lượt không có tool) không được port: kích
+hoạt là dừng.
 
-Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:134`) gộp các
-event bền vững của run: một event `assistant` nêu tên các lời gọi của response đó,
-event user `tool_result` kế tiếp đếm những lời gọi không lỗi và cập nhật chuỗi lỗi,
-và một `model_call_delivery` chính ghi lại lượt của nó. Run đang chạy gộp cùng các
+Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:145`) gộp các
+event bền vững của run: một event `assistant` nêu tên các lời gọi của response đó
+(trừ các lời gọi của tool poll, mà runner đọc từ registry), event user `tool_result`
+kế tiếp đếm những lời gọi không lỗi theo nội dung kết quả của chúng và cập nhật chuỗi
+lỗi, và một `model_call_delivery` chính ghi lại lượt của nó. Run đang chạy gộp cùng các
 event này khi stage chúng (`Runner::stage_seen`, `turn.rs:350`), và một lần resume gộp
-các event đã lưu (`start.rs:472`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
+các event đã lưu (`start.rs:473`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
 quả cùng checkpoint `ToolResults`, một delivery trước lời gọi của nó), và lượt lấy từ
 checkpoint, nên một sự cố ở bất kỳ lần ghi nào cũng resume với đúng các con số mà run
 đã có và kích hoạt tại cùng điểm (`tests/e2e_loop_guard.rs`).
