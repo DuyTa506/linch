@@ -387,7 +387,12 @@ impl<S: ToolSink> Runner<'_, S> {
             CacheScope::Session => Some(self.run.session_id.as_str()),
             CacheScope::Namespace => None,
         };
-        let key = cache_key(session, &call.tool_name, &call.input)?;
+        let key = cache_key(
+            session,
+            self.run.principal.as_ref(),
+            &call.tool_name,
+            &call.input,
+        )?;
         Some(Slot { cache, key })
     }
 
