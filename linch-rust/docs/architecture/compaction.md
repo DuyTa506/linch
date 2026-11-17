@@ -32,7 +32,7 @@ What differs in Rust:
   image (`compaction.rs:235-268`). There is no pluggable token estimator.
 - A paid summary is kept whole in the `Compacted` checkpoint, not as a
   hash-only recipe. A resume appends it without another provider call
-  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:303-318`).
+  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:309-324`).
 - The projection is always written to the session store as a log entry
   (`runner/write.rs:83-98`). There is no store detection and no opt-in.
 
@@ -105,7 +105,7 @@ already no longer than the placeholder and holds no image (Python's test,
 that do not change are shared, not copied.
 
 If the cleared view is no longer due, `clear` records it and the turn goes
-on with its primary call (`runner/compact.rs:359-402`):
+on with its primary call (`runner/compact.rs:365-408`):
 
 1. `pre_compact` runs with strategy `micro`.
 2. The `compaction` event (strategy `micro`, `messages_before` equal to
@@ -256,7 +256,7 @@ tests read as well.
 An accepted summary becomes a user message and a replacement view:
 
 1. `summary_message` leads the text with `<summary of earlier conversation>`,
-   so the model reads it as a recap (`compaction.rs:106, 568-587`). With
+   so the model reads it as a recap (`compaction.rs:106, 581-600`). With
    redaction scrubbing responses, the summary text is scrubbed first.
 2. With skills on, the message also carries a `<system-reminder>` with the body
    of each skill the model loaded in the session, since the summary folds their
@@ -264,16 +264,16 @@ An accepted summary becomes a user message and a replacement view:
 3. If the session has a catalog, one notice restates every catalog change of
    the session.
 4. `replacement` is the first message as it was, the summary, then the
-   messages from `keep_from` on (`compaction.rs:676-688`).
+   messages from `keep_from` on (`compaction.rs:689-701`).
 
 The run then stages the `compaction` event (message and token counts before
 and after, the strategy, the duration, `forced`) and saves `Compacted` with
-the summary and `keep_from` (`runner/compact.rs:262-297`,
+the summary and `keep_from` (`runner/compact.rs:265-303`,
 `crates/linch-core/src/events/kinds/control.rs`). `Compacted` writes through
 with the receipt and `usage`, so a paid summary is never lost.
 
 Next, `compacted` writes the projection to the session
-(`runner/compact.rs:303-318`). `project` flushes the held checkpoint, appends
+(`runner/compact.rs:309-324`). `project` flushes the held checkpoint, appends
 a `LogEntry::Projection` to the session store in one write, records it in the
 in-memory log, then runs the agent's `on_compact` callbacks
 (`runner/write.rs:83-98`). The `Compacted` checkpoint is already durable, so
@@ -303,7 +303,7 @@ event is free, like any such refusal (`provider/call.rs:257`). The error
 event's `kind` is `context_length`.
 
 `dispatch` asks `overflow` before it treats the failure as final
-(`runner/turn.rs:591`, `runner/compact.rs:326-358`):
+(`runner/turn.rs:591`, `runner/compact.rs:332-364`):
 
 1. With `micro`, if any old tool result is worth clearing, `clear` records
    the cleared view (with `forced` set on the event) and goes to the next
@@ -392,7 +392,7 @@ The request the model gets after a compaction is built from these parts:
 | Part | Source |
 |---|---|
 | System blocks and tools | The session's frozen prefix, byte for byte (`session_log.rs:53-60`) |
-| First message | The first message of the view, unchanged (`compaction.rs:676-688`) |
+| First message | The first message of the view, unchanged (`compaction.rs:689-701`) |
 | Summary | The `summary` user message with its reminders and catalog notice |
 | Kept turns | The last `keep_recent_turns` assistant turns and what follows them |
 | Later messages | Appended after the projection as the run goes on |
@@ -429,7 +429,7 @@ starts a new chain of parts.
 Nothing new is checkpointed. `Truncated::of` reads the attempts and the
 pending parts back from the durable `assistant` and `user` events: a cut
 answer counts once its feedback is durable (`truncation.rs`,
-`runner/start.rs:526-528`).
+`runner/start.rs:537-539`).
 
 ## Tests
 

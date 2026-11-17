@@ -206,7 +206,7 @@ thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:161-17
 
 ### Loop guard
 
-`spec.loop_guard` (`loop_guard.rs:111`) kết thúc một run bị kẹt, kể cả khi `max_turns`
+`spec.loop_guard` (`loop_guard.rs:114`) kết thúc một run bị kẹt, kể cả khi `max_turns`
 chưa đặt. Nó bật mặc định; giá trị mặc định không được ghi lên wire, nên hợp đồng của
 một spec không đặt nó không đổi.
 
@@ -263,7 +263,7 @@ resume như phần còn lại.
 `force_final_answer` của Python (thêm một lượt không có tool) không được port: kích
 hoạt là dừng.
 
-Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:296`) gộp các
+Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:301`) gộp các
 event bền vững của run: một event `assistant` nêu tên các lời gọi của response đó, một
 event `tool_call_end` cho biết lệnh của một lần poll đã xong chưa (`poll_done` trong
 metadata của nó, với các tool poll mà runner đọc từ registry), event user

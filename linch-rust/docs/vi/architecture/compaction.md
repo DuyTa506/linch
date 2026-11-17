@@ -34,7 +34,7 @@ Linch bản Python có cùng cấu trúc ([compaction](../../../../docs/architec
 - Một bản tóm tắt đã trả phí được giữ nguyên vẹn trong checkpoint `Compacted`, không
   phải dưới dạng một công thức chỉ chứa hash. Một lần resume nối nó vào mà không cần
   lời gọi provider nào nữa
-  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:303-318`).
+  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:309-324`).
 - Projection luôn được ghi vào session store dưới dạng một log entry
   (`runner/write.rs:83-98`). Không có phát hiện store và không có opt-in.
 
@@ -108,7 +108,7 @@ placeholder và không chứa ảnh (phép thử của Python, `compaction.rs:32
 sao chép.
 
 Nếu view đã xóa không còn đến hạn, `clear` ghi lại nó và lượt tiếp tục với lời gọi chính
-(`runner/compact.rs:359-402`):
+(`runner/compact.rs:365-408`):
 
 1. `pre_compact` chạy với strategy `micro`.
 2. Event `compaction` (strategy `micro`, `messages_before` bằng `messages_after`) được
@@ -247,22 +247,22 @@ cũng đọc.
 Một bản tóm tắt được chấp nhận trở thành một message của user và một view thay thế:
 
 1. `summary_message` mở đầu văn bản bằng `<summary of earlier conversation>`, để model
-   đọc nó như một bản tóm lược (`compaction.rs:106, 568-587`). Khi redaction che response,
+   đọc nó như một bản tóm lược (`compaction.rs:106, 581-600`). Khi redaction che response,
    văn bản tóm tắt được che trước.
 2. Khi skill được bật, message còn mang một `<system-reminder>` chứa nội dung của từng
    skill mà model đã nạp trong session, vì bản tóm tắt đã gộp các kết quả tool của chúng
    đi (`crates/linch-core/src/skills.rs`).
 3. Nếu session có catalog, một thông báo nhắc lại mọi thay đổi catalog của session.
 4. `replacement` là message đầu tiên như cũ, bản tóm tắt, rồi các message từ `keep_from`
-   trở đi (`compaction.rs:676-688`).
+   trở đi (`compaction.rs:689-701`).
 
 Sau đó run stage event `compaction` (số message và token trước và sau, chiến lược, thời
 lượng, `forced`) và lưu `Compacted` cùng bản tóm tắt và `keep_from`
-(`runner/compact.rs:262-297`, `crates/linch-core/src/events/kinds/control.rs`).
+(`runner/compact.rs:265-303`, `crates/linch-core/src/events/kinds/control.rs`).
 `Compacted` ghi write-through cùng receipt và `usage`, nên một bản tóm tắt đã trả phí
 không bao giờ bị mất.
 
-Tiếp theo, `compacted` ghi projection vào session (`runner/compact.rs:303-318`).
+Tiếp theo, `compacted` ghi projection vào session (`runner/compact.rs:309-324`).
 `project` flush checkpoint đang giữ, nối một `LogEntry::Projection` vào session store
 trong một lần ghi, ghi nó vào log trong bộ nhớ, rồi chạy các callback `on_compact` của
 agent (`runner/write.rs:83-98`). Checkpoint `Compacted` đã bền vững, nên lần flush
@@ -293,7 +293,7 @@ phí, như mọi lần từ chối kiểu đó (`provider/call.rs:257`). `kind` 
 `context_length`.
 
 `dispatch` hỏi `overflow` trước khi coi lỗi là cuối cùng
-(`runner/turn.rs:591`, `runner/compact.rs:326-358`):
+(`runner/turn.rs:591`, `runner/compact.rs:332-364`):
 
 1. Với `micro`, nếu có kết quả tool cũ nào đáng xóa, `clear` ghi lại view đã xóa (với
    `forced` được đặt trên event) và chuyển sang attempt chính kế tiếp của lượt.
@@ -375,7 +375,7 @@ Request mà model nhận được sau một lần compaction được dựng t�
 | Phần | Nguồn |
 |---|---|
 | Các block system và tool | Prefix đã đóng băng của session, từng byte một (`session_log.rs:53-60`) |
-| Message đầu tiên | Message đầu tiên của view, không đổi (`compaction.rs:676-688`) |
+| Message đầu tiên | Message đầu tiên của view, không đổi (`compaction.rs:689-701`) |
 | Bản tóm tắt | Message user `summary` cùng các reminder và thông báo catalog của nó |
 | Các lượt được giữ | `keep_recent_turns` lượt assistant cuối và những gì theo sau chúng |
 | Các message sau đó | Được nối sau projection khi run tiếp tục |
@@ -411,7 +411,7 @@ response gọi tool bắt đầu một chuỗi phần mới.
 
 Không có gì mới được checkpoint. `Truncated::of` đọc lại số lần thử và các phần đang chờ
 từ các event bền vững `assistant` và `user`: một câu trả lời bị cắt được tính khi phản
-hồi của nó đã bền vững (`truncation.rs`, `runner/start.rs:526-528`).
+hồi của nó đã bền vững (`truncation.rs`, `runner/start.rs:537-539`).
 
 ## Test
 

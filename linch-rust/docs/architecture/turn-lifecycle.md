@@ -214,7 +214,7 @@ is not made and the run fails with `TurnLimitError` (`runner/end.rs:161-177`).
 
 ### The loop guard
 
-`spec.loop_guard` (`loop_guard.rs:111`) ends a run that is stuck, with
+`spec.loop_guard` (`loop_guard.rs:114`) ends a run that is stuck, with
 `max_turns` unset as well. It is on by default; the default is left off the
 wire, so it does not change the contract of a spec that does not set it.
 
@@ -276,7 +276,7 @@ journal sink and is read back from the log on a resume like the rest.
 Python's `force_final_answer` (one more turn with no tools) is not ported:
 a trip stops.
 
-Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:296`)
+Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:301`)
 folds the run's durable events: an `assistant` event names the calls of its
 response, a `tool_call_end` event says whether a poll's command is done
 (`poll_done` in its metadata, for the tools that poll, which the runner reads
