@@ -55,7 +55,7 @@ no token.
 | `poll_interval_ms` | 1000 | Longest wait between polls; due schedules are checked once per interval |
 | `visibility_timeout_ms` | 30000 | How long a taken job stays hidden without a heartbeat. Keep the agents' `stores.lease_ttl_ms` no longer |
 | `retry_delay_ms` | 5000 | Wait before a failed job's next attempt; doubles each time, at most 5 minutes |
-| `history_retention_ms` | 7 days | How long ended jobs stay readable with `job` and `jobs` |
+| `history_retention_ms` | 7 days | How long ended and failed jobs stay readable with `job` and `jobs` |
 | `local_namespaces` | none | Namespace roots outside every tenant whose jobs it also runs, without checks (schedules a stdio client made); `dev` covers `dev` and `dev/...` |
 
 Run as many such servers on one database as you like: each fire is queued

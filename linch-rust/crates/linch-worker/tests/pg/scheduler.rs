@@ -15,7 +15,7 @@ use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
     WorkerError, create_schedule, delete_schedule, enqueue, enqueue_approve, enqueue_run,
-    fire_due_schedules, get_schedule, job, jobs, prune_definitions,
+    fire_due_schedules, get_schedule, job, jobs, prune_definitions, prune_history,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -287,6 +287,39 @@ async fn the_job_cap_counts_unfinished_jobs() {
     enqueue(&db.pool, &request("s3", "d"), Some(&cap))
         .await
         .unwrap();
+    db.finish().await;
+}
+
+/// Pruning the history also deletes failed jobs that failed longer ago than
+/// the retention: a dead letter is readable for as long as an ended job.
+#[tokio::test]
+async fn failed_jobs_are_pruned_with_the_history() {
+    let Some(db) = TestDb::new("prune_failed").await else {
+        return;
+    };
+    for session in ["old", "new", "live"] {
+        enqueue_run(&db.pool, "default", NS, &SessionId::new(session), "go")
+            .await
+            .unwrap();
+    }
+    db.sql(
+        "UPDATE linch_worker_jobs SET failed_at = now() - interval '8 days', error = 'boom' \
+         WHERE session_id = 'old'",
+    )
+    .await;
+    db.sql(
+        "UPDATE linch_worker_jobs SET failed_at = now() - interval '1 day', error = 'boom' \
+         WHERE session_id = 'new'",
+    )
+    .await;
+    let week = Duration::from_secs(7 * 24 * 3600);
+    assert_eq!(prune_history(&db.pool, week).await.unwrap(), 1);
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT session_id FROM linch_worker_jobs ORDER BY session_id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(left, ["live", "new"]);
     db.finish().await;
 }
 

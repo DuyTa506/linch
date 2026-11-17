@@ -54,8 +54,9 @@ pub struct WorkerConfig {
     /// job whose attempts failed 5 times is failed for good, and so is its
     /// run; waiting for a busy session never counts.
     pub retry_delay: Duration,
-    /// How long the history of ended jobs is kept; `None` keeps it. The
-    /// worker prunes it at most once every 10 minutes.
+    /// How long the history of ended jobs, and failed jobs, are kept;
+    /// `None` keeps them. The worker prunes them at most once every 10
+    /// minutes.
     pub history_retention: Option<Duration>,
 }
 

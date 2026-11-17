@@ -89,8 +89,8 @@ one `LISTEN` connection plus the job queries.
    queue is empty, and runs each job in its own task (`worker.rs:173-212`);
 4. waits for a notification, a finished job, the poll interval or `shutdown`.
 
-It also prunes the history of ended jobs older than `history_retention` (7
-days by default) at most once every 10 minutes.
+It also prunes the history of ended jobs, and the failed jobs, older than
+`history_retention` (7 days by default) at most once every 10 minutes.
 
 `Worker::definitions(roots, factory)` serves jobs that carry a stored agent
 definition: a job with one is taken only by a worker whose `roots` hold the
@@ -190,7 +190,8 @@ busy session never counts, so a start job is never given up on for that.
 
 A failed job is the dead letter: `failed_at` and `error` are set, it is never
 dequeued again, and it no longer counts against the one-job-per-run index or
-a queue limit (`lease.rs:288-302`). `error` holds the whole error chain
+a queue limit (`lease.rs:288-302`). It stays in `linch_worker_jobs` until
+`prune_history` deletes it, `history_retention` after it failed. `error` holds the whole error chain
 (`crates/linch-worker/src/error.rs:40-49`). When a run is failed with its job,
 the run goes first: a crash in between leaves a terminal run, which the job's
 next attempt acks (`settle.rs:46-56`).
@@ -210,7 +211,8 @@ schedule_id, limit)` (`crates/linch-worker/src/status.rs`) read both, scoped
 by the exact namespace (job ids are global), and name a `JobState`: `queued`,
 `running` (owned and still hidden), `retrying` (released with an error),
 `failed`, `done` or `superseded`. `prune_history(pool, older_than)` deletes
-history rows; failed jobs are never pruned.
+history rows that ended, and failed jobs that failed, more than
+`older_than` ago.
 
 ## Schedules
 

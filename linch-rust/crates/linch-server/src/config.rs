@@ -72,7 +72,8 @@ pub struct WorkerSection {
     /// The wait before a job's second attempt, doubling each time; 5000.
     #[serde(default)]
     pub retry_delay_ms: Option<u64>,
-    /// How long ended jobs stay in the history; 7 days.
+    /// How long ended jobs stay in the history, and failed jobs kept;
+    /// 7 days.
     #[serde(default)]
     pub history_retention_ms: Option<u64>,
     /// Namespace roots outside every tenant whose jobs it also runs,
