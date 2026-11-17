@@ -165,7 +165,7 @@ The run started.
 | `session_id`, `run_id` | The session and run |
 | `model` | `spec.model` |
 | `provider` | The provider's id: `anthropic`, `openai-chat`, `scripted`, ... |
-| `tools` | Names of the tools offered, in order |
+| `tools` | Names of the tools the model is offered, in order: the agent's, then the [final tool](./structured-output.md#the-final-tool) when the run made it from its output schema (a registered `final_tool_name` is already among the agent's) |
 | `parent_run_id` | The parent run, for a subagent's run; `None` otherwise |
 | `trace_id` | The `trace_id` given to `agent.run`, kept for the whole run and its subagents' runs; `None` when none was given ([Observability](./observability.md#correlate-logs-and-traces)) |
 | `resumed` | `True` on the `init` that starts a resume or approve of the run, with the run's current tools; `False` on the run's first |

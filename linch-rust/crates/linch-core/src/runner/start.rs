@@ -25,7 +25,7 @@ use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, ToolRecovery, reconcile};
 use crate::loop_guard::Watch;
 use crate::message::ContentBlock;
-use crate::provider::{OutputSchema, ToolChoice};
+use crate::provider::{OutputSchema, ToolChoice, ToolDefinition};
 use crate::reliability::Standing;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
@@ -126,7 +126,7 @@ pub(super) async fn new_run(
         parent_run_id: parent.clone(),
         model: agent.spec.model.clone(),
         provider: agent.provider.id().to_owned(),
-        tools: tools.into_iter().map(|tool| tool.name).collect(),
+        tools: offered(&tools, final_tool.as_ref().map(|tool| tool.name.as_str())),
         trace_id: options.trace_id.clone(),
         resumed: false,
         turn: 0,
@@ -471,7 +471,7 @@ pub(super) async fn continue_run(
         parent_run_id: record.parent_run_id.clone(),
         model: agent.spec.model.clone(),
         provider: agent.provider.id().to_owned(),
-        tools: tools.into_iter().map(|tool| tool.name).collect(),
+        tools: offered(&tools, recorded_final_name(&events)),
         trace_id: trace_id.clone(),
         resumed: true,
         turn: u64::from(checkpoint.turn),
@@ -672,6 +672,25 @@ fn run_final_tool(
     }
 }
 
+/// The name of the final tool the run's first `init` event recorded.
+fn recorded_final_name(events: &[Envelope]) -> Option<&str> {
+    events.iter().find_map(|envelope| match &envelope.event {
+        Event::Init(init) => Some(init.final_tool.as_deref()),
+        _ => None,
+    })?
+}
+
+/// The tool names the model is offered, for `init`: the agent's tools,
+/// then the run's final tool when the run made it (a registered one is
+/// already among the agent's).
+fn offered(tools: &[ToolDefinition], final_tool: Option<&str>) -> Vec<String> {
+    let mut names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+    if let Some(name) = final_tool.filter(|name| !names.iter().any(|known| known == name)) {
+        names.push(name.to_owned());
+    }
+    names
+}
+
 /// The final tool the run's `init` event recorded, for the runner's
 /// schema; `None` when it recorded none.
 ///
@@ -682,11 +701,7 @@ fn recorded_final_tool(
     runner: &Runner,
     events: &[Envelope],
 ) -> Result<Option<FinalTool>, RunError> {
-    let recorded = events.iter().find_map(|envelope| match &envelope.event {
-        Event::Init(init) => Some(init.final_tool.as_deref()),
-        _ => None,
-    });
-    let Some(Some(name)) = recorded else {
+    let Some(name) = recorded_final_name(events) else {
         return Ok(None);
     };
     let named = runner.agent.spec.final_tool_name.as_deref();

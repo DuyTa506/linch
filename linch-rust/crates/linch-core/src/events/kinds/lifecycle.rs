@@ -30,7 +30,8 @@ pub struct InitEvent {
     /// Id of the run's provider ([`crate::Provider::id`]), for example
     /// `anthropic` or `scripted`.
     pub provider: String,
-    /// Names of tools offered to the model.
+    /// Names of tools offered to the model: the agent's, then the run's
+    /// final tool when the run made it from its output schema.
     pub tools: Vec<String>,
     /// Trace identifier correlating this run with host observability.
     #[serde(default, skip_serializing_if = "Option::is_none")]

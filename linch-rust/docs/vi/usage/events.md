@@ -167,7 +167,7 @@ Run đã bắt đầu.
 | `session_id`, `run_id` | Session và run |
 | `model` | `spec.model` |
 | `provider` | Id của provider: `anthropic`, `openai-chat`, `scripted`, ... |
-| `tools` | Tên các tool được cấp, theo thứ tự |
+| `tools` | Tên các tool mà model được cấp, theo thứ tự: của agent, rồi [final tool](./structured-output.md#the-final-tool) khi run tạo nó từ output schema (một `final_tool_name` đã đăng ký thì đã nằm trong danh sách của agent) |
 | `parent_run_id` | Run cha, với run của một subagent; ngược lại là `None` |
 | `trace_id` | `trace_id` được truyền cho `agent.run`, giữ trong cả run và các run của subagent; `None` khi không truyền ([Observability](./observability.md#correlate-logs-and-traces)) |
 | `resumed` | `True` ở `init` mở đầu một lần resume hoặc approve của run, kèm các tool hiện tại của run; `False` ở `init` đầu tiên của run |
