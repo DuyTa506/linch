@@ -23,16 +23,16 @@
 //! there answers `()` and cannot fail closed. `event_emit` fires once per
 //! event about to be delivered to the caller, but only for events that are
 //! both streamed and durably logged: never for a hook's own record, and
-//! never for a stream-only delta or tool-progress event (see [`observe`]).
-//! [`BeforeProviderCall`] ([`call`]) lets a hook replace the provider
+//! never for a stream-only delta or tool-progress event (see `observe`).
+//! [`BeforeProviderCall`] (`call`) lets a hook replace the provider
 //! request about to be sent, or block the call; [`AfterProviderCall`]
-//! ([`assembly`]) lets a hook replace the assembled response a provider call
+//! (`assembly`) lets a hook replace the assembled response a provider call
 //! just produced, or block it, before it is staged and appended to the
 //! session — this is Rust's equivalent of Python's `AfterProviderCall`, as a
 //! mutate/block point only: Python's `retry` and `force_continue` actions
-//! there are not ported (see [`assembly`]). Unlike the observe-only points,
+//! there are not ported (see `assembly`). Unlike the observe-only points,
 //! both points' blocking verdicts can fail closed. `before_final_answer` has
-//! no Rust hook point of its own: [`Stop`] ([`turn`]) can rewrite the run's
+//! no Rust hook point of its own: [`Stop`] (`turn`) can rewrite the run's
 //! final-answer text or block the stop outright, folding that point in.
 //! Script hooks and RPC callbacks implement [`Hook`] later; they are not
 //! part of this module.
