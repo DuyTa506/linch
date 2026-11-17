@@ -506,8 +506,14 @@ mod tests {
         let a = json!({"x": 1, "y": [1, 2]});
         let b = json!({"y": [1, 2], "x": 1});
         let (a, b) = (a.as_object().unwrap(), b.as_object().unwrap());
-        assert_eq!(cache_key(None, None, "Grep", a), cache_key(None, None, "Grep", b));
-        assert_ne!(cache_key(None, None, "Grep", a), cache_key(None, None, "Glob", a));
+        assert_eq!(
+            cache_key(None, None, "Grep", a),
+            cache_key(None, None, "Grep", b)
+        );
+        assert_ne!(
+            cache_key(None, None, "Grep", a),
+            cache_key(None, None, "Glob", a)
+        );
         let other = json!({"x": 2, "y": [1, 2]});
         assert_ne!(
             cache_key(None, None, "Grep", a),

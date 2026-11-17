@@ -121,7 +121,9 @@ giữ chúng.
   `request_key`), `bpf`, `perf_event_open` và `userfaultfd`; cùng `unshare`, `setns` và
   `clone` với cờ `CLONE_NEW*`, nên ngay cả user namespace không đặc quyền cũng không mở
   được. `clone3`, mà bộ lọc không đọc được cờ của nó, nhận `ENOSYS` và glibc lùi về
-  `clone`. `io_uring`, mà bộ lọc sẽ không thấy các request của nó, bị từ chối.
+  `clone`. `io_uring`, mà bộ lọc sẽ không thấy các request của nó, bị từ chối. Bộ lọc là một denylist: một
+  syscall mà nó không nêu tên thì được phép, nên Landlock và việc từ chối chạy bằng root
+  mới là ranh giới, còn bộ lọc chỉ đóng các cửa được liệt kê ở đây.
 - **Tài nguyên.** Mỗi process bị giữ trong `memory_bytes`, `cpu_seconds` và
   `file_size_bytes`, và một lệnh trong `max_processes` process thêm, nên một fork bomb
   hay một tiến trình ngốn bộ nhớ thất bại ngay trong lệnh. Thời gian thực là timeout
