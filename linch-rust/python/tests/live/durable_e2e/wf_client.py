@@ -70,7 +70,7 @@ async def p3(wf: WorkflowContext, p: dict[str, Any]) -> Any:
 
 
 async def interrupt_wf(wf: WorkflowContext, p: dict[str, Any]) -> Any:
-    draft = p.get("draft", "v1")
+    draft = p.get("draft", "first")
     ok = await wf.interrupt("approve", {"draft": draft})
     if not ok:
         return "withdrawn"

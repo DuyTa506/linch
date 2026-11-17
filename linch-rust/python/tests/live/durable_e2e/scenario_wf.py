@@ -187,20 +187,20 @@ async def scenario_d(ctx: Ctx, out: dict[str, Any]) -> None:
     """4.4 interrupt answered after a server restart; 4.5 changed draft is stale."""
     d: dict[str, Any] = {}
     ctx.proxy.reset()
-    d["i1_first"] = brief(await ctx.client("interrupt", "wf-I1", draft="v1"))
+    d["i1_first"] = brief(await ctx.client("interrupt", "wf-I1", draft="first"))
     await ctx.kill()
     await ctx.start()
     d["i1_answer_after_restart"] = brief(
-        await ctx.client("interrupt", "wf-I1", draft="v1", resume={"approve": True})
+        await ctx.client("interrupt", "wf-I1", draft="first", resume={"approve": True})
     )
-    d["i1_again"] = brief(await ctx.client("interrupt", "wf-I1", draft="v1"))
+    d["i1_again"] = brief(await ctx.client("interrupt", "wf-I1", draft="first"))
     # 4.5
-    d["i2_first"] = brief(await ctx.client("interrupt", "wf-I2", draft="v1"))
+    d["i2_first"] = brief(await ctx.client("interrupt", "wf-I2", draft="first"))
     d["i2_changed_draft_with_answer"] = brief(
-        await ctx.client("interrupt", "wf-I2", draft="v2", resume={"approve": True})
+        await ctx.client("interrupt", "wf-I2", draft="second", resume={"approve": True})
     )
-    d["i2_answer_for_v2"] = brief(
-        await ctx.client("interrupt", "wf-I2", draft="v2", resume={"approve": True})
+    d["i2_answer_for_second"] = brief(
+        await ctx.client("interrupt", "wf-I2", draft="second", resume={"approve": True})
     )
     d["proxy_calls"] = ctx.proxy.n()
     out["D_interrupts"] = d
