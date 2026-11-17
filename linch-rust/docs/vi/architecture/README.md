@@ -35,7 +35,7 @@ sử dụng riêng.
 | [Events](./events.md) | `Event` và các loại của nó, `Envelope`, các lớp lưu trữ bền vững, wire format và phiên bản của nó, việc bọc subagent, cách client Python giải mã và test parity, cách thêm một loại event |
 | [Skill và subagent](./skills-subagents.md) | Tool `Skill`, danh sách và overlay của nó; tool `Subagent`, worker foreground và background, `SubagentContinue` và `TaskStop`; họ run; hợp đồng của run con; resume sau sự cố; reload; danh sách deep agent |
 | [Giao thức RPC và server](./rpc.md) | `linch-rpc` và `linch-server`: method và notification, mã lỗi, bên trong một kết nối, thứ tự và backpressure, transport stdio, socket và HTTP, tenant và allowlist, các giới hạn, cách thêm một method |
-| [Kernel](./kernel.md) | `Agent` là scope của từng agent, `AgentBuilder` và run contract digest, `Registration`, hai mươi hai chuỗi hook và cách mỗi chuỗi kết hợp các câu trả lời, đường plan và execute của một batch tool, không có biến toàn cục |
+| [Kernel](./kernel.md) | `Agent` là scope của từng agent, `AgentBuilder` và run contract digest, `Registration`, hai mươi hai chuỗi hook cùng waterfall `tool_execute`, và cách mỗi chuỗi kết hợp các câu trả lời, đường plan và execute của một batch tool, không có biến toàn cục |
 | [Vòng đời của lượt](./turn-lifecycle.md) | Một run: các bước của lượt, vì sao vòng lặp tiếp tục, barrier và group commit, batch tool và việc chạy song song chỉ đọc, suspend, resume và reconcile, các terminal |
 | [Thu gọn ngữ cảnh](./compaction.md) | Điều kiện kích hoạt, micro-compaction, lời gọi tóm tắt, phép chiếu có ghi log trên session log, khôi phục theo độ dài ngữ cảnh, khôi phục từng bước, những gì model nhìn thấy, khôi phục câu trả lời bị cắt |
 
@@ -87,8 +87,8 @@ Các điều này đúng trên mọi trang ở trên, giống như
 - **Khả năng quan sát là OpenTelemetry**, dựng từ luồng event với tên của Linch
   bản Python ([OpenTelemetry](./otel.md)).
 
-Điểm khác với Python ([kernel](./kernel.md)): không có `Context` IoC, event bus hay
-pipeline tool; các điểm mở rộng là trait (`Provider`, `Tool`, `RunStore`,
+Điểm khác với Python ([kernel](./kernel.md)): không có `Context` IoC hay event bus; pipeline tool là ba hook point ([kernel](./kernel.md#chuỗi-hook)); các điểm mở rộng là trait
+(`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) và các chuỗi hook
 (`crates/linch-core/src/hooks.rs`) được đưa vào `AgentBuilder::hooks`
 (`crates/linch-core/src/agent/builder.rs:85-86`).

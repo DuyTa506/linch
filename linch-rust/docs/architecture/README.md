@@ -35,7 +35,7 @@ has its own usage docs.
 | [Events](./events.md) | `Event` and its kinds, `Envelope`, persistence classes, the wire format and its version, subagent wrapping, the Python client's decoding and the parity test, adding an event kind |
 | [Skills and subagents](./skills-subagents.md) | The `Skill` tool, its listing and overlay; the `Subagent` tool, foreground and background workers, `SubagentContinue` and `TaskStop`; the run family; child contracts; resume after a crash; reloads; the deep agent roster |
 | [RPC protocol and server](./rpc.md) | `linch-rpc` and `linch-server`: methods and notifications, error codes, inside a connection, ordering and backpressure, the stdio, socket and HTTP transports, tenants and allowlists, limits, adding a method |
-| [Kernel](./kernel.md) | `Agent` as the per-agent scope, `AgentBuilder` and the run contract digest, `Registration`, the twenty-two hook chains and how each combines answers, the plan and execute path of a tool batch, no globals |
+| [Kernel](./kernel.md) | `Agent` as the per-agent scope, `AgentBuilder` and the run contract digest, `Registration`, the twenty-two hook chains and the `tool_execute` waterfall, and how each combines answers, the plan and execute path of a tool batch, no globals |
 | [Turn lifecycle](./turn-lifecycle.md) | One run: the turn steps, why the loop continues, barriers and group commit, the tool batch and read-only parallelism, suspend, resume and reconcile, terminals |
 | [Compaction](./compaction.md) | The trigger, micro-compaction, the summary call, the logged projection on the session log, context-length recovery, recovery of each step, what the model sees, truncation recovery |
 
@@ -87,8 +87,8 @@ These hold across the pages above, as in Python Linch's
 - **Observability is OpenTelemetry**, built from the event stream with Python
   Linch's names ([OpenTelemetry](./otel.md)).
 
-What differs from Python ([kernel](./kernel.md)): there is no IoC `Context`,
-event bus or tool pipeline; extension points are traits (`Provider`, `Tool`, `RunStore`,
+What differs from Python ([kernel](./kernel.md)): there is no IoC `Context` or
+event bus; the tool pipeline is three hook points ([kernel](./kernel.md#hook-chains)); extension points are traits (`Provider`, `Tool`, `RunStore`,
 `SessionStore`, `TaskStore`, `FileBackend`, `JournalStore`) and hook chains
 (`crates/linch-core/src/hooks.rs`) given to `AgentBuilder::hooks`
 (`crates/linch-core/src/agent/builder.rs:85-86`).

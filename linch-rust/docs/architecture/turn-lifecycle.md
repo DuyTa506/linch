@@ -14,15 +14,15 @@ Python Linch has the same loop ([turn lifecycle](../../../docs/architecture/turn
 What differs in Rust:
 
 - The loop is explicit: a `Step` enum, one variant per place a run can resume
-  from (`crates/linch-core/src/runner/turn.rs:33-73`). A resume reads the
+  from (`crates/linch-core/src/runner/turn.rs:45-109`). A resume reads the
   durable checkpoint and picks the step; it does not replay the loop.
 - The run advances only while its stream is polled. Dropping the stream drops
-  the run where it stands, like a crash (`runner.rs:83-87`).
+  the run where it stands, like a crash (`runner.rs:98-102`).
 - The loop guard ends a stuck run before its next provider call
   ([below](#the-loop-guard)): Python's repeated-call and repeated-failure
   checks, on by default, and a bound on turns without a provider call that
-  is always on (`loop_guard.rs`, `runner/end.rs:156-170`).
-- Hook points are the twenty-two in the [kernel](./kernel.md#hook-chains),
+  is always on (`loop_guard.rs`, `runner/end.rs:179-192`).
+- Hook points are the twenty-three in the [kernel](./kernel.md#hook-chains),
   thirteen of which only observe. `before_provider_call` can rewrite or
   block the request about to be sent, and `after_provider_call` can rewrite
   or block the response a call just assembled, before it is staged, or
@@ -51,7 +51,7 @@ What differs in Rust:
   (`src/linch/loop/runtime.py:968-1006`); another process can only mark such
   a run failed through the store (`mark_failed`, `src/linch/run_store.py:709`).
 - A subagent's run cannot suspend: a call that needs approval is denied
-  (`runner/batch.rs:73-75`).
+  (`runner/batch.rs:84-87`).
 
 ## One turn
 
@@ -60,12 +60,12 @@ What differs in Rust:
 1. **Compact** when `spec.compaction` is set and the provider view is due
    ([compaction](./compaction.md)): clear old tool results when `micro` is
    set and that is enough, else summarize. With it off, a turn starts at
-   dispatch (`turn.rs:313`).
+   dispatch (`turn.rs:395-398`).
 2. **Check limits.** A cancelled token aborts the run. `max_turns` and the
-   budget end it as failed before the call is made (`turn.rs:271-284`).
+   budget end it as failed before the call is made (`turn.rs:436-449`).
 3. **Build the request** from the session's provider view. The
    `context_build` hooks add blocks to the tail of the request only
-   (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged, and the request carries their count as
+   (`turn.rs:451-461`, `runner/hooks.rs:278-289`). They are never logged, and the request carries their count as
    `context_tail`, so a provider's cache breakpoint stays on the last logged block before them.
    With `spec.context_budget` set, `ContextBudget::apply` (`context_budget.rs`)
    then drops whole blocks by the declared order until they fit: it counts
@@ -84,15 +84,15 @@ What differs in Rust:
 4. **Stage and flush the delivery.** The `context_build` event and the
    model-call delivery are staged. The `ProviderPending` checkpoint is held,
    then `flush` writes the events and the checkpoint in one commit
-   (`turn.rs:299-305`). This is the barrier before the provider is called.
+   (`turn.rs:508-514`). This is the barrier before the provider is called.
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
-   events (`turn.rs:306-317`), unless the spec's redaction covers responses:
+   events (`turn.rs:517-534`), unless the spec's redaction covers responses:
    then none are sent, since a match can span two deltas. The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
    When an `after_provider_call` hook is attached, an accepted receipt and
    its `Usage` are written at once, with `ProviderPending` re-saved at the
    totals that count them, before the hooks run, `provider_call_stop`
-   included (`turn.rs:369-380`, `runner/hooks.rs`, `checks_responses`).
+   included (`turn.rs:550-557`, `runner/hooks.rs`, `checks_responses`).
    A hook may be a client callback with no timeout; a crash while it runs
    keeps the paid usage ([below](#a-crash-between-a-receipt-and-its-response)).
    The response itself is not written yet: an `after_provider_call` rewrite
@@ -108,14 +108,14 @@ What differs in Rust:
    `runner/hooks.rs`). On success the run then stages the `Assistant` event,
    and the `Usage` event unless step 5 already wrote it, and saves
    `AssistantReceived`, which writes through with the receipt when step 5
-   did not (`turn.rs:422-466`, `journal.rs:192-193`). A hook's retry
+   did not (`turn.rs:611-644`, `journal.rs:209-212`). A hook's retry
    rides that same write as the checkpoint's `retry_feedback`, so the paid
    response and what to do with it are durable together. The caller sees
-   those events only after this commit (`journal.rs:25-28`).
-7. **Append the response to the session** (`turn.rs:395-397`).
+   those events only after this commit (`journal.rs:27-30`).
+7. **Append the response to the session** (`turn.rs:671-673`).
 8. **Branch on the tool calls** of the response (below).
 9. **Append the tool results**, run `post_turn`, and start the next turn
-   (`turn.rs:217-226`).
+   (`turn.rs:338-361`).
 
 The observe-only points thread through these same steps: `agent_start` fires
 once, right after the prompt is accepted and before the first turn
@@ -133,7 +133,7 @@ None of them can change what they observe.
 
 A call that fails ends the run as failed with one terminal write that carries
 the receipt, the usage, the `Error`, the status and the `Result`
-(`turn.rs:337-347`), unless the spec's `provider_retry` or `fallback_models`
+(`turn.rs:594-598`), unless the spec's `provider_retry` or `fallback_models`
 take a retryable failure: then the run goes back to step 4 with the next
 delivery `attempt`, after a `provider_retry` write and a wait, or at once to
 a fallback model with a `model_fallback` event
@@ -144,19 +144,19 @@ the model's context window, is never retried; with `spec.compaction` set,
 `max_forced`) and the run goes back to step 4 with the turn's next delivery
 `attempt` and no `provider_retry` event; when nothing can shorten it, the run
 ends failed ([context-length recovery](./compaction.md#context-length-recovery),
-`turn.rs:464`, `runner/compact.rs:268-295`). A response the output limit cut off before it held any
+`turn.rs:584-588`, `runner/compact.rs:308-341`). A response the output limit cut off before it held any
 text or a whole tool call is not an answer: the session gets nothing, and the
-run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
+run ends the same way (`turn.rs:541-543, 562-566`, `runner/end.rs:128-142, 214-223`).
 
 With `spec.truncation_recovery`, a text answer the output limit cut off
 (stop reason `max_tokens`, no tool call) is appended and answered with a
 feedback message instead of ending the run, while `max_attempts` lasts; the
 run's final text joins the parts
-([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:532-608`).
+([cut-off answers](./compaction.md#cut-off-answers), `turn.rs:677-694, 736-743`).
 
 ### The loop continues while a response has tool calls
 
-`received` collects the `tool_use` blocks of the response (`turn.rs:388-392`).
+`received` collects the `tool_use` blocks of the response (`turn.rs:660-664`).
 
 - **Retried by `after_provider_call`**, the response is appended but neither
   of the branches below runs: none of its tool calls is planned, and `stop`
@@ -168,12 +168,12 @@ run's final text joins the parts
   (`runner/hooks.rs`, `retry_message`). It is staged as a `notification`
   and held as `ToolResults`, then the next turn starts. Only `max_turns`
   bounds these retries, as in Python.
-- **With tool calls**, the run goes to `Step::Batch` (`turn.rs:416-421`).
+- **With tool calls**, the run goes to `Step::Batch` (`turn.rs:728-733`).
   Then `Step::Results` appends the results and starts the next turn. The
   provider's `stop_reason` does not decide this; the blocks do.
 - **Without**, the run first waits for any background subagent it has, which
-  can add a notification and another turn (`turn.rs:433-435`,
-  `runner/inbox.rs:137-168`). With an output schema (`spec.output_schema`,
+  can add a notification and another turn (`turn.rs:700-702`,
+  `runner/inbox.rs:145-154, 175-213`). With an output schema (`spec.output_schema`,
   or the run's own from its first `init` event) the answer is checked next
   (`runner/structured.rs`, `structured.rs`). A failing one, while
   `structured_output_retries` lasts, stages a `verification` event
@@ -199,7 +199,7 @@ run's final text joins the parts
   `verification` event under the hook's policy id; past the bound it
   counts as an allow and the later hooks decide), rewrite the final-answer
   text (the value `post_turn` and the terminal `Result` see next), or block
-  the stop outright, ending the run failed (`turn.rs:436-440`,
+  the stop outright, ending the run failed (`turn.rs:708-712`,
   `runner/hooks.rs`). Feedback from either reaches the model as Python's
   does, in a `<system-reminder>` user message staged as a `notification`,
   and another turn starts. With an output schema a rewrite is checked again,
@@ -207,10 +207,10 @@ run's final text joins the parts
   the answer after a `retry` or `continue` is checked from the start, on its
   own budget. When every hook lets it stop, `post_turn` runs and the run
   ends `completed` with that text, and the parsed value as the result's
-  `structured_output` (`turn.rs:441-448`).
+  `structured_output` (`turn.rs:721-726`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
-is not made and the run fails with `TurnLimitError` (`runner/end.rs:138-154`).
+is not made and the run fails with `TurnLimitError` (`runner/end.rs:161-177`).
 
 ### The loop guard
 
@@ -223,7 +223,7 @@ wire, so it does not change the contract of a spec that does not set it.
 | `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again | At `Step::Results`, after the batch's results are appended (`turn.rs:326`) |
 | `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. A write or exec call (any tool of that scope) that succeeds with an input new among the latest 50 such calls clears the count of every other call, never its own. Off the wire at 10 | Same |
 | `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
-| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:454`) |
+| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:483-486`) |
 
 0 turns one of the first three off; `max_idle_turns` is at least 1, so the
 idle bound is always on. Such a turn never reaches the budget and appends
@@ -233,7 +233,7 @@ the call loops until the run is cancelled.
 A trip is one terminal write: the `loop_guard` event (`reason`
 `repeated_tool_call`, `repeated_failures` or `idle_turns`, `action` `stop`),
 an `Error` named `LoopGuardError` with the event's `detail`, and a failed
-`Result` with `stop_reason` `error` (`end.rs:156-170`). A tool trip comes
+`Result` with `stop_reason` `error` (`end.rs:179-192`). A tool trip comes
 after the results are in the session, so it stays paired; no `post_turn`
 runs for that turn.
 
@@ -284,9 +284,9 @@ from the registry), the next `tool_result` user event counts the calls by
 their result content (what a call returned, an offload file name removed)
 and moves the failure streak, and a primary `model_call_delivery` records its
 turn. The live run folds the same events as it stages them
-(`Runner::stage_seen`, `turn.rs:381`; the tools' `tool_call_end` events as
+(`Runner::stage_seen`, `turn.rs:405-411`; the tools' `tool_call_end` events as
 the journal sink stages them, `runner/sink.rs`), and a resume folds the
-stored ones (`start.rs:508`). Each is durable before the step that checks it
+stored ones (`start.rs:520`). Each is durable before the step that checks it
 (the results with the `ToolResults` checkpoint, a delivery before its call),
 and the turn comes from the checkpoint, so a crash at any write resumes with
 the counts the run had and trips at the same point
@@ -355,12 +355,12 @@ that never passes, a rewritten answer, and the same through a final tool.
 ## Barriers and group commit
 
 A `Journal` holds one run's events and checkpoint in memory and writes them
-with `RunStore::commit` at barriers (`journal.rs:1-33`). The count per turn and
+with `RunStore::commit` at barriers (`journal.rs:1-34`). The count per turn and
 the Postgres write paths are in
 [stores](./stores.md#group-commit-write-counts). This section is about when a
 write happens.
 
-`Journal::save` applies the phase rule (`journal.rs:190-208`):
+`Journal::save` applies the phase rule (`journal.rs:207-229`):
 
 | Phase | Write | Status |
 |---|---|---|
@@ -370,21 +370,21 @@ write happens.
 | `ProviderPending`, `CompactionPending`, `Cleared`, `ToolBatch`, `ToolResults`, `Finishing` | Held | unchanged |
 
 A held checkpoint is a snapshot: it covers only the events pending when it
-was saved (`journal.rs:76-80`, `201-202`). Every committed state is one that
-writing each step through would also have produced (`journal.rs:25-28`).
+was saved (`journal.rs:83-87`, `222-223`). Every committed state is one that
+writing each step through would also have produced (`journal.rs:27-30`).
 
 The caller places the barriers, and the run does it in these places:
 
 | Barrier | Call | Where |
 |---|---|---|
-| Before a provider dispatch | `Journal::flush` | `turn.rs:303-305` |
-| After an accepted call, before the hooks that follow it (only with an `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:373-380` |
+| Before a provider dispatch | `Journal::flush` | `turn.rs:511-514` |
+| After an accepted call, before the hooks that follow it (only with an `after_provider_call` hook) | `flush`, with `ProviderPending` re-saved | `turn.rs:551-557` |
 | Before a retry's wait | `flush`, with `ProviderPending` re-saved | `runner/retry.rs:69-72` |
-| Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:94-96, 116-118, 143-147` |
-| Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:39-45`, `runner/sink.rs:137-140` |
-| After each tool that really ran | `tool_finished` flushes | `sink.rs:142-182` |
-| Before every session-store write | `Journal::flush_checkpoint` | `runner/write.rs:96-103`, `journal.rs:220-231` |
-| The end of the run | `Journal::finish` | `journal.rs:233-257`, `runner/end.rs:55` |
+| Around a compaction summary call | `flush` before the call; `flush` or the `Compacted` write-through after it | `runner/compact.rs:159-162, 245-248, 265-269` |
+| Before each tool that really runs | `ToolSink::tool_starting` flushes | `scheduler/execute.rs:46-52`, `runner/sink.rs:219-224` |
+| After each tool that really ran | `tool_finished` flushes | `sink.rs:246-289` |
+| Before every session-store write | `Journal::flush_checkpoint` | `runner/write.rs:98-103`, `journal.rs:251-262` |
+| The end of the run | `Journal::finish` | `journal.rs:264-288`, `runner/end.rs:105` |
 
 This is the rule that run state is durable before the next side effect: the
 provider is called, a tool starts, the session store is written, or the run
@@ -392,40 +392,40 @@ ends only after every pending event and checkpoint is durable. Never defer a
 write past a barrier. Three kinds of write do not wait for the next barrier:
 
 - A paid receipt. An accepted call writes through with `AssistantReceived`
-  (`turn.rs:460`), or, when an `after_provider_call` hook is attached, on
+  (`turn.rs:644`), or, when an `after_provider_call` hook is attached, on
   its own with `ProviderPending` re-saved at the totals that count it,
-  before the hooks (`turn.rs:373-380`). A compaction summary writes through with `Compacted`
-  (`compact.rs:134-147`). A summary call that gave no text saves
+  before the hooks (`turn.rs:551-557`). A compaction summary writes through with `Compacted`
+  (`compact.rs:254-269`). A summary call that gave no text saves
   `CompactionPending` and flushes at once, so a resume does not buy it again
-  (`compact.rs:20-24, 114-120`). A failed call the run retries saves
+  (`compact.rs:23-29, 245-248`). A failed call the run retries saves
   `ProviderPending` again, at the totals that count its receipt, and flushes
   with its `provider_retry` event before the wait (`runner/retry.rs:69-72`).
 - A tool end. It is flushed right after the tool returns, from
   `tool_finished`, so a resume finds the result and does not run the tool
-  again (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).
+  again (`sink.rs:284-286`, `journal/reconcile.rs:381-385`).
 - A suspend. `AwaitingApproval` and `AwaitingInput` write through with
-  their status (`journal.rs:196-197`).
+  their status (`journal.rs:213-214`).
 
 A call that runs no tool (served by a hook, refused, denied or aborted) has
 its start and end staged without a flush. They reach the store with the next
-barrier (`sink.rs:3-7`, `179-181`). Hooks are not barriers
+barrier (`sink.rs:3-7`, `284-286`). Hooks are not barriers
 (`runner/hooks.rs:1-9`).
 
 `Journal::finish` commits the held state first, then the terminal status with
 the `Result` event. With nothing held, the pending events, the `Result` and the
 status go in one write, so a crash never leaves a failed receipt with its
-`Error` but a `running` status (`journal.rs:233-257`).
+`Error` but a `running` status (`journal.rs:264-288`).
 
 A failed write poisons the journal: every later write fails with
 `JournalError::Poisoned`, and nothing more reaches the store. The run keeps
-its last durable state and a resume recovers it (`journal.rs:30-32`,
-`285-295`).
+its last durable state and a resume recovers it (`journal.rs:32-34`,
+`320-330`).
 
 The caller sees an event only after its commit. `Outbox::deliver` queues the
 envelopes a commit made durable and yields once, so the stream hands them over
-before the run goes on (`runner.rs:278-298`). Deltas and tool progress skip
-this: they go out at once and carry the last durable seq (`runner.rs:74-80`,
-`runner/sink.rs:184-199`).
+before the run goes on (`runner.rs:307-315`). Deltas and tool progress skip
+this: they go out at once and carry the last durable seq (`runner.rs:301-305`,
+`runner/sink.rs:291-306`).
 
 The `event_emit` hook point fires right before each of these `deliver` calls,
 once per envelope in that batch, in order (`runner/hooks.rs`). Since the
@@ -435,30 +435,30 @@ both staged for the caller and just made durable.
 
 ## Tool batch
 
-`Step::Batch` plans, then suspends or runs (`runner/batch.rs:29-118`).
+`Step::Batch` plans, then suspends or runs (`runner/batch.rs:29-153`).
 
 1. **Plan.** `scheduler::plan` decides every call without running anything,
-   under the run's cancel token (`batch.rs:58-72`). A cancel there ends the
+   under the run's cancel token (`batch.rs:64-83`). A cancel there ends the
    run as a store cancel does ([below](#cancel-a-suspended-run)): an aborted
    result for each call without one, `Aborting`, the session append, then
    the terminal, so the session stays paired. The hook records of each
-   call go to the caller (`batch.rs:77-80`). The decisions are recorded for
-   the checkpoint (`batch.rs:81-83`). The steps of `plan` are in the
+   call go to the caller (`batch.rs:105-108`). The decisions are recorded for
+   the checkpoint (`batch.rs:109-111`). The steps of `plan` are in the
    [kernel](./kernel.md#tool-call-seams).
 2. **Suspend or run.** If any call awaits approval, the run suspends and the
-   batch is not executed (`batch.rs:84-87`). Otherwise it saves `ToolBatch`
-   (held, with `after_seq` = the last staged seq) and executes (`batch.rs:88-94`).
+   batch is not executed (`batch.rs:114-117`). Otherwise it saves `ToolBatch`
+   (held, with `after_seq` = the last staged seq) and executes (`batch.rs:122-128`).
 3. **Collect.** The results, any peer notes and catalog notices become one
    user message, staged as a `user` event with subtype `tool_result`. The run
    saves `ToolResults` (held). `Step::Results` then appends the message,
-   which first flushes that checkpoint (`batch.rs:99-118`, `turn.rs:217-226`).
+   which first flushes that checkpoint (`batch.rs:129-148`, `turn.rs:338-341`).
 
 ### Only read work runs in parallel
 
-`execute` groups calls (`scheduler/execute.rs:137-151`). A call joins a group
+`execute` groups calls (`scheduler/execute.rs:191-205`). A call joins a group
 only if the first call of the group is a read call, the group is under
 `max_tool_concurrency`, and the call is a read call too, or runs no tool
-(`execute.rs:155-163`). Every other call runs alone. `try_join_all` runs a
+(`execute.rs:196-201, 209-217`). Every other call runs alone. `try_join_all` runs a
 group's calls together, and results come back in call order.
 
 A read call is one whose `Tool::parallel(input)` is true. The default is true
@@ -466,14 +466,14 @@ only for `Read` scope (`crates/linch-core/src/tool.rs:34-36, 250-257`). The
 `Subagent` tool is `Exec` scope and says true only for a foreground call of a
 named type whose definition lists its tools and every one of them is a
 registered `Read` tool. Anything unknown fails closed
-(`crates/linch-core/src/subagents/tool.rs:124-146`). The default limit is 4,
-and 0 counts as 1 (`agent/spec.rs:55-57`, `execute.rs:137`).
+(`crates/linch-core/src/subagents/tool.rs:129-151`). The default limit is 4,
+and 0 counts as 1 (`agent/spec.rs:87-89`, `execute.rs:191`).
 
 Calls in one group overlap, so the `ToolSink` must accept concurrent calls
-(`execute.rs:33`). The journal sink takes turns on a mutex held across each
-flush (`sink.rs:38-40`). A sink error stops the batch: this tool and every
+(`execute.rs:40`). The journal sink takes turns on a mutex held across each
+flush (`sink.rs:41-42`). A sink error stops the batch: this tool and every
 later one do not run, and running tools in the group are cancelled
-(`execute.rs:39-45`).
+(`execute.rs:46-52`).
 
 ## Suspend and resume
 
@@ -483,61 +483,61 @@ A call that still needs approval after the `permission_request` chain
 suspends the run. `suspend` stages a `permission_request` event and a
 `suspended` event, parks the subagent family (if the agent has subagents) so
 its children outlive the stream, and saves `AwaitingApproval` with the pending ids
-(`batch.rs:155-183`). That write-through sets the status
-`awaiting_approval` (`journal.rs:195`). The stream ends with `Suspended`
+(`batch.rs:178-210, 244-256`). That write-through sets the status
+`awaiting_approval` (`journal.rs:213`). The stream ends with `Suspended`
 instead of `Result`. The run then waits in the store with status
 `awaiting_approval`; only a claim takes it back to `running`
 ([stores](./stores.md#run-store)). A failed write takes the park back
-(`batch.rs:217-229`).
+(`batch.rs:244-256`).
 
 An `AskUser` call ([tools](./tools.md#askuser)) suspends the same way once
 no call of the batch still needs approval: the plan marks it
 `PlannedAction::AwaitingInput`, and `suspend_for_input` stages one
 `input_request` per call (its questions) and a `suspended` event, then saves
 `AwaitingInput` with the pending ids, which sets `awaiting_input`
-(`batch.rs:188-217`). The other calls of that batch wait with it. A child
+(`batch.rs:212-242`). The other calls of that batch wait with it. A child
 run cannot wait for the user: its `AskUser` calls are refused with an error
-result before the batch runs (`batch.rs:76`).
+result before the batch runs (`batch.rs:86`).
 
 ### Resume and approve
 
 `Agent::resume` continues a run after a crash, a lost lease or a dropped
 stream. `Agent::approve` answers the pending calls of a suspended run and
 continues it, and `Agent::answer` answers its pending `AskUser` calls
-(`agent.rs:272-332`). All three enter `continue_run`
-(`runner/start.rs:175-333`):
+(`agent.rs:365-438`). All three enter `continue_run`
+(`runner/start.rs:250-550`):
 
 1. A token that is already cancelled does nothing: no claim, no write
-   (`start.rs:185-187`).
+   (`start.rs:261-263`).
 2. `check` refuses a terminal run, a run of another contract, an approve
    on a run that is not awaiting approval, and an answer on one that is not
-   awaiting input (`start.rs:534-563`). `check_answers` refuses an answer
+   awaiting input (`start.rs:755-786`). `check_answers` refuses an answer
    that does not fit the latest `input_request` questions with
-   `InvalidAnswer` (`start.rs:565`). It runs before the claim, so a
+   `InvalidAnswer` (`start.rs:791`). It runs before the claim, so a
    mistaken call does not fence a live owner, and again after it
-   (`start.rs:189-207`, `414-439`).
+   (`start.rs:269-276`, `366-373`).
 3. `claim` takes the lease and adds 1 to the epoch, which fences out the
    previous owner ([stores](./stores.md#fencing)); a child run is seized
-   instead (`start.rs:233-247`). On a store whose claims expire, a run
+   instead (`start.rs:277-290`). On a store whose claims expire, a run
    another holder keeps alive is refused with `RunLeased` before anything
    is written, and from here on the run future renews the lease and
    releases it if the run stops without settling
    ([leases](./stores.md#leases), `runner/lease.rs`).
 4. `reconcile` reads the checkpoint, the events and the session log, and
-   returns what to do next. It is pure (`journal/reconcile.rs:149-169`).
+   returns what to do next. It is pure (`journal/reconcile.rs:197-219`).
 5. A new `init` event with `resumed: true` is staged. It rides the first
-   barrier (`start.rs:284-296`).
+   barrier (`start.rs:466-481`).
 6. For an approve, the host's answers are recorded as decisions and committed
    with a `ToolBatch` checkpoint before the run goes on, so a crash after
-   that keeps them (`start.rs:259-261, 329-331`, `batch.rs:199-214`).
+   that keeps them (`start.rs:354-358, 543-546`, `batch.rs:283-299`).
    For an answer, each answered call's `tool_call_start` and
    `tool_call_end` (the rendered answer) are staged after the `init` and
    committed with a `ToolBatch` checkpoint before the run goes on
-   (`start.rs:220`, `306-330`). The model then reads a durable result, as
+   (`start.rs:482-484`, `374-407`). The model then reads a durable result, as
    for any tool that ran. No `pre_tool_use`, `post_tool_use` or
    `tool_use_start`/`tool_use_stop` hook sees an answer.
 
-What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
+What `reconcile` makes of each phase (`journal/reconcile.rs:220-312`):
 
 | Checkpoint phase | Recovery | The run continues with |
 |---|---|---|
@@ -554,25 +554,25 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 | `Finishing` | `Finishing` | Append the results that pair a final tool call unless they are in the session, then the terminal its `ending` holds ([below](#the-final-tool)) |
 
 Each tool call of a recovered batch recovers on its own
-(`reconcile.rs:309-332`):
+(`reconcile.rs:374-397`):
 
 - A call with a durable end reuses that result (`Done`).
 - A call that started but has no end gets an error result that says it was
   interrupted, and the tool is not run again (`Interrupted`,
-  `reconcile.rs:20-22`). The run stages the placeholder as that call's end
-  (`batch.rs:44-57`). A `Subagent` or `SubagentContinue` call is the
+  `reconcile.rs:21-23`). The run stages the placeholder as that call's end
+  (`batch.rs:46-60`). A `Subagent` or `SubagentContinue` call is the
   exception: it is planned again and resumes its durable child run
-  (`batch.rs:120-141`).
+  (`batch.rs:155-176`).
 - A call that never started is planned again, and asks for permission again
   unless a recorded decision covers it (`Replan`).
 
 A recorded allow covers only the input the host saw, and a recorded deny
-always denies (`scheduler.rs:59-66`). Reconcile fails when the session log
+always denies (`scheduler.rs:64-71`). Reconcile fails when the session log
 does not fit the checkpoint (`journal/reconcile/session.rs:9-22`).
 
 A retried approve or answer gets `NotSuspended`: once it has committed the
 run is in `ToolBatch`, and the host continues it with `resume`
-(`agent.rs:262-273`, `start.rs:432-437`).
+(`agent.rs:385-388, 419-421`, `start.rs:780-784`).
 
 ### Cancel a suspended run
 
@@ -646,7 +646,7 @@ count the receipt), an `accepted` receipt and its `usage` event, and no
   `usage` event is in the log, so the result's `total_usage` and
   `total_cost_usd` are the sum of every receipt, the orphan's included.
 - The call goes again. `reconcile` returns `Redispatch` with the next
-  attempt and no abandoned receipt (`journal/reconcile.rs:251-268`), so the
+  attempt and no abandoned receipt (`journal/reconcile.rs:315-332`), so the
   call gets a new delivery attempt id under the same logical call id. No
   `provider_retry` event is written, so it spends none of the turn's
   retries (`Standing::of` counts only those). Under a capped budget the
@@ -720,23 +720,23 @@ taken.
 
 Every terminal goes through `Runner::end`: it cancels and awaits the run's
 child runs, stages their final status, builds the `Result` and calls
-`Journal::finish` (`runner/end.rs:24-58`).
+`Journal::finish` (`runner/end.rs:74-110`).
 
 | Terminal | Status | When |
 |---|---|---|
-| `Result` success | `completed` | A text-only response, after `stop` and `post_turn` (`turn.rs:407-414`) |
-| Abort | `aborted` | The cancel token fired (`end.rs:61-64`), or `Agent::cancel` ended a suspended run (`runner/cancel.rs`) |
-| Hook failed closed | `failed` | A `stop` hook failed closed (`end.rs:66-74`) |
-| Output limit | `failed` | The response held no text or whole tool call (`end.rs:76-90`) |
-| Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:138-154`) |
+| `Result` success | `completed` | A text-only response, after `stop` and `post_turn` (`turn.rs:721-726`) |
+| Abort | `aborted` | The cancel token fired (`end.rs:112-116`), or `Agent::cancel` ended a suspended run (`runner/cancel.rs`) |
+| Hook failed closed | `failed` | A `stop` hook failed closed (`end.rs:118-126`) |
+| Output limit | `failed` | The response held no text or whole tool call (`end.rs:128-142`) |
+| Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:161-177`) |
 | Policy gate | `failed` | A completion gate still failed after `max_corrections`, with a `policy` event (`stop`) and a `PolicyGateError` ([above](#the-reliability-policy)) |
-| Loop guard | `failed` | The loop guard tripped, with a `loop_guard` event and a `LoopGuardError` (`end.rs:156-170`, [above](#the-loop-guard)) |
-| Budget | `failed` | The budget admits no more calls (`end.rs:110-122`) |
-| Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:343-346`, `runner/retry.rs`) |
+| Loop guard | `failed` | The loop guard tripped, with a `loop_guard` event and a `LoopGuardError` (`end.rs:179-192`, [above](#the-loop-guard)) |
+| Budget | `failed` | The budget admits no more calls (`end.rs:194-206`) |
+| Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:594-598`, `runner/retry.rs`) |
 
 A terminal status is final in the store ([stores](./stores.md#run-store)).
 `Agent::fail` marks a run that can never continue (a contract mismatch, a
-state that does not reconcile) as `failed` (`agent.rs:290-327`).
+state that does not reconcile) as `failed` (`agent.rs:497-536`).
 
 ## Example trace
 
@@ -754,7 +754,7 @@ session writes (`runner.rs:36-37`):
 
 The table is the shape pinned by
 `a_tool_turn_costs_three_plus_two_k_run_writes_and_two_session_writes`
-(`journal/tests/turn.rs:116`). With an `after_provider_call` hook
+(`journal/tests/turn.rs:121`). With an `after_provider_call` hook
 attached, the response step is two writes: the
 receipt and `Usage` with `ProviderPending` before the hooks, then
 `Assistant` with `AssistantReceived` after them, so the turn costs `4 + 2k`.

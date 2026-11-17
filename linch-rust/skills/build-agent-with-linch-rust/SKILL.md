@@ -1,6 +1,6 @@
 ---
 name: build-agent-with-linch-rust
-description: Design, build, extend, debug, and test AI agents on linch-rust, the Rust kernel of Linch that Python drives through the linch_rust client and its linch-server sidecar. Use this skill whenever a task touches linch-rust, linch_rust, `import linch_rust` or `from linch_rust import`, or asks for an agent with host tools, callbacks, approvals, MCP servers, skills, subagents, a deep agent, profiles, durable resume on Postgres, a shared server for tenants, scaling out sidecars, or choosing an architecture for an agent pipeline, even if the request only says "make an agent" inside a project that depends on linch-rust.
+description: Design, build, extend, debug, and test AI agents on linch-rust, the Rust kernel of Linch that Python drives through the linch_rust client and its linch-server sidecar. Use this skill whenever a task touches linch-rust, linch_rust, `import linch_rust` or `from linch_rust import`, or asks for an agent with host tools, callbacks, approvals, MCP servers, skills, subagents, a deep agent, profiles, durable resume on Postgres, a shared server for tenants, scaling out sidecars, steering a run while it works, agents that run for hours, compaction, long-term memory, loop guards, tool retry and caching, sandboxed commands, schedules, or choosing an architecture for an agent pipeline, even if the request only says "make an agent" inside a project that depends on linch-rust.
 ---
 
 # Build agents with linch-rust
@@ -48,12 +48,14 @@ Most tasks need more than one row. Paths are relative to `$DOCS`.
 | First agent, project setup | `usage/quickstart.md`, `usage/cli.md` |
 | Config fields, sessions, callbacks, the run contract | `usage/agent.md` |
 | Models, keys, self-hosted servers, the scripted provider | `usage/providers.md` |
-| Host tools, workspace tools, permissions, approvals, MCP | `usage/tools.md` |
+| Host tools, workspace tools, permissions, approvals, MCP, retry and cache of tool calls | `usage/tools.md` |
 | Start, stream, resume, approve, cancel; what is durable | `usage/runs.md` |
 | Rendering a stream, replay, usage and cost | `usage/events.md` |
 | A final answer another program parses (a JSON Schema) | `usage/structured-output.md` |
-| Long runs, context-window errors, cut-off answers, long-term memory | `usage/memory.md` |
-| Permission modes, redacting secrets, checking the final answer | `usage/security.md` |
+| Context-window errors, compaction, cut-off answers, file and long-term memory | `usage/memory.md` |
+| An agent that works for hours; correcting a run while it works | `usage/long-running.md`, `usage/runs.md` (Steer) |
+| Permission modes, redacting secrets, checking the final answer, tool order and completion gates | `usage/security.md` |
+| Where `Bash` runs: `local`, `sandbox`, `docker` | `usage/sandbox.md` |
 | Memory or Postgres stores, DSNs, pools | `usage/stores.md` |
 | Skills, subagents and workers for your agent | `usage/skills.md`, `usage/subagents.md` |
 | A model that plans, delegates and keeps notes | `usage/deep-agent.md`, `usage/tasks.md` |
@@ -80,8 +82,8 @@ async with Server() as server:  # or Server.connect(address, token=...)
 - Host tools are `async def` functions under `@tool(scope=...)`, passed as a list. `scope` is
   `read`, `write` or `exec` with no default; it decides approval and parallelism. A parameter
   typed `ToolContext` gets the call's ids, `principal` and `idempotency_key`.
-- Callbacks are `@callback(point, policy_id, policy_version)` at one of seven points, such as
-  `pre_tool_use`. Bump `policy_version` whenever the behaviour changes.
+- Callbacks are `@callback(point, policy_id, policy_version)` at one of the hook points in
+  `usage/agent.md`, such as `pre_tool_use`. Bump `policy_version` whenever the behaviour changes.
 - Modes are `default`, `accept_edits` and `skip_dangerous`. In `default`, a `write` or `exec`
   call ends the stream with `SuspendedEvent`; `agent.approve(run.id, decisions)` continues it
   with `Allow()` or `Deny(reason)` per pending `tool_use_id`.
@@ -100,6 +102,36 @@ async with Server() as server:  # or Server.connect(address, token=...)
   or `run.cancel()` it, because an unread run goes on and its events queue without a bound.
 - Start a project with `linch-rust new <name>` and add tools with `linch-rust add tool <name>`.
 - A new provider adapter, tool kind or store is Rust work: start at `architecture/README.md`.
+
+### Pick the control by the problem
+
+Each is a spec or config field in the Python client; the page holds the fields. Ask whether the
+problem is real before adding one.
+
+| The problem | Use | Pitfall |
+|---|---|---|
+| The run repeats one call | `spec.loop_guard`, on by default: ends the run `failed` with a `loop_guard` event | A host tool that polls needs `polls=True`, or each poll counts as a repeat |
+| Calls in the wrong order, or "done" too early | `spec.policy`: `{"prerequisites": [{"tool": "Edit", "requires": ["Read"]}], "gates": [...]}` | An ordering aid for the model, not security: permissions and the sandbox are |
+| The model must call a tool, or none | `spec.tool_choice` or `agent.run(..., tool_choice=...)` | A forced choice holds every turn: give the run a final tool or `max_turns`. DeepSeek refuses it while thinking |
+| A person corrects a run while it works | `await agent.steer(run.id, "skip file c")` | It lands at the next step, only the server driving the run takes it, memory stores lose it |
+| The conversation outgrows the context | `spec.compaction: {}` | The goal goes in `spec.system` `sections`, not the first message; what must survive goes in tasks, files or memory |
+| A program parses the answer | `spec.output_schema` | DeepSeek, vLLM, SGLang and llama.cpp get a final tool instead of a native schema; `server.provider_capabilities(config)` says which (`output_schema`), keyless |
+| A read tool is flaky or repeated | `spec.tool_retry` (tools with `@tool(idempotent=True)` only); `spec.tool_cache` (`{"tools": [...], "ttl_ms": ...}`) | Retry a tool that changes things and its effect doubles. A cache stores results as the tool returned them: set `spec.redaction` first |
+| The model runs shell commands | `execution: {"backend": "sandbox"}` or `{"backend": "docker"}` | `local`, the default, confines nothing; the sandbox needs Linux 6.12 and a server that is not root |
+| Check-ins and follow-ups | `agent.heartbeat(...)`, `agent.create_schedule(...)`, `schedule_tools: True` | Needs Postgres stores, no host tools or callbacks, and a worker |
+
+Memory, from the cheapest: **working** memory is the history, shortened by compaction;
+**internal** notes the model keeps itself are `filesystem: {"memory": True}` (add `memory_scope`);
+**long-term** facts across sessions, and for scheduled agents that have no callbacks, are
+`memory: {"recall": {"k": 5}}` on Postgres stores (a run without a `principal` has no memory
+under the default scope); **external** documents are a `context_build` callback built with
+`linch_rust.memory.retrieval`. A long run keeps its goal, a `task_ledger` and its files outside the
+conversation (`usage/long-running.md`).
+
+On a shared `linch-server --config`, most of these are denied until the tenant's `allow` lists
+them: `exec_tools`, `execution`, `tool_cache`, `memory` with `max_memories`, `task_ledger`,
+`max_schedules`, `provider_info`. A refusal is `NotAllowed` with `.kind`; a config asking for
+`Bash` without `exec_tools` opens without it, silently. Read the list in `usage/server.md`.
 
 ## 4. Test it like it is real
 

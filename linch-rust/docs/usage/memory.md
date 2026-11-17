@@ -60,6 +60,15 @@ its own usage, charged to the [budget](./agent.md#budget). It is reported by
 a `compaction` [event](./events.md#compactionevent-compaction) with
 `strategy` `summary`. The `pre_compact` and `post_compact` callbacks see it.
 
+The summary request is the request the turn's own call would send (the same
+system blocks, tools, thinking settings and messages, byte for byte, so the
+provider's prompt cache serves it) plus one last user message that asks for
+the summary. The summary is applied as a checkpoint message that also carries
+the folded user messages verbatim, up to `keep_user_tokens`. A reply that
+called a tool, is empty or is no smaller than what it replaces is rejected:
+the view stays as it was and the `compaction` event says why
+([Architecture](../architecture/compaction.md#the-summary-call)).
+
 A summary the model gives back as a tool call, as nothing, or as a text no
 smaller than the part it replaces (measured on the whole checkpoint, verbatim
 messages and reminders included) is rejected: the view stays as it was and a
@@ -605,7 +614,8 @@ rides the tail of the request, so retrieval never moves the cached prefix.
 | Recovery from a prompt-too-long error, always on | Only with `spec.compaction`; without it the refusal ends the run |
 | `reset_read_tracker` after a compaction | Built in for workspace agents |
 | `TruncationRecovery` | `spec.truncation_recovery` |
-| `RagConnector`, `ContextBuilder`, `FileMemoryContextBuilder` | A `context_build` callback; `linch_rust.memory.retrieval` |
+| `RagConnector`, `ContextBuilder` | A `context_build` callback; `linch_rust.memory.retrieval` |
+| `FileMemoryContextBuilder` | `filesystem.memory` ([above](#file-memory)) |
 | `ContextBudget` on a builder's result | `spec.context_budget`, on the callbacks' blocks, by a declared `drop_order` and `pinned` (Python drops oldest messages, then oldest system blocks) |
 | `SystemPromptConfig` | `spec.system` ([Agent config](./agent.md#system-sections)) |
 | `register_grounding_check` | Not built: it needs the ids retrieved in the run, shared by two callbacks, and a correction budget; `stop` retries are bounded to one per run call unless `spec.verification` is set |

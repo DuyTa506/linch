@@ -53,16 +53,16 @@ Server ─────── one linch-server child process, or a connection to 
 | Page | What it covers |
 |---|---|
 | [Quickstart](./quickstart.md) | Install, an offline run, a live provider, a host tool, an approval, Postgres |
-| [Agent config](./agent.md) | Every `AgentConfig` field with its default, `spec`, the run contract, intercept callbacks, sessions |
-| [Providers](./providers.md) | Each provider id, keys from the server's environment, self-hosted server profiles, the scripted provider |
+| [Agent config](./agent.md) | Every `AgentConfig` field with its default, `spec`, the run contract, system sections and the context budget, loop guard, reliability policy, intercept callbacks, sessions |
+| [Providers](./providers.md) | Each provider id, keys from the server's environment, self-hosted server profiles, the scripted provider, what a provider supports and which models it serves, temperature, retries and fallback, the concurrency limit |
 | [Sandbox](./sandbox.md) | Where `Bash` runs: `local`, `sandbox` (Landlock, seccomp, rlimits) or `docker`; what each confines |
 | [Remote execution](./remote-execution.md) | `Bash` on a host your client supplies: what runs where, interrupted calls, the file tools, the protocol |
-| [Tools](./tools.md) | Host tools, the workspace tools, scopes, permission modes and rules, approvals, the virtual filesystem, MCP tools |
-| [Runs](./runs.md) | Start, stream, resume, approve, cancel; errors at the end of a stream; what is durable and when |
+| [Tools](./tools.md) | Host tools, the workspace tools, scopes, permission modes and rules, approvals, retries and the result cache, schedule tools, the virtual filesystem, MCP tools |
+| [Runs](./runs.md) | Start, stream, resume, approve, cancel, steer a run that is going on; errors at the end of a stream; what is durable and when |
 | [Events](./events.md) | Every event type the client decodes, with its fields; sequence numbers and replay; usage and cost |
-| [Structured output](./structured-output.md) | A JSON Schema the final answer must satisfy: on the agent or one run, retries, callbacks, what each provider receives |
-| [Memory](./memory.md) | Compaction and micro-compaction, a prompt longer than the context window, cut-off answers, external memory through `context_build` |
-| [Security](./security.md) | Permission modes and auto-allow, redaction of responses, tool results and prompts, final-answer verifiers and their budget |
+| [Structured output](./structured-output.md) | A JSON Schema the final answer must satisfy: on the agent or one run, retries, callbacks, what each provider receives, `tool_choice` and the final tool |
+| [Memory](./memory.md) | Compaction and micro-compaction, a prompt longer than the context window, cut-off answers, file memory, built-in long-term memory, external memory through `context_build` |
+| [Security](./security.md) | Permission modes and auto-allow, redaction of responses, tool results and prompts, final-answer verifiers and their budget, tool order and completion gates |
 | [Stores](./stores.md) | Memory and Postgres stores, DSNs, schemas, migrations, namespaces, pools |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
 | [Troubleshooting](./troubleshooting.md) | Errors from the server binary to runs and tools, with causes and fixes |
@@ -76,7 +76,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Monitoring](./monitoring.md) | What is traced, how cost is computed and priced, running an eval, reading a run report |
 | [Server](./server.md) | Running `linch-server` for remote tenants, and `Server.connect`: tokens, allowlists, limits |
 | [Workflows](./workflows.md) | A Python function that directs a known sequence of agent calls: fan-out, pipeline, steps, interrupts; journaled in Postgres so a crash resumes without repeating finished calls; handoff between steps; `run_or_resume` |
-| [Scheduler](./scheduler.md) | Cron and interval schedules in a time zone, heartbeats on one session, one-off background runs, job status, the worker that runs them |
+| [Scheduler](./scheduler.md) | Cron and interval schedules in a time zone, heartbeats on one session, one-off background runs, schedule tools the model calls, job status, the worker that runs them |
 
 Coming later:
 
@@ -92,9 +92,12 @@ Coming later:
 | `session = await agent.session()`; `session.run(prompt)` | `agent.run(session_id, prompt)` with a session id you choose |
 | `ToolRegistry`, `@tool`, class tools | `@tool(scope=...)` host tools; `scope` has no default |
 | `permissions={"mode": "acceptEdits"}`, `can_use_tool` | `{"mode": "accept_edits", "project_root": ...}`; suspend and `agent.approve`, or a `permission_request` callback |
-| Hooks in-process | `@callback` at twenty-two hook points, declared at open |
+| Hooks in-process | `@callback` at twenty-three hook points, declared at open |
 | `InMemorySessionStore`, Postgres stores | `{"type": "memory"}` or `{"type": "postgres", "dsn": ...}` |
 | `ScriptedProvider` from `linch.ext.evals` | `{"id": "scripted", "turns": [...]}` with `linch_rust.scripted` |
+| `session.align(text)` | `agent.steer(run_id, text)` ([Runs](./runs.md#steer)) |
+| `ToolPipeline` listeners (retry, cache), `register_schedule_tools` | `spec.tool_retry`, `spec.tool_cache`, a `tool_execute` callback, `schedule_tools` ([Tools](./tools.md#retries-and-the-cache)) |
+| `LoopGuard`, `ContextBudget`, `SystemPromptConfig` | `spec.loop_guard`, `spec.context_budget`, `spec.system` ([Agent config](./agent.md#spec)) |
 | `linch` CLI | `linch-rust` CLI |
 | `CompactionLadder`, `TruncationRecovery`, `RagConnector` | `spec.compaction`, `spec.truncation_recovery`, a `context_build` callback ([Memory](./memory.md)) |
 
