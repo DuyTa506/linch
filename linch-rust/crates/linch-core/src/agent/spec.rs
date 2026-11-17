@@ -9,6 +9,7 @@ use serde_json::json;
 use crate::budget::RunBudget;
 use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
+use crate::context_budget::ContextBudget;
 use crate::json::JsonObject;
 use crate::loop_guard::LoopGuard;
 use crate::message::SystemBlock;
@@ -17,6 +18,7 @@ use crate::provider::{
 };
 use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
+use crate::system::SystemConfig;
 use crate::tool::ToolScope;
 use crate::truncation::TruncationRecovery;
 use crate::verification::VerificationSpec;
@@ -44,6 +46,21 @@ pub struct AgentSpec {
     /// `SystemPromptConfig.blocks`). None may be blank.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system_blocks: Vec<SystemBlock>,
+    /// Named system prompt sections, text appended after the prompt, and
+    /// whether the presets' own prompt text is left out (Python's
+    /// `SystemPromptConfig`; see [`crate::system`]). The default changes
+    /// nothing and is left off the wire, so a spec that does not set it
+    /// keeps the contract it had before sections existed. A subagent's
+    /// runs take it too: its system is the parent's, then its definition.
+    #[serde(default, skip_serializing_if = "SystemConfig::is_default")]
+    pub system: SystemConfig,
+    /// A cap on the request-only context the `context_build` hooks add
+    /// (retrieved memory, file memory), and what is dropped first when it
+    /// does not fit; see [`crate::context_budget`]. `None` (the default)
+    /// keeps every block and is left off the wire. A subagent's runs take
+    /// it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<ContextBudget>,
     /// Most provider calls one run may make; `None` sets no limit. A run that
     /// would need one more call ends with status `failed` (Python's
     /// `max_turns` tail).
@@ -163,6 +180,8 @@ impl AgentSpec {
             model: model.into(),
             system_prompt: String::new(),
             system_blocks: Vec::new(),
+            system: SystemConfig::default(),
+            context_budget: None,
             max_turns: None,
             thinking: None,
             effort: None,
@@ -214,17 +233,12 @@ impl AgentSpec {
     }
 }
 
-/// The spec's system blocks: the host's in order, then the system prompt
-/// unless it is empty.
-pub(crate) fn system_blocks(spec: &AgentSpec) -> Vec<SystemBlock> {
-    let mut system = spec.system_blocks.clone();
-    if !spec.system_prompt.is_empty() {
-        system.push(SystemBlock {
-            text: spec.system_prompt.clone(),
-            cacheable: false,
-        });
+impl AgentSpec {
+    /// Whether the presets leave their own prompt text out of
+    /// `system_prompt` (`system.replace_defaults`).
+    pub fn replaces_defaults(&self) -> bool {
+        self.system.replace_defaults
     }
-    system
 }
 
 /// Digest of the run contract: the spec, each tool's definition and scope,
@@ -328,6 +342,69 @@ mod tests {
         let wire = serde_json::to_value(&shaped).unwrap();
         assert_eq!(wire["structured_output_retries"], 2);
         assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), shaped);
+    }
+
+    /// Sections and a context budget are off the wire when unset (or the
+    /// default), so the contract of a spec without them is the one it had
+    /// before they existed; set, each is part of the contract.
+    #[test]
+    fn system_sections_and_the_context_budget_are_in_the_contract_only_when_set() {
+        use crate::system::SystemSection;
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let unset = AgentSpec::new("m");
+        let digest = contract_digest(&unset, &[], hooks, &none).unwrap();
+        assert_eq!(
+            digest.to_string(),
+            "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300",
+            "the contract of a spec without sections or a budget did not move"
+        );
+        let wire = serde_json::to_value(&unset).unwrap();
+        assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+        let empty: AgentSpec = serde_json::from_value(json!({"model": "m", "system": {}})).unwrap();
+        assert_eq!(empty, unset, "an empty system is the unset one");
+
+        let mut sectioned = unset.clone();
+        sectioned.system.sections = vec![SystemSection::new("policy", "Be brief.").order(1)];
+        let with = contract_digest(&sectioned, &[], hooks, &none).unwrap();
+        assert_eq!(
+            with.to_string(),
+            "e4fdbf9eea6cee642f153cf512a907cd59a9227689c77adbd3d80d2e69459957",
+            "the contract of a spec with one section"
+        );
+        let mut other = sectioned.clone();
+        other.system.sections[0].text = "Be long.".into();
+        assert_ne!(with, contract_digest(&other, &[], hooks, &none).unwrap());
+        other = sectioned.clone();
+        other.system.sections[0].cacheable = false;
+        assert_ne!(with, contract_digest(&other, &[], hooks, &none).unwrap());
+        other = sectioned.clone();
+        other.system.append = Some("tail".into());
+        assert_ne!(with, contract_digest(&other, &[], hooks, &none).unwrap());
+        other = sectioned.clone();
+        other.system.replace_defaults = true;
+        assert_ne!(with, contract_digest(&other, &[], hooks, &none).unwrap());
+
+        let mut budgeted = unset.clone();
+        budgeted.context_budget = Some(ContextBudget::new(500));
+        let capped = contract_digest(&budgeted, &[], hooks, &none).unwrap();
+        assert_eq!(
+            capped.to_string(),
+            "3983dcff71e93a5e2c2550270716f697408d0b7ec6f5d2f0eb5c47bd864564b8",
+            "the contract of a spec with a 500 token budget"
+        );
+        assert_ne!(digest, capped);
+        let mut lower = budgeted.clone();
+        lower.context_budget = Some(ContextBudget::new(499));
+        assert_ne!(capped, contract_digest(&lower, &[], hooks, &none).unwrap());
+        let mut ordered = budgeted.clone();
+        ordered.context_budget.as_mut().unwrap().drop_order = vec!["memory".into()];
+        assert_ne!(
+            capped,
+            contract_digest(&ordered, &[], hooks, &none).unwrap()
+        );
+        let wire = serde_json::to_value(&budgeted).unwrap();
+        assert_eq!(wire["context_budget"], json!({"max_tokens": 500}));
     }
 
     #[test]

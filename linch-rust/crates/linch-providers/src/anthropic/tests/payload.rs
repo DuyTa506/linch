@@ -452,3 +452,58 @@ async fn an_agent_s_host_blocks_carry_the_system_breakpoint() {
     assert_eq!(marked, [3], "the listing, the last cacheable block");
     assert_eq!(body["system"][2]["text"], "Be brief.");
 }
+
+/// The system sections of a spec reach the payload in order: the breakpoint
+/// lands on the last cacheable section, so the section that is not
+/// cacheable, the prompt and `append` stay outside the cached prefix.
+#[tokio::test]
+async fn an_agent_s_system_sections_carry_the_system_breakpoint() {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use linch_core::{
+        AgentBuilder, AgentSpec, MemoryRunStore, MemorySessionStore, PermissionEngine,
+        PermissionMode, PermissionPolicy, RunOptions, ScriptedProvider, ScriptedTurn,
+        SystemSection,
+    };
+
+    let mut spec = AgentSpec::new("claude-sonnet-4-6");
+    spec.system_prompt = "Be brief.".into();
+    spec.system.sections = vec![
+        SystemSection::new("today", "Today.")
+            .order(9)
+            .cacheable(false),
+        SystemSection::new("tone", "Tone.").order(2),
+        SystemSection::new("policy", "Policy.").order(1),
+    ];
+    spec.system.append = Some("Tail.".into());
+    let reply = ScriptedTurn::builder("claude-sonnet-4-6").text("hi");
+    let provider = Arc::new(ScriptedProvider::new([reply.build()]));
+    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let agent = AgentBuilder::new(spec)
+        .provider(provider.clone())
+        .permissions(PermissionEngine::new(policy).unwrap())
+        .run_store(Arc::new(MemoryRunStore::default()))
+        .session_store(Arc::new(MemorySessionStore::default()))
+        .namespace("ns")
+        .build()
+        .unwrap();
+    let mut stream = agent.run("go", RunOptions::new("s1"));
+    while stream.next().await.is_some() {}
+    let sent = provider.requests().remove(0);
+    let body = build(&ProviderRequest {
+        cache_control: Some(CacheControl { ttl: None }),
+        ..sent
+    });
+    let breakpoint = json!({"type": "ephemeral"});
+    assert_eq!(
+        body["system"],
+        json!([
+            {"type": "text", "text": "Policy."},
+            {"type": "text", "text": "Tone.", "cache_control": breakpoint},
+            {"type": "text", "text": "Today."},
+            {"type": "text", "text": "Be brief."},
+            {"type": "text", "text": "Tail."},
+        ])
+    );
+}

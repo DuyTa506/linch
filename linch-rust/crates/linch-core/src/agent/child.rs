@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::spec::{self, contract_digest};
+use super::spec::contract_digest;
 use super::{Agent, AgentInner, BuildError, RunOptions};
 use crate::ids::RunId;
 use crate::message::SystemBlock;
@@ -110,8 +110,9 @@ impl AgentInner {
     pub(crate) fn child(&self, definition: &SubagentDefinition) -> Result<Self, BuildError> {
         let filter = ChildTools::of(definition);
         let tools = filter.apply(&self.built_tools);
-        let mut system = spec::system_blocks(&self.spec);
-        let listing_at = (tools.resolve(SKILL_TOOL).is_some()).then_some(system.len());
+        let layout = crate::system::layout(&self.spec);
+        let mut system = layout.blocks;
+        let listing_at = (tools.resolve(SKILL_TOOL).is_some()).then_some(layout.listing_at);
         system.push(SystemBlock {
             text: format!("User-provided instructions:\n\n{}", definition.body),
             cacheable: true,

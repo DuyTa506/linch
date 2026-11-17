@@ -242,7 +242,9 @@ impl AgentBuilder {
     ///         final tool is not registered (or, made from the output
     ///         schema, its name is taken or unusable), the tool choice names
     ///         a tool the agent does not offer or its provider refuses it, or
-    ///         the tool schemas cannot be digested.
+    ///         the tool schemas cannot be digested, a system section is
+    ///         blank, repeated or not cacheable before a cacheable block,
+    ///         or the context budget cannot apply.
     pub fn build(self) -> Result<Agent, BuildError> {
         if self.spec.model.trim().is_empty() {
             return Err(BuildError::Invalid("the model must not be blank".into()));
@@ -251,6 +253,12 @@ impl AgentBuilder {
             return Err(BuildError::Invalid(
                 "a system block must not be blank".into(),
             ));
+        }
+        if let Some(problem) = self.spec.system.problem(&self.spec.system_blocks) {
+            return Err(BuildError::Invalid(problem));
+        }
+        if let Some(problem) = (self.spec.context_budget.as_ref()).and_then(|b| b.problem()) {
+            return Err(BuildError::Invalid(problem));
         }
         if let Some(problem) = self.spec.compaction.as_ref().and_then(|c| c.problem()) {
             return Err(BuildError::Invalid(problem.into()));
@@ -389,8 +397,9 @@ impl AgentBuilder {
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
         let contract = spec::contract_digest(&self.spec, &tools, built_hooks, &features)?;
-        let system = spec::system_blocks(&self.spec);
-        let listing_at = skill_versions.as_ref().map(|_| system.len());
+        let layout = crate::system::layout(&self.spec);
+        let system = layout.blocks;
+        let listing_at = skill_versions.as_ref().map(|_| layout.listing_at);
         let inner = Arc::new(AgentInner {
             provider,
             permissions,

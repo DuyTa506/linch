@@ -20,10 +20,10 @@ use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
     AfterProviderCallOutcome, AfterProviderCallRequest, AgentStartRequest, AgentStopRequest,
-    BeforeProviderCallOutcome, BeforeProviderCallRequest, ContextBuildRequest,
-    ContextBuildResponse, EventEmitRequest, HookRecord, HookStatus, Hooks, PostCompactRequest,
-    PostTurnRequest, PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest,
-    StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
+    BeforeProviderCallOutcome, BeforeProviderCallRequest, ContextBuildRequest, EventEmitRequest,
+    HookRecord, HookStatus, Hooks, PostCompactRequest, PostTurnRequest, PreCompactRequest,
+    ProviderCallStartRequest, ProviderCallStopRequest, StopOutcome, StopRequest, TurnStartRequest,
+    UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
@@ -66,6 +66,17 @@ pub(super) enum AfterCall {
     Blocked(String),
     /// The run already ended: the run cancel interrupted the chain.
     Ended,
+}
+
+/// What the `context_build` hooks added to one request.
+#[derive(Default)]
+pub(super) struct Context {
+    /// The blocks that fit the context budget, in hook order.
+    pub blocks: Vec<TextBlock>,
+    /// The hooks' metadata, merged.
+    pub metadata: JsonObject,
+    /// The budget's report; empty when the spec sets no budget.
+    pub budget: JsonObject,
 }
 
 /// What a text-only response leads to, after the `stop` chain.
@@ -289,15 +300,13 @@ impl Runner {
         .await;
     }
 
-    /// The `context_build` blocks for a request over `messages`; `None`
-    /// when the run cancel interrupted the chain.
-    pub(super) async fn context(
-        &self,
-        messages: Arc<Vec<Arc<Message>>>,
-    ) -> Option<ContextBuildResponse> {
+    /// The `context_build` blocks for a request over `messages`, within the
+    /// spec's context budget; `None` when the run cancel interrupted the
+    /// chain.
+    pub(super) async fn context(&self, messages: Arc<Vec<Arc<Message>>>) -> Option<Context> {
         let chain = &self.agent.hooks.context_build;
         if chain.is_empty() {
-            return Some(ContextBuildResponse::default());
+            return Some(Context::default());
         }
         let request = ContextBuildRequest {
             session_id: self.run.session_id.clone(),
@@ -307,24 +316,39 @@ impl Runner {
         };
         let mut records = Vec::new();
         let run = chain.run_into(&request, &mut records);
-        let context = self.cancel.run_until_cancelled(run).await;
+        let added = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
-        context
+        let added = added?;
+        let (blocks, budget) = match &self.agent.spec.context_budget {
+            Some(budget) => {
+                let trimmed = budget.apply(added.blocks);
+                (trimmed.blocks, trimmed.report)
+            }
+            None => (
+                added.blocks.into_iter().map(|b| b.block).collect(),
+                JsonObject::new(),
+            ),
+        };
+        Some(Context {
+            blocks,
+            metadata: added.metadata,
+            budget,
+        })
     }
 
     /// Stage the `context_build` event of the primary `request`: what it
-    /// was built from, with the context hooks' `metadata`. It rides the
-    /// call's `ProviderPending` barrier. The kernel keeps no context budget
-    /// and trims nothing, so `budget` is empty.
-    pub(super) fn stage_context(&mut self, request: &ProviderRequest, metadata: JsonObject) {
+    /// was built from, with the context hooks' `metadata` and the context
+    /// budget's report (empty when the spec sets none). It rides the call's
+    /// `ProviderPending` barrier.
+    pub(super) fn stage_context(&mut self, request: &ProviderRequest, context: Context) {
         let tools = request.tools.iter().map(|tool| tool.name.clone());
         self.journal.stage(Event::ContextBuild(ContextBuildEvent {
             model: request.model.clone(),
             system_blocks: request.system.len() as u64,
             messages: request.messages.len() as u64,
             selected_tools: Some(tools.collect()),
-            budget: JsonObject::new(),
-            metadata,
+            budget: context.budget,
+            metadata: context.metadata,
         }));
     }
 
