@@ -77,6 +77,21 @@ config: AgentConfig = {
 }
 ```
 
+**DeepSeek** has no row in the table: its API price depends on the hour
+(off-peak is half the peak rate; peak is 01:00 to 04:00 and 06:00 to 10:00 UTC
+on weekdays, other than Chinese public holidays), so one built-in rate would be
+wrong half the time. Set the rates you pay, with the cache-hit rate as
+`cache_read`. The rates below are the peak ones read on 2026-11-17 from
+https://api-docs.deepseek.com/quick_start/pricing, in USD per million tokens;
+check the page before relying on them:
+
+```python
+"pricing": {
+    "deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006},
+    "deepseek-v4-pro": {"input": 1.32, "output": 3.96, "cache_read": 0.044},
+},
+```
+
 `input` and `output` are required; `cache_read` and `cache_creation` default
 to `input`, so a cached token never costs less than you said. Rates must be
 finite and not negative; anything else is refused when the agent opens.
