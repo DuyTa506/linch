@@ -77,6 +77,12 @@ impl Tool for Read {
         true
     }
 
+    /// A read records what the session saw, so `Edit` and `Write` may
+    /// follow; a cache hit would skip that and leave the session unread.
+    fn cache_safe(&self) -> bool {
+        false
+    }
+
     fn summarize(&self, input: &JsonObject) -> String {
         let path = input
             .get("file_path")

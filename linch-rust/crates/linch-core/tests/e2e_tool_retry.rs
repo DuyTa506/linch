@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use common::*;
 use linch_core::events::kinds::ToolRetryEvent;
 use linch_core::provider::scripted::TurnBuilder;
+use linch_core::redaction::{RedactionRule, RedactionSpec};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, Envelope, Event, JsonObject, PermissionMode, RunId, RunOptions,
@@ -27,6 +28,8 @@ struct Shaky {
     idempotent: bool,
     fail_times: u32,
     code: Option<&'static str>,
+    /// The text of each failure.
+    message: String,
     /// Sleep this long on the first attempt.
     slow_first: Option<Duration>,
     attempts: AtomicU32,
@@ -39,6 +42,7 @@ impl Shaky {
             idempotent,
             fail_times,
             code,
+            message: "busy".into(),
             slow_first: None,
             attempts: AtomicU32::new(0),
             schema: json!({"type": "object"}).as_object().unwrap().clone(),
@@ -50,9 +54,17 @@ impl Shaky {
             idempotent,
             fail_times: 0,
             code: None,
+            message: "busy".into(),
             slow_first: Some(wait),
             attempts: AtomicU32::new(0),
             schema: json!({"type": "object"}).as_object().unwrap().clone(),
+        })
+    }
+
+    fn failing_with(message: &str) -> Arc<Self> {
+        Arc::new(Self {
+            message: message.to_owned(),
+            ..Arc::into_inner(Self::new(true, 1, Some("transient"))).unwrap()
         })
     }
 
@@ -91,7 +103,7 @@ impl Tool for Handle {
         }
         if n < this.fail_times {
             return Err(ToolOutputError {
-                message: "busy".into(),
+                message: this.message.clone(),
                 code: this.code.map(str::to_owned),
                 details: None,
             });
@@ -191,6 +203,65 @@ async fn a_transient_failure_retries_and_then_succeeds() {
         sent[&1], 1,
         "the model is called once with the final result"
     );
+}
+
+/// The retry event is persisted and streamed, so it carries the redacted,
+/// bounded error and never the tool's raw text.
+#[tokio::test]
+async fn a_retry_event_carries_the_redacted_and_bounded_error() {
+    let secret = "sk-0123456789abcdef";
+    let long = format!("busy {secret} {}", "x".repeat(2_000));
+    let tool = Shaky::failing_with(&long);
+    let mut spec = fast(|_| {});
+    spec.redaction = Some(RedactionSpec {
+        rules: vec![RedactionRule::new("sk-[0-9a-f]+")],
+        response: true,
+        tool_results: true,
+        prompt: false,
+    });
+    let stores = Arc::new(Stores::default());
+    let (agent, _) = agent_on(spec, &tool, stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let events = finish(stream).await;
+    let retried = retries(&events);
+    assert_eq!(retried.len(), 1);
+    assert!(!retried[0].error.contains(secret), "{}", retried[0].error);
+    assert!(retried[0].error.starts_with("busy [REDACTED]"));
+    assert!(retried[0].error.len() <= 512);
+    let durable = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    let stored = retries(&durable);
+    assert_eq!(stored[0].error, retried[0].error);
+    // With no redaction configured the text is only bounded.
+    let tool = Shaky::failing_with(&long);
+    let (agent, _) = agent_on(fast(|_| {}), &tool, Arc::new(Stores::default()));
+    let events = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let error = &retries(&events)[0].error;
+    assert!(
+        error.contains(secret) && error.len() <= 512,
+        "{}",
+        error.len()
+    );
+}
+
+/// Each attempt has its own timeout, so the call's retries are bounded as a
+/// whole: none starts once five minutes since the first attempt are spent.
+#[tokio::test(start_paused = true)]
+async fn a_call_stops_retrying_when_its_retry_budget_is_spent() {
+    let tool = Shaky::new(true, 99, Some("transient"));
+    let mut spec = spec();
+    spec.tool_retry = Some(ToolRetry {
+        max_attempts: 5,
+        base_delay_ms: 100_000,
+        max_delay_ms: 200_000,
+        ..ToolRetry::default()
+    });
+    let (agent, _) = agent_on(spec, &tool, Arc::new(Stores::default()));
+    let events = finish(agent.run("go", RunOptions::new("s1"))).await;
+    assert_eq!(tool.attempts(), 3, "5 attempts were allowed");
+    let delays: Vec<_> = retries(&events).iter().map(|r| r.delay_ms).collect();
+    assert_eq!(delays, [100_000, 200_000]);
+    assert_eq!(end_error(&events), Some(true));
 }
 
 #[tokio::test]

@@ -117,7 +117,8 @@ pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };
 pub use tool_cache::{
-    InMemoryToolCache, ToolCache, ToolCacheError, ToolCacheHandle, ToolCacheStore,
+    ByteQuota, CacheScope, InMemoryToolCache, Lookup, PutLimits, ToolCache, ToolCacheError,
+    ToolCacheHandle, ToolCacheStore,
 };
 pub use tool_retry::ToolRetry;
 pub use tool_search::ToolSearch;

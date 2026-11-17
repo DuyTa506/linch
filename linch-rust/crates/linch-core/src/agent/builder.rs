@@ -388,6 +388,20 @@ impl AgentBuilder {
         }
         let built_tools = self.tools.snapshot();
         let registered = |name: &str| built_tools.resolve(name).is_some();
+        // A hit skips the tool's run, so one whose run keeps session state
+        // (`Read`'s record of what the session saw) cannot be cached. A name
+        // that is not registered yet may be later; the scheduler checks again.
+        for name in self.spec.tool_cache.iter().flat_map(|cache| &cache.tools) {
+            if built_tools
+                .resolve(name)
+                .is_some_and(|tool| !tool.tool().cache_safe())
+            {
+                return Err(BuildError::Invalid(format!(
+                    "tool_cache.tools names {name:?}, whose run keeps session state that a \
+                     cache hit would skip; leave it out"
+                )));
+            }
+        }
         let native = provider.native_output_schema();
         let named = self.spec.final_tool_name.as_deref();
         let final_tool = FinalTool::of(named, output.as_deref(), native);
@@ -415,12 +429,9 @@ impl AgentBuilder {
         }
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
-        let tool_cache = self.spec.tool_cache.clone().map(|config| ToolCacheHandle {
-            config,
-            store: self
-                .tool_cache
-                .unwrap_or_else(|| Arc::new(InMemoryToolCache::new())),
-            namespace: namespace.clone(),
+        let tool_cache = self.spec.tool_cache.clone().map(|config| {
+            let store = (self.tool_cache).unwrap_or_else(|| Arc::new(InMemoryToolCache::new()));
+            ToolCacheHandle::new(config, store, namespace.clone())
         });
         let contract = spec::contract_digest(&self.spec, &tools, built_hooks, &features)?;
         let layout = crate::system::layout(&self.spec);

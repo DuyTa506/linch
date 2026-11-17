@@ -1,11 +1,12 @@
 //! [`execute`]: run a decided plan.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -21,11 +22,11 @@ use crate::json::JsonValue;
 use crate::message::ToolResultBlock;
 use crate::redaction::Redactor;
 use crate::registry::{OutputContractError, RegisteredTool};
-use crate::tool::{
-    Report, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
+use crate::tool::{Report, ToolContext, ToolOutputError, ToolProgress, ToolResult, ToolScope};
+use crate::tool_cache::{
+    CacheScope, Lookup, PutLimits, STORE_TIMEOUT, ToolCacheError, ToolCacheHandle, cache_key,
 };
-use crate::tool_cache::{ToolCacheHandle, cache_key};
-use crate::tool_retry::{TIMEOUT_CLASS, ToolRetry};
+use crate::tool_retry::{ERROR_BYTES, TIMEOUT_CLASS, ToolRetry};
 
 use super::RunIdentity;
 use super::plan::{BatchPlan, PlannedAction, PlannedCall};
@@ -93,7 +94,8 @@ pub struct Retrying {
     /// The class of the failure that is retried (the error's code, or
     /// `"timeout"`).
     pub class: String,
-    /// The failed attempt's error message.
+    /// The failed attempt's error message, redacted when the run redacts
+    /// tool results and cut to [`ERROR_BYTES`] bytes.
     pub error: String,
     /// How long the call waits before the attempt.
     pub delay: Duration,
@@ -234,36 +236,50 @@ impl From<ToolResult> for Finished {
     }
 }
 
+/// A call's cache entry: the cache and the call's key in it.
+struct Slot<'a> {
+    cache: &'a ToolCacheHandle,
+    key: String,
+}
+
+/// The tool's own result of the last attempt, kept when `tool_execute`
+/// layers wrap it, to tell whether they changed what the call returned.
+type Raw = Mutex<Option<ToolResult>>;
+
+/// A store call's answer, or `None` when it failed or took past
+/// [`STORE_TIMEOUT`]: either is a miss for the model's purposes.
+async fn bounded<T>(call: impl Future<Output = Result<T, ToolCacheError>>) -> Option<T> {
+    tokio::time::timeout(STORE_TIMEOUT, call).await.ok()?.ok()
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether the `tool_execute` layers returned the tool's own `result`
+/// unchanged. Without layers (`raw` is `None`) nothing could change it.
+fn untouched(raw: Option<&Raw>, result: &ToolResult) -> bool {
+    raw.is_none_or(|raw| lock(raw).as_ref() == Some(result))
+}
+
+/// `text` cut to at most `max` bytes, at a character boundary.
+fn cut(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 impl<S: ToolSink> Runner<'_, S> {
     async fn call(&self, call: &PlannedCall) -> Result<CallOutcome, S::Error> {
         let mut started = None;
         let mut cache_hit = false;
         let finished = match &call.action {
             _ if self.options.cancel.is_cancelled() => error(ABORTED),
-            PlannedAction::Run => match self.cached(call).await {
-                Some(output) => {
-                    cache_hit = true;
-                    let served = self.finish(call, Ok(output), false);
-                    self.unless_aborted(async { Ok(served.await) }).await?
-                }
-                None => {
-                    // Before the tool starts, so a crash during a write
-                    // never leaves entries it made stale.
-                    self.clear_for_write(call).await;
-                    self.sink.tool_starting(call).await?;
-                    started = Some(Instant::now());
-                    let finished = self
-                        .unless_aborted(async {
-                            let result = self.invoke(call).await?;
-                            Ok(self.finish(call, result, true).await)
-                        })
-                        .await?;
-                    self.clear_for_write(call).await;
-                    finished
-                }
-            },
+            PlannedAction::Run => self.run(call, &mut started, &mut cache_hit).await?,
             PlannedAction::Serve { result } => {
-                self.unless_aborted(async { Ok(self.finish(call, result.clone(), false).await) })
+                self.unless_aborted(async { Ok(self.finish(call, result.clone(), None).await) })
                     .await?
             }
             PlannedAction::Error { error } => Finished::from(Err(error.clone())),
@@ -286,59 +302,163 @@ impl<S: ToolSink> Runner<'_, S> {
         Ok(outcome)
     }
 
-    /// The cache and the key of `call`, when its tool is cacheable: a
-    /// read-scope tool the policy names that neither polls nor asks the
-    /// user, with an input that can be digested.
-    fn cache_of(&self, call: &PlannedCall) -> Option<(&ToolCacheHandle, String)> {
-        let handle = self.options.cache.as_ref()?;
+    /// A planned `Run` call: served from the cache, or run (behind the
+    /// durable start) and its result stored.
+    async fn run(
+        &self,
+        call: &PlannedCall,
+        started: &mut Option<Instant>,
+        cache_hit: &mut bool,
+    ) -> Result<Finished, S::Error> {
+        let slot = self.slot_of(call);
+        // The epoch the lookup saw: a result is stored only if no write
+        // cleared the namespace since.
+        let mut epoch = None;
+        if let Some(slot) = &slot {
+            let Some(lookup) = (self.options.cancel)
+                .run_until_cancelled(bounded(
+                    slot.cache.store.get(&slot.cache.namespace, &slot.key),
+                ))
+                .await
+            else {
+                return Ok(error(ABORTED));
+            };
+            match lookup {
+                Some(Lookup {
+                    hit: Some(output), ..
+                }) => {
+                    *cache_hit = true;
+                    let served = self.finish(call, Ok(output), None);
+                    return self.unless_aborted(async { Ok(served.await) }).await;
+                }
+                Some(Lookup { epoch: seen, .. }) => epoch = Some(seen),
+                None => {}
+            }
+        }
+        self.stop_cache_on_background(call);
+        // Before the tool starts, so a crash during a write never leaves
+        // entries it made stale.
+        if self.clear_before(call).await {
+            return Ok(error(ABORTED));
+        }
+        self.sink.tool_starting(call).await?;
+        *started = Some(Instant::now());
+        let raw = (slot.is_some() && !self.hooks.tool_execute.is_empty()).then(Raw::default);
+        let finished = self
+            .unless_aborted(async {
+                let result = self.invoke(call, raw.as_ref()).await?;
+                // A layer's veto or replacement is never cached.
+                let storing = match (&slot, epoch) {
+                    (Some(slot), Some(epoch)) if untouched(raw.as_ref(), &result) => {
+                        Some((slot, epoch))
+                    }
+                    _ => None,
+                };
+                Ok(self.finish(call, result, storing).await)
+            })
+            .await?;
+        self.clear_after(call).await;
+        Ok(finished)
+    }
+
+    /// The call's cache entry, when its tool is cacheable: a read-scope
+    /// tool the policy names that neither polls, asks the user nor keeps
+    /// session state, with an input that can be digested, while the
+    /// agent's caching has not ended.
+    fn slot_of(&self, call: &PlannedCall) -> Option<Slot<'_>> {
+        let cache = self
+            .options
+            .cache
+            .as_ref()
+            .filter(|cache| !cache.stopped())?;
         let tool = call.tool.as_ref()?.tool();
-        let cacheable = tool.scope() == ToolScope::Read && !tool.polls() && !tool.asks_user();
-        if !cacheable || !handle.config.names(&call.tool_name) {
+        let cacheable = tool.scope() == ToolScope::Read
+            && !tool.polls()
+            && !tool.asks_user()
+            && tool.cache_safe();
+        if !cacheable || !cache.config.names(&call.tool_name) {
             return None;
         }
-        Some((handle, cache_key(&call.tool_name, &call.input)?))
-    }
-
-    /// The live cached result of `call`. A store failure is a miss.
-    async fn cached(&self, call: &PlannedCall) -> Option<ToolOutput> {
-        let (handle, key) = self.cache_of(call)?;
-        handle
-            .store
-            .get(&handle.namespace, &key)
-            .await
-            .ok()
-            .flatten()
-    }
-
-    /// Store the successful `result` of a call that ran, when it is
-    /// cacheable and small enough. A store failure loses only the entry.
-    async fn store(&self, call: &PlannedCall, result: &ToolResult) {
-        let (Some((handle, key)), Ok(output)) = (self.cache_of(call), result) else {
-            return;
+        let session = match cache.config.scope {
+            CacheScope::Session => Some(self.run.session_id.as_str()),
+            CacheScope::Namespace => None,
         };
+        let key = cache_key(session, &call.tool_name, &call.input)?;
+        Some(Slot { cache, key })
+    }
+
+    /// Store the successful `result` of a call that ran, when it is small
+    /// enough. A store failure or timeout loses only the entry.
+    async fn store(&self, slot: &Slot<'_>, epoch: u64, result: &ToolResult) {
+        let Ok(output) = result else { return };
+        let config = &slot.cache.config;
         let size = serde_json::to_vec(output).map_or(u64::MAX, |bytes| bytes.len() as u64);
-        if size > handle.config.max_value_bytes {
+        if size > config.max_value_bytes {
             return;
         }
-        let (ttl, room) = (handle.config.ttl(), handle.config.max_entries);
-        let _ = handle
+        let limits = PutLimits {
+            ttl: config.ttl(),
+            max_entries: config.max_entries,
+            quota: config.quota.clone(),
+        };
+        let put = slot
+            .cache
             .store
-            .put(&handle.namespace, &key, output, ttl, room)
-            .await;
+            .put(&slot.cache.namespace, &slot.key, output, epoch, &limits);
+        let _ = bounded(put).await;
     }
 
-    /// Clear the namespace's entries around a write or exec tool's call,
-    /// when the policy says so. A store failure is ignored.
-    async fn clear_for_write(&self, call: &PlannedCall) {
-        let Some(handle) = self.options.cache.as_ref() else {
+    /// Ends caching for the agent at the first call that starts work
+    /// outliving it: nothing says when that work changes what a read tool
+    /// answers.
+    fn stop_cache_on_background(&self, call: &PlannedCall) {
+        let Some(cache) = self.options.cache.as_ref() else {
             return;
         };
-        let writes = call
-            .tool
-            .as_ref()
-            .is_some_and(|tool| tool.tool().scope() != ToolScope::Read);
-        if writes && handle.config.invalidate_on_write {
-            let _ = handle.store.clear(&handle.namespace).await;
+        let launches =
+            (call.tool.as_ref()).is_some_and(|tool| tool.tool().launches_background(&call.input));
+        if launches {
+            cache.stop();
+        }
+    }
+
+    /// The cache to clear around `call`: it is a write or exec tool's and
+    /// the policy says to.
+    fn clearing(&self, call: &PlannedCall) -> Option<&ToolCacheHandle> {
+        let cache = self.options.cache.as_ref()?;
+        let writes =
+            (call.tool.as_ref()).is_some_and(|tool| tool.tool().scope() != ToolScope::Read);
+        (writes && cache.config.invalidate_on_write).then_some(cache)
+    }
+
+    /// Clear the namespace's entries before a write or exec tool starts.
+    /// Whether the run abort fired first, so the tool must not start. A
+    /// clear that fails or times out leaves entries that may be stale, so
+    /// caching ends for the agent.
+    async fn clear_before(&self, call: &PlannedCall) -> bool {
+        let Some(cache) = self.clearing(call) else {
+            return false;
+        };
+        let clearing = bounded(cache.store.clear(&cache.namespace));
+        match self.options.cancel.run_until_cancelled(clearing).await {
+            None => true,
+            Some(Some(())) => false,
+            Some(None) => {
+                cache.stop();
+                false
+            }
+        }
+    }
+
+    /// Clear the namespace's entries after a write or exec tool ended. Not
+    /// cut short by the run abort: an aborted write may have changed
+    /// state, and the store call is bounded by [`STORE_TIMEOUT`] anyway.
+    async fn clear_after(&self, call: &PlannedCall) {
+        let Some(cache) = self.clearing(call) else {
+            return;
+        };
+        if bounded(cache.store.clear(&cache.namespace)).await.is_none() {
+            cache.stop();
         }
     }
 
@@ -356,13 +476,14 @@ impl<S: ToolSink> Runner<'_, S> {
 
     /// Run the tool, again after a retried failure, forwarding its
     /// progress to the sink. Only the sink's retry barrier can fail.
-    async fn invoke(&self, call: &PlannedCall) -> Result<ToolResult, S::Error> {
+    async fn invoke(&self, call: &PlannedCall, raw: Option<&Raw>) -> Result<ToolResult, S::Error> {
         let tool = call.tool.as_ref().expect("a Run entry holds its tool");
         let idempotent = tool.tool().idempotent();
         let retry = (self.options.retry.as_ref()).filter(|r| r.covers(&call.tool_name, idempotent));
+        let begun = tokio::time::Instant::now();
         let mut attempt = 1;
         loop {
-            let (result, timed_out) = self.run_attempt(call, tool, attempt).await;
+            let (result, timed_out) = self.run_attempt(call, tool, attempt, raw).await;
             let (Some(retry), Err(failure)) = (retry, &result) else {
                 return Ok(result);
             };
@@ -377,18 +498,34 @@ impl<S: ToolSink> Runner<'_, S> {
             if attempt >= retry.max_attempts {
                 return Ok(result);
             }
+            // The call's retries are bounded as a whole, not only each
+            // attempt by the call timeout.
+            let Some(delay) = retry.wait(attempt + 1, begun.elapsed()) else {
+                return Ok(result);
+            };
             attempt += 1;
-            let delay = retry.delay(attempt);
             let retrying = Retrying {
                 attempt,
                 max_attempts: retry.max_attempts,
                 class: class.to_owned(),
-                error: failure.message.clone(),
+                error: self.retry_error(&failure.message),
                 delay,
             };
             self.sink.tool_retrying(call, &retrying).await?;
             tokio::time::sleep(delay).await;
         }
+    }
+
+    /// The failed attempt's error as the `tool_retry` event keeps it:
+    /// redacted first (the event is persisted and streamed before any
+    /// `post_tool_use` hook sees the failure), then cut, so a secret is
+    /// never split past the pattern that would have matched it.
+    fn retry_error(&self, message: &str) -> String {
+        let redacted = match self.options.redactor.as_deref() {
+            Some(redactor) => redactor.text(message),
+            None => Cow::Borrowed(message),
+        };
+        cut(&redacted, ERROR_BYTES).to_owned()
     }
 
     /// One attempt of the tool, with its own context, deadline and
@@ -398,7 +535,11 @@ impl<S: ToolSink> Runner<'_, S> {
         call: &PlannedCall,
         tool: &Arc<RegisteredTool>,
         attempt: u32,
+        raw: Option<&Raw>,
     ) -> (ToolResult, bool) {
+        if let Some(raw) = raw {
+            *lock(raw) = None;
+        }
         let token = self.options.cancel.child_token();
         // Cancels the token however the call ends, so work the tool spawned
         // stops too.
@@ -419,7 +560,7 @@ impl<S: ToolSink> Runner<'_, S> {
         .with_reports(progress)
         .with_deadline(deadline)
         .with_trace_id(self.run.trace_id.clone());
-        let execution = self.body(call, tool, ctx, attempt);
+        let execution = self.body(call, tool, ctx, attempt, raw);
         let execution = self.timed(call, deadline, caught(&call.tool_name, execution));
         let outcome = {
             let forward = pin!(async {
@@ -447,6 +588,7 @@ impl<S: ToolSink> Runner<'_, S> {
         tool: &Arc<RegisteredTool>,
         ctx: ToolContext,
         attempt: u32,
+        raw: Option<&Raw>,
     ) -> ToolResult {
         let pipeline = &self.hooks.tool_execute;
         if pipeline.is_empty() {
@@ -460,7 +602,13 @@ impl<S: ToolSink> Runner<'_, S> {
             input: call.input.clone(),
             attempt,
         };
-        let body = Box::pin(async { tool.tool().execute(call.input.clone(), ctx).await });
+        let body = Box::pin(async {
+            let result = tool.tool().execute(call.input.clone(), ctx).await;
+            if let Some(raw) = raw {
+                *lock(raw) = Some(result.clone());
+            }
+            result
+        });
         pipeline.run(&tool_call, body).await
     }
 
@@ -502,10 +650,16 @@ impl<S: ToolSink> Runner<'_, S> {
     /// offload pointer, say) without breaking it, and gets a violation as
     /// an error result.
     ///
-    /// `fresh` says the tool just ran, so a successful result is stored
-    /// in the tool cache after the schema check and redaction, before
+    /// `storing` names the cache entry and the epoch a lookup saw when the
+    /// tool just ran and its result may be cached: a successful result is
+    /// stored after the schema check and redaction, before
     /// `post_tool_use`.
-    async fn finish(&self, call: &PlannedCall, result: ToolResult, fresh: bool) -> Finished {
+    async fn finish(
+        &self,
+        call: &PlannedCall,
+        result: ToolResult,
+        storing: Option<(&Slot<'_>, u64)>,
+    ) -> Finished {
         let mut finished = Finished::from(result);
         if let (Ok(output), Some(tool)) = (&finished.result, &call.tool)
             && let Err(violation) = tool.validate_output(output)
@@ -520,8 +674,8 @@ impl<S: ToolSink> Runner<'_, S> {
         if let Some(redactor) = redactor {
             redactor.result(&mut finished.result);
         }
-        if fresh {
-            self.store(call, &finished.result).await;
+        if let Some((slot, epoch)) = storing {
+            self.store(slot, epoch, &finished.result).await;
         }
         if !self.hooks.post_tool_use.is_empty() {
             let redacted = redactor.map(|_| finished.result.clone());

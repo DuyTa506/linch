@@ -17,6 +17,16 @@
 //! interrupted and never runs again (see [`crate::journal`]). A
 //! non-idempotent tool is never run twice.
 //!
+//! **Bounds.** The error text of a `tool_retry` event is run through the
+//! agent's redaction (when it covers tool results) and cut to
+//! [`ERROR_BYTES`] bytes, since the event is persisted and streamed before
+//! any `post_tool_use` hook sees the failure. A call's retries together
+//! stop at [`RETRY_BUDGET`] from its first attempt. A timed-out attempt of
+//! a host tool is abandoned with a `$/cancelRequest` notification and no
+//! acknowledgement exists in the protocol, so the next attempt may start
+//! while the client's handler is still winding down: a host tool that
+//! declares itself idempotent must tolerate two calls overlapping.
+//!
 //! [`Tool::idempotent`]: crate::Tool::idempotent
 //! [`ToolOutputError::code`]: crate::ToolOutputError::code
 
@@ -27,6 +37,15 @@ use serde::{Deserialize, Serialize};
 /// The class a call that ran past the call timeout reports, for
 /// [`ToolRetry::retry_on`]. The timeout error itself has no code.
 pub const TIMEOUT_CLASS: &str = "timeout";
+
+/// Longest a call may spend retrying, from the start of its first attempt:
+/// no attempt starts once it is spent, and a wait is cut to what is left.
+/// Each attempt has its own `call_timeout`, so without this a call could
+/// take `max_attempts` times that, plus every wait.
+pub const RETRY_BUDGET: Duration = Duration::from_secs(300);
+
+/// Most bytes of a failed attempt's error a `tool_retry` event keeps.
+pub const ERROR_BYTES: usize = 512;
 
 /// The class retried unless the policy lists others.
 pub const TRANSIENT_CLASS: &str = "transient";
@@ -128,6 +147,17 @@ impl ToolRetry {
         let wait = self.base_delay_ms.saturating_mul(1u64 << doublings);
         Duration::from_millis(wait.min(self.max_delay_ms))
     }
+
+    /// The wait before attempt `next` of a call that has spent `spent`
+    /// since its first attempt began, or `None` once the call's
+    /// [`RETRY_BUDGET`] is gone: the wait is cut to what the budget has
+    /// left.
+    pub(crate) fn wait(&self, next: u32, spent: Duration) -> Option<Duration> {
+        let left = RETRY_BUDGET
+            .checked_sub(spent)
+            .filter(|left| !left.is_zero())?;
+        Some(self.delay(next).min(left))
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +174,21 @@ mod tests {
         let waits: Vec<_> = (2..=6).map(|n| retry.delay(n).as_millis()).collect();
         assert_eq!(waits, [100, 200, 350, 350, 350]);
         assert_eq!(retry.delay(u32::MAX).as_millis(), 350);
+    }
+
+    #[test]
+    fn a_call_stops_retrying_when_its_budget_is_spent_and_the_wait_is_cut() {
+        let retry = ToolRetry {
+            base_delay_ms: 100,
+            max_delay_ms: 200,
+            ..ToolRetry::default()
+        };
+        let spent = |secs| Duration::from_secs(secs);
+        assert_eq!(retry.wait(2, spent(0)), Some(Duration::from_millis(100)));
+        let nearly = RETRY_BUDGET - Duration::from_millis(30);
+        assert_eq!(retry.wait(3, nearly), Some(Duration::from_millis(30)));
+        assert_eq!(retry.wait(2, RETRY_BUDGET), None);
+        assert_eq!(retry.wait(2, RETRY_BUDGET + spent(1)), None);
     }
 
     #[test]

@@ -121,6 +121,11 @@ impl Tool for SubagentTool {
         ToolScope::Exec
     }
 
+    /// A background worker runs on after the call.
+    fn launches_background(&self, input: &JsonObject) -> bool {
+        in_background(input)
+    }
+
     /// Only a foreground call of a named type whose definition lists its
     /// tools, each of them a registered read-scope tool; anything unknown
     /// fails closed.

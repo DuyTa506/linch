@@ -163,6 +163,12 @@ impl Tool for Bash {
         ToolScope::Exec
     }
 
+    /// A `run_in_background` command keeps running after the call, and may
+    /// change files a cached read tool answers about.
+    fn launches_background(&self, input: &JsonObject) -> bool {
+        input.get("run_in_background").and_then(|v| v.as_bool()) == Some(true)
+    }
+
     fn validate(&self, mut input: JsonObject) -> Result<JsonObject, ToolOutputError> {
         if let Some(timeout) = optional_count(&input, "timeout_ms")? {
             input.insert("timeout_ms".into(), timeout.min(MAX_TIMEOUT_MS).into());
