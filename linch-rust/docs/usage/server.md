@@ -395,7 +395,8 @@ silently instead:
   tenant sets none, else the lesser of the two caps (a tenant that sets
   `max_corrections` may lower it, not raise it). A rule naming a tool the
   agent lacks refuses the open (`OpenError`), never dropped; the tenant's
-  error does not name the tool, as the operator wrote the rule.
+  error does not name the tool or echo a pattern, as the operator wrote the rule
+  (the server config refuses a `required_policy` whose check does not compile).
   The rules bind the model's call order only: a client's host tool under a
   required name, a `pre_tool_use` hook, a `post_tool_use` replacement or a
   cache hit can still satisfy a prerequisite, so this is not enforcement
