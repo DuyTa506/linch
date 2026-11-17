@@ -121,6 +121,14 @@ pub struct AgentConfig {
     /// unasked in modes that allow reads. Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ask_user: bool,
+    /// Whether the agent has the schedule tools (`CreateSchedule`,
+    /// `ListSchedules`, `CancelSchedule`): the model schedules runs of
+    /// this same agent in its own session. The facade does not bind them:
+    /// a host that runs the schedules (linch-server, with a worker) puts
+    /// them in the registry first, and the open refuses the switch when
+    /// they are missing or the stores are not Postgres. Off when absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub schedule_tools: bool,
     /// The deep agent preset: planning, a subagent roster, kept workers and
     /// file memory (see [`DeepAgentConfig`] for what it turns on). Off
     /// when absent.

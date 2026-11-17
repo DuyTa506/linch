@@ -249,7 +249,8 @@ impl From<&OpenError> for ErrorObject {
             | OpenError::Tools(_)
             | OpenError::Policy(_)
             | OpenError::DeepAgent(_)
-            | OpenError::Profile(_) => Self::new(code::BUILD_INVALID, message),
+            | OpenError::Profile(_)
+            | OpenError::ScheduleTools(_) => Self::new(code::BUILD_INVALID, message),
             OpenError::Store(_) => Self::new(code::STORE_UNAVAILABLE, message),
             OpenError::Mcp(McpError::Config(_)) => Self::new(code::BUILD_INVALID, message),
             OpenError::Mcp(McpError::Connect { server, .. }) => {

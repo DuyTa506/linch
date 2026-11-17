@@ -51,6 +51,10 @@ pub enum OpenError {
     /// The domain profile is invalid.
     #[error("profile unusable: {0}")]
     Profile(#[from] ProfileError),
+    /// `schedule_tools` is on, but the stores are not Postgres or the host
+    /// did not bind the schedule tools before the open.
+    #[error("schedule_tools unusable: {0}")]
+    ScheduleTools(&'static str),
     /// The agent itself could not be built.
     #[error(transparent)]
     Build(#[from] BuildError),
