@@ -10,7 +10,7 @@ use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
     AgentConfig, AgentSpec, ExecutionConfig, McpTransportConfig, PermissionMode, PermissionPolicy,
-    Principal, ProviderConfig, StoreConfig, ToolChoice,
+    Principal, ProviderConfig, StoreConfig, SystemSection, ToolChoice,
 };
 use serde_json::json;
 
@@ -45,6 +45,7 @@ impl Tenant {
         allow.admit_provider(&config.provider)?;
         admit_guardrails(&config.spec)?;
         allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;
+        admit_system(&mut config.spec, &allow.system_sections)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
         if !allow.permission_modes.contains(&mode) {
             // The config's spelling (`skip_dangerous`), not the variant's.
@@ -419,4 +420,69 @@ pub(crate) fn admit_tool_choice(
 
 fn refused(kind: &str, message: String) -> ErrorObject {
     ErrorObject::new(code::NOT_ALLOWED, message).with_data(json!({ "kind": kind }))
+}
+
+/// Most system prompt sections a tenant's spec may hold; the operator's
+/// own (see `Allowlists::system_sections`) do not count.
+pub const MAX_SYSTEM_SECTIONS: usize = 16;
+
+/// Longest name of a system prompt section, in bytes.
+pub const MAX_SECTION_NAME_BYTES: usize = 64;
+
+/// Longest text of one system prompt section or of `system.append`, in
+/// bytes.
+pub const MAX_SECTION_BYTES: usize = 16 * 1024;
+
+/// Most bytes the sections' texts and `system.append` of a tenant's spec
+/// may hold together: they ride every request of every run.
+pub const MAX_SYSTEM_BYTES: usize = 64 * 1024;
+
+/// Longest hook policy id, and most ids in each list, of a context budget.
+pub const MAX_BUDGET_POLICY_BYTES: usize = 128;
+
+/// Replace the sections the operator sets, then bound the tenant's own:
+/// at most [`MAX_SYSTEM_SECTIONS`] with names up to
+/// [`MAX_SECTION_NAME_BYTES`], texts up to [`MAX_SECTION_BYTES`], and
+/// [`MAX_SYSTEM_BYTES`] in all with `append`. A context budget names at
+/// most [`MAX_GUARDRAILS`] hooks in each list, by ids up to
+/// [`MAX_BUDGET_POLICY_BYTES`]. The operator's sections go first and win
+/// a name the config holds, so admitting a config twice adds them once
+/// and `replace_defaults` cannot remove them.
+fn admit_system(spec: &mut AgentSpec, operator: &[SystemSection]) -> Result<(), ErrorObject> {
+    let system = &mut spec.system;
+    system
+        .sections
+        .retain(|own| !operator.iter().any(|set| set.name == own.name));
+    let own = system.sections.len();
+    let append = system.append.as_deref().map_or(0, str::len);
+    let text: usize = system.sections.iter().map(|s| s.text.len()).sum();
+    let too_big = own > MAX_SYSTEM_SECTIONS
+        || (system.sections.iter())
+            .any(|s| s.name.len() > MAX_SECTION_NAME_BYTES || s.text.len() > MAX_SECTION_BYTES)
+        || append > MAX_SECTION_BYTES
+        || text + append > MAX_SYSTEM_BYTES;
+    if too_big {
+        let message = format!(
+            "system allows at most {MAX_SYSTEM_SECTIONS} sections of at most \
+             {MAX_SECTION_BYTES} bytes and {MAX_SYSTEM_BYTES} bytes in all with append, \
+             and section names of at most {MAX_SECTION_NAME_BYTES} bytes"
+        );
+        return Err(refused("system", message));
+    }
+    if let Some(budget) = &spec.context_budget {
+        let ids = [&budget.drop_order, &budget.pinned];
+        let oversized = ids.iter().any(|list| {
+            list.len() > MAX_GUARDRAILS || list.iter().any(|id| id.len() > MAX_BUDGET_POLICY_BYTES)
+        });
+        if oversized {
+            let message = format!(
+                "context_budget names at most {MAX_GUARDRAILS} hooks in each list, by ids of at \
+                 most {MAX_BUDGET_POLICY_BYTES} bytes"
+            );
+            return Err(refused("context_budget", message));
+        }
+    }
+    let sections = &mut spec.system.sections;
+    sections.splice(0..0, operator.iter().cloned());
+    Ok(())
 }

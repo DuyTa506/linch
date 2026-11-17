@@ -255,6 +255,13 @@ pub enum AccessError {
         /// The refused variable.
         name: String,
     },
+    /// The `system_sections` the operator set cannot be sent: a blank or
+    /// repeated name, or blank text.
+    #[error("system_sections: {problem}")]
+    SystemSections {
+        /// What is wrong with them.
+        problem: String,
+    },
     /// A workspace root does not exist or cannot be resolved.
     #[error("workspace root {} cannot be resolved: {source}", root.display())]
     WorkspaceRoot {
