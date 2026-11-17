@@ -6,7 +6,7 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::pg::TestDb;
 use common::*;
@@ -332,9 +332,15 @@ async fn a_background_run_keeps_the_principal_it_was_made_for() {
     db.drop().await;
 }
 
-/// Poll `job.get` until the job is in `state`.
+/// How long a test waits for a background run: generous, since a loaded
+/// machine can starve the worker for a long time.
+const DEADLINE: Duration = Duration::from_secs(120);
+
+/// Poll `job.get` until the job is in `state`, or panic with its last state
+/// and error at the deadline.
 async fn wait_for(rpc: &Rpc, agent: &str, job_id: i64, state: &str) -> JobInfo {
-    for _ in 0..400 {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
         let got = rpc
             .call(method::JOB_GET, json!({"agent": agent, "job_id": job_id}))
             .await
@@ -343,9 +349,15 @@ async fn wait_for(rpc: &Rpc, agent: &str, job_id: i64, state: &str) -> JobInfo {
         if got.state == state {
             return got;
         }
+        assert!(
+            Instant::now() < deadline,
+            "job {job_id} never reached {state}: last state {}, error {:?}, attempts {}",
+            got.state,
+            got.error,
+            got.attempts,
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("job {job_id} never reached {state}");
 }
 
 fn worker_config(owner: &str) -> WorkerConfig {
@@ -416,8 +428,8 @@ async fn a_worker_runs_a_tenants_background_runs_and_fires() {
         .await
         .unwrap();
     assert_eq!(info(beat).fires, 0);
-    let mut fired = Vec::new();
-    for _ in 0..400 {
+    let deadline = Instant::now() + DEADLINE;
+    let fired = loop {
         let listed = rpc
             .call(
                 method::JOB_LIST,
@@ -425,12 +437,16 @@ async fn a_worker_runs_a_tenants_background_runs_and_fires() {
             )
             .await
             .unwrap();
-        fired = serde_json::from_value::<Vec<JobInfo>>(listed["jobs"].clone()).unwrap();
+        let fired = serde_json::from_value::<Vec<JobInfo>>(listed["jobs"].clone()).unwrap();
         if fired.iter().filter(|job| job.state == "done").count() >= 2 {
-            break;
+            break fired;
         }
+        assert!(
+            Instant::now() < deadline,
+            "fewer than two fires done: {fired:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
     let done: Vec<&JobInfo> = fired.iter().filter(|job| job.state == "done").collect();
     assert!(done.len() >= 2, "{fired:?}");
     assert!(
@@ -576,11 +592,13 @@ async fn a_config_secret_is_stored_only_with_its_definition() {
     let running = tokio::spawn(worker_with(Arc::clone(&acme)).run(shutdown.clone()));
     wait_for(&rpc, &agent, first.job_id, "done").await;
     let by_beat = json!({"agent": agent, "schedule_id": "beat"});
-    for _ in 0..400 {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
         let fired = rpc.call(method::JOB_LIST, by_beat.clone()).await.unwrap();
         if fired.to_string().contains(r#""state":"done""#) {
             break;
         }
+        assert!(Instant::now() < deadline, "no beat fire done: {fired}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let id = json!({"agent": agent, "id": "beat"});

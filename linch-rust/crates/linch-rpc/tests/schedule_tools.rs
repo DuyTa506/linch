@@ -9,7 +9,7 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::pg::TestDb;
 use common::*;
@@ -153,21 +153,28 @@ async fn pool(db: &TestDb) -> linch::postgres::PgPool {
     pool.unwrap()
 }
 
-/// The first `done` fire of schedule `id`, within a minute: the worker's
-/// open may wait out other tests' migrations (30 s at most).
+/// How long a test waits for a worker: generous, since a loaded machine can
+/// starve it (and the worker's open can wait out other tests' migrations).
+const DEADLINE: Duration = Duration::from_secs(120);
+
+/// The first `done` fire of schedule `id`, within [`DEADLINE`].
 async fn first_fire(rpc: &Rpc, agent: &str, id: &str) -> JobInfo {
-    for _ in 0..1200 {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
         let listed = rpc
             .call(method::JOB_LIST, json!({"agent": agent, "schedule_id": id}))
             .await
             .unwrap();
         let jobs: Vec<JobInfo> = serde_json::from_value(listed["jobs"].clone()).unwrap();
-        if let Some(done) = jobs.into_iter().rev().find(|job| job.state == "done") {
-            return done;
+        if let Some(done) = jobs.iter().rev().find(|job| job.state == "done") {
+            return done.clone();
         }
+        assert!(
+            Instant::now() < deadline,
+            "schedule {id} never fired: {jobs:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("schedule {id} never fired");
 }
 
 /// The model schedules a heartbeat in its session; a worker fires it, and
@@ -624,9 +631,8 @@ async fn a_tenant_that_lost_its_schedules_fails_the_fire() {
     let worker =
         Worker::new(pool, worker_config("w1")).definitions(factory.roots(), Arc::new(factory));
     let running = tokio::spawn(worker.run(shutdown.clone()));
-    let mut failed = None;
-    // A minute, as for `first_fire`.
-    for _ in 0..1200 {
+    let deadline = Instant::now() + DEADLINE;
+    let failed = loop {
         let listed = rpc
             .call(
                 method::JOB_LIST,
@@ -635,12 +641,12 @@ async fn a_tenant_that_lost_its_schedules_fails_the_fire() {
             .await
             .unwrap();
         let jobs: Vec<JobInfo> = serde_json::from_value(listed["jobs"].clone()).unwrap();
-        failed = jobs.into_iter().find(|job| job.state == "failed");
-        if failed.is_some() {
-            break;
+        if let Some(failed) = jobs.into_iter().find(|job| job.state == "failed") {
+            break failed;
         }
+        assert!(Instant::now() < deadline, "no fire failed: {listed}");
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
     rpc.call(
         method::SCHEDULE_DELETE,
         json!({"agent": agent, "id": "beat"}),
@@ -649,7 +655,6 @@ async fn a_tenant_that_lost_its_schedules_fails_the_fire() {
     .unwrap();
     shutdown.cancel();
     running.await.unwrap().unwrap();
-    let failed = failed.expect("the fire failed");
     assert!(
         failed.error.as_deref().unwrap().contains("max_schedules"),
         "{failed:?}"

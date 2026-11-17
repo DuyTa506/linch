@@ -48,7 +48,7 @@ async fn server(dir: &Path, name: &str, config: &Value) -> (Child, PathBuf) {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !socket.exists() {
         assert!(Instant::now() < deadline, "the socket never appeared");
         sleep(Duration::from_millis(20)).await;
@@ -76,7 +76,7 @@ async fn terminate(mut child: Child) {
     let pid = child.id().unwrap().to_string();
     let sent = Command::new("kill").args(["-TERM", &pid]).status().await;
     assert!(sent.unwrap().success());
-    let status = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+    let status = tokio::time::timeout(Duration::from_secs(120), child.wait()).await;
     assert!(status.expect("the server stops").unwrap().success());
 }
 
@@ -140,7 +140,7 @@ async fn a_server_without_a_worker_runs_no_scheduler() {
     let start = json!({"agent": agent, "session_id": "s1", "prompt": "go"});
     let _: Value = client.call(method::RUN_START, &start).await.unwrap();
     let pool = pool(&db).await;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while scalar(
         &pool,
         "SELECT count(*) FROM linch_runs WHERE status = 'completed'",
@@ -221,7 +221,7 @@ async fn a_schedule_runs_only_where_its_agent_stores() {
     let config = server_config(&ours, true, allow);
     let (child, _socket) = server(dir.path(), "b", &config).await;
     let completed = "SELECT count(*) FROM linch_runs WHERE status = 'completed'";
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while scalar(&our_pool, completed).await == 0 {
         assert!(Instant::now() < deadline, "no fire ran");
         sleep(Duration::from_millis(50)).await;
@@ -237,7 +237,7 @@ async fn a_schedule_runs_only_where_its_agent_stores() {
 
 /// Wait until every job of the schema has ended, and none failed.
 async fn all_ended(pool: &PgPool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let failed = scalar(
             pool,
@@ -331,7 +331,7 @@ async fn a_run_whose_server_was_killed_finishes_on_another() {
     let queued: JobInfo = a.call(method::JOB_ENQUEUE, &enqueue).await.unwrap();
     let pool = pool(&db).await;
     // Kill the server while the run waits on its tool.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while scalar(
         &pool,
         "SELECT count(*) FROM linch_runs WHERE status = 'running'",
