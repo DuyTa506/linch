@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::background::{Proc, Processes, Unread};
 use super::process::End;
-use super::{INTERRUPTED, fit};
+use super::{DEADLINE_MARGIN, INTERRUPTED, fit};
 use crate::exec::Exit;
 use crate::input::{coded, optional_count, schema, string};
 
@@ -102,6 +102,7 @@ impl Tool for BashOutput {
         let wait = fit(
             Duration::from_millis(wait_ms.min(MAX_WAIT_MS)),
             ctx.deadline,
+            |_| DEADLINE_MARGIN,
         );
         if wait_ms > 0 && proc.is_running() {
             tokio::select! {

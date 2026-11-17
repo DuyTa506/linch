@@ -283,7 +283,7 @@
 //! this connection: `linch-server` with a `worker` section, on the same
 //! database and schema (a stdio server never runs them). Each names an
 //! open `agent` with Postgres stores, no host tools or callbacks and no
-//! `remote` execution backend (else `-32040`, `data.reason`
+//! `remote` execution backend for its `Bash` (else `-32040`, `data.reason`
 //! `memory_store`, `host_tools`, `callbacks` or `remote_execution`). Its namespace scopes the schedules and jobs, and its
 //! config as opened, without its store DSN, is stored with each one: the
 //! worker opens it again for every attempt and checks it against the
@@ -371,15 +371,18 @@
 //! command and what it started, and the host answers once it is dead with
 //! the same chunk. The server enforces the timeout and the cancel: it sends
 //! `exec.kill`, and reports the command as timed out or killed only when
-//! the host answered. A host that stops answering reads, errors, closes
-//! its connection or does not confirm a kill makes the call `interrupted`
+//! the host answered with the command's `exit`. A host that stops
+//! answering reads, errors, closes its connection, does not confirm a kill
+//! (an answer without `exit`) or leaves a start unanswered, unreadable or
+//! late (only an error answer proves the command did not start) makes the
+//! call `interrupted`
 //! (`[interrupted ...]`, code `interrupted`): the command's outcome is
 //! unknown and none is invented. A command still running when its
 //! connection closes belongs to a host that is gone, so the host must kill
 //! its commands then. The commands run wherever the host runs them, with
 //! the host's own isolation; the server's `execution` allowlist for a
 //! tenant must list the remote entry exactly. The agent cannot run in a
-//! worker or on a schedule, and with a policy that does not set
+//! worker or on a schedule (unless it has no `Bash`), and with a policy that does not set
 //! `shared_workspace` it has no file tools.
 //!
 //! **`hook.call`** `{agent, point, policy_id, request}`

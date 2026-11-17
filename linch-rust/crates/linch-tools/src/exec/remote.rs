@@ -7,10 +7,11 @@
 //! `exec.read` and `exec.kill`; a test implements it in memory.
 //!
 //! The server only ever reports what the host told it. A command's exit
-//! comes from a read (or a confirmed kill). If the host stops answering,
-//! its connection closes or it does not confirm a kill, the call ends
-//! `End::Interrupted`: the command's outcome is
-//! unknown, and no exit code is made up.
+//! comes from a read (or a confirmed kill: an answer with an exit). If the
+//! host stops answering, its connection closes, it does not confirm a kill,
+//! or a start's answer is lost, the call ends `End::Interrupted`: the
+//! command's outcome is unknown, and no exit code is made up. Only a start
+//! the host refuses outright proves the command never ran.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,10 +24,11 @@ use async_trait::async_trait;
 use linch_core::SessionId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::{Launch, Shell};
+use crate::bash::DEADLINE_MARGIN;
 use crate::bash::process::{End, Started};
 
 /// How long one read waits on the host for new output before it answers
@@ -40,6 +42,28 @@ const READ_GRACE: Duration = Duration::from_secs(5);
 
 /// How long the host has to confirm a kill, and to accept a start.
 pub const HOST_ANSWER: Duration = Duration::from_secs(5);
+
+/// The fewest time between the starts of two reads when the host answered
+/// the first at once with next to nothing, so a host that never waits cannot
+/// make the server send one request after another.
+const MIN_POLL: Duration = Duration::from_millis(25);
+
+/// An answer shorter than this (both streams together) is next to nothing.
+const SMALL_ANSWER: usize = 4096;
+
+/// The most output of one command the server takes before it kills the
+/// command: the model keeps 30 KB of it, so a host that never stops is not
+/// a command that is still printing.
+const OUTPUT_BUDGET: usize = 256 * 1024 * 1024;
+
+/// The longest host error text shown to the model, in bytes.
+const REFUSAL_LIMIT: usize = 2048;
+
+/// How long before a call's deadline a remote command must end: a kill
+/// (up to [`HOST_ANSWER`]), a read that may be in flight and the result.
+const KILL_MARGIN: Duration = HOST_ANSWER
+    .saturating_add(READ_WAIT)
+    .saturating_add(DEADLINE_MARGIN);
 
 /// Host variables of `Bash`'s environment that describe the server, not the
 /// command: a remote host builds its own.
@@ -69,7 +93,8 @@ pub struct RemoteChunk {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
     /// Present exactly once, in the last chunk, when the command ended;
-    /// the host forgets the command after sending it.
+    /// the host forgets the command after sending it. A kill answer without
+    /// it does not confirm the command is dead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
 }
@@ -96,7 +121,8 @@ pub struct RemoteCommand {
 /// Why the host did not do what the server asked.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RemoteError {
-    /// The host answered with an error; this is its message.
+    /// The host answered with an error; this is its message. For a start,
+    /// the only error that proves the command did not run.
     #[error("{0}")]
     Rejected(String),
     /// The connection to the host is closed.
@@ -118,7 +144,10 @@ pub enum RemoteError {
 /// should send a cancel to the host when dropped.
 #[async_trait]
 pub trait RemoteExec: Send + Sync + fmt::Debug {
-    /// Start `command`.
+    /// Start `command`. Return [`RemoteError::Rejected`] only when the host
+    /// did not start it: any other error (or none in time) leaves the
+    /// server unsure, so it kills the command and reports the call
+    /// interrupted.
     async fn start(&self, command: RemoteCommand) -> Result<(), RemoteError>;
 
     /// Wait up to `wait` for output or the end of command `id`, and take
@@ -126,7 +155,8 @@ pub trait RemoteExec: Send + Sync + fmt::Debug {
     async fn read(&self, id: &str, wait: Duration) -> Result<RemoteChunk, RemoteError>;
 
     /// Kill command `id` and everything it started, wait until it is dead
-    /// and take what it printed since the last read, with its exit.
+    /// and take what it printed since the last read, with its exit. An
+    /// answer without the exit does not confirm that it is dead.
     async fn kill(&self, id: &str) -> Result<RemoteChunk, RemoteError>;
 }
 
@@ -199,6 +229,21 @@ impl fmt::Debug for RemoteShell {
     }
 }
 
+/// `message` as the model may read it: plain text (control characters
+/// become spaces) of at most [`REFUSAL_LIMIT`] bytes.
+fn bounded(message: &str) -> String {
+    let mut text = String::new();
+    for c in message.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        if text.len() + c.len_utf8() > REFUSAL_LIMIT {
+            text.push_str("...");
+            break;
+        }
+        text.push(c);
+    }
+    text
+}
+
 #[async_trait]
 impl Shell for RemoteShell {
     async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started> {
@@ -225,16 +270,29 @@ impl Shell for RemoteShell {
         let mut run = RemoteRun::new(Arc::clone(&self.host), id);
         match timeout(HOST_ANSWER, self.host.start(command)).await {
             Ok(Ok(())) => Ok(Started::Remote(run)),
-            Ok(Err(error)) => {
+            // Only a refusal proves the host did not start it.
+            Ok(Err(RemoteError::Rejected(message))) => {
                 run.armed = false;
-                Err(io::Error::other(error.to_string()))
+                Err(io::Error::other(bounded(&message)))
             }
-            Err(_) => Err(io::Error::other(RemoteError::Unresponsive.to_string())),
+            // Anything else may follow a start that happened: an answer
+            // that was lost, unreadable or late. The call must not look
+            // like a command that never ran (the model would run it twice),
+            // so it is watched and killed, and ends interrupted.
+            Ok(Err(_)) | Err(_) => {
+                run.unconfirmed = true;
+                Ok(Started::Remote(run))
+            }
         }
     }
 
     fn program(&self) -> &str {
         "the remote command"
+    }
+
+    fn deadline_margin(&self, left: Duration) -> Duration {
+        // Half of a short deadline at most, so it does not shrink to nothing.
+        KILL_MARGIN.min(left / 2).max(DEADLINE_MARGIN)
     }
 }
 
@@ -244,6 +302,8 @@ pub(crate) struct RemoteRun {
     host: Arc<dyn RemoteExec>,
     id: String,
     armed: bool,
+    /// The host's answer to the start did not say whether it started.
+    unconfirmed: bool,
 }
 
 impl fmt::Debug for RemoteRun {
@@ -256,6 +316,7 @@ impl fmt::Debug for RemoteRun {
 enum Stop {
     TimedOut,
     Aborted,
+    /// The host stopped answering, or sent more than it may.
     Lost,
 }
 
@@ -265,6 +326,7 @@ impl RemoteRun {
             host,
             id,
             armed: true,
+            unconfirmed: false,
         }
     }
 
@@ -272,8 +334,9 @@ impl RemoteRun {
     /// `cancel` fires, feeding `on_out` and `on_err`. On a timeout or
     /// cancel the host is told to kill the command; the end is then
     /// [`End::TimedOut`] or [`End::Aborted`] only if the host confirmed the
-    /// kill, and [`End::Interrupted`] otherwise. The same when the host
-    /// stops answering or its connection closes.
+    /// kill with an exit, and [`End::Interrupted`] otherwise. The same when
+    /// the host stops answering, its connection closes, its start was not
+    /// confirmed or it sends more than [`OUTPUT_BUDGET`].
     pub(crate) async fn supervise(
         mut self,
         limit: Duration,
@@ -281,25 +344,12 @@ impl RemoteRun {
         mut on_out: impl FnMut(&[u8]),
         mut on_err: impl FnMut(&[u8]),
     ) -> End {
-        let deadline = Instant::now() + limit;
-        let stop = loop {
-            let read = timeout(READ_WAIT + READ_GRACE, self.host.read(&self.id, READ_WAIT));
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => break Stop::Aborted,
-                () = tokio::time::sleep_until(deadline) => break Stop::TimedOut,
-                chunk = read => match chunk {
-                    Ok(Ok(chunk)) => {
-                        on_out(chunk.stdout.as_bytes());
-                        on_err(chunk.stderr.as_bytes());
-                        if let Some(exit) = chunk.exit {
-                            self.armed = false;
-                            return End::Exited(exit);
-                        }
-                    }
-                    _ => break Stop::Lost,
-                },
-            }
+        let stop = match self.unconfirmed {
+            true => Stop::Lost,
+            false => match self.poll(limit, cancel, &mut on_out, &mut on_err).await {
+                Ok(end) => return end,
+                Err(stop) => stop,
+            },
         };
         let killed = timeout(HOST_ANSWER, self.host.kill(&self.id)).await;
         self.armed = false;
@@ -309,13 +359,60 @@ impl RemoteRun {
         on_out(chunk.stdout.as_bytes());
         on_err(chunk.stderr.as_bytes());
         match (stop, chunk.exit) {
+            // What the command did before is unknown, whatever the kill says.
+            (Stop::Lost, _) => End::Interrupted,
+            // Without an exit the host did not say the command is dead.
+            (_, None) => End::Interrupted,
             // It ended by itself just before the kill.
             (_, Some(exit @ Exit::Code(_))) => End::Exited(exit),
-            (Stop::TimedOut, _) => End::TimedOut,
-            (Stop::Aborted, _) => End::Aborted,
-            // The host did not answer a read but answered the kill: the
-            // command is dead, yet what it did before is unknown.
-            (Stop::Lost, _) => End::Interrupted,
+            (Stop::TimedOut, Some(Exit::Signal(_))) => End::TimedOut,
+            (Stop::Aborted, Some(Exit::Signal(_))) => End::Aborted,
+        }
+    }
+
+    /// Read until the command ends (`Ok`) or the loop must stop (`Err`).
+    async fn poll(
+        &mut self,
+        limit: Duration,
+        cancel: &CancellationToken,
+        on_out: &mut impl FnMut(&[u8]),
+        on_err: &mut impl FnMut(&[u8]),
+    ) -> Result<End, Stop> {
+        let deadline = Instant::now() + limit;
+        let mut taken = 0;
+        loop {
+            let began = Instant::now();
+            let read = timeout(READ_WAIT + READ_GRACE, self.host.read(&self.id, READ_WAIT));
+            let chunk = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(Stop::Aborted),
+                () = sleep_until(deadline) => return Err(Stop::TimedOut),
+                chunk = read => match chunk {
+                    Ok(Ok(chunk)) => chunk,
+                    _ => return Err(Stop::Lost),
+                },
+            };
+            on_out(chunk.stdout.as_bytes());
+            on_err(chunk.stderr.as_bytes());
+            if let Some(exit) = chunk.exit {
+                self.armed = false;
+                return Ok(End::Exited(exit));
+            }
+            let size = chunk.stdout.len() + chunk.stderr.len();
+            taken += size;
+            if taken > OUTPUT_BUDGET {
+                return Err(Stop::Lost);
+            }
+            if size < SMALL_ANSWER {
+                // A host that waits as asked is never early; one that does
+                // not is paced, and cancel and the deadline still win.
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(Stop::Aborted),
+                    () = sleep_until(deadline) => return Err(Stop::TimedOut),
+                    () = sleep_until(began + MIN_POLL) => {}
+                }
+            }
         }
     }
 }

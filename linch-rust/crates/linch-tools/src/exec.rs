@@ -45,6 +45,7 @@ pub use remote::{
 pub use sandbox::SandboxPolicy;
 
 use crate::LocalFs;
+use crate::bash::DEADLINE_MARGIN;
 use crate::bash::process::{self, Spawned, Started};
 
 /// Which execution backend an agent's tools use, as config data.
@@ -309,6 +310,13 @@ pub(crate) trait Shell: Send + Sync + fmt::Debug {
     /// What a spawn error names as the program that did not start.
     fn program(&self) -> &str {
         "/bin/sh"
+    }
+
+    /// How long before a call's deadline (`left` away) a command of this
+    /// shell must end, so its kill and the result fit before the scheduler
+    /// drops the call.
+    fn deadline_margin(&self, _left: Duration) -> Duration {
+        DEADLINE_MARGIN
     }
 
     /// Drop what the shell keeps for `session`.

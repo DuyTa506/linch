@@ -36,9 +36,11 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Longest timeout a call may ask for, in milliseconds.
 const MAX_TIMEOUT_MS: u64 = 1_800_000;
 
-/// How long before the call's deadline the command is killed, so the kill,
-/// the pipe drain and the result fit before the scheduler drops the call.
-const DEADLINE_MARGIN: Duration = Duration::from_millis(100);
+/// How long before the call's deadline a local command is killed, so the
+/// kill, the pipe drain and the result fit before the scheduler drops the
+/// call. A remote command's kill is a round trip: see
+/// [`Shell::deadline_margin`].
+pub(crate) const DEADLINE_MARGIN: Duration = Duration::from_millis(100);
 
 /// Host variables passed through to the shell; nothing else is inherited,
 /// so the host's credentials stay out of the command's environment.
@@ -55,8 +57,9 @@ const ALLOWED_ENV: [&str; 9] = [
 /// call). Each stream keeps its first 4000 and last 26000 bytes.
 ///
 /// A call with a [`ToolContext::deadline`] (the scheduler's call timeout)
-/// cuts its timeout to end 100 ms before it, so the output so far reaches
-/// the model instead of a generic timeout.
+/// cuts its timeout to end 100 ms before it (about 6 s for a `remote`
+/// command, whose kill is a round trip to its host), so the output so far
+/// reaches the model instead of a generic timeout.
 ///
 /// With [`Bash::with_processes`], `run_in_background` starts the command
 /// in that registry and returns its id at once; [`BashOutput`] reads it and
@@ -199,11 +202,14 @@ impl Tool for Bash {
                 .start(command, Duration::from_millis(timeout_ms), &ctx)
                 .await;
         }
-        let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline);
         let spawned = (self.shell)
             .spawn(self.launch(command, &ctx, false))
             .await
             .map_err(|error| self.spawn_failed(error))?;
+        // After the spawn, which a remote host may take seconds to answer:
+        // the margin counts from when the command runs.
+        let margin = |left| self.shell.deadline_margin(left);
+        let timeout = fit(Duration::from_millis(timeout_ms), ctx.deadline, margin);
         let finished = process::run(spawned, timeout, &ctx.cancel)
             .await
             .map_err(|error| self.spawn_failed(error))?;
@@ -269,14 +275,18 @@ impl Bash {
     }
 }
 
-/// `timeout`, cut to end [`DEADLINE_MARGIN`] before `deadline` (at least
-/// 1 ms).
-fn fit(timeout: Duration, deadline: Option<Instant>) -> Duration {
+/// `timeout`, cut to end `margin` (given the time left) before `deadline`
+/// (at least 1 ms).
+fn fit(
+    timeout: Duration,
+    deadline: Option<Instant>,
+    margin: impl FnOnce(Duration) -> Duration,
+) -> Duration {
     let Some(deadline) = deadline else {
         return timeout;
     };
     let left = deadline.saturating_duration_since(Instant::now());
-    let left = left.saturating_sub(DEADLINE_MARGIN);
+    let left = left.saturating_sub(margin(left));
     timeout.min(left.max(Duration::from_millis(1)))
 }
 
