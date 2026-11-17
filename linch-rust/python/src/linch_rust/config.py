@@ -316,15 +316,23 @@ class LoopGuard(TypedDict, total=False):
     `repeated_failures` or `idle_turns`), an `ErrorEvent` named
     `LoopGuardError`, and a `ResultEvent` of subtype `error`, before its
     next provider call. Python counts identical inputs whatever the
-    result; here a repeat must also return the same result, an error result
-    is the failure streak's, a built-in tool that polls (`BashOutput`) never
-    repeats, and there is no `force_final_answer`.
+    result; here a repeat must also return the same result, within the
+    latest 20 results, an error result is the failure streak's, and there is
+    no `force_final_answer`. `max_identical_inputs` is Python's rule loosened
+    (10 among the latest 50 calls, not 3 in the whole run). A tool that polls
+    (`BashOutput`; a host tool or MCP tool declared `polls`) is waited on: it
+    ends the run only after
+    `max_idle_turns` identical answers in a row, or at once when a finished
+    command is read again.
 
     Attributes:
         max_identical_tool_calls: Calls of one tool with the same input
             and the same result, not an error, that end the run; the one
             that reaches it runs first. A call whose result changed is
             progress. 3 when absent, 0 never.
+        max_identical_inputs: Calls of one tool with the same input among
+            the latest 50, whatever their results, that end the run (a
+            tool that polls is not counted). 10 when absent, 0 never.
         max_consecutive_failures: Tool batches in a row whose every call
             failed that end the run. 3 when absent, 0 never.
         max_idle_turns: Most turns in a row that may end without a provider
@@ -334,6 +342,7 @@ class LoopGuard(TypedDict, total=False):
     """
 
     max_identical_tool_calls: int
+    max_identical_inputs: int
     max_consecutive_failures: int
     max_idle_turns: int
 

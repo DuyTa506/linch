@@ -97,3 +97,112 @@ async fn a_tenant_may_not_raise_the_idle_turn_bound() {
     open["namespace"] = json!("rpc");
     local.open(open).await;
 }
+
+/// A model forced to call a tool every turn never answers, so a tenant's
+/// forced choice needs something that ends the run: `max_turns` or a final
+/// tool, named in the spec or, for a run's own choice, on its agent.
+#[tokio::test]
+async fn a_tenant_may_not_force_a_tool_nothing_would_end() {
+    let remote = Rpc::remote(tenant("acme", Allowlists::new().scripted_provider(true)));
+    let config = |spec: Value| {
+        let mut config = scripted(vec![], None, "");
+        config["namespace"] = json!("acme");
+        config["tools"] = json!([host_tool("lookup", "read")]);
+        for (key, value) in spec.as_object().unwrap() {
+            config["spec"][key] = value.clone();
+        }
+        config
+    };
+    let required = json!({"type": "required"});
+    let named = json!({"type": "tool", "name": "lookup"});
+    // An output schema alone is no end: its final tool exists only on a
+    // provider that cannot take the schema natively.
+    let schema = json!({"name": "answer", "schema": {"type": "object"}});
+    for spec in [
+        json!({"tool_choice": required}),
+        json!({"tool_choice": named}),
+        json!({"tool_choice": required, "output_schema": schema}),
+    ] {
+        let kind = refused(&remote, config(spec.clone())).await;
+        assert_eq!(kind.as_deref(), Some("tool_choice"), "{spec}");
+    }
+    for spec in [
+        json!({"tool_choice": required, "max_turns": 5}),
+        json!({"tool_choice": {"type": "auto"}}),
+        json!({"tool_choice": named, "final_tool_name": "lookup"}),
+        json!({"tool_choice": required, "final_tool_name": "lookup"}),
+    ] {
+        assert_eq!(refused(&remote, config(spec.clone())).await, None, "{spec}");
+    }
+
+    // A run's own choice is held to the same rule by its agent.
+    let start = |agent: &str, choice: &Value| {
+        let params = json!({"agent": agent, "session_id": "s1", "prompt": "go",
+                            "tool_choice": choice});
+        remote.call(method::RUN_START, params)
+    };
+    let loose = remote.open(config(json!({}))).await;
+    let error = start(&loose, &required).await.unwrap_err();
+    assert_eq!(
+        refusal(error),
+        (code::NOT_ALLOWED, Some("tool_choice".into()))
+    );
+    assert!(start(&loose, &json!({"type": "auto"})).await.is_ok());
+    // The same on an agent with an output schema, as at open.
+    let schemed = remote.open(config(json!({"output_schema": schema}))).await;
+    let error = start(&schemed, &required).await.unwrap_err();
+    assert_eq!(refusal(error).1.as_deref(), Some("tool_choice"));
+    let bounded = remote.open(config(json!({"max_turns": 3}))).await;
+    assert!(start(&bounded, &required).await.is_ok());
+
+    // A local connection is not held to it.
+    let local = Rpc::new();
+    let mut open = config(json!({"tool_choice": required}));
+    open["namespace"] = json!("rpc");
+    local.open(open).await;
+}
+
+/// A host tool that declares it polls is waited on, as `BashOutput` is: the
+/// same answer eight times is no loop. One that does not declare it is, at
+/// the third. A poll whose answer says it is done is a repeat again.
+#[tokio::test]
+async fn a_host_tool_may_declare_that_it_polls() {
+    let turns = || {
+        let mut turns: Vec<_> = (0..8)
+            .map(|n| tool_turn(&format!("c{n}"), "status", json!({"q": "job"})))
+            .collect();
+        turns.push(text_turn("Done."));
+        turns
+    };
+    let run = |polls: bool, done: bool| async move {
+        let answer = match done {
+            true => json!({"value": "finished", "metadata": {"poll_done": true}}),
+            false => json!({"value": "running"}),
+        };
+        let mut rpc = Rpc::with_handler(handler(move |_, _, _| {
+            let answer = answer.clone();
+            async move { Ok(answer) }
+        }));
+        let mut tool = host_tool("status", "read");
+        if polls {
+            tool["polls"] = json!(true);
+        }
+        let config = hosted(turns(), "default", json!({"tools": [tool]}));
+        let agent = rpc.open(config).await;
+        let run_id = rpc.start(&agent, "s1", "wait").await;
+        let ended = rpc.until_end(&run_id).await;
+        let Event::Result(result) = ended.last() else {
+            panic!("{:?}", ended.last())
+        };
+        let ends = (ended.envelopes.iter())
+            .filter(|e| matches!(e.event, Event::ToolCallEnd(_)))
+            .count();
+        (
+            serde_json::to_value(result).unwrap()["subtype"].clone(),
+            ends,
+        )
+    };
+    assert_eq!(run(true, false).await, (json!("success"), 8));
+    assert_eq!(run(false, false).await, (json!("error"), 3));
+    assert_eq!(run(true, true).await, (json!("error"), 3));
+}

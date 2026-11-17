@@ -148,6 +148,77 @@ async fn polling_a_running_command_is_not_a_loop() {
     assert_eq!(polls, 10);
 }
 
+/// The tools that poll a background command: `BashOutput` reads it, `Bash`
+/// starts it.
+fn background_tools(dir: &std::path::Path) -> Vec<Arc<dyn Tool>> {
+    let processes = Arc::new(Processes::new());
+    let bash = Bash::new(dir).with_processes(Arc::clone(&processes));
+    vec![
+        Arc::new(bash),
+        Arc::new(BashOutput::new(Arc::clone(&processes))),
+        Arc::new(BashKill::new(processes)),
+    ]
+}
+
+/// The id of the background command in the messages of `request`.
+fn process_id(request: &ProviderRequest) -> String {
+    let all = serde_json::to_string(&request.messages).unwrap();
+    let at = all.find("bash_").expect("the background command's id");
+    all[at..at + 17].to_owned()
+}
+
+/// A command that finished answers the same `[exit code 0]` to every read:
+/// that is no wait, so the third identical read ends the run, where it used
+/// to loop until the budget did.
+#[tokio::test]
+async fn reading_a_finished_command_again_is_a_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Answering(Box::new(|request, n| match n {
+        0 => call(
+            n,
+            "Bash",
+            json!({"command": "echo hi", "run_in_background": true}),
+        ),
+        1..=12 => call(
+            n,
+            "BashOutput",
+            json!({"process_id": process_id(request), "wait_ms": 5000}),
+        ),
+        _ => text("done"),
+    }));
+    let (status, ends, guards) = run(agent(provider, background_tools(dir.path()))).await;
+    assert_eq!(status, "error");
+    assert_eq!(guards, ["repeated_tool_call"]);
+    // The first read has the output; the next three say only the exit code.
+    let polls = ends.iter().filter(|name| *name == "BashOutput").count();
+    assert_eq!(polls, 4);
+}
+
+/// A command that runs on and prints nothing answers the same "still
+/// running" for as long as it is polled: it is waited for, up to the guard's
+/// `max_idle_turns` identical answers in a row, and then the run ends.
+#[tokio::test]
+async fn polling_a_silent_running_command_forever_is_a_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Answering(Box::new(|request, n| match n {
+        0 => call(
+            n,
+            "Bash",
+            json!({"command": "sleep 30", "run_in_background": true}),
+        ),
+        1..=60 => call(n, "BashOutput", json!({"process_id": process_id(request)})),
+        _ => text("done"),
+    }));
+    let (status, ends, guards) = run(agent(provider, background_tools(dir.path()))).await;
+    assert_eq!(status, "error");
+    assert_eq!(guards, ["repeated_tool_call"]);
+    let polls = ends.iter().filter(|name| *name == "BashOutput").count();
+    assert_eq!(
+        polls, 26,
+        "25 identical answers are allowed, the 26th ends it"
+    );
+}
+
 /// Reading a file again after an edit returns new content: progress. The
 /// same read of an unchanged file three times is a loop.
 #[tokio::test]

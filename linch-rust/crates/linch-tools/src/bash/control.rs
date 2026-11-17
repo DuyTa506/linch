@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use linch_core::loop_guard::POLL_DONE;
 use linch_core::{
     JsonObject, JsonValue, Tool, ToolContext, ToolOutput, ToolOutputError, ToolResult, ToolScope,
 };
@@ -91,7 +92,9 @@ impl Tool for BashOutput {
         ToolScope::Read
     }
 
-    /// Reading a command that runs on asks the same thing until it ends.
+    /// Reading a command that runs on asks the same thing until it ends. A
+    /// command that has ended says so in the result's metadata
+    /// ([`POLL_DONE`]): reading it again is a repeat.
     fn polls(&self) -> bool {
         true
     }
@@ -193,6 +196,7 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
             (Some(code), _) => {
                 metadata.insert("status".into(), "exited".into());
                 metadata.insert("exit_code".into(), code.into());
+                metadata.insert(POLL_DONE.into(), true.into());
                 let failure = (code != 0).then(|| ("exit_status", json!({"exit_code": code})));
                 (format!("[exit code {code}]"), failure)
             }
@@ -211,6 +215,7 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
         }
         Some(End::Aborted) => {
             metadata.insert("status".into(), "killed".into());
+            metadata.insert(POLL_DONE.into(), true.into());
             ("[killed; process group killed]".into(), None)
         }
     };

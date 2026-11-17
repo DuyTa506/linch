@@ -66,6 +66,12 @@ print(report.spec())
 {'name': 'run_report', 'description': 'Run a named report.', 'input_schema': {'type': 'object', 'properties': {'report': {'type': 'string', 'enum': ['daily', 'weekly']}}, 'required': ['report'], 'additionalProperties': False}, 'scope': 'exec', 'timeout_ms': 30000}
 ```
 
+A tool that asks after something that runs on (a job's status) declares
+`polls=True`: the [loop guard](./agent.md#loop_guard) then waits on its
+repeated answers instead of ending the run at the third identical one.
+Return `ToolOutput(value, metadata={"poll_done": True})` once the job is
+done, so reading it again is a repeat.
+
 `@tool` returns a `HostTool`; `spec()` is what the server receives and
 `fn` is your function, so a unit test can `await search_orders.fn(customer="ada")`.
 

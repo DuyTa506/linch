@@ -67,6 +67,10 @@ impl Tool for HostTool {
         self.spec.scope
     }
 
+    fn polls(&self) -> bool {
+        self.spec.polls
+    }
+
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let params = ToolCallParams {
             agent: self.agent.clone(),

@@ -46,6 +46,14 @@ pub struct HostToolSpec {
     /// Longest wait for one call before it is cancelled (default 300 000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<NonZeroU64>,
+    /// Whether the tool polls the state of something that runs on, so the
+    /// loop guard waits on its repeated answers instead of counting them as
+    /// a loop (`Tool::polls`). A call that finds the thing done returns
+    /// `{"poll_done": true}` in the result's `metadata`: reading it again
+    /// is then a repeat.
+    /// Default false, and then not sent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub polls: bool,
 }
 
 impl Serialize for OpenParams {

@@ -68,6 +68,11 @@ print(report.spec())
 {'name': 'run_report', 'description': 'Run a named report.', 'input_schema': {'type': 'object', 'properties': {'report': {'type': 'string', 'enum': ['daily', 'weekly']}}, 'required': ['report'], 'additionalProperties': False}, 'scope': 'exec', 'timeout_ms': 30000}
 ```
 
+Một tool hỏi về một thứ đang chạy (trạng thái một job) khai báo `polls=True`: [loop
+guard](./agent.md#loop_guard) khi đó chờ các câu trả lời lặp lại của nó thay vì kết
+thúc run ở câu giống nhau thứ ba. Trả về `ToolOutput(value, metadata={"poll_done":
+True})` khi job đã xong, để đọc lại nó là một lần lặp.
+
 `@tool` trả về một `HostTool`; `spec()` là thứ server nhận được và `fn` là hàm của
 bạn, nên một unit test có thể `await search_orders.fn(customer="ada")`.
 

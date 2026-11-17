@@ -1,7 +1,7 @@
 //! [`McpConfig`]: one MCP server of an [`AgentConfig`](super::AgentConfig),
 //! the serde mirror of [`McpServerConfig`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -27,6 +27,13 @@ pub struct McpConfig {
     /// gets the `read` scope instead of `exec`. Default `false`.
     #[serde(default)]
     pub trust_annotations: bool,
+    /// The server's tools, by the names it lists them under, that poll: they
+    /// ask after something that runs on, so the [loop
+    /// guard](linch_core::loop_guard) waits on their repeated answers
+    /// (up to `max_idle_turns` identical ones in a row) instead of counting
+    /// them as a loop. Absent or empty: none poll, and nothing is sent.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub polls: BTreeSet<String>,
     /// Longest wait for one tool call before it is cancelled (default
     /// 300 000).
     #[serde(default = "default_call_timeout_ms")]
@@ -117,6 +124,7 @@ impl From<McpConfig> for McpServerConfig {
         let reconnect = config.reconnect;
         let mut server = Self::new(config.name, transport);
         server.trust_annotations = config.trust_annotations;
+        server.polls = config.polls;
         server.call_timeout = Duration::from_millis(config.call_timeout_ms);
         server.reconnect = ReconnectPolicy {
             attempts: reconnect.attempts,

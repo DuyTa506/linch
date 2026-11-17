@@ -136,6 +136,7 @@ mod tests {
             description: description.into(),
             input_schema,
             scope: ToolScope::Exec,
+            polls: false,
         }
     }
 

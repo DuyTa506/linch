@@ -354,6 +354,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
 | `provider_concurrency` | `max_provider_concurrency` above the tenant's | The tenant's runs would make more calls at once on the server's key than the operator allows; `data.max` is the cap |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
+| `tool_choice` | A forced `tool_choice` (`required`, or a tool that is not the final tool), in the spec or in `run.start`, on an agent with no `max_turns` and no `final_tool_name` (an output schema alone does not end the run on every provider) | A model forced to call a tool every turn never answers, and no budget ends the run |
 
 A path that does not exist is refused like one outside the roots, so a
 client cannot probe the server's file system. Five changes are made

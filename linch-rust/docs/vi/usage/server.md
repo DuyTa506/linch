@@ -355,6 +355,7 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `verification` | Hơn 32 verifier trong `spec.verification`, một pattern dài quá 1024 byte, hoặc hơn 32 keyword trong một verifier | Tương tự, cho mọi câu trả lời cuối cùng |
 | `provider_concurrency` | `max_provider_concurrency` lớn hơn mức của tenant | Các run của tenant sẽ gọi cùng lúc nhiều hơn mức nhà vận hành cho phép trên key của server; `data.max` là mức trần |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
+| `tool_choice` | Một `tool_choice` bị ép (`required`, hoặc một tool không phải final tool), trong spec hoặc trong `run.start`, trên một agent không có `max_turns` và không có `final_tool_name` (riêng output schema không kết thúc run trên mọi provider) | Model bị ép gọi một tool mỗi lượt sẽ không bao giờ trả lời, và không budget nào kết thúc run |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
 không thể dò hệ thống tệp của server. Năm thay đổi được thực hiện âm thầm thay vì từ

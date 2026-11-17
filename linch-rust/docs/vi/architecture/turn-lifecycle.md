@@ -197,17 +197,18 @@ thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:138-15
 
 ### Loop guard
 
-`spec.loop_guard` (`loop_guard.rs:66`) kết thúc một run bị kẹt, kể cả khi `max_turns`
+`spec.loop_guard` (`loop_guard.rs:105`) kết thúc một run bị kẹt, kể cả khi `max_turns`
 chưa đặt. Nó bật mặc định; giá trị mặc định không được ghi lên wire, nên hợp đồng của
 một spec không đặt nó không đổi.
 
 | Kiểm tra | Mặc định | Kích hoạt | Kiểm tra khi |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong run: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc), không phải lỗi, và không phải tool poll | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:303`) |
+| `max_identical_tool_calls` | 3 | Cùng một lời gọi với cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input và cùng nội dung kết quả (cả hai là JSON chuẩn tắc, đã bỏ tên file offload), không phải lỗi. Một tool poll chỉ lặp khi một lệnh đã xong bị đọc lại | Tại `Step::Results`, sau khi kết quả của batch được nối vào (`turn.rs:326`) |
+| `max_identical_inputs` | 10 | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và lỗi; một tool poll không được đếm. Không có trên wire khi bằng 10 | Như trên |
 | `max_consecutive_failures` | 3 | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi; một batch có một lời gọi thành công thì đếm lại từ đầu | Như trên |
-| `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:415`) |
+| `max_idle_turns` | 25 | Thêm một lượt so với con số này, liên tiếp, không có lời gọi provider: một `force_continue` của `before_provider_call` | Trong nhánh `force_continue` của dispatch, trước khi feedback của nó được stage (`turn.rs:454`) |
 
-0 tắt một trong hai kiểm tra đầu; `max_idle_turns` tối thiểu là 1, nên giới hạn số
+0 tắt một trong ba kiểm tra đầu; `max_idle_turns` tối thiểu là 1, nên giới hạn số
 lượt không có lời gọi provider luôn bật. Một lượt như vậy không bao giờ chạm tới budget và lần nào cũng
 nối vào session, nên nếu không có giới hạn này, một hook luôn bỏ qua lời gọi sẽ lặp
 cho đến khi run bị hủy.
@@ -224,20 +225,33 @@ kết quả của mọi lời gọi giống hệt trước đó là đã có ti�
 khi sửa, một trạng thái đã đổi) và bắt đầu một bộ đếm riêng; quay lại một kết quả cũ
 là một lần lặp của kết quả đó. Một kết quả lỗi không bao giờ là lần lặp, vì chính Linch
 yêu cầu model lặp lại một số lời gọi bị từ chối (một tool bị hoãn: `call tool_search
-with select:X first`); các lời gọi cứ lỗi mãi thuộc về chuỗi lỗi. Một tool có `polls()`
-là true (`tool.rs:279`; `BashOutput`, đọc một lệnh chạy nền cho đến khi nó kết thúc)
-cũng không bao giờ là lần lặp; các lần lỗi của nó vẫn được tính vào chuỗi lỗi. Python
-đếm các input giống nhau bất kể kết quả, kể cả lời gọi lỗi và bị từ chối.
+with select:X first`); các lời gọi cứ lỗi mãi thuộc về chuỗi lỗi. Số lần gọi giống nhau nhìn vào 20 kết quả
+gần nhất, nên một trạng thái thỉnh thoảng được đọc trong một run dài không phải vòng
+lặp, và cách đếm thứ hai là luật của Python (đếm các input giống nhau của một tool trên toàn
+run, kể cả kết quả và lỗi, với ngưỡng 3) được nới thành 10 trong 50 input gần nhất.
+
+Một tool có `polls()` là true (`tool.rs:279`; `BashOutput`, một host tool có `polls`,
+một MCP tool trong `polls` của server) chờ một thứ đang chạy. Các câu trả lời của nó
+được đếm riêng: cùng một câu trả lời `max_idle_turns` lần liên tiếp (một câu mới thì
+đếm lại) kết thúc run với `repeated_tool_call`, nên một lệnh im lặng không bị poll mãi.
+Một kết quả mà metadata `ToolCallEnd` có `poll_done` (`BashOutput` của một lệnh đã
+thoát hoặc bị kill) là một lần lặp của kết quả đó theo ngưỡng thường, vì một lệnh đã
+xong trả lời giống nhau cho mọi lần đọc. Các lần lỗi của nó vẫn được tính vào chuỗi
+lỗi. `ToolCallEnd` đến guard ngay khi chạy qua journal sink và được đọc lại từ log khi
+resume như phần còn lại.
 `force_final_answer` của Python (thêm một lượt không có tool) không được port: kích
 hoạt là dừng.
 
-Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:145`) gộp các
-event bền vững của run: một event `assistant` nêu tên các lời gọi của response đó
-(trừ các lời gọi của tool poll, mà runner đọc từ registry), event user `tool_result`
-kế tiếp đếm những lời gọi không lỗi theo nội dung kết quả của chúng và cập nhật chuỗi
-lỗi, và một `model_call_delivery` chính ghi lại lượt của nó. Run đang chạy gộp cùng các
-event này khi stage chúng (`Runner::stage_seen`, `turn.rs:350`), và một lần resume gộp
-các event đã lưu (`start.rs:473`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
+Không có gì được checkpoint cho guard. `Watch::of` (`loop_guard.rs:270`) gộp các
+event bền vững của run: một event `assistant` nêu tên các lời gọi của response đó, một
+event `tool_call_end` cho biết lệnh của một lần poll đã xong chưa (`poll_done` trong
+metadata của nó, với các tool poll mà runner đọc từ registry), event user
+`tool_result` kế tiếp đếm các lời gọi theo nội dung kết quả của chúng (cái lời gọi
+trả về, đã bỏ tên file offload) và cập nhật chuỗi lỗi, và một `model_call_delivery`
+chính ghi lại lượt của nó. Run đang chạy gộp cùng các event này khi stage chúng
+(`Runner::stage_seen`, `turn.rs:381`; các event `tool_call_end` của tool khi journal
+sink stage chúng, `runner/sink.rs`), và một lần resume gộp các event đã lưu
+(`start.rs:508`). Mỗi cái đều bền vững trước bước kiểm tra nó (kết
 quả cùng checkpoint `ToolResults`, một delivery trước lời gọi của nó), và lượt lấy từ
 checkpoint, nên một sự cố ở bất kỳ lần ghi nào cũng resume với đúng các con số mà run
 đã có và kích hoạt tại cùng điểm (`tests/e2e_loop_guard.rs`).

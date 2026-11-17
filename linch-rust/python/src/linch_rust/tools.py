@@ -86,6 +86,7 @@ class HostTool:
     Attributes:
         context_param: The parameter that takes the call's `ToolContext`,
             or `None` when the function declares none.
+        polls: Whether the tool polls something that runs on (see `tool`).
     """
 
     name: str
@@ -95,6 +96,7 @@ class HostTool:
     timeout_ms: int | None
     fn: Callable[..., Awaitable[Any]]
     context_param: str | None = None
+    polls: bool = False
 
     def spec(self) -> dict[str, Any]:
         """The declaration as `agent.open` takes it in `tools`."""
@@ -106,6 +108,8 @@ class HostTool:
         }
         if self.timeout_ms is not None:
             spec["timeout_ms"] = self.timeout_ms
+        if self.polls:
+            spec["polls"] = True
         return spec
 
 
@@ -116,6 +120,7 @@ def tool(
     description: str | None = None,
     input_schema: Mapping[str, Any] | None = None,
     timeout: float | None = None,
+    polls: bool = False,
 ) -> Callable[[ToolFn], HostTool]:
     """Declare a function as a host tool; a plain function runs in a worker thread.
 
@@ -137,6 +142,12 @@ def tool(
             type hints (`str`, `int`, `float`, `bool`, `list`, `dict`,
             `Optional`) when absent.
         timeout: Seconds the server waits for an answer; 300 when absent.
+        polls: Whether the tool asks after something that runs on (a job's
+            status). The loop guard then waits on its repeated answers, up
+            to `max_idle_turns` identical ones in a row, instead of ending
+            the run at the third. Return `ToolOutput(..., metadata=
+            {"poll_done": True})` once the thing is done, so reading it
+            again is a repeat. False when absent.
 
     Returns:
         A decorator that turns the function into a `HostTool`.
@@ -159,6 +170,7 @@ def tool(
             input_schema=schema,
             scope=scope,
             timeout_ms=timeout_ms,
+            polls=polls,
             fn=fn if inspect.iscoroutinefunction(fn) else _threaded(fn),
             context_param=next(
                 (param.name for param in _parameters(fn) if _takes_context(param)), None
