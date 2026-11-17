@@ -1,4 +1,4 @@
-"""Live e2e (area long): the long-running harness pattern (L1-L4 of `long_results/expectations.md`).
+"""Live e2e (area long): the long-running harness pattern (L1-L4 of `expectations/long.md`).
 
 A goal-contract system section, `tasks` with a shared `task_ledger`, a low
 compaction threshold, Postgres stores, vLLM through the body-logging tee. The
@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config
+from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
 from live_sched_support import pg_dsn, query
 
 from linch_rust import (
@@ -25,10 +25,13 @@ from linch_rust import (
 
 __all__ = ["pg_dsn"]
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
-GOAL = "GOAL-CONTRACT: the work is done when Step A, Step B and Step C are completed and Step D is still pending."
+GOAL = (
+    "GOAL-CONTRACT: the work is done when Step A, Step B and Step C are completed "
+    "and Step D is still pending."
+)
 LIST = "e2e-ledger"
 
 
@@ -39,7 +42,8 @@ async def lookup_big(key: str) -> str:
 
 
 PROMPT = (
-    "Do this now with tool calls, without asking questions. First call TaskCreate four times, with the subjects exactly "
+    "Do this now with tool calls, without asking questions. First call TaskCreate four times, with "
+    "the subjects exactly "
     "'Step A', 'Step B', 'Step C' and 'Step D' (a short description each). Then for Step A, "
     "Step B and Step C, in that order: call TaskUpdate to set the task in_progress, call "
     "lookup_big with the key a, b or c, then call TaskUpdate to set the task completed. "

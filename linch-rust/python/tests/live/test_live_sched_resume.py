@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 from collections import Counter
 from typing import Any
@@ -215,8 +216,12 @@ async def test_a_frozen_server_loses_its_run_and_is_fenced_out(vllm: str, pg_dsn
         taken = await new_agent.resume(run.id)
         from linch_rust import RunLeased
 
-        with pytest.raises(RunLeased):
+        with pytest.raises(RunLeased) as refused:
             await taken.result()
+        # The refusal names the holder by an opaque server id (8 hex characters), not by a
+        # constant name shared by every server.
+        owner = refused.value.owner
+        assert owner != "linch-rpc" and re.fullmatch(r"[0-9a-f]{8}", owner), owner
 
         # Frozen past its lease, the old server no longer holds the run.
         os.kill(old.pid, signal.SIGSTOP)

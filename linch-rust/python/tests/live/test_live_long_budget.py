@@ -1,4 +1,5 @@
-"""Live e2e (area long): context budget and system sections (B1-B3 of `long_results/expectations.md`)."""
+"""Live e2e (area long): context budget and system sections (B1-B3 of "
+"`expectations/long.md`)."""
 
 from __future__ import annotations
 
@@ -6,11 +7,11 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config
+from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
 
 from linch_rust import ContextBuildEvent, ResultEvent, callback
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
 
@@ -42,7 +43,7 @@ async def one_run(tee: Tee, spec: dict[str, Any], callbacks: list[Any]) -> tuple
     return builds[0], tee.chat()[0]
 
 
-async def test_a_context_build_section_over_the_budget_drops_whole_blocks_in_the_documented_order() -> None:
+async def test_a_context_build_section_over_the_budget_drops_whole_blocks_in_order() -> None:
     """B1: 5 blocks of 100 tokens, cap 250: beta, alpha#1, alpha#0 go; gamma and delta stay."""
     tee = Tee("budget_drop")
     out: dict[str, Any] = {}
@@ -65,7 +66,13 @@ async def test_a_context_build_section_over_the_budget_drops_whole_blocks_in_the
             try:
                 buildN, requestN = await one_run(
                     teeN,
-                    {"context_budget": {"max_tokens": cap, "drop_order": ["gamma"], "pinned": ["delta"]}},
+                    {
+                        "context_budget": {
+                            "max_tokens": cap,
+                            "drop_order": ["gamma"],
+                            "pinned": ["delta"],
+                        }
+                    },
                     callbacks,
                 )
             finally:
@@ -97,7 +104,8 @@ async def test_a_context_build_section_over_the_budget_drops_whole_blocks_in_the
         dump("budget_drop", out)
     dropped = sorted((d["source"], d["index"]) for d in out["budget"]["dropped"])
     assert dropped == [("alpha", 0), ("alpha", 1), ("beta", 0)], out["budget"]
-    # The order of dropping: the later unlisted callback first, then the last block of the earlier one.
+    # The order of dropping: the later unlisted callback first, then the last block of the earlier
+    # one.
     assert out["cap_350"]["dropped"] == [("alpha", 1), ("beta", 0)], out["cap_350"]
     assert out["cap_350"]["sent"] == ["ALPHA-0", "GAMMA-0", "DELTA-0"]
     # Then the callbacks of `drop_order`; the pinned one never.
@@ -155,7 +163,9 @@ async def test_system_sections_go_first_by_order_and_cost_their_tokens() -> None
         }
     dump("sections_order_tokens", out)
     pos = out["sections"]["positions"]
-    assert 0 <= pos["SECTION-A"] < pos["SECTION-B"] < pos["SECTION-C"] < pos["terse test agent"], pos
+    assert 0 <= pos["SECTION-A"] < pos["SECTION-B"] < pos["SECTION-C"] < pos["terse test agent"], (
+        pos
+    )
     assert pos["terse test agent"] < pos["APPEND-Z"]
     base = out["baseline"]["prompt_tokens"]
     with_sections = out["sections"]["prompt_tokens"]

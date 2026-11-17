@@ -1,6 +1,6 @@
 """Live toolsec: the Linux sandbox backend (Landlock, seccomp, rlimits) on a real server.
 
-Expectations are in `toolsec/expectations.md` section 2 (ids 2.1 to 2.6).
+Expectations are in `expectations/toolsec.md` section 2 (ids 2.1 to 2.6).
 """
 
 from __future__ import annotations
@@ -226,12 +226,16 @@ async def test_sandbox_with_network_opens_inet_only() -> None:
         bash(sock("AF_INET6")),
         bash(
             py(
-                "import socket,errno\ntry:\n socket.socket(16,socket.SOCK_RAW,0);print('opened')\nexcept OSError as e:\n print('refused',errno.errorcode.get(e.errno))"
+                "import socket,errno\ntry:\n "
+                "socket.socket(16,socket.SOCK_RAW,0);print('opened')\n"
+                "except OSError as e:\n print('refused',errno.errorcode.get(e.errno))"
             )
         ),
         bash(
             py(
-                "import socket,errno\ntry:\n socket.socket(17,socket.SOCK_RAW,0);print('opened')\nexcept OSError as e:\n print('refused',errno.errorcode.get(e.errno))"
+                "import socket,errno\ntry:\n "
+                "socket.socket(17,socket.SOCK_RAW,0);print('opened')\n"
+                "except OSError as e:\n print('refused',errno.errorcode.get(e.errno))"
             )
         ),
         bash(sock("AF_UNIX")),

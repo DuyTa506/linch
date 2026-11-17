@@ -1,6 +1,6 @@
 """Live toolsec: the Bash tool end to end on a real server (no LLM: a programmable fake model).
 
-Expectations are in `toolsec/expectations.md` section 1 (ids 1.1 to 1.11).
+Expectations are in `expectations/toolsec.md` section 1 (ids 1.1 to 1.11).
 """
 
 from __future__ import annotations
@@ -144,16 +144,16 @@ async def test_background_output_kill_cap_and_close_session() -> None:
                 outs = ends(envelopes, "BashOutput")
                 kills = ends(envelopes, "BashKill")
                 first = bg[0]
-                assert re.fullmatch(r"bash_[0-9a-f]{12}", first.metadata["process_id"])
-                assert "BashOutput" in text_of(first) and "pid" in first.metadata
+                assert re.fullmatch(r"bash_[0-9a-f]{12}", first.metadata["process_id"])  # pyright: ignore[reportOptionalSubscript]
+                assert "BashOutput" in text_of(first) and "pid" in first.metadata  # pyright: ignore[reportOperatorIssue]
                 record(AREA, "1.4-start", text=text_of(first), metadata=first.metadata)
                 assert "bg-finished-77" in text_of(outs[0]) and "[exit code 0]" in text_of(outs[0])
-                assert not alive(first.metadata["pid"])
+                assert not alive(first.metadata["pid"])  # pyright: ignore[reportOptionalSubscript]
                 record(AREA, "1.4-output", text=text_of(outs[0]))
 
                 sleeper = bg[1]
                 assert not kills[0].is_error
-                group_gone = await until_async(lambda: not alive(sleeper.metadata["pid"]), 3)
+                group_gone = await until_async(lambda: not alive(sleeper.metadata["pid"]), 3)  # pyright: ignore[reportOptionalSubscript]
                 record(AREA, "1.5", killed_in_s=group_gone, text=text_of(kills[0]))
                 assert group_gone is not None
                 sleepers = [b for b in bg[2:] if not b.is_error]
@@ -165,7 +165,7 @@ async def test_background_output_kill_cap_and_close_session() -> None:
                     refused=[(b.error_code, text_of(b)[:200]) for b in refused],
                 )
                 assert refused and refused[-1].error_code == "too_many_processes"
-                pids = [b.metadata["pid"] for b in sleepers]
+                pids = [b.metadata["pid"] for b in sleepers]  # pyright: ignore[reportOptionalSubscript]
                 assert all(alive(p) for p in pids)
                 await agent.close_session("s1")
                 gone = await until_async(lambda: not any(alive(p) for p in pids), 5)
@@ -316,7 +316,9 @@ async def test_server_sigkill_background_lifeline_and_foreground_survival() -> N
                         pids = descendants(proc.pid)
                         assert pids
                         proc.kill()
-                        gone = await until_async(lambda: not any(alive(p) for p in pids), 6)
+                        gone = await until_async(
+                            lambda pids=pids: not any(alive(p) for p in pids), 6
+                        )
                         results[mode] = {"pids": pids, "dead_after_s": gone}
                         for p in pids:
                             if alive(p):

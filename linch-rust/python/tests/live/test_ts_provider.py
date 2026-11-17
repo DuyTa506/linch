@@ -1,7 +1,7 @@
 """Live toolsec: provider request settings and error scrubbing against a local echoing gateway
 (#159, #162), tenant limits on those settings, and the server's stderr logging.
 
-Expectations are in `toolsec/expectations.md` sections 7 and 8.2.
+Expectations are in `expectations/toolsec.md` sections 7 and 8.2.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ async def test_header_values_in_error_text_are_scrubbed_by_name_and_length() -> 
     assert not seen["x-long-trace"], "an 8+ byte value must be scrubbed"
     # documented: a plain-named header under 8 bytes is NOT scrubbed (recorded either way)
     assert seen["x-trace-id"] in (True, False)
-    for name, value in values.items():
+    for name in values:
         assert not in_log[name], f"{name} value appears in the LINCH_LOG=debug stderr"
 
 
@@ -295,7 +295,8 @@ async def test_extra_body_cannot_replace_messages_tool_choice_or_model() -> None
 
 @needs_server
 async def test_server_log_levels_and_a_provoked_warning(pg_dsn: str) -> None:
-    """LINCH_LOG default is warn; RUST_LOG is read when LINCH_LOG is unset; a bad filter falls back."""
+    """LINCH_LOG default is warn; RUST_LOG is read when LINCH_LOG is unset; a bad filter falls "
+    "back."""
     import asyncio
 
     outcomes: dict[str, Any] = {}

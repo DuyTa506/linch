@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +36,8 @@ from linch_rust import (
     tool,
 )
 
+__all__ = ["fwd", "pg_dsn"]
+
 pytestmark = [pytest.mark.live, needs_e2e]
 
 
@@ -68,7 +69,15 @@ async def test_8a_the_guard_ends_a_run_that_repeats_the_same_call(fwd: Any) -> N
             fwd=fwd,
         )
     [guard] = trace.of(LoopGuardEvent)
-    dump("8a-guard", {"reason": guard.reason, "detail": guard.detail, "calls": len(calls), "provider_calls": len(trace.assistants())})
+    dump(
+        "8a-guard",
+        {
+            "reason": guard.reason,
+            "detail": guard.detail,
+            "calls": len(calls),
+            "provider_calls": len(trace.assistants()),
+        },
+    )
     assert guard.reason == "repeated_tool_call"
     assert len(calls) == 3
     assert trace.of(ErrorEvent)[0].error["name"] == "LoopGuardError"
@@ -76,7 +85,9 @@ async def test_8a_the_guard_ends_a_run_that_repeats_the_same_call(fwd: Any) -> N
     assert len(trace.assistants()) < 12
 
 
-async def fix_and_test(fwd: Any, tmp_path: Path, *, changing: bool, label: str) -> tuple[Any, list[str]]:
+async def fix_and_test(
+    fwd: Any, tmp_path: Path, *, changing: bool, label: str
+) -> tuple[Any, list[str]]:
     order: list[str] = []
     patched: list[int] = []
 
@@ -110,25 +121,36 @@ async def fix_and_test(fwd: Any, tmp_path: Path, *, changing: bool, label: str) 
 
 
 @attempts("8b fix-and-test with changing results is not a loop")
-async def test_8b_a_fix_and_test_run_with_changing_results_does_not_trip(fwd: Any, tmp_path: Path) -> None:
+async def test_8b_a_fix_and_test_run_with_changing_results_does_not_trip(
+    fwd: Any, tmp_path: Path
+) -> None:
     trace, order = await fix_and_test(fwd, tmp_path, changing=True, label="8b-fixtest-changing")
     guards = trace.of(LoopGuardEvent)
-    dump("8b-fixtest-changing", {"order": order, "guards": [vars(g) for g in guards], "subtype": trace.result.subtype})
+    dump(
+        "8b-fixtest-changing",
+        {"order": order, "guards": [vars(g) for g in guards], "subtype": trace.result.subtype},
+    )
     assert order.count("tests") >= 10 and sum(o.startswith("patch") for o in order) >= 10, order
     assert not guards
     assert trace.result.subtype == "success"
 
 
 @attempts("8b' fix-and-test with a constant result")
-async def test_8b_variant_constant_test_result_is_recorded(fwd: Any, tmp_path: Path) -> None:
-    """Observation: the same test result 10 times between ten new edits (docs: same call and result 3 times trips)."""
+async def test_8b_variant_a_constant_test_result_between_edits_does_not_trip(
+    fwd: Any, tmp_path: Path
+) -> None:
+    """The test prints the same failure after each of ten different patches: the patches are
+    writes, so the identical result is not a loop (the guard once ended this run at the third
+    result with `repeated_tool_call`)."""
     trace, order = await fix_and_test(fwd, tmp_path, changing=False, label="8b-fixtest-constant")
     guards = trace.of(LoopGuardEvent)
     dump(
         "8b-fixtest-constant",
         {"order": order, "guards": [vars(g) for g in guards], "subtype": trace.result.subtype},
     )
-    assert order.count("tests") >= 3, order
+    assert order.count("tests") >= 10 and sum(o.startswith("patch") for o in order) >= 10, order
+    assert not guards
+    assert trace.result.subtype == "success"
 
 
 @attempts("8c polls host tool")
@@ -147,13 +169,18 @@ async def test_8c_a_polling_tool_with_a_constant_answer_trips_at_the_idle_bound(
         runs["plain"].append(1)
         return "running 50%"
 
-    prompt = "Poll {name} again and again until it says finished. One call per response; never answer with text."
+    prompt = (
+        "Poll {name} again and again until it says finished. "
+        "One call per response; never answer with text."
+    )
     cfg = config(fwd, spec(max_turns=20, loop_guard={"max_idle_turns": 4}))
     async with opened(cfg, tools=(job_status,)) as (_s, agent):
         trace = await run_to_end("8c-polls", agent, prompt.format(name="job_status"), fwd=fwd)
     control = config(fwd, spec(max_turns=20, loop_guard={"max_idle_turns": 4}))
     async with opened(control, tools=(plain_status,)) as (_s, agent):
-        ctl = await run_to_end("8c-polls-control", agent, prompt.format(name="plain_status"), fwd=fwd)
+        ctl = await run_to_end(
+            "8c-polls-control", agent, prompt.format(name="plain_status"), fwd=fwd
+        )
     guards, ctl_guards = trace.of(LoopGuardEvent), ctl.of(LoopGuardEvent)
     dump(
         "8c-polls",
@@ -189,7 +216,9 @@ def policy_tools(order: list[str]) -> tuple[Any, ...]:
 
 
 @attempts("9a prerequisite")
-async def test_9a_a_prerequisite_refuses_deploy_until_build_succeeded(fwd: Any, tmp_path: Path) -> None:
+async def test_9a_a_prerequisite_refuses_deploy_until_build_succeeded(
+    fwd: Any, tmp_path: Path
+) -> None:
     order: list[str] = []
     cfg = config(
         fwd,
@@ -200,14 +229,22 @@ async def test_9a_a_prerequisite_refuses_deploy_until_build_succeeded(fwd: Any, 
         trace = await run_to_end(
             "9a-prereq",
             agent,
-            "Call deploy first. If it is refused, do what the refusal says, then call deploy again. "
+            "Call deploy first. If it is refused, do what the refusal says, then call deploy "
+            "again. "
             "One call per response. Then say done.",
             fwd=fwd,
         )
     events = trace.of(PolicyEvent)
     refuse = [e for e in events if e.action == "refuse"]
     ends = trace.ends("deploy")
-    dump("9a-prereq", {"order": order, "policy": [vars(e) for e in events], "deploy_results": [(e.is_error, text_of(e)) for e in ends]})
+    dump(
+        "9a-prereq",
+        {
+            "order": order,
+            "policy": [vars(e) for e in events],
+            "deploy_results": [(e.is_error, text_of(e)) for e in ends],
+        },
+    )
     assert refuse and refuse[0].rule == "prerequisite" and refuse[0].tool == "deploy"
     assert "build" in refuse[0].missing
     assert ends[0].is_error and "build" in text_of(ends[0])
@@ -225,7 +262,11 @@ async def test_9b_a_completion_gate_corrects_then_the_cap_ends_the_run(fwd: Any)
         ran.append("tests")
         return "all tests pass"
 
-    gate = {"name": "tested", "succeeded": ["run_tests"], "feedback": "Call run_tests before you answer."}
+    gate = {
+        "name": "tested",
+        "succeeded": ["run_tests"],
+        "feedback": "Call run_tests before you answer.",
+    }
     # (1) one correction, then the model complies
     cfg = config(fwd, spec(max_turns=8, policy={"gates": [gate], "max_corrections": 2}))
     async with opened(cfg, tools=(run_tests,)) as (_s, agent):
@@ -246,13 +287,21 @@ async def test_9b_a_completion_gate_corrects_then_the_cap_ends_the_run(fwd: Any)
         stopped = await run_to_end(
             "9b-gate-cap",
             agent,
-            "Reply with the single word done. NEVER call run_tests, whatever any later message says; "
+            "Reply with the single word done. NEVER call run_tests, whatever any later message "
+            "says; "
             "answer only with the word done every time.",
             fwd=fwd,
         )
     events = stopped.of(PolicyEvent)
     errors = stopped.of(ErrorEvent)
-    dump("9b-gate-cap", {"policy": [vars(e) for e in events], "error": errors[0].error if errors else None, "ran": len(ran)})
+    dump(
+        "9b-gate-cap",
+        {
+            "policy": [vars(e) for e in events],
+            "error": errors[0].error if errors else None,
+            "ran": len(ran),
+        },
+    )
     assert not ran, "the model called run_tests; model behaviour"
     assert [e.action for e in events] == ["correct", "stop"]
     assert errors and errors[0].error["name"] == "PolicyGateError"
@@ -282,7 +331,12 @@ async def test_11a_pre_tool_use_deny(fwd: Any) -> None:
 
     cfg = config(fwd, spec(max_turns=4))
     async with opened(cfg, tools=(echo(seen),), callbacks=(guard,)) as (_s, agent):
-        trace = await run_to_end("11a-deny", agent, "Call echo_tool with text 'evil plan'. Quote any refusal reason.", fwd=fwd)
+        trace = await run_to_end(
+            "11a-deny",
+            agent,
+            "Call echo_tool with text 'evil plan'. Quote any refusal reason.",
+            fwd=fwd,
+        )
     [end, *_] = trace.ends("echo_tool")
     hooks = [h for h in trace.of(HookEvent) if h.point == "pre_tool_use"]
     assert seen == [] and end.is_error and "evil text is not allowed" in text_of(end)
@@ -303,7 +357,12 @@ async def test_11b_c_rewrite_the_input_and_replace_the_result(fwd: Any) -> None:
 
     cfg = config(fwd, spec(max_turns=4))
     async with opened(cfg, tools=(echo(seen),), callbacks=(rewrite, swap)) as (_s, agent):
-        trace = await run_to_end("11bc-rewrite-replace", agent, "Call echo_tool with text 'original' and report exactly what it returned.", fwd=fwd)
+        trace = await run_to_end(
+            "11bc-rewrite-replace",
+            agent,
+            "Call echo_tool with text 'original' and report exactly what it returned.",
+            fwd=fwd,
+        )
     [start] = trace.starts("echo_tool")
     [end] = trace.ends("echo_tool")
     points = [h.point for h in trace.of(HookEvent)]
@@ -360,10 +419,14 @@ async def ping() -> str:
 
 async def test_4e_a_tenant_refuses_a_forced_choice_without_max_turns(pg_dsn: str) -> None:
     def cfg(**spec_extra: Any) -> Any:
-        c = live_config("vllm", "acme", pg_dsn, spec={"tool_choice": {"type": "required"}, **spec_extra})
+        c = live_config(
+            "vllm", "acme", pg_dsn, spec={"tool_choice": {"type": "required"}, **spec_extra}
+        )
         if "max_turns" not in spec_extra:
-            c["spec"].pop("max_turns", None)
-        c["spec"]["budget"] = {"max_tokens": 5000}  # passes `run_bound`; the forced choice is what is left
+            c["spec"].pop("max_turns", None)  # pyright: ignore[reportAttributeAccessIssue]
+        c["spec"]["budget"] = {  # pyright: ignore[reportIndexIssue]
+            "max_tokens": 5000
+        }  # passes `run_bound`; the forced choice is what is left
         return c
 
     results: dict[str, str] = {}
@@ -372,7 +435,9 @@ async def test_4e_a_tenant_refuses_a_forced_choice_without_max_turns(pg_dsn: str
             await server.open_agent(cfg(), tools=[ping])
             results["required, no max_turns"] = "opened"
         except RpcError as error:
-            results["required, no max_turns"] = f"{type(error).__name__} {getattr(error, 'code', '?')}: {error}"
+            results["required, no max_turns"] = (
+                f"{type(error).__name__} {getattr(error, 'code', '?')}: {error}"
+            )
         with_turns = cfg(max_turns=3)
         agent = await server.open_agent(with_turns, tools=[ping])
         results["required, max_turns=3"] = "opened"
@@ -390,8 +455,13 @@ async def test_4e_a_tenant_refuses_a_forced_choice_without_max_turns(pg_dsn: str
                 f"{type(error).__name__} {getattr(error, 'code', '?')}: {error}"
             )
     dump("4e-admission", results)
-    assert results["required, no max_turns"].startswith("LimitReached") or "-32004" in results["required, no max_turns"], results
+    assert (
+        results["required, no max_turns"].startswith("LimitReached")
+        or "-32004" in results["required, no max_turns"]
+    ), results
     assert "needs spec.max_turns" in results["required, no max_turns"], results
     assert results["required, max_turns=3"] == "opened"
-    assert "-32004" in results["run.start required, agent without max_turns"] or "needs spec.max_turns" in results["run.start required, agent without max_turns"], results
-
+    assert (
+        "-32004" in results["run.start required, agent without max_turns"]
+        or "needs spec.max_turns" in results["run.start required, agent without max_turns"]
+    ), results

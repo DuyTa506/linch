@@ -39,8 +39,8 @@ async def takeover(ttl: int, rep: int, proxy: h.CountingProxy) -> dict[str, Any]
         config = h.cfg(dsn, proxy.url, "lease-takeover", ttl=ttl)
         started = asyncio.Event()
         async with Server() as a, Server() as b:
-            agent_a = await a.open_agent(config, tools=[slow_tool(started, asyncio.Event(), [])])
-            agent_b = await b.open_agent(config, tools=[slow_tool(asyncio.Event(), None, [])])
+            agent_a = await a.open_agent(config, tools=[slow_tool(started, asyncio.Event(), [])])  # pyright: ignore[reportArgumentType]
+            agent_b = await b.open_agent(config, tools=[slow_tool(asyncio.Event(), None, [])])  # pyright: ignore[reportArgumentType]
             run = await agent_a.run("s1", PROMPT)
             await asyncio.wait_for(started.wait(), 120)
             # 2.1: B is refused while A holds the lease (A has the tool running).
@@ -69,7 +69,7 @@ async def takeover(ttl: int, rep: int, proxy: h.CountingProxy) -> dict[str, Any]
                     await asyncio.sleep(0.05)
             out["takeover_s"] = round(t_ok - t_kill, 3) if t_ok else None
             out["polls"] = polls
-            out["result"] = getattr(result, "subtype", None)
+            out["result"] = getattr(result, "subtype", None)  # pyright: ignore[reportPossiblyUnboundVariable]
             rows = h.summarize(await agent_b.events(run.id))
             out["history"] = h.check_history(rows)
             out["events"] = h.types(rows)
@@ -88,8 +88,8 @@ async def fence(ttl: int, proxy: h.CountingProxy) -> dict[str, Any]:
         started = asyncio.Event()
         old_calls: list[str] = []
         async with Server() as a, Server() as b:
-            agent_a = await a.open_agent(config, tools=[slow_tool(started, release, old_calls)])
-            agent_b = await b.open_agent(config, tools=[slow_tool(asyncio.Event(), None, [])])
+            agent_a = await a.open_agent(config, tools=[slow_tool(started, release, old_calls)])  # pyright: ignore[reportArgumentType]
+            agent_b = await b.open_agent(config, tools=[slow_tool(asyncio.Event(), None, [])])  # pyright: ignore[reportArgumentType]
             run = await agent_a.run("s1", PROMPT)
             await asyncio.wait_for(started.wait(), 120)
             epoch0 = h.q(dsn, "SELECT epoch, status, lease_holder FROM linch_runs")

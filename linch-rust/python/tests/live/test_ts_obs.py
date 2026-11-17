@@ -1,8 +1,9 @@
 """Live toolsec: OpenTelemetry spans of a real run, exported as OTLP/JSON to a local receiver.
 
 Spans are built by the Python client (`linch_rust.otel.Telemetry`), not by the server: see
-`toolsec/expectations.md` B1 and section 8.1. The OTLP exporter packages are not installed, so the
-exporter here serializes finished spans as OTLP/JSON and POSTs them to a receiver started by the test.
+`expectations/toolsec.md` B1 and section 8.1. The OTLP exporter packages are not installed, so the
+exporter here serializes finished spans as OTLP/JSON and POSTs them to a receiver started by the
+test.
 """
 
 from __future__ import annotations
@@ -58,8 +59,8 @@ class OtlpJsonExporter(SpanExporter):
             ctx = span.get_span_context()
             encoded.append(
                 {
-                    "traceId": f"{ctx.trace_id:032x}",
-                    "spanId": f"{ctx.span_id:016x}",
+                    "traceId": f"{ctx.trace_id:032x}",  # pyright: ignore[reportOptionalMemberAccess]
+                    "spanId": f"{ctx.span_id:016x}",  # pyright: ignore[reportOptionalMemberAccess]
                     "parentSpanId": f"{span.parent.span_id:016x}" if span.parent else "",
                     "name": span.name,
                     "kind": int(span.kind.value) + 1,
@@ -210,7 +211,7 @@ async def test_genai_spans_with_usage_reach_an_otlp_receiver() -> None:
         },
         metrics=sorted(
             m.name
-            for rm in reader.get_metrics_data().resource_metrics
+            for rm in reader.get_metrics_data().resource_metrics  # pyright: ignore[reportOptionalMemberAccess]
             for sm in rm.scope_metrics
             for m in sm.metrics
         ),

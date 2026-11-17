@@ -7,7 +7,8 @@ It serves `POST /v1/chat/completions` (streaming) and answers each request by ca
 - `("tools", [("Bash", {"command": "true"}), ...])`: tool calls;
 - `("http", 400, b"body")`: an HTTP error answer (the body is sent as is).
 
-Every request is kept in `.requests` (headers lower-cased, body parsed). `GET /v1/models` answers one
+Every request is kept in `.requests` (headers lower-cased, body parsed). `GET /v1/models` answers
+one
 model. No LLM is involved: the scenario is the handler.
 """
 

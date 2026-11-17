@@ -1,4 +1,4 @@
-"""Live e2e (area long): steering (expectations S1-S11, M1 of `long_results/expectations.md`).
+"""Live e2e (area long): steering (expectations S1-S11, M1 of `expectations/long.md`).
 
 A real vLLM model through the sidecar; the restart cases use Postgres stores
 and `kill -9`. Raw data goes to `$E2E_RESULTS/steer_*.json`.
@@ -22,6 +22,7 @@ from live_core_support import (
     make_config,
     message_text,
     needs_pg,
+    needs_vllm,
 )
 from live_sched_support import pg_dsn, query
 
@@ -46,7 +47,7 @@ from linch_rust import (
 
 __all__ = ["pg_dsn"]
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
 PROMPT = (
@@ -94,9 +95,7 @@ async def test_steer_during_a_tool_call_queues_then_aligns_and_is_followed() -> 
         slow = held_tool(4, started)
         word = f"PLUM-{90 + n}"
         async with live_server() as server:
-            agent = await server.open_agent(
-                make_config(LIVE, LIVE.spec(max_turns=5)), tools=[slow]
-            )
+            agent = await server.open_agent(make_config(LIVE, LIVE.spec(max_turns=5)), tools=[slow])
             run = await agent.run("s1", PROMPT)
             envelopes: list[Any] = []
             task = asyncio.create_task(pump(run, envelopes, started))
@@ -292,14 +291,16 @@ async def test_a_steer_of_a_suspended_run_survives_kill_9_and_is_delivered_once(
     out: dict[str, Any] = {}
     async with live_server() as server:
         agent = await server.open_agent(config, tools=[deploy])
-        run = await agent.run("s1", "Call the deploy tool for service api, then answer in one short sentence.")
+        run = await agent.run(
+            "s1", "Call the deploy tool for service api, then answer in one short sentence."
+        )
         call_ids: list[str] = []
         async with asyncio.timeout(120):
             async for envelope in run:
                 if isinstance(envelope.event, PermissionRequestEvent):
                     call_ids += [r["tool_use_id"] for r in envelope.event.requests]
                 suspended = envelope.event
-        assert isinstance(suspended, SuspendedEvent) and call_ids
+        assert isinstance(suspended, SuspendedEvent) and call_ids  # pyright: ignore[reportPossiblyUnboundVariable]
         t0 = now()
         raw = await agent._conn.request(
             "run.steer",
@@ -331,13 +332,11 @@ async def test_a_steer_of_a_suspended_run_survives_kill_9_and_is_delivered_once(
                 await asyncio.sleep(leased.expires_in or 0.5)
         events = await agent.events(run.id)
     aligned = [
-        e.event
-        for e in events
-        if isinstance(e.event, UserEvent) and e.event.subtype == "alignment"
+        e.event for e in events if isinstance(e.event, UserEvent) and e.event.subtype == "alignment"
     ]
     out["alignments_after_approve"] = [(a.steer_id, message_text(a.message)) for a in aligned]
     out["steer_received_rows"] = steer_rows(pg_dsn, "sus-1")
-    out["final_text"] = getattr(result, "final_text", None)
+    out["final_text"] = getattr(result, "final_text", None)  # pyright: ignore[reportPossiblyUnboundVariable]
     dump("steer_suspended_restart", out)
     assert out["steer_of_suspended"]["answer"] == {"queued": True, "id": "sus-1"}
     assert out["steer_of_suspended"]["answered_in_s"] < 2
@@ -365,7 +364,9 @@ async def test_a_delivered_steer_is_not_logged_again_after_kill_9_and_a_dead_run
         task = asyncio.create_task(pump(run, envelopes, started))
         async with asyncio.timeout(120):
             await started.wait()
-            steer_id = await agent.steer(run.id, "New instruction: end with the word KIWI-12.", steer_id="run-1")
+            steer_id = await agent.steer(
+                run.id, "New instruction: end with the word KIWI-12.", steer_id="run-1"
+            )
             while not alignments(envelopes):
                 await asyncio.sleep(0.02)
         os.kill(server.pid, signal.SIGKILL)
@@ -405,9 +406,7 @@ async def test_a_delivered_steer_is_not_logged_again_after_kill_9_and_a_dead_run
                 await asyncio.sleep(leased.expires_in or 0.5)
         events = await agent.events(run.id)
     aligned = [
-        e.event
-        for e in events
-        if isinstance(e.event, UserEvent) and e.event.subtype == "alignment"
+        e.event for e in events if isinstance(e.event, UserEvent) and e.event.subtype == "alignment"
     ]
     out["alignment_ids_after_resume"] = [a.steer_id for a in aligned]
     out["steer_received_rows"] = steer_rows(pg_dsn, "run-1")

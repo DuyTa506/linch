@@ -6,10 +6,10 @@ import json
 from typing import Any
 
 import pytest
-from e2e_core_support import MODEL, UPSTREAM, config, dump, needs_e2e, opened, spec
+from e2e_core_support import MODEL, UPSTREAM, config, dump, needs_e2e, spec
 from live_core_support import live_server
 
-from linch_rust import ModelNotFound, OpenError, RpcError, tool
+from linch_rust import ModelNotFound, RpcError, tool
 
 pytestmark = [pytest.mark.live, needs_e2e]
 
@@ -86,27 +86,36 @@ async def test_7a_a_cost_cap_without_a_price_is_refused_at_open() -> None:
     )
     assert await open_outcome("7a priced cap", priced) == "opened"
     # A token cap alone opens without a price.
-    assert await open_outcome("7a token cap", config(None, spec(budget={"max_tokens": 100}))) == "opened"
+    assert (
+        await open_outcome("7a token cap", config(None, spec(budget={"max_tokens": 100})))
+        == "opened"
+    )
 
 
 @pytest.mark.parametrize("ms", [0, 99, 100])
 async def test_7d_call_timeout_ms_bounds(ms: int) -> None:
     outcome = await open_outcome(f"7d call_timeout_ms={ms}", config(None, spec(call_timeout_ms=ms)))
     if ms < 100:
-        assert outcome.startswith("OpenError") and "-32011" in outcome and "call_timeout_ms" in outcome
+        assert (
+            outcome.startswith("OpenError") and "-32011" in outcome and "call_timeout_ms" in outcome
+        )
     else:
         assert outcome == "opened"
 
 
 @pytest.mark.parametrize("temperature", [0, 0.0, 1.0, 2.0])
 async def test_6b_temperature_in_range_opens(temperature: float) -> None:
-    out = await open_outcome(f"6b temperature={temperature}", config(None, spec(temperature=temperature)))
+    out = await open_outcome(
+        f"6b temperature={temperature}", config(None, spec(temperature=temperature))
+    )
     assert out == "opened"
 
 
 @pytest.mark.parametrize("temperature", [2.5, -0.1])
 async def test_6b_temperature_out_of_range_is_refused(temperature: float) -> None:
-    out = await open_outcome(f"6b temperature={temperature}", config(None, spec(temperature=temperature)))
+    out = await open_outcome(
+        f"6b temperature={temperature}", config(None, spec(temperature=temperature))
+    )
     assert out.startswith("OpenError") and "temperature" in out
 
 
@@ -129,7 +138,9 @@ POLICY: dict[str, Any] = {"prerequisites": [{"tool": "deploy", "requires": ["bui
 
 async def test_9c_a_policy_and_a_forced_choice_are_refused_at_open() -> None:
     cases = {
-        "required + prerequisite": spec(policy=POLICY, tool_choice={"type": "required"}, max_turns=4),
+        "required + prerequisite": spec(
+            policy=POLICY, tool_choice={"type": "required"}, max_turns=4
+        ),
         "none + prerequisite": spec(policy=POLICY, tool_choice={"type": "none"}, max_turns=4),
         "named deploy + prerequisite": spec(
             policy=POLICY, tool_choice={"type": "tool", "name": "deploy"}, max_turns=4
@@ -144,10 +155,17 @@ async def test_9c_a_policy_and_a_forced_choice_are_refused_at_open() -> None:
         out = await open_outcome(f"9c {label}", config(None, sp), (build, deploy))
         assert out.startswith("OpenError") and "-32011" in out, (label, out)
     # Controls: the policy alone, and auto, open.
-    assert await open_outcome("9c policy only", config(None, spec(policy=POLICY, max_turns=4)), (build, deploy)) == "opened"
     assert (
         await open_outcome(
-            "9c policy + auto", config(None, spec(policy=POLICY, tool_choice={"type": "auto"})), (build, deploy)
+            "9c policy only", config(None, spec(policy=POLICY, max_turns=4)), (build, deploy)
+        )
+        == "opened"
+    )
+    assert (
+        await open_outcome(
+            "9c policy + auto",
+            config(None, spec(policy=POLICY, tool_choice={"type": "auto"})),
+            (build, deploy),
         )
         == "opened"
     )
@@ -155,7 +173,9 @@ async def test_9c_a_policy_and_a_forced_choice_are_refused_at_open() -> None:
 
 async def test_4e_stdio_has_no_admission_for_a_forced_choice() -> None:
     required = spec(tool_choice={"type": "required"})  # no max_turns, no final tool
-    out = await open_outcome("4e stdio required, no max_turns", config(None, required), (build, deploy))
+    out = await open_outcome(
+        "4e stdio required, no max_turns", config(None, required), (build, deploy)
+    )
     dump("static", {"case": "4e stdio verdict", "outcome": out})
     assert out == "opened"
 

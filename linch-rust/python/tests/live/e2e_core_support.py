@@ -18,6 +18,7 @@ import functools
 import http.client
 import json
 import os
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -47,9 +48,7 @@ MODEL = (
     or "qwen3.6-35b-a3b"
 )
 RESULTS = Path(
-    os.environ.get(
-        "E2E_RESULTS", "/home/aiqk3/Desktop/duy_dev/linch-agent-scratch/e2e/results/core"
-    )
+    os.environ.get("E2E_RESULTS", Path(tempfile.gettempdir()) / "linch-live-e2e" / "core")
 )
 
 needs_e2e = pytest.mark.skipif(
@@ -77,7 +76,11 @@ class Forwarder:
 
     def __init__(self, upstream: str = UPSTREAM) -> None:
         parts = urllib.parse.urlsplit(upstream)
-        self.host, self.port, self.prefix = parts.hostname or "127.0.0.1", parts.port or 80, parts.path
+        self.host, self.port, self.prefix = (
+            parts.hostname or "127.0.0.1",
+            parts.port or 80,
+            parts.path,
+        )
         self.records: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         forwarder = self
@@ -85,7 +88,7 @@ class Forwarder:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.0"
 
-            def log_message(self, *args: Any) -> None:
+            def log_message(self, format: str, *args: Any) -> None:
                 pass
 
             def _forward(self) -> None:
@@ -247,7 +250,9 @@ async def run_to_end(
     return trace
 
 
-def attempts(name: str, tries: int = 2) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
+def attempts(
+    name: str, tries: int = 2
+) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Run a model-driven scenario up to `tries` times, recording every attempt.
 
     Unlike `retry_once`, a first failure is written to `attempts.jsonl`, so a model

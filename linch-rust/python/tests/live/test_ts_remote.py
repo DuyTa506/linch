@@ -1,6 +1,6 @@
 """Live toolsec: remote execution (`SubprocessHost`, a recording host, tenants) on a real server.
 
-Expectations are in `toolsec/expectations.md` section 3 (ids 3.1 to 3.7).
+Expectations are in `expectations/toolsec.md` section 3 (ids 3.1 to 3.7).
 """
 
 from __future__ import annotations
@@ -185,15 +185,11 @@ async def test_a_background_flood_reads_output_limit_status() -> None:
     )
     assert end.is_error and end.error_code == "output_limit"
     assert "[output limit reached (256 MiB); the command was killed]" in text_of(end)
-    # Doc claim (remote-execution.md): "a background process reads `status: output_limit`".
-    # Observed: the status is in none of metadata, canonical_output or the result block.
-    found = "output_limit" in str(end.metadata) + str(end.canonical_output) + str(
-        {k: v for k, v in end.result.items() if k != "content"}
-    )
-    record(AREA, "3.3-background-status-claim", status_field_reachable=found)
-    assert found, (
-        "BashOutput's `status: output_limit` is not reachable from the tool_call_end event"
-    )
+    # remote-execution.md: "a background process reads `status: output_limit`". The tool result
+    # carries it in the `tool_call_end` metadata, beside `process_id`.
+    status = (end.metadata or {}).get("status")
+    record(AREA, "3.3-background-status-claim", status=status)
+    assert status == "output_limit", end.metadata
 
 
 @needs_server
@@ -227,8 +223,8 @@ async def test_the_host_gets_the_principal_of_each_run() -> None:
                     )
                     alice = {"tenant": "acme", "user": "alice", "roles": ["admin"]}
                     bob = {"tenant": "acme", "user": "bob"}
-                    await finish(agent, await agent.run("s1", "go", principal=alice))
-                    await finish(agent, await agent.run("s2", "go", principal=bob))
+                    await finish(agent, await agent.run("s1", "go", principal=alice))  # pyright: ignore[reportArgumentType]
+                    await finish(agent, await agent.run("s2", "go", principal=bob))  # pyright: ignore[reportArgumentType]
                     await finish(agent, await agent.run("s3", "go"))
     finally:
         await model.stop()
@@ -267,7 +263,7 @@ async def test_connection_end_and_client_death_with_a_background_command() -> No
                     remote_config(model, root, namespace="acme"), execution=host
                 )
                 envelopes = await finish(agent, await agent.run("s1", "go"))
-                pid = ends(envelopes, "Bash")[0].metadata.get("pid")
+                pid = ends(envelopes, "Bash")[0].metadata.get("pid")  # pyright: ignore[reportOptionalMemberAccess]
                 bg_pids = [p for p in descendants(proc.pid)]
                 record(AREA, "3.5-clean-before", server_descendants=bg_pids, metadata_pid=pid)
                 await server.__aexit__(None, None, None)
@@ -317,7 +313,8 @@ def marker_pids(command: str) -> list[int]:
 
 @needs_server
 async def test_server_sigkill_with_a_live_client_reaps_the_remote_command() -> None:
-    """Brief: a dropped connection reaps the command. The client stays alive, the server is killed."""
+    """Brief: a dropped connection reaps the command. The client stays alive, the server is "
+    "killed."""
     marker = "sleep 3303"
     model = await plan_model([bash(marker, run_in_background=True)]).start()
     try:

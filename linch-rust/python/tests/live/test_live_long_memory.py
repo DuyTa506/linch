@@ -1,4 +1,5 @@
-"""Live e2e (area long): file memory and built-in long-term memory (K1-K5 of `long_results/expectations.md`).
+"""Live e2e (area long): file memory and built-in long-term memory (K1-K5 of
+`expectations/long.md`).
 
 Postgres stores (a schema per test), vLLM through the body-logging tee. K5 seeds
 the scope with the scripted provider (the same namespace, principal and memory
@@ -12,7 +13,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, load, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config
+from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
 from live_sched_support import pg_dsn, query
 
 from linch_rust import (
@@ -26,7 +27,7 @@ from linch_rust.scripted import text_turn, tool_turn
 
 __all__ = ["pg_dsn"]
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
 ADA = {"tenant": "acme", "user": "ada"}
@@ -77,12 +78,18 @@ async def test_file_memory_written_in_one_session_is_read_in_another(pg_dsn: str
             )
             out["run1_calls"] = [e.tool_name for e in events1 if isinstance(e, ToolCallStartEvent)]
             n_before = len(tee.chat())
-            result2, events2 = await ask(agent, "B", "What is my favourite colour? Answer with one word.")
+            result2, events2 = await ask(
+                agent, "B", "What is my favourite colour? Answer with one word."
+            )
             out["run2_calls"] = [e.tool_name for e in events2 if isinstance(e, ToolCallStartEvent)]
             out["run2_answer"] = result2.final_text
     finally:
         tee.close()
-    files = query(pg_dsn, "SELECT path, content FROM linch_files WHERE namespace = %s ORDER BY path", "e2e-filemem")
+    files = query(
+        pg_dsn,
+        "SELECT path, content FROM linch_files WHERE namespace = %s ORDER BY path",
+        "e2e-filemem",
+    )
     out["files"] = [list(r) for r in files]
     first_request_run2 = tee.chat()[n_before]
     tail = msg_text(first_request_run2["body"]["messages"][-1])
@@ -135,8 +142,12 @@ async def test_long_term_memory_save_recall_scopes_and_caps(pg_dsn: str) -> None
             out["recall_in_tail"] = '<memory-data untrusted="true">' in tail and "Thursday" in tail
             out["recall_tail"] = tail[-600:]
             out["recall_answer"] = result.final_text
-            out["recall_tool_calls"] = [e.tool_name for e in ev if isinstance(e, ToolCallStartEvent)]
-            out["recall_metadata"] = [e.metadata for e in ev if isinstance(e, ContextBuildEvent)][:1]
+            out["recall_tool_calls"] = [
+                e.tool_name for e in ev if isinstance(e, ToolCallStartEvent)
+            ]
+            out["recall_metadata"] = [e.metadata for e in ev if isinstance(e, ContextBuildEvent)][
+                :1
+            ]
             # K3: bob sees none of ada's memory; no principal means no memory.
             _, ev = await ask(
                 plain, "s4", "Call MemorySearch with query 'rotation'.", principal=BOB
@@ -158,8 +169,10 @@ async def test_long_term_memory_save_recall_scopes_and_caps(pg_dsn: str) -> None
             _, ev = await ask(
                 plain,
                 "s8",
-                "Make three MemorySave calls, one after another, saving 'fact two: ada owns a cat', "
-                "then 'fact three: ada owns a dog', then 'fact four: ada owns a fish'. Then reply ok.",
+                "Make three MemorySave calls, one after another, saving 'fact two: ada owns a "
+                "cat', "
+                "then 'fact three: ada owns a dog', then 'fact four: ada owns a fish'. Then reply "
+                "ok.",
                 principal=ADA,
             )
             out["ada_cap_saves"] = results_of(ev, "MemorySave")
@@ -169,7 +182,8 @@ async def test_long_term_memory_save_recall_scopes_and_caps(pg_dsn: str) -> None
         tee.close()
     rows = query(
         pg_dsn,
-        "SELECT scope, count(*) FROM linch_memories WHERE namespace = %s GROUP BY scope ORDER BY scope",
+        "SELECT scope, count(*) FROM linch_memories WHERE namespace = %s GROUP BY scope ORDER BY "
+        "scope",
         ns,
     )
     out["rows_by_scope"] = [list(r) for r in rows]
@@ -180,7 +194,10 @@ async def test_long_term_memory_save_recall_scopes_and_caps(pg_dsn: str) -> None
     assert out["recall_in_tail"], out["recall_tail"]
     assert out["bob_search"] and "Thursday" not in out["bob_search"][0][0]
     assert out["no_principal_save"] and out["no_principal_save"][0][1], out["no_principal_save"]
-    assert "not_allowed" in out["no_principal_save"][0][0] or "principal" in out["no_principal_save"][0][0].lower()
+    assert (
+        "not_allowed" in out["no_principal_save"][0][0]
+        or "principal" in out["no_principal_save"][0][0].lower()
+    )
     assert out["ada_search_after_bob"] and "jazz" not in out["ada_search_after_bob"][0][0]
     assert len(rows) == 2 and all(r[1] <= 2 for r in rows), rows
     refused = [r for r in out["ada_cap_saves"] if r[1]]
@@ -206,7 +223,10 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
             tool_turn(
                 f"seed-{i}",
                 "MemorySave",
-                {"content": f"note {i}: {words}uses runner {i} for stage {i % 7}", "tags": ["seed"]},
+                {
+                    "content": f"note {i}: {words}uses runner {i} for stage {i % 7}",
+                    "tags": ["seed"],
+                },
             )
         )
     turns.append(text_turn("seeded"))
@@ -224,7 +244,11 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
             seeder = await server.open_agent(seed_config)  # type: ignore[arg-type]
             result, _ = await ask(seeder, "seed", "seed the memory", principal=ADA)
             out["seed_result"] = result.final_text
-            rows = query(pg_dsn, "SELECT scope, count(*) FROM linch_memories WHERE namespace = %s GROUP BY scope", ns)
+            rows = query(
+                pg_dsn,
+                "SELECT scope, count(*) FROM linch_memories WHERE namespace = %s GROUP BY scope",
+                ns,
+            )
             out["rows_after_seed"] = [list(r) for r in rows]
             # The vLLM agent must see the same scope: save one memory through it as ada.
             recalling = await server.open_agent(
@@ -239,7 +263,11 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
                 principal=ADA,
             )
             out["scope_check_save"] = results_of(ev, "MemorySave")
-            rows2 = query(pg_dsn, "SELECT scope, count(*) FROM linch_memories WHERE namespace = %s GROUP BY scope", ns)
+            rows2 = query(
+                pg_dsn,
+                "SELECT scope, count(*) FROM linch_memories WHERE namespace = %s GROUP BY scope",
+                ns,
+            )
             out["rows_after_vllm_save"] = [list(r) for r in rows2]
 
             question = "Which runner does the kestrel deployment pipeline use?"
@@ -247,7 +275,7 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
             gaps_off: list[float] = []
             hits: list[int] = []
             for i in range(10):
-                run = await recalling.run(f"r{i}", question, principal=ADA)
+                run = await recalling.run(f"r{i}", question, principal=ADA)  # pyright: ignore[reportArgumentType]
                 await run.result()
                 envs = await recalling.events(run.id)
                 for j, env in enumerate(envs):
@@ -256,7 +284,7 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
                         ids = (env.event.metadata.get("memory") or {}).get("ids") or []
                         hits.append(len(ids))
                         break
-                run = await baseline.run(f"b{i}", question, principal=ADA)
+                run = await baseline.run(f"b{i}", question, principal=ADA)  # pyright: ignore[reportArgumentType]
                 await run.result()
                 envs = await baseline.events(run.id)
                 for j, env in enumerate(envs):
@@ -270,13 +298,23 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
             for i in range(10):
                 run = await plain.run(
                     f"q{i}",
-                    "Call MemorySearch with query 'kestrel deployment pipeline' and limit 5, then reply ok.",
-                    principal=ADA,
+                    "Call MemorySearch with query 'kestrel deployment pipeline' and limit 5, then "
+                    "reply ok.",
+                    principal=ADA,  # pyright: ignore[reportArgumentType]
                 )
                 await run.result()
                 envs = await plain.events(run.id)
-                start = next(e for e in envs if isinstance(e.event, ToolCallStartEvent) and e.event.tool_name == "MemorySearch")
-                end = next(e for e in envs if isinstance(e.event, ToolCallEndEvent) and e.event.tool_name == "MemorySearch")
+                start = next(
+                    e
+                    for e in envs
+                    if isinstance(e.event, ToolCallStartEvent)
+                    and e.event.tool_name == "MemorySearch"
+                )
+                end = next(
+                    e
+                    for e in envs
+                    if isinstance(e.event, ToolCallEndEvent) and e.event.tool_name == "MemorySearch"
+                )
                 searches.append(end.ts_ms - start.ts_ms)
             out["memory_search_tool_ms"] = searches
     finally:
@@ -286,7 +324,9 @@ async def test_recall_latency_with_200_memories_in_the_scope(pg_dsn: str) -> Non
         out["p50_search_tool_ms"] = statistics.median(out.get("memory_search_tool_ms", [0]))
         dump("memory_recall_latency", out)
     assert out["rows_after_seed"] and out["rows_after_seed"][0][1] == SEED
-    assert len(out["rows_after_vllm_save"]) == 1, "the vLLM agent saved into the scripted agent's scope"
+    assert len(out["rows_after_vllm_save"]) == 1, (
+        "the vLLM agent saved into the scripted agent's scope"
+    )
     assert all(h > 0 for h in out["recall_hits"]), out["recall_hits"]
     print(
         f"recall p50 gap {out['p50_recall_gap_ms']} ms vs off {out['p50_off_gap_ms']} ms; "

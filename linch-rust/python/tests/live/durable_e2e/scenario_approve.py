@@ -20,7 +20,6 @@ import h
 from linch_rust import (
     Allow,
     LinchError,
-    ResultEvent,
     Server,
     SuspendedEvent,
     tool,
@@ -50,7 +49,7 @@ async def approve_after_kill(proxy: h.CountingProxy) -> dict[str, Any]:
         config = h.cfg(dsn, proxy.url, "appr", permissions=perm())
         c1: list[str] = []
         async with Server() as s1:
-            agent = await s1.open_agent(config, tools=[save_tool(c1)])
+            agent = await s1.open_agent(config, tools=[save_tool(c1)])  # pyright: ignore[reportArgumentType]
             run = await agent.run("s1", PROMPT)
             suspended = await asyncio.wait_for(run.result(), 120)
             out["suspended"] = isinstance(suspended, SuspendedEvent)
@@ -60,7 +59,7 @@ async def approve_after_kill(proxy: h.CountingProxy) -> dict[str, Any]:
         out["proxy_calls_at_suspend"] = proxy.n()
         c2: list[str] = []
         async with Server() as s2:
-            agent2 = await s2.open_agent(config, tools=[save_tool(c2)])
+            agent2 = await s2.open_agent(config, tools=[save_tool(c2)])  # pyright: ignore[reportArgumentType]
             t0 = time.time()
             # No lease wait expected: a suspended run refuses nobody.
             r = await agent2.approve(run.id, {i: Allow() for i in out["pending"]})
@@ -87,7 +86,7 @@ async def cancel_suspended(proxy: h.CountingProxy, after_restart: bool) -> dict[
         config = h.cfg(dsn, proxy.url, "canc", permissions=perm())
         s1 = Server()
         await s1.start()
-        agent = await s1.open_agent(config, tools=[save_tool([])])
+        agent = await s1.open_agent(config, tools=[save_tool([])])  # pyright: ignore[reportArgumentType]
         run = await agent.run("s1", PROMPT)
         suspended = await asyncio.wait_for(run.result(), 120)
         assert isinstance(suspended, SuspendedEvent)
@@ -97,7 +96,7 @@ async def cancel_suspended(proxy: h.CountingProxy, after_restart: bool) -> dict[
             await s1.close()
             s2 = Server()
             await s2.start()
-            agent = await s2.open_agent(config, tools=[save_tool([])])
+            agent = await s2.open_agent(config, tools=[save_tool([])])  # pyright: ignore[reportArgumentType]
             server = s2
         else:
             server = s1
@@ -169,7 +168,8 @@ async def pruned(proxy: h.CountingProxy) -> dict[str, Any]:
         def counts() -> dict[str, Any]:
             tables = h.q(
                 dsn,
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() "
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = "
+                "current_schema() "
                 "AND table_name LIKE 'linch_worker%%' ORDER BY 1",
             )
             res: dict[str, Any] = {}
@@ -187,7 +187,8 @@ async def pruned(proxy: h.CountingProxy) -> dict[str, Any]:
             out["tools"] = None
             job = await agent.enqueue(
                 "sched-1",
-                "Call the tool Write with file_path 'note.txt' and content 'hi', then reply with exactly: DONE",
+                "Call the tool Write with file_path 'note.txt' and content 'hi', then reply with "
+                "exactly: DONE",
             )
             done = await agent.wait_job(job["job_id"], timeout=180)
             out["job_state"] = done["state"]

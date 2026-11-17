@@ -7,7 +7,6 @@ from pathlib import Path
 
 import h
 
-from linch_rust import Server
 from linch_rust.scripted import MODEL, text_turn
 
 
@@ -48,7 +47,8 @@ async def main() -> None:
         ):
             cols = h.q(
                 dsn,
-                "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=%s ORDER BY ordinal_position",
+                "SELECT column_name, data_type FROM information_schema.columns WHERE "
+                "table_schema=current_schema() AND table_name=%s ORDER BY ordinal_position",
                 t,
             )
             print(t, [c[0] for c in cols])

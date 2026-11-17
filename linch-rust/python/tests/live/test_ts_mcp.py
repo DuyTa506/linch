@@ -1,6 +1,6 @@
 """Live toolsec: a stdio MCP server end to end (tools, errors, `polls`, lifeline, tenant allowlist).
 
-Expectations are in `toolsec/expectations.md` section 4 (ids 4.1 to 4.6).
+Expectations are in `expectations/toolsec.md` section 4 (ids 4.1 to 4.6).
 """
 
 from __future__ import annotations

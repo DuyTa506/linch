@@ -1,7 +1,8 @@
-"""Live toolsec: two tenants on one server, `allow.*` absent by default: every denied path, the limits,
+"""Live toolsec: two tenants on one server, `allow.*` absent by default: every denied path, the
+limits,
 isolation between tenants, the tool cache across principals, and no leak in a tenant's error text.
 
-Expectations are in `toolsec/expectations.md` section 6.
+Expectations are in `expectations/toolsec.md` section 6.
 """
 
 from __future__ import annotations
@@ -467,7 +468,7 @@ async def test_tool_cache_hit_miss_clear_and_no_sharing_across_principals() -> N
                         ("s5", alice),
                         ("s6", alice),
                     ):
-                        run = await agent.run(session, "go", principal=principal)
+                        run = await agent.run(session, "go", principal=principal)  # pyright: ignore[reportArgumentType]
                         envelopes = await finish(agent, run)
                         name = "touch" if session == "s5" else "lookup"
                         end = ends(envelopes, name)[0]

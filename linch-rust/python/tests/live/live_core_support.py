@@ -100,6 +100,7 @@ needs_live = pytest.mark.skipif(
     reason="no live model: set LINCH_LIVE_VLLM_URL or DEEPSEEK_API_KEY",
 )
 needs_pg = pytest.mark.skipif(not PG_DSN, reason="LINCH_TEST_PG_DSN is not set")
+needs_vllm = pytest.mark.skipif(not VLLM_URL, reason="LINCH_LIVE_VLLM_URL is not set")
 
 
 def server_env(**extra: str) -> dict[str, str]:
@@ -287,6 +288,7 @@ __all__ = [
     "message_text",
     "needs_live",
     "needs_pg",
+    "needs_vllm",
     "pg_stores",
     "retry_once",
     "server_env",

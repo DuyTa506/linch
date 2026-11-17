@@ -27,7 +27,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-E2E_DIR = Path(os.environ.get("E2E_DIR", "/home/aiqk3/Desktop/duy_dev/linch-agent-scratch/e2e"))
+E2E_DIR = Path(os.environ.get("E2E_DIR", Path(tempfile.gettempdir()) / "linch-live-e2e"))
 RESULTS = E2E_DIR / "results" / "durable"
 RESULTS.mkdir(parents=True, exist_ok=True)
 UPSTREAM = ("127.0.0.1", 18201)  # the e2e proxy; never the vLLM host itself
@@ -54,7 +54,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     proxy: CountingProxy
 
-    def log_message(self, *a: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
     def do_GET(self) -> None:

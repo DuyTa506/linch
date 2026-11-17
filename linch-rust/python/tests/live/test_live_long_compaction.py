@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, load, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config
+from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
 
 from linch_rust import CompactionEvent, ResultEvent, tool
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
 INTRO = "The conversation to summarize ends above."
@@ -49,12 +49,17 @@ def agent_config(
     compaction_output: int = 600,
     **spec_extra: Any,
 ) -> Any:
-    compaction: dict[str, Any] = {"keep_recent_turns": keep_recent, "max_output_tokens": compaction_output}
+    compaction: dict[str, Any] = {
+        "keep_recent_turns": keep_recent,
+        "max_output_tokens": compaction_output,
+    }
     if threshold is not None:
         compaction["threshold_tokens"] = threshold
     if keep_user_tokens is not None:
         compaction["keep_user_tokens"] = keep_user_tokens
-    config = make_config(LIVE, LIVE.spec(max_output_tokens=200, compaction=compaction, **spec_extra))
+    config = make_config(
+        LIVE, LIVE.spec(max_output_tokens=200, compaction=compaction, **spec_extra)
+    )
     provider: dict[str, Any] = {"id": "vllm", "base_url": tee.url}
     if window is not None:
         provider["context_window"] = window
@@ -122,9 +127,7 @@ def analyse(tee: Tee) -> dict[str, Any]:
     for idx, rec in enumerate(chats):
         if not is_summary_request(rec):
             continue
-        prev = next(
-            (r for r in reversed(chats[:idx]) if not is_summary_request(r)), None
-        )
+        prev = next((r for r in reversed(chats[:idx]) if not is_summary_request(r)), None)
         s_msgs = rec["body"]["messages"]
         info: dict[str, Any] = {
             "index": idx,
@@ -136,15 +139,17 @@ def analyse(tee: Tee) -> dict[str, Any]:
             "latency_s": rec.get("latency_s"),
             "instruction_chars": len(msg_text(s_msgs[-1])),
             "updates_checkpoint": UPDATE in msg_text(s_msgs[-1]),
-            "tools_equal_prev": prev is not None and prev["body"].get("tools") == rec["body"].get("tools"),
-            "system_equal_prev": prev is not None
-            and prev["body"]["messages"][0] == s_msgs[0],
+            "tools_equal_prev": prev is not None
+            and prev["body"].get("tools") == rec["body"].get("tools"),
+            "system_equal_prev": prev is not None and prev["body"]["messages"][0] == s_msgs[0],
         }
         if prev is not None:
             p_msgs = prev["body"]["messages"]
             info["prev_messages"] = len(p_msgs)
             info["prev_prompt_tokens"] = prev.get("prompt_tokens")
-            info["prompt_delta_tokens"] = (rec.get("prompt_tokens") or 0) - (prev.get("prompt_tokens") or 0)
+            info["prompt_delta_tokens"] = (rec.get("prompt_tokens") or 0) - (
+                prev.get("prompt_tokens") or 0
+            )
             info["prev_is_prefix"] = s_msgs[: len(p_msgs)] == p_msgs
             info["extra_messages_between"] = len(s_msgs) - 1 - len(p_msgs)
             info["trailing_messages_after_prefix"] = [
@@ -156,7 +161,9 @@ def analyse(tee: Tee) -> dict[str, Any]:
             n_msgs = nxt["body"]["messages"]
             cps = [m for m in n_msgs if SUMMARY_TAG in msg_text(m)]
             info["next_request_summary_messages"] = len(cps)
-            info["next_request_summary_count_in_text"] = sum(msg_text(m).count(SUMMARY_TAG) for m in n_msgs)
+            info["next_request_summary_count_in_text"] = sum(
+                msg_text(m).count(SUMMARY_TAG) for m in n_msgs
+            )
             info["next_request_verbatim_blocks"] = sum(msg_text(m).count(VERBATIM) for m in n_msgs)
             info["next_request_messages"] = len(n_msgs)
             info["next_request_prompt_tokens"] = nxt.get("prompt_tokens")
@@ -209,7 +216,8 @@ RULE = "ZEBRA-SEVEN-RULE"
 
 
 async def test_the_checkpoint_carries_early_short_user_messages_verbatim() -> None:
-    """C5: user messages are short, tool results bulky: every folded user message fits the budget."""
+    """C5: user messages are short, tool results bulky: every folded user message fits the "
+    "budget."""
     tee = Tee("compaction_verbatim")
     try:
         async with live_server() as server:
@@ -219,7 +227,10 @@ async def test_the_checkpoint_carries_early_short_user_messages_verbatim() -> No
             prompts = [
                 "Hello. Reply ok.",
                 f"Standing rule: always sign off with the phrase {RULE}. Reply ok.",
-                *(f"Call lookup_big with key 'k{n}', then reply with one word." for n in range(1, 7)),
+                *(
+                    f"Call lookup_big with key 'k{n}', then reply with one word."
+                    for n in range(1, 7)
+                ),
             ]
             for text in prompts:
                 result = await (await agent.run("v", text)).result()
@@ -232,7 +243,10 @@ async def test_the_checkpoint_carries_early_short_user_messages_verbatim() -> No
     assert summaries, report
     first = summaries[0]
     print("verbatim blocks:", first["next_request_verbatim_blocks"])
-    assert f"{VERBATIM}\nStanding rule: always sign off with the phrase {RULE}" in first["checkpoint_text"]
+    assert (
+        f"{VERBATIM}\nStanding rule: always sign off with the phrase {RULE}"
+        in first["checkpoint_text"]
+    )
 
 
 @pytest.mark.parametrize("rep", [1, 2, 3])
@@ -244,10 +258,13 @@ async def test_summary_request_checkpoint_recall_and_second_compaction(rep: int)
     comps = [c for c in report["compactions"] if c["strategy"] == "summary" and not c["rejected"]]
     assert comps and len(comps) >= 2, report["compactions"]
     for c in comps:
-        assert c["tokens_before"] > c["tokens_after"] and c["messages_after"] < c["messages_before"], c
+        assert (
+            c["tokens_before"] > c["tokens_after"] and c["messages_after"] < c["messages_before"]
+        ), c
         assert c["duration_ms"] > 0
     first = summaries[0]
-    # C1: system and tools identical, the previous primary request is a prefix, one trailing instruction.
+    # C1: system and tools identical, the previous primary request is a prefix, one trailing
+    # instruction.
     assert first["status"] == 200
     assert first["system_equal_prev"] and first["tools_equal_prev"], first
     assert first["prev_is_prefix"], first
@@ -269,9 +286,7 @@ async def test_summary_request_checkpoint_recall_and_second_compaction(rep: int)
 
 async def test_keep_user_tokens_zero_carries_no_verbatim_blocks() -> None:
     """C5: 0 turns the verbatim section off; the summary request is the same shape."""
-    _, report, _ = await run_scenario(
-        "compaction_keep_user_0", {"keep_user_tokens": 0}, fillers=12
-    )
+    _, report, _ = await run_scenario("compaction_keep_user_0", {"keep_user_tokens": 0}, fillers=12)
     dump("compaction_keep_user_0", report)
     summaries = report["summaries"]
     assert summaries

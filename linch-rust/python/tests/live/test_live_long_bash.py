@@ -1,4 +1,5 @@
-"""Live e2e (area long): a long background command and the idle bound (P1-P3 of `long_results/expectations.md`)."""
+"""Live e2e (area long): a long background command and the idle bound (P1-P3 of "
+"`expectations/long.md`)."""
 
 from __future__ import annotations
 
@@ -14,12 +15,13 @@ from live_core_support import (
     drive,
     live_server,
     make_config,
+    needs_vllm,
     text_of,
 )
 
 from linch_rust import LoopGuardEvent
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
 RUNNER = (
@@ -62,7 +64,7 @@ async def test_a_20_second_background_command_is_polled_to_its_end(tmp_path: Pat
         trace = await drive(agent, run, timeout=240)
         elapsed = time.time() - started
         start = trace.ends("Bash")[0]
-        pid = start.metadata["pid"]
+        pid = start.metadata["pid"]  # pyright: ignore[reportOptionalSubscript]
         outputs = [text_of(o) for o in trace.ends("BashOutput")]
         out.update(
             elapsed_s=round(elapsed, 1),
@@ -85,13 +87,12 @@ async def test_a_20_second_background_command_is_polled_to_its_end(tmp_path: Pat
 
 
 async def test_a_silent_command_polled_without_waiting_trips_the_idle_bound(tmp_path: Path) -> None:
-    """P2: the same answer `max_idle_turns` times in a row ends the run; the process outlives the run
+    """P2: the same answer `max_idle_turns` times in a row ends the run; the process outlives the
+    run
     (documented) and dies with the session."""
     out: dict[str, Any] = {}
     async with live_server() as server:
-        config = bash_config(
-            tmp_path.resolve(), max_turns=24, loop_guard={"max_idle_turns": 3}
-        )
+        config = bash_config(tmp_path.resolve(), max_turns=24, loop_guard={"max_idle_turns": 3})
         agent = await server.open_agent(config)
         run = await agent.run(
             "p2",
@@ -101,7 +102,7 @@ async def test_a_silent_command_polled_without_waiting_trips_the_idle_bound(tmp_
         )
         trace = await drive(agent, run, timeout=240)
         start = trace.ends("Bash")[0]
-        pid = start.metadata["pid"]
+        pid = start.metadata["pid"]  # pyright: ignore[reportOptionalSubscript]
         out.update(
             bash_output_calls=len(trace.ends("BashOutput")),
             loop_guard=[(e.reason, e.detail) for e in trace.of(LoopGuardEvent)],

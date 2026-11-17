@@ -7,7 +7,6 @@ Usage: python scenario_sched.py s1|s2|s3|s4 ...
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import sys
 import tempfile
@@ -107,7 +106,8 @@ async def s1(proxy: h.CountingProxy) -> dict[str, Any]:
             out["schedule"] = {k: sched.get(k) for k in ("fires", "skips", "paused", "last_fire")}
             hist = h.q(
                 dsn,
-                "SELECT schedule_id, fire_at, run_id, outcome, attempts FROM linch_worker_history ORDER BY fire_at",
+                "SELECT schedule_id, fire_at, run_id, outcome, attempts FROM linch_worker_history "
+                "ORDER BY fire_at",
             )
             out["history_rows"] = len(hist)
             out["distinct_fire_at"] = len({r[1] for r in hist})
@@ -145,7 +145,8 @@ async def s1(proxy: h.CountingProxy) -> dict[str, Any]:
 
 
 async def s2() -> dict[str, Any]:
-    """5.2 a 60 s heartbeat; the server is down for 190 s; one fire after the restart, the rest in skips."""
+    """5.2 a 60 s heartbeat; the server is down for 190 s; one fire after the restart, the rest in "
+    "skips."""
     out: dict[str, Any] = {"load": h.load()}
     with h.schema() as dsn:
         d = Path(tempfile.mkdtemp(prefix="du-s2-"))
@@ -200,7 +201,8 @@ async def s2() -> dict[str, Any]:
 
 
 async def s3(proxy: h.CountingProxy) -> dict[str, Any]:
-    """5.3 a stored tenant definition with no max_turns and no budget fails its fire, text in job.list."""
+    """5.3 a stored tenant definition with no max_turns and no budget fails its fire, text in "
+    "job.list."""
     out: dict[str, Any] = {"load": h.load()}
     with h.schema() as dsn:
         proxy.reset()
@@ -216,9 +218,10 @@ async def s3(proxy: h.CountingProxy) -> dict[str, Any]:
         unbounded = h.cfg(dsn, proxy.url, "acme/unb", ttl=2000)
         del unbounded["spec"]["max_turns"]
         bounded = h.cfg(dsn, proxy.url, "acme/unb", ttl=2000)
-        # A stdio client has no tenant: it stores the unbounded definition (as an old release could).
+        # A stdio client has no tenant: it stores the unbounded definition (as an old release
+        # could).
         async with Server() as stdio:
-            ua = await stdio.open_agent(unbounded)
+            ua = await stdio.open_agent(unbounded)  # pyright: ignore[reportArgumentType]
             await ua.create_schedule("Reply with exactly: PONG", interval_ms=2000, id="unb")
             await ua.enqueue("unb-job", "Reply with exactly: PONG")
         srv = h.Srv(conf, directory=d)
@@ -258,7 +261,8 @@ async def s3(proxy: h.CountingProxy) -> dict[str, Any]:
 
 
 async def s4() -> dict[str, Any]:
-    """5.4 a job that cannot open its agent is retried and given up; both on stderr (LINCH_LOG=warn)."""
+    """5.4 a job that cannot open its agent is retried and given up; both on stderr "
+    "(LINCH_LOG=warn)."""
     out: dict[str, Any] = {"load": h.load()}
     with h.schema() as dsn:
         d = Path(tempfile.mkdtemp(prefix="du-s4-"))
@@ -275,7 +279,7 @@ async def s4() -> dict[str, Any]:
         ]
         cfg["permissions"] = {"mode": "skip_dangerous", "project_root": "/"}
         async with Server() as stdio:
-            agent = await stdio.open_agent(cfg)
+            agent = await stdio.open_agent(cfg)  # pyright: ignore[reportArgumentType]
             job = await agent.enqueue("retry-job", "hello")
             mcp.unlink()  # the worker cannot start the agent's MCP server any more
             srv = h.Srv(conf, directory=d, env={"LINCH_LOG": "warn"})

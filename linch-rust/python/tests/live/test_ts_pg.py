@@ -1,7 +1,8 @@
-"""Live toolsec on Postgres: a tool cache shared by namespace is not shared across tenants, an error past
+"""Live toolsec on Postgres: a tool cache shared by namespace is not shared across tenants, an
+error past
 admission leaks no DSN, and the worker's `LINCH_LOG=debug` output holds no provider header value.
 
-Expectations are in `toolsec/expectations.md` section 6 (cache, error text) and 7.7.
+Expectations are in `expectations/toolsec.md` section 6 (cache, error text) and 7.7.
 """
 
 from __future__ import annotations
@@ -88,7 +89,9 @@ async def test_tool_cache_entries_never_cross_tenants_on_one_postgres(pg_dsn: st
                         agent = await server.open_agent(config, tools=[lookup])
                         principal = {"tenant": namespace, "user": user}
                         run = await agent.run(
-                            f"s-{len(flags)}", f"{namespace}-prompt", principal=principal
+                            f"s-{len(flags)}",
+                            f"{namespace}-prompt",
+                            principal=principal,  # pyright: ignore[reportArgumentType]
                         )
                         end = ends(await finish(agent, run), "lookup")[0]
                         flags.append((namespace, end.cache_hit))

@@ -50,7 +50,8 @@ async def commits(reps: int) -> dict[str, Any]:
                 result = None
                 async with Server() as server:
                     agent = await server.open_agent(
-                        scripted_config(dsn, turns), tools=[make_tool()]
+                        scripted_config(dsn, turns),
+                        tools=[make_tool()],
                     )
                     if n >= 0:
                         run = await agent.run("s1", "go")

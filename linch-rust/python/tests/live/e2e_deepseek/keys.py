@@ -1,7 +1,15 @@
-import json
-import sys
+"""Print the analysis block of a scenario result: keys.py <live|rehearsal> <scenario>"""
 
-d = json.load(open(f"/home/aiqk3/Desktop/duy_dev/linch-agent-scratch/e2e/results/deepseek/{sys.argv[1]}/{sys.argv[2]}.json"))
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = (
+    Path(os.environ.get("E2E_RESULTS", Path(tempfile.gettempdir()) / "linch-live-e2e")) / "deepseek"
+)
+d = json.load(open(ROOT / sys.argv[1] / f"{sys.argv[2]}.json"))
 for k, v in d["analysis"].items():
     if k != "requests":
         print(k, v)

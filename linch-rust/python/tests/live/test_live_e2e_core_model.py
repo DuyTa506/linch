@@ -1,4 +1,5 @@
-"""Live e2e (core): structured output, tool_choice, effort, temperature, budgets (vLLM, wire-checked)."""
+"""Live e2e (core): structured output, tool_choice, effort, temperature, budgets (vLLM, "
+"wire-checked)."""
 
 from __future__ import annotations
 
@@ -31,6 +32,8 @@ from linch_rust import (
     callback,
     tool,
 )
+
+__all__ = ["fwd"]
 
 pytestmark = [pytest.mark.live, needs_e2e]
 
@@ -98,7 +101,9 @@ async def test_3b_the_final_tool_ends_the_run_with_a_valid_object(fwd: Any) -> N
 
 
 @attempts("3c unsatisfiable schema, final tool beside another tool")
-async def test_3c_an_unsatisfiable_schema_fails_with_a_typed_error_after_the_retries(fwd: Any) -> None:
+async def test_3c_an_unsatisfiable_schema_fails_with_a_typed_error_after_the_retries(
+    fwd: Any,
+) -> None:
     cfg = config(fwd, spec(output_schema=IMPOSSIBLE, structured_output_retries=2, max_turns=8))
     async with opened(cfg, tools=(clock,)) as (_s, agent):
         mark = fwd.mark()
@@ -123,7 +128,9 @@ async def test_3c_an_unsatisfiable_schema_fails_with_a_typed_error_after_the_ret
         },
     )
     assert not trace.starts(), "the model called another tool; model behaviour"
-    assert result.subtype == "error" and errors and errors[0].error["name"] == "StructuredOutputError"
+    assert (
+        result.subtype == "error" and errors and errors[0].error["name"] == "StructuredOutputError"
+    )
     assert [v.action for v in ver] == ["retry", "retry", "stop"]
     assert [v.attempt for v in ver[:2]] == [1, 2]
     assert result.structured_error
@@ -131,11 +138,14 @@ async def test_3c_an_unsatisfiable_schema_fails_with_a_typed_error_after_the_ret
 
 
 async def test_3c_forced_only_variant_is_recorded(fwd: Any) -> None:
-    """Observation, no verdict assertion: the final tool is the only tool, so it is forced by name."""
+    """Observation, no verdict assertion: the final tool is the only tool, so it is forced by "
+    "name."""
     cfg = config(fwd, spec(output_schema=IMPOSSIBLE, structured_output_retries=2, max_turns=8))
     async with opened(cfg) as (_s, agent):
         mark = fwd.mark()
-        trace = await run_to_end("3c-forced-only", agent, "Give the final answer with n = 7.", fwd=fwd)
+        trace = await run_to_end(
+            "3c-forced-only", agent, "Give the final answer with n = 7.", fwd=fwd
+        )
         calls = fwd.chat()[mark:]
     errors = trace.of(ErrorEvent)
     dump(
@@ -155,7 +165,9 @@ async def test_3c_forced_only_variant_is_recorded(fwd: Any) -> None:
 async def test_4a_required_makes_the_model_call_a_tool(fwd: Any) -> None:
     cfg = config(fwd, spec(tool_choice={"type": "required"}, max_turns=1))
     async with opened(cfg, tools=(lookup, clock)) as (_s, agent):
-        trace = await run_to_end("4a-required", agent, "Say hello to the user in plain text.", fwd=fwd)
+        trace = await run_to_end(
+            "4a-required", agent, "Say hello to the user in plain text.", fwd=fwd
+        )
         wire = fwd.chat()[-1]["body"]
     first = trace.assistants()[0].message["content"]
     assert any(b["type"] == "tool_use" for b in first)
@@ -199,8 +211,17 @@ async def test_4d_a_named_choice_the_turn_does_not_offer_goes_out_as_auto(fwd: A
         trace = await run_to_end("4d-dropped", agent, "Say hello to the user.", fwd=fwd)
         wire = fwd.chat()[-1]["body"]
     metadata = trace.of(ContextBuildEvent)[0].metadata
-    dump("4d-dropped", {"wire_tool_choice": wire.get("tool_choice"), "metadata": metadata, "tools": [t["function"]["name"] for t in wire["tools"]]})
-    assert trace.of(ErrorEvent) == [] or trace.result.subtype == "error"  # max_turns ends it, not a 400
+    dump(
+        "4d-dropped",
+        {
+            "wire_tool_choice": wire.get("tool_choice"),
+            "metadata": metadata,
+            "tools": [t["function"]["name"] for t in wire["tools"]],
+        },
+    )
+    assert (
+        trace.of(ErrorEvent) == [] or trace.result.subtype == "error"
+    )  # max_turns ends it, not a 400
     assert [t["function"]["name"] for t in wire["tools"]] == ["clock"]
     assert wire.get("tool_choice") in (None, "auto")
     assert metadata.get("tool_choice_dropped") == "lookup"
@@ -237,7 +258,11 @@ async def test_5_reasoning_effort_levels(fwd: Any, effort: str, prompt_key: str)
         for rep in range(3):
             mark = fwd.mark()
             trace = await run_to_end(
-                f"5-effort-{effort}-{prompt_key}", agent, PROMPTS[prompt_key], session=f"s{rep}", fwd=None
+                f"5-effort-{effort}-{prompt_key}",
+                agent,
+                PROMPTS[prompt_key],
+                session=f"s{rep}",
+                fwd=None,
             )
             wire = fwd.chat()[mark:]
             body = wire[0]["body"]
@@ -250,11 +275,15 @@ async def test_5_reasoning_effort_levels(fwd: Any, effort: str, prompt_key: str)
                     "prompt": prompt_key,
                     "rep": rep,
                     "completion_tokens": usage.get("completion_tokens"),
-                    "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+                    "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get(
+                        "reasoning_tokens"
+                    ),
                     "result_output_tokens": trace.result.total_usage["output_tokens"],
                     "thinking_deltas": len(deltas),
                     "wire_effort_fields": {
-                        k: body[k] for k in body if "effort" in k or "reasoning" in k or "chat_template" in k
+                        k: body[k]
+                        for k in body
+                        if "effort" in k or "reasoning" in k or "chat_template" in k
                     },
                     "subtype": trace.result.subtype,
                     "stop_reason": trace.result.stop_reason,
@@ -266,9 +295,13 @@ async def test_5_reasoning_effort_levels(fwd: Any, effort: str, prompt_key: str)
             if effort == "off":
                 assert not deltas and usage["completion_tokens_details"]["reasoning_tokens"] == 0
             elif effort in ("high", "max"):
-                assert "xhigh" in json.dumps({k: v for k, v in body.items() if "effort" in k or "chat_template" in k})
+                assert "xhigh" in json.dumps(
+                    {k: v for k, v in body.items() if "effort" in k or "chat_template" in k}
+                )
             else:
-                assert effort in json.dumps({k: v for k, v in body.items() if "effort" in k or "chat_template" in k})
+                assert effort in json.dumps(
+                    {k: v for k, v in body.items() if "effort" in k or "chat_template" in k}
+                )
 
 
 def effort_means() -> dict[str, float]:
@@ -341,7 +374,10 @@ async def test_7b_a_tiny_cost_cap_ends_the_run_with_the_budget_error(fwd: Any) -
         calls = len(fwd.chat()) - mark
     budget = trace.of(BudgetEvent)
     errors = trace.of(ErrorEvent)
-    dump("7b-cost-cap", {"calls": calls, "budget": [vars(b) for b in budget], "errors": [e.error for e in errors]})
+    dump(
+        "7b-cost-cap",
+        {"calls": calls, "budget": [vars(b) for b in budget], "errors": [e.error for e in errors]},
+    )
     assert trace.starts("ping"), "the model did not call ping; model behaviour"
     assert [b.kind for b in budget][-1] == "exceeded"
     assert errors and errors[0].error["name"] == "BudgetExceededError"

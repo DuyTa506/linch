@@ -26,6 +26,8 @@ from linch_rust import (
     SubagentEvent,
 )
 
+__all__ = ["fwd"]
+
 pytestmark = [pytest.mark.live, needs_e2e]
 
 ANALYST = """\
@@ -99,7 +101,8 @@ async def test_12b_a_foreground_subagent_answers_the_parent(fwd: Any, tmp_path: 
         trace = await run_to_end(
             "12b-subagent",
             agent,
-            "Call the Subagent tool with subagent_type 'analyst' and prompt 'Read facts.txt and report "
+            "Call the Subagent tool with subagent_type 'analyst' and prompt 'Read facts.txt and "
+            "report "
             "it.' Then tell me the vault code.",
             fwd=fwd,
         )
@@ -107,7 +110,9 @@ async def test_12b_a_foreground_subagent_answers_the_parent(fwd: Any, tmp_path: 
     children = [s.event for s in trace.of(SubagentEvent)]
     [child_init] = [e for e in children if isinstance(e, InitEvent)]
     assert not call.is_error and "8842" in text_of(call)
-    assert child_init.tools == ["Read"] and child_init.parent_run_id == trace.of(InitEvent)[0].run_id
+    assert (
+        child_init.tools == ["Read"] and child_init.parent_run_id == trace.of(InitEvent)[0].run_id
+    )
     assert "8842" in (trace.result.final_text or "")
 
 
@@ -119,7 +124,8 @@ async def test_12c_read_scoped_subagents_run_in_parallel(fwd: Any, tmp_path: Pat
             "12c-parallel",
             agent,
             "In ONE response make two Subagent calls at once: subagent_type 'analyst' with prompt "
-            "'Read facts.txt and report it.', and subagent_type 'analyst' with prompt 'Read more.txt "
+            "'Read facts.txt and report it.', and subagent_type 'analyst' with prompt 'Read "
+            "more.txt "
             "and report it.'. Then tell me both codes.",
             fwd=fwd,
         )

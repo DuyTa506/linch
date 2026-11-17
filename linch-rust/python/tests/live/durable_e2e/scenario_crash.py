@@ -37,7 +37,7 @@ async def one(point: str, proxy: h.CountingProxy) -> dict[str, Any]:
     with h.schema() as dsn:
         proxy.reset()
         spec = {"max_output_tokens": 200} if point == "mid_stream" else None
-        config = h.cfg(dsn, proxy.url, f"crash-{point}", ttl=TTL, spec=spec)
+        config: Any = h.cfg(dsn, proxy.url, f"crash-{point}", ttl=TTL, spec=spec)
         holder: dict[str, Any] = {"pid": None, "armed": True, "bpc": 0, "stop": 0, "apc": 0}
 
         def kill(why: str) -> bool:
@@ -97,7 +97,9 @@ async def one(point: str, proxy: h.CountingProxy) -> dict[str, Any]:
         async with Server() as server:
             holder["pid"] = server.pid
             agent = await server.open_agent(
-                config, tools=[make_tools(first_tool_calls)], callbacks=callbacks()
+                config,
+                tools=[make_tools(first_tool_calls)],
+                callbacks=callbacks(),
             )
             run = await agent.run("s1", COUNT if point == "mid_stream" else PROMPT)
             try:
@@ -122,7 +124,7 @@ async def one(point: str, proxy: h.CountingProxy) -> dict[str, Any]:
         out["first_tool_calls"] = len(first_tool_calls)
         # What was durable at the kill.
         async with Server() as probe:
-            pa = await probe.open_agent(config, tools=[make_tools([])], callbacks=callbacks())
+            pa = await probe.open_agent(config, tools=[make_tools([])], callbacks=callbacks())  # pyright: ignore[reportArgumentType]
             pre = h.summarize(await pa.events(run.id))
         out["durable_at_kill"] = h.types(pre)
         holder["armed"] = False
@@ -132,7 +134,9 @@ async def one(point: str, proxy: h.CountingProxy) -> dict[str, Any]:
         t0 = time.time()
         async with Server() as server2:
             agent2 = await server2.open_agent(
-                config, tools=[make_tools(second_tool_calls)], callbacks=callbacks()
+                config,
+                tools=[make_tools(second_tool_calls)],
+                callbacks=callbacks(),
             )
             result = None
             leased_for = 0.0

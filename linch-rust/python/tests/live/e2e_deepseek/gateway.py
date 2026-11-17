@@ -1,13 +1,17 @@
 """Counting gateway in front of the DeepSeek API, for the live e2e runs.
 
-- Forwards only `POST .../chat/completions` to https://api.deepseek.com (the Authorization header is passed
+- Forwards only `POST .../chat/completions` to https://api.deepseek.com (the Authorization header
+is passed
   through and never stored); everything else is 404.
 - Header NAMES are logged, never values (the one probe header's value is only compared, not stored).
-- Refuses locally (HTTP 400, not forwarded, not counted) a request with no `max_tokens`, one over the cap,
+- Refuses locally (HTTP 400, not forwarded, not counted) a request with no `max_tokens`, one over
+the cap,
   or any request once the persisted forwarded count reached the limit.
-- `x-e2e-mode: echo400` answers a 400 whose body quotes the value of `x-e2e-probe` (scrub test); not forwarded.
+- `x-e2e-mode: echo400` answers a 400 whose body quotes the value of `x-e2e-probe` (scrub test);
+not forwarded.
 - Control file (JSON, re-read per request): {"mock": bool, "text": str, "args": {tool: {..}},
-  "max_tokens_cap": int, "limit": int}. With `mock` the reply is a canned SSE stream (not forwarded, not
+  "max_tokens_cap": int, "limit": int}. With `mock` the reply is a canned SSE stream (not
+forwarded, not
   counted); a forced named tool_choice (or "required" with a tool) is answered with a tool call.
 - Every forwarded request body is stored in `<dir>/bodies/NNN.json` (bodies hold no credentials).
 """
@@ -92,7 +96,7 @@ class Gateway:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.0"  # the body is delimited by closing the connection
 
-            def log_message(self, *_: Any) -> None:
+            def log_message(self, format: str, *args: Any) -> None:
                 pass
 
             def do_GET(self) -> None:
@@ -144,7 +148,14 @@ class Gateway:
         }
         if request.headers.get("x-e2e-mode") == "echo400":
             message = f"Invalid request: header x-e2e-probe rejected with value {probe}"
-            data = {"error": {"message": message, "type": "invalid_request_error", "param": None, "code": "invalid_request_error"}}
+            data = {
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": "invalid_request_error",
+                }
+            }
             self.log({**base, "kind": "echo400", "status": 400})
             request._plain(400, data)  # type: ignore[attr-defined]
             return
@@ -152,7 +163,9 @@ class Gateway:
         mt = body.get("max_tokens")
         if mt is None or int(mt) > cap:
             self.log({**base, "kind": "refused_max_tokens", "status": 400, "cap": cap})
-            request._plain(400, {"error": {"message": f"gateway: max_tokens {mt} not allowed (cap {cap})"}})  # type: ignore[attr-defined]
+            request._plain(  # pyright: ignore[reportAttributeAccessIssue]
+                400, {"error": {"message": f"gateway: max_tokens {mt} not allowed (cap {cap})"}}
+            )  # type: ignore[attr-defined]
             return
         if control.get("mock", True):
             self._mock(request, body, control, base, raw)
@@ -171,10 +184,12 @@ class Gateway:
             self.log({**base, "kind": "refused_limit", "status": 400})
             request._plain(400, {"error": {"message": "gateway: request limit reached"}})  # type: ignore[attr-defined]
             return
-        (self.dir / "bodies" / f"{seq:03d}.json").write_text(json.dumps(body))
-        self._forward(request, raw, base, seq)
+        (self.dir / "bodies" / f"{seq:03d}.json").write_text(json.dumps(body))  # pyright: ignore[reportPossiblyUnboundVariable]
+        self._forward(request, raw, base, seq)  # pyright: ignore[reportPossiblyUnboundVariable]
 
-    def _forward(self, request: BaseHTTPRequestHandler, raw: bytes, base: dict[str, Any], seq: int) -> None:
+    def _forward(
+        self, request: BaseHTTPRequestHandler, raw: bytes, base: dict[str, Any], seq: int
+    ) -> None:
         auth = request.headers.get("authorization", "")
         headers = {
             "authorization": auth,
@@ -186,7 +201,13 @@ class Gateway:
             self.inflight += 1
             inflight_at_start = self.inflight
         t_start = time.time()
-        record: dict[str, Any] = {**base, "kind": "forwarded", "seq": seq, "t_start": t_start, "inflight_at_start": inflight_at_start}
+        record: dict[str, Any] = {
+            **base,
+            "kind": "forwarded",
+            "seq": seq,
+            "t_start": t_start,
+            "inflight_at_start": inflight_at_start,
+        }
         text = b""
         status = 0
         first_byte: float | None = None
@@ -196,7 +217,9 @@ class Gateway:
             response = conn.getresponse()
             status = response.status
             request.send_response(status)
-            request.send_header("content-type", response.getheader("content-type", "application/json"))
+            request.send_header(
+                "content-type", response.getheader("content-type", "application/json")
+            )
             request.send_header("connection", "close")
             request.end_headers()
             while True:
@@ -222,7 +245,14 @@ class Gateway:
         record.update(parse_response(decoded, status))
         self.log(record)
 
-    def _mock(self, request: BaseHTTPRequestHandler, body: dict[str, Any], control: dict[str, Any], base: dict[str, Any], raw: bytes) -> None:
+    def _mock(
+        self,
+        request: BaseHTTPRequestHandler,
+        body: dict[str, Any],
+        control: dict[str, Any],
+        base: dict[str, Any],
+        raw: bytes,
+    ) -> None:
         t_start = time.time()
         with self.lock:
             self.mock_seq = getattr(self, "mock_seq", 0) + 1
@@ -256,21 +286,54 @@ class Gateway:
         chunks.append(mk({"role": "assistant", "content": ""}))
         if call is not None:
             args = json.dumps((control.get("args") or {}).get(call, {}))
-            chunks.append(mk({"tool_calls": [{"index": 0, "id": "call_mock", "type": "function", "function": {"name": call, "arguments": ""}}]}))
+            chunks.append(
+                mk(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_mock",
+                                "type": "function",
+                                "function": {"name": call, "arguments": ""},
+                            }
+                        ]
+                    }
+                )
+            )
             chunks.append(mk({"tool_calls": [{"index": 0, "function": {"arguments": args}}]}))
             chunks.append(mk({}, "tool_calls"))
         else:
             for i in range(0, len(text), 400):
                 chunks.append(mk({"content": text[i : i + 400]}))
             chunks.append(mk({}, "stop"))
-        chunks.append({"id": "mock", "object": "chat.completion.chunk", "model": body.get("model"), "choices": [], "usage": usage})
+        chunks.append(
+            {
+                "id": "mock",
+                "object": "chat.completion.chunk",
+                "model": body.get("model"),
+                "choices": [],
+                "usage": usage,
+            }
+        )
         payload = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
         request.send_response(200)
         request.send_header("content-type", "text/event-stream")
         request.send_header("connection", "close")
         request.end_headers()
         request.wfile.write(payload.encode())
-        self.log({**base, "kind": "mock", "mock_seq": mseq, "status": 200, "t_start": t_start, "t_end": time.time(), "mock_call": call, "text_chars": len(text), "last_user": last_text(body)[:120]})
+        self.log(
+            {
+                **base,
+                "kind": "mock",
+                "mock_seq": mseq,
+                "status": 200,
+                "t_start": t_start,
+                "t_end": time.time(),
+                "mock_call": call,
+                "text_chars": len(text),
+                "last_user": last_text(body)[:120],
+            }
+        )
 
 
 def last_text(body: dict[str, Any]) -> str:
@@ -294,9 +357,16 @@ def parse_response(decoded: str, status: int) -> dict[str, Any]:
             whole = json.loads(decoded)
             choice = (whole.get("choices") or [{}])[0]
             message = choice.get("message") or {}
-            out.update(usage=whole.get("usage"), finish_reason=choice.get("finish_reason"), response_model=whole.get("model"),
-                       content_chars=len(message.get("content") or ""), reasoning_chars=len(message.get("reasoning_content") or ""),
-                       tool_calls=[(c.get("function") or {}).get("name") for c in message.get("tool_calls") or []])
+            out.update(
+                usage=whole.get("usage"),
+                finish_reason=choice.get("finish_reason"),
+                response_model=whole.get("model"),
+                content_chars=len(message.get("content") or ""),
+                reasoning_chars=len(message.get("reasoning_content") or ""),
+                tool_calls=[
+                    (c.get("function") or {}).get("name") for c in message.get("tool_calls") or []
+                ],
+            )
             return out
         except ValueError:
             pass
@@ -329,9 +399,19 @@ def parse_response(decoded: str, status: int) -> dict[str, Any]:
                 name = (call.get("function") or {}).get("name")
                 if name:
                     tool_names.append(name)
-    out.update(usage=usage, finish_reason=finish, response_model=model, content_chars=content_chars, reasoning_chars=reasoning_chars, tool_calls=tool_names)
+    out.update(
+        usage=usage,
+        finish_reason=finish,
+        response_model=model,
+        content_chars=content_chars,
+        reasoning_chars=reasoning_chars,
+        tool_calls=tool_names,
+    )
     return out
 
 
 def message_hashes(body: dict[str, Any]) -> list[str]:
-    return [hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:12] for m in body.get("messages") or []]
+    return [
+        hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:12]
+        for m in body.get("messages") or []
+    ]

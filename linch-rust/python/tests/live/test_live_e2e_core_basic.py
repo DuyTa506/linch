@@ -23,6 +23,8 @@ from live_core_support import PG_DSN, message_text, text_of
 
 from linch_rust import InitEvent, PartialAssistantEvent, UsageEvent, tool
 
+__all__ = ["fwd"]
+
 pytestmark = [pytest.mark.live, needs_e2e]
 
 
@@ -50,7 +52,12 @@ async def test_1_basic_run_events_usage_and_a_durable_row(fwd: Any) -> None:
     usages = trace.of(UsageEvent)
     dump(
         "1-basic",
-        {"types": types, "status": status, "total_usage": result.total_usage, "wire_usage": wire["usage"]},
+        {
+            "types": types,
+            "status": status,
+            "total_usage": result.total_usage,
+            "wire_usage": wire["usage"],
+        },
     )
     assert types[0] == "init" and types[-1] == "result" and "assistant" in types
     assert init.provider == "vllm" and init.model == MODEL
@@ -59,13 +66,16 @@ async def test_1_basic_run_events_usage_and_a_durable_row(fwd: Any) -> None:
     assert len(usages) == 1
     out = result.total_usage["output_tokens"]
     assert out == usages[0].usage["output_tokens"] == wire["usage"]["completion_tokens"]
-    assert result.total_usage["input_tokens"] + result.total_usage.get("cache_read_tokens", 0) == (
-        wire["usage"]["prompt_tokens"]
+    assert (
+        result.total_usage["input_tokens"] + result.total_usage.get("cache_read_tokens", 0)
+        == (wire["usage"]["prompt_tokens"])
     )
     assert result.total_cost_usd is None and usages[0].cost_usd is None
     assert status in {"completed", "done", "success"}, status
     streamed = "".join(
-        d.delta.get("text", "") for d in trace.of(PartialAssistantEvent) if d.delta["kind"] == "text"
+        d.delta.get("text", "")
+        for d in trace.of(PartialAssistantEvent)
+        if d.delta["kind"] == "text"
     )
     assert streamed == message_text(trace.assistants()[0].message)
 
@@ -80,7 +90,8 @@ async def test_1c_cost_equals_tokens_times_price(fwd: Any) -> None:
     for t in (trace, second):
         u = t.result.total_usage
         expected = (
-            (u["input_tokens"] + u.get("cache_read_tokens", 0) + u.get("cache_creation_tokens", 0)) * p_in
+            (u["input_tokens"] + u.get("cache_read_tokens", 0) + u.get("cache_creation_tokens", 0))
+            * p_in
             + u["output_tokens"] * p_out
         ) / 1e6
         usages = t.of(UsageEvent)
@@ -115,7 +126,9 @@ async def test_2a_tool_loop_continues_while_tool_calls_and_stops_on_text(fwd: An
     assert seen[:2] == ["alpha", "beta"] and calls == 2
     assert kinds.index("tool_call_start") < kinds.index("tool_call_end")
     assistants = trace.assistants()
-    with_tools = [a for a in assistants if any(b["type"] == "tool_use" for b in a.message["content"])]
+    with_tools = [
+        a for a in assistants if any(b["type"] == "tool_use" for b in a.message["content"])
+    ]
     assert len(assistants) == len(with_tools) + 1  # the loop stops on the first text-only response
     assert all(b["type"] != "tool_use" for b in assistants[-1].message["content"])
     final = trace.result.final_text or ""
@@ -141,7 +154,9 @@ async def test_2b_builtin_read_tools_on_a_temp_dir(fwd: Any, tmp_path: Path) -> 
         )
     names = [s.tool_name for s in trace.starts()]
     assert {"Glob", "Grep", "Read"} <= set(names), names
-    assert not any(e.is_error for e in trace.ends()), [text_of(e) for e in trace.ends() if e.is_error]
+    assert not any(e.is_error for e in trace.ends()), [
+        text_of(e) for e in trace.ends() if e.is_error
+    ]
     assert "ZX-4417" in (trace.result.final_text or "")
 
 
@@ -188,7 +203,8 @@ async def test_2c_read_tools_overlap_and_write_tools_serialise(fwd: Any, tmp_pat
         reads = await run_to_end(
             "2c-reads",
             agent,
-            "Call check_alpha and check_beta in the same response (two calls at once), then say done.",
+            "Call check_alpha and check_beta in the same response (two calls at once), then say "
+            "done.",
             fwd=fwd,
         )
         read_wall = time.monotonic() - t0
@@ -202,12 +218,17 @@ async def test_2c_read_tools_overlap_and_write_tools_serialise(fwd: Any, tmp_pat
             fwd=fwd,
         )
         write_spans = dict(spans)
-    dump("2c", {"read_spans": read_spans, "write_spans": write_spans, "read_wall_incl_model": read_wall})
+    dump(
+        "2c",
+        {"read_spans": read_spans, "write_spans": write_spans, "read_wall_incl_model": read_wall},
+    )
     first = [b["name"] for b in reads.assistants()[0].message["content"] if b["type"] == "tool_use"]
     assert first == ["check_alpha", "check_beta"], first
     (a0, a1), (b0, b1) = read_spans["alpha"], read_spans["beta"]
     assert max(a0, b0) < min(a1, b1), f"reads were serialised: {read_spans}"
-    first_w = [b["name"] for b in writes.assistants()[0].message["content"] if b["type"] == "tool_use"]
+    first_w = [
+        b["name"] for b in writes.assistants()[0].message["content"] if b["type"] == "tool_use"
+    ]
     assert first_w == ["save_one", "save_two"], first_w
     (c0, c1), (d0, d1) = write_spans["save_one"], write_spans["save_two"]
     assert c1 <= d0 + 0.02 or d1 <= c0 + 0.02, f"writes overlapped: {write_spans}"

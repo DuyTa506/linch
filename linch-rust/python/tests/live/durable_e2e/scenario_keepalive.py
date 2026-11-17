@@ -1,4 +1,4 @@
-"""Does the server set TCP keepalive when the liveness times are below one second?"""
+"""Does the server set TCP keepalive for whole-second liveness times, without a warning?"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ async def probe(liveness: dict[str, int] | None) -> dict[str, object]:
         warnings = [ln for ln in srv.log.splitlines() if "keepalive" in ln]
         return {
             "liveness": liveness,
-            "status": status,
+            "status": status,  # pyright: ignore[reportPossiblyUnboundVariable]
             "keepalive_warnings": len(warnings),
             "sample": warnings[:1],
         }
@@ -32,16 +32,13 @@ async def main() -> None:
     rows = [
         await probe(None),
         await probe(
-            {"keepalive_idle_ms": 1000, "keepalive_interval_ms": 1000, "keepalive_probes": 2}
+            {"keepalive_idle_secs": 1, "keepalive_interval_secs": 1, "keepalive_probes": 2}
         ),
         await probe(
-            {"keepalive_idle_ms": 1000, "keepalive_interval_ms": 500, "keepalive_probes": 2}
+            {"keepalive_idle_secs": 2, "keepalive_interval_secs": 1, "keepalive_probes": 2}
         ),
         await probe(
-            {"keepalive_idle_ms": 500, "keepalive_interval_ms": 1000, "keepalive_probes": 2}
-        ),
-        await probe(
-            {"keepalive_idle_ms": 1500, "keepalive_interval_ms": 1500, "keepalive_probes": 2}
+            {"keepalive_idle_secs": 1, "keepalive_interval_secs": 2, "keepalive_probes": 2}
         ),
     ]
     for r in rows:

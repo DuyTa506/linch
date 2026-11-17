@@ -1,6 +1,6 @@
 """Live toolsec: one skill and one read-only subagent with a real model (vLLM through the proxy).
 
-Expectations are in `toolsec/expectations.md` section 5. Tiny prompts, `max_output_tokens` 300.
+Expectations are in `expectations/toolsec.md` section 5. Tiny prompts, `max_output_tokens` 300.
 """
 
 from __future__ import annotations

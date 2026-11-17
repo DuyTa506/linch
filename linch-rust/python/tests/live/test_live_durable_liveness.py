@@ -1,10 +1,8 @@
 """Live: the liveness section of `linch-server --config` (#165), against the real binary.
 
-RED: keepalive times below one second. The config says each field is "at least 1" (a
-millisecond count), but the kernel takes whole seconds, so a sub-second idle time or probe
-interval is rounded to 0 and `setsockopt` answers EINVAL: the server logs "cannot set TCP
-keepalive on a connection" for every connection and the connection has no keepalive at all.
-Skips without a server binary.
+Keepalive times are whole seconds (`keepalive_idle_secs`, `keepalive_interval_secs`): the kernel
+takes no finer unit, so a sub-second value is refused when the config loads (exit status 2, the
+field named) instead of failing with EINVAL on every connection. Skips without a server binary.
 """
 
 from __future__ import annotations
@@ -85,17 +83,20 @@ async def _stderr_after_two_connections(liveness: dict[str, int]) -> tuple[str, 
 
 async def test_whole_second_keepalive_times_are_set_without_a_warning() -> None:
     status, stderr = await _stderr_after_two_connections(
-        {"keepalive_idle_ms": 1500, "keepalive_interval_ms": 1500, "keepalive_probes": 2}
+        {"keepalive_idle_secs": 2, "keepalive_interval_secs": 1, "keepalive_probes": 2}
     )
     assert " 101 " in status, status
     assert "cannot set TCP keepalive" not in stderr, stderr
 
 
-async def test_sub_second_keepalive_times_do_not_leave_connections_without_keepalive() -> None:
-    # Either the config is refused at startup (status 2, reason on stderr) or the times are
-    # rounded up to a whole second and keepalive is set. Today: a warning per connection.
-    status, stderr = await _stderr_after_two_connections(
-        {"keepalive_idle_ms": 1000, "keepalive_interval_ms": 500, "keepalive_probes": 2}
-    )
-    assert status.startswith("exit 2") or " 101 " in status, status
-    assert "cannot set TCP keepalive" not in stderr, stderr
+async def test_sub_second_keepalive_times_are_refused_at_startup() -> None:
+    # A millisecond name is an unknown field and 0 seconds is out of range: both stop the server
+    # at startup (status 2, the field named), never a warning per connection.
+    for liveness, field in [
+        ({"keepalive_idle_ms": 1000, "keepalive_interval_ms": 500}, "keepalive_idle_ms"),
+        ({"keepalive_idle_secs": 0}, "liveness.keepalive_idle_secs"),
+    ]:
+        status, stderr = await _stderr_after_two_connections(liveness)
+        assert status.startswith("exit 2"), status
+        assert field in stderr, stderr
+        assert "cannot set TCP keepalive" not in stderr, stderr

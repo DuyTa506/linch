@@ -1,6 +1,6 @@
 """Live e2e (area long): a 60 s heartbeat and a cron schedule on a real worker.
 
-Expectations L5-L7 and M2 of `long_results/expectations.md`. The tenant keeps
+Expectations L5-L7 and M2 of `expectations/long.md`. The tenant keeps
 the documented 60 s `min_schedule_interval_ms` (the helper's 1000 is removed).
 The provider is reached through the body-logging tee, so each fire's first
 request can be compared with the previous fire's reply. Raw data goes to
@@ -9,13 +9,13 @@ request can be compared with the previous fire's reply. Raw data goes to
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import time
 from typing import Any
 
 import pytest
 from e2e_long_support import MODEL, Tee, dump, load, msg_text
+from live_core_support import needs_vllm
 from live_sched_support import (
     TOKEN,
     live_config,
@@ -32,7 +32,7 @@ from linch_rust import InitEvent, NotAllowed, ResultEvent, ScheduleFireEvent
 
 __all__ = ["pg_dsn", "vllm"]
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 PROMPT = (
     "Check-in. Reply with CHECK-IN followed by the number of earlier check-in "
@@ -75,7 +75,7 @@ async def test_a_60s_heartbeat_and_a_cron_schedule_fire_on_time(vllm: str, pg_ds
                 done = {"hb": 0, "cr": 0}
                 for job in await agent.jobs():
                     if job["state"] == "done" and job.get("schedule_id") in done:
-                        done[job["schedule_id"]] += 1
+                        done[job["schedule_id"]] += 1  # pyright: ignore[reportTypedDictNotRequiredAccess]
                 return done["hb"] >= 3 and done["cr"] >= 2
 
             await until(enough, timeout=330, every=2, what="3 heartbeat fires and 2 cron fires")
@@ -87,7 +87,7 @@ async def test_a_60s_heartbeat_and_a_cron_schedule_fire_on_time(vllm: str, pg_ds
                 sid = job.get("schedule_id")
                 if sid not in fires or job["state"] != "done":
                     continue
-                events = await agent.events(job["run_id"])
+                events = await agent.events(job["run_id"])  # pyright: ignore[reportTypedDictNotRequiredAccess]
                 assert seqs_increasing(events)
                 init = next(e for e in events if isinstance(e.event, InitEvent))
                 fire = next(e.event for e in events if isinstance(e.event, ScheduleFireEvent))
@@ -95,7 +95,7 @@ async def test_a_60s_heartbeat_and_a_cron_schedule_fire_on_time(vllm: str, pg_ds
                 assert isinstance(last, ResultEvent)
                 fires[sid].append(
                     {
-                        "run_id": job["run_id"],
+                        "run_id": job["run_id"],  # pyright: ignore[reportTypedDictNotRequiredAccess]
                         "session_id": job.get("session_id"),
                         "fire_at_ms": fire.fire_at_ms,
                         "init_ts_ms": init.ts_ms,
@@ -134,10 +134,13 @@ async def test_a_60s_heartbeat_and_a_cron_schedule_fire_on_time(vllm: str, pg_ds
     # L5: fire n+1's first request holds fire n's prompt and reply.
     by_run = [r for r in tee.chat() if msg_text(r["body"]["messages"][-1]).startswith("Check-in")]
     counts = [len(r["body"]["messages"]) for r in by_run]
-    assert {2, 4, 6} <= set(counts), counts  # cron fires start fresh sessions (2); the heartbeat grows
-    assert any("CHECK-IN" in msg_text(m) for m in max(by_run, key=lambda r: len(r["body"]["messages"]))["body"]["messages"][:-1]), (
-        "the last fire sees an earlier reply"
-    )
+    assert {2, 4, 6} <= set(counts), (
+        counts
+    )  # cron fires start fresh sessions (2); the heartbeat grows
+    assert any(
+        "CHECK-IN" in msg_text(m)
+        for m in max(by_run, key=lambda r: len(r["body"]["messages"]))["body"]["messages"][:-1]
+    ), "the last fire sees an earlier reply"
     # M2: jitter of the interval fires (relative to the due time on the server clock).
     for f in hb:
         assert abs(f["queue_lag_s"]) < 5, f

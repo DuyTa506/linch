@@ -1,6 +1,7 @@
-"""Live toolsec: a tenant cannot choose its own execution policy (`allow_root`, image, network, limits).
+"""Live toolsec: a tenant cannot choose its own execution policy (`allow_root`, image, network,
+limits).
 
-Expectations are in `toolsec/expectations.md` id 2.9. The docker daemon is not reachable by the test
+Expectations are in `expectations/toolsec.md` id 2.9. The docker daemon is not reachable by the test
 user, so a docker entry is exercised at admission only.
 """
 

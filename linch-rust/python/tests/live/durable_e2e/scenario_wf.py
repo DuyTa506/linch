@@ -94,7 +94,7 @@ class Client:
                 rec = json.loads(line)
             except Exception:
                 rec = {"raw": line.decode(errors="replace")}
-            rec["t"] = round(time.time() - self.t0, 2)
+            rec["t"] = round(time.time() - self.t0, 2)  # pyright: ignore[reportArgumentType]
             self.lines.append(rec)
 
     async def wait_note(self, note: str, timeout: float = 120) -> None:
@@ -266,7 +266,7 @@ async def scenario_g(ctx: Ctx, out: dict[str, Any]) -> None:
     ctx.proxy.reset()
     ctx.proxy.hold = True
     async with Server.connect(ctx.srv.addresses["socket"], token=TOKEN) as server:
-        agent = await server.open_agent(ctx.config)
+        agent = await server.open_agent(ctx.config)  # pyright: ignore[reportArgumentType]
         run = await agent.run("roa-3", "Reply with exactly: PONG", run_id="roa-3")
         await h.until(lambda: ctx.proxy.n() >= 1, timeout=30, what="the provider call")
         g["driven_by_other_wait_1s"] = brief(

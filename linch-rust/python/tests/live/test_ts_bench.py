@@ -1,8 +1,10 @@
 """Measurements of the toolsec area. Run these with the RELEASE binary (`BIN=release run.sh`).
 
-M1 tool-call overhead (scripted provider, a no-op host tool and Bash `true`), M2 tool cache hit versus
+M1 tool-call overhead (scripted provider, a no-op host tool and Bash `true`), M2 tool cache hit
+versus
 miss of a 200 ms tool, M3 admission cost (tenant versus local), M4 server RSS over 100 runs,
-M5 Bash spawn time (local and sandbox). Numbers go to `$TOOLSEC_RESULTS/bench.jsonl` with the load average.
+M5 Bash spawn time (local and sandbox). Numbers go to `$TOOLSEC_RESULTS/bench.jsonl` with the load
+average.
 """
 
 from __future__ import annotations
@@ -50,7 +52,8 @@ def summary(values: list[float]) -> dict[str, float]:
 async def timed_run(
     agent: Any, session: str, prompt: str = "go"
 ) -> tuple[list[float], list[int], float]:
-    """Inter-arrival times (ms) of consecutive tool results, their reported durations, wall seconds."""
+    """Inter-arrival times (ms) of consecutive tool results, their reported durations, wall "
+    "seconds."""
     stamps: list[float] = []
     durations: list[int] = []
     start = time.perf_counter()
@@ -218,7 +221,10 @@ async def test_m3_admission_cost_tenant_versus_local() -> None:
     record(
         AREA,
         "M3",
-        note="20 agents x 3 repeats each, each closed after its open; memory stores, scripted provider, workspace+accept_edits",
+        note=(
+            "20 agents x 3 repeats each, each closed after its open; memory stores, "
+            "scripted provider, workspace+accept_edits"
+        ),
         local_stdio_ms=summary(local),
         tenant_socket_ms=summary(remote),
     )

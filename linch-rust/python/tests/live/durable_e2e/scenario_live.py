@@ -96,7 +96,9 @@ async def silent(liveness: dict[str, int] | None, label: str, limit: float) -> d
                 "import asyncio,sys\n"
                 "from websockets.asyncio.client import connect\n"
                 "async def m():\n"
-                f"    async with connect('ws://127.0.0.1:{port}/rpc', additional_headers={{'Authorization':'Bearer {TOKEN}'}}, ping_interval=None) as ws:\n"
+                f"    async with connect('ws://127.0.0.1:{port}/rpc',"
+                f" additional_headers={{'Authorization':'Bearer {TOKEN}'}},"
+                " ping_interval=None) as ws:\n"
                 "        print('up', flush=True)\n"
                 "        await asyncio.sleep(3600)\n"
                 "asyncio.run(m())\n",
@@ -182,8 +184,8 @@ async def main() -> None:
     short = {
         "ping_interval_ms": 500,
         "pong_timeout_ms": 2000,
-        "keepalive_idle_ms": 1000,
-        "keepalive_interval_ms": 500,
+        "keepalive_idle_secs": 1,
+        "keepalive_interval_secs": 1,
         "keepalive_probes": 2,
     }
     res: dict[str, Any] = {}

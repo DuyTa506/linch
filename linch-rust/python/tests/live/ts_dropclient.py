@@ -1,4 +1,5 @@
-"""A client process the toolsec tests SIGKILL: it opens an agent on a listening server and runs once.
+"""A client process the toolsec tests SIGKILL: it opens an agent on a listening server and runs
+once.
 
 Usage: python ts_dropclient.py ADDRESS TOKEN CONFIG_JSON_FILE [remote]
 

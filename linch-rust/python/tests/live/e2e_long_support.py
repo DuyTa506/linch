@@ -63,7 +63,7 @@ class Tee:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def log_message(self, *_a: Any) -> None:
+            def log_message(self, format: str, *args: Any) -> None:
                 pass
 
             def do_GET(self) -> None:
@@ -75,7 +75,11 @@ class Tee:
 
             def _go(self, body: bytes | None) -> None:
                 t0 = time.time()
-                rec: dict[str, Any] = {"ts": round(t0, 3), "path": self.path, "method": self.command}
+                rec: dict[str, Any] = {
+                    "ts": round(t0, 3),
+                    "path": self.path,
+                    "method": self.command,
+                }
                 if body:
                     try:
                         rec["body"] = json.loads(body)

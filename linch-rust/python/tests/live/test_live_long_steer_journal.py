@@ -7,17 +7,20 @@ from typing import Any
 
 import pytest
 from e2e_long_support import dump
-from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_pg
+from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_pg, needs_vllm
 from live_sched_support import pg_dsn, query
 
 from linch_rust import ToolCallStartEvent, UserEvent, tool
 
 __all__ = ["pg_dsn"]
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, needs_vllm]
 
 LIVE: Live = ONLY_VLLM[0].values[0]  # type: ignore[assignment]
-PROMPT = "Call the slow_task tool. When it returns, follow any new instruction, then answer in one short sentence."
+PROMPT = (
+    "Call the slow_task tool. When it returns, follow any new instruction, "
+    "then answer in one short sentence."
+)
 
 
 @needs_pg

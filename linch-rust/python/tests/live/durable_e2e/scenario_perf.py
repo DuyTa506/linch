@@ -44,7 +44,7 @@ def make_tool() -> Any:
 
 def scripted_config(
     dsn: str | None, turns: list[dict[str, Any]], ns: str = "perf", ttl: int = 60000
-) -> dict[str, Any]:
+) -> Any:
     c: dict[str, Any] = {
         "namespace": ns,
         "spec": {"model": MODEL, "max_turns": 20},
@@ -58,7 +58,8 @@ def scripted_config(
 def stat() -> tuple[int, int]:
     with psycopg.connect(h.PG_DSN, autocommit=True) as c:
         row = c.execute(
-            "SELECT xact_commit, xact_rollback FROM pg_stat_database WHERE datname = current_database()"
+            "SELECT xact_commit, xact_rollback FROM pg_stat_database WHERE datname = "
+            "current_database()"
         ).fetchone()
         assert row is not None
         return int(row[0]), int(row[1])
@@ -106,12 +107,12 @@ async def commits() -> dict[str, Any]:
             with h.schema() as dsn:
                 async with Server() as server:
                     agent = await server.open_agent(
-                        scripted_config(dsn, turns), tools=[make_tool()]
+                        scripted_config(dsn, turns),
+                        tools=[make_tool()],
                     )
                     await settle()
                     s0 = stat()
                     table_stats(schema_of(dsn))
-                    idle0 = time.time()
                     await asyncio.sleep(4.0)  # idle control, same agent open
                     await settle()
                     s_idle = stat()
@@ -171,7 +172,7 @@ async def resume_latency(reps: int) -> dict[str, Any]:
             config = scripted_config(dsn, [text_turn("ok")], ttl=1000)
             holder: dict[str, Any] = {"pid": None, "armed": True}
 
-            def make_cb(kill: bool) -> Any:
+            def make_cb(kill: bool, holder: dict[str, Any]) -> Any:
                 @callback("before_provider_call", "bpc", 1)
                 async def bpc(req: dict[str, Any]) -> dict[str, Any]:
                     if kill and holder["armed"]:
@@ -184,7 +185,7 @@ async def resume_latency(reps: int) -> dict[str, Any]:
 
             async with Server() as s1:
                 holder["pid"] = s1.pid
-                agent = await s1.open_agent(config, callbacks=[make_cb(True)])
+                agent = await s1.open_agent(config, callbacks=[make_cb(True, holder)])  # pyright: ignore[reportArgumentType]
                 run = await agent.run("s1", "go")
                 try:
                     await asyncio.wait_for(run.result(), 30)
@@ -193,13 +194,11 @@ async def resume_latency(reps: int) -> dict[str, Any]:
             await asyncio.sleep(1.6)  # the lease (1 s) is over: the resume does not wait for it
             t0 = time.time()
             async with Server() as s2:
-                t_spawn = time.time()
-                agent2 = await s2.open_agent(config, callbacks=[make_cb(False)])
+                agent2 = await s2.open_agent(config, callbacks=[make_cb(False, holder)])  # pyright: ignore[reportArgumentType]
                 t_open = time.time()
                 r2 = await agent2.resume(run.id)
-                t_call = time.time()
                 first = None
-                async for env in r2:
+                async for _env in r2:
                     first = time.time()
                     break
                 result = await r2.result()
@@ -256,7 +255,7 @@ async def throughput(reps: int) -> dict[str, Any]:
                         dsn if store == "postgres" else None, [text_turn("ok")] * 30
                     )
                     async with Server() as server:
-                        agent = await server.open_agent(cfg)
+                        agent = await server.open_agent(cfg)  # pyright: ignore[reportArgumentType]
                         await one_batch(agent, 2, 1, "warm")
                         dt = await one_batch(agent, 20, conc, f"b{rep}")
                         vals.append(dt)
@@ -276,7 +275,8 @@ async def throughput(reps: int) -> dict[str, Any]:
 
 
 async def overhead(reps: int) -> dict[str, Any]:
-    """The same 3-tool-turn run (4 provider calls, 3 tool calls) on memory and on Postgres, one at a time."""
+    """The same 3-tool-turn run (4 provider calls, 3 tool calls) on memory and on Postgres, one at "
+    "a time."""
     out: dict[str, Any] = {"load": h.load(), "binary": os.environ["LINCH_SERVER_BIN"]}
     turns = [
         tool_turn(f"c{r}-{i}", "lookup", {"topic": f"t{r}-{i}"}) if i < 3 else text_turn("done")
@@ -285,11 +285,11 @@ async def overhead(reps: int) -> dict[str, Any]:
     ]
     res: dict[str, list[float]] = {"memory": [], "postgres": []}
     for store in ("memory", "postgres"):
-        for rep in range(reps):
+        for _rep in range(reps):
             with h.schema() as dsn:
                 cfg = scripted_config(dsn if store == "postgres" else None, turns)
                 async with Server() as server:
-                    agent = await server.open_agent(cfg, tools=[make_tool()])
+                    agent = await server.open_agent(cfg, tools=[make_tool()])  # pyright: ignore[reportArgumentType]
                     await (await agent.run("warm", "go")).result()
                     for i in range(10):
                         t0 = time.time()

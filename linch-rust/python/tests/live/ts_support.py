@@ -43,9 +43,7 @@ from linch_rust.scripted import MODEL, text_turn, tool_turn
 pytestmark = pytest.mark.live
 
 RESULTS = Path(
-    os.environ.get(
-        "TOOLSEC_RESULTS", "/home/aiqk3/Desktop/duy_dev/linch-agent-scratch/e2e/results/toolsec"
-    )
+    os.environ.get("TOOLSEC_RESULTS", Path(tempfile.gettempdir()) / "linch-live-e2e" / "toolsec")
 )
 PG_DSN = os.environ.get("LINCH_TEST_PG_DSN", "")
 VLLM_URL = os.environ.get("LINCH_TEST_VLLM_URL", "")
