@@ -249,6 +249,56 @@ fn ten_test_runs_between_ten_edits_are_not_a_loop() {
     }
 }
 
+/// The same fix-and-test loop when the test prints the same failure every
+/// time (3 tests failing, whatever the patch): each patch changed what the
+/// next run would find, so an identical answer after it is no repeat, and
+/// neither is a read that answers as it did.
+#[test]
+fn identical_test_results_between_patches_are_not_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    for n in 0..200 {
+        once(&mut watch, "Edit", json!({"n": n}), "ok");
+        let test = json!({"command": "cargo test"});
+        once(&mut watch, "Bash", test, "3 tests failing");
+        once(&mut watch, "Read", json!({"path": "src/lib.rs"}), "same");
+        assert!(watch.tool_trip().is_none(), "{n}: {:?}", watch.tool_trip());
+    }
+}
+
+/// With no patch between, the same call with the same result is the loop at
+/// the third, exec or not.
+#[test]
+fn the_same_exec_result_with_no_patch_between_trips_at_three() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    let test = json!({"command": "cargo test"});
+    for _ in 0..2 {
+        once(&mut watch, "Bash", test.clone(), "3 tests failing");
+        assert!(watch.tool_trip().is_none());
+    }
+    once(&mut watch, "Bash", test, "3 tests failing");
+    let trip = watch.tool_trip().unwrap();
+    assert!(
+        trip.detail.contains("same result 3 time(s)"),
+        "{}",
+        trip.detail
+    );
+}
+
+/// A patch that failed changed nothing: the identical results before it
+/// stand.
+#[test]
+fn a_failed_patch_does_not_clear_the_same_result_count() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    let test = json!({"command": "cargo test"});
+    for n in 0..2 {
+        once(&mut watch, "Bash", test.clone(), "3 tests failing");
+        watch.see(&calling(&[("Edit", json!({"n": n}))]));
+        watch.see(&answered(&[("no match", true)]));
+    }
+    once(&mut watch, "Bash", test, "3 tests failing");
+    assert!(watch.tool_trip().is_some());
+}
+
 /// A write or exec call clears what was asked before it only with an input
 /// it has not had lately, and never its own count: the same test command run
 /// again and again with no edit between still ends the run, whatever its

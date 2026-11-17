@@ -181,6 +181,22 @@ lần kill trả về 256 KiB cuối của mỗi stream, và chỉ kèm `exit` k
 dọn. Một lệnh không ai đọc trong `idle_timeout` giây (120) bị kill và bị quên: server
 poll mỗi giây khi nó còn kết nối.
 
+Cái gì chết khi nào, với `SubprocessHost` (mỗi lần kill là cả process group):
+
+| Chuyện gì xảy ra | Cái gì chết |
+| --- | --- |
+| Một lệnh tự kết thúc | những gì nó để lại đang chạy trong group của nó |
+| Timeout của lệnh, hoặc cancel | lệnh đó, bằng `exec.kill` |
+| `close_session`, `close`, kết nối thoát sạch | mọi lệnh của agent hoặc kết nối đó |
+| Server chết | mọi lệnh của kết nối của nó (kết nối kết thúc) |
+| Client chết, kể cả bằng `SIGKILL` | mọi lệnh nó đã bắt đầu: mỗi lệnh có một process canh chừng đọc một pipe mà chỉ client giữ, và kill group khi pipe đóng |
+| Không ai đọc một lệnh trong `idle_timeout` giây | lệnh đó |
+
+Process canh chừng là một `/bin/sh` chỉ chạy các lệnh builtin của shell, nên không cần
+`PATH` và không cần dependency; nó đứng trong một session riêng và kết thúc cùng lệnh.
+Một host của riêng bạn sống lâu hơn client (một phiên SSH, một API sandbox) phải tự làm
+điều tương tự: server không thể dừng một lệnh khi client của nó đã mất.
+
 Khác biệt so với `RemoteExecutionBackend` của Python Linch: Python gộp một remote shell
 và một remote filesystem và chạy cả hai trong thế giới của host; ở đây lớp tệp ở lại
 trên server và bị giữ lại trừ khi workspace được dùng chung. `run(command, cwd, timeout,

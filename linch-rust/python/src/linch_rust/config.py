@@ -435,7 +435,8 @@ class LoopGuard(TypedDict, total=False):
         max_identical_tool_calls: Calls of one tool with the same input
             and the same result, not an error, that end the run; the one
             that reaches it runs first. A call whose result changed is
-            progress. 3 when absent, 0 never.
+            progress, and so is any call asked before a write or exec call
+            that succeeded with a new input. 3 when absent, 0 never.
         max_identical_inputs: Calls of one tool with the same input among
             the latest 50, whatever their results, that end the run (a
             tool that polls is not counted). 10 when absent, 0 never.

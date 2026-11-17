@@ -274,8 +274,8 @@ class CompactionEvent:
     with no model call. `forced` is true when the provider's refusal of a
     prompt as too long caused it, rather than the view reaching the trigger.
     `rejected` is set when a summary was not applied (the counts then show an
-    unchanged view): a code, `tool_call`, `empty` or `not_smaller` (the whole
-    checkpoint is no smaller than the part it replaces), then what follows (the
+    unchanged view): a code, `tool_call`, `empty` or `not_smaller` (the view with
+    the whole checkpoint in it is estimated no smaller than the view now), then what follows (the
     next due turn asks again, asks again once the view has grown, or the run ends).
     """
 

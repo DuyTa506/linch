@@ -34,7 +34,7 @@ Linch bản Python có cùng cấu trúc ([compaction](../../../../docs/architec
 - Một bản tóm tắt đã trả phí được giữ nguyên vẹn trong checkpoint `Compacted`, không
   phải dưới dạng một công thức chỉ chứa hash. Một lần resume nối nó vào mà không cần
   lời gọi provider nào nữa
-  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:303-318`).
+  (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:309-324`).
 - Projection luôn được ghi vào session store dưới dạng một log entry
   (`runner/write.rs:83-98`). Không có phát hiện store và không có opt-in.
 
@@ -108,7 +108,7 @@ placeholder và không chứa ảnh (phép thử của Python, `compaction.rs:32
 sao chép.
 
 Nếu view đã xóa không còn đến hạn, `clear` ghi lại nó và lượt tiếp tục với lời gọi chính
-(`runner/compact.rs:359-402`):
+(`runner/compact.rs:365-408`):
 
 1. `pre_compact` chạy với strategy `micro`.
 2. Event `compaction` (strategy `micro`, `messages_before` bằng `messages_after`) được
@@ -174,9 +174,13 @@ Lời gọi kết thúc với một receipt. Usage của nó được tính và 
 ### Khi không có bản tóm tắt
 
 Một câu trả lời bị từ chối, và không được áp dụng, khi nó gọi một tool, rỗng, hoặc ước
-lượng của toàn bộ checkpoint mà nó sẽ tạo ra không nhỏ hơn phần mà nó sẽ thay thế
-(`compaction::rejection`; đo cả message: phần đầu, văn bản của model, phần nguyên văn, các
-reminder của skill và các thay đổi catalog được nhắc lại). Receipt có disposition `rejected`;
+lượng của view mà nó sẽ để lại không nhỏ hơn view mà nó thay thế
+(`compaction::rejection`). Hai con số này chính là `tokens_before` và `tokens_after` mà event
+`compaction` báo: message đầu, toàn bộ checkpoint (phần đầu, văn bản của model, phần nguyên
+văn, các reminder của skill và các thay đổi catalog được nhắc lại) và các lượt được giữ.
+Ước lượng là số ký tự chia bốn, nên một checkpoint ít hơn phần nó thay thế vài ký tự vẫn có
+thể để view ở cùng một ước lượng; đó không phải là tiết kiệm và bị từ chối, nên một lần nén
+được chấp nhận luôn có `tokens_after < tokens_before`. Receipt có disposition `rejected`;
 view giữ nguyên như cũ, và một event `compaction` với số đếm trước và sau bằng nhau cùng một
 lý do `rejected` được ghi ở mọi lần từ chối: mã (`tool_call`, `empty`, `not_smaller`), rồi
 điều xảy ra tiếp theo, "the next due turn asks again" ở đầu một lượt, "asks again once the
@@ -185,13 +189,17 @@ liên tiếp, hoặc "the prompt still does not fit, so the run ends" với bả
 Không thử lại trong cùng lượt.
 
 Một model không bao giờ cho ra bản tóm tắt dùng được sẽ không bị hỏi ở mọi lượt đến hạn
-(`compaction::Rejections`). Sau `REJECTIONS_BEFORE_HOLD` (2) lần từ chối liên tiếp, bất kể mã
-nào, một lượt đến hạn sẽ không hỏi cho tới khi view ước lượng đã lớn thêm
-`window / HOLD_GROWTH_DIVISOR` (một phần mười context window của model) kể từ lần hỏi bị
-từ chối gần nhất; lần từ chối kế tiếp lại giữ từ kích thước mới, và một bản tóm tắt được
-chấp nhận (bắt buộc hay không) xóa bộ đếm. Bản tóm tắt bắt buộc, theo sau một lần provider
+(`compaction::Rejections`). Một bản tóm tắt được áp dụng nhưng để view vẫn đến hạn
+(`compaction::due` trên `tokens_after` của event: ngưỡng kích hoạt thấp hơn trọng lượng của
+checkpoint cộng các lượt được giữ, nên lượt kế tiếp lại đến hạn) được tính như một lần từ
+chối: nó đã trả phí và không đổi điều gì mà ngưỡng nhìn thấy được. Sau
+`REJECTIONS_BEFORE_HOLD` (2) lần như vậy liên tiếp, bất kể mã nào, một lượt đến hạn sẽ không
+hỏi cho tới khi view ước lượng đã lớn thêm `window / HOLD_GROWTH_DIVISOR` (một phần mười
+context window của model) kể từ lần gần nhất; lần kế tiếp lại giữ từ kích thước mới, và một
+bản tóm tắt (bắt buộc hay không) để view dưới ngưỡng xóa bộ đếm. Hai bản tóm tắt đầu của một
+run như vậy vẫn được áp dụng: chỉ những lần hỏi sau đó phải chờ. Bản tóm tắt bắt buộc, theo sau một lần provider
 từ chối, không bao giờ bị giữ. Bộ đếm được đọc lại từ các event `compaction` bền vững của run
-khi resume, nên một lần crash không gỡ việc giữ. Bộ đếm là của riêng run: mỗi run mới trên
+khi resume (một event bị từ chối, hoặc một event được áp dụng mà `tokens_after` vẫn đến hạn), nên một lần crash không gỡ việc giữ. Bộ đếm là của riêng run: mỗi run mới trên
 một session bắt đầu từ không. Biên là một phần mười window bất kể `threshold_tokens` (một
 model mà provider báo window 0 có biên 1 token, tức không giữ gì). Hai lần hỏi là bằng chứng rằng model sẽ không
 làm được trên prefix này, mỗi lần là một request đầy đủ prefix trả phí vô ích; một phần mười
@@ -217,8 +225,8 @@ message user của phần đã gộp, được harness sao chép nguyên văn (m
 cho mỗi token), không bao giờ quá một nửa ước lượng của phần đã gộp, và không bao giờ quá
 phần còn lại của phần đã gộp sau khi trừ phần đầu, văn bản của model và các block đuôi
 (reminder của skill, thay đổi catalog được nhắc lại): các block nguyên văn và marker của
-chúng co lại cho vừa. Quy tắc luôn đúng: toàn bộ checkpoint được ước lượng nhỏ hơn phần đã
-gộp, nếu không bản tóm tắt bị từ chối với `not_smaller` (ở trên); nên một checkpoint không
+chúng co lại cho vừa. Quy tắc luôn đúng: toàn bộ view còn lại được ước lượng nhỏ hơn view trước đó,
+nếu không bản tóm tắt bị từ chối với `not_smaller` (ở trên); nên một checkpoint không
 bao giờ lớn hơn thứ nó thay thế, và với một window nhỏ hơn `keep_user_tokens` cộng output của
 bản tóm tắt thì nó không bao giờ vượt window mà phần đã gộp vừa trong đó. Message không vừa
 thì bị cắt với `[truncated]` (được tính vào phép vừa, không tính vào hai mức trần) và các
@@ -239,22 +247,22 @@ cũng đọc.
 Một bản tóm tắt được chấp nhận trở thành một message của user và một view thay thế:
 
 1. `summary_message` mở đầu văn bản bằng `<summary of earlier conversation>`, để model
-   đọc nó như một bản tóm lược (`compaction.rs:106, 568-587`). Khi redaction che response,
+   đọc nó như một bản tóm lược (`compaction.rs:106, 581-600`). Khi redaction che response,
    văn bản tóm tắt được che trước.
 2. Khi skill được bật, message còn mang một `<system-reminder>` chứa nội dung của từng
    skill mà model đã nạp trong session, vì bản tóm tắt đã gộp các kết quả tool của chúng
    đi (`crates/linch-core/src/skills.rs`).
 3. Nếu session có catalog, một thông báo nhắc lại mọi thay đổi catalog của session.
 4. `replacement` là message đầu tiên như cũ, bản tóm tắt, rồi các message từ `keep_from`
-   trở đi (`compaction.rs:676-688`).
+   trở đi (`compaction.rs:692-704`).
 
 Sau đó run stage event `compaction` (số message và token trước và sau, chiến lược, thời
 lượng, `forced`) và lưu `Compacted` cùng bản tóm tắt và `keep_from`
-(`runner/compact.rs:262-297`, `crates/linch-core/src/events/kinds/control.rs`).
+(`runner/compact.rs:265-303`, `crates/linch-core/src/events/kinds/control.rs`).
 `Compacted` ghi write-through cùng receipt và `usage`, nên một bản tóm tắt đã trả phí
 không bao giờ bị mất.
 
-Tiếp theo, `compacted` ghi projection vào session (`runner/compact.rs:303-318`).
+Tiếp theo, `compacted` ghi projection vào session (`runner/compact.rs:309-324`).
 `project` flush checkpoint đang giữ, nối một `LogEntry::Projection` vào session store
 trong một lần ghi, ghi nó vào log trong bộ nhớ, rồi chạy các callback `on_compact` của
 agent (`runner/write.rs:83-98`). Checkpoint `Compacted` đã bền vững, nên lần flush
@@ -285,7 +293,7 @@ phí, như mọi lần từ chối kiểu đó (`provider/call.rs:257`). `kind` 
 `context_length`.
 
 `dispatch` hỏi `overflow` trước khi coi lỗi là cuối cùng
-(`runner/turn.rs:591`, `runner/compact.rs:326-358`):
+(`runner/turn.rs:591`, `runner/compact.rs:332-364`):
 
 1. Với `micro`, nếu có kết quả tool cũ nào đáng xóa, `clear` ghi lại view đã xóa (với
    `forced` được đặt trên event) và chuyển sang attempt chính kế tiếp của lượt.
@@ -367,7 +375,7 @@ Request mà model nhận được sau một lần compaction được dựng t�
 | Phần | Nguồn |
 |---|---|
 | Các block system và tool | Prefix đã đóng băng của session, từng byte một (`session_log.rs:53-60`) |
-| Message đầu tiên | Message đầu tiên của view, không đổi (`compaction.rs:676-688`) |
+| Message đầu tiên | Message đầu tiên của view, không đổi (`compaction.rs:692-704`) |
 | Bản tóm tắt | Message user `summary` cùng các reminder và thông báo catalog của nó |
 | Các lượt được giữ | `keep_recent_turns` lượt assistant cuối và những gì theo sau chúng |
 | Các message sau đó | Được nối sau projection khi run tiếp tục |
@@ -403,7 +411,7 @@ response gọi tool bắt đầu một chuỗi phần mới.
 
 Không có gì mới được checkpoint. `Truncated::of` đọc lại số lần thử và các phần đang chờ
 từ các event bền vững `assistant` và `user`: một câu trả lời bị cắt được tính khi phản
-hồi của nó đã bền vững (`truncation.rs`, `runner/start.rs:526-528`).
+hồi của nó đã bền vững (`truncation.rs`, `runner/start.rs:537-539`).
 
 ## Test
 

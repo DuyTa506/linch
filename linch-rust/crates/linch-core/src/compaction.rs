@@ -424,11 +424,14 @@ impl Forced {
     }
 }
 
-/// Consecutive rejected summaries after which a run stops asking at every
-/// due turn. A model that answered a summary request with a tool call, a
-/// blank or a reply no smaller than the folded part will usually do it
-/// again on the same prefix, and each ask is a full-prefix request paid for
-/// nothing; two in a row is the evidence that it is not a one-off.
+/// Consecutive useless summaries after which a run stops asking at every
+/// due turn: rejected ones, and applied ones that leave the view still due.
+/// A model that answered a summary request with a tool call, a blank or a
+/// reply that does not shrink the view will usually do it again on the same
+/// prefix, and a view that is still over the trigger after a summary (a
+/// trigger below what the kept turns and the checkpoint weigh) is due again
+/// next turn: each ask is a full-prefix request paid for nothing, and two in
+/// a row is the evidence that it is not a one-off.
 pub(crate) const REJECTIONS_BEFORE_HOLD: u32 = 2;
 
 /// Once held, a run asks again after its view has grown by one tenth of the
@@ -437,45 +440,53 @@ pub(crate) const REJECTIONS_BEFORE_HOLD: u32 = 2;
 /// forces a summary whatever the hold.
 pub(crate) const HOLD_GROWTH_DIVISOR: u64 = 10;
 
-/// The rejected summaries a run asked for in a row, read from its
-/// `compaction` events (so a resumed run holds as the first one did): after
-/// [`REJECTIONS_BEFORE_HOLD`] of them the run does not ask at a turn's start
-/// until the view has grown by a margin ([`HOLD_GROWTH_DIVISOR`]), or an
-/// accepted summary clears the count. A forced summary is never held.
+/// The useless summaries a run asked for in a row, read from its
+/// `compaction` events (so a resumed run holds as the first one did): a
+/// summary is useless when it was rejected, or applied and left a view that
+/// is still due. After [`REJECTIONS_BEFORE_HOLD`] of them the run does not
+/// ask at a turn's start until the view has grown by a margin
+/// ([`HOLD_GROWTH_DIVISOR`]); a summary that leaves the view under the
+/// trigger clears the count. A forced summary is never held.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Rejections {
-    /// Rejected summaries since the last accepted one.
+    /// Useless summaries since the last one that was not.
     streak: u32,
-    /// The estimated view at the last rejected ask.
+    /// The estimated view the last useless summary left.
     at_tokens: u64,
 }
 
 impl Rejections {
-    /// What the summary `compaction` events of `events` say.
-    pub(crate) fn of(events: &[Envelope]) -> Self {
+    /// What the summary `compaction` events of `events` say; `due` tells
+    /// whether a view of that many tokens is due for a summary.
+    pub(crate) fn of(events: &[Envelope], due: impl Fn(u64) -> bool) -> Self {
         let mut rejections = Self::default();
         for envelope in events {
             if let Event::Compaction(event) = &envelope.event
                 && event.strategy == STRATEGY
             {
                 match event.rejected {
-                    Some(_) => rejections.rejected(event.tokens_before),
-                    None => rejections = Self::default(),
+                    Some(_) => rejections.rejected(event.tokens_after),
+                    None => rejections.applied(event.tokens_after, due(event.tokens_after)),
                 }
             }
         }
         rejections
     }
 
-    /// A summary asked for at a view of `tokens` was rejected.
+    /// A summary asked for was rejected and left the view at `tokens`.
     pub(crate) fn rejected(&mut self, tokens: u64) {
         self.streak += 1;
         self.at_tokens = tokens;
     }
 
-    /// A summary was accepted.
-    pub(crate) fn accepted(&mut self) {
-        *self = Self::default();
+    /// A summary was applied and left a view of `tokens`, `still_due` or
+    /// not. A view that is still due makes the next turn ask again for what
+    /// is no help: it counts as a rejection.
+    pub(crate) fn applied(&mut self, tokens: u64, still_due: bool) {
+        match still_due {
+            true => self.rejected(tokens),
+            false => *self = Self::default(),
+        }
     }
 
     /// Whether the run is holding off: enough rejections in a row, and a
@@ -543,20 +554,22 @@ fn is_summary(message: &Message) -> bool {
 
 /// Why a summary reply is not used, or `None` when it is: `called` a tool
 /// (a reply of a summary request that offers the tools), no `text`, or a
-/// whole `checkpoint` message (the summary, the verbatim blocks, the
-/// reminders) no smaller, estimated, than the `folded` messages it would
-/// replace, so applying it would not shorten the view.
+/// compacted view (the first message, the whole checkpoint, the kept turns)
+/// whose estimate, `tokens_after`, is no smaller than the view's,
+/// `tokens_before`, so applying it would not shorten the view. These are the
+/// two numbers the `compaction` event reports, so what the event says
+/// is what was checked.
 pub(crate) fn rejection(
     called: bool,
     text: &str,
-    checkpoint: &Message,
-    folded: &[Arc<Message>],
+    tokens_before: u64,
+    tokens_after: u64,
 ) -> Option<&'static str> {
     if called {
         Some("tool_call")
     } else if text.is_empty() {
         Some("empty")
-    } else if estimate_tokens(&[Arc::new(checkpoint.clone())]) >= estimate_tokens(folded) {
+    } else if tokens_after >= tokens_before {
         Some("not_smaller")
     } else {
         None
@@ -577,9 +590,10 @@ pub(crate) fn summary_message(text: &str) -> Message {
 /// The rule that keeps it from outgrowing what it replaces: the verbatim
 /// blocks take at most `keep_user_tokens`, at most half of the folded
 /// part's estimate, and no more than what is left of the folded part after
-/// the header, the `text` and the `tail`, markers included. So the whole
-/// message is estimated smaller than the folded part whenever those three
-/// alone are; when they are not, [`rejection`] measures the whole message
+/// the header, the `text` and the `tail`, markers included, and a whole
+/// token short of it, so the view around it cannot round the saving away.
+/// So the whole message is estimated smaller than the folded part whenever
+/// those three alone are; when they are not, [`rejection`] measures the whole view
 /// and rejects the summary as `not_smaller`. The first message that does
 /// not fit is cut with `[truncated]` and the older ones are dropped. A
 /// checkpoint of an earlier compaction in `folded` hands over its blocks,
@@ -593,12 +607,14 @@ pub(crate) fn checkpoint(
 ) -> Message {
     let mut message = summary_message(text);
     let replaced = estimate_tokens(folded);
-    // The estimate is characters / 4: under 4 * replaced characters is
-    // under `replaced` tokens.
+    // The estimate is characters / 4: a whole token under `replaced` is
+    // 4 * replaced - 4 characters at most, which leaves the view smaller
+    // whatever its other messages add (one character fewer could round to
+    // the same estimate, and [`rejection`] would discard the paid summary).
     let fit = usize::try_from(replaced)
         .unwrap_or(usize::MAX)
         .saturating_mul(4)
-        .saturating_sub(1);
+        .saturating_sub(4);
     let rest = (message.content.iter().chain(&tail))
         .map(counted_chars)
         .sum::<usize>();
