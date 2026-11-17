@@ -184,7 +184,8 @@ A user-role message entered the conversation.
 | Field | What it is |
 |---|---|
 | `message` | `{"role": "user", "content": [blocks]}` |
-| `subtype` | `prompt` (your prompt), `tool_result` (the results of a tool batch), `notification` (a runtime notice, such as a background worker finishing, or a hook's feedback that takes another turn) or `alignment` |
+| `subtype` | `prompt` (your prompt), `tool_result` (the results of a tool batch), `notification` (a runtime notice, such as a background worker finishing, or a hook's feedback that takes another turn) or `alignment` (a [steer](./runs.md#steer): text you sent to the run) |
+| `steer_id` | On `alignment`: the id `steer` returned. Absent otherwise |
 
 ### `AssistantEvent` (`assistant`)
 

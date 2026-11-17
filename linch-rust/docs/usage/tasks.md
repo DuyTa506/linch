@@ -174,6 +174,44 @@ update the coordinator's task ids.
 
 ---
 
+## A ledger that outlives sessions
+
+Tasks belong to one session, so a session that starts with an empty
+conversation starts with no tasks, and the model sees them only if it calls
+`TaskList`. For an agent that works in many sessions (see
+[Long-running agents](./long-running.md)) turn the list into a ledger:
+
+```python
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": "deepseek-flash"},
+    "provider": {"id": "deepseek"},
+    "tasks": True,
+    "task_ledger": {"list": "report-ledger"},
+    "stores": {"type": "postgres", "dsn": "postgres://..."},
+}
+```
+
+- Every session of the agent then reads and writes the one list
+  `list`, instead of one per session. The list is stored as an empty
+  session of the namespace, so pick an id no run uses as its session id.
+- Each request carries the list's open tasks (`#id [status] subject`, in id
+  order, then a count of the completed ones) as extra context after the
+  conversation, read again for every request. It is never logged, so
+  compaction cannot summarise it away, and the cached prefix is untouched.
+  `max_chars` (4000 when absent, at least 200) bounds it; open tasks past it
+  are named as a count.
+- The block comes from a `context_build` hook with the policy id
+  `linch.tasks.ledger-context`. `spec.context_budget` counts it like any
+  context block: list that id in `pinned` so a budget never drops it.
+- It is off by default; an agent without `task_ledger` writes and sends
+  exactly what it did before.
+- With memory stores the ledger lives in the server's memory. With Postgres
+  it survives compaction, a new session, a restart and a crash (the same
+  rows `TaskCreate` and `TaskUpdate` write, one transaction each).
+
+---
+
 ## Related pages
 
 - [Subagents](./subagents.md): child runs and their sessions

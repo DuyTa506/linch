@@ -67,7 +67,8 @@ Server ─────── one linch-server child process, or a connection to 
 | [Khắc phục sự cố](./troubleshooting.md) | Các lỗi từ server binary đến run và tool, cùng nguyên nhân và cách khắc phục |
 | [Skill](./skills.md) | Tool `Skill`, skill `verify` tích hợp sẵn, các skill trong `config_dir/skills` |
 | [Subagent](./subagents.md) | Tool `Subagent`: worker foreground và background, continue, stop, fork, mailbox |
-| [Task](./tasks.md) | Các tool task của session |
+| [Task](./tasks.md) | Các tool task của session, và ledger task dùng chung giữa các session |
+| [Agent chạy dài](./long-running.md) | Điều khác đi với một agent chạy hàng giờ: hợp đồng mục tiêu, ledger task, artifact, steer, một lần kiểm tra hoàn thành độc lập, mẫu harness |
 | [Deep agent](./deep-agent.md) | Preset `deep_agent` và các profile của nó |
 | [Profile](./profiles.md) | Domain profile có phiên bản cho các run của một agent |
 | [Observability](./observability.md) | Span và metric OpenTelemetry từ client |

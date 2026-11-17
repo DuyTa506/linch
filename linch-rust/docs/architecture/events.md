@@ -41,7 +41,8 @@ encoding.
 |---|---|---|---|---|
 | `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in. The start's carries the run's own `output_schema` and `tool_choice`, and its final tool's name (`final_tool`), which a resume reads back |
 | `schedule_fire` | `ScheduleFireEvent`, `kinds/lifecycle.rs` | yes | yes | A run a worker started for a schedule fire: the `schedule_id` and the `fire_at_ms` it was due, staged right after `init` in the same write, so no write is added. Any other run has none. A resume does not repeat it; it stays in `run.events` |
-| `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
+| `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment` (a steer, with `steer_id`), `notification` |
+| `steer_received` | `SteerReceivedEvent`, `kinds/lifecycle.rs` | no | yes | `steer_id`, `text`: a steer the run accepted, written and flushed before the caller is answered; the `alignment` event with the same id marks it delivered. A run rebuilds what is pending from these two (`runner/steer.rs`) |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
 | `usage` | `UsageEvent`, `kinds/control.rs:13` | yes | yes | |
