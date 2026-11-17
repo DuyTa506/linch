@@ -82,9 +82,12 @@ pub struct CompactionEvent {
     pub forced: bool,
     /// Why a summary was not applied, then what follows, after a colon:
     /// `tool_call` (the reply called a tool), `empty`, or `not_smaller`
-    /// (no smaller than the part it would replace). At a turn's start the
-    /// next due turn asks again; a forced summary ends the run. The counts
-    /// show an unchanged view. Omitted when the compaction was applied.
+    /// (the whole checkpoint, verbatim messages and reminders included, no
+    /// smaller than the part it would replace). At a turn's start the
+    /// next due turn asks again, from the second rejection in a row once the
+    /// view has grown by a tenth of the context window or the provider
+    /// refuses the prompt; a forced summary ends the run. The counts show an
+    /// unchanged view. Omitted when the compaction was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
 }

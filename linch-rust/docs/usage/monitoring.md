@@ -56,8 +56,9 @@ USD per million tokens. A model is matched on its exact id.
 OpenAI, Gemini and DeepSeek models, and every model a local server (vLLM,
 SGLang, llama.cpp) serves. Python Linch has no rates for them either. A run
 with several models adds only its priced calls; a run with none priced has
-`total_cost_usd: None`. A USD `budget` cannot bind a model without a price, so
-a token cap is the guard there.
+`total_cost_usd: None`. An agent with a USD `budget` and a model without a price
+does not open (`-32011`, naming the model): price the model with `pricing`, or
+use a token cap.
 
 **Price a model yourself** with `pricing` in the agent config. It is per
 agent, by exact model id, and replaces the table for that model or adds one it

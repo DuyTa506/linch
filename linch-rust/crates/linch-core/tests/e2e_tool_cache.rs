@@ -21,8 +21,8 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, InMemoryToolCache, JsonObject, Lookup,
-    LoopGuard, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy, PutLimits,
-    RunId, RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, Tool, ToolCache,
+    LoopGuard, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy, Principal,
+    PutLimits, RunId, RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, Tool, ToolCache,
     ToolCacheError, ToolCacheStore, ToolContext, ToolOutput, ToolOutputError, ToolRegistry,
     ToolResult, ToolScope,
 };
@@ -1018,4 +1018,65 @@ async fn caching_that_stops_for_a_failed_clear_is_logged_once() {
     let lines = log.matches("the tool cache stopped for an agent").count();
     assert_eq!(lines, 1, "{log}");
     assert!(log.contains("WARN"), "{log}");
+}
+
+/// A read tool that answers for the run's principal, as `MemorySearch` does
+/// (a principal's memories are its own).
+struct Whoami {
+    schema: JsonObject,
+}
+
+#[async_trait]
+impl Tool for Whoami {
+    fn name(&self) -> &str {
+        "Whoami"
+    }
+    fn description(&self) -> &str {
+        "The user the run acts for."
+    }
+    fn input_schema(&self) -> &JsonObject {
+        &self.schema
+    }
+    fn scope(&self) -> ToolScope {
+        ToolScope::Read
+    }
+    async fn execute(&self, _input: JsonObject, ctx: ToolContext) -> ToolResult {
+        let user = ctx.principal.as_ref().map_or("nobody", Principal::user);
+        Ok(ToolOutput::new(user.to_owned()))
+    }
+}
+
+/// RED: the key has no principal, so with `scope: namespace` a result one
+/// principal's run stored is served to another principal's run of the same
+/// namespace.
+#[tokio::test]
+async fn a_cached_result_is_never_served_to_another_principal() {
+    for scope in ["namespace"] {
+        let shared: Arc<dyn ToolCacheStore> = Arc::new(InMemoryToolCache::new());
+        let mut seen = Vec::new();
+        for (session, user) in ["s1", "s2"].into_iter().zip(["alice", "bob"]) {
+            let schema = json!({"type": "object", "properties": {"value": {"type": "string"}}});
+            let whoami = Whoami {
+                schema: schema.as_object().unwrap().clone(),
+            };
+            let agent = agent_of(
+                scoped_tools(&["Whoami"], Some(scope)),
+                vec![Arc::new(whoami)],
+                script(&["Whoami"]),
+                &shared,
+                Hooks::default(),
+            );
+            let mut options = RunOptions::new(session);
+            options.principal = Some(Principal::new("acme", user, Vec::<String>::new()).unwrap());
+            let events = finish(agent.run("go", options)).await;
+            let answer = (events.iter())
+                .find_map(|envelope| match &envelope.event {
+                    Event::ToolCallEnd(end) => serde_json::to_value(&end.result).ok(),
+                    _ => None,
+                })
+                .expect("the tool call ended");
+            seen.push(answer["content"][0]["text"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(seen, ["alice", "bob"], "scope {scope}");
+    }
 }

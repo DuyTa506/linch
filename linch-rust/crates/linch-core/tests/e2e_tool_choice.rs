@@ -694,6 +694,39 @@ async fn a_named_choice_the_turn_does_not_offer_falls_back_to_auto() {
     assert_eq!(dropped, [None, Some(json!("Write")), None]);
 }
 
+/// `required` needs a tool to call: a `before_provider_call` hook that
+/// leaves the request with none would make every provider answer 400, so
+/// the turn goes out with no choice, and its `context_build` event says
+/// `required` was dropped.
+#[tokio::test]
+async fn a_required_choice_on_a_request_with_no_tool_is_dropped() {
+    let hooks = Hooks::default();
+    let strip = hook::<linch_core::hooks::BeforeProviderCall>("strip", |request| {
+        let mut request = request.request.clone();
+        request.tools.clear();
+        Ok(linch_core::hooks::BeforeProviderCallResponse::Rewrite {
+            request: Box::new(request),
+        })
+    });
+    let _ = hooks.before_provider_call.register(strip.arc()).unwrap();
+    let provider = Arc::new(ScriptedProvider::new([text_turn("done")]));
+    let mut spec = spec();
+    spec.tool_choice = Some(ToolChoice::Required {});
+    let stores = Arc::new(Stores::default());
+    let agent = final_agent(spec, provider.clone(), &Runs::default(), hooks, stores);
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let sent = provider.requests();
+    assert!(sent[0].tools.is_empty(), "the hook took the tools off");
+    assert_eq!(sent[0].tool_choice, None, "{:?}", sent[0].tool_choice);
+    let dropped: Vec<_> = (envelopes.iter())
+        .filter_map(|envelope| match &envelope.event {
+            Event::ContextBuild(build) => Some(build.metadata.get("tool_choice_dropped").cloned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dropped, [Some(json!("required"))]);
+}
+
 /// A `pre_tool_use` hook that blocks one `total`.
 fn veto_total(hooks: &Hooks, total: u64) {
     let veto = hook::<PreToolUse>("veto", move |request| {

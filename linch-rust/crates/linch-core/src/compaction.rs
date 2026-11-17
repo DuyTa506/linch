@@ -424,6 +424,77 @@ impl Forced {
     }
 }
 
+/// Consecutive rejected summaries after which a run stops asking at every
+/// due turn. A model that answered a summary request with a tool call, a
+/// blank or a reply no smaller than the folded part will usually do it
+/// again on the same prefix, and each ask is a full-prefix request paid for
+/// nothing; two in a row is the evidence that it is not a one-off.
+pub(crate) const REJECTIONS_BEFORE_HOLD: u32 = 2;
+
+/// Once held, a run asks again after its view has grown by one tenth of the
+/// model's context window since the last ask (the divisor): a few turns of
+/// growth is a changed prefix worth another try, and a refused prompt still
+/// forces a summary whatever the hold.
+pub(crate) const HOLD_GROWTH_DIVISOR: u64 = 10;
+
+/// The rejected summaries a run asked for in a row, read from its
+/// `compaction` events (so a resumed run holds as the first one did): after
+/// [`REJECTIONS_BEFORE_HOLD`] of them the run does not ask at a turn's start
+/// until the view has grown by a margin ([`HOLD_GROWTH_DIVISOR`]), or an
+/// accepted summary clears the count. A forced summary is never held.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Rejections {
+    /// Rejected summaries since the last accepted one.
+    streak: u32,
+    /// The estimated view at the last rejected ask.
+    at_tokens: u64,
+}
+
+impl Rejections {
+    /// What the summary `compaction` events of `events` say.
+    pub(crate) fn of(events: &[Envelope]) -> Self {
+        let mut rejections = Self::default();
+        for envelope in events {
+            if let Event::Compaction(event) = &envelope.event
+                && event.strategy == STRATEGY
+            {
+                match event.rejected {
+                    Some(_) => rejections.rejected(event.tokens_before),
+                    None => rejections = Self::default(),
+                }
+            }
+        }
+        rejections
+    }
+
+    /// A summary asked for at a view of `tokens` was rejected.
+    pub(crate) fn rejected(&mut self, tokens: u64) {
+        self.streak += 1;
+        self.at_tokens = tokens;
+    }
+
+    /// A summary was accepted.
+    pub(crate) fn accepted(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether the run is holding off: enough rejections in a row, and a
+    /// view of `tokens` that has not grown by the margin for `window`.
+    pub(crate) fn holds(&self, tokens: u64, window: u64) -> bool {
+        self.streak >= REJECTIONS_BEFORE_HOLD && tokens < self.at_tokens + Self::margin(window)
+    }
+
+    /// Tokens the view must grow by before the next ask.
+    pub(crate) fn margin(window: u64) -> u64 {
+        (window / HOLD_GROWTH_DIVISOR).max(1)
+    }
+
+    /// Whether the next rejection starts, or goes on with, the hold.
+    pub(crate) fn will_hold(&self) -> bool {
+        self.streak + 1 >= REJECTIONS_BEFORE_HOLD
+    }
+}
+
 /// The summary call, from `primary`: the request a primary call would send
 /// for the view before `keep_from`, so its system blocks, tools and messages
 /// are the bytes the prompt cache holds from the last primary call. Only
@@ -472,19 +543,20 @@ fn is_summary(message: &Message) -> bool {
 
 /// Why a summary reply is not used, or `None` when it is: `called` a tool
 /// (a reply of a summary request that offers the tools), no `text`, or a
-/// `summary` message no smaller, estimated, than the `folded` messages it
-/// would replace, so applying it would not shorten the view.
+/// whole `checkpoint` message (the summary, the verbatim blocks, the
+/// reminders) no smaller, estimated, than the `folded` messages it would
+/// replace, so applying it would not shorten the view.
 pub(crate) fn rejection(
     called: bool,
     text: &str,
-    summary: &Message,
+    checkpoint: &Message,
     folded: &[Arc<Message>],
 ) -> Option<&'static str> {
     if called {
         Some("tool_call")
     } else if text.is_empty() {
         Some("empty")
-    } else if estimate_tokens(&[Arc::new(summary.clone())]) >= estimate_tokens(folded) {
+    } else if estimate_tokens(&[Arc::new(checkpoint.clone())]) >= estimate_tokens(folded) {
         Some("not_smaller")
     } else {
         None
@@ -499,38 +571,77 @@ pub(crate) fn summary_message(text: &str) -> Message {
 
 /// The checkpoint that replaces the `folded` turns: the model's summary
 /// `text`, then the user messages of `folded` copied verbatim, newest
-/// first (a block each), up to `keep_user_tokens` and never more than half
-/// of the folded part's estimate, so the checkpoint cannot outgrow what it
-/// replaces. The first message that does not fit is cut with `[truncated]`
-/// (the marker is not counted) and the older ones are dropped. A checkpoint
-/// of an earlier compaction in `folded` hands over its blocks, which are
-/// older than every message after it. The view's first message stays as it
-/// was, so `folded` starts after it.
-pub(crate) fn checkpoint(text: &str, folded: &[Arc<Message>], keep_user_tokens: u32) -> Message {
+/// first (a block each), then the `tail` blocks (skill reminders, restated
+/// catalog changes).
+///
+/// The rule that keeps it from outgrowing what it replaces: the verbatim
+/// blocks take at most `keep_user_tokens`, at most half of the folded
+/// part's estimate, and no more than what is left of the folded part after
+/// the header, the `text` and the `tail`, markers included. So the whole
+/// message is estimated smaller than the folded part whenever those three
+/// alone are; when they are not, [`rejection`] measures the whole message
+/// and rejects the summary as `not_smaller`. The first message that does
+/// not fit is cut with `[truncated]` and the older ones are dropped. A
+/// checkpoint of an earlier compaction in `folded` hands over its blocks,
+/// which are older than every message after it. The view's first message
+/// stays as it was, so `folded` starts after it.
+pub(crate) fn checkpoint(
+    text: &str,
+    folded: &[Arc<Message>],
+    keep_user_tokens: u32,
+    tail: Vec<ContentBlock>,
+) -> Message {
     let mut message = summary_message(text);
-    let tokens = (estimate_tokens(folded) / 2).min(u64::from(keep_user_tokens));
+    let replaced = estimate_tokens(folded);
+    // The estimate is characters / 4: under 4 * replaced characters is
+    // under `replaced` tokens.
+    let fit = usize::try_from(replaced)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4)
+        .saturating_sub(1);
+    let rest = (message.content.iter().chain(&tail))
+        .map(counted_chars)
+        .sum::<usize>();
+    let mut spare = fit.saturating_sub(rest);
+    let tokens = (replaced / 2).min(u64::from(keep_user_tokens));
     let mut room = usize::try_from(tokens)
         .unwrap_or(usize::MAX)
         .saturating_mul(4);
     for original in folded.iter().rev().flat_map(|m| user_texts(m)) {
-        if room == 0 {
+        let body = spare.saturating_sub(VERBATIM_MARK.len());
+        if room == 0 || body == 0 {
             break;
         }
-        let text = if original.len() <= room {
+        let text = if original.len() <= room.min(body) {
             original
         } else {
-            let mut end = room;
+            let mut end = room.min(body.saturating_sub(TRUNCATED.len()));
             while !original.is_char_boundary(end) {
                 end -= 1;
+            }
+            if end == 0 {
+                break;
             }
             format!("{}{TRUNCATED}", &original[..end])
         };
         room = room.saturating_sub(text.len());
+        spare = body.saturating_sub(text.len());
         message
             .content
             .push(ContentBlock::text(format!("{VERBATIM_MARK}{text}")));
     }
+    message.content.extend(tail);
     message
+}
+
+/// Characters `estimate_tokens` counts in a block of a checkpoint, which
+/// holds text and catalog changes only.
+fn counted_chars(block: &ContentBlock) -> usize {
+    match block {
+        ContentBlock::Text(text) => text.text.len(),
+        ContentBlock::CatalogChange(change) => change.text.len(),
+        _ => 0,
+    }
 }
 
 /// What of `message` a checkpoint carries, newest first: a user message's

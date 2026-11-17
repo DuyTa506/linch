@@ -43,7 +43,9 @@ pub struct RunBudget {
     /// Most tokens the tree may spend, all four usage buckets summed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// Most USD the tree may spend, by the agent's pricing.
+    /// Most USD the tree may spend, by the agent's pricing. The agent does
+    /// not build when its model has no price, and a run ends with a
+    /// `BudgetAccountingError` on a call served by a model that has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost_usd: Option<f64>,
     /// Fraction of either cap at which the one warning fires (default 0.9).
@@ -83,6 +85,8 @@ pub(crate) struct Spent {
     pub(crate) warned: bool,
     /// A call's usage is unknown.
     pub(crate) unknown: bool,
+    /// A call has usage and no cost: a cost cap cannot count it.
+    pub(crate) unpriced: bool,
 }
 
 impl Spent {
@@ -105,7 +109,10 @@ impl Spent {
         match receipt.usage {
             Some(usage) => {
                 self.tokens = self.tokens.saturating_add(tokens(&usage));
-                self.usd += receipt.cost_usd.unwrap_or(0.0);
+                match receipt.cost_usd {
+                    Some(cost) => self.usd += cost,
+                    None => self.unpriced = true,
+                }
             }
             None => self.unknown |= receipt.disposition != CallDisposition::NotDispatched,
         }
@@ -118,6 +125,7 @@ impl Spent {
             usd: self.usd + other.usd,
             warned: self.warned || other.warned,
             unknown: self.unknown || other.unknown,
+            unpriced: self.unpriced || other.unpriced,
         }
     }
 }
@@ -135,6 +143,8 @@ pub(crate) enum Refusal {
     Exceeded(BudgetEvent),
     /// A capped budget cannot account for a call of the tree.
     Unknown,
+    /// A cost cap cannot count a call the pricing has no rate for.
+    Unpriced,
 }
 
 impl Refusal {
@@ -152,6 +162,12 @@ impl Refusal {
             Self::Unknown => json!({
                 "name": "BudgetAccountingError",
                 "message": "budget cannot admit a call after unknown use",
+                "retryable": false,
+            }),
+            Self::Unpriced => json!({
+                "name": "BudgetAccountingError",
+                "message": "max_cost_usd cannot count a call the pricing has no price for; \
+                            set a price for the model that served it or cap max_tokens",
                 "retryable": false,
             }),
         };
@@ -221,6 +237,9 @@ impl Meter {
             || (limits.max_cost_usd).is_some_and(|max| spent.usd >= max);
         if exceeded {
             return Some(Refusal::Exceeded(self.event(BudgetKind::Exceeded, &spent)));
+        }
+        if limits.max_cost_usd.is_some() && spent.unpriced {
+            return Some(Refusal::Unpriced);
         }
         (limits.capped() && spent.unknown).then_some(Refusal::Unknown)
     }

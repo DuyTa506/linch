@@ -214,14 +214,14 @@ is not made and the run fails with `TurnLimitError` (`runner/end.rs:138-154`).
 
 ### The loop guard
 
-`spec.loop_guard` (`loop_guard.rs:105`) ends a run that is stuck, with
+`spec.loop_guard` (`loop_guard.rs:111`) ends a run that is stuck, with
 `max_turns` unset as well. It is on by default; the default is left off the
 wire, so it does not change the contract of a spec that does not set it.
 
 | Check | Default | Trips | Checked |
 |---|---|---|---|
 | `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again | At `Step::Results`, after the batch's results are appended (`turn.rs:326`) |
-| `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. Off the wire at 10 | Same |
+| `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. A write or exec call (any tool of that scope) that succeeds with an input new among the latest 50 such calls clears the count of every other call, never its own. Off the wire at 10 | Same |
 | `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
 | `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:454`) |
 
@@ -247,7 +247,20 @@ failing are the failure streak's. The same call count looks at the latest
 20 results, so a status read now and then in a long run is no loop, and the
 second count, Python's rule (which counts a tool's identical inputs over the
 whole run, results and failures included, at its limit of 3) loosened to 10
-among the latest 50 inputs.
+among the latest 50 inputs. A successful result of a write or exec tool
+(`registry.rs` `writes()`, read from the agent's tools) clears every other
+call's slot in that window (`Recent::keep_only`) when its own input is new in
+a second, never cleared window of write and exec successes (`mutations`),
+because what it changed makes a later identical call a new question: ten test
+runs between ten edits are no loop. A repeated write or exec input changed
+nothing, so the same call run again and again, a cycle of 2, 3 or 5 exec calls,
+and an edit and its undo with a test run after each, all keep their counts and
+trip at 10. A failed write clears nothing.
+
+What the window cannot see: a cycle of more than 5 distinct calls whose results
+change every time never puts 10 of one call in 50, so only `max_turns` and the
+budget (both unset by default) end it; a polling tool whose answer changes every
+time is kept out of both counts and is bounded by those two alone.
 
 A tool whose `polls()` is true (`tool.rs:279`; `BashOutput`, a host tool
 with `polls`, an MCP tool in the server's `polls`) waits on something that
@@ -263,7 +276,7 @@ journal sink and is read back from the log on a resume like the rest.
 Python's `force_final_answer` (one more turn with no tools) is not ported:
 a trip stops.
 
-Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:270`)
+Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:296`)
 folds the run's durable events: an `assistant` event names the calls of its
 response, a `tool_call_end` event says whether a poll's command is done
 (`poll_done` in its metadata, for the tools that poll, which the runner reads

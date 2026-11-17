@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use linch_core::JsonValue;
+use linch_core::{JsonValue, Principal};
 use tokio_util::sync::CancellationToken;
 
 use super::context::{EventSink, LiveGate, WorkflowContext};
@@ -79,6 +79,12 @@ pub struct WorkflowOptions {
     /// until the call ends. A host that meters live work (places, a cap on
     /// calls in flight) goes here.
     pub live_gate: Option<LiveGate>,
+    /// Who the workflow's agent calls act for: it is the principal of every
+    /// call's run, so permission rules keyed on its roles apply. It is
+    /// stored with the workflow, and a resume must name the same one
+    /// (`JournalStoreError::PrincipalMismatch` otherwise). `None`: the
+    /// calls act for nobody.
+    pub principal: Option<Principal>,
 }
 
 impl WorkflowOptions {
@@ -104,6 +110,7 @@ impl WorkflowOptions {
             max_records: None,
             max_record_bytes: None,
             live_gate: None,
+            principal: None,
         }
     }
 }
@@ -161,7 +168,9 @@ impl WorkflowSession {
         let (namespace, id) = (&options.namespace, &options.workflow_id);
         // Read before the claim, which sets the status to running.
         let before = journal.load(namespace, id).await?;
-        let lease = journal.claim(namespace, id).await?;
+        let lease = journal
+            .claim(namespace, id, options.principal.as_ref())
+            .await?;
         let stored = journal.load(namespace, id).await?;
         let previous = before.map(|run| run.status);
         let awaiting = match &previous {

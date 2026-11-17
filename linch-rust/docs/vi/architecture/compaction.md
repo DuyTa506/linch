@@ -174,12 +174,28 @@ Lời gọi kết thúc với một receipt. Usage của nó được tính và 
 ### Khi không có bản tóm tắt
 
 Một câu trả lời bị từ chối, và không được áp dụng, khi nó gọi một tool, rỗng, hoặc ước
-lượng của nó không nhỏ hơn phần mà nó sẽ thay thế (`compaction::rejection`; đo văn bản của
-model, không tính phần đầu hay phần nguyên văn). Receipt có disposition `rejected`; view
-giữ nguyên như cũ, và một event `compaction` với số đếm trước và sau bằng nhau cùng một lý
-do `rejected` được ghi: mã (`tool_call`, `empty`, `not_smaller`), rồi điều xảy ra tiếp theo,
-"the next due turn asks again" ở đầu một lượt hoặc "the prompt still does not fit, so the
-run ends" với bản tóm tắt bắt buộc. Không thử lại trong cùng lượt.
+lượng của toàn bộ checkpoint mà nó sẽ tạo ra không nhỏ hơn phần mà nó sẽ thay thế
+(`compaction::rejection`; đo cả message: phần đầu, văn bản của model, phần nguyên văn, các
+reminder của skill và các thay đổi catalog được nhắc lại). Receipt có disposition `rejected`;
+view giữ nguyên như cũ, và một event `compaction` với số đếm trước và sau bằng nhau cùng một
+lý do `rejected` được ghi ở mọi lần từ chối: mã (`tool_call`, `empty`, `not_smaller`), rồi
+điều xảy ra tiếp theo, "the next due turn asks again" ở đầu một lượt, "asks again once the
+view has grown by N tokens, or when the provider refuses the prompt" từ lần từ chối thứ hai
+liên tiếp, hoặc "the prompt still does not fit, so the run ends" với bản tóm tắt bắt buộc.
+Không thử lại trong cùng lượt.
+
+Một model không bao giờ cho ra bản tóm tắt dùng được sẽ không bị hỏi ở mọi lượt đến hạn
+(`compaction::Rejections`). Sau `REJECTIONS_BEFORE_HOLD` (2) lần từ chối liên tiếp, bất kể mã
+nào, một lượt đến hạn sẽ không hỏi cho tới khi view ước lượng đã lớn thêm
+`window / HOLD_GROWTH_DIVISOR` (một phần mười context window của model) kể từ lần hỏi bị
+từ chối gần nhất; lần từ chối kế tiếp lại giữ từ kích thước mới, và một bản tóm tắt được
+chấp nhận (bắt buộc hay không) xóa bộ đếm. Bản tóm tắt bắt buộc, theo sau một lần provider
+từ chối, không bao giờ bị giữ. Bộ đếm được đọc lại từ các event `compaction` bền vững của run
+khi resume, nên một lần crash không gỡ việc giữ. Bộ đếm là của riêng run: mỗi run mới trên
+một session bắt đầu từ không. Biên là một phần mười window bất kể `threshold_tokens` (một
+model mà provider báo window 0 có biên 1 token, tức không giữ gì). Hai lần hỏi là bằng chứng rằng model sẽ không
+làm được trên prefix này, mỗi lần là một request đầy đủ prefix trả phí vô ích; một phần mười
+window là vài lượt tăng trưởng, một prefix đã đổi đáng để thử lại.
 
 Ở đầu một lượt, một lời gọi thất bại, trả lời không có văn bản, hoặc bị từ chối, không
 gây lỗi nghiêm trọng. Lượt tiếp tục mà không compact, với lời gọi chính. Receipt và
@@ -198,9 +214,15 @@ Message thay thế các lượt đã gộp là một checkpoint (`compaction::ch
 tiên là phần đầu của bản tóm tắt và bản tóm tắt của model; các block sau nó là các
 message user của phần đã gộp, được harness sao chép nguyên văn (mỗi block bắt đầu bằng
 `[user message, verbatim]`), mới nhất trước, tối đa `keep_user_tokens` (khoảng bốn ký tự
-cho mỗi token) và không bao giờ quá một nửa ước lượng của phần đã gộp, để checkpoint không
-lớn hơn thứ nó thay thế (message không vừa thì bị cắt với `[truncated]`, không được tính, và
-các message cũ hơn bị bỏ).
+cho mỗi token), không bao giờ quá một nửa ước lượng của phần đã gộp, và không bao giờ quá
+phần còn lại của phần đã gộp sau khi trừ phần đầu, văn bản của model và các block đuôi
+(reminder của skill, thay đổi catalog được nhắc lại): các block nguyên văn và marker của
+chúng co lại cho vừa. Quy tắc luôn đúng: toàn bộ checkpoint được ước lượng nhỏ hơn phần đã
+gộp, nếu không bản tóm tắt bị từ chối với `not_smaller` (ở trên); nên một checkpoint không
+bao giờ lớn hơn thứ nó thay thế, và với một window nhỏ hơn `keep_user_tokens` cộng output của
+bản tóm tắt thì nó không bao giờ vượt window mà phần đã gộp vừa trong đó. Message không vừa
+thì bị cắt với `[truncated]` (được tính vào phép vừa, không tính vào hai mức trần) và các
+message cũ hơn bị bỏ.
 Kết quả tool và các message `<system-reminder>` không phải lời của user nên không được
 sao chép. Codex giữ tối đa 20k token message user gần đây và opencode 15k; model không cần
 trích dẫn một chỉ dẫn để nó sống sót qua một bản tóm tắt.

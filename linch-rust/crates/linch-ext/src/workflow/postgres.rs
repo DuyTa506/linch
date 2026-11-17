@@ -9,11 +9,12 @@
 use std::future::Future;
 
 use async_trait::async_trait;
+use linch_core::Principal;
 use sqlx::PgPool;
 
 use super::journal::{
     Interrupt, JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowHold,
-    WorkflowRun, WorkflowStatus,
+    WorkflowRun, WorkflowStatus, principal_text,
 };
 
 /// A [`JournalStore`] backed by Postgres.
@@ -106,21 +107,32 @@ impl JournalStore for PgJournalStore {
         &self,
         namespace: &str,
         workflow_id: &str,
+        principal: Option<&Principal>,
     ) -> Result<JournalLease, JournalStoreError> {
-        let epoch: i64 = retried(|| {
+        let principal = principal_text(principal);
+        // A claim naming another principal updates no row, so it returns
+        // none: the workflow is left as it was.
+        let epoch: Option<i64> = retried(|| {
             sqlx::query_scalar(
-                "INSERT INTO linch_ext_workflows (namespace, workflow_id, status, epoch) \
-                 VALUES ($1, $2, 'running', 1) \
+                "INSERT INTO linch_ext_workflows (namespace, workflow_id, status, epoch, principal) \
+                 VALUES ($1, $2, 'running', 1, $3) \
                  ON CONFLICT (namespace, workflow_id) DO UPDATE \
                  SET epoch = linch_ext_workflows.epoch + 1, status = 'running', interrupt = NULL \
+                 WHERE linch_ext_workflows.principal IS NOT DISTINCT FROM $3 \
                  RETURNING epoch",
             )
             .bind(namespace)
             .bind(workflow_id)
-            .fetch_one(&self.pool)
+            .bind(&principal)
+            .fetch_optional(&self.pool)
         })
         .await
         .map_err(backend)?;
+        let Some(epoch) = epoch else {
+            return Err(JournalStoreError::PrincipalMismatch {
+                workflow_id: workflow_id.to_owned(),
+            });
+        };
         Ok(JournalLease {
             namespace: namespace.to_owned(),
             workflow_id: workflow_id.to_owned(),

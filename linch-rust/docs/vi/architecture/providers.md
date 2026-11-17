@@ -530,7 +530,10 @@ Tính giá là opt-in trên agent: `AgentBuilder::pricing`
 `Fn(&str, &Usage) -> Option<f64>`. Crate `linch` truyền
 `linch_providers::cost` (`crates/linch/src/open.rs:143`). Khi một receipt có
 usage, runner tính giá theo model đã phục vụ lời gọi, nếu không thì theo model của
-agent (`crates/linch-core/src/runner/write.rs:107`). Một giá bị thiếu
+agent (`crates/linch-core/src/runner/write.rs:107`). `AgentBuilder::build` từ chối một
+`budget.max_cost_usd` khi pricing không có giá hữu hạn cho model của spec
+(`BuildError::Invalid`, mà `agent.open` báo là `-32011`), và một run có nó sẽ kết thúc
+bằng `BudgetAccountingError` ở lời gọi có usage mà không có giá. Một giá bị thiếu
 hoặc không hữu hạn vẫn là `None` (`crates/linch-core/src/agent.rs:141`), và tổng
 của một run chỉ cộng các lời gọi có giá. Chi phí xuất hiện dưới dạng `cost_usd` trên
 receipt và các event `Usage` và `total_cost_usd` trên `Result`. Bảng giá không phải

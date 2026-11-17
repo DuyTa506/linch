@@ -659,11 +659,129 @@ async fn a_reply_that_is_not_a_summary_is_rejected_and_the_run_goes_on() {
             })
             .collect();
         assert_eq!(reports.len(), 2, "{why}");
-        for report in reports {
+        for (n, report) in reports.into_iter().enumerate() {
             let reason = report.rejected.as_deref().unwrap();
-            assert_eq!(reason, format!("{why}: the next due turn asks again"));
+            match n {
+                0 => assert_eq!(reason, format!("{why}: the next due turn asks again")),
+                // The second in a row starts the hold.
+                _ => assert!(
+                    reason.starts_with(&format!("{why}: asks again once the view has grown")),
+                    "{why}: {reason}"
+                ),
+            }
             assert_eq!(report.messages_before, report.messages_after);
             assert_eq!(report.tokens_before, report.tokens_after);
+        }
+    }
+}
+
+/// A window below `keep_user_tokens` plus the summary's output, the default
+/// spec (the trigger follows the window): every accepted summary leaves a
+/// view smaller than the one it replaced and under the window.
+#[tokio::test]
+async fn on_a_tiny_window_a_compaction_never_leaves_a_view_over_it() {
+    let stores = Arc::new(Stores::default());
+    let window = 3000;
+    let provider = Arc::new(Keyed {
+        turns: big_script(12),
+        window,
+        ..Keyed::answering()
+    });
+    let mut spec = spec();
+    spec.compaction = Some(CompactionSpec {
+        keep_recent_turns: 1,
+        ..CompactionSpec::default()
+    });
+    assert!(
+        window < 15_000 + 4096,
+        "below keep_user_tokens + max_output"
+    );
+    let runs = Runs::default();
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let permissions = policy(PermissionMode::SkipDangerous);
+    let agent = agent_with(spec, provider, tools, permissions, stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+    assert_eq!(status(&stores, &run_id).await, RunStatus::Completed);
+    let accepted: Vec<_> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::Compaction(c) if c.rejected.is_none() => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert!(!accepted.is_empty(), "the window forced compactions");
+    for report in accepted {
+        assert!(report.tokens_after < report.tokens_before, "{report:?}");
+        assert!(report.tokens_after < window, "{report:?}");
+    }
+}
+
+/// A model that never gives a usable summary must not be paid for one on
+/// every turn of a long run: a rejected summary is asked again only after
+/// a backoff or up to a cap (the number is the fix's choice; it must be
+/// well under the 10 due turns).
+#[tokio::test]
+async fn a_summary_that_is_always_rejected_is_not_bought_every_turn() {
+    for summary in [Summary::Tool, Summary::Long, Summary::Blank] {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Keyed {
+            turns: big_script(10),
+            summary,
+            ..Keyed::answering()
+        });
+        let agent = compacting_agent(provider.clone(), &Runs::default(), stores.clone());
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        finish(stream).await;
+        assert_eq!(status(&stores, &run_id).await, RunStatus::Completed);
+        let calls: u32 = (provider.calls.lock().unwrap().iter())
+            .filter(|(key, _)| key.starts_with("summary"))
+            .map(|(_, n)| n)
+            .sum();
+        assert!(
+            calls <= 3,
+            "{calls} summary calls in 10 turns, all rejected"
+        );
+    }
+}
+
+/// The hold on a rejected summary is read back from the durable events: a
+/// run that crashes after its second rejection and resumes does not go back
+/// to asking at every due turn.
+#[tokio::test]
+async fn a_crash_does_not_lift_the_hold_on_a_rejected_summary() {
+    let script = || {
+        Arc::new(Keyed {
+            turns: big_script(10),
+            summary: Summary::Tool,
+            ..Keyed::answering()
+        })
+    };
+    let clean = Arc::new(Stores::default());
+    let agent = compacting_agent(script(), &Runs::default(), clean.clone());
+    finish(agent.run("go", RunOptions::new("s1"))).await;
+    let writes = clean.log.lock().unwrap().len() as u64;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let stores = Arc::new(Stores::default());
+            let provider = script();
+            let runs = Runs::default();
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let stream =
+                compacting_agent(provider.clone(), &runs, faulty).run("go", RunOptions::new("s1"));
+            let run_id = stream.run_id().clone();
+            assert!(drain(stream).await.1.is_some(), "{context}");
+            let resumed = compacting_agent(provider.clone(), &runs, stores.clone());
+            let run_id = recover(&resumed, &stores, run_id).await;
+            assert_eq!(status(&stores, &run_id).await, RunStatus::Completed);
+            let calls: u32 = (provider.calls.lock().unwrap().iter())
+                .filter(|(key, _)| key.starts_with("summary"))
+                .map(|(_, n)| n)
+                .sum();
+            // Two asks, and one more when the crash lost an answer.
+            assert!(calls <= 3, "{context}: {calls} summary calls");
         }
     }
 }

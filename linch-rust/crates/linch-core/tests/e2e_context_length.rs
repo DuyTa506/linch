@@ -414,6 +414,49 @@ async fn a_refusal_nothing_shortens_ends_the_run_with_the_refusal() {
     }
 }
 
+/// Refuses a prompt whose system blocks alone are over 10000 characters.
+fn big_system(request: &ProviderRequest) -> bool {
+    request
+        .system
+        .iter()
+        .map(|block| block.text.len())
+        .sum::<usize>()
+        > 10_000
+}
+
+/// The context budget counts only what `context_build` adds, so an oversize
+/// system prompt (sections, here) is caught by the provider alone: the run
+/// ends `failed` with the provider's own refusal after one call, and no
+/// summary is bought for a view that was never the problem.
+#[tokio::test]
+async fn an_oversize_system_prompt_ends_the_run_with_the_refusal() {
+    for compaction in [None, summarizing(), micro()] {
+        let context = format!("{compaction:?}");
+        let stores = Arc::new(Stores::default());
+        let provider = Window::new(big_system);
+        let mut spec = spec();
+        spec.compaction = compaction;
+        spec.system.sections = vec![linch_core::SystemSection::new("policy", "p".repeat(20_000))];
+        let runs = Runs::default();
+        let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+        let permissions = policy(PermissionMode::SkipDangerous);
+        let agent = agent_with(spec, provider.clone(), tools, permissions, stores.clone());
+        let (run_id, events) = run(&agent, &stores).await;
+        assert_eq!(
+            status(&stores, &run_id).await,
+            RunStatus::Failed,
+            "{context}"
+        );
+        assert_eq!(provider.calls("summary"), 0, "{context}");
+        assert_eq!(provider.calls("refused"), 1, "{context}");
+        assert_eq!(
+            error_of(&events).unwrap()["kind"],
+            "context_length",
+            "{context}"
+        );
+    }
+}
+
 /// `max_forced` bounds the forced summaries of a whole run.
 #[tokio::test]
 async fn forced_summaries_stop_at_the_run_bound() {

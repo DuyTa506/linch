@@ -889,10 +889,13 @@ config["spec"] = {
 | `scope` | `"session"` | `"session"`: an entry serves only the session that stored it. `"namespace"`: every session of the namespace shares entries |
 
 **What is a key.** The agent's `namespace`, the session (with the default
-`scope`), the tool name and the canonical input. A read tool may answer per
-session (a session's own files, its shell's home), so by default one
-session never gets another's result; `scope: "namespace"` shares entries
-and is your promise that the tool answers alike for everyone. Entries
+`scope`), the run's principal (tenant and user, when it has one), the tool
+name and the canonical input. A read tool may answer per session (a
+session's own files, its shell's home) or per principal (`MemorySearch`
+reads the principal's own memories), so by default one session never gets
+another's result and no `scope` serves one principal another's;
+`scope: "namespace"` shares entries across the sessions of one principal and
+is your promise that the tool answers alike for them. Entries
 never cross namespaces. A write or exec call clears the whole namespace,
 every session's entries, and `max_entries` counts the whole namespace. The
 tool registry has no tool version or digest, so the key has none either:

@@ -516,11 +516,13 @@ pub(super) async fn continue_run(
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
     runner.verify_retries = crate::verification::retries_spent(&events);
-    let polls = runner.agent.snapshot().polls();
-    runner.watch = Watch::of(&runner.agent.spec.loop_guard, polls, &events);
+    let snapshot = runner.agent.snapshot();
+    let (polls, writes) = (snapshot.polls(), snapshot.writes());
+    runner.watch = Watch::of(&runner.agent.spec.loop_guard, polls, writes, &events);
     runner.gates = (runner.agent.gates.clone()).map(|rules| Gates::of(rules, &events));
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
+    runner.rejections = crate::compaction::Rejections::of(&events);
     if let Some(truncation) = &runner.agent.spec.truncation_recovery {
         let spent = Truncated::of(&events, &truncation.reminder());
         runner.truncations = spent.attempts;

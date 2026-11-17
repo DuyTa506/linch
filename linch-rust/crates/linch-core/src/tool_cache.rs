@@ -24,12 +24,14 @@
 //!   as the tool returned it**, secrets included; a tenant server refuses
 //!   a cache without that redaction.
 //! - **The key** is the agent's namespace, the session
-//!   ([`CacheScope::Session`], the default), the tool name and the
-//!   canonical digest of the input. Read-scope tools may answer per session
-//!   (a session's own files, its shell's home), so the default never serves
-//!   one session another's result; [`CacheScope::Namespace`] shares entries
-//!   across sessions, which is a promise that the tool answers the same
-//!   for the same input whoever asks. The registry has no tool version or
+//!   ([`CacheScope::Session`], the default), the run's principal (tenant and
+//!   user, when it has one), the tool name and the canonical digest of the
+//!   input. Read-scope tools may answer per session (a session's own files,
+//!   its shell's home) or per principal (its memories), so the default never
+//!   serves one session another's result and no scope serves one principal
+//!   another's; [`CacheScope::Namespace`] shares entries across sessions of
+//!   the same principal, which is a promise that the tool answers the same
+//!   for the same input whoever asks within it. The registry has no tool version or
 //!   digest, so the key has none either: when a tool's behaviour changes
 //!   (a new deploy), old entries live until their TTL; clear the namespace
 //!   or change it. A tool that polls, asks the user, or says
@@ -94,6 +96,7 @@ use tokio::time::Instant;
 
 use crate::canonical::digest_with_domain;
 use crate::json::JsonObject;
+use crate::policy::Principal;
 use crate::tool::ToolOutput;
 
 /// Domain separator of a cache key's digest.
@@ -280,14 +283,23 @@ pub trait ToolCacheStore: Send + Sync {
 
 /// The cache key of a call: the digest of the session (for
 /// [`CacheScope::Session`]; `None` shares the key across sessions), the
+/// principal's tenant and user (`None` for a run that acts for nobody), the
 /// tool name and the canonical input. `None` when the input is too deep to
 /// digest, which makes the call uncacheable.
-pub fn cache_key(session: Option<&str>, tool_name: &str, input: &JsonObject) -> Option<String> {
-    let parts = match session {
-        Some(session) => json!([session, tool_name, input]),
-        None => json!([tool_name, input]),
-    };
-    let key = digest_with_domain(KEY_DOMAIN, &parts).ok()?;
+pub fn cache_key(
+    session: Option<&str>,
+    principal: Option<&Principal>,
+    tool_name: &str,
+    input: &JsonObject,
+) -> Option<String> {
+    let mut parts = Vec::with_capacity(4);
+    parts.extend(session.map(|session| json!(session)));
+    // A principal-aware read tool (a principal's memories are its own)
+    // answers per user, so no entry is shared across principals.
+    parts.extend(principal.map(|principal| json!([principal.tenant(), principal.user()])));
+    parts.push(json!(tool_name));
+    parts.push(json!(input));
+    let key = digest_with_domain(KEY_DOMAIN, &json!(parts)).ok()?;
     Some(key.to_string())
 }
 
@@ -509,12 +521,18 @@ mod tests {
         let a = json!({"x": 1, "y": [1, 2]});
         let b = json!({"y": [1, 2], "x": 1});
         let (a, b) = (a.as_object().unwrap(), b.as_object().unwrap());
-        assert_eq!(cache_key(None, "Grep", a), cache_key(None, "Grep", b));
-        assert_ne!(cache_key(None, "Grep", a), cache_key(None, "Glob", a));
+        assert_eq!(
+            cache_key(None, None, "Grep", a),
+            cache_key(None, None, "Grep", b)
+        );
+        assert_ne!(
+            cache_key(None, None, "Grep", a),
+            cache_key(None, None, "Glob", a)
+        );
         let other = json!({"x": 2, "y": [1, 2]});
         assert_ne!(
-            cache_key(None, "Grep", a),
-            cache_key(None, "Grep", other.as_object().unwrap())
+            cache_key(None, None, "Grep", a),
+            cache_key(None, None, "Grep", other.as_object().unwrap())
         );
     }
 
@@ -523,17 +541,31 @@ mod tests {
         let input = json!({"x": 1});
         let input = input.as_object().unwrap();
         assert_ne!(
-            cache_key(Some("s1"), "Grep", input),
-            cache_key(Some("s2"), "Grep", input)
+            cache_key(Some("s1"), None, "Grep", input),
+            cache_key(Some("s2"), None, "Grep", input)
         );
         assert_eq!(
-            cache_key(Some("s1"), "Grep", input),
-            cache_key(Some("s1"), "Grep", input)
+            cache_key(Some("s1"), None, "Grep", input),
+            cache_key(Some("s1"), None, "Grep", input)
         );
         assert_ne!(
-            cache_key(Some("s1"), "Grep", input),
-            cache_key(None, "Grep", input)
+            cache_key(Some("s1"), None, "Grep", input),
+            cache_key(None, None, "Grep", input)
         );
+    }
+
+    #[test]
+    fn a_principal_keys_its_entries_apart_and_none_is_the_unscoped_key() {
+        let input = json!({"x": 1});
+        let input = input.as_object().unwrap();
+        let alice = Principal::new("acme", "alice", ["r"]).unwrap();
+        let bob = Principal::new("acme", "bob", ["r"]).unwrap();
+        let other_tenant = Principal::new("beta", "alice", ["r"]).unwrap();
+        let key = |principal| cache_key(None, principal, "Grep", input);
+        assert_ne!(key(Some(&alice)), key(Some(&bob)));
+        assert_ne!(key(Some(&alice)), key(Some(&other_tenant)));
+        assert_ne!(key(Some(&alice)), key(None));
+        assert_eq!(key(Some(&alice)), key(Some(&alice)));
     }
 
     #[test]

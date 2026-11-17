@@ -228,11 +228,16 @@ fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     assert!(tokens > 9);
     let sized = |chars: usize| "x".repeat(chars);
     let check = |called, text: &str| {
-        let summary = Message::user_text(text);
-        rejection(called, text, &summary, folded)
+        let made = checkpoint(text, folded, 0, Vec::new());
+        rejection(called, text, &made, folded)
     };
-    assert_eq!(check(false, &sized(tokens * 4 - 4)), None);
-    assert_eq!(check(false, &sized(tokens * 4)), Some("not_smaller"));
+    // The whole checkpoint is measured, header included.
+    let header = SUMMARY_HEADER.len();
+    assert_eq!(check(false, &sized(tokens * 4 - header - 1)), None);
+    assert_eq!(
+        check(false, &sized(tokens * 4 - header)),
+        Some("not_smaller")
+    );
     assert_eq!(check(false, ""), Some("empty"));
     assert_eq!(check(true, "Let me look."), Some("tool_call"));
     assert_eq!(check(true, ""), Some("tool_call"));
@@ -272,7 +277,7 @@ fn the_checkpoint_matches_the_golden_cases() {
             .map(Arc::new)
             .collect();
         let tokens = case["keep_user_tokens"].as_u64().unwrap() as u32;
-        let made = checkpoint(case["summary"].as_str().unwrap(), &folded, tokens);
+        let made = checkpoint(case["summary"].as_str().unwrap(), &folded, tokens, vec![]);
         let expected: Message = serde_json::from_value(case["expected"].clone()).unwrap();
         assert_eq!(made, expected, "{}", case["name"]);
     }
@@ -291,7 +296,7 @@ fn a_second_compaction_carries_the_first_ones_user_messages_and_asks_for_an_upda
         user("never touch prod"),
         assistant.clone(),
     ];
-    let first = checkpoint("S1: nothing yet", &first_view[1..], 15_000);
+    let first = checkpoint("S1: nothing yet", &first_view[1..], 15_000, vec![]);
     let after_first = replacement(&first_view, first, 4);
     // Later turns, then a second compaction folds the first checkpoint.
     let mut second_view = after_first;
@@ -303,7 +308,7 @@ fn a_second_compaction_carries_the_first_ones_user_messages_and_asks_for_an_upda
         user("last"),
     ]);
     let keep = keep_from(&second_view, 1).expect("something to fold");
-    let second = checkpoint("S2: deploying", &second_view[1..keep], 15_000);
+    let second = checkpoint("S2: deploying", &second_view[1..keep], 15_000, vec![]);
     let verbatim: Vec<_> = (second.content.iter())
         .filter_map(|b| match b {
             ContentBlock::Text(t) => t.text.strip_prefix(VERBATIM_MARK),
@@ -356,7 +361,7 @@ fn the_verbatim_section_never_outgrows_the_folded_part() {
     ];
     let keep = keep_from(&view, 1).unwrap();
     let folded = &view[1..keep];
-    let made = checkpoint("short summary", folded, 15_000);
+    let made = checkpoint("short summary", folded, 15_000, vec![]);
     let blocks: Vec<_> = (made.content.iter())
         .filter_map(|b| match b {
             ContentBlock::Text(t) => t.text.strip_prefix(VERBATIM_MARK),
@@ -377,6 +382,139 @@ fn the_verbatim_section_never_outgrows_the_folded_part() {
         estimate_tokens(&compacted) < estimate_tokens(&view),
         "tokens_after is below tokens_before"
     );
+}
+
+/// A folded part of two big pastes and a question.
+fn pastes() -> Vec<Arc<Message>> {
+    let paste = |n: u8| Arc::new(Message::user_text(format!("{n}").repeat(2000)));
+    let reply = Arc::new(Message::assistant_text("a".repeat(400)));
+    let view = vec![
+        Arc::new(Message::user_text("go")),
+        paste(1),
+        reply.clone(),
+        paste(2),
+        reply.clone(),
+        Arc::new(Message::user_text("last question")),
+        reply,
+    ];
+    let keep = keep_from(&view, 1).unwrap();
+    view[1..keep].to_vec()
+}
+
+fn size_of(message: Message) -> u64 {
+    estimate_tokens(&[Arc::new(message)])
+}
+
+/// An accepted summary must leave a view smaller than the part it replaced:
+/// the saving is measured on the whole checkpoint, not on the model's text
+/// alone, or the verbatim section added after the check can make a
+/// compaction grow the view.
+#[test]
+fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
+    let folded = pastes();
+    let before = estimate_tokens(&folded);
+    // A summary just under the folded part's size is no saving once the
+    // header is counted: the whole checkpoint is what is measured.
+    let long = "s".repeat(before as usize * 4 - 8);
+    let made = checkpoint(&long, &folded, 15_000, Vec::new());
+    assert_eq!(rejection(false, &long, &made, &folded), Some("not_smaller"));
+    // Whatever the summary, an accepted checkpoint is smaller.
+    for chars in [100, 1000, 2000, 3000, 4000, 4300] {
+        let text = "s".repeat(chars);
+        let made = checkpoint(&text, &folded, 15_000, Vec::new());
+        let after = size_of(made.clone());
+        match rejection(false, &text, &made, &folded) {
+            None => assert!(after < before, "{chars}: {after} tokens for {before}"),
+            Some(why) => assert_eq!(why, "not_smaller", "{chars}"),
+        }
+    }
+    // A summary that leaves room still carries the user messages.
+    let roomy = checkpoint(&"s".repeat(1000), &folded, 15_000, Vec::new());
+    assert!(roomy.content.len() > 1);
+}
+
+/// The reminders and the restated catalog are part of the checkpoint: they
+/// take from the verbatim section's room, and a tail as big as the folded
+/// part makes the whole checkpoint a rejected one.
+#[test]
+fn the_tail_is_counted_in_the_fit() {
+    let folded = pastes();
+    let before = estimate_tokens(&folded);
+    let tail = |chars: usize| vec![ContentBlock::text("r".repeat(chars))];
+    let verbatim = |made: &Message| {
+        (made.content.iter())
+            .filter(|b| matches!(b, ContentBlock::Text(t) if t.text.starts_with(VERBATIM_MARK)))
+            .count()
+    };
+    let light = checkpoint("short", &folded, 15_000, tail(100));
+    let heavy = checkpoint("short", &folded, 15_000, tail(3500));
+    assert!(verbatim(&heavy) < verbatim(&light));
+    assert!(size_of(heavy) < before);
+    let over = checkpoint("short", &folded, 15_000, tail(before as usize * 4));
+    assert_eq!(verbatim(&over), 0);
+    assert_eq!(
+        rejection(false, "short", &over, &folded),
+        Some("not_smaller")
+    );
+}
+
+/// A window smaller than the user-message budget and the summary's output
+/// together: whatever the summary, the reminders and the keep budget, an
+/// accepted checkpoint is smaller than the part it replaces, which a view
+/// that is due under the window holds, so it never exceeds the window.
+#[test]
+fn a_tiny_window_never_gets_a_checkpoint_over_it() {
+    let window = 2000u64;
+    let spec = CompactionSpec::default();
+    assert!(window < u64::from(spec.keep_user_tokens) + u64::from(spec.max_output_tokens));
+    let folded = pastes();
+    let before = estimate_tokens(&folded);
+    assert!(before < window, "the folded part is under the window");
+    for summary in [10usize, 400, 1500, 3000, 4000, 8000] {
+        for tail in [0usize, 200, 2000, 4000] {
+            let text = "s".repeat(summary);
+            let blocks = (tail > 0)
+                .then(|| ContentBlock::text("r".repeat(tail)))
+                .into_iter()
+                .collect();
+            let made = checkpoint(&text, &folded, spec.keep_user_tokens, blocks);
+            let after = size_of(made.clone());
+            if rejection(false, &text, &made, &folded).is_none() {
+                assert!(
+                    after < before && after < window,
+                    "{summary}/{tail}: {after}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rejected_summaries_hold_until_the_view_has_grown_or_one_is_accepted() {
+    let window = 1000;
+    let margin = Rejections::margin(window);
+    assert_eq!(margin, 100, "a tenth of the window");
+    let mut rejections = Rejections::default();
+    assert!(!rejections.holds(900, window), "nothing rejected");
+    assert!(!rejections.will_hold() || REJECTIONS_BEFORE_HOLD == 1);
+    rejections.rejected(900);
+    assert!(!rejections.holds(900, window), "one is not the evidence");
+    assert!(rejections.will_hold(), "the next one starts the hold");
+    rejections.rejected(900);
+    assert!(rejections.holds(900, window));
+    assert!(rejections.holds(900 + margin - 1, window));
+    assert!(
+        !rejections.holds(900 + margin, window),
+        "grown by the margin"
+    );
+    // Asked again at the grown view and rejected: held from there.
+    rejections.rejected(1000);
+    assert!(rejections.holds(1000 + margin - 1, window));
+    assert!(!rejections.holds(1000 + margin, window));
+    rejections.accepted();
+    assert_eq!(rejections, Rejections::default());
+    assert!(!rejections.holds(0, window));
+    assert_eq!(Rejections::margin(0), 1, "never a zero margin");
 }
 
 #[test]

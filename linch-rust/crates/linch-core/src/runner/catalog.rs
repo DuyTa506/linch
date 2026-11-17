@@ -108,20 +108,25 @@ impl Runner {
         request
     }
 
-    /// Take the named tool choice off `request` when the turn does not offer
-    /// that tool (a skill narrowed the turn, tool search deferred it, a hook
-    /// rewrote the request): a provider answers such a request with a 400.
-    /// The turn goes out as `auto`; returns the name dropped.
+    /// Take a tool choice off `request` that the turn cannot satisfy: a
+    /// named tool the turn does not offer (a skill narrowed the turn, tool
+    /// search deferred it, a hook rewrote the request), or `required` on a
+    /// request a hook left with no tool: a provider answers such a request
+    /// with a 400. The turn goes out as `auto`, or with no choice when it
+    /// offers no tool (as the run's own rule has it); returns the name
+    /// dropped (`required` for that choice).
     pub(super) fn drop_unoffered_choice(request: &mut ProviderRequest) -> Option<String> {
-        let Some(ToolChoice::Tool { name }) = &request.tool_choice else {
-            return None;
+        let dropped = match &request.tool_choice {
+            Some(ToolChoice::Tool { name })
+                if !request.tools.iter().any(|tool| &tool.name == name) =>
+            {
+                name.clone()
+            }
+            Some(ToolChoice::Required {}) if request.tools.is_empty() => "required".to_owned(),
+            _ => return None,
         };
-        if request.tools.iter().any(|tool| &tool.name == name) {
-            return None;
-        }
-        let name = name.clone();
-        request.tool_choice = Some(ToolChoice::Auto {});
-        Some(name)
+        request.tool_choice = (!request.tools.is_empty()).then_some(ToolChoice::Auto {});
+        Some(dropped)
     }
 
     /// The tool choice of `request`: none on a turn that offers no tool

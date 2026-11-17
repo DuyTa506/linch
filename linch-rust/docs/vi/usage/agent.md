@@ -205,7 +205,7 @@ có, trừ `bash`.
 | `max_output_tokens` | không có: mặc định của provider | Số token nhiều nhất mà một phản hồi được sinh ra |
 | `temperature` | không có: mặc định của provider | Temperature lấy mẫu, từ 0 đến 2 (`0` được phép; `anthropic` nhận tối đa 1). Giá trị ngoài khoảng làm `agent.open` thất bại. Provider nào bỏ qua hoặc từ chối nó có trong [Providers](./providers.md#temperature) |
 | `max_tool_concurrency` | `4` | Số lời gọi tool scope đọc nhiều nhất chạy cùng lúc; `0` được tính là 1 |
-| `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây; quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
+| `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây, tối thiểu 100 (`0` và giá trị nhỏ hơn làm `agent.open` thất bại: mọi lời gọi sẽ hết giờ ngay); quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
 | `compaction` | không có: không bao giờ nén | Khi nào tóm tắt phần cũ của cuộc hội thoại ([bên dưới](#compaction)) |
 | `budget` | không có: không giới hạn | Giới hạn token và USD cho mỗi run và các subagent của nó, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([bên dưới](#budget)) |
 | `provider_retry` | bật: 5 lần thử, từ 1 giây gấp đôi đến 30 giây, jitter 0.2 | Gọi lại cùng model sau một lỗi có thể thử lại, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, là các mặc định của Python; `{"max_attempts": 1}` tắt nó ([providers](./providers.md#lỗi-và-thử-lại)) |
@@ -309,7 +309,7 @@ chúng bị từ chối khi resume cho đến khi kết thúc.
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
 | `micro` | `False` | Xóa các kết quả tool cũ trước khi tóm tắt, không có lời gọi model ([Memory](./memory.md#micro-compaction)) |
 | `max_forced` | `3` | Số bản tóm tắt nhiều nhất một run tạo ra vì provider từ chối một prompt là quá dài so với context window; `0` là không bao giờ ([Memory](./memory.md#when-the-prompt-does-not-fit)) |
-| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì |
+| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì. Các block nguyên văn cũng co lại cho vừa: toàn bộ checkpoint nhỏ hơn phần nó thay thế, nếu không bản tóm tắt bị từ chối |
 
 Khi không có `threshold_tokens` (`"compaction": {}` bật tính năng này), run nén
 giống như Python Linch: khi giá trị ước tính cộng với phần dự trữ cho đầu ra đạt
@@ -331,7 +331,7 @@ Loop guard kết thúc một run bị kẹt, trước lời gọi provider kế 
 | Trường | Mặc định | Run kết thúc khi |
 |---|---|---|
 | `max_identical_tool_calls` | `3` | Cùng một lời gọi nhận cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input, cùng kết quả, không phải lỗi. Lời gọi chạm tới ngưỡng vẫn chạy trước. Một lời gọi có kết quả đã đổi (một file đọc lại sau khi sửa) là có tiến triển và không được đếm, và một lời gọi cách xa từ lâu trong một run dài khỏe mạnh cũng vậy. Một kết quả đã được chuyển sang filesystem (offload kết quả lớn) được tính theo nội dung của nó, bất kể tên file. `0` tắt kiểm tra này |
-| `max_identical_inputs` | `10` | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và bất kể có lỗi hay không: luật của Python đếm cái này trên toàn run với ngưỡng của `max_identical_tool_calls`; ở đây cách đếm nới hơn (10, trong một cửa sổ), nên một run dài khỏe mạnh không bị cắt. Nó chặn một vòng lặp mà kết quả đổi mỗi lần (một timestamp) hoặc luân phiên giữa vài lời gọi. Một tool poll không được đếm. `0` tắt kiểm tra này; không có trên wire khi bằng `10` |
+| `max_identical_inputs` | `10` | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và bất kể có lỗi hay không: luật của Python đếm cái này trên toàn run với ngưỡng của `max_identical_tool_calls`; ở đây cách đếm nới hơn (10, trong một cửa sổ), và một lời gọi write hay exec thành công với một input mới (không nằm trong 50 lời gọi như vậy gần nhất) xóa bộ đếm của mọi lời gọi khác (một lần sửa đổi thứ mà lần chạy test kế tiếp tìm thấy), nên một run sửa-và-test dài không bị cắt. Cùng một lời gọi, hay một chu trình các lời gọi write hoặc exec, chạy đi chạy lại mà không có lần sửa mới nào ở giữa vẫn được đếm. Nó chặn một vòng lặp mà kết quả đổi mỗi lần (một timestamp) hoặc luân phiên giữa vài lời gọi. Một tool poll không được đếm. `0` tắt kiểm tra này; không có trên wire khi bằng `10` |
 | `max_consecutive_failures` | `3` | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi. Một batch có một lời gọi thành công thì đếm lại từ đầu. `0` tắt kiểm tra này |
 | `max_idle_turns` | `25` | Thêm một lượt liên tiếp nữa sẽ kết thúc mà không có lời gọi provider, điều mà chỉ một callback `before_provider_call` trả lời `force_continue` mới gây ra. Tối thiểu `1`: kiểm tra này luôn bật |
 
@@ -360,6 +360,14 @@ một lần poll đã xong bằng metadata `{"poll_done": true}`.
 Giá trị mặc định không được ghi vào spec, nên bỏ `loop_guard` đi thì giữ nguyên
 [hợp đồng của run](#hợp-đồng-của-run) của một agent từ trước khi có guard, và các run
 của nó vẫn resume được; mọi giá trị khác đều đổi hợp đồng.
+
+Guard không bắt được gì. Nó đếm một input nhiều nhất 10 lần trong 50 kết quả gần nhất, nên
+một chu trình hơn 5 lời gọi khác nhau mà kết quả đổi mỗi lần (mỗi lần một timestamp khác, chẳng
+hạn) không bao giờ đạt 10 trong 50 và không bị bắt: chỉ `max_turns` và [budget](#budget)
+kết thúc một run như vậy, và cả hai mặc định đều không có. Một tool `polls` của
+[MCP](#mcp_servers) mà câu trả lời đổi ở mọi lần gọi (một thời gian đã trôi trong dòng trạng
+thái) nằm ngoài mọi bộ đếm, nên chỉ `max_turns` và budget giới hạn nó. Hãy đặt `max_turns`
+(và một budget) cho một run phải kết thúc.
 
 ### `policy`
 
@@ -467,7 +475,7 @@ lời gọi của model, không ràng buộc host của tenant
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `max_tokens` | không có: không giới hạn token | Số token nhiều nhất mà run và các subagent của nó được tiêu, cộng cả bốn nhóm usage |
-| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); model không có giá thì không cộng thêm gì, nên chỉ `max_tokens` ràng buộc nó |
+| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); model cần có giá (bảng tích hợp sẵn hoặc `pricing` của agent), nếu không `agent.open` thất bại với lỗi agent không hợp lệ (`-32011`) nêu tên model; với model không có giá, hãy đặt giới hạn `max_tokens` |
 | `warn_ratio` | `0.9` | Tỷ lệ của một trong hai giới hạn mà tại đó một event `budget` loại `warning` được phát ra |
 
 Giống Python Linch, mỗi lời gọi provider được tính phí một lần khi nó kết thúc, và
@@ -484,7 +492,12 @@ với một lỗi tên `BudgetAccountingError`. Một lời gọi thất bại t
 thứ gì (không kết nối được, hoặc status 4xx, 503 hay 529 trước khi có output) được tính bằng
 không và vẫn được thử lại như thường; một 500, 502 hay 504 có thể đã bị tính tiền ở
 upstream, nên nó được tính là không rõ. Một run bị crash giữa chừng một lời gọi sẽ
-resume vào đúng lỗi đó.
+resume vào đúng lỗi đó. Giới hạn chi phí cần mọi lời gọi đều có giá: một lời gọi có
+usage mà không có giá (provider phục vụ một model mà `pricing` không có đơn giá,
+kể cả [model dự phòng](./providers.md#lỗi-và-thử-lại)) làm lời gọi kế tiếp bị từ chối
+với một `BudgetAccountingError` nói rõ điều đó. Chỉ có giới hạn token thì không bị
+ảnh hưởng. Giá được tra theo id mà provider báo cáo, nếu không thì `spec.model`, nên
+hãy khóa `pricing` theo các id mà nó báo cáo.
 
 Mỗi run của agent bắt đầu với mức chi tiêu bằng không. Một run được resume bắt đầu
 từ mức chi tiêu mà bản ghi bền vững của nó và của các run con cho biết, nên một

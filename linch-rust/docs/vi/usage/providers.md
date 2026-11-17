@@ -50,7 +50,7 @@ Mọi provider thật đều nhận `request`, dạng dữ liệu của `extra_b
 | Trường | Ý nghĩa |
 |---|---|
 | `request.extra_body` | Trường gộp vào mọi body. Chúng thay trường adapter đã đặt, trừ `model`, `stream`, `temperature`, hội thoại (`messages`, `input`, `contents`, `system`, `instructions`, `systemInstruction`, `system_instruction`), tool và cách chọn tool (`tools`, `tool_choice`, `toolConfig`, `tool_config`) và các trường trạng thái phía vendor (`store`, `previous_response_id`, `conversation`) do session sở hữu. `chat_template_kwargs` gộp từng trường, `generationConfig` của Gemini cũng vậy, và trường của chính request thắng |
-| `request.default_headers` | Header gửi kèm mọi request, cho gateway. `authorization`, `x-api-key`, `x-goog-api-key` hoặc `api-key` thay khóa provider cho mọi lời gọi (một lượt, danh sách model, dò window): khóa trong môi trường khi đó không được gửi và không cần đặt. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` và `proxy-connection` bị từ chối khi mở. Giá trị được ẩn khi in hoặc ghi log config, và bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte |
+| `request.default_headers` | Header gửi kèm mọi request, cho gateway. `authorization`, `x-api-key`, `x-goog-api-key` hoặc `api-key` thay khóa provider cho mọi lời gọi (một lượt, danh sách model, dò window): khóa trong môi trường khi đó không được gửi và không cần đặt. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` và `proxy-connection` bị từ chối khi mở. Trong các kiểu Rust, giá trị được ẩn khỏi đầu ra `Debug`; một config Python là dict thường và hiện giá trị khi được in hoặc ghi log. Giá trị bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte, hoặc ở mọi độ dài khi tên header có `token`, `key`, `secret`, `auth` hoặc `cookie` |
 | `request.timeout_ms` | Khoảng lặng dài nhất giữa hai chunk của phản hồi trước khi call lỗi; vắng: giới hạn của adapter |
 | `chat.parallel_tool_calls` | Gửi khi request có tool; vắng: mặc định của server |
 | `chat.include_stream_options` | `false` bỏ `stream_options`, cho server từ chối nó. Mặc định bật |
@@ -78,11 +78,14 @@ số áp dụng cho mọi giai đoạn của lời gọi (connect, read, write, 
 `request.timeout_ms` ở trên chỉ thay timeout đọc, còn timeout kết nối (30 giây)
 vẫn cố định.
 
-Giá trị của `default_headers` được ẩn khi một config được echo lại hoặc ghi
-log, và bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte (một gateway
-lặp lại header bị từ chối trong response body sẽ hiện `[redacted]`). Giá trị
-ngắn hơn được giữ nguyên trong nội dung lỗi vì xóa nó sẽ làm hỏng thông báo.
-Hãy đặt secret trong môi trường của server nếu có thể: giá trị trong config
+Trong các kiểu Rust (`RequestOptions`, `Schedule`, `RunRequest`), giá trị của
+`default_headers` được ẩn khỏi đầu ra `Debug`; điều này không tới Python, nơi một
+config là dict thường và in ra, ghi log các giá trị của nó, nên đừng để config vào
+log. Giá trị bị xóa khỏi nội dung lỗi của provider khi dài từ 8 byte, và ở mọi độ
+dài khi tên header có `token`, `key`, `secret`, `auth` hoặc `cookie` (một gateway
+lặp lại header bị từ chối trong response body sẽ hiện `[redacted]`). Giá trị của
+header khác ngắn hơn 8 byte được giữ nguyên trong nội dung lỗi vì xóa nó sẽ làm hỏng
+thông báo. Hãy đặt secret trong môi trường của server nếu có thể: giá trị trong config
 được lưu cùng config (một run theo lịch giữ nó trong store, như giá trị header
 của MCP), và giá trị của `extra_body` không được ẩn. `request` và `chat` không
 thuộc run contract, như `base_url`: resume run với thiết lập khác không gây
@@ -234,7 +237,8 @@ qua `spec.thinking`. Các server (`vllm`, `sglang`, `llamacpp`) chuyển effort 
 chat template của model, nơi quyết định giá trị nào được nhận. Template Qwen3
 của vLLM chỉ nhận `low`, `medium` và `xhigh`, nên `high` và `max` được gửi là
 `xhigh`; SGLang nhận mọi mức (nó chỉ bật thinking) và llama.cpp để template của model từ
-chối mức; cả hai gửi nguyên mức.
+chối mức; cả hai gửi nguyên mức. Với model vLLM mà template không nhận `xhigh`, hãy tự
+đặt mức trong `request.extra_body.reasoning_effort`: nó thay giá trị đã ánh xạ.
 
 ### `anthropic`
 
@@ -266,6 +270,11 @@ dạng `tool_choice` nào hoạt động, trường giới hạn đầu ra nào 
 thinking. Một profile không sao chép gì từ profile của OpenAI. Bảng về những gì
 mỗi loại hỗ trợ nằm ở
 [trang providers của kiến trúc](../architecture/providers.md#openai-chat-completions-and-server-profiles).
+
+Chỉ vLLM có test chạy thật (`LINCH_TEST_VLLM_URL`; không đặt biến này thì chúng
+bị bỏ qua). Profile SGLang chưa được chạy với server thật, và `n_ctx` mà
+`GET /props` của llama.cpp trả về chỉ được đối chiếu với tài liệu của nó; nếu
+server trả lời khác, cửa sổ ngữ cảnh rơi về 128000 và `context_window` đặt nó.
 
 `base_url` là bắt buộc và gồm cả `/v1`. Key là tùy chọn: chỉ đặt nó trong môi
 trường của server khi inference server được khởi động cùng một key.
@@ -461,7 +470,7 @@ của nhà cung cấp ngày 2026-11-17):
 | Provider | Trường | Ghi chú |
 |---|---|---|
 | `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 đến 2. OpenAI nói mức hỗ trợ tham số khác nhau theo model; model từ chối nó sẽ trả lỗi HTTP, Linch không đoán trước. |
-| `anthropic` | `temperature` | 0 đến 1. Claude Opus 4.7 trở lên, Sonnet 5 trở lên và Haiku 5.5 trả 400 với giá trị khác mặc định ở mọi request; model cũ hơn chỉ từ chối khi thinking bật; API version `2026-10-21` bỏ nó. |
+| `anthropic` | `temperature` | 0 đến 1. Claude Sonnet 5.5 trả 400 với các tham số lấy mẫu (`temperature`, `top_p`, `top_k`): hướng dẫn migrate của nó bảo bỏ chúng và không nói giá trị mặc định có qua được không. Claude Opus 4.7 trở lên, Sonnet 5 và Haiku 5.5 trả 400 với giá trị khác mặc định ở mọi request; model cũ hơn chỉ từ chối khi thinking bật; API version `2026-10-21` bỏ nó. Theo tài liệu của Anthropic tính đến 2026-11-17 (<https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide>); Linch gửi đúng những gì spec đặt và không đoán trước việc từ chối. |
 | `deepseek` | `temperature` | 0 đến 2. Không có tác dụng ở chế độ thinking (mặc định), nơi nó được gửi và bị bỏ qua. |
 | `gemini` | `generationConfig.temperature` | 0.0 đến 2.0. Bị bỏ qua im lặng trên Gemini 3.6 Flash và các model mới hơn. |
 

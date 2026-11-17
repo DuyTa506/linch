@@ -176,14 +176,32 @@ budget, and a `usage` event is staged, whether or not the call gave a summary
 
 ### When there is no summary
 
-A reply is rejected, and not applied, when it called a tool, is empty, or its
-estimate is no smaller than the part it would replace (`compaction::rejection`;
-the model's text is measured, not the header or the verbatim section). The
-receipt has the disposition `rejected`; the view stays as it was, and a
+A reply is rejected, and not applied, when it called a tool, is empty, or the
+whole checkpoint it would make has an estimate no smaller than the part it would
+replace (`compaction::rejection`; the whole message is measured: header, the
+model's text, verbatim section, skill reminders and restated catalog changes).
+The receipt has the disposition `rejected`; the view stays as it was, and a
 `compaction` event with equal before and after counts and a `rejected` reason is
-written: the code (`tool_call`, `empty`, `not_smaller`), then what follows, "the
-next due turn asks again" at a turn's start or "the prompt still does not fit, so
-the run ends" for a forced summary. There is no retry within the turn.
+written, on every rejection: the code (`tool_call`, `empty`, `not_smaller`), then
+what follows, "the next due turn asks again" at a turn's start, "asks again once
+the view has grown by N tokens, or when the provider refuses the prompt" from the
+second rejection in a row, or "the prompt still does not fit, so the run ends"
+for a forced summary. There is no retry within the turn.
+
+A model that never gives a usable summary is not asked at every due turn
+(`compaction::Rejections`). After `REJECTIONS_BEFORE_HOLD` (2) rejections in a
+row, whatever their codes, a turn's start that is due does not ask until the
+estimated view has grown by `window / HOLD_GROWTH_DIVISOR` (a tenth of the
+model's context window) since the last rejected ask; the next rejection holds
+again from the new size, and an accepted summary (forced or not) clears the
+count. A forced summary, which follows a provider refusal, is never held. The
+count is read back from the run's durable `compaction` events on a resume, so a
+crash does not lift the hold. The count is the run's own: each new run on a
+session starts at zero. The margin is a tenth of the window whatever the
+`threshold_tokens` (a model whose provider reports a window of 0 gets a margin
+of 1 token, so no hold). Two asks are the evidence that the model will not
+do it on this prefix, a full-prefix request paid for nothing each time; a tenth
+of the window is a few turns of growth, a changed prefix worth another try.
 
 At a turn's start, a call that failed, answered with no text, or was
 rejected, is not fatal. The turn goes on uncompacted with its primary call. The receipt and
@@ -201,10 +219,16 @@ The message that replaces the folded turns is a checkpoint (`compaction::checkpo
 the first block is the summary header and the model's summary; the blocks after
 it are the user messages of the folded part, copied verbatim by the harness
 (each block starts with `[user message, verbatim]`), newest first, up to
-`keep_user_tokens` (about four characters per token) and never more than half of
-the folded part's estimate, so the checkpoint cannot outgrow what it replaces (the
-message that does not fit is cut with `[truncated]`, which is not counted, and
-the older ones are dropped). Tool results and
+`keep_user_tokens` (about four characters per token), never more than half of
+the folded part's estimate, and never more than what is left of the folded part
+after the header, the model's text and the tail blocks (skill reminders,
+restated catalog changes): the verbatim blocks and their markers shrink to fit.
+The rule that holds: the whole checkpoint is estimated smaller than the folded
+part, or the summary is rejected as `not_smaller` (above); so a checkpoint never
+outgrows what it replaces, and with a window below `keep_user_tokens` plus the
+summary's output it never exceeds the window the folded part fit in. The message
+that does not fit is cut with `[truncated]` (counted in the fit, not in the two
+caps) and the older ones are dropped. Tool results and
 `<system-reminder>` messages are not the user's words and are not copied.
 Codex keeps up to 20k tokens of recent user messages and opencode 15k; the model
 need not quote an instruction for it to survive a summary.

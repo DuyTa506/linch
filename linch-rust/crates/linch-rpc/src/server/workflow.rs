@@ -116,6 +116,7 @@ impl Server {
         params: WorkflowStartParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let run_id = workflow_id(&params.run_id)?;
+        self.admit_principal(params.principal.as_ref())?;
         let caps = match &self.0.tenant {
             Some(tenant) => Some(tenant.workflow_caps()?),
             None => None,
@@ -143,6 +144,7 @@ impl Server {
         let mut options = WorkflowOptions::new(store, namespace, run_id.clone());
         options.resume = params.resume.into_iter().collect();
         options.budget = budget;
+        options.principal = params.principal;
         options.cancel = cancel.clone();
         let outbox = self.0.outbox.clone();
         let event_run = run_id.clone();
@@ -466,6 +468,11 @@ impl Server {
         let tenant = self.0.tenant.is_some();
         match error {
             WorkflowError::Store(JournalStoreError::Held { workflow_id }) => held(workflow_id),
+            WorkflowError::Store(JournalStoreError::PrincipalMismatch { workflow_id }) => {
+                let message = format!("workflow {workflow_id:?} was started for another principal");
+                ErrorObject::new(code::NOT_ALLOWED, message)
+                    .with_data(json!({ "kind": "workflow_principal" }))
+            }
             WorkflowError::Store(JournalStoreError::LeaseLost { .. }) => {
                 ErrorObject::new(code::LEASE_LOST, "another client took the workflow over")
             }

@@ -113,6 +113,11 @@ impl Runner {
             {
                 return self.clear(&view, before, cleared, 1, false).await.map(Some);
             }
+            // Summaries rejected twice in a row are not asked for again
+            // until the view has grown (see `Rejections`).
+            if self.rejections.holds(tokens_before, window) {
+                return Ok(Some(next));
+            }
             compaction::keep_from(&view, keep)
         };
         let Some(keep_from) = keep_from else {
@@ -187,26 +192,24 @@ impl Runner {
             None => text,
         };
         let text = text.trim();
-        let mut summary = compaction::checkpoint(text, &view[1..keep_from], spec.keep_user_tokens);
+        let mut tail = Vec::new();
         if agent.skills.is_some() {
             // The bodies the model loaded, which the summary folds away.
             let reminders = skills::reminders(&self.log.full_history());
-            (summary.content).extend(reminders.into_iter().map(ContentBlock::text));
+            tail.extend(reminders.into_iter().map(ContentBlock::text));
         }
         if let Some(catalog) = &self.catalog {
             let restated = catalog.restatement(&agent.listed_skills());
-            summary
-                .content
-                .extend(restated.map(ContentBlock::CatalogChange));
+            tail.extend(restated.map(ContentBlock::CatalogChange));
         }
-        // A reply that called a tool, is empty, or is no smaller than the
-        // part it replaces is rejected: the view stays as it was, and the
-        // receipt and the `compaction` event say why. The model's text is
-        // what is measured, not the header, the verbatim user messages or
-        // the reminders added to it.
-        let plain = Message::user_text(text);
+        let folded = &view[1..keep_from];
+        let summary = compaction::checkpoint(text, folded, spec.keep_user_tokens, tail);
+        // A reply that called a tool, is empty, or whose whole checkpoint
+        // (header, verbatim user messages and reminders included) is no
+        // smaller than the part it replaces is rejected: the view stays as
+        // it was, and the receipt and the `compaction` event say why.
         let rejection = answered
-            .then(|| compaction::rejection(called, text, &plain, &view[1..keep_from]))
+            .then(|| compaction::rejection(called, text, &summary, folded))
             .flatten();
         if rejection.is_some() {
             receipt.disposition = CallDisposition::Rejected;
@@ -222,6 +225,8 @@ impl Runner {
         if rejection.is_some() || text.is_empty() {
             if let Some(reason) = rejection {
                 let (messages, tokens) = (view.len() as u64, tokens_before);
+                let holds = self.rejections.will_hold();
+                self.rejections.rejected(tokens);
                 self.journal.stage(Event::Compaction(CompactionEvent {
                     messages_before: messages,
                     messages_after: messages,
@@ -232,6 +237,12 @@ impl Runner {
                     forced,
                     rejected: Some(if forced {
                         format!("{reason}: the prompt still does not fit, so the run ends")
+                    } else if holds {
+                        let margin = compaction::Rejections::margin(agent.context_window());
+                        format!(
+                            "{reason}: asks again once the view has grown by {margin} tokens, \
+                             or when the provider refuses the prompt"
+                        )
                     } else {
                         format!("{reason}: the next due turn asks again")
                     }),
@@ -248,6 +259,7 @@ impl Runner {
             self.outbox.deliver(ready).await;
             return Ok(Some(next));
         }
+        self.rejections.accepted();
         let compacted = compaction::replacement(&view, summary.clone(), keep_from);
         let (messages_before, messages_after) = (view.len() as u64, compacted.len() as u64);
         let tokens_after = estimate_tokens(&compacted);

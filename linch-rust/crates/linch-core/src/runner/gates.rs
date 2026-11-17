@@ -82,7 +82,8 @@ impl Runner {
         let Some(gates) = &self.gates else {
             return Ok(None);
         };
-        let Some(failure) = gates.check(text) else {
+        let offered = |name: &str| self.snapshot.resolve(name).is_some();
+        let Some(failure) = gates.check(text, &offered) else {
             return Ok(None);
         };
         if gates.can_correct() {
@@ -109,7 +110,8 @@ impl Runner {
         if answer == text {
             return Ok(None);
         }
-        let Some(failure) = gates.check(answer) else {
+        let offered = |name: &str| self.snapshot.resolve(name).is_some();
+        let Some(failure) = gates.check(answer, &offered) else {
             return Ok(None);
         };
         let event = gates.rewritten(&failure);

@@ -396,7 +396,8 @@ kills the new group.
   and `socket(AF_UNIX)`, and with the network off every `socket`. Landlock
   restricts pathname Unix sockets only from ABI 9, and a socket of the
   server's user (a session bus, a Docker socket) would start something
-  outside the sandbox.
+  outside the sandbox. The filter is a denylist: a syscall it does not name
+  is allowed, and Landlock and the non-root check are the boundary.
 - `RLIMIT_NPROC` counts every task of the user, so the limit is the count at
   the spawn plus `max_processes`: headroom, not a quota.
 - Homes are `s<n>` under a `TempDir` the shell owns; `close_session` removes

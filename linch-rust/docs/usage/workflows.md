@@ -78,8 +78,8 @@ returns what it returns. `wf` is a `WorkflowContext`:
 `wf.agent` takes `name`, `subagent`, `label`, `key`, `output_schema`,
 `fork`, `timeout_ms` and `retry`. `run_workflow` takes `budget`,
 `max_concurrency` (4 when unset; a nested fan-out has its own limit),
-`step_timeout_ms`, `deadline_ms`, `resume` (answers to interrupts) and
-`on_event`, which receives `WorkflowEvent`s: `phase`, `agent_start`,
+`step_timeout_ms`, `deadline_ms`, `resume` (answers to interrupts),
+`principal` (below) and `on_event`, which receives `WorkflowEvent`s: `phase`, `agent_start`,
 `agent_end`, `agent_replayed`, `step_start`, `step_end`, `step_replayed`,
 `interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` and
 `interrupt_stale`.
@@ -229,6 +229,25 @@ namespace (which must be the tenant's) and the `run_id`, so one tenant
 cannot reach another's workflow. A tenant never reads a store's or a run's
 own error text: a journal failure answers `the workflow journal failed`.
 
+## Acting for a principal
+
+`run_workflow(..., principal={"tenant": "acme", "user": "ada", "roles":
+["support"]})` (`principal` in `workflow.start`) makes every agent call's
+run act for that principal, so a permission rule keyed on a role applies to
+the workflow's calls as it does to a run started for the same principal. A
+tenant's principal must name the tenant, as for `run.start`. Without one the
+calls act for nobody, and a principal-scoped feature (the structured
+memory) has nothing to reach.
+
+The principal is stored with the workflow when it is first started. Starting
+the same id again must name the same principal, whole (tenant, user and
+roles; the order of roles does not matter), or the start is refused with
+`NotAllowed` (`-32004`, `kind: workflow_principal`) and nothing changes: the
+journaled calls ran under that principal's rules, and a replay under others
+would hand their results to a user they were not made for. That covers a
+principal where there was none, and none where there was one. Start a new
+`run_id` to act for someone else.
+
 ## One driver per workflow
 
 `workflow.start` takes an exclusive **hold** on `(namespace, run_id)`
@@ -300,8 +319,6 @@ node can be retried any number of times and the run happens once.
 
 ## Known gaps
 
-- Workflow calls run without a `principal`; permission rules keyed on a
-  principal's roles do not apply to them.
 - There is no standalone `workflow.answer`: an answer goes through the next
   `workflow.start`'s `resume`.
 - The deadline and step timeouts are enforced in the client; a client that

@@ -387,7 +387,8 @@ bị giới hạn, và không có code nào chạy giữa fork và exec, nên cr
   trúc khác, từ chối các syscall x32, `io_uring_setup` và `socket(AF_UNIX)`, và khi
   mạng tắt là mọi `socket`. Landlock chỉ giới hạn pathname Unix socket từ ABI 9, và
   một socket của user của server (session bus, socket Docker) sẽ khởi động thứ gì đó
-  ngoài sandbox.
+  ngoài sandbox. Bộ lọc là một denylist: một syscall mà nó không nêu tên thì được
+  phép, và Landlock cùng việc kiểm tra không-root mới là ranh giới.
 - `RLIMIT_NPROC` đếm mọi task của user, nên giới hạn là số đếm lúc spawn cộng
   `max_processes`: khoảng dư, không phải hạn ngạch.
 - Home là `s<n>` dưới một `TempDir` mà shell sở hữu; `close_session` xóa một cái trên

@@ -84,6 +84,53 @@ fn unknown_use_refuses_a_capped_budget_only() {
 }
 
 #[test]
+fn a_call_with_usage_and_no_cost_refuses_a_cost_cap_only() {
+    let unpriced = receipt(used(1, 1, 0, 0), None, CallDisposition::Accepted);
+    let tokens = meter(Some(100), None);
+    tokens.charge(&unpriced);
+    assert!(tokens.refusal().is_none(), "a token cap needs no price");
+    let cost = meter(None, Some(1.0));
+    cost.charge(&receipt(
+        used(1, 1, 0, 0),
+        Some(0.1),
+        CallDisposition::Accepted,
+    ));
+    assert!(cost.refusal().is_none());
+    cost.charge(&unpriced);
+    let Some(refusal @ Refusal::Unpriced) = cost.refusal() else {
+        panic!("a cost cap cannot count an unpriced call");
+    };
+    let error = refusal.error().error;
+    assert_eq!(error["name"], "BudgetAccountingError");
+    assert!(error["message"].as_str().unwrap().contains("price"));
+}
+
+#[test]
+fn an_unpriced_call_in_the_log_is_still_unpriced_after_a_resume() {
+    let event = |receipt| Envelope {
+        v: 1,
+        seq: 0,
+        run_id: RunId::new("r"),
+        ts_ms: 0,
+        ignorable: false,
+        event: Event::ModelCallReceipt(receipt),
+    };
+    let events = [event(receipt(
+        used(1, 1, 0, 0),
+        None,
+        CallDisposition::Accepted,
+    ))];
+    let limits = RunBudget {
+        max_cost_usd: Some(1.0),
+        ..RunBudget::default()
+    };
+    let spent = Spent::of(&events);
+    assert!(spent.unpriced);
+    let resumed = Meter::new(limits, Spent::default().and(spent));
+    assert!(matches!(resumed.refusal(), Some(Refusal::Unpriced)));
+}
+
+#[test]
 fn the_warning_fires_once_at_its_ratio_of_either_cap() {
     let meter = meter(Some(1000), Some(1.0));
     meter.charge(&receipt(

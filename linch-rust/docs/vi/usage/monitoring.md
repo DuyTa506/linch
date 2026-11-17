@@ -58,9 +58,9 @@ USD trên một triệu token. Một model được khớp theo id chính xác.
 giờ là phỏng đoán: các model OpenAI, Gemini và DeepSeek, và mọi model mà một
 server cục bộ (vLLM, SGLang, llama.cpp) phục vụ. Python Linch cũng không có đơn
 giá cho chúng. Một run dùng nhiều model chỉ cộng các lần gọi đã có giá; một run
-không có lần gọi nào có giá thì `total_cost_usd: None`. Một `budget` tính bằng
-USD không thể ràng buộc một model không có giá, nên giới hạn token là biện pháp
-bảo vệ ở đó.
+không có lần gọi nào có giá thì `total_cost_usd: None`. Một agent có `budget` tính bằng
+USD mà model không có giá thì không mở được (`-32011`, nêu tên model): hãy đặt giá
+cho model bằng `pricing`, hoặc dùng giới hạn token.
 
 **Tự đặt giá cho một model** bằng `pricing` trong agent config. Nó áp dụng theo
 từng agent, theo id model chính xác, và thay thế bảng giá cho model đó hoặc thêm
