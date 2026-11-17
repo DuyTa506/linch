@@ -345,6 +345,33 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Hỏi một provider hỗ trợ gì
+
+Trước khi mở một agent, hãy hỏi server provider của nó hỗ trợ gì và liệt kê những model
+nào. Chúng nhận `provider` của một cấu hình agent, hoặc cả `AgentConfig`:
+
+```python
+caps = await server.provider_capabilities(config)      # no key needed
+models = await server.list_models(config["provider"])  # needs the key
+info = await server.model_info(config["provider"], "qwen3.6-35b-a3b")
+```
+
+`ProviderCapabilities` được đọc như trong
+[trang providers của kiến trúc](../architecture/providers.md#khả-năng-và-danh-sách-model):
+`context_window` cùng `context_source` của nó (`server`, `table`, `configured` hoặc
+`default`, một phỏng đoán), `native_output_schema`, `tool_choice` (với
+`forced_refused_with`), `thinking`, `vision`, `streams_tool_arguments`,
+`prompt_cache` và `stop_sequences`. Câu trả lời của một provider cloud là của
+adapter, không phải của vendor; danh sách model là của vendor, và một trường mà nó
+không cung cấp (OpenAI không cung cấp cửa sổ) là `None`.
+
+Lỗi: `ModelsUnsupported` (-32035, provider `scripted`),
+`ModelNotFound` (-32036), `ProviderRequestFailed` (-32037: `.kind` là
+`connect`, `transport` hoặc `status`, với `.status`; message không nêu
+key lẫn URL), và `OpenError` (-32013) khi key không được
+đặt trên server. Một tenant từ xa cần `allow.provider_info` và một
+`base_url` được cho phép.
+
 ## Lỗi và thử lại
 
 Một run thử lại một lời gọi provider thất bại với lỗi mà một lời gọi khác có thể

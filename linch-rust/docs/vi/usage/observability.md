@@ -194,6 +194,8 @@ vào thời gian của event đóng nó. Instrumentation scope là `linch`.
 | `compaction` | Các thuộc tính định danh và lượt, `linch.compaction.strategy` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.conversation.id`, `linch.run_id`, `linch.turn_index` |
 
+Một run mà một lần kích hoạt lịch bắt đầu cũng có `linch.schedule.id` trên mỗi span này và `linch.schedule.fire_at_ms` trên `invoke_agent` (chỉ Rust; Python Linch không có lịch). Một stream được resume, không có event `schedule_fire`, không có cả hai.
+
 `gen_ai.provider.name` lấy từ id provider của cấu hình (`openai-chat` và
 `openai-responses` báo `openai`, `gemini` báo `gcp.gemini`), và `gen_ai.request.model`
 lấy từ `spec.model` cho đến khi event `init` của run nêu tên model. Một chat, cùng hai

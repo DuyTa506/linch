@@ -39,6 +39,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `type` | Payload, trong `events/` | Stored | Delivered | Ghi chú |
 |---|---|---|---|---|
 | `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục. Event của lúc bắt đầu mang `output_schema` và `tool_choice` riêng của run, và tên final tool của nó (`final_tool`), thứ mà một lần resume đọc lại |
+| `schedule_fire` | `ScheduleFireEvent`, `kinds/lifecycle.rs` | yes | yes | Một run mà worker bắt đầu cho một lần kích hoạt lịch: `schedule_id` và `fire_at_ms` mà nó đến hạn, được stage ngay sau `init` trong cùng một lần ghi, nên không thêm lần ghi nào. Mọi run khác không có nó. Một lần resume không lặp lại nó; nó vẫn nằm trong `run.events` |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
@@ -194,6 +195,13 @@ Mỗi event của nó cũng đến log của run cha bên trong một event `sub
 
 [Skill và subagent](./skills-subagents.md) nói về thời điểm các run con chạy.
 
+### Golden sample
+
+`crates/linch-core/src/events/golden/accounting.json` chứa một wire sample của
+`schedule_fire` và của mỗi loại `model_call_*`. Một test Rust giải mã rồi mã hóa
+lại từng sample về chính nó; `test_events.py` giải mã cùng tệp đó vào các lớp của
+client.
+
 ## Client Python
 
 `python/src/linch_rust/events.py` có một dataclass frozen cho mỗi loại được delivery,
@@ -210,7 +218,10 @@ với tên wire là biến lớp `type`, được gom trong union `Event` (`even
   `ignorable`.
 - Các giá trị lồng nhau (message, usage, các block kết quả tool) vẫn là
   các dict JSON mà server đã gửi.
-- Các loại chỉ dành cho journal không có lớp; server không bao giờ gửi chúng.
+- Ba loại chỉ dành cho journal cũng có lớp (`ModelCallDeliveryEvent`,
+  `ModelCallReceiptEvent`, `ModelCallUsageSettlementEvent`), cho các envelope
+  đọc từ một journal; server không bao giờ stream chúng, cũng không trả chúng từ
+  `run.events`, nên client chỉ thấy chúng theo cách đó.
 
 Vậy hai phía khác nhau có chủ ý: Rust từ chối những gì nó không biết, còn
 client chấp nhận. Một client cũ hơn server của nó vẫn hoạt động nhờ
@@ -225,10 +236,9 @@ client chấp nhận. Một client cũ hơn server của nó vẫn hoạt độn
 - các variant của `pub enum Event {` trong `events/event/mod.rs`, được viết dưới dạng
   `Name(Payload),` mỗi dòng một variant;
 - các nhánh `Serialize` được viết dưới dạng `Event::Name(e) => tagged("name", e)`;
-- phần thân `pub struct Payload {` của mỗi payload trong `events/event/mod.rs` hoặc
-  `events/kinds/*.rs`, và các dòng `pub field:` của nó;
-- `subagent` bằng tay, và không có loại nào trong `JOURNAL_ONLY`
-  (`test_events.py:26`).
+- phần thân `pub struct Payload {` của mỗi payload trong `events/event/mod.rs`,
+  `events/kinds/*.rs` hoặc `events/model_call.rs`, và các dòng `pub field:` của nó;
+- `subagent` bằng tay.
 
 Sau đó nó khẳng định rằng tập các loại và tên trường của mỗi loại bằng với
 tập của các lớp Python. Nó chỉ so sánh tên, không so sánh kiểu hay tính tùy chọn. Một loại

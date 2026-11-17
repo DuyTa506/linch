@@ -196,6 +196,8 @@ ends at its closing event's. The instrumentation scope is `linch`.
 | `compaction` | Identity attributes and turn, `linch.compaction.strategy` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.conversation.id`, `linch.run_id`, `linch.turn_index` |
 
+A run a schedule fire started also has `linch.schedule.id` on each of these spans and `linch.schedule.fire_at_ms` on `invoke_agent` (Rust only; Python Linch has no schedules). A resumed stream, which has no `schedule_fire` event, has neither.
+
 `gen_ai.provider.name` comes from the config's provider id (`openai-chat` and
 `openai-responses` report `openai`, `gemini` reports `gcp.gemini`), and
 `gen_ai.request.model` from `spec.model` until the run's `init` event names

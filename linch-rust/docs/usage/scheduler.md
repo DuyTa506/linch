@@ -325,6 +325,16 @@ the server cannot see a worker in another process, so `max_schedules` is
 the operator's word that one runs. A worker also checks it again at every
 fire: a tenant whose `max_schedules` was removed fails the fire's job.
 
+## Trace a run to its schedule
+
+A run a schedule fire starts has a `schedule_fire` event (`ScheduleFireEvent`
+in the client) right after its `init`, with the `schedule_id` and
+`fire_at_ms`, the time the fire was due in Unix milliseconds. It is durable,
+so `Agent.events(run_id)` finds it, and it arrives on the run's stream when a
+client reads one. A run queued with `job.enqueue` has none, and a resume does
+not repeat it. The OpenTelemetry spans of the run carry `linch.schedule.id`
+([Observability](./observability.md)).
+
 ## Durability
 
 - **Each fire is queued exactly once.** A due schedule's row is locked, its

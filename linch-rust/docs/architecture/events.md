@@ -40,6 +40,7 @@ encoding.
 | `type` | Payload, in `events/` | Stored | Delivered | Notes |
 |---|---|---|---|---|
 | `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in. The start's carries the run's own `output_schema` and `tool_choice`, and its final tool's name (`final_tool`), which a resume reads back |
+| `schedule_fire` | `ScheduleFireEvent`, `kinds/lifecycle.rs` | yes | yes | A run a worker started for a schedule fire: the `schedule_id` and the `fire_at_ms` it was due, staged right after `init` in the same write, so no write is added. Any other run has none. A resume does not repeat it; it stays in `run.events` |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
@@ -195,6 +196,13 @@ The child's `seq` is not kept; read the child run's own log for it.
 
 [Skills and subagents](./skills-subagents.md) covers when children run.
 
+### Golden samples
+
+`crates/linch-core/src/events/golden/accounting.json` holds one wire sample
+of `schedule_fire` and of each `model_call_*` kind. A Rust test decodes and
+re-encodes each one to itself; `test_events.py` decodes the same file into
+the client's classes.
+
 ## The Python client
 
 `python/src/linch_rust/events.py` has one frozen dataclass per delivered
@@ -211,7 +219,10 @@ kind, with the wire name as the class variable `type`, gathered in the
   `ignorable`.
 - Nested values (messages, usage, tool result blocks) stay the JSON dicts
   the server sent.
-- The journal-only kinds have no class; the server never sends them.
+- The three journal-only kinds have classes too (`ModelCallDeliveryEvent`,
+  `ModelCallReceiptEvent`, `ModelCallUsageSettlementEvent`), for envelopes
+  read from a journal; the server never streams them, nor returns them from
+  `run.events`, so a client sees them only that way.
 
 So the two sides differ on purpose: Rust refuses what it does not know, and
 the client tolerates it. A client older than its server keeps working on
@@ -227,10 +238,9 @@ text:
 - the variants of `pub enum Event {` in `events/event/mod.rs`, written as
   `Name(Payload),` one per line;
 - the `Serialize` arms written as `Event::Name(e) => tagged("name", e)`;
-- each payload's `pub struct Payload {` body in `events/event/mod.rs` or
-  `events/kinds/*.rs`, and its `pub field:` lines;
-- `subagent` by hand, and none of the kinds in `JOURNAL_ONLY`
-  (`test_events.py:26`).
+- each payload's `pub struct Payload {` body in `events/event/mod.rs`,
+  `events/kinds/*.rs` or `events/model_call.rs`, and its `pub field:` lines;
+- `subagent` by hand.
 
 It then asserts that the set of kinds and each kind's field names equal
 those of the Python classes. It compares names only, not types or

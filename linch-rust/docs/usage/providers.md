@@ -345,6 +345,34 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Ask what a provider supports
+
+Before opening an agent, ask the server what its provider supports and which
+models it lists. They take the `provider` of an agent config, or the whole
+`AgentConfig`:
+
+```python
+caps = await server.provider_capabilities(config)      # no key needed
+models = await server.list_models(config["provider"])  # needs the key
+info = await server.model_info(config["provider"], "qwen3.6-35b-a3b")
+```
+
+`ProviderCapabilities` reads as in
+[Providers (architecture)](../architecture/providers.md#capabilities-and-model-lists):
+`context_window` with its `context_source` (`server`, `table`, `configured` or
+`default`, a guess), `native_output_schema`, `tool_choice` (with
+`forced_refused_with`), `thinking`, `vision`, `streams_tool_arguments`,
+`prompt_cache` and `stop_sequences`. A cloud provider's answer is the
+adapter's, not the vendor's; the model list is the vendor's, and a field it
+does not give (OpenAI gives no window) is `None`.
+
+Errors: `ModelsUnsupported` (-32035, the `scripted` provider),
+`ModelNotFound` (-32036), `ProviderRequestFailed` (-32037: `.kind` is
+`connect`, `transport` or `status`, with `.status`; the message names
+neither the key nor the URL), and `OpenError` (-32013) when the key is not
+set on the server. A remote tenant needs `allow.provider_info` and an
+allowed `base_url`.
+
 ## Failures and retries
 
 A run retries a provider call that failed with an error another call may

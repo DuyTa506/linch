@@ -631,6 +631,50 @@ async fn main() {
 }
 ```
 
+## Khả năng và danh sách model
+
+`Provider::capabilities(model)` (`crates/linch-core/src/provider/client.rs`)
+trả lời adapter hỗ trợ gì dưới dạng dữ liệu thuần,
+`ProviderCapabilities` (`provider/capabilities.rs`). Nó không có I/O: một cửa sổ
+mà server báo được `prepare` đọc một lần. Mọi adapter đều ghi đè nó và nêu từng
+trường; phần mặc định của trait chỉ lặp lại những gì trait đã nói
+(`declared: false`, vision `unknown`, không hỗ trợ gì khác), nên không adapter nào
+dùng quy tắc của adapter khác. Các server profile nêu `vision`,
+`streams_tool_arguments`, `prompt_cache`, `stop_sequences` và hình dạng danh sách
+model của chúng thành các trường `ChatProfile` bắt buộc, nên trình biên dịch buộc
+mỗi profile phải nêu từng cái.
+
+| Trường | Ý nghĩa |
+|---|---|
+| `context_window`, `context_source` | Cửa sổ mà một run sẽ dùng, và nó là `configured`, từ `server`, từ `table` của adapter hay một phỏng đoán `default` |
+| `native_output_schema` | `Provider::native_output_schema` |
+| `tool_choice` | `auto`, `none`, `required`, `named`, và `forced_refused_with`: các trạng thái thinking (`unset`, `adaptive`, `budgeted`) mà trong đó một lựa chọn ép buộc bị từ chối. Được đọc bằng cách thăm dò `tool_choice_refusal`, nên đó là quy tắc của agent |
+| `thinking` | `disable` (`thinking: disabled` được gửi), `budget`, `effort`, `reasoning_text` (stream mang văn bản reasoning; adapter Responses chỉ có nó với một `reasoning_summary`) |
+| `vision` | `supported` (Anthropic, Gemini), `model_dependent` (adapter gửi ảnh, model được phục vụ quyết định) |
+| `streams_tool_arguments` | Chỉ false với Gemini, nơi một lời gọi đến nguyên vẹn |
+| `prompt_cache` | `explicit` (`cache_control` của Anthropic) hoặc `automatic` (server cache một prefix dùng chung; không gửi điều khiển nào) |
+| `stop_sequences` | False với Responses API, nơi chúng bị từ chối |
+
+`crates/linch-providers/src/capabilities_tests.rs` kiểm tra mọi quy tắc đã khai báo
+so với hành vi của adapter: mỗi lựa chọn tool với mỗi trạng thái thinking so với
+cả lời từ chối lẫn việc payload có dựng được hay không, output schema và stop
+sequence so với payload, và thinking, effort, budget và `cache_control` so với việc
+chúng có thay đổi phần thân request hay không.
+
+`list_models()` và `model_info(model)` hỏi API của vendor
+(`crates/linch-providers/src/models.rs`): OpenAI, adapter Responses và
+DeepSeek dùng `GET {base}/models`; vLLM và SGLang giống vậy với `max_model_len`;
+llama.cpp giống vậy với cửa sổ lấy từ `/props`; Anthropic `GET /v1/models`
+(giới hạn 1000, phân trang bằng `after_id`) với `max_input_tokens`, `max_tokens` và
+`image_input`; Gemini `GET /v1beta/models` (cỡ trang 1000, `pageToken`),
+bỏ các model không có `generateContent`. Đọc tối đa 10 trang, một
+request tối đa 15 giây và 4 MiB, một redirect bị từ chối, và
+id model không bao giờ được đưa vào URL (`model_info` đọc danh sách). Một lỗi là một
+`ModelsError`: `Unsupported` (provider scripted), `NotFound`, hoặc một
+`ProviderError` có message với văn bản cố định cho lỗi kết nối hoặc
+timeout và, với một câu trả lời lỗi, chỉ `error.message`, đã xóa key, nên
+không key lẫn URL nào có thể xuất hiện.
+
 ## Test adapter
 
 - `ScriptedProvider` (`crates/linch-core/src/provider/scripted.rs`) phát lại các lượt cố

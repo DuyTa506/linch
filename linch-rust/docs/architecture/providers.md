@@ -632,6 +632,50 @@ async fn main() {
 }
 ```
 
+## Capabilities and model lists
+
+`Provider::capabilities(model)` (`crates/linch-core/src/provider/client.rs`)
+answers what the adapter supports as plain data,
+`ProviderCapabilities` (`provider/capabilities.rs`). It does no I/O: a window
+a server reports is read once by `prepare`. Every adapter overrides it and
+states each field; the trait default only repeats what the trait already
+says (`declared: false`, vision `unknown`, nothing else supported), so no
+adapter takes another's rules. The server profiles state `vision`,
+`streams_tool_arguments`, `prompt_cache`, `stop_sequences` and the shape of
+their model list as required `ChatProfile` fields, so the compiler forces
+each one.
+
+| Field | Meaning |
+|---|---|
+| `context_window`, `context_source` | The window a run would use, and whether it is `configured`, from the `server`, the adapter's `table` or a `default` guess |
+| `native_output_schema` | `Provider::native_output_schema` |
+| `tool_choice` | `auto`, `none`, `required`, `named`, and `forced_refused_with`: the thinking states (`unset`, `adaptive`, `budgeted`) in which a forced choice is refused. Read by probing `tool_choice_refusal`, so it is the agent's rule |
+| `thinking` | `disable` (`thinking: disabled` is sent), `budget`, `effort`, `reasoning_text` (the stream carries reasoning text; the Responses adapter has it only with a `reasoning_summary`) |
+| `vision` | `supported` (Anthropic, Gemini), `model_dependent` (the adapter sends images, the served model decides) |
+| `streams_tool_arguments` | False only for Gemini, whose call arrives whole |
+| `prompt_cache` | `explicit` (Anthropic's `cache_control`) or `automatic` (the server caches a shared prefix; no control is sent) |
+| `stop_sequences` | False for the Responses API, which refuses them |
+
+`crates/linch-providers/src/capabilities_tests.rs` checks every declared rule
+against the adapter's behaviour: each tool choice with each thinking state
+against both the refusal and whether the payload builds, the output schema
+and stop sequences against the payload, and thinking, effort, budget and
+`cache_control` against whether they change the request body.
+
+`list_models()` and `model_info(model)` ask the vendor's API
+(`crates/linch-providers/src/models.rs`): OpenAI, the Responses adapter and
+DeepSeek `GET {base}/models`; vLLM and SGLang the same with `max_model_len`;
+llama.cpp the same with the window from `/props`; Anthropic `GET /v1/models`
+(limit 1000, paged by `after_id`) with `max_input_tokens`, `max_tokens` and
+`image_input`; Gemini `GET /v1beta/models` (page size 1000, `pageToken`),
+leaving out models without `generateContent`. At most 10 pages are read, one
+request takes at most 15 seconds and 4 MiB, a redirect is refused, and the
+model id is never put in a URL (`model_info` reads the list). A failure is a
+`ModelsError`: `Unsupported` (the scripted provider), `NotFound`, or a
+`ProviderError` whose message has fixed text for a failure to connect or a
+timeout and, for an error answer, only `error.message`, scrubbed of the key,
+so neither the key nor the URL can appear.
+
 ## Testing adapters
 
 - `ScriptedProvider` (`crates/linch-core/src/provider/scripted.rs`) replays

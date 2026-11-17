@@ -109,6 +109,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `allow` field | When absent | What it allows |
 |---|---|---|
 | `scripted_provider` | `false` | The `scripted` provider, for tests and evals |
+| `provider_info` | `false` | `provider.capabilities`, `provider.models` and `provider.model`: the model calls send the server's key to the provider's `base_url`, which must be allowed too |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands through the agent's execution backend |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |

@@ -110,6 +110,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | Trường `allow` | Khi không có | Cho phép gì |
 |---|---|---|
 | `scripted_provider` | `false` | Provider `scripted`, cho kiểm thử và đánh giá |
+| `provider_info` | `false` | `provider.capabilities`, `provider.models` và `provider.model`: các lời gọi model gửi key của server đến `base_url` của provider, nên `base_url` đó cũng phải được cho phép |
 | `exec_tools` | `false` | `Bash` cho agent có workspace, chạy lệnh qua execution backend của agent |
 | `max_runs` | 16 | Số run mà tenant điều khiển cùng lúc, trên tất cả các kết nối của nó |
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
