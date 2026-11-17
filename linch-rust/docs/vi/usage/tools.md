@@ -16,6 +16,7 @@ các workspace tool tích hợp sẵn, hệ thống tệp ảo và MCP server, �
 | Hệ thống tệp ảo: `ls`, `read_file`, `write_file`, `edit_file` | Trong server, trên các tệp văn bản lưu trong kho | `filesystem` |
 | MCP tool: `mcp__<server>__<tool>` | Trong MCP server | `mcp_servers` |
 | Task của session: `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate` | Trong server | `tasks` ([Task](./tasks.md)) |
+| Lịch: `CreateSchedule`, `ListSchedules`, `CancelSchedule` | Trong server; một worker chạy các lần kích hoạt | `schedule_tools` ([bên dưới](#tool-lập-lịch)) |
 | `Skill`, `Subagent`, `SubagentContinue`, `TaskStop`, `send_message` | Trong server | `skills`, `subagents`, `workers`, `mailbox` ([Skill](./skills.md), [Subagent](./subagents.md)) |
 | `tool_search` | Trong server | `tool_search` ([Config của agent](./agent.md#trường-cấp-cao-nhất)) |
 
@@ -670,6 +671,16 @@ Postgres it is.
   nhận một lỗi nói rằng run không thể chờ người dùng.
 - Một response vừa hỏi vừa cần phê duyệt sẽ tạm dừng để chờ phê duyệt trước, rồi
   mới chờ câu trả lời.
+
+## Tool lập lịch
+
+`schedule_tools: True` cho model `CreateSchedule` (scope `exec`), `ListSchedules` (`read`)
+và `CancelSchedule` (`write`), tức `register_schedule_tools` của Python. Một lịch do nó tạo
+chạy chính agent này, trong session của run đang gọi, cho principal của run đang gọi, dưới
+các mức trần lập lịch của tenant; nó chỉ liệt kê và hủy các lịch của chính agent này. Nó
+cần các store Postgres, không có host tool hay callback, và một tenant có allowlist cấp cho
+nó `max_schedules`, và mặc định nó tắt: khi tắt, danh sách tool và hợp đồng của run vẫn như
+trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-model-lập-lịch).
 
 ## Hệ thống tệp ảo
 
