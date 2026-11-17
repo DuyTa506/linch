@@ -92,6 +92,7 @@ fn end(id: &str, name: &str) -> Event {
         canonical_output: None,
         metadata: None,
         error_code: None,
+        cache_hit: false,
     })
 }
 

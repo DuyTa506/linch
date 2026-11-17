@@ -21,7 +21,11 @@ use crate::json::JsonValue;
 use crate::message::ToolResultBlock;
 use crate::redaction::Redactor;
 use crate::registry::{OutputContractError, RegisteredTool};
-use crate::tool::{Report, ToolContext, ToolOutputError, ToolProgress, ToolResult};
+use crate::tool::{
+    Report, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
+};
+use crate::tool_cache::{ToolCacheHandle, cache_key};
+use crate::tool_retry::{TIMEOUT_CLASS, ToolRetry};
 
 use super::RunIdentity;
 use super::plan::{BatchPlan, PlannedAction, PlannedCall};
@@ -46,6 +50,16 @@ pub trait ToolSink: Send + Sync {
     /// [`execute`] returns the error.
     async fn tool_starting(&self, call: &PlannedCall) -> Result<(), Self::Error>;
 
+    /// Called before a running call's next attempt, after an attempt
+    /// failed with an error [`ToolRetry`] retries: the barrier of a retry,
+    /// as [`Self::tool_starting`] is of the first attempt. The next attempt
+    /// (after its backoff wait) starts only after it returns, and an error
+    /// stops the batch the same way. The default does nothing.
+    async fn tool_retrying(&self, call: &PlannedCall, retry: &Retrying) -> Result<(), Self::Error> {
+        let _ = (call, retry);
+        Ok(())
+    }
+
     /// Called exactly once per call with its result, as soon as the result
     /// exists, so within a read group in completion order. Calls that run
     /// no tool (served, refused or aborted) get only this call. An error
@@ -69,6 +83,22 @@ pub trait ToolSink: Send + Sync {
     }
 }
 
+/// A retry about to happen, as [`ToolSink::tool_retrying`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retrying {
+    /// The attempt about to run, from 2.
+    pub attempt: u32,
+    /// Most attempts the policy allows.
+    pub max_attempts: u32,
+    /// The class of the failure that is retried (the error's code, or
+    /// `"timeout"`).
+    pub class: String,
+    /// The failed attempt's error message.
+    pub error: String,
+    /// How long the call waits before the attempt.
+    pub delay: Duration,
+}
+
 /// One call's result, as [`ToolSink::tool_finished`] sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallOutcome {
@@ -85,6 +115,8 @@ pub struct CallOutcome {
     pub contract_error: Option<OutputContractError>,
     /// The `post_tool_use` hooks called, in call order.
     pub hook_records: Vec<HookRecord>,
+    /// Whether the tool cache served the result: no tool ran.
+    pub cache_hit: bool,
 }
 
 /// Limits for one [`execute`] call.
@@ -94,7 +126,7 @@ pub struct ExecuteOptions {
     pub max_concurrency: usize,
     /// Longest one tool may run before it gets a timeout error result; the
     /// tool sees the end as [`ToolContext::deadline`]. `None` waits for the
-    /// tool.
+    /// tool. With `retry`, the limit is per attempt.
     pub call_timeout: Option<Duration>,
     /// Run abort. Cancelling it cancels running tools, and calls not yet
     /// started get an aborted error result.
@@ -103,6 +135,13 @@ pub struct ExecuteOptions {
     /// after a hook replaced it; progress reports are then dropped, since
     /// a match can span two of them. `None` keeps results as they are.
     pub redactor: Option<Arc<Redactor>>,
+    /// Runs an idempotent tool again after a failure it reports as
+    /// transient (see [`crate::tool_retry`]). `None` never retries.
+    pub retry: Option<ToolRetry>,
+    /// Serves an identical call of a named read tool from the cache, after
+    /// the call was planned (see [`crate::tool_cache`]). `None` caches
+    /// nothing.
+    pub cache: Option<ToolCacheHandle>,
 }
 
 /// Run a decided plan and return one result per call, in call order.
@@ -114,6 +153,9 @@ pub struct ExecuteOptions {
 /// when the call ends. A success value of a run or served call is checked
 /// against the tool's `output_schema`, then the `post_tool_use` chain of
 /// `hooks` runs on the result (a violation reaches it as an error).
+///
+/// With `tool_execute` layers registered in `hooks`, each attempt of a
+/// tool runs behind them (see [`crate::hooks::ToolMiddleware`]).
 ///
 /// A run abort is not an error: the calls it stops get an aborted error
 /// result, and a tool that panics gets an error result naming the panic.
@@ -195,19 +237,34 @@ impl From<ToolResult> for Finished {
 impl<S: ToolSink> Runner<'_, S> {
     async fn call(&self, call: &PlannedCall) -> Result<CallOutcome, S::Error> {
         let mut started = None;
+        let mut cache_hit = false;
         let finished = match &call.action {
             _ if self.options.cancel.is_cancelled() => error(ABORTED),
-            PlannedAction::Run => {
-                self.sink.tool_starting(call).await?;
-                started = Some(Instant::now());
-                self.unless_aborted(async {
-                    let result = self.invoke(call).await;
-                    self.finish(call, result).await
-                })
-                .await
-            }
+            PlannedAction::Run => match self.cached(call).await {
+                Some(output) => {
+                    cache_hit = true;
+                    let served = self.finish(call, Ok(output), false);
+                    self.unless_aborted(async { Ok(served.await) }).await?
+                }
+                None => {
+                    // Before the tool starts, so a crash during a write
+                    // never leaves entries it made stale.
+                    self.clear_for_write(call).await;
+                    self.sink.tool_starting(call).await?;
+                    started = Some(Instant::now());
+                    let finished = self
+                        .unless_aborted(async {
+                            let result = self.invoke(call).await?;
+                            Ok(self.finish(call, result, true).await)
+                        })
+                        .await?;
+                    self.clear_for_write(call).await;
+                    finished
+                }
+            },
             PlannedAction::Serve { result } => {
-                self.unless_aborted(self.finish(call, result.clone())).await
+                self.unless_aborted(async { Ok(self.finish(call, result.clone(), false).await) })
+                    .await?
             }
             PlannedAction::Error { error } => Finished::from(Err(error.clone())),
             PlannedAction::Blocked { reason } => error(reason),
@@ -223,23 +280,125 @@ impl<S: ToolSink> Runner<'_, S> {
             duration: started.map_or(Duration::ZERO, |at| at.elapsed()),
             contract_error: finished.contract_error,
             hook_records: finished.hook_records,
+            cache_hit,
         };
         self.sink.tool_finished(call, &outcome).await?;
         Ok(outcome)
     }
 
-    /// `work`, or an aborted result once the run abort fires. An abort that
-    /// already fired never polls `work`.
-    async fn unless_aborted(&self, work: impl Future<Output = Finished>) -> Finished {
-        match self.options.cancel.run_until_cancelled(work).await {
-            Some(finished) => finished,
-            None => error(ABORTED),
+    /// The cache and the key of `call`, when its tool is cacheable: a
+    /// read-scope tool the policy names that neither polls nor asks the
+    /// user, with an input that can be digested.
+    fn cache_of(&self, call: &PlannedCall) -> Option<(&ToolCacheHandle, String)> {
+        let handle = self.options.cache.as_ref()?;
+        let tool = call.tool.as_ref()?.tool();
+        let cacheable = tool.scope() == ToolScope::Read && !tool.polls() && !tool.asks_user();
+        if !cacheable || !handle.config.names(&call.tool_name) {
+            return None;
+        }
+        Some((handle, cache_key(&call.tool_name, &call.input)?))
+    }
+
+    /// The live cached result of `call`. A store failure is a miss.
+    async fn cached(&self, call: &PlannedCall) -> Option<ToolOutput> {
+        let (handle, key) = self.cache_of(call)?;
+        handle
+            .store
+            .get(&handle.namespace, &key)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Store the successful `result` of a call that ran, when it is
+    /// cacheable and small enough. A store failure loses only the entry.
+    async fn store(&self, call: &PlannedCall, result: &ToolResult) {
+        let (Some((handle, key)), Ok(output)) = (self.cache_of(call), result) else {
+            return;
+        };
+        let size = serde_json::to_vec(output).map_or(u64::MAX, |bytes| bytes.len() as u64);
+        if size > handle.config.max_value_bytes {
+            return;
+        }
+        let (ttl, room) = (handle.config.ttl(), handle.config.max_entries);
+        let _ = handle
+            .store
+            .put(&handle.namespace, &key, output, ttl, room)
+            .await;
+    }
+
+    /// Clear the namespace's entries around a write or exec tool's call,
+    /// when the policy says so. A store failure is ignored.
+    async fn clear_for_write(&self, call: &PlannedCall) {
+        let Some(handle) = self.options.cache.as_ref() else {
+            return;
+        };
+        let writes = call
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.tool().scope() != ToolScope::Read);
+        if writes && handle.config.invalidate_on_write {
+            let _ = handle.store.clear(&handle.namespace).await;
         }
     }
 
-    /// Run the tool, forwarding its progress to the sink.
-    async fn invoke(&self, call: &PlannedCall) -> ToolResult {
+    /// `work`, or an aborted result once the run abort fires. An abort that
+    /// already fired never polls `work`.
+    async fn unless_aborted(
+        &self,
+        work: impl Future<Output = Result<Finished, S::Error>>,
+    ) -> Result<Finished, S::Error> {
+        match self.options.cancel.run_until_cancelled(work).await {
+            Some(finished) => finished,
+            None => Ok(error(ABORTED)),
+        }
+    }
+
+    /// Run the tool, again after a retried failure, forwarding its
+    /// progress to the sink. Only the sink's retry barrier can fail.
+    async fn invoke(&self, call: &PlannedCall) -> Result<ToolResult, S::Error> {
         let tool = call.tool.as_ref().expect("a Run entry holds its tool");
+        let idempotent = tool.tool().idempotent();
+        let retry = (self.options.retry.as_ref()).filter(|r| r.covers(&call.tool_name, idempotent));
+        let mut attempt = 1;
+        loop {
+            let (result, timed_out) = self.run_attempt(call, tool, attempt).await;
+            let (Some(retry), Err(failure)) = (retry, &result) else {
+                return Ok(result);
+            };
+            let class = if timed_out {
+                Some(TIMEOUT_CLASS)
+            } else {
+                failure.code.as_deref()
+            };
+            let Some(class) = class.filter(|class| retry.retries(class)) else {
+                return Ok(result);
+            };
+            if attempt >= retry.max_attempts {
+                return Ok(result);
+            }
+            attempt += 1;
+            let delay = retry.delay(attempt);
+            let retrying = Retrying {
+                attempt,
+                max_attempts: retry.max_attempts,
+                class: class.to_owned(),
+                error: failure.message.clone(),
+                delay,
+            };
+            self.sink.tool_retrying(call, &retrying).await?;
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// One attempt of the tool, with its own context, deadline and
+    /// progress channel. Also says whether it ran past the call timeout.
+    async fn run_attempt(
+        &self,
+        call: &PlannedCall,
+        tool: &Arc<RegisteredTool>,
+        attempt: u32,
+    ) -> (ToolResult, bool) {
         let token = self.options.cancel.child_token();
         // Cancels the token however the call ends, so work the tool spawned
         // stops too.
@@ -260,9 +419,9 @@ impl<S: ToolSink> Runner<'_, S> {
         .with_reports(progress)
         .with_deadline(deadline)
         .with_trace_id(self.run.trace_id.clone());
-        let execution = self.attempt(call, tool, ctx);
+        let execution = self.body(call, tool, ctx, attempt);
         let execution = self.timed(call, deadline, caught(&call.tool_name, execution));
-        let result = {
+        let outcome = {
             let forward = pin!(async {
                 while let Some(report) = reports.recv().await {
                     self.report(call, report);
@@ -270,23 +429,24 @@ impl<S: ToolSink> Runner<'_, S> {
                 future::pending::<Infallible>().await
             });
             match future::select(pin!(execution), forward).await {
-                Either::Left((result, _)) => result,
+                Either::Left((outcome, _)) => outcome,
                 Either::Right((never, _)) => match never {},
             }
         };
         while let Ok(report) = reports.try_recv() {
             self.report(call, report);
         }
-        result
+        outcome
     }
 
-    /// One attempt: the tool body, behind the `tool_execute` layers when
-    /// any are registered, and called directly otherwise.
-    async fn attempt(
+    /// The tool body, behind the `tool_execute` layers when any are
+    /// registered, and called directly otherwise.
+    async fn body(
         &self,
         call: &PlannedCall,
         tool: &Arc<RegisteredTool>,
         ctx: ToolContext,
+        attempt: u32,
     ) -> ToolResult {
         let pipeline = &self.hooks.tool_execute;
         if pipeline.is_empty() {
@@ -298,7 +458,7 @@ impl<S: ToolSink> Runner<'_, S> {
             tool_use_id: call.tool_use_id.clone(),
             tool_name: call.tool_name.clone(),
             input: call.input.clone(),
-            attempt: 1,
+            attempt,
         };
         let body = Box::pin(async { tool.tool().execute(call.input.clone(), ctx).await });
         pipeline.run(&tool_call, body).await
@@ -312,25 +472,28 @@ impl<S: ToolSink> Runner<'_, S> {
         }
     }
 
-    /// `execution`, or a timeout error result at `deadline`.
+    /// `execution`, or a timeout error result at `deadline`; the flag says
+    /// which.
     async fn timed(
         &self,
         call: &PlannedCall,
         deadline: Option<tokio::time::Instant>,
         execution: impl Future<Output = ToolResult>,
-    ) -> ToolResult {
+    ) -> (ToolResult, bool) {
         let (Some(deadline), Some(limit)) = (deadline, self.options.call_timeout) else {
-            return execution.await;
+            return (execution.await, false);
         };
-        tokio::time::timeout_at(deadline, execution)
-            .await
-            .unwrap_or_else(|_| {
-                Err(ToolOutputError::new(format!(
+        match tokio::time::timeout_at(deadline, execution).await {
+            Ok(result) => (result, false),
+            Err(_) => {
+                let message = format!(
                     "Tool {:?} timed out after {}ms",
                     call.tool_name,
                     limit.as_millis()
-                )))
-            })
+                );
+                (Err(ToolOutputError::new(message)), true)
+            }
+        }
     }
 
     /// Check a success value against the tool's output schema, then run
@@ -338,7 +501,11 @@ impl<S: ToolSink> Runner<'_, S> {
     /// the tool returns, so a hook may replace a valid value (with an
     /// offload pointer, say) without breaking it, and gets a violation as
     /// an error result.
-    async fn finish(&self, call: &PlannedCall, result: ToolResult) -> Finished {
+    ///
+    /// `fresh` says the tool just ran, so a successful result is stored
+    /// in the tool cache after the schema check and redaction, before
+    /// `post_tool_use`.
+    async fn finish(&self, call: &PlannedCall, result: ToolResult, fresh: bool) -> Finished {
         let mut finished = Finished::from(result);
         if let (Ok(output), Some(tool)) = (&finished.result, &call.tool)
             && let Err(violation) = tool.validate_output(output)
@@ -352,6 +519,9 @@ impl<S: ToolSink> Runner<'_, S> {
         let redactor = self.options.redactor.as_deref();
         if let Some(redactor) = redactor {
             redactor.result(&mut finished.result);
+        }
+        if fresh {
+            self.store(call, &finished.result).await;
         }
         if !self.hooks.post_tool_use.is_empty() {
             let redacted = redactor.map(|_| finished.result.clone());

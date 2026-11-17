@@ -260,6 +260,8 @@ fn options(max_concurrency: usize) -> ExecuteOptions {
         call_timeout: None,
         cancel: CancellationToken::new(),
         redactor: None,
+        retry: None,
+        cache: None,
     }
 }
 

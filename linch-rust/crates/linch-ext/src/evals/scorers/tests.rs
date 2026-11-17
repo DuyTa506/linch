@@ -36,6 +36,7 @@ fn end(id: &str, tool: &str, is_error: bool) -> Event {
         canonical_output: None,
         metadata: None,
         error_code: None,
+        cache_hit: false,
     })
 }
 

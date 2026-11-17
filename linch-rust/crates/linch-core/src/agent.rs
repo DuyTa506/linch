@@ -35,6 +35,7 @@ use crate::skills::SkillSet;
 use crate::store::{RunRecord, RunStore, SessionStore};
 use crate::structured::{FinalTool, OutputContract};
 use crate::subagents::{Registry, Roster, Workers};
+use crate::tool_cache::ToolCacheHandle;
 use crate::tool_search::ToolSearch;
 use crate::usage::Usage;
 use crate::verification::Verifiers;
@@ -213,6 +214,9 @@ pub(crate) struct AgentInner {
     /// The cap on concurrent provider calls this agent's runs share, its
     /// subagents' included; `None` for no cap. Not part of the contract.
     pub(crate) gate: Option<ProviderGate>,
+    /// The cache of tool results (see [`crate::tool_cache`]); `None`
+    /// without `spec.tool_cache`, and for a subagent's agent.
+    pub(crate) tool_cache: Option<ToolCacheHandle>,
     /// The inbox each run of a session drains; `None` without one.
     pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
     /// The subagent child runs of each run that is live or suspended in

@@ -13,6 +13,7 @@ pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
     "usage",
     "tool_call_start",
     "tool_call_end",
+    "tool_retry",
     "tool_progress",
     "permission_request",
     "input_request",

@@ -46,6 +46,7 @@ pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
     pub(super) exec_tools: bool,
+    pub(super) tool_cache: bool,
     pub(super) max_runs: usize,
     pub(super) max_agents: usize,
     pub(super) max_connections: usize,
@@ -222,6 +223,7 @@ impl Allowlists {
         Self {
             scripted_provider: false,
             exec_tools: false,
+            tool_cache: false,
             max_runs: DEFAULT_MAX_RUNS,
             max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
@@ -239,6 +241,15 @@ impl Allowlists {
             execution: vec![ExecutionConfig::Local {}],
             system_sections: Vec::new(),
         }
+    }
+
+    /// Whether a tenant's `spec.tool_cache` is allowed. Off by default: the
+    /// cache keeps results in the server's memory or its database, shared by
+    /// every session of the tenant's namespace, bounded to 1024 entries, a
+    /// one-hour ttl and 1 MiB a result.
+    pub fn tool_cache(mut self, allowed: bool) -> Self {
+        self.tool_cache = allowed;
+        self
     }
 
     /// Whether the `scripted` provider is allowed (for tests and evals).

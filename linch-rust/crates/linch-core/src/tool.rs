@@ -280,6 +280,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether running a call again after it failed is safe: it has no
+    /// effect beyond its result, or the same effect twice is the same.
+    /// `spec.tool_retry` retries only a tool that says yes, whatever the
+    /// policy lists (see [`crate::tool_retry`]). The default is no.
+    fn idempotent(&self) -> bool {
+        false
+    }
+
     /// One-line summary of a call for events and approval prompts.
     fn summarize(&self, input: &JsonObject) -> String {
         let _ = input;

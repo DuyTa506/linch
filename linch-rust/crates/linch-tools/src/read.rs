@@ -72,6 +72,11 @@ impl Tool for Read {
         ToolScope::Read
     }
 
+    /// A read has no effect, so a failed call may run again.
+    fn idempotent(&self) -> bool {
+        true
+    }
+
     fn summarize(&self, input: &JsonObject) -> String {
         let path = input
             .get("file_path")

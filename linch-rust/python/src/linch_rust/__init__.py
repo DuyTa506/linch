@@ -39,7 +39,9 @@ from .config import (
     SandboxExecution,
     System,
     SystemSection,
+    ToolCache,
     ToolChoice,
+    ToolRetry,
     ToolSearch,
     TruncationRecovery,
     Verification,
@@ -105,6 +107,7 @@ from .events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolProgressEvent,
+    ToolRetryEvent,
     UnknownEvent,
     UsageEvent,
     UserEvent,
@@ -126,7 +129,7 @@ from .monitor import (
 from .run import Run
 from .schedule import CHECK_IN, Job, JobState, Schedule
 from .server import Server
-from .tools import HostTool, Scope, ToolContext, ToolOutput, tool
+from .tools import HostTool, Scope, ToolContext, ToolError, ToolOutput, tool
 
 __all__ = [
     "Usage",
@@ -229,12 +232,16 @@ __all__ = [
     "SuspendedEvent",
     "System",
     "SystemSection",
+    "ToolCache",
     "ToolCallEndEvent",
     "ToolCallStartEvent",
     "ToolChoice",
     "ToolContext",
+    "ToolError",
     "ToolOutput",
     "ToolProgressEvent",
+    "ToolRetry",
+    "ToolRetryEvent",
     "ToolSearch",
     "TruncationRecovery",
     "Unauthenticated",

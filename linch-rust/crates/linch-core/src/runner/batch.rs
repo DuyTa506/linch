@@ -54,6 +54,7 @@ impl Runner {
                     canonical_output: None,
                     metadata: None,
                     error_code: None,
+                    cache_hit: false,
                 }));
             }
         }
@@ -242,6 +243,8 @@ impl Runner {
             call_timeout: spec.call_timeout(),
             cancel: self.cancel.clone(),
             redactor: self.agent.result_redactor().cloned(),
+            retry: spec.tool_retry.clone(),
+            cache: self.agent.tool_cache.clone(),
         };
         let run_id = self.run.run_id.clone();
         let hooks = &self.agent.hooks;

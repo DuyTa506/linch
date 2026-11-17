@@ -80,6 +80,30 @@ pub(super) fn tool_call_start_event() -> impl Strategy<Value = ToolCallStartEven
         )
 }
 
+pub(super) fn tool_retry_event() -> impl Strategy<Value = ToolRetryEvent> {
+    (
+        short_string(),
+        short_string(),
+        (2..10u32, 2..10u32),
+        short_string(),
+        short_string(),
+        0..10_000u64,
+    )
+        .prop_map(
+            |(tool_use_id, tool_name, (attempt, max_attempts), error_class, error, delay_ms)| {
+                ToolRetryEvent {
+                    tool_use_id,
+                    tool_name,
+                    attempt,
+                    max_attempts,
+                    error_class,
+                    error,
+                    delay_ms,
+                }
+            },
+        )
+}
+
 pub(super) fn tool_progress_event() -> impl Strategy<Value = ToolProgressEvent> {
     (
         short_string(),

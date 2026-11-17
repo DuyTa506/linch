@@ -18,6 +18,7 @@ impl Event {
             Event::Usage(_) => "usage",
             Event::ToolCallStart(_) => "tool_call_start",
             Event::ToolCallEnd(_) => "tool_call_end",
+            Event::ToolRetry(_) => "tool_retry",
             Event::ToolProgress(_) => "tool_progress",
             Event::PermissionRequest(_) => "permission_request",
             Event::InputRequest(_) => "input_request",

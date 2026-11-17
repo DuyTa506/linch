@@ -106,6 +106,8 @@ class ToolCallEndEvent:
     the model (a host tool's `ToolOutput.metadata`, or where an offloaded
     result went); `None` for an error or a tool that set none. `error_code`
     is a failed call's machine-readable code, `None` without one.
+    `cache_hit` is set when `spec.tool_cache` served the result: the tool
+    did not run, and the call has no durable start.
     """
 
     type: ClassVar[str] = "tool_call_end"
@@ -115,6 +117,7 @@ class ToolCallEndEvent:
     canonical_output: Any = None
     metadata: JsonObject | None = None
     error_code: str | None = None
+    cache_hit: bool = False
 
     @property
     def tool_use_id(self) -> str:
@@ -125,6 +128,27 @@ class ToolCallEndEvent:
     def is_error(self) -> bool:
         """Whether the result is a tool error."""
         return bool(self.result.get("is_error", False))
+
+
+@dataclass(frozen=True)
+class ToolRetryEvent:
+    """A tool attempt failed with an error `spec.tool_retry` retries.
+
+    It is durable before the wait and the next attempt: `attempt` is the
+    one about to run (from 2) of at most `max_attempts`, `error_class` the
+    failure's class (the error's `code`, or `timeout`), `error` its message
+    and `delay_ms` the wait. A crash after it leaves the call with no end,
+    which a resume reports as interrupted and does not run again.
+    """
+
+    type: ClassVar[str] = "tool_retry"
+    tool_use_id: str
+    tool_name: str
+    attempt: int
+    max_attempts: int
+    error_class: str
+    error: str
+    delay_ms: int
 
 
 @dataclass(frozen=True)
@@ -442,6 +466,7 @@ Event = (
     | UsageEvent
     | ToolCallStartEvent
     | ToolCallEndEvent
+    | ToolRetryEvent
     | ToolProgressEvent
     | PermissionRequestEvent
     | InputRequestEvent
@@ -476,6 +501,7 @@ _KINDS: dict[str, type[Any]] = {
         UsageEvent,
         ToolCallStartEvent,
         ToolCallEndEvent,
+        ToolRetryEvent,
         ToolProgressEvent,
         PermissionRequestEvent,
         InputRequestEvent,

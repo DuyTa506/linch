@@ -39,6 +39,7 @@ fn replaced(response: PostToolUseResponse) -> Option<ToolOutput> {
     match response {
         PostToolUseResponse::Continue => None,
         PostToolUseResponse::Replace { result } => Some(result.expect("a success result")),
+        PostToolUseResponse::Mutate { .. } => panic!("the offload replaces, it never mutates"),
     }
 }
 

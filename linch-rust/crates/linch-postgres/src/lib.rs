@@ -45,6 +45,7 @@ mod pool_size;
 mod run;
 mod session;
 mod tasks;
+mod tool_cache;
 
 pub use codec::CodecError;
 pub use files::PgFileBackend;
@@ -54,6 +55,7 @@ pub use run::{DEFAULT_RUN_LEASE_TTL, PgRunStore};
 pub use session::PgSessionStore;
 pub use sqlx::PgPool;
 pub use sqlx::migrate::MigrateError;
+pub use tool_cache::PgToolCache;
 
 /// Table that records which migrations have been applied.
 ///
@@ -215,6 +217,13 @@ fn migrator() -> Migrator {
             Cow::Borrowed("run principal"),
             MigrationType::Simple,
             include_str!("../migrations/0007_run_principal.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            8,
+            Cow::Borrowed("tool cache"),
+            MigrationType::Simple,
+            include_str!("../migrations/0008_tool_cache.sql").into_sql_str(),
             false,
         ),
     ];

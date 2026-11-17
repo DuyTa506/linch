@@ -164,11 +164,13 @@
 //! handle lives until `agent.close` or the end of its connection.
 //!
 //! Each of `tools` ([`HostToolSpec`](protocol::HostToolSpec)) is
-//! `{name, description, input_schema, scope, timeout_ms?}`. `scope` is
+//! `{name, description, input_schema, scope, timeout_ms?, idempotent?}`. `scope` is
 //! required: `read`, `write` or `exec`. It decides approval like any tool's
 //! (in mode `default`, `write` and `exec` calls ask), and only `read` calls
-//! run in parallel. `timeout_ms` defaults to 300 000. A host tool is run
-//! with `tool.call` on the connection that opened the agent.
+//! run in parallel. `timeout_ms` defaults to 300 000. `idempotent` (default
+//! false) says a repeat has no effect beyond its result: only such a tool is
+//! retried by `spec.tool_retry`. A host tool is run with `tool.call` on the
+//! connection that opened the agent.
 //!
 //! Each of `callbacks` ([`CallbackSpec`](protocol::CallbackSpec)) is
 //! `{point, policy_id, policy_version, matcher?, timeout_ms?, fail_mode?}`
@@ -355,7 +357,8 @@
 //! model sees and `metadata` is for the host only (the call's
 //! `tool_call_end` event carries it). An error object is a
 //! tool error the model reads: its `message` is shown and its `data` kept
-//! as details. Every way a call can fail without a result has a code in
+//! as details; when `data.code` is a string it is the error's `code`, the
+//! class `spec.tool_retry` matches. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
 //!
 //! **`hook.call`** `{agent, point, policy_id, request}`

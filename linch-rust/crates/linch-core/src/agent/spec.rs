@@ -20,6 +20,8 @@ use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
 use crate::system::SystemConfig;
 use crate::tool::ToolScope;
+use crate::tool_cache::ToolCache;
+use crate::tool_retry::ToolRetry;
 use crate::truncation::TruncationRecovery;
 use crate::verification::VerificationSpec;
 
@@ -167,6 +169,22 @@ pub struct AgentSpec {
     /// not take it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_tool_name: Option<String>,
+    /// Runs a failed tool call again (Python's `Agent.tool_retry`; see
+    /// [`crate::tool_retry`]): only a tool that declares itself idempotent,
+    /// only after an error of a class the policy lists, with a durable
+    /// `tool_retry` event before each attempt. `None` (the default) never
+    /// retries and is left off the wire, so a spec that does not set it
+    /// keeps the contract of a spec written before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_retry: Option<ToolRetry>,
+    /// Reuses the result of a named read tool for an identical call, after
+    /// permission and the hooks (see [`crate::tool_cache`]); entries expire,
+    /// belong to the agent's namespace and are cleared by a write tool.
+    /// `None` (the default) caches nothing and is left off the wire, so a
+    /// spec that does not set it keeps the contract of a spec written
+    /// before this existed. A subagent's runs do not use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_cache: Option<ToolCache>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -200,6 +218,8 @@ impl AgentSpec {
             loop_guard: LoopGuard::default(),
             tool_choice: None,
             final_tool_name: None,
+            tool_retry: None,
+            tool_cache: None,
         }
     }
 
@@ -511,6 +531,81 @@ mod tests {
         for refused in [json!(null), json!({"force_final_answer": true})] {
             let spec = json!({"model": "m", "loop_guard": refused});
             assert!(serde_json::from_value::<AgentSpec>(spec).is_err());
+        }
+    }
+
+    /// Retry is off unless the spec sets it: an unset spec is on neither the
+    /// wire nor in the contract, with the digest of a spec written before
+    /// `tool_retry` existed; any policy, `{}` included, is a contract of its
+    /// own.
+    #[test]
+    fn tool_retry_is_off_the_wire_and_the_contract_unless_set() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let unset = AgentSpec::new("m");
+        assert_eq!(unset.tool_retry, None);
+        let wire = serde_json::to_value(&unset).unwrap();
+        assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+        let golden = "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300";
+        let base = contract_digest(&unset, &[], hooks, &none).unwrap();
+        assert_eq!(base.to_string(), golden);
+        for policy in [
+            json!({}),
+            json!({"max_attempts": 4}),
+            json!({"retry_on": ["timeout"]}),
+        ] {
+            let read: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "tool_retry": policy})).unwrap();
+            let wire = serde_json::to_value(&read).unwrap();
+            assert!(wire.get("tool_retry").is_some(), "{wire}");
+            assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), read);
+            let digest = contract_digest(&read, &[], hooks, &none).unwrap();
+            assert_ne!(base, digest, "{policy}");
+        }
+        for refused in [
+            json!(null),
+            json!({"jitter": 0.1}),
+            json!({"max_attempts": 0}),
+        ] {
+            let spec = json!({"model": "m", "tool_retry": refused});
+            let read = serde_json::from_value::<AgentSpec>(spec);
+            let ok = read.is_ok_and(|spec| spec.tool_retry.is_some_and(|r| r.problem().is_none()));
+            assert!(!ok, "{refused}");
+        }
+    }
+
+    /// A spec without `tool_cache` has the wire form and contract it had
+    /// before the field existed; a cache, with whatever fields, is a
+    /// contract of its own, and a policy that names no tool is refused.
+    #[test]
+    fn tool_cache_is_off_the_wire_and_the_contract_unless_set() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let unset = AgentSpec::new("m");
+        assert_eq!(unset.tool_cache, None);
+        let wire = serde_json::to_value(&unset).unwrap();
+        assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
+        let golden = "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300";
+        let base = contract_digest(&unset, &[], hooks, &none).unwrap();
+        assert_eq!(base.to_string(), golden);
+        for cache in [
+            json!({"tools": ["Read"]}),
+            json!({"tools": ["Read"], "ttl_ms": 10}),
+            json!({"tools": ["Read"], "invalidate_on_write": false}),
+        ] {
+            let read: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "tool_cache": cache})).unwrap();
+            let wire = serde_json::to_value(&read).unwrap();
+            assert!(wire.get("tool_cache").is_some(), "{wire}");
+            assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), read);
+            let digest = contract_digest(&read, &[], hooks, &none).unwrap();
+            assert_ne!(base, digest, "{cache}");
+        }
+        for refused in [json!(null), json!({}), json!({"tools": []})] {
+            let spec = json!({"model": "m", "tool_cache": refused});
+            let read = serde_json::from_value::<AgentSpec>(spec);
+            let ok = read.is_ok_and(|spec| spec.tool_cache.is_some_and(|c| c.problem().is_none()));
+            assert!(!ok, "{refused}");
         }
     }
 

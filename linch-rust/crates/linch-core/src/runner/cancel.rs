@@ -160,6 +160,7 @@ impl Runner {
                 canonical_output: None,
                 metadata: None,
                 error_code: None,
+                cache_hit: false,
             }));
             results.push(ContentBlock::ToolResult(result));
         }

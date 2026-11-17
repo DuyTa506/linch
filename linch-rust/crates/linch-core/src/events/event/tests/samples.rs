@@ -66,6 +66,16 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             canonical_output: None,
             metadata: None,
             error_code: Some("not_found".into()),
+            cache_hit: false,
+        }),
+        Event::ToolRetry(ToolRetryEvent {
+            tool_use_id: "c1".into(),
+            tool_name: "Read".into(),
+            attempt: 2,
+            max_attempts: 3,
+            error_class: "transient".into(),
+            error: "busy".into(),
+            delay_ms: 200,
         }),
         Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),

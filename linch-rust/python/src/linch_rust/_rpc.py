@@ -35,7 +35,7 @@ import orjson
 
 from .callbacks import Callback
 from .errors import ConnectionClosed, LinchError, error_from, run_end_error
-from .tools import HostTool, ToolContext, ToolOutput
+from .tools import HostTool, ToolContext, ToolError, ToolOutput
 
 JsonObject = dict[str, Any]
 # A host tool's or callback's own failure; the code is application-defined.
@@ -153,8 +153,11 @@ def _encode(message: JsonObject) -> str:
     return json.dumps(message, ensure_ascii=False, allow_nan=False)
 
 
-def _error_line(id: Any, code: int, message: str) -> str:
-    return _encode({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+def _error_line(id: Any, code: int, message: str, data: Any = None) -> str:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return _encode({"jsonrpc": "2.0", "id": id, "error": error})
 
 
 class Connection:
@@ -275,6 +278,8 @@ class Connection:
             line = _encode({"jsonrpc": "2.0", "id": id, "result": result})
         except _Refused as error:
             line = _error_line(id, error.code, str(error))
+        except ToolError as error:
+            line = _error_line(id, _HANDLER_ERROR, str(error), {"code": error.code})
         except Exception as error:
             line = _error_line(id, _HANDLER_ERROR, f"{type(error).__name__}: {error}")
         try:

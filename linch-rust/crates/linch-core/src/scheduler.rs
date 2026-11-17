@@ -37,7 +37,7 @@ use crate::json::JsonObject;
 use crate::policy::Principal;
 
 pub(crate) use execute::ABORTED;
-pub use execute::{CallOutcome, ExecuteOptions, ToolSink, execute};
+pub use execute::{CallOutcome, ExecuteOptions, Retrying, ToolSink, execute};
 pub(crate) use plan::plan_one;
 pub use plan::{BatchPlan, PlannedAction, PlannedCall, plan};
 
