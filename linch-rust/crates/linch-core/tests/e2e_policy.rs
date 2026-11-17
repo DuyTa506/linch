@@ -558,11 +558,8 @@ async fn a_refusal_does_not_name_a_tool_a_skill_hid() {
 
 /// A gate's correction does not name a tool the turn did not offer either
 /// (a prerequisite's refusal already keeps such a name out of the text).
-/// Minor and optional: the tool is one the agent has, a skill's narrowing
-/// ends, and a `tool_deny` rule does not hide a tool, so the name leaks
-/// nothing the model could not see. Ignored until the owner decides.
+/// The correction still says the requirement is unmet, without the name.
 #[tokio::test]
-#[ignore = "minor: the correction names a tool a skill hid for the turn"]
 async fn a_correction_does_not_name_a_tool_a_skill_hid() {
     let mut skill = Skill::new("narrow", "/skills/narrow", "Narrow.", "go");
     skill.allowed_tools = Some(vec!["Update".into()]);
