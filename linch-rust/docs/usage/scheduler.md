@@ -295,14 +295,23 @@ had:
   session's: not another session's, not a schedule without a session (one
   the client made with `create_schedule` and no `session_id`), not another
   agent's, nor another namespace's.
-- **Not from a subagent.** A subagent may hold fewer tools than the agent a
-  schedule runs, so its `CreateSchedule` gets an error.
+- **Not from a subagent.** A subagent, in the foreground or the
+  background, may hold fewer tools than the agent a schedule runs, so its
+  `CreateSchedule` gets an error with code `not_allowed`.
 - **Asked like any exec tool.** `CreateSchedule` asks in modes `default` and
   `accept_edits`. A fire that calls it with nobody to approve suspends;
   give the background runs a mode or rules that allow what they must do.
 
 The fires queue on the `default` queue. A fire's run has the tools too,
 so it can schedule again, within the same caps.
+
+**Known gap: a changed config orphans its schedules.** The tools find
+schedules by the digest of the stored config. Open the agent again with
+any change to its config, and `ListSchedules` and `CancelSchedule` no
+longer see the schedules the old config's runs made. Those schedules
+still fire, running the old config, and count toward `max_schedules`.
+List them with `agent.schedules()` and remove them with
+`agent.delete_schedule(id)` (`schedule.delete`).
 
 `open_agent` refuses `schedule_tools`:
 
