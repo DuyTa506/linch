@@ -133,7 +133,7 @@ async fn tool_ends(
     root: &Path,
     processes: &Arc<Processes>,
     turns: Vec<ScriptedTurn>,
-) -> Vec<linch_core::ToolCallEndEvent> {
+) -> Vec<Event> {
     let agent = AgentBuilder::new(AgentSpec::new(MODEL))
         .provider(Arc::new(ScriptedProvider::new(turns)))
         .tools(registry(root, processes))
@@ -149,8 +149,9 @@ async fn tool_ends(
     let mut stream = agent.run("go", RunOptions::new("s1"));
     let mut ends = Vec::new();
     while let Some(item) = stream.next().await {
-        if let Event::ToolCallEnd(end) = item.unwrap().event {
-            ends.push(end);
+        let event = item.unwrap().event;
+        if matches!(event, Event::ToolCallEnd(_)) {
+            ends.push(event);
         }
     }
     ends
@@ -170,8 +171,9 @@ async fn a_failed_poll_carries_its_status_in_the_tool_end_metadata() {
             .build(),
         TurnBuilder::new(MODEL).text("started").build(),
     ];
-    let [started] = &tool_ends(dir.path(), &processes, turns).await[..] else {
-        panic!("one tool end")
+    let started = tool_ends(dir.path(), &processes, turns).await;
+    let [Event::ToolCallEnd(started)] = &started[..] else {
+        panic!("one tool end: {started:?}")
     };
     let id = started.metadata.as_ref().unwrap()["process_id"].clone();
 
@@ -183,7 +185,7 @@ async fn a_failed_poll_carries_its_status_in_the_tool_end_metadata() {
         TurnBuilder::new(MODEL).text("done").build(),
     ];
     let ends = tool_ends(dir.path(), &processes, turns).await;
-    let [end] = &ends[..] else {
+    let [Event::ToolCallEnd(end)] = &ends[..] else {
         panic!("one tool end: {ends:?}")
     };
     assert!(end.result.is_error);
@@ -193,5 +195,8 @@ async fn a_failed_poll_carries_its_status_in_the_tool_end_metadata() {
     assert_eq!(metadata["exit_code"], 3);
     assert_eq!(metadata["process_id"], id);
     let text = serde_json::to_value(&end.result).unwrap()["content"][0]["text"].clone();
-    assert_eq!(text, "out\n[exit code 3]", "the model-visible text is as before");
+    assert_eq!(
+        text, "out\n[exit code 3]",
+        "the model-visible text is as before"
+    );
 }

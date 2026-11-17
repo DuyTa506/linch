@@ -127,8 +127,10 @@ class ToolCallEndEvent:
 
     `metadata` is what the tool returned for the host only, never shown to
     the model (a host tool's `ToolOutput.metadata`, or where an offloaded
-    result went); `None` for an error or a tool that set none. `error_code`
-    is a failed call's machine-readable code, `None` without one.
+    result went; for a failed call, the error's `details` object, such as a
+    `Bash` command's `status` and `exit_code`); `None` for a tool that set
+    none. `error_code` is a failed call's machine-readable code, `None`
+    without one.
     `cache_hit` is set when `spec.tool_cache` served the result: the tool
     did not run, and the call has no durable start.
     """

@@ -40,7 +40,8 @@ per call; per-call data arrives in `ToolContext`.
 
 `ToolOutput` holds the `value` the model sees and `metadata` it does not.
 `ToolOutputError` holds the `message` the model sees, an optional `code` for
-the host, and optional `details` (`tool.rs:42-83`).
+the host, and optional `details` for the host: an object reaches the call's
+`tool_call_end` event as its `metadata` (`tool.rs:42-83`).
 
 `ToolContext` (`tool.rs:117`) carries the session id, run id, `tool_use_id`,
 the caller's `principal`, a `cancel` token (cancelled on run abort or when the

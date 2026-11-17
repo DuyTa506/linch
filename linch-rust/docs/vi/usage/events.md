@@ -267,7 +267,7 @@ Một lời gọi tool đã kết thúc.
 | `result` | Block kết quả tool mà model đọc: `{"tool_use_id", "content": [blocks], "is_error"?}` |
 | `duration_ms` | Lời gọi mất bao lâu |
 | `canonical_output` | Giá trị có cấu trúc, với các tool khai báo output schema; ngược lại là `None` |
-| `metadata` | Chi tiết chỉ dành cho host, không bao giờ hiển thị cho model: những gì một host tool trả về trong [`ToolOutput.metadata`](./tools.md#metadata-cho-host), hoặc nơi một kết quả được offload đã đi tới; `None` với lỗi hoặc với tool không đặt gì |
+| `metadata` | Chi tiết chỉ dành cho host, không bao giờ hiển thị cho model: những gì một host tool trả về trong [`ToolOutput.metadata`](./tools.md#metadata-cho-host), hoặc nơi một kết quả được offload đã đi tới; với lời gọi thất bại, là object `details` của lỗi (`status` và `exit_code` của một lệnh `Bash`, xem [Workspace tool](./tools.md#workspace-tool)); `None` với tool không đặt gì |
 | `error_code` | Mã máy đọc được của một lời gọi thất bại (`invalid_input`, `not_found`, ...), khi tool của nó cung cấp; ngược lại là `None` |
 | `cache_hit` | Việc [`spec.tool_cache`](./tools.md#tool_cache) có phục vụ kết quả hay không: tool không chạy, và `tool_call_start` của lời gọi được ghi cùng với event này, không phải trước nó. Ngược lại là `False` |
 | `tool_use_id` | Property: `result["tool_use_id"]` |

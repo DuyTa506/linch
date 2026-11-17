@@ -59,10 +59,16 @@ async fn bash_reports_stdout_stderr_and_exit_status() {
     let failed = run(&tool, "echo partial; exit 3", 5_000).await.unwrap_err();
     assert_eq!(failed.code.as_deref(), Some("exit_status"));
     assert_eq!(failed.message, "partial\n[exit code 3]");
-    assert_eq!(failed.details, Some(json!({"exit_code": 3})));
+    assert_eq!(
+        failed.details,
+        Some(json!({"status": "exited", "exit_code": 3, "truncated": false}))
+    );
     let killed = run(&tool, "kill -9 $$", 5_000).await.unwrap_err();
     assert_eq!(killed.message, "[killed by signal 9]");
-    assert_eq!(killed.details, Some(json!({"signal": 9})));
+    assert_eq!(
+        killed.details,
+        Some(json!({"status": "exited", "signal": 9, "truncated": false}))
+    );
 }
 
 #[tokio::test]

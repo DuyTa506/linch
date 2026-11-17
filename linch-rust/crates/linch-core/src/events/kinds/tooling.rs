@@ -49,9 +49,10 @@ pub struct ToolCallEndEvent {
     )]
     pub canonical_output: Option<JsonValue>,
     /// The host-facing [`crate::ToolOutput::metadata`] of a successful
-    /// result, after `post_tool_use`; never shown to the model. `None`, and
-    /// absent on the wire, for an error or a tool that set none. Boxed so
-    /// the tool end is not the largest event every envelope pays for.
+    /// result, or the [`crate::ToolOutputError::details`] object of a failed
+    /// one, after `post_tool_use`; never shown to the model. `None`, and
+    /// absent on the wire, for a tool that set none. Boxed so the tool end
+    /// is not the largest event every envelope pays for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Box<JsonObject>>,
     /// The [`crate::ToolOutputError::code`] of a failed call, after

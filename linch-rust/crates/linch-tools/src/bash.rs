@@ -279,6 +279,7 @@ impl Bash {
         output
             .metadata
             .insert("process_id".into(), proc.id.clone().into());
+        output.metadata.insert("status".into(), "running".into());
         if let Some(pid) = proc.pid {
             output.metadata.insert("pid".into(), pid.into());
         }
@@ -303,30 +304,39 @@ fn fit(
 
 /// The model-facing result: stdout, then `[stderr]` and stderr, then the
 /// status line. Anything but exit code 0 is an error carrying the same text.
+///
+/// The host-facing facts are `status` (`exited`, `timed_out`, `killed`,
+/// `output_limit` or `interrupted`), `exit_code` or `signal` for a command
+/// that ended by itself, and `truncated`: the output's metadata, or the
+/// error's details. The call's end event carries either as `metadata`.
 fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
     let (stdout, out_cut) = finished.stdout.render();
     let (stderr, err_cut) = finished.stderr.render();
-    let (status, failure): (String, Option<(&str, JsonValue)>) = match finished.end {
-        End::Exited(Exit::Code(0)) => ("[exit code 0]".into(), None),
-        End::Exited(Exit::Code(code)) => (
-            format!("[exit code {code}]"),
-            Some(("exit_status", json!({"exit_code": code}))),
-        ),
-        End::Exited(Exit::Signal(signal)) => (
-            format!("[killed by signal {signal}]"),
-            Some(("exit_status", json!({"signal": signal}))),
-        ),
-        End::TimedOut => (
-            format!("[timed out after {timeout_ms} ms; process group killed]"),
-            Some(("timeout", JsonValue::Null)),
-        ),
-        End::Aborted => (
-            "[aborted; process group killed]".into(),
-            Some(("aborted", JsonValue::Null)),
-        ),
-        End::OutputLimit => (OUTPUT_LIMIT.into(), Some(("output_limit", JsonValue::Null))),
-        End::Interrupted => (INTERRUPTED.into(), Some(("interrupted", JsonValue::Null))),
+    let mut metadata = JsonObject::new();
+    let (status, state, failure): (String, &str, Option<&str>) = match finished.end {
+        End::Exited(Exit::Code(code)) => {
+            metadata.insert("exit_code".into(), code.into());
+            let failure = (code != 0).then_some("exit_status");
+            (format!("[exit code {code}]"), "exited", failure)
+        }
+        End::Exited(Exit::Signal(signal)) => {
+            metadata.insert("signal".into(), signal.into());
+            let line = format!("[killed by signal {signal}]");
+            (line, "exited", Some("exit_status"))
+        }
+        End::TimedOut => {
+            let line = format!("[timed out after {timeout_ms} ms; process group killed]");
+            (line, "timed_out", Some("timeout"))
+        }
+        End::Aborted => {
+            let line = "[aborted; process group killed]".to_owned();
+            (line, "killed", Some("aborted"))
+        }
+        End::OutputLimit => (OUTPUT_LIMIT.into(), "output_limit", Some("output_limit")),
+        End::Interrupted => (INTERRUPTED.into(), "interrupted", Some("interrupted")),
     };
+    metadata.insert("status".into(), state.into());
+    metadata.insert("truncated".into(), (out_cut || err_cut).into());
     let mut parts = Vec::new();
     if !stdout.is_empty() {
         parts.push(stdout);
@@ -339,16 +349,13 @@ fn render(finished: Finished, timeout_ms: u128) -> ToolResult {
     match failure {
         None => {
             let mut output = ToolOutput::new(text);
-            output.metadata.insert("exit_code".into(), 0.into());
-            output
-                .metadata
-                .insert("truncated".into(), (out_cut || err_cut).into());
+            output.metadata = metadata;
             Ok(output)
         }
-        Some((code, details)) => Err(ToolOutputError {
+        Some(code) => Err(ToolOutputError {
             message: text,
             code: Some(code.to_owned()),
-            details: (!details.is_null()).then_some(details),
+            details: Some(JsonValue::Object(metadata)),
         }),
     }
 }

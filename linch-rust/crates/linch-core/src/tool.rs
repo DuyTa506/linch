@@ -66,7 +66,8 @@ pub struct ToolOutputError {
     /// Machine-readable error code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
-    /// Structured details for the host.
+    /// Structured details for the host, never shown to the model. An
+    /// object reaches the call's `tool_call_end` event as its `metadata`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<JsonValue>,
 }
