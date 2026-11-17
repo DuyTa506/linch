@@ -8,7 +8,7 @@ use crate::events::model_call::{
 };
 use crate::events::{Envelope, Event};
 use crate::message::{Message, Role, ToolResultBlock, ToolUseBlock};
-use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
+use crate::run::{Checkpoint, Ending, Phase, StopReason, ToolDecisionRecord};
 use crate::session_log::LogEntry;
 
 mod session;
@@ -138,6 +138,16 @@ pub enum Recovery {
     Aborting {
         /// The results that pair the last response's tool calls.
         message: Message,
+        /// Whether the message is already in the session.
+        appended: bool,
+    },
+    /// `Finishing`: append the message unless `appended`, then end the run
+    /// as `ending` says.
+    Finishing {
+        /// The results that pair the final tool call's response.
+        message: Message,
+        /// How the run ends.
+        ending: Ending,
         /// Whether the message is already in the session.
         appended: bool,
     },
@@ -293,6 +303,11 @@ pub fn reconcile(
         Phase::Aborting { message } => Ok(Recovery::Aborting {
             appended: appended(checkpoint, session, message)?,
             message: message.clone(),
+        }),
+        Phase::Finishing { message, ending } => Ok(Recovery::Finishing {
+            appended: appended(checkpoint, session, message)?,
+            message: message.clone(),
+            ending: ending.clone(),
         }),
     }
 }

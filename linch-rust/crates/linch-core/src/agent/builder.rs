@@ -3,7 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
-use super::{Agent, AgentInner, BuildError, Pricing, SessionClose, Versions};
+use super::{Agent, AgentInner, BuildError, Pricing, SessionClose, Versions, tool_choice_problem};
 use crate::coordination::{Mailbox, SendMessageTool};
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
@@ -16,7 +16,7 @@ use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
-use crate::structured::OutputContract;
+use crate::structured::{FINAL_TOOL_FEATURE, FinalTool, OutputContract};
 use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
 use crate::tool_search::{SearchTool, ToolSearch};
 use crate::usage::Usage;
@@ -224,8 +224,11 @@ impl AgentBuilder {
     ///         compaction, budget or
     ///         provider retry settings cannot run, the loop guard allows no
     ///         turn without a provider call, a fallback model is blank
-    ///         or repeats a model, a built-in tool's name is taken, or the
-    ///         tool schemas cannot be digested.
+    ///         or repeats a model, a built-in tool's name is taken, the
+    ///         final tool is not registered (or, made from the output
+    ///         schema, its name is taken or unusable), the tool choice names
+    ///         a tool the agent does not offer or its provider refuses it, or
+    ///         the tool schemas cannot be digested.
     pub fn build(self) -> Result<Agent, BuildError> {
         if self.spec.model.trim().is_empty() {
             return Err(BuildError::Invalid("the model must not be blank".into()));
@@ -343,6 +346,29 @@ impl AgentBuilder {
             features.insert("permissions".into(), value);
         }
         let built_tools = self.tools.snapshot();
+        let registered = |name: &str| built_tools.resolve(name).is_some();
+        let native = provider.native_output_schema();
+        let named = self.spec.final_tool_name.as_deref();
+        let final_tool = FinalTool::of(named, output.as_deref(), native);
+        if let Some(tool) = &final_tool {
+            if let Some(problem) = tool.problem(registered) {
+                return Err(BuildError::Invalid(problem));
+            }
+            // An agent whose provider takes its schema natively keeps the
+            // contract it had before the final tool existed.
+            if tool.made.is_some() {
+                features.insert(FINAL_TOOL_FEATURE.into(), tool.name.clone().into());
+            }
+        }
+        if let Some(choice) = &self.spec.tool_choice {
+            let offered = |name: &str| {
+                registered(name) || final_tool.as_ref().is_some_and(|t| t.name == name)
+            };
+            let thinking = self.spec.thinking.as_ref();
+            if let Some(problem) = tool_choice_problem(&*provider, choice, thinking, offered) {
+                return Err(BuildError::Invalid(problem));
+            }
+        }
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
         let contract = spec::contract_digest(&self.spec, &tools, built_hooks, &features)?;
@@ -355,6 +381,7 @@ impl AgentBuilder {
             sessions,
             spec: self.spec,
             output,
+            final_tool,
             redactor,
             verifiers,
             tools: self.tools,

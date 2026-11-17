@@ -226,6 +226,7 @@ pub async fn messages(sessions: &dyn SessionStore, session: &str) -> Vec<Message
 pub struct Replay {
     turns: Vec<ScriptedTurn>,
     calls: Mutex<HashMap<usize, u32>>,
+    native: bool,
 }
 
 impl Replay {
@@ -233,7 +234,15 @@ impl Replay {
         Self {
             turns,
             calls: Mutex::new(HashMap::new()),
+            native: true,
         }
+    }
+
+    /// Report no native structured output: a run with a schema offers
+    /// its final tool.
+    pub fn without_native_output_schema(mut self) -> Self {
+        self.native = false;
+        self
     }
 
     pub fn calls(&self) -> HashMap<usize, u32> {
@@ -245,6 +254,10 @@ impl Replay {
 impl Provider for Replay {
     fn id(&self) -> &str {
         "replay"
+    }
+
+    fn native_output_schema(&self) -> bool {
+        self.native
     }
 
     async fn stream(

@@ -12,7 +12,9 @@ use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
 use crate::loop_guard::LoopGuard;
 use crate::message::SystemBlock;
-use crate::provider::{OutputSchema, ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
+use crate::provider::{
+    OutputSchema, ProviderRequest, ReasoningEffort, Thinking, ToolChoice, ToolDefinition,
+};
 use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
 use crate::tool::ToolScope;
@@ -126,6 +128,28 @@ pub struct AgentSpec {
     /// runs take it too.
     #[serde(default, skip_serializing_if = "LoopGuard::is_default")]
     pub loop_guard: LoopGuard,
+    /// Whether and which tool the model must call (Python's
+    /// `Agent.tool_choice`): `auto`, `none`, `required` or a named tool,
+    /// sent with every primary request of a run that does not bring its
+    /// own (`RunOptions::tool_choice`), but on a turn that offers no tool.
+    /// A forced choice holds every turn, so such a run ends through the
+    /// final tool, or a limit. `None` (the default) sends none; the
+    /// provider's default is `auto`. The agent refuses a named tool it does
+    /// not have, and a choice its provider refuses
+    /// ([`crate::Provider::tool_choice_refusal`]). A subagent's runs do not
+    /// take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    /// A registered tool whose call ends the run instead of running
+    /// (Python's `Agent.final_tool_name`): its input, checked against the
+    /// output schema when there is one, is the result's
+    /// `structured_output`. `None` (the default) has none, unless the run
+    /// has an output schema its provider cannot take natively
+    /// ([`crate::Provider::native_output_schema`]): the run then offers a
+    /// final tool of its own, named after the schema. A subagent's runs do
+    /// not take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_tool_name: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -155,6 +179,8 @@ impl AgentSpec {
             verification: None,
             truncation_recovery: None,
             loop_guard: LoopGuard::default(),
+            tool_choice: None,
+            final_tool_name: None,
         }
     }
 

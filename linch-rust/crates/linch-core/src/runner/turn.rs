@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::cancel::Unpaired;
 use super::end::cut_empty;
+use super::final_tool::Unanswered;
 use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
@@ -24,15 +25,16 @@ use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
 use crate::journal::{Journal, ToolRecovery};
 use crate::loop_guard::Watch;
 use crate::message::Message;
+use crate::provider::ToolChoice;
 use crate::provider::call::ModelCall;
 use crate::provider::{AssistantAssembly, ProviderError};
 use crate::registry::ToolSnapshot;
 use crate::reliability::Standing;
-use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
+use crate::run::{Ending, Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
 use crate::skills;
-use crate::structured::OutputContract;
+use crate::structured::{FinalTool, OutputContract};
 use crate::usage::Usage;
 
 /// What the run does next.
@@ -91,6 +93,13 @@ pub(super) enum Step {
     /// Append the tool results (or stop feedback) unless `appended`, then
     /// start the next turn.
     Results { message: Message, appended: bool },
+    /// Append the results that pair a final tool call unless `appended`,
+    /// then end the run as `ending` says.
+    Finishing {
+        message: Message,
+        ending: Box<Ending>,
+        appended: bool,
+    },
     /// The run was cancelled: pair the session, then end it `aborted`.
     Abort(Unpaired),
 }
@@ -171,6 +180,14 @@ pub(super) struct Runner {
     /// What the loop guard counted of the run, read back from its durable
     /// log on a resume.
     pub(super) watch: Watch,
+    /// The run's tool choice: its own, else the agent's.
+    pub(super) tool_choice: Option<ToolChoice>,
+    /// The tool whose call ends the run (see `runner/final_tool.rs`).
+    pub(super) final_tool: Option<FinalTool>,
+    /// A logged response whose final tool call the run is deciding on,
+    /// none of its calls answered yet: feedback for the model and every
+    /// terminal pair them first.
+    pub(super) unpaired: Option<Unanswered>,
 }
 
 impl Runner {
@@ -187,6 +204,8 @@ impl Runner {
         let log = session_log(entries);
         let output = agent.output.clone();
         let watch = Watch::new(&agent.spec.loop_guard, agent.snapshot().polls());
+        let tool_choice = agent.spec.tool_choice.clone();
+        let final_tool = agent.final_tool.clone();
         let mut runner = Self {
             snapshot: agent.snapshot(),
             narrowed: false,
@@ -218,6 +237,9 @@ impl Runner {
             truncations: 0,
             truncated: String::new(),
             watch,
+            tool_choice,
+            final_tool,
+            unpaired: None,
         };
         runner.narrow();
         runner
@@ -314,6 +336,14 @@ impl Runner {
                             Some(self.turn_start().await)
                         }
                     }
+                }
+                Step::Finishing {
+                    message,
+                    ending,
+                    appended,
+                } => {
+                    self.finishing(message, *ending, appended).await?;
+                    None
                 }
                 Step::Abort(unpaired) => {
                     self.cancelled(unpaired).await?;
@@ -587,6 +617,9 @@ impl Runner {
         let text = message.text();
         self.stop_reason = stop_reason;
         let retry = retry_feedback.map(|feedback| retry_message(&message, &feedback));
+        let final_call = (self.final_tool.as_ref())
+            .is_some_and(|tool| message.tool_uses().any(|call| call.name == tool.name))
+            .then(|| message.clone());
         if !appended {
             self.append(message).await?;
         }
@@ -595,6 +628,9 @@ impl Runner {
         }
         // The parts the output limit cut off before this response.
         let parts = std::mem::take(&mut self.truncated);
+        if let Some(response) = final_call {
+            return self.final_call(response, stop_reason).await;
+        }
         if calls.is_empty() {
             if let Some(reminder) = self.continuing(stop_reason, &text) {
                 self.truncated = parts + &text;

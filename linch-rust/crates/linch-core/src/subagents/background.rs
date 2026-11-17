@@ -142,6 +142,7 @@ async fn pick_up(
         cancel: cancel.clone(),
         trace_id: run.trace_id.clone(),
         output_schema: None,
+        tool_choice: None,
     };
     let loaded = child.runs.load(&child.namespace, &id).await;
     if let (Ok(_), Some(ctx)) = (&loaded, call) {

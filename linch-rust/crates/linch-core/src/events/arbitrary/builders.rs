@@ -33,6 +33,8 @@ pub(super) fn init_event() -> impl Strategy<Value = InitEvent> {
                 resumed: at.0,
                 turn: at.1,
                 output_schema: None,
+                tool_choice: None,
+                final_tool: None,
             },
         )
 }

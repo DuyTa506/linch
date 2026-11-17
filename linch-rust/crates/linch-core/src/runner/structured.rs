@@ -31,9 +31,7 @@ use crate::agent::RunError;
 use crate::events::Event;
 use crate::events::kinds::{ErrorEvent, ResultSubtype, VerificationAction, VerificationEvent};
 use crate::json::JsonObject;
-use crate::message::Message;
 use crate::run::{RunStatus, StopReason};
-use crate::skills::system_reminder;
 use crate::structured::{VERIFIER, feedback};
 use crate::verification::OnFail;
 
@@ -64,13 +62,18 @@ impl Runner {
 
     /// Send a schema `error` back to the model, or end the run once the
     /// retries are spent.
-    async fn schema_retry(&mut self, text: &str, error: String) -> Result<Checked, RunError> {
+    pub(super) async fn schema_retry(
+        &mut self,
+        text: &str,
+        error: String,
+    ) -> Result<Checked, RunError> {
         let allowed = self.agent.spec.structured_output_retries;
         if self.schema_retries < allowed {
             self.schema_retries += 1;
             self.stage_verification(VERIFIER, VerificationAction::Retry, &error);
-            let message = Message::user_text(system_reminder(&feedback(&error)));
-            return Ok(Checked::Retry(self.feedback(message).await?));
+            let tool = self.final_tool.as_ref().map(|tool| tool.name.clone());
+            let feedback = feedback(&error, tool.as_deref());
+            return Ok(Checked::Retry(self.send_back(&feedback).await?));
         }
         let why = match allowed {
             0 => "the final answer does not satisfy the output schema".to_owned(),
@@ -154,7 +157,11 @@ impl Runner {
     /// `value`. A `retry` failure goes back to the model while the
     /// verification retries last, then is accepted with an `exhausted`
     /// event; a `stop` failure ends the run failed.
-    async fn verify(&mut self, text: &str, value: Option<JsonObject>) -> Result<Checked, RunError> {
+    pub(super) async fn verify(
+        &mut self,
+        text: &str,
+        value: Option<JsonObject>,
+    ) -> Result<Checked, RunError> {
         let Some(verifiers) = self.agent.verifiers.clone() else {
             return Ok(Checked::Valid(value));
         };
@@ -183,8 +190,7 @@ impl Runner {
             OnFail::Retry if self.verify_retries < verifiers.max_retries => {
                 self.verify_retries += 1;
                 self.stage_verification(name, VerificationAction::Retry, feedback);
-                let message = Message::user_text(system_reminder(feedback));
-                Ok(Checked::Retry(self.feedback(message).await?))
+                Ok(Checked::Retry(self.send_back(feedback).await?))
             }
             OnFail::Retry => {
                 self.stage_verification(name, VerificationAction::Exhausted, feedback);

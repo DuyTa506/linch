@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::json::JsonObject;
 use crate::message::Message;
 use crate::policy::PermissionDecision;
 use crate::usage::Usage;
@@ -171,6 +172,39 @@ pub enum Phase {
         /// The user message to append.
         message: Message,
     },
+    /// A response called the run's final tool and the run ends on it:
+    /// `message`, the results that pair the response's tool calls (the
+    /// acknowledgement of an answer taken, or the error of one refused),
+    /// goes into the session, then the run ends as `ending` says. It may
+    /// not be in the session yet. Every continuation of the run appends it
+    /// and ends the run, without asking the model or a hook again.
+    Finishing {
+        /// The user message to append.
+        message: Message,
+        /// How the run ends.
+        ending: Ending,
+    },
+}
+
+/// How a [`Phase::Finishing`] run ends: its status and its `Result`'s
+/// answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ending {
+    /// `completed`, `failed`, or `aborted` (a cancel or a hook ended the run
+    /// before it took the answer).
+    pub status: RunStatus,
+    /// The `stop_reason` of the `Result`.
+    pub stop_reason: StopReason,
+    /// The `final_text` of the `Result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_text: Option<String>,
+    /// The `structured_output` of the `Result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<JsonObject>,
+    /// The `structured_error` of the `Result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_error: Option<String>,
 }
 
 /// Durable progress of a running run.

@@ -70,6 +70,7 @@ mod compact;
 mod end;
 mod fail;
 mod family;
+mod final_tool;
 mod hooks;
 mod inbox;
 mod lease;

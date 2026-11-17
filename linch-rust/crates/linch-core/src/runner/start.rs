@@ -11,7 +11,7 @@ use super::lease::Held;
 use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
 use super::{Driving, Family, Shared, cancel, hooks, inbox};
-use crate::agent::{AgentInner, RunError, RunOptions};
+use crate::agent::{AgentInner, RunError, RunOptions, tool_choice_problem};
 use crate::ask_user::{self, AskUserAnswer};
 use crate::budget::{Meter, Spent};
 use crate::catalog::{self, Catalog};
@@ -24,13 +24,13 @@ use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, ToolRecovery, reconcile};
 use crate::loop_guard::Watch;
 use crate::message::ContentBlock;
-use crate::provider::OutputSchema;
+use crate::provider::{OutputSchema, ToolChoice};
 use crate::reliability::Standing;
 use crate::run::{Checkpoint, Phase, StopReason, ToolDecisionRecord};
 use crate::scheduler::RunIdentity;
 use crate::skills::SKILL_TOOL;
 use crate::store::{Lease, RunRecord, StoreError};
-use crate::structured::{self, OutputContract};
+use crate::structured::{self, FinalTool, OutputContract};
 use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
 use crate::truncation::Truncated;
@@ -51,11 +51,23 @@ pub(super) async fn new_run(
     let Shared { outbox, driving } = shared;
     let started = Instant::now();
     let namespace = agent.namespace.clone();
-    // The run's own schema is checked before anything is written.
+    // The run's own schema, its final tool and tool choice are checked
+    // before anything is written.
     let output = match options.output_schema.clone() {
         Some(schema) => Some(compile(&run_id, schema)?),
         None => None,
     };
+    let final_tool = run_final_tool(&agent, &run_id, output.as_deref())?;
+    if let Some(choice) = &options.tool_choice {
+        let tools = agent.snapshot();
+        let offered = |name: &str| {
+            tools.resolve(name).is_some() || final_tool.as_ref().is_some_and(|t| t.name == name)
+        };
+        let thinking = agent.spec.thinking.as_ref();
+        if let Some(reason) = tool_choice_problem(&*agent.provider, choice, thinking, offered) {
+            return Err(RunError::InvalidToolChoice { run_id, reason });
+        }
+    }
     if options.run_id.is_some() {
         // A caller-chosen id may be taken: refuse it before any write.
         match agent.runs.load(&namespace, &run_id).await {
@@ -111,6 +123,8 @@ pub(super) async fn new_run(
         resumed: false,
         turn: 0,
         output_schema: options.output_schema.clone(),
+        tool_choice: options.tool_choice.clone(),
+        final_tool: final_tool.as_ref().map(|tool| tool.name.clone()),
     }));
     // A session's first run lists the agent's skills, as
     // Python does once per session, when the run offers `Skill` (a child
@@ -189,6 +203,10 @@ pub(super) async fn new_run(
     runner.seen = seen;
     if output.is_some() {
         runner.output = output;
+    }
+    runner.final_tool = final_tool;
+    if options.tool_choice.is_some() {
+        runner.tool_choice = options.tool_choice;
     }
     let prompt = Step::Prompt {
         prompt,
@@ -415,6 +433,15 @@ pub(super) async fn continue_run(
         Recovery::Aborting { message, appended } => {
             Step::Abort(cancel::Unpaired::Saved { message, appended })
         }
+        Recovery::Finishing {
+            message,
+            ending,
+            appended,
+        } => Step::Finishing {
+            message,
+            ending: Box::new(ending),
+            appended,
+        },
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     held.watch(&journal);
@@ -435,6 +462,8 @@ pub(super) async fn continue_run(
         resumed: true,
         turn: u64::from(checkpoint.turn),
         output_schema: None,
+        tool_choice: None,
+        final_tool: None,
     }));
     for event in answered {
         journal.stage(event);
@@ -489,6 +518,10 @@ pub(super) async fn continue_run(
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }
+    if let Some(choice) = tool_choice_of(&events) {
+        runner.tool_choice = Some(choice);
+    }
+    runner.final_tool = recorded_final_tool(&runner, &events)?;
     held.drive(async move {
         if let Some(decisions) = commit {
             runner.commit_decisions(decisions, assistant_seq).await?;
@@ -581,6 +614,71 @@ fn schema_of(events: &[Envelope]) -> Option<OutputSchema> {
         Event::Init(init) => Some(init.output_schema.clone()),
         _ => None,
     })?
+}
+
+/// The run's own tool choice, from the `init` event that created it;
+/// `None` when it took the agent's.
+fn tool_choice_of(events: &[Envelope]) -> Option<ToolChoice> {
+    events.iter().find_map(|envelope| match &envelope.event {
+        Event::Init(init) => Some(init.tool_choice.clone()),
+        _ => None,
+    })?
+}
+
+/// The final tool of new run `run_id` of `agent`: the agent's, or, when
+/// the run brings its own schema `output`, the one for that schema.
+///
+/// Raises:
+///     RunError: InvalidOutputSchema when the tool made from `output`
+///         cannot be offered.
+fn run_final_tool(
+    agent: &AgentInner,
+    run_id: &RunId,
+    output: Option<&OutputContract>,
+) -> Result<Option<FinalTool>, RunError> {
+    let Some(output) = output else {
+        return Ok(agent.final_tool.clone());
+    };
+    let named = agent.spec.final_tool_name.as_deref();
+    let native = agent.provider.native_output_schema();
+    let Some(tool) = FinalTool::of(named, Some(output), native) else {
+        return Ok(None);
+    };
+    let tools = agent.snapshot();
+    match tool.problem(|name| tools.resolve(name).is_some()) {
+        None => Ok(Some(tool)),
+        Some(reason) => Err(RunError::InvalidOutputSchema {
+            run_id: run_id.clone(),
+            reason,
+        }),
+    }
+}
+
+/// The final tool the run's `init` event recorded, for the runner's
+/// schema; `None` when it recorded none.
+///
+/// Raises:
+///     RunError: InvalidOutputSchema when the recorded tool is no longer
+///         the agent's, nor made from the run's schema.
+fn recorded_final_tool(
+    runner: &Runner,
+    events: &[Envelope],
+) -> Result<Option<FinalTool>, RunError> {
+    let recorded = events.iter().find_map(|envelope| match &envelope.event {
+        Event::Init(init) => Some(init.final_tool.as_deref()),
+        _ => None,
+    });
+    let Some(Some(name)) = recorded else {
+        return Ok(None);
+    };
+    let named = runner.agent.spec.final_tool_name.as_deref();
+    match FinalTool::recorded(name, named, runner.output.as_deref()) {
+        Some(tool) => Ok(Some(tool)),
+        None => Err(RunError::InvalidOutputSchema {
+            run_id: runner.run.run_id.clone(),
+            reason: format!("the run's final tool {name:?} is no longer this agent's"),
+        }),
+    }
 }
 
 /// `schema`, compiled for run `run_id`.
