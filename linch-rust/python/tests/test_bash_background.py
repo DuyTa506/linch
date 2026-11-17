@@ -25,8 +25,18 @@ async def start(agent: Agent) -> tuple[str, int]:
 
 
 def alive(pid: int) -> bool:
-    """Whether `pid` is in the process table, zombies included."""
-    return Path(f"/proc/{pid}").exists()
+    """Whether `pid` is in the process table, zombies included.
+
+    Signal 0 checks without signalling, on Linux and macOS alike (macOS has
+    no `/proc`).
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 async def gone(pid: int) -> None:
