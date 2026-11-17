@@ -6,15 +6,18 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use async_trait::async_trait;
 use common::hooks::hook;
 use common::*;
 use linch_core::hooks::{BeforeProviderCall, BeforeProviderCallResponse};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, LoopGuard, Message, PermissionMode,
-    Role, RunId, RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, ToolScope,
+    Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, JsonObject, LoopGuard, Message,
+    PermissionMode, Role, RunId, RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, Tool,
+    ToolContext, ToolOutput, ToolRegistry, ToolResult, ToolScope,
 };
 use serde_json::{Value, json};
 
@@ -389,6 +392,177 @@ async fn a_crash_at_any_write_of_a_skip_loop_still_trips() {
             assert_eq!(got.len(), want.len(), "{context}");
             assert_eq!(got[..2], want[..2], "{context}");
             assert_eq!(got[3..], want[3..], "{context}");
+        }
+    }
+}
+
+/// A read tool that answers each call with `answer(n)`, `n` counting its
+/// calls from 0; a poll when `poll`.
+struct Ticker {
+    name: &'static str,
+    poll: bool,
+    answer: fn(u32) -> String,
+    calls: AtomicU32,
+    schema: JsonObject,
+}
+
+impl Ticker {
+    fn new(name: &'static str, poll: bool, answer: fn(u32) -> String) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            poll,
+            answer,
+            calls: AtomicU32::new(0),
+            schema: object(json!({"type": "object"})),
+        })
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Tool for Ticker {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "Answer."
+    }
+    fn input_schema(&self) -> &JsonObject {
+        &self.schema
+    }
+    fn scope(&self) -> ToolScope {
+        ToolScope::Read
+    }
+    fn polls(&self) -> bool {
+        self.poll
+    }
+    async fn execute(&self, _input: JsonObject, _ctx: ToolContext) -> ToolResult {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::new(json!((self.answer)(n))))
+    }
+}
+
+/// Ten calls of `tool` with the same input, then an answer.
+fn ten_turns(tool: &str) -> Vec<ScriptedTurn> {
+    let mut turns: Vec<_> = (0..10)
+        .map(|t| {
+            TurnBuilder::new(MODEL)
+                .tool_call(&format!("call_{t}"), tool, &json!({}))
+                .build()
+        })
+        .collect();
+    turns.push(text_turn("done"));
+    turns
+}
+
+/// An agent with only `tool`, on `stores`, answered by `provider`.
+fn ticking<S: RunStore + SessionStore + 'static>(
+    tool: Arc<Ticker>,
+    provider: Arc<Replay>,
+    stores: Arc<S>,
+) -> Agent {
+    let tools = ToolRegistry::new();
+    let _ = tools.register(tool).unwrap();
+    AgentBuilder::new(spec())
+        .provider(provider)
+        .tools(Arc::new(tools))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .build()
+        .unwrap()
+}
+
+/// [`ten_turns`] of `tool`, run to the end.
+async fn ten_calls(tool: Arc<Ticker>) -> (RunStatus, Vec<Envelope>) {
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(ten_turns(tool.name)));
+    let stream = ticking(tool, provider, stores.clone()).run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    ended(&stores, &run_id).await
+}
+
+/// A repeat is the same call with the same result: a call whose result
+/// differs from every earlier identical call's made progress (a file read
+/// again after an edit), however often it is made.
+#[tokio::test]
+async fn the_same_call_with_a_new_result_is_progress() {
+    let changing = Ticker::new("Status", false, |n| format!("step {n}"));
+    let (status, events) = ten_calls(changing.clone()).await;
+    assert_eq!(status, RunStatus::Completed, "{:?}", guards(&events));
+    assert_eq!(changing.calls(), 10);
+
+    let same = Ticker::new("Status", false, |_| "idle".into());
+    let (status, events) = ten_calls(same.clone()).await;
+    assert_eq!(status, RunStatus::Failed);
+    let guard = guards(&events);
+    assert_eq!(guard[0]["reason"], "repeated_tool_call", "{guard:?}");
+    assert_eq!(same.calls(), 3);
+
+    // Back to an earlier answer is a repeat of that answer.
+    let flipping = Ticker::new("Status", false, |n| format!("side {}", n % 2));
+    let (status, _) = ten_calls(flipping.clone()).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(flipping.calls(), 5, "the third `side 0`");
+}
+
+/// A tool that declares itself a poll (`BashOutput` reading a command that
+/// runs on) is never a repeat, whatever it answers.
+#[tokio::test]
+async fn a_poll_is_never_a_repeat() {
+    let poll = Ticker::new("Poll", true, |_| "still running".into());
+    let (status, events) = ten_calls(poll.clone()).await;
+    assert_eq!(status, RunStatus::Completed, "{:?}", guards(&events));
+    assert_eq!(poll.calls(), 10);
+}
+
+/// The result that keys a repeat is read back from the durable
+/// `tool_result` events: a crash at any write of a run whose answers
+/// alternate ends it on the third durable copy of one answer, never
+/// earlier. An interrupted call's placeholder is an error, which keys
+/// nothing.
+#[tokio::test]
+async fn a_crash_at_any_write_keys_repeats_on_the_durable_results() {
+    let flipping = || Ticker::new("Status", false, |n| format!("side {}", n % 2));
+    let clean = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(ten_turns("Status")));
+    finish(ticking(flipping(), provider, clean.clone()).run("go", RunOptions::new("s1"))).await;
+    let writes = clean.log.lock().unwrap().len() as u64;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let (stores, tool) = (Arc::new(Stores::default()), flipping());
+            let provider = Arc::new(Replay::new(ten_turns("Status")));
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let crashed = ticking(tool.clone(), provider.clone(), faulty);
+            let stream = crashed.run("go", RunOptions::new("s1"));
+            let run_id = stream.run_id().clone();
+            assert!(drain(stream).await.1.is_some(), "{context}");
+            let agent = ticking(tool, provider, stores.clone());
+            let run_id = recover(&agent, &stores, run_id).await;
+
+            let (status, events) = ended(&stores, &run_id).await;
+            assert_eq!(status, RunStatus::Failed, "{context}");
+            let guard = guards(&events);
+            assert_eq!(guard.len(), 1, "{context}: {guard:?}");
+            assert_eq!(guard[0]["reason"], "repeated_tool_call", "{context}");
+            let session = messages(&*stores, "s1").await;
+            let answers: Vec<String> = (session.iter())
+                .map(result_texts)
+                .filter(|texts| !texts.is_empty())
+                .map(|texts| texts[0].clone())
+                .collect();
+            let (last, before) = answers.split_last().unwrap();
+            let copies = |text: &str, of: &[String]| of.iter().filter(|a| *a == text).count();
+            assert_eq!(copies(last, &answers), 3, "{context}: {answers:?}");
+            for answer in before {
+                assert!(copies(answer, before) < 3, "{context}: {answers:?}");
+            }
         }
     }
 }

@@ -4,14 +4,19 @@
 //!
 //! Three checks, each over the run's own durable events:
 //!
-//! - **Repeated tool call**: one tool called with the same input (Linch
-//!   canonical JSON, so key order does not count) `max_identical_tool_calls`
-//!   times in the run with a result that is not an error. The call that
-//!   reaches the limit runs; the run ends before the next provider call.
-//!   Python counts every call asked for; here a refused or failed call does
-//!   not count, since Linch itself asks the model to repeat some refused
-//!   calls (a deferred tool: "call tool_search ... first"). Calls that keep
-//!   failing are the failure streak's.
+//! - **Repeated tool call**: the same call with the same result
+//!   `max_identical_tool_calls` times in the run: one tool, the same input
+//!   (Linch canonical JSON, so key order does not count) and the same
+//!   result content. The call that reaches the limit runs; the run ends
+//!   before the next provider call. A call whose result differs from every
+//!   earlier identical call's made progress (a file read again after an
+//!   edit) and starts a count of its own. An error result is never a
+//!   repeat: Linch itself asks the model to repeat some refused calls (a
+//!   deferred tool: "call tool_search ... first"), and calls that keep
+//!   failing are the failure streak's. Nor is a call of a tool that
+//!   [polls](crate::Tool::polls) (`BashOutput`): waiting on a command that
+//!   runs on asks the same thing until it ends. Python counts identical
+//!   inputs whatever the result, failed and refused calls included.
 //! - **Repeated failures**: `max_consecutive_failures` tool batches in a row
 //!   in which every call failed. A batch with one success starts it again.
 //! - **Idle turns** (Rust only): more than `max_idle_turns` turns in a row
@@ -21,16 +26,18 @@
 //!
 //! Nothing new is checkpointed. `Watch::of` reads the counts back from
 //! the run's `assistant` events (the calls asked for), its `tool_result`
-//! user events (the batches' results, which count those calls) and its primary `model_call_delivery`
-//! events (the turn of the last call), each durable before the step that
-//! acts on it; the live run counts the same events as it stages them. A
-//! crash therefore resumes with the counts it had, and cannot reset them.
+//! user events (the batches' results, whose content keys the repeats) and
+//! its primary `model_call_delivery` events (the turn of the last call),
+//! each durable before the step that acts on it; the live run counts the
+//! same events as it stages them. A crash therefore resumes with the
+//! counts it had, and cannot reset them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::canonical::to_canonical_string;
 use crate::events::kinds::{LoopGuardAction, LoopGuardEvent, LoopGuardReason, UserEventSubtype};
 use crate::events::model_call::ModelCallKind;
 use crate::events::{Envelope, Event};
@@ -57,9 +64,9 @@ fn default_max_idle_turns() -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopGuard {
-    /// Calls of one tool with the same input and a result that is not an
-    /// error that end the run (default 3); the one that reaches it runs
-    /// first. 0 never counts.
+    /// Calls of one tool with the same input and the same result, not an
+    /// error, that end the run (default 3); the one that reaches it runs
+    /// first. A tool that polls never counts. 0 never counts.
     #[serde(default = "default_max_identical_tool_calls")]
     pub max_identical_tool_calls: u32,
     /// Tool batches in a row whose every call failed that end the run
@@ -98,11 +105,13 @@ impl LoopGuard {
 #[derive(Debug, Clone)]
 pub(crate) struct Watch {
     guard: LoopGuard,
-    /// The calls of the last response, by `tool_use_id`: the hash of their
-    /// tool and canonical input, and the tool.
-    pending: HashMap<String, ([u8; 32], String)>,
-    /// Calls per tool and canonical input that did not fail, keyed by
-    /// their hash.
+    /// The tools that poll, whose calls are never repeats.
+    polls: HashSet<String>,
+    /// The calls of the last response, by `tool_use_id`: their tool and
+    /// canonical input, and the tool.
+    pending: HashMap<String, (String, String)>,
+    /// Calls per tool, canonical input and result content that did not
+    /// fail, keyed by the hash of the three.
     calls: HashMap<[u8; 32], u32>,
     /// The first call that reached `max_identical_tool_calls`: its tool and
     /// count.
@@ -117,10 +126,12 @@ pub(crate) struct Watch {
 }
 
 impl Watch {
-    /// A watch of a run with nothing counted.
-    pub(crate) fn new(guard: &LoopGuard) -> Self {
+    /// A watch of a run with nothing counted, whose `polls` tools are
+    /// never repeats.
+    pub(crate) fn new(guard: &LoopGuard, polls: HashSet<String>) -> Self {
         Self {
             guard: guard.clone(),
+            polls,
             pending: HashMap::new(),
             calls: HashMap::new(),
             repeated: None,
@@ -131,8 +142,8 @@ impl Watch {
     }
 
     /// The counts of a run with these durable `events`.
-    pub(crate) fn of(guard: &LoopGuard, events: &[Envelope]) -> Self {
-        let mut watch = Self::new(guard);
+    pub(crate) fn of(guard: &LoopGuard, polls: HashSet<String>, events: &[Envelope]) -> Self {
+        let mut watch = Self::new(guard, polls);
         for envelope in events {
             watch.see(&envelope.event);
         }
@@ -148,12 +159,14 @@ impl Watch {
                     return;
                 }
                 for call in response.message.tool_uses() {
+                    if self.polls.contains(&call.name) {
+                        continue;
+                    }
                     let Ok(key) = permission_decision_key(&call.name, &call.input) else {
                         continue;
                     };
-                    let hash = Sha256::digest(key).into();
                     self.pending
-                        .insert(call.id.clone(), (hash, call.name.clone()));
+                        .insert(call.id.clone(), (key, call.name.clone()));
                 }
             }
             Event::User(user) if user.subtype == UserEventSubtype::ToolResult => {
@@ -165,10 +178,18 @@ impl Watch {
                     .collect();
                 let pending = std::mem::take(&mut self.pending);
                 for result in results.iter().filter(|result| !result.is_error) {
-                    let Some((hash, tool)) = pending.get(&result.tool_use_id) else {
+                    let Some((key, tool)) = pending.get(&result.tool_use_id) else {
                         continue;
                     };
-                    let count = self.calls.entry(*hash).or_default();
+                    let content = serde_json::to_value(&result.content).ok();
+                    let Some(content) = content.and_then(|c| to_canonical_string(&c).ok()) else {
+                        continue;
+                    };
+                    let mut hash = Sha256::new();
+                    hash.update(key.len().to_le_bytes());
+                    hash.update(key);
+                    hash.update(content);
+                    let count = self.calls.entry(hash.finalize().into()).or_default();
                     *count += 1;
                     let limit = self.guard.max_identical_tool_calls;
                     if *count >= limit && self.repeated.is_none() {
@@ -201,7 +222,8 @@ impl Watch {
             return Some(stop(
                 LoopGuardReason::RepeatedToolCall,
                 format!(
-                    "Tool '{tool}' called with identical inputs {count} time(s) (limit: {limit})."
+                    "Tool '{tool}' called with identical inputs and the same result {count} \
+                     time(s) (limit: {limit})."
                 ),
             ));
         }
@@ -272,8 +294,14 @@ mod tests {
     }
 
     fn results(failed: &[bool]) -> Event {
-        let blocks = failed.iter().enumerate().map(|(at, failed)| {
-            ContentBlock::ToolResult(ToolResultBlock::text(format!("c{at}"), "r", *failed))
+        let answers: Vec<_> = failed.iter().map(|failed| ("r", *failed)).collect();
+        answered(&answers)
+    }
+
+    /// Results with these texts, failed or not.
+    fn answered(answers: &[(&str, bool)]) -> Event {
+        let blocks = answers.iter().enumerate().map(|(at, (text, failed))| {
+            ContentBlock::ToolResult(ToolResultBlock::text(format!("c{at}"), *text, *failed))
         });
         Event::User(UserEvent {
             message: Message::new(Role::User, blocks.collect()),
@@ -294,7 +322,7 @@ mod tests {
 
     #[test]
     fn identical_calls_trip_at_the_limit_whatever_the_key_order() {
-        let mut watch = Watch::new(&LoopGuard::default());
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
         let (read, other) = (json!({"a": 1, "b": 2}), json!({"b": 2, "a": 1}));
         batch(&mut watch, &[("Read", read.clone(), false)]);
         batch(
@@ -316,8 +344,45 @@ mod tests {
     }
 
     #[test]
+    fn a_call_is_a_repeat_only_with_the_same_result() {
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+        let read = json!({"path": "a"});
+        for text in ["v1", "v1", "v2", "v2", "v3"] {
+            watch.see(&calling(&[("Read", read.clone())]));
+            watch.see(&answered(&[(text, false)]));
+        }
+        assert!(watch.tool_trip().is_none(), "each content twice at most");
+        watch.see(&calling(&[("Read", read.clone())]));
+        watch.see(&answered(&[("v1", false)]));
+        let trip = watch.tool_trip().unwrap();
+        assert!(
+            trip.detail.contains("same result 3 time(s)"),
+            "{}",
+            trip.detail
+        );
+    }
+
+    #[test]
+    fn a_poll_is_never_a_repeat_but_its_failures_count() {
+        let polls = HashSet::from(["BashOutput".to_owned()]);
+        let mut watch = Watch::new(&LoopGuard::default(), polls);
+        let poll = json!({"process_id": "bash_1"});
+        for _ in 0..5 {
+            batch(&mut watch, &[("BashOutput", poll.clone(), false)]);
+        }
+        assert!(watch.tool_trip().is_none());
+        for _ in 0..3 {
+            batch(&mut watch, &[("BashOutput", poll.clone(), true)]);
+        }
+        assert_eq!(
+            watch.tool_trip().unwrap().reason,
+            LoopGuardReason::RepeatedFailures
+        );
+    }
+
+    #[test]
     fn a_failure_streak_trips_and_a_success_resets_it() {
-        let mut watch = Watch::new(&LoopGuard::default());
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
         for batch in [&[true][..], &[true, true], &[false, true], &[true], &[true]] {
             watch.see(&results(batch));
         }
@@ -338,7 +403,7 @@ mod tests {
             max_consecutive_failures: 0,
             ..LoopGuard::default()
         };
-        let mut watch = Watch::new(&off);
+        let mut watch = Watch::new(&off, HashSet::new());
         for failed in [true, false, true, true, false, true, true] {
             batch(&mut watch, &[("Read", json!({}), failed)]);
         }
@@ -351,7 +416,7 @@ mod tests {
             max_idle_turns: 2,
             ..LoopGuard::default()
         };
-        let mut watch = Watch::new(&guard);
+        let mut watch = Watch::new(&guard, HashSet::new());
         assert!(watch.idle_trip(0).is_none());
         assert!(watch.idle_trip(1).is_none());
         assert_eq!(
@@ -377,7 +442,7 @@ mod tests {
             results(&[true, true]),
             calling(&[("Read", json!({}))]),
         ];
-        let mut live = Watch::new(&LoopGuard::default());
+        let mut live = Watch::new(&LoopGuard::default(), HashSet::new());
         for event in &events {
             live.see(event);
         }
@@ -392,7 +457,7 @@ mod tests {
                 event,
             })
             .collect();
-        let read = Watch::of(&LoopGuard::default(), &envelopes);
+        let read = Watch::of(&LoopGuard::default(), HashSet::new(), &envelopes);
         assert_eq!(
             (read.pending, read.calls, read.failures, read.last_call),
             (live.pending, live.calls, live.failures, live.last_call)

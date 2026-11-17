@@ -473,7 +473,8 @@ pub(super) async fn continue_run(
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
     runner.verify_retries = crate::verification::retries_spent(&events);
-    runner.watch = Watch::of(&runner.agent.spec.loop_guard, &events);
+    let polls = runner.agent.snapshot().polls();
+    runner.watch = Watch::of(&runner.agent.spec.loop_guard, polls, &events);
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
     if let Some(truncation) = &runner.agent.spec.truncation_recovery {

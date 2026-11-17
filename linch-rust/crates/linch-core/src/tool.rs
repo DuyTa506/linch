@@ -271,6 +271,15 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether the tool polls the state of something that runs on (as
+    /// `BashOutput` reads a background command), so the same call with the
+    /// same result is waiting, not a loop: the loop guard never counts its
+    /// calls as repeats (see [`crate::loop_guard`]). They still count
+    /// toward its failure streak. The default is no.
+    fn polls(&self) -> bool {
+        false
+    }
+
     /// One-line summary of a call for events and approval prompts.
     fn summarize(&self, input: &JsonObject) -> String {
         let _ = input;

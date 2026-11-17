@@ -186,7 +186,7 @@ impl Runner {
         let session_len = entries.len() as u64;
         let log = session_log(entries);
         let output = agent.output.clone();
-        let watch = Watch::new(&agent.spec.loop_guard);
+        let watch = Watch::new(&agent.spec.loop_guard, agent.snapshot().polls());
         let mut runner = Self {
             snapshot: agent.snapshot(),
             narrowed: false,
