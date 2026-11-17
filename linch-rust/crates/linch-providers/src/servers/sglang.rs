@@ -9,6 +9,11 @@
 //!   itself does for `reasoning_effort: "none"`.
 //! - **`reasoning_effort`** is accepted and passed to the template; any
 //!   value but `none` turns thinking on.
+//!   Checked 2026-11-17 in `entrypoints/openai/protocol.py` at `main`: the
+//!   field takes `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+//!   `ultra`, `max` or a number below 1, and only sets the thinking
+//!   switches; the value itself never reaches the template. Linch sends
+//!   its level as is.
 //! - **`tool_choice`:** `auto`, `none`, `required` and a named function;
 //!   tool calls come back as `tool_calls` only with `--tool-call-parser`.
 //!   Rechecked 2026-11-17 against
@@ -38,7 +43,7 @@ use serde_json::json;
 use super::{kwargs, sglang_usage};
 use crate::context::ContextRule;
 use crate::models::OpenAiRow;
-use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport};
+use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport, effort_value};
 use crate::openai_compat::stream::ReasoningField;
 use linch_core::{PromptCache, Support};
 
@@ -52,7 +57,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     },
     max_tokens_field: "max_completion_tokens",
     json_schema: false,
-    reasoning_effort: true,
+    reasoning_effort: Some(effort_value),
     template_thinking_switch: true,
     usage: sglang_usage,
     context: ContextRule::Models,

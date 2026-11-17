@@ -412,7 +412,10 @@ Một server được chọn bằng `ServerOptions::new(Server::Vllm, base_url)`
 (`crates/linch-providers/src/servers.rs:76`), thứ điền
 `chat_template_kwargs` mà tài liệu của server đó nêu để tắt thinking. Khi
 một request yêu cầu `Thinking::Disabled`, các kwargs đó được gửi và effort bị
-bỏ ra (`profile.rs:144-154`). Một `output_schema` được gửi dưới dạng
+bỏ ra (`profile.rs:144-154`). `reasoning_effort` của profile quyết định cách
+ghi effort: OpenAI, SGLang và llama.cpp gửi `low` đến `max` nguyên vẹn; vLLM
+gửi `high` và `max` thành `xhigh`, vì chat template Qwen3 phía sau chỉ nhận
+`low`, `medium` và `xhigh` và trả HTTP 400 với giá trị khác (`servers/vllm.rs`). Một `output_schema` được gửi dưới dạng
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` khi quy tắc `json_schema` của profile bật, mà chỉ
 profile của OpenAI bật; vLLM, SGLang và llama.cpp từ chối nó ngay tại chỗ với

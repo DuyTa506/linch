@@ -174,7 +174,11 @@ OpenAI Responses API. Mỗi request mang toàn bộ lịch sử; không gửi
 ```
 
 Dùng `spec.effort` (`low` đến `max`) cho độ sâu suy luận; các adapter OpenAI bỏ
-qua `spec.thinking`.
+qua `spec.thinking`. Các server (`vllm`, `sglang`, `llamacpp`) chuyển effort cho
+chat template của model, nơi quyết định giá trị nào được nhận. Template Qwen3
+của vLLM chỉ nhận `low`, `medium` và `xhigh`, nên `high` và `max` được gửi là
+`xhigh`; SGLang nhận mọi mức (nó chỉ bật thinking) và llama.cpp để template của model từ
+chối mức; cả hai gửi nguyên mức.
 
 ### `anthropic`
 

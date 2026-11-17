@@ -252,7 +252,7 @@ impl Provider for OpenAiChat {
                 // The switch sends nothing when its kwargs are empty.
                 disable: profile.template_thinking_switch && !self.thinking_off.is_empty(),
                 budget: false,
-                effort: profile.reasoning_effort,
+                effort: profile.reasoning_effort.is_some(),
                 reasoning_text: profile.reasoning_field.is_some(),
             },
             vision: profile.vision,

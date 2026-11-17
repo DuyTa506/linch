@@ -412,7 +412,11 @@ A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
 (`crates/linch-providers/src/servers.rs:76`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
-left out (`profile.rs:144-154`). An `output_schema` is sent as
+left out (`profile.rs:144-154`). The profile's `reasoning_effort` writes the
+effort: OpenAI, SGLang and llama.cpp send `low` to `max` as they are; vLLM
+sends `high` and `max` as `xhigh`, because the Qwen3 chat template behind it
+takes only `low`, `medium` and `xhigh` and answers HTTP 400 otherwise
+(`servers/vllm.rs`). An `output_schema` is sent as
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` when the profile's `json_schema` rule is on, which only
 OpenAI's is; vLLM, SGLang and llama.cpp refuse it locally as `InvalidRequest`

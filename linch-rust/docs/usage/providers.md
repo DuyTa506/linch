@@ -174,7 +174,11 @@ The OpenAI Responses API. Each request carries the full history; no
 ```
 
 Use `spec.effort` (`low` to `max`) for reasoning depth; the OpenAI adapters
-ignore `spec.thinking`.
+ignore `spec.thinking`. The servers (`vllm`, `sglang`, `llamacpp`) pass effort
+to the model's chat template, which decides what it accepts. vLLM's Qwen3
+template takes only `low`, `medium` and `xhigh`, so `high` and `max` are sent
+as `xhigh`; SGLang takes every level (it only switches thinking on) and llama.cpp lets the
+model's template refuse levels; both send the level as it is.
 
 ### `anthropic`
 
