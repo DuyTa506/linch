@@ -239,10 +239,10 @@ async fn an_entry_expires_after_its_ttl() {
     };
     finish(make(&shared).run("go", RunOptions::new("s1"))).await;
     let events = finish(make(&shared).run("go", RunOptions::new("s2"))).await;
-    assert_eq!(ends(&events)[0].2, true, "a live entry is served");
+    assert!(ends(&events)[0].2, "a live entry is served");
     tokio::time::advance(Duration::from_secs(11)).await;
     let events = finish(make(&shared).run("go", RunOptions::new("s3"))).await;
-    assert_eq!(ends(&events)[0].2, false, "an expired entry is not");
+    assert!(!ends(&events)[0].2, "an expired entry is not");
 }
 
 #[tokio::test]

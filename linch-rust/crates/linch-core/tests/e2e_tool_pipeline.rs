@@ -105,7 +105,7 @@ async fn layers_wrap_the_tool_first_registered_outermost() {
         ]
     );
     assert_eq!(runs.lock().unwrap()["call_0_0"], 1);
-    assert_eq!(ends(&envelopes)[0].result.is_error, false);
+    assert!(!ends(&envelopes)[0].result.is_error);
 }
 
 #[tokio::test]
