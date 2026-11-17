@@ -60,6 +60,13 @@ class ExecStart:
             like), never its own `PATH`, `HOME`, `USER`, `SHELL` or `TMPDIR`.
         background: Whether the model does not wait for it.
         session_id: The session that owns the call.
+        principal: Who the run that made the call acts for (`tenant`, `user`
+            and `roles`, `roles` empty when it has none): the `principal` of
+            its `run`. `None` when the run has none. Runs of several
+            principals on one agent share this host, so a host that serves
+            more than one must scope or deny the command by it (a working
+            directory, an account or a container per principal);
+            `SubprocessHost` ignores it and runs every command the same way.
     """
 
     agent: str
@@ -69,6 +76,7 @@ class ExecStart:
     env: Mapping[str, str]
     background: bool
     session_id: str
+    principal: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

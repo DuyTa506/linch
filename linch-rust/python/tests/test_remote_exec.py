@@ -20,6 +20,8 @@ from scripted import config, text_turn, tool_turn
 from linch_rust import (
     Agent,
     AgentConfig,
+    ExecStart,
+    Principal,
     RemoteExecution,
     Server,
     SubprocessHost,
@@ -75,6 +77,39 @@ async def gone(pid: int, what: str) -> None:
     while alive(pid):
         assert time.monotonic() < deadline, f"process {pid} outlived {what}"
         await asyncio.sleep(0.05)
+
+
+class Recording(SubprocessHost):
+    """A host that keeps each `ExecStart` it served."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.starts: list[ExecStart] = []
+
+    async def start(self, request: ExecStart) -> None:
+        self.starts.append(request)
+        await super().start(request)
+
+
+async def test_the_host_gets_the_principal_of_the_run_that_made_each_command(
+    tmp_path: Path,
+) -> None:
+    ada: Principal = {"tenant": "t", "user": "ada", "roles": ["support"]}
+    bob: Principal = {"tenant": "t", "user": "bob"}
+    call = tool_turn("c1", "Bash", {"command": "true"})
+    turns = [call, text_turn("a"), call, text_turn("b"), call, text_turn("c")]
+    host = Recording()
+    async with Server() as server:
+        agent = await server.open_agent(agent_config(tmp_path, turns), execution=host)
+        for session, principal in (("s1", ada), ("s2", bob), ("s3", None)):
+            run = await agent.run(session, "go", principal=principal)
+            [_ async for _ in run]
+    assert [start.principal for start in host.starts] == [
+        {"tenant": "t", "user": "ada", "roles": ["support"]},
+        {"tenant": "t", "user": "bob", "roles": []},
+        None,
+    ]
+    assert [start.session_id for start in host.starts] == ["s1", "s2", "s3"]
 
 
 @pytest.mark.source

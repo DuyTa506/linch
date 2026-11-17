@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use linch::SessionId;
+use linch::{Principal, SessionId};
 use serde::{Deserialize, Serialize};
 
 /// Params of `exec.start`: start one command. The result is `{}`; an error
@@ -31,6 +31,13 @@ pub struct ExecStartParams {
     pub background: bool,
     /// Session that owns the call.
     pub session_id: SessionId,
+    /// Who the run that made the call acts for: the `principal` of its
+    /// `run.start`. Absent when the run has none. Several principals' runs
+    /// on one agent share the client's host, so a host that serves more than
+    /// one scopes or denies the command by it; the connection's own tenant
+    /// is the only one a tenant's principal can name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
 }
 
 /// Params of `exec.read`: wait up to `wait_ms` for output or the end of a

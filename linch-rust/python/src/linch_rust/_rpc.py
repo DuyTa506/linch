@@ -126,6 +126,7 @@ async def _exec(host: ExecutionHost, method: str, params: JsonObject, agent: str
                 env=dict(params.get("env") or {}),
                 background=bool(params.get("background", False)),
                 session_id=str(params.get("session_id", "")),
+                principal=params.get("principal"),
             )
         )
         return {}

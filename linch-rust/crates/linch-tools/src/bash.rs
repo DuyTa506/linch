@@ -234,6 +234,7 @@ impl Bash {
             cwd: &self.cwd,
             env: &self.env,
             session: &ctx.session_id,
+            principal: ctx.principal.as_ref(),
             lifeline,
         }
     }

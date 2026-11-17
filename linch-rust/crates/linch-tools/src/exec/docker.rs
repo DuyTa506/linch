@@ -571,6 +571,7 @@ mod tests {
             cwd: Path::new("/work/space"),
             env,
             session: &SESSION,
+            principal: None,
             lifeline,
         }
     }

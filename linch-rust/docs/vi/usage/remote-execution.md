@@ -74,6 +74,21 @@ và `workspace` chứa các tool cũng có):
   `open_with_remote(..., None)`, extension Python) thất bại với một thông báo nói rõ
   điều đó, và client Python raise `ValueError` trước khi mở.
 
+### Một host, nhiều principal
+
+Host là client đã mở agent, nên các run của mọi principal trên agent đó (mỗi `run`
+với `principal` riêng) đều đến cùng một host. Server không giới hạn một lệnh theo
+principal: `exec.start` chỉ nêu agent và session. Nó mang theo `principal` của run đã
+tạo lời gọi (`{tenant, user, roles}`, chính cái đã đưa cho `run.start`; vắng mặt khi
+run không có), để một host phục vụ nhiều hơn một principal có thể giới hạn hoặc từ chối
+lệnh theo nó (mỗi principal một thư mục làm việc, một tài khoản hay một container).
+Python: `ExecStart.principal`. `SubprocessHost` bỏ qua nó và chạy mọi lệnh như nhau,
+dưới quyền người dùng của tiến trình này: đừng dùng chung một host giữa các principal
+cần được tách biệt. `exec.read` và `exec.kill` chỉ nêu lệnh; `exec_id` của nó là cái
+host đã thấy ở `exec.start`, nên host nào ghi nhớ principal ở đó thì cũng biết nó về
+sau. Trên kết nối của một tenant, tenant của principal là tenant của chính kết nối;
+`user` và `roles` là điều client tuyên bố, như với các quy tắc quyền.
+
 ## Tệp: các tool tệp tác động lên server
 
 Hãy đọc phần này trước khi bật. `Read`, `Write`, `Edit`, `Grep` và `Glob` chạy trong
@@ -146,7 +161,7 @@ format); không có gì khác được khai báo, `execution` của cấu hình 
 
 | Request | Params | Result |
 |---|---|---|
-| `exec.start` | `agent, exec_id, command, cwd?, env?, background?, session_id` | `{}` |
+| `exec.start` | `agent, exec_id, command, cwd?, env?, background?, session_id, principal?` | `{}` |
 | `exec.read` | `agent, exec_id, wait_ms` | `{stdout?, stderr?, exit?}` |
 | `exec.kill` | `agent, exec_id` | `{stdout?, stderr?, exit?}` |
 

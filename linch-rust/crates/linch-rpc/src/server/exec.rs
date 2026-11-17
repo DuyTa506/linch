@@ -72,6 +72,7 @@ impl RemoteExec for HostExec {
             env: command.env,
             background: command.background,
             session_id: command.session,
+            principal: command.principal,
         };
         self.call(method::EXEC_START, params).await.map(|_| ())
     }
@@ -153,6 +154,7 @@ mod tests {
                 env: Default::default(),
                 background: false,
                 session: "s".into(),
+                principal: None,
             };
             host.start(command).await
         });

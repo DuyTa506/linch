@@ -313,6 +313,7 @@ mod tests {
                     cwd: Path::new("/"),
                     env: &env,
                     session: &session,
+                    principal: None,
                     lifeline: true,
                 };
                 let timeout = Duration::from_secs(30);

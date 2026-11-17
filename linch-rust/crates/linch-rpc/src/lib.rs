@@ -399,7 +399,10 @@
 //! [`ExecReadParams`](protocol::ExecReadParams),
 //! [`ExecKillParams`](protocol::ExecKillParams)); the config is all the
 //! declaration there is. `exec.start` `{agent, exec_id, command, cwd?,
-//! env?, background?, session_id}` starts a command: `cwd` is the policy's
+//! env?, background?, session_id, principal?}` starts a command; `principal` is
+//! the `principal` of the run that made the call, absent when it has none
+//! (runs of several principals on one agent share the client's host, and a
+//! host that serves more than one scopes or denies by it), `cwd` is the policy's
 //! (the host's choice when absent) and `env` is the server's allowlisted
 //! variables without its `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR`, so
 //! no server secret or identity crosses. `exec.read` `{agent, exec_id,
