@@ -12,7 +12,7 @@
 //!
 //! Nothing new is checkpointed. The attempts spent and the parts so far
 //! are read back from the run's durable `assistant` and `notification`
-//! events ([`Truncated::of`]), so a resume neither resets the bound nor
+//! events (`Truncated::of`), so a resume neither resets the bound nor
 //! loses a part.
 
 use serde::{Deserialize, Serialize};
