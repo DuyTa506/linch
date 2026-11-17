@@ -397,6 +397,20 @@ kind, never the key, the URL or the vendor's own words), and `OpenError`
 `list_models` and `model_info` calls a minute, then gets `LimitReached`
 (`kind` `provider_calls`).
 
+## Temperature
+
+`spec.temperature` (0 to 2) goes with every request when set, `0` included, and
+stays off the wire when unset. `agent.open` fails for a value outside 0 to 2, or
+above 1 on `anthropic`. Each adapter sends it as given (checked 2026-11-17 against
+the vendor references):
+
+| Provider | Field | Notes |
+|---|---|---|
+| `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 to 2. OpenAI says parameter support varies by model; a model that refuses it answers with an HTTP error, which Linch does not predict. |
+| `anthropic` | `temperature` | 0 to 1. Claude Opus 4.7 and later, Sonnet 5 and later and Haiku 5.5 answer 400 to a non-default value on every request; older models refuse it only while thinking is on; API version `2026-10-21` removes it. |
+| `deepseek` | `temperature` | 0 to 2. Has no effect in thinking mode (the default), where it is sent and ignored. |
+| `gemini` | `generationConfig.temperature` | 0.0 to 2.0. Silently ignored on Gemini 3.6 Flash and newer models. |
+
 ## Failures and retries
 
 A run retries a provider call that failed with an error another call may

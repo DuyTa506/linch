@@ -13,6 +13,10 @@
 //!   history.
 //! - With [`ResponsesOptions::store`] off, `store: false` is sent and
 //!   reasoning comes back encrypted, so replay needs no server state.
+//! - `temperature` takes 0 to 2 (checked 2026-11-17 in the Chat Completions
+//!   reference, which says parameter support varies by model; the same
+//!   field is sent here). Whether a reasoning model takes it is left to
+//!   the API.
 //! - There is no stop-sequence parameter, so stop sequences are rejected.
 //! - Structured output (checked 2026-11-17) is native: `text.format` =
 //!   `{"type": "json_schema", name, strict, schema, description?}`. It

@@ -199,6 +199,7 @@ absent, except `bash`.
 | `thinking` | none: the provider's default | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` or `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` is `summarized` or `omitted`. How each provider maps it is in the [architecture providers page](../architecture/providers.md#the-adapters) |
 | `effort` | none | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`, for providers that support it |
 | `max_output_tokens` | none: the provider's default | Most tokens one response may generate |
+| `temperature` | none: the provider's default | Sampling temperature, 0 to 2 (`0` is allowed; `anthropic` takes at most 1). A value outside the range fails `agent.open`. Which providers ignore or refuse it is in [Providers](./providers.md#temperature) |
 | `max_tool_concurrency` | `4` | Most read-scope tool calls that run at once; `0` counts as 1 |
 | `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |

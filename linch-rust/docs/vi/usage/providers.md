@@ -395,6 +395,20 @@ bao giờ là key, URL hay lời của vendor), và `OpenError` (-32013) khi key
 [Server](./server.md)), và được gọi `list_models` và `model_info` 10 lần một
 phút, sau đó nhận `LimitReached` (`kind` là `provider_calls`).
 
+## Temperature
+
+`spec.temperature` (0 đến 2) đi kèm mọi request khi được đặt, kể cả `0`, và không
+xuất hiện trên wire khi không đặt. `agent.open` thất bại với giá trị ngoài 0 đến 2,
+hoặc trên 1 với `anthropic`. Mỗi adapter gửi nguyên giá trị (đối chiếu với tài liệu
+của nhà cung cấp ngày 2026-11-17):
+
+| Provider | Trường | Ghi chú |
+|---|---|---|
+| `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 đến 2. OpenAI nói mức hỗ trợ tham số khác nhau theo model; model từ chối nó sẽ trả lỗi HTTP, Linch không đoán trước. |
+| `anthropic` | `temperature` | 0 đến 1. Claude Opus 4.7 trở lên, Sonnet 5 trở lên và Haiku 5.5 trả 400 với giá trị khác mặc định ở mọi request; model cũ hơn chỉ từ chối khi thinking bật; API version `2026-10-21` bỏ nó. |
+| `deepseek` | `temperature` | 0 đến 2. Không có tác dụng ở chế độ thinking (mặc định), nơi nó được gửi và bị bỏ qua. |
+| `gemini` | `generationConfig.temperature` | 0.0 đến 2.0. Bị bỏ qua im lặng trên Gemini 3.6 Flash và các model mới hơn. |
+
 ## Lỗi và thử lại
 
 Một run thử lại một lời gọi provider thất bại với lỗi mà một lời gọi khác có thể

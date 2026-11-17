@@ -96,7 +96,7 @@ required fields and optional controls an adapter may ignore or refuse:
 | Field | Notes |
 |---|---|
 | `model`, `system`, `tools`, `messages` | Always set by the runner. |
-| `max_output_tokens`, `temperature`, `stop_sequences` | Optional. |
+| `max_output_tokens`, `temperature`, `stop_sequences` | Optional. `temperature` is `spec.temperature`; every adapter sends it when set, `0` included, and `Provider::max_temperature` (2, Anthropic 1) bounds it when the agent is built. |
 | `effort` (`ReasoningEffort`), `thinking` (`Thinking`) | `None` keeps the provider default. Each adapter maps them itself. |
 | `cache_control` | Set (no TTL) on every primary call of a run, as Python's `cache_prompt=True`; a compaction summary call has none (`crates/linch-core/src/agent.rs`). |
 | `output_schema`, `tool_choice` | Optional. |

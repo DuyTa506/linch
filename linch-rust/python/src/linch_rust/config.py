@@ -974,9 +974,11 @@ class AgentConfig(TypedDict, total=False):
         namespace: Store key space for this agent's runs and sessions.
         spec: The model, instructions and loop limits, such as
             `{"model": "deepseek-flash", "system_prompt": "Be brief."}`;
-            `system_blocks`, a token or USD `budget`, a `provider_retry`
-            policy (see `ProviderRetry`), `fallback_models`, the models to
-            fail over to in order, an `output_schema` (see
+            `temperature` (0 to 2, and at most 1 on `anthropic`; 0 is
+            allowed, unset leaves the provider's default; the open fails
+            on a value outside the range), `system_blocks`, a token or
+            USD `budget`, a `provider_retry` policy (see `ProviderRetry`),
+            `fallback_models`, the models to fail over to in order, an `output_schema` (see
             `OutputSchema`) with its `structured_output_retries`, a
             `tool_choice` (see `ToolChoice`), a `final_tool_name` (a
             registered tool whose call ends the run, its input the answer), a

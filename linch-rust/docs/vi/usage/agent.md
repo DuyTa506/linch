@@ -203,6 +203,7 @@ có, trừ `bash`.
 | `thinking` | không có: mặc định của provider | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` hoặc `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` là `summarized` hoặc `omitted`. Cách mỗi provider ánh xạ nó nằm ở [trang providers của kiến trúc](../architecture/providers.md#the-adapters) |
 | `effort` | không có | Mức nỗ lực suy luận: `low`, `medium`, `high`, `xhigh` hoặc `max`, cho các provider hỗ trợ |
 | `max_output_tokens` | không có: mặc định của provider | Số token nhiều nhất mà một phản hồi được sinh ra |
+| `temperature` | không có: mặc định của provider | Temperature lấy mẫu, từ 0 đến 2 (`0` được phép; `anthropic` nhận tối đa 1). Giá trị ngoài khoảng làm `agent.open` thất bại. Provider nào bỏ qua hoặc từ chối nó có trong [Providers](./providers.md#temperature) |
 | `max_tool_concurrency` | `4` | Số lời gọi tool scope đọc nhiều nhất chạy cùng lúc; `0` được tính là 1 |
 | `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây; quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
 | `compaction` | không có: không bao giờ nén | Khi nào tóm tắt phần cũ của cuộc hội thoại ([bên dưới](#compaction)) |

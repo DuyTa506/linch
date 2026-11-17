@@ -15,7 +15,7 @@ use crate::json::JsonObject;
 use crate::loop_guard::LoopGuard;
 use crate::message::SystemBlock;
 use crate::provider::{
-    OutputSchema, ProviderRequest, ReasoningEffort, Thinking, ToolChoice, ToolDefinition,
+    OutputSchema, Provider, ProviderRequest, ReasoningEffort, Thinking, ToolChoice, ToolDefinition,
 };
 use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
@@ -78,6 +78,12 @@ pub struct AgentSpec {
     /// Most tokens one response may generate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Sampling temperature sent with every request, 0 to 2 and within the
+    /// provider's own limit ([`crate::Provider::max_temperature`]); `None`
+    /// leaves the provider's default (Python's `temperature`). Some models
+    /// ignore or refuse it: the provider docs say which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
     /// Most read-scope tools that run at once (default 4; 0 counts as 1).
     #[serde(default = "default_concurrency")]
     pub max_tool_concurrency: u32,
@@ -213,6 +219,7 @@ impl AgentSpec {
             thinking: None,
             effort: None,
             max_output_tokens: None,
+            temperature: None,
             max_tool_concurrency: default_concurrency(),
             call_timeout_ms: None,
             compaction: None,
@@ -253,7 +260,7 @@ impl AgentSpec {
             context_tail: 0,
             messages,
             max_output_tokens: self.max_output_tokens,
-            temperature: None,
+            temperature: self.temperature,
             stop_sequences: Vec::new(),
             effort: self.effort,
             thinking: self.thinking.clone(),
@@ -262,6 +269,23 @@ impl AgentSpec {
             tool_choice: None,
         }
     }
+}
+
+/// Why `temperature` cannot be sent to `provider`: not a number from 0 to
+/// 2, or past the provider's own limit; `None` when it can.
+pub(crate) fn temperature_problem(temperature: f64, provider: &dyn Provider) -> Option<String> {
+    if !(0.0..=2.0).contains(&temperature) {
+        return Some(format!(
+            "temperature must be a number from 0 to 2, not {temperature}"
+        ));
+    }
+    let limit = provider.max_temperature();
+    (temperature > limit).then(|| {
+        format!(
+            "temperature {temperature} is too high: {} takes at most {limit}",
+            provider.id()
+        )
+    })
 }
 
 impl AgentSpec {
@@ -436,6 +460,31 @@ mod tests {
         );
         let wire = serde_json::to_value(&budgeted).unwrap();
         assert_eq!(wire["context_budget"], json!({"max_tokens": 500}));
+    }
+
+    /// An unset temperature is off the wire and the contract; one that is
+    /// set, 0 included, is on both.
+    #[test]
+    fn the_temperature_is_in_the_contract_only_when_set() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let unset = AgentSpec::new("m");
+        assert_eq!(
+            serde_json::to_value(&unset).unwrap(),
+            json!({"model": "m", "max_tool_concurrency": 4})
+        );
+        let base = contract_digest(&unset, &[], hooks, &none).unwrap();
+        let mut seen = vec![base];
+        for temperature in [0.0, 0.7] {
+            let mut set = unset.clone();
+            set.temperature = Some(temperature);
+            let wire = serde_json::to_value(&set).unwrap();
+            assert_eq!(wire["temperature"], json!(temperature));
+            assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), set);
+            let digest = contract_digest(&set, &[], hooks, &none).unwrap();
+            assert!(!seen.contains(&digest), "{temperature} is a contract");
+            seen.push(digest);
+        }
     }
 
     #[test]

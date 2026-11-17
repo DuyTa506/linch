@@ -219,6 +219,24 @@ async def test_a_loop_guard_that_cannot_run_fails_the_open() -> None:
             await server.open_agent(cfg)
 
 
+@pytest.mark.parametrize("temperature", [0, 0.7, 2])
+async def test_a_spec_temperature_in_range_opens(temperature: float) -> None:
+    cfg = config([text_turn("done")])
+    cfg["spec"] = {"model": MODEL, "temperature": temperature}
+    envelopes = await run_once(cfg)
+
+    assert isinstance(envelopes[-1].event, ResultEvent)
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.5])
+async def test_a_spec_temperature_out_of_range_fails_the_open(temperature: float) -> None:
+    cfg = config([])
+    cfg["spec"] = {"model": MODEL, "temperature": temperature}
+    async with Server() as server:
+        with pytest.raises(OpenError, match="temperature"):
+            await server.open_agent(cfg)
+
+
 @pytest.mark.source
 def test_the_typed_loop_guard_names_every_field_the_server_reads() -> None:
     source = LOOP_GUARD_RS.read_text(encoding="utf-8")

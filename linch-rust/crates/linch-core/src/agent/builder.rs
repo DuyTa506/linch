@@ -322,6 +322,11 @@ impl AgentBuilder {
             ));
         }
         let provider = self.provider.ok_or(BuildError::Missing("provider"))?;
+        if let Some(problem) = (self.spec.temperature)
+            .and_then(|temperature| spec::temperature_problem(temperature, &*provider))
+        {
+            return Err(BuildError::Invalid(problem));
+        }
         let permissions = (self.permissions).ok_or(BuildError::Missing("permission engine"))?;
         let runs = self.runs.ok_or(BuildError::Missing("run store"))?;
         let sessions = self.sessions.ok_or(BuildError::Missing("session store"))?;

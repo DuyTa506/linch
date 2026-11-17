@@ -54,6 +54,13 @@ pub trait Provider: Send + Sync {
         true
     }
 
+    /// The highest `temperature` the provider takes; every provider takes 0
+    /// and up. An agent whose spec asks for more does not build. It
+    /// defaults to 2, the limit of OpenAI, DeepSeek and Gemini.
+    fn max_temperature(&self) -> f64 {
+        2.0
+    }
+
     /// Why the provider cannot send `choice` in a request with `thinking`;
     /// `None` when it can (the default: every choice). It never does I/O.
     /// The agent refuses a `tool_choice` this names when it is built and
