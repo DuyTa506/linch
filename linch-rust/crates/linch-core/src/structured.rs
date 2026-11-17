@@ -11,6 +11,9 @@
 //! A run may also have a [`FinalTool`]: a tool whose call ends the run,
 //! its input the answer, checked the same way (see `runner/final_tool.rs`).
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use jsonschema::Validator;
 
 use crate::events::Envelope;
@@ -18,7 +21,8 @@ use crate::events::Event;
 use crate::events::kinds::VerificationAction;
 use crate::json::{JsonObject, JsonValue};
 use crate::provider::{OutputSchema, ToolDefinition};
-use crate::registry::{truncate, violations};
+use crate::registry::{RegisteredTool, ToolSnapshot, compiled, truncate, violations};
+use crate::tool::{Tool, ToolContext, ToolOutputError, ToolResult, ToolScope};
 
 /// The `verifier` of the `verification` events the schema gate stages.
 pub(crate) const VERIFIER: &str = "output_schema";
@@ -194,6 +198,37 @@ impl FinalTool {
         }
     }
 
+    /// The tool as the planner decides its call: the registered tool of
+    /// `snapshot` for a named final tool, else a read-scope stand-in for the
+    /// one made from the output schema, which is not registered.
+    ///
+    /// Raises:
+    ///     String: Why the call cannot be planned: the named tool is no
+    ///         longer registered, or the made one's schema does not compile
+    ///         as a tool's.
+    pub(crate) fn registered(
+        &self,
+        snapshot: &ToolSnapshot,
+    ) -> Result<Arc<RegisteredTool>, String> {
+        let name = &self.name;
+        let Some(definition) = &self.made else {
+            let tool = snapshot.resolve(name);
+            return tool.cloned().ok_or_else(|| {
+                format!("the final tool {name:?} is not a registered tool any more")
+            });
+        };
+        let mut schema = definition.input_schema.clone();
+        schema
+            .entry("type")
+            .or_insert_with(|| JsonValue::from("object"));
+        let made = MadeTool {
+            name: definition.name.clone(),
+            description: definition.description.clone(),
+            schema,
+        };
+        compiled(Arc::new(made)).map_err(|error| error.to_string())
+    }
+
     /// Why a response with `calls` tool calls, one of them this tool's,
     /// cannot end the run: the final tool must be called alone.
     pub(crate) fn alone(&self, calls: usize) -> Result<(), String> {
@@ -205,6 +240,38 @@ impl FinalTool {
                 self.name
             )),
         }
+    }
+}
+
+/// The final tool made from an output schema, as a tool the planner can
+/// decide a call of. It never runs: the call is the answer.
+struct MadeTool {
+    name: String,
+    description: String,
+    schema: JsonObject,
+}
+
+#[async_trait]
+impl Tool for MadeTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> &JsonObject {
+        &self.schema
+    }
+
+    /// Giving an answer touches nothing.
+    fn scope(&self) -> ToolScope {
+        ToolScope::Read
+    }
+
+    async fn execute(&self, _input: JsonObject, _ctx: ToolContext) -> ToolResult {
+        Err(ToolOutputError::new("the final tool is not run"))
     }
 }
 

@@ -222,6 +222,90 @@ async fn a_text_answer_waits_for_the_background_child_and_hears_of_it() {
     assert_eq!(times, stored);
 }
 
+/// A response that calls `Read` with `input`, as call `id`.
+fn read_call(id: &str, input: serde_json::Value) -> ScriptedTurn {
+    let call = TurnBuilder::new(MODEL).tool_call(id, "Read", &input);
+    call.usage(usage(10, 5)).build()
+}
+
+/// A final tool call waits for a running background child as a text answer
+/// does: the call's result says the answer was not taken and carries the
+/// child's notification, the session stays paired, and the model's second
+/// call is the answer.
+#[tokio::test]
+async fn a_final_call_waits_for_the_background_child_and_hears_of_it() {
+    let parent = vec![
+        background_turn(&["check x"], &[]),
+        read_call("f1", json!({"value": "early"})),
+        read_call("f2", json!({"value": "late"})),
+    ];
+    let family = Family::new(parent, vec![text_turn("x holds")]);
+    let provider = Arc::new(Gated {
+        family,
+        gate: Notify::new(),
+    });
+    let stores = Arc::new(Stores::default());
+    let runs = Runs::default();
+    let registry = linch_core::ToolRegistry::new();
+    let _ = registry
+        .register(Arc::new(Echo::new("Read", ToolScope::Read, &runs)))
+        .unwrap();
+    let mut spec = spec();
+    spec.final_tool_name = Some("Read".into());
+    let workers = Workers {
+        background: true,
+        ..Workers::default()
+    };
+    let agent = AgentBuilder::new(spec)
+        .provider(provider.clone())
+        .tools(Arc::new(registry))
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .subagents(Vec::new())
+        .workers(workers)
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+
+    let Event::Result(result) = &envelopes.last().unwrap().event else {
+        panic!("the run ended with a result");
+    };
+    assert_eq!(
+        result.structured_output,
+        Some(object(json!({"value": "late"})))
+    );
+    let child = format!("{run_id}:sub_0");
+    let log = messages(&*stores, "s1").await;
+    assert_eq!(log.len(), 7, "prompt, spawn, ack, call, notes, call, ack");
+    for (at, message) in log.iter().enumerate() {
+        let ids: Vec<_> = message.tool_uses().map(|call| call.id.clone()).collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let answered: Vec<_> = (log[at + 1].content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult(result) => Some(result.tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answered, ids, "the calls of message {at} are answered");
+    }
+    let notes = &log[4];
+    let ContentBlock::ToolResult(first) = &notes.content[0] else {
+        panic!("the notes message answers the call first");
+    };
+    assert!(first.is_error, "the answer was not taken");
+    let note = notification(&child, "completed", "Agent #1", "x holds");
+    assert_eq!(notes.content[1], ContentBlock::text(note.clone()));
+    let requests = provider.family.requests_of("parent");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].messages.last().unwrap(), notes);
+}
+
 #[tokio::test]
 async fn a_background_child_that_ends_in_a_batch_joins_its_results() {
     let parent = vec![

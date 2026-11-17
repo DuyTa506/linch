@@ -181,6 +181,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - A named `tool_choice` is checked against each turn's own request (after `before_provider_call`), not only at `agent.open`: on a turn that does not offer the tool (a skill narrowed the tools, tool search deferred it) the request goes out as `auto`, and that turn's `context_build` event has `metadata.tool_choice_dropped`, instead of every provider call failing with a 400. Turns that offer it are unchanged.
 
+- The final tool's call is decided as any call of a batch is: a `pre_tool_use` hook runs on it (a rewrite is the answer, a veto goes back as the call's error result), permission rules apply (a deny goes back the same way; an `Ask` counts as allowed, since nothing runs), and a named final tool's input is checked with the tool's own schema and `Tool::validate` even with no output schema. A veto or deny draws on `structured_output_retries`, so one that never lifts ends the run `failed` rather than looping under a forced `tool_choice`. A `stop` hook's rewrite of a final answer is parsed and checked again (the output schema and the tool), so `structured_output` and `final_text` agree; one that is not a valid object ends the run `failed`. A final call now hears waiting background subagents and peer messages first, as a text answer does, instead of cancelling them: its result says the answer was not taken and carries the notes, and the model calls again.
+
 ### Changed
 
 - A worker's history pruning also deletes failed jobs that failed more than `history_retention` ago (`prune_history` counts them); they stayed in `linch_worker_jobs` forever.

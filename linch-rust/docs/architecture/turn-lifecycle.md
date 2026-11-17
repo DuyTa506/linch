@@ -623,7 +623,15 @@ with the request's thinking (`Provider::tool_choice_refusal`).
 
 `received` hands a logged response that calls it to `final_call`
 (`runner/final_tool.rs`) instead of planning a batch, so no tool event is
-written. While the run decides, `Runner::unpaired` holds the response:
+written. `final_call` first hears waiting background children and peers
+(`Runner::hear_back_final`, `runner/inbox.rs`: the notes join the response's
+results in one `ToolResults` message), then decides the call with
+`scheduler::plan_one` (the tool's own validation, `pre_tool_use`, permission;
+`Ask` counts as allowed, a veto or deny draws on `structured_output_retries`
+through `retry_or_fail`). A made final tool is planned as a read-scope
+`MadeTool` (`structured.rs`), since it is not registered. A `stop` rewrite is
+parsed and checked again (`recheck`). While the run decides,
+`Runner::unpaired` holds the response:
 
 - Feedback (a schema failure, a verifier's or a `stop` hook's retry) goes
   through `send_back`, which turns it into the response's results (the

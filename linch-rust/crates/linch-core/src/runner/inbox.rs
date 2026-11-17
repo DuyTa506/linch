@@ -149,6 +149,35 @@ impl Runner {
     /// on for the others. `None` when nothing waits; a cancel while
     /// waiting aborts the run.
     pub(super) async fn hear_back(&mut self) -> Result<Option<Option<Step>>, RunError> {
+        self.hear_back_as(|_, notes| Message::new(Role::User, notes))
+            .await
+    }
+
+    /// [`Self::hear_back`] for a response that called the final tool, whose
+    /// calls are still unanswered: the message that carries the notes pairs
+    /// them first (the final call's result says the answer was not taken),
+    /// so the session stays paired and the model answers again.
+    pub(super) async fn hear_back_final(&mut self) -> Result<Option<Option<Step>>, RunError> {
+        self.hear_back_as(|runner, notes| match runner.unpaired.take() {
+            Some(unanswered) => {
+                let name = runner.final_tool.as_ref().map_or("", |tool| &tool.name);
+                let text = format!(
+                    "Final answer not taken yet: background work reported while you answered. \
+                     Read what came in, then call {name} again when you are done."
+                );
+                unanswered.heard(&text, notes)
+            }
+            None => Message::new(Role::User, notes),
+        })
+        .await
+    }
+
+    /// Wait for what [`Self::hear_back`] waits for, and log `build` of the
+    /// notes (and the catalog notice) as the message for the next turn.
+    async fn hear_back_as(
+        &mut self,
+        build: impl FnOnce(&mut Self, Vec<ContentBlock>) -> Message,
+    ) -> Result<Option<Option<Step>>, RunError> {
         let Some(family) = self.family.clone() else {
             return Ok(None);
         };
@@ -166,7 +195,7 @@ impl Runner {
             (notes, peers) = self.notes().await?;
         }
         notes.extend(self.catalog_change());
-        let message = Message::new(Role::User, notes);
+        let message = build(self, notes);
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::Notification,

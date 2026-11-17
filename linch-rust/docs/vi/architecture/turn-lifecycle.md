@@ -594,7 +594,14 @@ chọn bị ép với thinking của request (`Provider::tool_choice_refusal`).
 
 `received` giao một response đã ghi log mà gọi nó cho `final_call`
 (`runner/final_tool.rs`) thay vì plan một batch, nên không có event tool nào được
-ghi. Trong lúc run quyết định, `Runner::unpaired` giữ response đó:
+ghi. Trước hết `final_call` lắng nghe các child nền và peer đang chờ
+(`Runner::hear_back_final`, `runner/inbox.rs`: các ghi chú nằm chung với kết quả của
+response trong một message `ToolResults`), rồi quyết định lời gọi bằng
+`scheduler::plan_one` (validate của chính tool, `pre_tool_use`, permission; `Ask` được
+coi là cho phép, một veto hay deny dùng ngân sách `structured_output_retries` qua
+`retry_or_fail`). Final tool do run tạo ra được plan như một `MadeTool` có scope read
+(`structured.rs`) vì nó không được đăng ký. Một lần `stop` viết lại được parse và kiểm tra
+lại (`recheck`). Trong lúc run quyết định, `Runner::unpaired` giữ response đó:
 
 - Phản hồi (một lần thất bại schema, một retry của verifier hoặc của hook `stop`)
   đi qua `send_back`, thứ biến nó thành các kết quả của response (kết quả của lời

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use common::hooks::hook;
 use common::*;
 use linch_core::events::kinds::{ResultEvent, ResultSubtype, VerificationAction};
-use linch_core::hooks::{Stop, StopResponse};
+use linch_core::hooks::{PreToolUse, PreToolUseResponse, Stop, StopResponse};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
@@ -630,9 +630,6 @@ async fn a_hook_that_ends_the_run_first_still_pairs_the_call() {
 /// The turns of one crash scenario, made afresh for each run.
 type Script = fn() -> Vec<ScriptedTurn>;
 
-/// A crash at any write of a final tool run ends where the clean run
-/// ended: the same session, paired, the same `verification` events, no
-/// paid response bought again; and the session takes another run.
 /// A named tool choice is sent only on a turn whose request offers that
 /// tool: a skill that narrows the turn to other tools would otherwise make
 /// every provider call of the turn a 400. The turn goes out as `auto`, and
@@ -684,9 +681,200 @@ async fn a_named_choice_the_turn_does_not_offer_falls_back_to_auto() {
     assert_eq!(dropped, [None, Some(json!("Write")), None]);
 }
 
+/// A `pre_tool_use` hook that blocks one `total`.
+fn veto_total(hooks: &Hooks, total: u64) {
+    let veto = hook::<PreToolUse>("veto", move |request| {
+        Ok(match request.input.get("total") == Some(&json!(total)) {
+            true => PreToolUseResponse::Block {
+                reason: "not that one".into(),
+            },
+            false => PreToolUseResponse::Continue,
+        })
+    });
+    let _ = hooks.pre_tool_use.register(veto.arc()).unwrap();
+}
+
+/// The final call is decided as any call is: a `pre_tool_use` veto goes
+/// back as its result, the model calls again, and the hook's record shows.
+#[tokio::test]
+async fn a_pre_tool_use_veto_goes_back_as_the_final_calls_result() {
+    let provider = scripted([
+        call("f1", "invoice", json!({"total": 7})),
+        call("f2", "invoice", json!({"total": 2})),
+    ]);
+    let hooks = Hooks::default();
+    veto_total(&hooks, 7);
+    let stores = Arc::new(Stores::default());
+    let agent = final_agent(shaped(1), provider, &Runs::default(), hooks, stores.clone());
+    let envelopes = finish(agent.run("bill me", RunOptions::new("s1"))).await;
+    assert_eq!(result(&envelopes).structured_output, Some(total(2)));
+    let log = messages(&*stores, "s1").await;
+    assert_paired(&log, "after a veto");
+    let (_, text, error) = &results(&log[2])[0];
+    assert!(*error, "the veto is an error result");
+    assert!(text.contains("not that one"), "{text}");
+    let hook_events = (envelopes.iter())
+        .filter(|envelope| matches!(envelope.event, Event::Hook(_)))
+        .count();
+    assert_eq!(hook_events, 2, "the hook was asked of both calls");
+    assert_eq!(tool_events(&envelopes), 0, "the call still never runs");
+}
+
+/// A hook that rewrites the final call's input changes the answer: the
+/// result holds the rewritten object.
+#[tokio::test]
+async fn a_pre_tool_use_rewrite_is_the_answer() {
+    let provider = scripted([call("f1", "invoice", json!({"total": 1}))]);
+    let hooks = Hooks::default();
+    let rewrite = hook::<PreToolUse>("rewrite", |_| {
+        Ok(PreToolUseResponse::Rewrite { input: total(9) })
+    });
+    let _ = hooks.pre_tool_use.register(rewrite.arc()).unwrap();
+    let agent = final_agent(
+        shaped(0),
+        provider,
+        &Runs::default(),
+        hooks,
+        Arc::new(Stores::default()),
+    );
+    let envelopes = finish(agent.run("bill me", RunOptions::new("s1"))).await;
+    let result = result(&envelopes);
+    assert_eq!(result.structured_output, Some(total(9)));
+    assert_eq!(result.final_text.as_deref(), Some(r#"{"total":9}"#));
+}
+
+/// A deny rule on the final tool, or a veto that never lifts, cannot keep a
+/// run going: they draw on `structured_output_retries`, so under a forced
+/// choice with no `max_turns` the run still ends failed, session paired.
+#[tokio::test]
+async fn a_refusal_that_never_lifts_ends_the_run_failed() {
+    let deny = || {
+        let mut strict = linch_core::PermissionPolicy::new(PermissionMode::SkipDangerous, "/");
+        let rule = linch_core::permissions::ToolRule::new(
+            "invoice",
+            linch_core::permissions::RuleDecision::Deny,
+        );
+        let layer = [linch_core::permissions::Rule::Tool(rule)];
+        strict.layers = vec![linch_core::PermissionLayer::new("runtime", layer)];
+        linch_core::PermissionEngine::new(strict).unwrap()
+    };
+    for denied in [true, false] {
+        let turns: Vec<_> = (1..=6)
+            .map(|n| call(&format!("f{n}"), "invoice", json!({"total": 7})))
+            .collect();
+        let provider = scripted(turns);
+        let hooks = Hooks::default();
+        if !denied {
+            veto_total(&hooks, 7);
+        }
+        let stores = Arc::new(Stores::default());
+        let mut spec = shaped(2);
+        spec.tool_choice = Some(ToolChoice::Required {});
+        assert_eq!(spec.max_turns, None);
+        let mut builder = builder(spec, provider.clone(), vec![], hooks, stores.clone());
+        if denied {
+            builder = builder.permissions(deny());
+        }
+        let agent = builder.build().unwrap();
+        let envelopes = finish(agent.run("bill me", RunOptions::new("s1"))).await;
+        let context = format!("denied: {denied}");
+        assert_eq!(
+            result(&envelopes).subtype,
+            ResultSubtype::Error,
+            "{context}"
+        );
+        assert_eq!(
+            provider.requests().len(),
+            3,
+            "{context}: 2 retries, then it ends"
+        );
+        let log = messages(&*stores, "s1").await;
+        assert_paired(&log, &context);
+        let (_, text, _) = &results(&log[2])[0];
+        let reason = if denied { "denied" } else { "not that one" };
+        assert!(text.contains(reason), "{context}: {text}");
+    }
+}
+
+/// A named final tool's own input schema and `Tool::validate` are checked,
+/// with no output schema to do it: the invalid input goes back as the
+/// call's error, and the valid one is the answer.
+#[tokio::test]
+async fn a_named_final_tools_input_is_checked_with_the_tool() {
+    let provider = Arc::new(ScriptedProvider::new([
+        call("f1", "Read", json!({"value": 3})),
+        call("f2", "Read", json!({"value": "ok"})),
+    ]));
+    let mut spec = spec();
+    spec.final_tool_name = Some("Read".into());
+    spec.structured_output_retries = 1;
+    let stores = Arc::new(Stores::default());
+    let agent = final_agent(
+        spec,
+        provider,
+        &Runs::default(),
+        Hooks::default(),
+        stores.clone(),
+    );
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let got = result(&envelopes);
+    assert_eq!(got.structured_output, Some(object(json!({"value": "ok"}))));
+    let log = messages(&*stores, "s1").await;
+    assert_paired(&log, "after an invalid input");
+    let (_, text, error) = &results(&log[2])[0];
+    assert!(*error && text.contains("value"), "{text}");
+}
+
+/// A `stop` hook's rewrite of a final tool's answer is parsed and checked
+/// again, so `structured_output` is the object `final_text` holds; one that
+/// is not an object the tool accepts ends the run failed.
+#[tokio::test]
+async fn a_stop_rewrite_of_a_final_answer_is_checked_again() {
+    for (rewritten, want) in [
+        (r#"{"value": "changed"}"#, Some(json!({"value": "changed"}))),
+        (r#"{"value": 4}"#, None),
+        ("not json", None),
+    ] {
+        let provider = Arc::new(ScriptedProvider::new([call(
+            "f1",
+            "Read",
+            json!({"value": "first"}),
+        )]));
+        let mut spec = spec();
+        spec.final_tool_name = Some("Read".into());
+        let hooks = Hooks::default();
+        let rewrite = hook::<Stop>("rewrite", move |_| {
+            Ok(StopResponse::Rewrite {
+                text: rewritten.into(),
+            })
+        });
+        let _ = hooks.stop.register(rewrite.arc()).unwrap();
+        let stores = Arc::new(Stores::default());
+        let agent = final_agent(spec, provider, &Runs::default(), hooks, stores.clone());
+        let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+        let got = result(&envelopes);
+        let context = format!("rewritten to {rewritten}");
+        match want {
+            Some(want) => {
+                assert_eq!(got.subtype, ResultSubtype::Success, "{context}");
+                assert_eq!(got.final_text.as_deref(), Some(rewritten), "{context}");
+                assert_eq!(got.structured_output, Some(object(want)), "{context}");
+            }
+            None => {
+                assert_eq!(got.subtype, ResultSubtype::Error, "{context}");
+                assert!(got.structured_error.is_some(), "{context}");
+            }
+        }
+        assert_paired(&messages(&*stores, "s1").await, &context);
+    }
+}
+
+/// A crash at any write of a final tool run ends where the clean run
+/// ended: the same session, paired, the same `verification` events, no
+/// paid response bought again; and the session takes another run.
 #[tokio::test]
 async fn a_crash_at_any_write_ends_where_the_clean_run_did() {
-    let scripts: [(&str, Script, RunStatus); 3] = [
+    let scripts: [(&str, Script, RunStatus); 4] = [
         (
             "good",
             || vec![call("f1", "invoice", json!({"total": 1}))],
@@ -713,19 +901,37 @@ async fn a_crash_at_any_write_ends_where_the_clean_run_did() {
             },
             RunStatus::Failed,
         ),
+        (
+            "vetoed, good",
+            || {
+                vec![
+                    call("f1", "invoice", json!({"total": 7})),
+                    call("f2", "invoice", json!({"total": 1})),
+                ]
+            },
+            RunStatus::Completed,
+        ),
     ];
+    // A hook that vetoes the one input the "vetoed" script starts with.
+    let vetoing = || {
+        let hooks = Hooks::default();
+        let veto = hook::<PreToolUse>("veto-seven", |request| {
+            Ok(match request.input.get("total") == Some(&json!(7)) {
+                true => PreToolUseResponse::Block {
+                    reason: "seven is unlucky".into(),
+                },
+                false => PreToolUseResponse::Continue,
+            })
+        });
+        let _ = hooks.pre_tool_use.register(veto.arc()).unwrap();
+        hooks
+    };
     let make =
         |turns: Vec<ScriptedTurn>| Arc::new(Replay::new(turns).without_native_output_schema());
     for (name, turns, status) in scripts {
         let clean = Arc::new(Stores::default());
         let runs = Runs::default();
-        let agent = final_agent(
-            shaped(1),
-            make(turns()),
-            &runs,
-            Hooks::default(),
-            clean.clone(),
-        );
+        let agent = final_agent(shaped(1), make(turns()), &runs, vetoing(), clean.clone());
         let stream = agent.run("bill me", RunOptions::new("s1"));
         let clean_id = stream.run_id().clone();
         finish(stream).await;
@@ -741,8 +947,7 @@ async fn a_crash_at_any_write_ends_where_the_clean_run_did() {
                 let stores = Arc::new(Stores::default());
                 let provider = make(turns());
                 let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
-                let crashing =
-                    final_agent(shaped(1), provider.clone(), &runs, Hooks::default(), faulty);
+                let crashing = final_agent(shaped(1), provider.clone(), &runs, vetoing(), faulty);
                 let stream = crashing.run("bill me", RunOptions::new("s1"));
                 let run_id = stream.run_id().clone();
                 assert!(drain(stream).await.1.is_some(), "{context}");
@@ -750,7 +955,7 @@ async fn a_crash_at_any_write_ends_where_the_clean_run_did() {
                     shaped(1),
                     provider.clone(),
                     &runs,
-                    Hooks::default(),
+                    vetoing(),
                     stores.clone(),
                 );
                 let run_id = match stores.runs.load(NS, &run_id).await {

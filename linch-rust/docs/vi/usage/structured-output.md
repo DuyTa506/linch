@@ -160,7 +160,20 @@ yêu cầu câu trả lời cuối cùng. Tool này nằm cuối danh sách tool
 
 Một response gọi nó kết thúc run với input của lời gọi làm câu trả lời:
 
-- Lời gọi không bao giờ chạy: không có `tool_call_start` hay `tool_call_end`.
+- Lời gọi không bao giờ chạy: không có `tool_call_start` hay `tool_call_end`. Tuy vậy
+  nó được quyết định như mọi lời gọi: input schema và validate của tool, các callback
+  `pre_tool_use` và các luật permission đều áp dụng, và các event `hook` của callback
+  được phát ra. Một callback có thể viết lại input (câu trả lời là bản đã viết lại), một
+  veto hay luật deny được gửi lại dưới dạng kết quả lỗi của lời gọi, và một input mà
+  tool không chấp nhận cũng vậy. Các lần từ chối này dùng `structured_output_retries`,
+  nên một lần từ chối không bao giờ được gỡ sẽ kết thúc run `failed` với
+  `StructuredOutputError` thay vì lặp mãi, kể cả với `tool_choice` bị ép và `max_turns`
+  chưa đặt. Quyết định `Ask` được coi là cho phép: không có gì chạy nên không có gì để
+  duyệt.
+- Trước khi lời gọi được quyết định, một [subagent nền](./agent.md) vẫn đang chạy, hoặc
+  đã kết thúc mà chưa được giao kết quả, được chờ như với một câu trả lời dạng text. Kết
+  quả của lời gọi khi đó nói rằng câu trả lời chưa được nhận, thông báo của subagent đi
+  chung trong cùng message, và model gọi lại tool.
 - Input của nó được kiểm tra như một câu trả lời dạng text: một lần thất bại được
   gửi lại dưới dạng kết quả lỗi của lời gọi (`Call the invoice tool again, ...`),
   theo cùng `structured_output_retries` và các event `verification`, và quá số
@@ -170,14 +183,16 @@ Một response gọi nó kết thúc run với input của lời gọi làm câu
 - Một input hợp lệ đi tiếp đến các verifier và các callback `stop`, chúng thấy
   nó dưới dạng văn bản JSON; văn bản đó là `final_text` của kết quả, còn object là
   `structured_output` của nó. Một retry từ callback được gửi lại dưới dạng kết quả
-  của lời gọi.
+  của lời gọi. Một callback `stop` viết lại văn bản sẽ bị kiểm tra lại: nó vẫn phải là
+  một object JSON mà output schema (nếu có) và tool chấp nhận, và nó trở thành
+  `structured_output`; nếu không, run kết thúc `failed`.
 - Session nhận một kết quả cho mọi lời gọi của response trước khi run kết thúc
   (`Final answer captured by the host.` cho một câu trả lời được nhận), nên run
   kế tiếp của session bắt đầu ở trạng thái đã ghép cặp, bất kể điều gì đã kết thúc
   run này. Một crash sau quyết định sẽ hoàn tất run khi resume mà không hỏi lại
   model hay một callback.
-- Nó kết thúc run ngay lập tức, kể cả khi các [subagent nền](./agent.md) vẫn đang
-  chạy: chúng bị hủy, như ở bất kỳ lần kết thúc nào của một run.
+- Nó kết thúc run khi không còn gì để nghe: một subagent được khởi động sau lượt cuối
+  của model bị hủy, như ở bất kỳ lần kết thúc nào của một run.
 
 Khi final tool là tool duy nhất, nó bị ép bằng một `tool_choice` có tên, hoặc
 `required` ở nơi provider từ chối một lựa chọn có tên, như chế độ compatible của
@@ -200,8 +215,8 @@ schema có `name` trùng với tên một tool đã đăng ký hoặc không ph�
 
 `spec.final_tool_name` đặt tên một tool đã đăng ký mà lời gọi của nó kết thúc run
 theo cùng cách, trên bất kỳ provider nào (`final_tool_name` của Python). Input của
-nó được kiểm tra theo output schema khi có, và là câu trả lời nguyên như vậy khi
-không có. Tool không bao giờ chạy. `agent.open` từ chối một tên không phải một
+nó được kiểm tra theo input schema và `validate` của chính tool, rồi theo output
+schema khi có, và sau đó là câu trả lời nguyên như vậy. Tool không bao giờ chạy. `agent.open` từ chối một tên không phải một
 tool đã đăng ký.
 
 ```python
