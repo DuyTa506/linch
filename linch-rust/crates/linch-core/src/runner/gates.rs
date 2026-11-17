@@ -42,9 +42,12 @@ impl Runner {
         let Some(gates) = &self.gates else {
             return HashMap::new();
         };
+        // The tools this turn offers: a skill's `allowed_tools`, the child's
+        // filter and tool search's deferral are already out of the snapshot.
+        let offered = |name: &str| self.snapshot.resolve(name).is_some();
         let refused = blocks
             .iter()
-            .filter_map(|block| Some((block.id.clone(), gates.refusal(&block.name)?)));
+            .filter_map(|block| Some((block.id.clone(), gates.refusal(&block.name, &offered)?)));
         refused.collect()
     }
 

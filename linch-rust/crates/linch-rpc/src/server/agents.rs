@@ -53,7 +53,13 @@ impl Server {
             .config
             .open_with(tools, hooks, &self.0.pools)
             .await
-            .map_err(|error| ErrorObject::from(&error))?;
+            .map_err(|error| {
+                let error = ErrorObject::from(&error);
+                match &self.0.tenant {
+                    Some(tenant) => tenant.open_error(error),
+                    None => error,
+                }
+            })?;
         if let (Some(binding), Some((tenant, (definition, migrated)))) = (binding, scheduling) {
             binding.bind(Bound {
                 pool: (opened.pool().cloned()).expect("schedule_tools opened on Postgres"),

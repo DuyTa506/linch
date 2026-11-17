@@ -70,6 +70,11 @@ pub(super) async fn new_run(
         if let Some(reason) = tool_choice_problem(provider, choice, thinking, offered, toolless) {
             return Err(RunError::InvalidToolChoice { run_id, reason });
         }
+        let named = final_tool.as_ref().map(|tool| tool.name.as_str());
+        let policy = agent.spec.policy.as_ref();
+        if let Some(reason) = policy.and_then(|policy| policy.choice_problem(choice, named)) {
+            return Err(RunError::InvalidToolChoice { run_id, reason });
+        }
     }
     if options.run_id.is_some() {
         // A caller-chosen id may be taken: refuse it before any write.

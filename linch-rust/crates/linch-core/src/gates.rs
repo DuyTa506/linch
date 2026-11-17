@@ -50,18 +50,11 @@ use serde::{Deserialize, Serialize};
 use crate::events::kinds::{PolicyAction, PolicyEvent, PolicyRule, UserEventSubtype};
 use crate::events::{Envelope, Event};
 use crate::message::ContentBlock;
+use crate::provider::ToolChoice;
 use crate::verification::{Check, OnFail, VerificationSpec, Verifier, Verifiers};
 
 /// Corrections a policy allows unless it says otherwise.
 pub const DEFAULT_MAX_CORRECTIONS: u32 = 2;
-
-fn default_max_corrections() -> u32 {
-    DEFAULT_MAX_CORRECTIONS
-}
-
-fn is_default_max_corrections(value: &u32) -> bool {
-    *value == DEFAULT_MAX_CORRECTIONS
-}
 
 fn default_min_calls() -> u32 {
     1
@@ -75,7 +68,7 @@ fn is_one(value: &u32) -> bool {
 /// off: nothing is checked, and the spec's wire form and contract digest
 /// are those of a spec written before policies existed. Set, even empty,
 /// it is part of the run contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReliabilityPolicy {
     /// Tools that may only run after others succeeded. At most one entry
@@ -87,22 +80,11 @@ pub struct ReliabilityPolicy {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<CompletionGate>,
     /// How many correction turns the gates may spend in one run, across
-    /// all of them (default 2); 0 ends the run at the first failure.
-    #[serde(
-        default = "default_max_corrections",
-        skip_serializing_if = "is_default_max_corrections"
-    )]
-    pub max_corrections: u32,
-}
-
-impl Default for ReliabilityPolicy {
-    fn default() -> Self {
-        Self {
-            prerequisites: Vec::new(),
-            gates: Vec::new(),
-            max_corrections: DEFAULT_MAX_CORRECTIONS,
-        }
-    }
+    /// all of them; 0 ends the run at the first failure. `None` (absent on
+    /// the wire) is [`DEFAULT_MAX_CORRECTIONS`] for a run, and no cap of
+    /// its own when a tenant's policy is merged into an operator's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_corrections: Option<u32>,
 }
 
 /// `tool` may only run after every tool in `requires` has succeeded.
@@ -138,6 +120,11 @@ pub struct CompletionGate {
 }
 
 impl ReliabilityPolicy {
+    /// The corrections a run may spend: the policy's, else the default.
+    pub fn corrections(&self) -> u32 {
+        self.max_corrections.unwrap_or(DEFAULT_MAX_CORRECTIONS)
+    }
+
     /// Why this policy cannot run on an agent, if it cannot.
     ///
     /// Args:
@@ -230,6 +217,40 @@ impl ReliabilityPolicy {
             }
         }
         None
+    }
+
+    /// Why `choice`, a tool choice that holds every turn, would keep this
+    /// policy from ever being met, if it would.
+    ///
+    /// Args:
+    ///     choice: The tool choice of the agent or of one run.
+    ///     final_tool: The run's final tool, which lets a forced run end.
+    pub(crate) fn choice_problem(
+        &self,
+        choice: &ToolChoice,
+        final_tool: Option<&str>,
+    ) -> Option<String> {
+        // Whether a rule needs tools called: a held-back tool, or a gate
+        // that counts successes. Check-only gates need an answer, not a call.
+        let calls =
+            !self.prerequisites.is_empty() || (self.gates.iter()).any(|g| !g.succeeded.is_empty());
+        let rules = calls || !self.gates.is_empty();
+        let (what, unmet) = match choice {
+            ToolChoice::Auto {} => return None,
+            ToolChoice::Disabled {} => ("none", calls),
+            // The model may call any tool, and the final one ends the run.
+            ToolChoice::Required {} => ("required", rules && final_tool.is_none()),
+            ToolChoice::Tool { name } if final_tool == Some(name.as_str()) => {
+                ("the final tool", calls)
+            }
+            ToolChoice::Tool { .. } => ("a named tool", rules),
+        };
+        unmet.then(|| {
+            format!(
+                "policy: tool_choice {what} holds every turn, so the policy's prerequisites and \
+                 gates could not be met; use auto, or the final tool to end the run"
+            )
+        })
     }
 
     /// A tool whose requirements lead back to itself, if there is one.
@@ -364,9 +385,12 @@ pub(crate) struct Gates {
     pending: HashMap<String, (String, bool)>,
     /// Successful calls of each tool a rule counts.
     successes: HashMap<String, u32>,
-    /// The calls already refused, by `tool_use_id`, so that a re-plan of
-    /// their batch after a crash does not report them twice.
-    refused: HashSet<String>,
+    /// Responses seen so far: the turn a call belongs to.
+    responses: u32,
+    /// The calls already refused, by response and `tool_use_id` (a provider
+    /// may reuse an id on a later turn), so that a re-plan of their batch
+    /// after a crash does not report them twice.
+    refused: HashSet<(u32, String)>,
     /// Corrections spent.
     corrections: u32,
 }
@@ -378,6 +402,7 @@ impl Gates {
             rules,
             pending: HashMap::new(),
             successes: HashMap::new(),
+            responses: 0,
             refused: HashSet::new(),
             corrections: 0,
         }
@@ -396,6 +421,7 @@ impl Gates {
     pub(crate) fn see(&mut self, event: &Event) {
         match event {
             Event::Assistant(response) => {
+                self.responses += 1;
                 self.pending.clear();
                 for call in response.message.tool_uses() {
                     if !self.rules.referenced.contains(&call.name) {
@@ -423,7 +449,8 @@ impl Gates {
             }
             Event::Policy(event) => match (event.rule, event.action) {
                 (PolicyRule::Prerequisite, PolicyAction::Refuse) => {
-                    self.refused.extend(event.tool_use_id.clone());
+                    let turn = self.responses;
+                    (self.refused).extend(event.tool_use_id.iter().map(|id| (turn, id.clone())));
                 }
                 (PolicyRule::Completion, PolicyAction::Correct) => self.corrections += 1,
                 _ => {}
@@ -433,8 +460,10 @@ impl Gates {
     }
 
     /// The tools of `tool`'s prerequisite that have not succeeded yet, as
-    /// the refusal of a call of it; `None` when the call may run.
-    pub(crate) fn refusal(&self, tool: &str) -> Option<Refusal> {
+    /// the refusal of a call of it; `None` when the call may run. The
+    /// message names them only when `offered` says the model has each one:
+    /// a tool a skill or the run's options hid from it is not named.
+    pub(crate) fn refusal(&self, tool: &str, offered: &dyn Fn(&str) -> bool) -> Option<Refusal> {
         let required = self.rules.requires.get(tool)?;
         let missing: Vec<String> = (required.iter())
             .filter(|name| self.successes.get(*name).copied().unwrap_or(0) == 0)
@@ -443,11 +472,16 @@ impl Gates {
         if missing.is_empty() {
             return None;
         }
-        let list = quoted(&missing);
-        let message = format!(
-            "Tool '{tool}' cannot run yet: {list} must succeed first. Call {list}, wait for its \
-             result, then call '{tool}' again."
-        );
+        let message = match missing.iter().all(|name| offered(name)) {
+            true => {
+                let list = quoted(&missing);
+                format!(
+                    "Tool '{tool}' cannot run yet: {list} must succeed first. Call {list}, wait \
+                     for its result, then call '{tool}' again."
+                )
+            }
+            false => format!("Tool '{tool}' cannot run yet: a prerequisite has not succeeded."),
+        };
         Some(Refusal { missing, message })
     }
 
@@ -459,7 +493,7 @@ impl Gates {
         tool_use_id: &str,
         refusal: &Refusal,
     ) -> Option<PolicyEvent> {
-        if self.refused.contains(tool_use_id) {
+        if (self.refused).contains(&(self.responses, tool_use_id.to_owned())) {
             return None;
         }
         Some(PolicyEvent {
@@ -495,7 +529,13 @@ impl Gates {
             }
             let line = match (&gate.feedback, failed) {
                 (Some(feedback), _) => feedback.clone(),
-                (None, Some(failure)) if short.is_empty() => failure.feedback,
+                // Not the pattern or keywords: they are the operator's, and the
+                // model that reads this may be a tenant's.
+                (None, Some(_)) if short.is_empty() => format!(
+                    "The requirement '{}' is not met: your final answer does not satisfy its \
+                     check. Revise it and give your final answer again.",
+                    gate.name
+                ),
                 (None, _) => {
                     let tools = quoted(&short.iter().map(|t| (*t).clone()).collect::<Vec<_>>());
                     let times = match gate.min_calls {
@@ -521,7 +561,7 @@ impl Gates {
 
     /// Whether another correction may go to the model.
     pub(crate) fn can_correct(&self) -> bool {
-        self.corrections < self.rules.policy.max_corrections
+        self.corrections < self.rules.policy.corrections()
     }
 
     /// The `policy` event of a correction for `failure`, counted as spent.
@@ -540,7 +580,7 @@ impl Gates {
 
     /// The `policy` event of the stop `failure` ends the run on.
     pub(crate) fn stop(&self, failure: &Failure) -> PolicyEvent {
-        let max = self.rules.policy.max_corrections;
+        let max = self.rules.policy.corrections();
         let detail = match max {
             0 => "the final answer does not meet the completion gates".to_owned(),
             n => format!(
@@ -617,29 +657,41 @@ mod tests {
     #[test]
     fn a_call_unlocks_only_with_a_foreground_success_of_an_earlier_batch() {
         let mut gates = Gates::new(policy());
-        assert!(gates.refusal("Lookup").is_none(), "nothing requires Lookup");
-        let refusal = gates.refusal("Update").unwrap();
+        assert!(
+            gates.refusal("Lookup", &|_| true).is_none(),
+            "nothing requires Lookup"
+        );
+        let refusal = gates.refusal("Update", &|_| true).unwrap();
         assert_eq!(refusal.missing, ["Lookup"]);
         assert!(refusal.message.contains("'Lookup' must succeed first"));
 
         gates.see(&asked(&[("a", "Lookup", json!({}))]));
-        assert!(gates.refusal("Update").is_some(), "its result is not in");
+        assert!(
+            gates.refusal("Update", &|_| true).is_some(),
+            "its result is not in"
+        );
         gates.see(&answered(&[("a", true)]));
-        assert!(gates.refusal("Update").is_some(), "an error does not count");
+        assert!(
+            gates.refusal("Update", &|_| true).is_some(),
+            "an error does not count"
+        );
         let background = json!({"run_in_background": true});
         gates.see(&asked(&[("b", "Lookup", background)]));
         gates.see(&answered(&[("b", false)]));
-        assert!(gates.refusal("Update").is_some(), "an ack does not");
+        assert!(
+            gates.refusal("Update", &|_| true).is_some(),
+            "an ack does not"
+        );
         let foreground = json!({"run_in_background": false});
         gates.see(&asked(&[("c", "Lookup", foreground)]));
         gates.see(&answered(&[("c", false)]));
-        assert!(gates.refusal("Update").is_none());
+        assert!(gates.refusal("Update", &|_| true).is_none());
     }
 
     #[test]
     fn a_refusal_is_reported_once_and_a_correction_counts() {
         let mut gates = Gates::new(policy());
-        let refusal = gates.refusal("Update").unwrap();
+        let refusal = gates.refusal("Update", &|_| true).unwrap();
         let event = gates.refused_event("Update", "x", &refusal).unwrap();
         gates.see(&Event::Policy(event));
         assert!(gates.refused_event("Update", "x", &refusal).is_none());
@@ -656,6 +708,30 @@ mod tests {
         }
         assert!(!gates.can_correct());
         assert_eq!(gates.stop(&failure).attempt, 2);
+    }
+
+    #[test]
+    fn a_refusal_does_not_name_a_tool_the_model_was_not_offered() {
+        let gates = Gates::new(policy());
+        let hidden = |name: &str| name != "Lookup";
+        let refusal = gates.refusal("Update", &hidden).unwrap();
+        assert!(!refusal.message.contains("Lookup"), "{}", refusal.message);
+        assert!(refusal.message.contains("'Update'"));
+        assert_eq!(refusal.missing, ["Lookup"], "the audit event keeps it");
+    }
+
+    #[test]
+    fn a_provider_that_repeats_an_id_is_refused_and_reported_again_next_turn() {
+        let mut gates = Gates::new(policy());
+        gates.see(&asked(&[("x", "Update", json!({}))]));
+        let refusal = gates.refusal("Update", &|_| true).unwrap();
+        let event = gates.refused_event("Update", "x", &refusal).unwrap();
+        gates.see(&Event::Policy(event));
+        assert!(gates.refused_event("Update", "x", &refusal).is_none());
+        // The next response reuses the id: its refusal is a new one.
+        gates.see(&answered(&[("x", true)]));
+        gates.see(&asked(&[("x", "Update", json!({}))]));
+        assert!(gates.refused_event("Update", "x", &refusal).is_some());
     }
 
     #[test]
@@ -717,7 +793,11 @@ mod tests {
         assert_eq!(failure.gates, ["cites", "polite"]);
         assert!(failure.missing.is_empty());
         let lines: Vec<_> = failure.feedback.lines().collect();
-        assert!(lines[0].contains("must match the pattern"), "{lines:?}");
+        assert!(lines[0].contains("'cites' is not met"), "{lines:?}");
+        assert!(
+            !failure.feedback.contains("\\d"),
+            "the pattern stays hidden"
+        );
         assert_eq!(lines[1], "Say please.");
         assert!(gates.check("please see [1]").is_none());
     }

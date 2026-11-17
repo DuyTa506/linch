@@ -224,6 +224,44 @@ async fn a_tenant_cannot_remove_the_policy_its_operator_requires() {
     );
 }
 
+/// A tenant policy that leaves `max_corrections` out does not lower the
+/// operator's cap to the default; one that sets it may only go below it.
+#[tokio::test]
+async fn an_absent_tenant_cap_keeps_the_operators() {
+    let operator: linch::ReliabilityPolicy = serde_json::from_value(json!({
+        "gates": [{"name": "looked-up", "succeeded": ["lookup"]}],
+        "max_corrections": 3,
+    }))
+    .unwrap();
+    let mut rpc = Rpc::remote_with(
+        acme(Allowlists::new().required_policy(Some(operator))),
+        answering(),
+    );
+    let own = json!({"gates": [{"name": "polite", "check":
+        {"type": "keywords", "keywords": ["thanks"]}}]});
+    let turns = (0..6).map(|_| text_turn("done")).collect();
+    let agent = rpc.open(remote_config(turns, Some(own))).await;
+    let run_id = rpc.start(&agent, "s1", "go").await;
+    let ended = rpc.until_end(&run_id).await;
+    let actions: Vec<_> = (policies(&ended).iter())
+        .map(|e| e["action"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(actions, ["correct", "correct", "correct", "stop"]);
+
+    // Its own, lower cap still applies; a higher one does not raise it.
+    for (own_cap, corrections) in [(1, 1), (9, 3)] {
+        let own = json!({"max_corrections": own_cap});
+        let turns = (0..6).map(|_| text_turn("done")).collect();
+        let agent = rpc.open(remote_config(turns, Some(own))).await;
+        let run_id = rpc.start(&agent, "s1", "go").await;
+        let ended = rpc.until_end(&run_id).await;
+        let spent = (policies(&ended).iter())
+            .filter(|e| e["action"] == "correct")
+            .count();
+        assert_eq!(spent, corrections, "own cap {own_cap}");
+    }
+}
+
 /// An operator rule naming a tool the agent lacks refuses the open: it is
 /// never dropped.
 #[tokio::test]
@@ -232,6 +270,29 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
     let remote = Rpc::remote(acme(required));
     let mut toolless = remote_config(vec![], None);
     toolless["tools"] = json!([]);
-    let error = remote.call(method::AGENT_OPEN, toolless).await.unwrap_err();
+    let error = remote
+        .call(method::AGENT_OPEN, toolless.clone())
+        .await
+        .unwrap_err();
+    // The tenant is not told which tools the operator's rules name.
+    let message = match &error {
+        linch_rpc::ClientError::Rpc(object) => object.message.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(message.starts_with("policy:"), "{message}");
+    assert!(!message.contains("update") && !message.contains("lookup"));
     assert_eq!(code_of(error), code::BUILD_INVALID);
+
+    // A local connection has no tenant: its error names the tool.
+    let local = Rpc::new();
+    let mut open = config(
+        vec![],
+        json!({"gates": [{"name": "g", "succeeded": ["nope"]}]}),
+    );
+    open["namespace"] = json!("rpc");
+    let error = local.call(method::AGENT_OPEN, open).await.unwrap_err();
+    match error {
+        linch_rpc::ClientError::Rpc(object) => assert!(object.message.contains("nope")),
+        other => panic!("{other:?}"),
+    }
 }

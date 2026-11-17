@@ -20,6 +20,22 @@ use super::{Allowlists, Tenant};
 use crate::error::{ErrorObject, code};
 
 impl Tenant {
+    /// `error`, an `agent.open` failure, without the tool names of a policy
+    /// the operator required: a rule naming a tool the tenant's agent lacks
+    /// would otherwise tell the tenant what the operator's policy holds.
+    pub(crate) fn open_error(&self, error: ErrorObject) -> ErrorObject {
+        let unmet = error.code == code::BUILD_INVALID
+            && error.message.contains("policy:")
+            && error.message.contains("not a tool the agent has");
+        match (&self.allow.required_policy, unmet) {
+            (Some(_), true) => ErrorObject::new(
+                error.code,
+                "policy: the agent lacks a tool that the policy required for this tenant names",
+            ),
+            _ => error,
+        }
+    }
+
     /// Refuse `config` unless its namespace is this tenant's and its
     /// provider, endpoints, permissions, workspace, store and MCP servers
     /// are all allowed. The workspace, the project root and the config
@@ -562,7 +578,7 @@ fn admit_policy(
             );
             return Err(refused("policy", message));
         }
-        if policy.max_corrections > MAX_CORRECTIONS {
+        if policy.max_corrections.is_some_and(|n| n > MAX_CORRECTIONS) {
             let message = format!("policy.max_corrections may be at most {MAX_CORRECTIONS}");
             return Err(refused("policy", message));
         }
@@ -607,7 +623,12 @@ fn admit_policy(
     spec.policy = Some(ReliabilityPolicy {
         prerequisites,
         gates,
-        max_corrections: required.max_corrections.min(tenant.max_corrections),
+        // A tenant that leaves it out keeps the operator's; one that sets it
+        // may lower it, not raise it past what the operator's policy allows.
+        max_corrections: match tenant.max_corrections {
+            None => required.max_corrections,
+            Some(own) => Some(own.min(required.corrections())),
+        },
     });
     Ok(())
 }

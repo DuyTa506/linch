@@ -642,6 +642,7 @@ mod tests {
         for policy in [
             json!({}),
             json!({"max_corrections": 5}),
+            json!({"max_corrections": 2}),
             json!({"prerequisites": [{"tool": "b", "requires": ["a"]}]}),
             json!({"gates": [{"name": "g", "succeeded": ["a"]}]}),
             json!({"gates": [{"name": "g", "succeeded": ["a"], "min_calls": 2}]}),

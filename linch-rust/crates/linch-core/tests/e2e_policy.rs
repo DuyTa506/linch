@@ -16,9 +16,9 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, BuildError, ContentBlock, Envelope, Event, Hooks, JsonObject,
-    LoopGuard, Message, OutputSchema, PermissionMode, ReliabilityPolicy, Role, RunId, RunOptions,
-    RunStatus, RunStore, ScriptedTurn, SessionStore, Tool, ToolContext, ToolOutput,
-    ToolOutputError, ToolRegistry, ToolResult, ToolScope,
+    LoopGuard, Message, OutputSchema, PermissionMode, ReliabilityPolicy, Role, RunError, RunId,
+    RunOptions, RunStatus, RunStore, ScriptedTurn, SessionStore, Skill, Tool, ToolChoice,
+    ToolContext, ToolOutput, ToolOutputError, ToolRegistry, ToolResult, ToolScope,
 };
 use serde_json::{Value, json};
 
@@ -333,6 +333,172 @@ async fn a_refused_call_uses_neither_permission_nor_hooks() {
     assert!(!kinds(&events).contains(&"permission_request".to_owned()));
     assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock());
     assert!(runs.lock().unwrap().is_empty());
+}
+
+fn invoice() -> OutputSchema {
+    OutputSchema {
+        name: "invoice".into(),
+        schema: object(json!({
+            "type": "object",
+            "properties": {"total": {"type": "number"}},
+            "required": ["total"],
+        })),
+        strict: true,
+        description: None,
+    }
+}
+
+fn build_with(spec: AgentSpec) -> Result<Agent, BuildError> {
+    let provider = Arc::new(Replay::new(vec![]).without_native_output_schema());
+    let mode = PermissionMode::SkipDangerous;
+    let stores = Arc::new(Stores::default());
+    builder(
+        spec,
+        provider,
+        mode,
+        Hooks::default(),
+        &Runs::default(),
+        stores,
+    )
+    .build()
+}
+
+/// A tool choice that holds every turn cannot go with rules it keeps from
+/// being met: a held-back tool or a `succeeded` gate never gets called.
+/// The final tool is the way out of `required`.
+#[test]
+fn a_forced_tool_choice_cannot_go_with_a_policy_it_defeats() {
+    let named = |name: &str| ToolChoice::Tool { name: name.into() };
+    let check_only = json!({"gates": [{"name": "g", "check":
+        {"type": "keywords", "keywords": ["done"]}}]});
+    let mut cases = Vec::new();
+    for (policy, why) in [(ordered(), "ordered"), (tested(), "tested")] {
+        for choice in [
+            named("Test"),
+            ToolChoice::Required {},
+            ToolChoice::Disabled {},
+        ] {
+            cases.push((policy.clone(), choice, why));
+        }
+    }
+    for (policy, choice, why) in cases {
+        let mut spec = policy;
+        spec.tool_choice = Some(choice.clone());
+        match build_with(spec) {
+            Err(BuildError::Invalid(reason)) => {
+                assert!(reason.contains("tool_choice"), "{why} {choice:?}: {reason}")
+            }
+            other => panic!("{why} {choice:?}: {:?}", other.map(|_| ())),
+        }
+    }
+    // What does not defeat it: auto, any choice without rules, and a check
+    // on the answer with no tool to call.
+    let mut allowed = vec![(tested(), ToolChoice::Auto {})];
+    allowed.push((with_policy(json!({})), named("Test")));
+    allowed.push((with_policy(json!({})), ToolChoice::Required {}));
+    allowed.push((with_policy(check_only), ToolChoice::Disabled {}));
+    for (spec, choice) in allowed {
+        let mut spec = spec;
+        spec.tool_choice = Some(choice.clone());
+        assert!(build_with(spec).is_ok(), "{choice:?}");
+    }
+    // With a final tool the run can end under `required`, and the model can
+    // still call `Test` first; the final tool itself cannot be forced while
+    // a gate needs `Test`.
+    let mut spec = tested();
+    spec.output_schema = Some(invoice());
+    spec.tool_choice = Some(ToolChoice::Required {});
+    assert!(build_with(spec.clone()).is_ok());
+    spec.tool_choice = Some(named("invoice"));
+    assert!(build_with(spec).is_err());
+}
+
+/// The same check at the start of a run that brings its own tool choice.
+#[tokio::test]
+async fn a_run_cannot_bring_a_tool_choice_its_policy_defeats() {
+    let stores = Arc::new(Stores::default());
+    let turns = (0..4).map(|_| text_turn("done")).collect();
+    let provider = Arc::new(Replay::new(turns));
+    let agent = agent_on(tested(), provider, &Runs::default(), stores.clone());
+    let mut options = RunOptions::new("s1");
+    options.tool_choice = Some(ToolChoice::Required {});
+    let (envelopes, error) = drain(agent.run("go", options)).await;
+    assert!(envelopes.is_empty());
+    assert!(
+        matches!(&error, Some(RunError::InvalidToolChoice { reason, .. })
+            if reason.contains("policy")),
+        "{error:?}"
+    );
+    let mut options = RunOptions::new("s1");
+    options.tool_choice = Some(ToolChoice::Auto {});
+    let (_, error) = drain(agent.run("go", options)).await;
+    assert!(error.is_none(), "{error:?}");
+}
+
+/// `required` with the final tool: the model calls `Test` to meet the gate,
+/// then ends the run through the final tool.
+#[tokio::test]
+async fn the_final_tool_ends_a_required_run_whose_gate_needs_another_tool() {
+    let mut spec = tested();
+    spec.output_schema = Some(invoice());
+    spec.tool_choice = Some(ToolChoice::Required {});
+    let submit = |id: &str| {
+        TurnBuilder::new(MODEL)
+            .tool_call(id, "invoice", &json!({"total": 1}))
+            .usage(usage(10, 5))
+            .build()
+    };
+    let turns = vec![submit("f1"), call(1, "Test"), submit("f2")];
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(turns).without_native_output_schema());
+    let agent = agent_on(spec, provider, &Runs::default(), stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Completed, "{:?}", policies(&events));
+    assert_eq!(actions(&events, PolicyAction::Correct), 1);
+}
+
+/// A refusal tells the model about the tools it has: with `Lookup` hidden by
+/// a skill's `allowed_tools`, the refusal of `Update` does not name it, and
+/// the audit event still does.
+#[tokio::test]
+async fn a_refusal_does_not_name_a_tool_a_skill_hid() {
+    let mut skill = Skill::new("narrow", "/skills/narrow", "Narrow.", "go");
+    skill.allowed_tools = Some(vec!["Update".into()]);
+    let load = TurnBuilder::new(MODEL)
+        .tool_call("k1", "Skill", &json!({"skill": "narrow", "args": ""}))
+        .usage(usage(10, 5))
+        .build();
+    let turns = vec![load, call(1, "Update"), text_turn("done")];
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(turns));
+    let mode = PermissionMode::SkipDangerous;
+    let hooks = Hooks::default();
+    let agent = builder(
+        ordered(),
+        provider,
+        mode,
+        hooks,
+        &Runs::default(),
+        stores.clone(),
+    )
+    .skills(vec![skill])
+    .build()
+    .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Completed);
+    let session = messages(&*stores, "s1").await;
+    let refusal = (answers(&session).into_iter())
+        .find(|(id, ..)| id == "call_1_0")
+        .unwrap();
+    assert!(refusal.2 && refusal.1.contains("'Update'"), "{refusal:?}");
+    assert!(!refusal.1.contains("Lookup"), "{refusal:?}");
+    assert_eq!(policies(&events)[0]["missing"], json!(["Lookup"]));
 }
 
 /// A gate sends the answer back once, with the reminder, and the run
