@@ -15,6 +15,8 @@ from linch_rust import (
     Envelope,
     ErrorEvent,
     InitEvent,
+    LoopGuard,
+    LoopGuardEvent,
     ModelFallbackEvent,
     OpenError,
     Profile,
@@ -31,6 +33,7 @@ from linch_rust import (
 TASKS = ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"]
 CONFIG_RS = Path(__file__).resolve().parents[2] / "crates/linch/src/config.rs"
 RELIABILITY_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/reliability.rs"
+LOOP_GUARD_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/loop_guard.rs"
 
 
 async def run_once(cfg: AgentConfig, session_id: str = "s1") -> list[Envelope]:
@@ -177,6 +180,47 @@ async def test_a_retry_policy_that_cannot_run_fails_the_open() -> None:
     async with Server() as server:
         with pytest.raises(OpenError):
             await server.open_agent(cfg)
+
+
+def repeated(n: int) -> list[dict[str, Any]]:
+    """`n` calls of a tool the agent does not have, each with its own input."""
+    return [tool_turn(f"c{i}", "Missing", {"n": i}) for i in range(n)]
+
+
+async def test_the_loop_guard_ends_a_run_whose_calls_keep_failing() -> None:
+    envelopes = await run_once(config(repeated(10)))
+
+    [guard] = [e.event for e in envelopes if isinstance(e.event, LoopGuardEvent)]
+    assert (guard.reason, guard.action) == ("repeated_failures", "stop")
+    [error] = [e.event for e in envelopes if isinstance(e.event, ErrorEvent)]
+    assert error.error["name"] == "LoopGuardError"
+    assert (final(envelopes).subtype, final(envelopes).stop_reason) == ("error", "error")
+
+
+async def test_a_loop_guard_check_set_to_zero_is_off() -> None:
+    guard: LoopGuard = {"max_consecutive_failures": 0}
+    cfg = config(repeated(10))
+    cfg["spec"] = {"model": MODEL, "max_turns": 5, "loop_guard": guard}
+    envelopes = await run_once(cfg)
+
+    reasons = [e.event.reason for e in envelopes if isinstance(e.event, LoopGuardEvent)]
+    assert reasons == ["max_turns"]
+
+
+async def test_a_loop_guard_that_cannot_run_fails_the_open() -> None:
+    cfg = config([])
+    cfg["spec"] = {"model": MODEL, "loop_guard": {"max_idle_turns": 0}}
+    async with Server() as server:
+        with pytest.raises(OpenError):
+            await server.open_agent(cfg)
+
+
+@pytest.mark.source
+def test_the_typed_loop_guard_names_every_field_the_server_reads() -> None:
+    source = LOOP_GUARD_RS.read_text(encoding="utf-8")
+    body = source.split("pub struct LoopGuard {", 1)[1].split("\n}", 1)[0]
+    fields = set(re.findall(r"^\s*pub (\w+):", body, re.MULTILINE))
+    assert fields == LoopGuard.__optional_keys__
 
 
 @pytest.mark.source

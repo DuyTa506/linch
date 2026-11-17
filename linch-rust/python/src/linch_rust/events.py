@@ -204,7 +204,12 @@ class CompactionEvent:
 
 @dataclass(frozen=True)
 class LoopGuardEvent:
-    """The loop guard tripped, or `max_turns` was reached."""
+    """The loop guard tripped, or `max_turns` was reached.
+
+    `reason` is `repeated_tool_call`, `repeated_failures`, `idle_turns`
+    (turns in a row without a provider call; see `LoopGuard`) or
+    `max_turns`; `action` is `stop`.
+    """
 
     type: ClassVar[str] = "loop_guard"
     reason: str

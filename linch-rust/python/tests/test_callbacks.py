@@ -11,6 +11,7 @@ from linch_rust import (
     ContextBuildEvent,
     Envelope,
     HookEvent,
+    LoopGuardEvent,
     PromptBlocked,
     ResultEvent,
     Server,
@@ -190,6 +191,25 @@ async def test_a_before_provider_call_force_continue_ends_at_max_turns() -> None
     assert _verdicts(envelopes, "before_provider_call") == ["force_continue"] * 2
     assert _feedback(envelopes) == [_reminder("again")] * 2
     assert not any(isinstance(e.event, ContextBuildEvent) for e in envelopes)
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent) and final.subtype == "error"
+
+
+async def test_an_always_skipping_callback_ends_at_the_idle_turn_bound() -> None:
+    @callback("before_provider_call", "again", 1)
+    async def again(request: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "force_continue", "feedback": "again"}
+
+    spec = {"model": MODEL, "loop_guard": {"max_idle_turns": 3}}
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("unused")], spec=spec), callbacks=[again])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert _verdicts(envelopes, "before_provider_call") == ["force_continue"] * 4
+    assert _feedback(envelopes) == [_reminder("again")] * 3
+    [guard] = [e.event for e in envelopes if isinstance(e.event, LoopGuardEvent)]
+    assert guard.reason == "idle_turns"
     final = envelopes[-1].event
     assert isinstance(final, ResultEvent) and final.subtype == "error"
 
