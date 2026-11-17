@@ -202,6 +202,23 @@ of each stream, and with `exit` only once the shell was reaped. A command
 that nobody reads for `idle_timeout` seconds (120) is killed and forgotten:
 the server polls every second while it is connected.
 
+What dies when, with `SubprocessHost` (each kill is the whole process group):
+
+| What happens | What dies |
+| --- | --- |
+| A command ends on its own | what it left running in its group |
+| The command's timeout, or a cancel | the command, by `exec.kill` |
+| `close_session`, `close`, a clean exit of the connection | every command of that agent or connection |
+| The server dies | every command of its connection (the connection ends) |
+| The client dies, even by `SIGKILL` | every command it started: a watchdog process per command reads a pipe only the client holds, and kills the group when it closes |
+| Nobody reads a command for `idle_timeout` seconds | that command |
+
+The watchdog is a `/bin/sh` that runs only shell builtins, so it needs no
+`PATH` and no dependency; it stands in a session of its own and ends when the
+command does. A host of your own that outlives the client (an SSH session, a
+sandbox API) must do the same itself: the server cannot stop a command once
+its client is gone.
+
 Differences from Python Linch's `RemoteExecutionBackend`: Python bundles a
 remote shell and a remote filesystem and runs both in the host's world; here
 the file layer stays on the server and is withheld unless the workspace is
