@@ -41,6 +41,29 @@ pub enum WorkflowError {
         /// The call that did not run.
         label: String,
     },
+    /// The workflow's budget is spent, so no further agent call starts. The
+    /// calls that finished stay journaled.
+    #[error("workflow budget exhausted ({spent_tokens} tokens, ${spent_usd:.4} spent)")]
+    BudgetExceeded {
+        /// Tokens the workflow's agent calls have spent, replayed ones
+        /// included.
+        spent_tokens: u64,
+        /// The priced cost of those calls in USD.
+        spent_usd: f64,
+        /// The token cap, if the budget has one.
+        max_tokens: Option<u64>,
+        /// The USD cap, if the budget has one.
+        max_cost_usd: Option<f64>,
+    },
+    /// A cap on what one workflow may do is reached (see
+    /// [`WorkflowOptions::max_records`](super::WorkflowOptions::max_records)).
+    #[error("workflow limit reached: at most {max} {what}")]
+    LimitExceeded {
+        /// What is capped, such as `journal records`.
+        what: &'static str,
+        /// The cap.
+        max: u64,
+    },
     /// A value could not be journaled as JSON, so it could never replay.
     #[error("{label} cannot be journaled: {message}")]
     Encode {

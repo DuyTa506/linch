@@ -1,4 +1,6 @@
-//! [`run_workflow`] and its [`WorkflowOptions`].
+//! [`run_workflow`] and its [`WorkflowOptions`], and the
+//! [`WorkflowSession`] a host that drives the calls itself (as the RPC
+//! server does, for a client-side workflow function) opens and finishes.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -8,9 +10,24 @@ use std::time::Duration;
 use linch_core::JsonValue;
 use tokio_util::sync::CancellationToken;
 
-use super::context::{EventSink, WorkflowContext};
+use super::context::{EventSink, LiveGate, WorkflowContext};
 use super::error::WorkflowError;
-use super::journal::{JournalStore, JournalStoreError, WorkflowStatus};
+use super::journal::{JournalLease, JournalStore, JournalStoreError, WorkflowHold, WorkflowStatus};
+
+/// A spending cap shared by every agent call of one workflow.
+///
+/// It is checked before each agent call that would run live, against what
+/// the workflow's finished calls spent, replayed ones included, so a resume
+/// never starts over from zero. One running call can overshoot the cap; set
+/// the agent's own `spec.budget` to bound a single call.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WorkflowBudget {
+    /// Most tokens the workflow's agent calls may spend, all four usage
+    /// buckets summed.
+    pub max_tokens: Option<u64>,
+    /// Most USD they may spend, by the agent's pricing.
+    pub max_cost_usd: Option<f64>,
+}
 
 /// How one [`run_workflow`] call journals and runs.
 ///
@@ -44,12 +61,27 @@ pub struct WorkflowOptions {
     pub cancel: CancellationToken,
     /// Receives every workflow event; `None` drops them.
     pub on_event: Option<EventSink>,
+    /// Caps what the workflow's agent calls spend; `None` is no cap.
+    pub budget: Option<WorkflowBudget>,
+    /// Most records the journal may hold for this workflow, replayed ones
+    /// included; a call that would add one past it fails with
+    /// [`WorkflowError::LimitExceeded`]. `None` is no cap.
+    pub max_records: Option<u64>,
+    /// Most bytes one record's JSON value may take; a call whose value is
+    /// larger fails with [`WorkflowError::LimitExceeded`] and journals
+    /// nothing. `None` is no cap.
+    pub max_record_bytes: Option<usize>,
+    /// Asked before each agent call that would run live (never for a
+    /// replay); its error fails the call, and the guard it returns is held
+    /// until the call ends. A host that meters live work (places, a cap on
+    /// calls in flight) goes here.
+    pub live_gate: Option<LiveGate>,
 }
 
 impl WorkflowOptions {
     /// Options for workflow `workflow_id` of `namespace`, journaled in
-    /// `journal`, with no answers, 4 branches at once, no timeouts, a fresh
-    /// cancel token and no event sink.
+    /// `journal`, with no answers, 4 branches at once, no timeouts, no
+    /// caps, a fresh cancel token and no event sink.
     pub fn new(
         journal: Arc<dyn JournalStore>,
         namespace: impl Into<String>,
@@ -65,7 +97,119 @@ impl WorkflowOptions {
             deadline: None,
             cancel: CancellationToken::new(),
             on_event: None,
+            budget: None,
+            max_records: None,
+            max_record_bytes: None,
+            live_gate: None,
         }
+    }
+}
+
+/// A claimed workflow whose calls the host drives itself.
+///
+/// [`run_workflow`] is built on it: [`Self::open`] claims the workflow and
+/// seeds a [`WorkflowContext`] with the stored records, and
+/// [`Self::finish`] writes the final status. A host whose workflow
+/// function does not run in this process (the RPC server's client does)
+/// holds the session across its calls instead.
+pub struct WorkflowSession {
+    journal: Arc<dyn JournalStore>,
+    lease: JournalLease,
+    context: WorkflowContext,
+    stored: usize,
+    previous: Option<WorkflowStatus>,
+    /// Kept for as long as the session lives.
+    _hold: WorkflowHold,
+}
+
+impl WorkflowSession {
+    /// Claim the workflow (creating it when new), which fences out any
+    /// process still running it, and load its records.
+    ///
+    /// Raises:
+    ///     WorkflowError: `Store` when the claim or the load fails.
+    pub async fn open(options: &WorkflowOptions) -> Result<Self, WorkflowError> {
+        Self::open_with(options, WorkflowHold::default()).await
+    }
+
+    /// Like [`Self::open`], for a host that wants a second driver refused
+    /// instead of fencing out the first: the store's
+    /// [`hold`](JournalStore::hold) is taken before anything is written,
+    /// so a refusal leaves the epoch and the status as they were, and is
+    /// kept until the session drops.
+    ///
+    /// Raises:
+    ///     WorkflowError: `Store` with [`JournalStoreError::Held`] while
+    ///         another holder drives the workflow, or when the claim or the
+    ///         load fails.
+    pub async fn open_held(options: &WorkflowOptions) -> Result<Self, WorkflowError> {
+        let hold = options
+            .journal
+            .hold(&options.namespace, &options.workflow_id)
+            .await?;
+        Self::open_with(options, hold).await
+    }
+
+    async fn open_with(
+        options: &WorkflowOptions,
+        hold: WorkflowHold,
+    ) -> Result<Self, WorkflowError> {
+        let journal = options.journal.clone();
+        let (namespace, id) = (&options.namespace, &options.workflow_id);
+        // Read before the claim, which sets the status to running.
+        let before = journal.load(namespace, id).await?;
+        let lease = journal.claim(namespace, id).await?;
+        let stored = journal.load(namespace, id).await?;
+        let previous = before.map(|run| run.status);
+        let records = stored.map(|run| run.records).unwrap_or_default();
+        let count = records.len();
+        let context = WorkflowContext::new(lease.clone(), records, options);
+        Ok(Self {
+            journal,
+            lease,
+            context,
+            stored: count,
+            previous,
+            _hold: hold,
+        })
+    }
+
+    /// The context the calls run on.
+    pub fn context(&self) -> &WorkflowContext {
+        &self.context
+    }
+
+    /// How many records the journal held when the workflow was claimed.
+    pub fn stored(&self) -> usize {
+        self.stored
+    }
+
+    /// The status the workflow had before this claim; `None` for a new one.
+    pub fn previous(&self) -> Option<&WorkflowStatus> {
+        self.previous.as_ref()
+    }
+
+    /// The lease epoch this claim holds.
+    pub fn epoch(&self) -> u64 {
+        self.lease.epoch
+    }
+
+    /// Write the final status: `awaiting_input` with the interrupt when one
+    /// suspended the run, else `completed` when `ok` and `failed` when not.
+    /// A lost lease writes nothing, since another process owns the
+    /// workflow now.
+    ///
+    /// Raises:
+    ///     WorkflowError: `Store` when the write fails, including a lost
+    ///         lease.
+    pub async fn finish(&self, ok: bool) -> Result<(), WorkflowError> {
+        let status = match self.context.suspended() {
+            Some(interrupt) => WorkflowStatus::AwaitingInput(interrupt),
+            None if ok => WorkflowStatus::Completed,
+            None => WorkflowStatus::Failed,
+        };
+        self.journal.set_status(&self.lease, status).await?;
+        Ok(())
     }
 }
 
@@ -104,11 +248,8 @@ where
     F: FnOnce(WorkflowContext) -> Fut,
     Fut: Future<Output = Result<T, WorkflowError>>,
 {
-    let journal = options.journal.clone();
-    let lease = (journal.claim(&options.namespace, &options.workflow_id)).await?;
-    let stored = (journal.load(&options.namespace, &options.workflow_id)).await?;
-    let records = stored.map(|run| run.records).unwrap_or_default();
-    let context = WorkflowContext::new(lease.clone(), records, &options);
+    let session = WorkflowSession::open(&options).await?;
+    let context = session.context().clone();
     let run = workflow(context.clone());
     let outcome = match options.deadline.filter(|deadline| !deadline.is_zero()) {
         Some(after) => tokio::time::timeout(after, run).await.unwrap_or_else(|_| {
@@ -123,22 +264,19 @@ where
         return outcome;
     }
     if let Some(interrupt) = context.suspended() {
-        let status = WorkflowStatus::AwaitingInput(interrupt.clone());
-        journal.set_status(&lease, status).await?;
+        session.finish(true).await?;
         return Err(WorkflowError::Suspended(interrupt));
     }
     match outcome {
         Ok(value) => {
-            journal
-                .set_status(&lease, WorkflowStatus::Completed)
-                .await?;
+            session.finish(true).await?;
             Ok(value)
         }
         // The function's error is the cause; when the status write fails
         // too, the workflow stays `running`, which reads as a crash and
         // resumes the same way.
         Err(error) => {
-            let _ = journal.set_status(&lease, WorkflowStatus::Failed).await;
+            let _ = session.finish(false).await;
             Err(error)
         }
     }

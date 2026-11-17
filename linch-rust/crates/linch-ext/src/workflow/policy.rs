@@ -36,7 +36,7 @@ impl Retry {
     }
 
     /// The wait after failed attempt number `failed` (0 for the first).
-    fn delay(&self, failed: u32) -> Duration {
+    pub(super) fn delay(&self, failed: u32) -> Duration {
         let factor = 2u32.saturating_pow(failed);
         self.base_delay.saturating_mul(factor).min(self.max_delay)
     }

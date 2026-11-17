@@ -12,12 +12,17 @@ use linch_core::events::kinds::{WorkflowEvent, WorkflowKind};
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 
-use super::engine::WorkflowOptions;
+use super::engine::{WorkflowBudget, WorkflowOptions};
 use super::error::WorkflowError;
 use super::journal::{Interrupt, JournalLease, JournalRecord, JournalStore};
 
 /// Receives every [`WorkflowEvent`] a workflow emits, in order.
 pub type EventSink = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
+
+/// What a host asks before an agent call runs live: the guard it returns
+/// is held until the call ends, and its error fails the call.
+pub type LiveGate =
+    Arc<dyn Fn() -> Result<Box<dyn std::any::Any + Send + Sync>, WorkflowError> + Send + Sync>;
 
 /// The orchestration handle passed to a workflow function.
 ///
@@ -45,6 +50,12 @@ pub(super) struct Inner {
     pub(super) resume: Mutex<HashMap<String, JsonValue>>,
     /// The first interrupt that suspended this run.
     pub(super) suspended: Mutex<Option<Interrupt>>,
+    pub(super) budget: Option<WorkflowBudget>,
+    /// Tokens and USD the workflow's agent calls have spent so far.
+    pub(super) spent: Mutex<(u64, f64)>,
+    max_records: Option<u64>,
+    max_record_bytes: Option<usize>,
+    pub(super) live_gate: Option<LiveGate>,
 }
 
 /// Journaled results by `(call_key, occurrence)`, and how many calls of
@@ -80,6 +91,11 @@ impl WorkflowContext {
             max_concurrency: options.max_concurrency.max(1),
             resume: Mutex::new(options.resume.clone()),
             suspended: Mutex::new(None),
+            budget: options.budget,
+            spent: Mutex::new((0, 0.0)),
+            max_records: options.max_records,
+            max_record_bytes: options.max_record_bytes,
+            live_gate: options.live_gate.clone(),
         };
         Self {
             inner: Arc::new(inner),
@@ -92,8 +108,24 @@ impl WorkflowContext {
     }
 
     /// The first interrupt that suspended this run, if any did.
-    pub(super) fn suspended(&self) -> Option<Interrupt> {
+    pub fn suspended(&self) -> Option<Interrupt> {
         lock(&self.inner.suspended).clone()
+    }
+
+    /// What the workflow's agent calls have spent so far, replayed ones
+    /// included: tokens, and USD.
+    pub fn spent(&self) -> (u64, f64) {
+        *lock(&self.inner.spent)
+    }
+
+    /// Poll `future` as the code of branch path `path`, the way a
+    /// `parallel` branch is polled: the calls it makes count their
+    /// occurrences apart from every other path's. For a host whose fan-out
+    /// runs elsewhere (a client), which names each branch itself; `path` is
+    /// the branch index at each level, outermost first, joined by `.`
+    /// (`1`, `0.2`), and empty outside every branch.
+    pub fn scoped<F: Future>(&self, path: &str, future: F) -> impl Future<Output = F::Output> {
+        BRANCH.scope(path.to_owned(), future)
     }
 
     /// The journal key of a call with content key `call_key`, this call's
@@ -122,6 +154,22 @@ impl WorkflowContext {
         (key, occurrence, cached)
     }
 
+    /// `LimitExceeded` when the journal holds as many records as it may.
+    /// Checked before live work starts, so a call that could not be
+    /// journaled never spends.
+    pub(super) fn check_room(&self) -> Result<(), WorkflowError> {
+        if let Some(max) = self.inner.max_records {
+            let held = lock(&self.inner.journal).records.len() as u64;
+            if held >= max {
+                return Err(WorkflowError::LimitExceeded {
+                    what: "journal records",
+                    max,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Make one result durable, then cache it.
     pub(super) async fn record(
         &self,
@@ -129,6 +177,15 @@ impl WorkflowContext {
         occurrence: u64,
         value: &JsonValue,
     ) -> Result<(), WorkflowError> {
+        self.check_room()?;
+        if let Some(max) = self.inner.max_record_bytes {
+            if value.to_string().len() > max {
+                return Err(WorkflowError::LimitExceeded {
+                    what: "bytes in a journal record",
+                    max: max as u64,
+                });
+            }
+        }
         let record = JournalRecord {
             call_key: call_key.to_owned(),
             occurrence,

@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use super::journal::{
-    Interrupt, JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowRun,
-    WorkflowStatus,
+    Interrupt, JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowHold,
+    WorkflowRun, WorkflowStatus,
 };
 
 /// A [`JournalStore`] backed by Postgres.
@@ -249,5 +249,57 @@ impl JournalStore for PgJournalStore {
             });
         }
         Ok(())
+    }
+
+    /// A session advisory lock on a connection of its own, which the
+    /// database drops the moment that connection closes, so a killed
+    /// process frees its workflow at once and no lease has to expire.
+    /// Needs session-level connections: behind a transaction-mode pooler
+    /// the lock would outlive nothing.
+    async fn hold(
+        &self,
+        namespace: &str,
+        workflow_id: &str,
+    ) -> Result<WorkflowHold, JournalStoreError> {
+        // Detached, so its slot returns to the pool and the connection
+        // closes (freeing the lock) when the hold drops.
+        let mut connection = self.pool.acquire().await.map_err(backend)?.detach();
+        // The schema is part of the name, so two schemas of one database
+        // (as parallel tests use) never share a hold.
+        let name = format!(
+            "linch-workflow:{}:{namespace}{workflow_id}",
+            namespace.len()
+        );
+        let taken: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_lock(hashtextextended(current_schema() || $1, 0))",
+        )
+        .bind(name)
+        .fetch_one(&mut connection)
+        .await
+        .map_err(backend)?;
+        if !taken {
+            return Err(JournalStoreError::Held {
+                workflow_id: workflow_id.to_owned(),
+            });
+        }
+        Ok(WorkflowHold::new(PgHold(Some(connection))))
+    }
+}
+
+/// The connection that holds a workflow's advisory lock.
+struct PgHold(Option<sqlx::PgConnection>);
+
+impl Drop for PgHold {
+    fn drop(&mut self) {
+        use sqlx::Connection as _;
+        // Closing says goodbye to the server; without a runtime the socket
+        // is dropped, which frees the lock all the same.
+        if let (Some(connection), Ok(runtime)) =
+            (self.0.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(async move {
+                let _ = connection.close().await;
+            });
+        }
     }
 }
