@@ -94,6 +94,11 @@ impl Files {
         self.registrations.push(registration);
     }
 
+    /// Undo `registration` with the others if the open fails.
+    pub(crate) fn also(&mut self, registration: Registration) {
+        self.registrations.push(registration);
+    }
+
     /// `spec` with [`PROMPT`] after its system prompt when the tools are on
     /// and the spec does not replace the defaults.
     pub(crate) fn teach(&self, mut spec: AgentSpec) -> AgentSpec {

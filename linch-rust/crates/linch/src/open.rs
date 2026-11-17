@@ -10,7 +10,7 @@ use linch_core::ask_user::AskUser;
 use linch_core::{
     Agent, AgentBuilder, Hooks, InMemoryMailbox, Mailbox, MemoryRunStore, MemorySessionStore,
     PermissionEngine, PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider,
-    SessionStore, TaskStore, Tool, ToolRegistry,
+    SessionId, SessionStore, StoreError, TaskStore, Tool, ToolRegistry,
 };
 use linch_mcp::McpServer;
 use linch_postgres::{PgMailbox, PgRunStore, PgSessionStore, PgToolCache};
@@ -20,13 +20,14 @@ use linch_providers::{
     ServerOptions, anthropic, deepseek, gemini, openai,
 };
 use linch_tools::{
-    ExecutionBackend, LocalFs, Processes, ReadTracker, SCHEDULE_TOOL_NAMES, TASK_TOOL_NAMES,
-    task_tools, workspace_tools,
+    DEFAULT_LEDGER_CHARS, ExecutionBackend, LocalFs, Processes, ReadTracker, SCHEDULE_TOOL_NAMES,
+    TASK_TOOL_NAMES, TaskLedgerContext, task_tools, task_tools_in, workspace_tools,
 };
 
 use crate::agent_memory::Memory;
 use crate::config::{
     AgentConfig, ExecutionConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig,
+    TaskLedger,
 };
 use crate::deep;
 use crate::error::OpenError;
@@ -152,8 +153,42 @@ impl AgentConfig {
             .extend(self.profile.and_then(|p| p.deny_layer()));
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, tasks, pool) = stores(self.stores, pools).await?;
+        let ledger = match &self.task_ledger {
+            None => None,
+            Some(_) if !self.tasks => return Err(OpenError::TaskLedger("it needs tasks")),
+            Some(ledger) if ledger.list.trim().is_empty() => {
+                return Err(OpenError::TaskLedger("the list id is blank"));
+            }
+            Some(TaskLedger {
+                max_chars: Some(max),
+                ..
+            }) if *max < 200 => {
+                return Err(OpenError::TaskLedger("max_chars is under 200"));
+            }
+            Some(ledger) => Some(ledger.clone()),
+        };
+        let mut ledger_hook = None;
         if self.tasks {
-            for tool in task_tools(tasks, Arc::clone(&runs), &self.namespace) {
+            let list = ledger.as_ref().map(|l| SessionId::new(l.list.clone()));
+            let made = match &list {
+                Some(list) => {
+                    // The list is a session of the store, created once.
+                    match sessions.create(&self.namespace, list).await {
+                        Ok(()) | Err(StoreError::Conflict { .. }) => {}
+                        Err(error) => return Err(OpenError::Store(Box::new(error))),
+                    }
+                    let max = ledger.as_ref().and_then(|l| l.max_chars);
+                    let max = max.unwrap_or(DEFAULT_LEDGER_CHARS);
+                    let namespace = &self.namespace;
+                    let hook =
+                        TaskLedgerContext::new(Arc::clone(&tasks), namespace, list.clone(), max);
+                    ledger_hook = Some(hook);
+                    let runs = Arc::clone(&runs);
+                    task_tools_in(tasks, runs, namespace, list.clone())
+                }
+                None => task_tools(tasks, Arc::clone(&runs), &self.namespace),
+            };
+            for tool in made {
                 // The registry lives as long as the agent; the handle is not needed.
                 let _ = tools.register(tool)?;
             }
@@ -183,6 +218,14 @@ impl AgentConfig {
             files.remember(
                 &hooks,
                 self.filesystem.as_ref().and_then(|f| f.memory_scope),
+            );
+        }
+        if let Some(hook) = ledger_hook {
+            files.also(
+                hooks
+                    .context_build
+                    .register(Arc::new(hook))
+                    .expect("the ledger hook has a policy id, no matcher and fails open"),
             );
         }
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;

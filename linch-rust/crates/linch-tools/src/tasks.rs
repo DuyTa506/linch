@@ -27,23 +27,48 @@ pub fn task_tools(
     runs: Arc<dyn RunStore>,
     namespace: &str,
 ) -> Vec<Arc<dyn Tool>> {
+    tools(store, runs, namespace, None)
+}
+
+/// The four task tools over one task list, `list`, that every session of
+/// `namespace` shares: a session that starts later finds the tasks an
+/// earlier one left. The list is a session of the store (its id must exist
+/// as one; the host creates it), and no run uses it as its own.
+pub fn task_tools_in(
+    store: Arc<dyn TaskStore>,
+    runs: Arc<dyn RunStore>,
+    namespace: &str,
+    list: SessionId,
+) -> Vec<Arc<dyn Tool>> {
+    tools(store, runs, namespace, Some(list))
+}
+
+fn tools(
+    store: Arc<dyn TaskStore>,
+    runs: Arc<dyn RunStore>,
+    namespace: &str,
+    list: Option<SessionId>,
+) -> Vec<Arc<dyn Tool>> {
+    let (create, tasks) = (
+        TaskCreate::new(Arc::clone(&store), Arc::clone(&runs), namespace),
+        TaskList::new(Arc::clone(&store), Arc::clone(&runs), namespace),
+    );
+    let get = TaskGet::new(Arc::clone(&store), Arc::clone(&runs), namespace);
+    let update = TaskUpdate::new(store, runs, namespace);
+    let (create, tasks, get, update) = match list {
+        Some(list) => (
+            create.in_list(list.clone()),
+            tasks.in_list(list.clone()),
+            get.in_list(list.clone()),
+            update.in_list(list),
+        ),
+        None => (create, tasks, get, update),
+    };
     vec![
-        Arc::new(TaskCreate::new(
-            Arc::clone(&store),
-            Arc::clone(&runs),
-            namespace,
-        )),
-        Arc::new(TaskList::new(
-            Arc::clone(&store),
-            Arc::clone(&runs),
-            namespace,
-        )),
-        Arc::new(TaskGet::new(
-            Arc::clone(&store),
-            Arc::clone(&runs),
-            namespace,
-        )),
-        Arc::new(TaskUpdate::new(store, runs, namespace)),
+        Arc::new(create),
+        Arc::new(tasks),
+        Arc::new(get),
+        Arc::new(update),
     ]
 }
 
@@ -52,6 +77,8 @@ struct Tasks {
     store: Arc<dyn TaskStore>,
     runs: Arc<dyn RunStore>,
     namespace: String,
+    /// A task list shared by every session, instead of the call's session.
+    list: Option<SessionId>,
 }
 
 impl Tasks {
@@ -61,6 +88,7 @@ impl Tasks {
             store,
             runs,
             namespace,
+            list: None,
         }
     }
 
@@ -68,6 +96,9 @@ impl Tasks {
     /// the root run of its tree. A call whose run the store does not know
     /// uses its own session.
     async fn session(&self, ctx: &ToolContext) -> Result<SessionId, ToolOutputError> {
+        if let Some(list) = &self.list {
+            return Ok(list.clone());
+        }
         let mut session = ctx.session_id.clone();
         let mut run = ctx.run_id.clone();
         loop {
@@ -144,6 +175,12 @@ pub struct TaskCreate {
 }
 
 impl TaskCreate {
+    /// This tool over the shared task list `list` (see [`task_tools_in`]).
+    pub fn in_list(mut self, list: SessionId) -> Self {
+        self.tasks.list = Some(list);
+        self
+    }
+
     /// A `TaskCreate` over `store`, for the sessions of `namespace`.
     pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let schema = schema(json!({
@@ -223,6 +260,12 @@ pub struct TaskList {
 }
 
 impl TaskList {
+    /// This tool over the shared task list `list` (see [`task_tools_in`]).
+    pub fn in_list(mut self, list: SessionId) -> Self {
+        self.tasks.list = Some(list);
+        self
+    }
+
     /// A `TaskList` over `store`, for the sessions of `namespace`.
     pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let schema = schema(json!({"type": "object", "properties": {}}));
@@ -274,6 +317,12 @@ pub struct TaskGet {
 }
 
 impl TaskGet {
+    /// This tool over the shared task list `list` (see [`task_tools_in`]).
+    pub fn in_list(mut self, list: SessionId) -> Self {
+        self.tasks.list = Some(list);
+        self
+    }
+
     /// A `TaskGet` over `store`, for the sessions of `namespace`.
     pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let schema = schema(json!({
@@ -333,6 +382,12 @@ pub struct TaskUpdate {
 }
 
 impl TaskUpdate {
+    /// This tool over the shared task list `list` (see [`task_tools_in`]).
+    pub fn in_list(mut self, list: SessionId) -> Self {
+        self.tasks.list = Some(list);
+        self
+    }
+
     /// A `TaskUpdate` over `store`, for the sessions of `namespace`.
     pub fn new(store: Arc<dyn TaskStore>, runs: Arc<dyn RunStore>, namespace: &str) -> Self {
         let ids = json!({"type": "array", "items": {"type": "string"}});
