@@ -769,3 +769,46 @@ async fn a_tenant_that_guesses_another_tenants_ids_reaches_nothing() {
     );
     db.drop().await;
 }
+
+/// RED: a workflow's calls act for no principal, so a permission rule keyed
+/// on a role (here: deny `Glob` to `guest`) does not reach them, while the
+/// same call in a run started for the guest is denied. `workflow.start`
+/// should take the principal its calls act for.
+#[tokio::test]
+async fn a_workflow_started_for_a_principal_runs_its_calls_under_that_principals_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = vec![
+        tool_turn("c1", "Glob", json!({"pattern": "*"})),
+        text_turn("done"),
+        tool_turn("c2", "Glob", json!({"pattern": "*"})),
+        text_turn("done"),
+    ];
+    let mut config = scripted(turns, Some(dir.path()), "default");
+    let deny = json!({"type": "tool", "tool": "Glob", "decision": "deny", "role": "guest"});
+    config["permissions"]["layers"] = json!([{"name": "roles", "rules": [deny]}]);
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(config).await;
+    let guest = json!({"tenant": "acme", "user": "gus", "roles": ["guest"]});
+    let denied = |events: &[linch::Envelope]| {
+        (events.iter())
+            .filter_map(|envelope| match &envelope.event {
+                linch::Event::ToolCallEnd(end) => Some(end.is_error()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // The rule works for a run started for the guest.
+    let params = json!({"agent": agent, "session_id": "direct", "prompt": "go",
+                        "principal": guest});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert_eq!(denied(&ended.envelopes), [true], "the control run");
+    // The same agent in a workflow started for the guest.
+    let params = json!({"agent": agent, "run_id": "w", "principal": guest});
+    rpc.call(method::WORKFLOW_START, params).await.unwrap();
+    let result = call(&rpc, "w", "go", json!({})).await.unwrap();
+    let params = json!({"agent": agent, "run_id": result["session_id"]});
+    let events = rpc.call(method::RUN_EVENTS, params).await.unwrap();
+    let events: linch_rpc::protocol::Events = serde_json::from_value(events).unwrap();
+    assert_eq!(denied(&events.events), [true], "the workflow's call");
+}
