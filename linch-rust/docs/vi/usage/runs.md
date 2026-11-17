@@ -526,7 +526,10 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
 - **Cái gì được chấp nhận.** Một run đang chạy, hoặc bị tạm dừng chờ phê duyệt hay
   chờ câu trả lời. Một run bị tạm dừng giữ steer và đọc nó khi bạn approve hoặc
   answer; nó vẫn ở trạng thái tạm dừng. Một run đã kết thúc bị từ chối bằng
-  `RunTerminal`, một run không xác định bằng `RunNotFound`.
+  `RunTerminal`, một run không xác định bằng `RunNotFound`. Một run nhàn rỗi
+  (đang xếp hàng, hoặc `running` mà không server nào lái, sau một crash hay một
+  stream bị bỏ) bị từ chối bằng `InvalidSteer`: hãy resume nó trước, rồi mới
+  steer.
 - **Bền vững trước khi trả lời.** Steer là một event `steer_received` trong
   journal riêng của run (chỉ có trong journal: `agent.events` không bao giờ liệt kê
   nó). Lời gọi trả về sau khi nó được ghi. Một run do server điều khiển sẽ ghi nó ở

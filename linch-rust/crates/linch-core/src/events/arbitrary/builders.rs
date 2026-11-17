@@ -255,6 +255,11 @@ pub(super) fn compaction_event() -> impl Strategy<Value = CompactionEvent> {
         )
 }
 
+pub(super) fn steer_received_event() -> impl Strategy<Value = SteerReceivedEvent> {
+    (short_string(), short_string())
+        .prop_map(|(steer_id, text)| SteerReceivedEvent { steer_id, text })
+}
+
 pub(super) fn loop_guard_event() -> impl Strategy<Value = LoopGuardEvent> {
     (
         prop_oneof![

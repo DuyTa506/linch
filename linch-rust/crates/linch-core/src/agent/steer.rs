@@ -53,7 +53,9 @@ impl Agent {
     ///     names in `steer_id`.
     ///
     /// Raises:
-    ///     RunError: `InvalidSteer` for bad text or id; `Store` (`NotFound`)
+    ///     RunError: `InvalidSteer` for bad text or id, or for a run that is
+    ///         idle (queued, or running with no process driving it: resume it
+    ///         first); `Store` (`NotFound`)
     ///         for an unknown run, (`RunLeased`) when another process drives
     ///         it, or when a read or write fails; `Terminal` for a finished
     ///         run; `SteerQueueFull` at [`MAX_PENDING_STEERS`] undelivered
@@ -129,11 +131,12 @@ impl Agent {
         }
     }
 
-    /// Write the steer into the journal of a run no runner of this process
-    /// drives, under a claim of the run: another process that drives it
-    /// refuses the claim (`RunLeased`). A claim turns a suspended run
+    /// Write the steer into the journal of a suspended run no runner of this
+    /// process drives, under a claim of the run: another process that drives
+    /// it refuses the claim (`RunLeased`). A claim turns a suspended run
     /// `running`, so the write puts it back in the suspension it was in,
-    /// whatever it decided.
+    /// whatever it decided. An idle run (queued, or running with nobody
+    /// driving it) is refused with `InvalidSteer`.
     async fn steer_stored(
         &self,
         run_id: RunId,
@@ -142,6 +145,21 @@ impl Agent {
     ) -> Result<(), RunError> {
         let inner = &self.inner;
         let (runs, namespace) = (&inner.runs, inner.namespace.as_str());
+        if !before.is_awaiting() {
+            // Not driven here and not waiting for an answer: idle. A
+            // durable store tells a run another server drives (`RunLeased`)
+            // from one nobody does; a queued run is left to its worker.
+            if before == RunStatus::Running && runs.lease_ttl().is_some() {
+                let lease = runs.claim(namespace, &run_id, "linch-steer").await?;
+                let _ = runs.release(&lease).await;
+            }
+            return Err(RunError::InvalidSteer {
+                run_id,
+                reason: "the run is not running and not waiting for an approval or an answer; \
+                         resume it first"
+                    .to_owned(),
+            });
+        }
         let claimed = runs.claim(namespace, &run_id, "linch-steer").await;
         let lease = match claimed {
             Ok(lease) => lease,

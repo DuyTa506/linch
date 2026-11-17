@@ -215,6 +215,32 @@ async fn a_steer_pending_at_a_text_answer_is_read_in_another_turn() {
     assert!(matches!(&result.event, Event::Result(r) if r.final_text.as_deref() == Some("second")));
 }
 
+#[tokio::test]
+async fn a_run_nobody_drives_and_that_is_not_waiting_refuses_a_steer() {
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![text_turn("done")]));
+    let tools = Arc::new(ToolRegistry::new());
+    let agent = agent_on(
+        provider,
+        tools,
+        PermissionMode::SkipDangerous,
+        stores.clone(),
+    );
+    // The stream is dropped after its first event: the run is left `running`
+    // with no runner.
+    let mut stream = agent.run("go", options());
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    tokio::task::yield_now().await;
+    let run_id = RunId::new("r1");
+    let record = stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.status, RunStatus::Running);
+    let error = agent.steer(run_id.clone(), TEXT, None).await.unwrap_err();
+    assert!(matches!(error, RunError::InvalidSteer { .. }), "{error}");
+    let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    assert_eq!(received(&events), 0, "nothing was written");
+}
+
 /// A run suspended on a write's approval, and the agent that drives it.
 async fn suspended(stores: &Arc<Stores>) -> Agent {
     let runs = Runs::default();
@@ -397,9 +423,26 @@ async fn a_crash_at_any_write_of_the_steer_still_delivers_it_once() {
                 .await;
             // The same call sent again after a failure is what a client does.
             let second = agent.steer(RunId::new("r1"), TEXT, Some("s1".into())).await;
-            assert_eq!(second.unwrap(), "s1", "{context}: {first:?}");
-            recover(&agent, &stores).await;
-            assert_delivered_once(&stores, &context).await;
+            match second {
+                Ok(id) => {
+                    assert_eq!(id, "s1", "{context}: {first:?}");
+                    recover(&agent, &stores).await;
+                    assert_delivered_once(&stores, &context).await;
+                }
+                // The failed write left the claim's `running` status: the run
+                // is idle until it is resumed, and the steer is refused. If
+                // its event reached the journal first, the resume delivers it
+                // once; if not, the caller sends it again after the resume.
+                Err(RunError::InvalidSteer { .. }) => {
+                    recover(&agent, &stores).await;
+                    let log = messages(&*stores, "s1").await;
+                    let logged = log.iter().filter(|m| **m == steer_message()).count();
+                    let events = stores.runs.events(NS, &RunId::new("r1"), 0).await.unwrap();
+                    assert_eq!(logged, received(&events), "{context}: logged as received");
+                    assert!(logged <= 1, "{context}: at most once");
+                }
+                Err(other) => panic!("{context}: {other:?}"),
+            }
         }
     }
 }

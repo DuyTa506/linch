@@ -669,10 +669,15 @@ mailbox message: the model cannot send one.
   waits for the step in progress (a model call or tool batch holds the
   journal). A resent id is answered without a second event; more than 16
   unread steers is `SteerQueueFull`.
-- **A run nobody drives** (suspended for approval or an answer, or an
-  expired lease) is claimed, gets the event written under the claim, and is
-  put back to its status (`steer_stored`). A live lease elsewhere is
-  `RunLeased`; a terminal run `Terminal`. Nothing is routed between servers.
+- **A suspended run** (approval or answer) that no runner of this process
+  drives is claimed, gets the event written under the claim, and is put back
+  to its status (`steer_stored`). A live lease elsewhere is `RunLeased`; a
+  terminal run `Terminal`. Nothing is routed between servers.
+- **An idle run** (queued, or `running` with nobody driving it: a crashed
+  server, a dropped stream) is refused with `InvalidSteer`, as the owner
+  asked; on a durable store the refusal first claims a `running` run only to
+  tell a live holder elsewhere (`RunLeased`) from none, and releases it.
+  Resume it, then steer.
 - **Delivery.** `Runner::steered` runs where a batch's results are
   appended (`Step::Results`) and before a text answer would end the run
   (`received`): it takes one pending steer through the prompt redactor and

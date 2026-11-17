@@ -40,6 +40,7 @@ pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
     "model_call_delivery",
     "model_call_receipt",
     "model_call_usage_settlement",
+    "steer_received",
 ];
 
 /// A durable event of a type this build does not know, kept for

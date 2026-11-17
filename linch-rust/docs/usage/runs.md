@@ -125,7 +125,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `InvalidOutputSchema` | -32031 | The run's `output_schema` does not compile or its root is not an object; `.reason` says why. No run or session was created |
 | `InvalidToolChoice` | -32034 | The run's `tool_choice` names a tool the run does not offer, or the provider refuses it; `.reason` says why. No run or session was created |
 | `InvalidAnswer` | -32032 | The answers do not fit the pending `AskUser` questions; `.reason` says why. Nothing was written: the run still waits ([below](#answer)) |
-| `InvalidSteer` | -32038 | The steer's text is blank or longer than 16 KiB, or its id is not usable; `.reason` says why. Nothing was written |
+| `InvalidSteer` | -32038 | The steer's text is blank or longer than 16 KiB, its id is not usable, or the run is idle; `.reason` says why. Nothing was written |
 | `RunLeased` | -32033 | Another server drives the run (Postgres); `.owner` and `.expires_in` (seconds) say whose lease and for how long. Nothing was written ([Stores](./stores.md#run-leases)) |
 | `LeaseLost` | -32022 | Another server took the run over, or failed it, while this one drove it; the run stopped here without writing |
 | `RunError` | -32020 to -32028 | A store or journal write failed, or the stored state does not fit together; the run stays at its last durable state |
@@ -524,7 +524,9 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
 - **What is accepted.** A run that is running, or suspended for an approval or
   an answer. A suspended run keeps the steer and reads it once you approve or
   answer; it stays suspended. A run that finished is refused with
-  `RunTerminal`, an unknown one with `RunNotFound`.
+  `RunTerminal`, an unknown one with `RunNotFound`. An idle run (queued, or
+  `running` with no server driving it, after a crash or a dropped stream) is
+  refused with `InvalidSteer`: resume it first, then steer.
 - **Durable before the answer.** The steer is a `steer_received` event in the
   run's own journal (journal only: `agent.events` never lists it). The call
   returns after it is written. A run the server drives writes it at its next

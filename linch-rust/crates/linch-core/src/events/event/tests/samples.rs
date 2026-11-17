@@ -242,6 +242,10 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             usage: Usage::default(),
             cost_usd: None,
         }),
+        Event::SteerReceived(SteerReceivedEvent {
+            steer_id: "st1".into(),
+            text: "use tabs".into(),
+        }),
         Event::Ignorable(IgnorableEvent::new("future_kind", JsonObject::new()).unwrap()),
     ]
 }

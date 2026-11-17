@@ -192,6 +192,25 @@ fn subagent_round_trips_and_boxes_its_child() {
 }
 
 #[test]
+fn a_user_event_without_a_steer_id_keeps_its_wire_form() {
+    let prompt = Event::User(UserEvent {
+        message: crate::message::Message::user_text("hi"),
+        subtype: UserEventSubtype::Prompt,
+        steer_id: None,
+    });
+    let wire = serde_json::to_value(&prompt).unwrap();
+    assert!(wire.get("steer_id").is_none(), "{wire}");
+    let steer = Event::User(UserEvent {
+        message: crate::message::Message::user_text("hi"),
+        subtype: UserEventSubtype::Alignment,
+        steer_id: Some("st1".into()),
+    });
+    let wire = serde_json::to_value(&steer).unwrap();
+    assert_eq!(wire["steer_id"], json!("st1"));
+    assert_eq!(wire["subtype"], json!("alignment"));
+}
+
+#[test]
 fn persistence_classification_covers_every_kind() {
     use std::collections::HashSet;
 
@@ -202,6 +221,7 @@ fn persistence_classification_covers_every_kind() {
         "model_call_delivery",
         "model_call_receipt",
         "model_call_usage_settlement",
+        "steer_received",
     ]
     .into_iter()
     .collect();
