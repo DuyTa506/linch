@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
@@ -249,6 +250,29 @@ async def test_a_second_server_cannot_take_a_live_run(pg_dsn: str) -> None:
 
     assert refused.value.run_id == run.id
     assert refused.value.expires_in is not None and 20 < refused.value.expires_in <= 30
+
+
+async def test_a_refusal_names_the_holder_by_an_opaque_stable_id(pg_dsn: str) -> None:
+    # `RunLeased.owner` tells an operator which server drives the run, and holds no host
+    # name, path or pid: 8 hex characters, the same for every run of one server.
+    stores = {"type": "postgres", "dsn": pg_dsn}
+    async with Server() as one, Server() as three, Server() as two:
+        for server, run_id in ((one, "held-1"), (three, "held-3")):
+            wait, started = blocking_tool()
+            held = config([tool_turn("call_1", "wait", {"q": "x"})], stores=stores)
+            agent = await server.open_agent(held, tools=[wait])
+            await agent.run(f"s-{run_id}", "Wait for x", run_id=run_id)
+            await asyncio.wait_for(started.wait(), 10)
+        other, _ = blocking_tool()
+        probe = await two.open_agent(config([text_turn("Taken.")], stores=stores), tools=[other])
+        owners = []
+        for run_id in ("held-1", "held-3", "held-1"):
+            with pytest.raises(RunLeased) as refused:
+                await (await probe.resume(run_id)).result()
+            owners.append(refused.value.owner)
+
+    assert all(re.fullmatch(r"[0-9a-f]{8}", owner) for owner in owners), owners
+    assert owners[0] == owners[2] and owners[0] != owners[1], owners
 
 
 async def test_a_server_that_exits_frees_its_runs_at_once(pg_dsn: str) -> None:

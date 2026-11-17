@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import signal
 import socket
@@ -34,6 +35,7 @@ from linch_rust import (
     PartialAssistantEvent,
     Principal,
     ResultEvent,
+    RunLeased,
     Server,
     SuspendedEvent,
     ToolCallEndEvent,
@@ -58,6 +60,7 @@ class Listening:
 
     socket: str
     websocket: str
+    server_id: str = ""
 
     def address(self, transport: str) -> str:
         return self.socket if transport == "unix" else self.websocket
@@ -69,6 +72,7 @@ async def listening(
     max_connections: int = 4,
     postgres_dsns: Sequence[str] = (),
     liveness: dict[str, int] | None = None,
+    server_id: str | None = None,
 ) -> AsyncIterator[Listening]:
     """Run `linch-server --config` with tenants `acme` (token `TOKEN`) and `beta`."""
     # Short: a socket path is at most about 100 bytes.
@@ -86,6 +90,8 @@ async def listening(
     }
     if liveness is not None:
         config["liveness"] = liveness
+    if server_id is not None:
+        config["server_id"] = server_id
     path = directory / "server.json"
     path.write_text(json.dumps(config))
     process = await asyncio.create_subprocess_exec(
@@ -94,13 +100,16 @@ async def listening(
     assert process.stderr is not None
     try:
         addresses: dict[str, str] = {}
+        named = ""
         while len(addresses) < 2:
             line = await asyncio.wait_for(process.stderr.readline(), 30)
             assert line, "the server exited before it listened"
             _, _, address = line.decode().strip().partition("listening on ")
             if address:
                 addresses[address.split(":")[0]] = address
-        yield Listening(addresses["unix"], addresses["ws"])
+            _, _, named_id = line.decode().strip().partition("server id ")
+            named = named_id or named
+        yield Listening(addresses["unix"], addresses["ws"], named)
     finally:
         if process.returncode is None:
             process.send_signal(signal.SIGTERM)
@@ -322,6 +331,36 @@ async def test_a_postgres_run_suspended_on_the_socket_is_approved_over_the_webso
 
     assert saved == ["hi"]
     assert isinstance(result, ResultEvent) and result.final_text == "Saved."
+
+
+@pytest.mark.parametrize("configured", [None, "ops-a"])
+async def test_a_leased_runs_refusal_names_the_server_that_drives_it(
+    pg_dsn: str, configured: str | None
+) -> None:
+    # The holder is the server's id: the one it prints at startup (random, 8 hex characters),
+    # or the configured `server_id`, the same for every tenant and connection.
+    started = asyncio.Event()
+
+    @tool(scope="read")
+    async def wait(q: str) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return q
+
+    stores = {"type": "postgres", "dsn": pg_dsn}
+    async with listening(postgres_dsns=[pg_dsn], server_id=configured) as at:
+        async with Server.connect(at.websocket, token=TOKEN) as remote, Server() as local:
+            held = acme([tool_turn("c1", "wait", {"q": "x"})], stores=stores)
+            agent = await remote.open_agent(held, tools=[wait])
+            await agent.run("s1", "Wait", run_id="held-1")
+            await asyncio.wait_for(started.wait(), 10)
+            probe = await local.open_agent(acme([text_turn("Taken.")], stores=stores))
+            with pytest.raises(RunLeased) as refused:
+                await (await probe.resume("held-1")).result()
+
+    assert refused.value.owner == (configured or at.server_id), at
+    if configured is None:
+        assert re.fullmatch(r"[0-9a-f]{8}", at.server_id), at
 
 
 async def test_a_remote_connection_names_its_tenant() -> None:
