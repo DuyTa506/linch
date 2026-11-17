@@ -633,6 +633,57 @@ type Script = fn() -> Vec<ScriptedTurn>;
 /// A crash at any write of a final tool run ends where the clean run
 /// ended: the same session, paired, the same `verification` events, no
 /// paid response bought again; and the session takes another run.
+/// A named tool choice is sent only on a turn whose request offers that
+/// tool: a skill that narrows the turn to other tools would otherwise make
+/// every provider call of the turn a 400. The turn goes out as `auto`, and
+/// the `context_build` event of that turn says what was dropped.
+#[tokio::test]
+async fn a_named_choice_the_turn_does_not_offer_falls_back_to_auto() {
+    let mut review = linch_core::Skill::new("review", "/skills/review", "Review.", "go");
+    review.allowed_tools = Some(vec!["Read".into()]);
+    let turns = [
+        call("k1", "Skill", json!({"skill": "review", "args": ""})),
+        call("r1", "Read", json!({"value": "x"})),
+        text_turn("done"),
+    ];
+    let provider = Arc::new(ScriptedProvider::new(turns));
+    let stores = Arc::new(Stores::default());
+    let runs = Runs::default();
+    let tools = vec![
+        Echo::new("Read", ToolScope::Read, &runs),
+        Echo::new("Write", ToolScope::Write, &runs),
+    ];
+    let mut spec = spec();
+    spec.tool_choice = Some(ToolChoice::Tool {
+        name: "Write".into(),
+    });
+    let agent = (builder(spec, provider.clone(), tools, Hooks::default(), stores)
+        .skills(vec![review])
+        .build())
+    .unwrap();
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let sent: Vec<_> = (provider.requests().into_iter())
+        .map(|request| {
+            let names: Vec<_> = request.tools.iter().map(|t| t.name.clone()).collect();
+            (names, request.tool_choice)
+        })
+        .collect();
+    let write = Some(ToolChoice::Tool {
+        name: "Write".into(),
+    });
+    assert_eq!(sent[0].1, write, "the first turn offers Write");
+    assert!(!sent[1].0.contains(&"Write".to_owned()), "{sent:?}");
+    assert_eq!(sent[1].1, Some(ToolChoice::Auto {}), "{sent:?}");
+    assert_eq!(sent[2].1, write, "the skill's turn is over");
+    let dropped: Vec<_> = (envelopes.iter())
+        .filter_map(|envelope| match &envelope.event {
+            Event::ContextBuild(build) => Some(build.metadata.get("tool_choice_dropped").cloned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dropped, [None, Some(json!("Write")), None]);
+}
+
 #[tokio::test]
 async fn a_crash_at_any_write_ends_where_the_clean_run_did() {
     let scripts: [(&str, Script, RunStatus); 3] = [

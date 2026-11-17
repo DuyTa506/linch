@@ -222,7 +222,7 @@ Request cho lời gọi model kế tiếp đã được lắp ráp; lời gọi 
 | `messages` | Số message hội thoại được gửi |
 | `selected_tools` | Tên các tool được cấp trong request này |
 | `budget` | Kế toán context; `{}`, vì server không cắt bớt context |
-| `metadata` | Những gì các callback `context_build` trả về trong `metadata`, được gộp lại, key của callback đến sau thắng; `{}` nếu không có |
+| `metadata` | Những gì các callback `context_build` trả về trong `metadata`, được gộp lại, key của callback đến sau thắng; `{}` nếu không có. Ở lượt mà `tool_choice` có tên không được request đưa ra, `tool_choice_dropped` chứa tên tool |
 
 ### `UsageEvent` (`usage`)
 

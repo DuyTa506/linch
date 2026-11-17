@@ -108,6 +108,22 @@ impl Runner {
         request
     }
 
+    /// Take the named tool choice off `request` when the turn does not offer
+    /// that tool (a skill narrowed the turn, tool search deferred it, a hook
+    /// rewrote the request): a provider answers such a request with a 400.
+    /// The turn goes out as `auto`; returns the name dropped.
+    pub(super) fn drop_unoffered_choice(request: &mut ProviderRequest) -> Option<String> {
+        let Some(ToolChoice::Tool { name }) = &request.tool_choice else {
+            return None;
+        };
+        if request.tools.iter().any(|tool| &tool.name == name) {
+            return None;
+        }
+        let name = name.clone();
+        request.tool_choice = Some(ToolChoice::Auto {});
+        Some(name)
+    }
+
     /// The tool choice of `request`: none on a turn that offers no tool
     /// (Python's rule); else the run's; else, when the run's own final
     /// tool is the only tool, that tool forced, as Python's compatible

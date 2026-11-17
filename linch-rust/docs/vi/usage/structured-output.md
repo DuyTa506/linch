@@ -227,6 +227,11 @@ lần resume giữ nó.
 Nó được gửi với mọi request trừ ở một lượt không đưa ra tool nào (quy tắc của
 Python: ví dụ một skill thu hẹp một lượt về không còn tool nào). Một lựa chọn bị ép giữ ở mọi lượt, nên một run như vậy chỉ có thể kết thúc
 qua final tool của nó, hoặc `max_turns` và [loop guard](./agent.md#loop_guard).
+Tool có tên được kiểm tra với request của chính từng lượt, sau mọi lần ghi lại của
+`before_provider_call`: ở lượt không đưa tool đó ra (một skill đã thu hẹp tool, tool
+search đã hoãn nó) request đi với `auto` thay vì bị provider trả 400, và sự kiện
+`context_build` của lượt đó có `metadata.tool_choice_dropped` mang tên tool. `required`
+không bao giờ bị bỏ: một lượt có ít nhất một tool thì thoả được nó.
 `agent.open` từ chối một tool có tên mà agent không đưa ra (final tool được tính),
 `required` khi agent không đưa ra tool nào, và một lựa chọn mà provider của nó từ chối; lựa chọn riêng của một run bị từ chối
 với `InvalidToolChoice` (mã -32034) trước khi có gì được ghi.

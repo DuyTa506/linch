@@ -221,6 +221,12 @@ for one run, and the run stores it in its first `init` event
 It is sent with every request but on a turn that offers no tool (Python's
 rule: a skill that narrows a turn to no tool, for example). A forced choice holds every turn, so such a run can end only through
 its final tool, or `max_turns` and the [loop guard](./agent.md#loop_guard).
+A named tool is checked against each turn's own request, after any
+`before_provider_call` rewrite: on a turn that does not offer it (a skill
+narrowed the tools, tool search deferred it) the request goes out as `auto`
+instead of failing with the provider's 400, and that turn's `context_build`
+event has `metadata.tool_choice_dropped` with the tool's name. `required` is
+never dropped: a turn with at least one tool can satisfy it.
 `agent.open` refuses a named tool the agent does not offer (the final tool
 counts), `required` when it offers no tool at all, and a choice its provider
 refuses; a run's own one is refused with

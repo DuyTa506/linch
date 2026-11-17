@@ -179,6 +179,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - A provider gate is keyed by the origin (scheme, host, port) of `base_url` plus the key variable, as tenant admission matches it, so `https://x/v1`, `https://x/v1?a` and `https://x/v1//` share one gate instead of each getting its own.
 
+- A named `tool_choice` is checked against each turn's own request (after `before_provider_call`), not only at `agent.open`: on a turn that does not offer the tool (a skill narrowed the tools, tool search deferred it) the request goes out as `auto`, and that turn's `context_build` event has `metadata.tool_choice_dropped`, instead of every provider call failing with a 400. Turns that offer it are unchanged.
+
 ### Changed
 
 - A worker's history pruning also deletes failed jobs that failed more than `history_retention` ago (`prune_history` counts them); they stayed in `linch_worker_jobs` forever.

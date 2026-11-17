@@ -219,7 +219,7 @@ The request for the next model call was assembled; the call starts.
 | `messages` | Number of conversation messages sent |
 | `selected_tools` | Tool names offered in this request |
 | `budget` | Context accounting; `{}`, as the server trims no context |
-| `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any |
+| `metadata` | What the `context_build` callbacks returned as `metadata`, merged, a later callback's key winning; `{}` without any. On a turn whose named `tool_choice` the request did not offer, `tool_choice_dropped` holds the tool's name |
 
 ### `UsageEvent` (`usage`)
 

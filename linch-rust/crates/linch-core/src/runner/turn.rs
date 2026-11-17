@@ -434,8 +434,16 @@ impl Runner {
         if model.is_some() || self.standing.fallbacks > 0 {
             request.model = self.call_model(model);
         }
+        let mut metadata = context.metadata;
         let request = match self.before_provider_call(request, self.turn).await {
-            BeforeCall::Send(request) => *request,
+            BeforeCall::Send(request) => {
+                let mut request = *request;
+                // After the hooks: one may have changed the tools.
+                if let Some(name) = Self::drop_unoffered_choice(&mut request) {
+                    metadata.insert("tool_choice_dropped".into(), name.into());
+                }
+                request
+            }
             // Python's `_gate_retry_tail`: the turn ends without a call, its
             // feedback durable before the next turn's. The view ends with a
             // user message here (a resumed response goes to `received`,
@@ -468,7 +476,7 @@ impl Runner {
             }
             held => held,
         };
-        self.stage_context(&request, context.metadata);
+        self.stage_context(&request, metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
