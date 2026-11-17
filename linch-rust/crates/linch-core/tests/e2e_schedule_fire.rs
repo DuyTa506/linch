@@ -123,3 +123,32 @@ async fn a_crash_at_any_write_keeps_the_fire_once() {
         }
     }
 }
+
+/// An older build does not know `schedule_fire`; it reads the run's events
+/// only if the producer marked the envelope ignorable. Only the fire is
+/// marked, so every other envelope stays as it was.
+#[tokio::test]
+async fn the_fire_is_ignorable_to_an_older_build_and_nothing_else_is() {
+    let stores = Arc::new(Stores::default());
+    finish(make(stores.clone()).run("go", scheduled())).await;
+    let stored = stores
+        .runs
+        .events(NS, &RunId::new("sched-run"), 0)
+        .await
+        .unwrap();
+    for envelope in &stored {
+        let marked = matches!(envelope.event, Event::ScheduleFire(_));
+        assert_eq!(envelope.ignorable, marked, "{}", envelope.event.type_name());
+        let text = serde_json::to_string(envelope).unwrap();
+        assert_eq!(text.contains("\"ignorable\":true"), marked, "{text}");
+    }
+    // What an older build sees: the same text with a type it does not know.
+    let fire = serde_json::to_string(&stored[1]).unwrap();
+    let older = fire.replace("\"schedule_fire\"", "\"schedule_fire_from_the_future\"");
+    let decoded: linch_core::Envelope = older.parse().unwrap();
+    let Event::Ignorable(skipped) = decoded.event else {
+        panic!("not skipped: {:?}", decoded.event);
+    };
+    assert_eq!(skipped.type_name(), "schedule_fire_from_the_future");
+    assert_eq!(skipped.raw()["schedule_id"], "nightly");
+}

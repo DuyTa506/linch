@@ -453,7 +453,9 @@ A background worker's child run changed status: `child_run_id` and `status`
 A worker started this run for a [schedule](./scheduler.md#trace-a-run-to-its-schedule)
 fire: `schedule_id` and `fire_at_ms`, when the fire was due in Unix
 milliseconds. It follows the run's first `init` in the same write; a run no
-schedule started, a queued job and a resume have none.
+schedule started, a queued job and a resume have none. Its envelope is
+written `ignorable`, so a Rust build that predates the kind skips it when it
+reads the run's events instead of failing on an unknown type.
 
 ### Journal-only kinds
 

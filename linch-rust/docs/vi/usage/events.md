@@ -453,7 +453,9 @@ rồi `completed`, `failed` hoặc `aborted`).
 Một worker đã bắt đầu run này cho một lần chạy của [lịch](./scheduler.md): có
 `schedule_id` và `fire_at_ms`, thời điểm lần chạy đến hạn tính bằng mili giây
 Unix. Event nằm ngay sau `init` đầu tiên của run, trong cùng một lần ghi; run
-không do lịch bắt đầu, job xếp hàng và run được resume đều không có nó.
+không do lịch bắt đầu, job xếp hàng và run được resume đều không có nó. Envelope của nó
+được ghi là `ignorable`, nên một bản build Rust có trước loại này bỏ qua nó khi đọc
+các event của run thay vì lỗi vì loại không biết.
 
 ### Các loại chỉ có trong journal
 

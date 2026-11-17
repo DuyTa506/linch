@@ -89,12 +89,14 @@ the run's stream, and so sent to clients. The two columns are the
 | `seq` | The run's sequence number. Durable events take consecutive seqs from 1; a stream-only event carries the last durable seq, so seqs on the stream repeat and have gaps |
 | `run_id` | The run the event belongs to |
 | `ts_ms` | The producer's wall clock in Unix milliseconds when it made the envelope (`envelope.rs:170-174`). Order by `seq`, never by `ts_ms`: a crashed run and its resume may run on clocks that disagree |
-| `ignorable` | The producer's promise that an unknown `event.type` may be skipped. Absent on the wire when false |
+| `ignorable` | The producer's promise that an unknown `event.type` may be skipped. Absent on the wire when false. The journal sets it only on `schedule_fire` |
 | `event` | The event |
 
 The run's journal makes every envelope (`crates/linch-core/src/journal.rs:315`):
 `v` is `WIRE_VERSION`, `ts_ms` is the time the event was staged, and
-`ignorable` is false. When an envelope becomes durable is the
+`ignorable` is false, except that of a `schedule_fire` event, which is true: it
+only names the schedule behind a run, so a build that predates it may skip it
+(`Event::skippable_by_older_builds`). When an envelope becomes durable is the
 [group commit](./stores.md#group-commit-write-counts) rule: a durable event
 is held until the next barrier write, which carries it.
 
@@ -387,7 +389,10 @@ others, and one is checked by nothing:
 Then run `cargo test -p linch-core events` and the parity test above.
 Adding a variant is a wire change for older readers: an older Rust build
 reads the new kind as `UnknownType` unless the producer marks the envelope
-`ignorable`, and the core never does.
+`ignorable`. The core does so only for a kind a reader loses nothing by
+skipping: `schedule_fire` (`Event::skippable_by_older_builds`, checked by
+`the_fire_is_ignorable_to_an_older_build_and_nothing_else_is`). Decide that in
+that method, never per run.
 
 ## Tests
 

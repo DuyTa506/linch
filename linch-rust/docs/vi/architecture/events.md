@@ -88,12 +88,14 @@ run yield ra, và do đó gửi tới client. Hai cột này là
 | `seq` | Số thứ tự của run. Các event bền vững nhận seq liên tiếp từ 1; một event chỉ có trong stream mang seq bền vững gần nhất, nên các seq trên stream lặp lại và có khoảng trống |
 | `run_id` | Run mà event thuộc về |
 | `ts_ms` | Đồng hồ thực của bên tạo ra, tính bằng mili giây Unix, lúc nó tạo envelope (`envelope.rs:170-174`). Hãy sắp xếp theo `seq`, không bao giờ theo `ts_ms`: một run gặp sự cố và lần resume của nó có thể chạy trên các đồng hồ không khớp nhau |
-| `ignorable` | Cam kết của bên tạo rằng một `event.type` không biết có thể bị bỏ qua. Không xuất hiện trên wire khi là false |
+| `ignorable` | Cam kết của bên tạo rằng một `event.type` không biết có thể bị bỏ qua. Không xuất hiện trên wire khi là false. Journal chỉ đặt nó cho `schedule_fire` |
 | `event` | Event |
 
 Journal của run tạo mọi envelope (`crates/linch-core/src/journal.rs:315`):
 `v` là `WIRE_VERSION`, `ts_ms` là thời điểm event được stage, và
-`ignorable` là false. Thời điểm một envelope trở nên bền vững theo quy tắc
+`ignorable` là false, trừ của event `schedule_fire` là true: nó chỉ nêu lịch đứng
+sau một run, nên một bản build có trước loại này có thể bỏ qua nó
+(`Event::skippable_by_older_builds`). Thời điểm một envelope trở nên bền vững theo quy tắc
 [group commit](./stores.md#số-lần-ghi-của-group-commit): một event bền vững
 được giữ lại đến lần ghi barrier kế tiếp, lần ghi đó mang nó đi.
 
@@ -385,7 +387,10 @@ những cái khác, và có một danh sách không có gì kiểm tra:
 Sau đó chạy `cargo test -p linch-core events` và test parity ở trên.
 Thêm một variant là một thay đổi wire đối với các bộ đọc cũ hơn: một bản build Rust cũ
 hơn đọc loại mới thành `UnknownType` trừ khi bên tạo đánh dấu envelope là
-`ignorable`, và lõi không bao giờ làm vậy.
+`ignorable`. Lõi chỉ làm vậy với một loại mà bộ đọc không mất gì khi bỏ qua:
+`schedule_fire` (`Event::skippable_by_older_builds`, được kiểm bởi
+`the_fire_is_ignorable_to_an_older_build_and_nothing_else_is`). Quyết định điều đó
+trong method ấy, không bao giờ theo từng run.
 
 ## Test
 

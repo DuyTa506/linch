@@ -316,7 +316,8 @@ trong client) ngay sau `init` của nó, với `schedule_id` và
 `fire_at_ms`, thời điểm lần kích hoạt đến hạn tính bằng mili giây Unix. Nó bền vững,
 nên `Agent.events(run_id)` tìm thấy nó, và nó đến trên stream của run khi một
 client đọc stream. Một run được đưa vào hàng đợi bằng `job.enqueue` không có nó, và một lần resume
-không lặp lại nó. Các span OpenTelemetry của run mang `linch.schedule.id`
+không lặp lại nó. Envelope của nó là `ignorable`, nên một bản build cũ hơn đọc các
+event của run sẽ bỏ qua nó. Các span OpenTelemetry của run mang `linch.schedule.id`
 ([Khả năng quan sát](./observability.md)).
 
 ## Độ bền vững

@@ -332,7 +332,8 @@ in the client) right after its `init`, with the `schedule_id` and
 `fire_at_ms`, the time the fire was due in Unix milliseconds. It is durable,
 so `Agent.events(run_id)` finds it, and it arrives on the run's stream when a
 client reads one. A run queued with `job.enqueue` has none, and a resume does
-not repeat it. The OpenTelemetry spans of the run carry `linch.schedule.id`
+not repeat it. Its envelope is `ignorable`, so an older build reading the run's
+events skips it. The OpenTelemetry spans of the run carry `linch.schedule.id`
 ([Observability](./observability.md)).
 
 ## Durability

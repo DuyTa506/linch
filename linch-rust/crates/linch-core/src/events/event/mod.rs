@@ -336,6 +336,14 @@ impl Event {
         }
     }
 
+    /// Whether a build that predates this kind may skip it: the producer
+    /// marks its envelope `ignorable`. True only for a kind added after the
+    /// first release that a reader loses nothing by skipping
+    /// (`schedule_fire`, which only names the schedule behind the run).
+    pub(crate) fn skippable_by_older_builds(&self) -> bool {
+        matches!(self, Event::ScheduleFire(_))
+    }
+
     /// Whether this event, or a nested `subagent` event, is an
     /// [`IgnorableEvent`] — i.e. whether an enclosing [`super::Envelope`]
     /// must set `ignorable: true` for this event to decode back.

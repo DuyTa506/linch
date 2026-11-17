@@ -325,7 +325,7 @@ impl Journal {
             seq,
             run_id: self.lease.run_id.clone(),
             ts_ms: now_ms(),
-            ignorable: false,
+            ignorable: event.skippable_by_older_builds(),
             event,
         }
     }
