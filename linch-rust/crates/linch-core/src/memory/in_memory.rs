@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::{Memory, MemoryError, MemoryStore, NewMemory, search_terms};
+use super::{Memory, MemoryError, MemoryStore, NewMemory, index_words, search_terms};
 
 struct Row {
     scope: Option<String>,
@@ -59,8 +59,10 @@ impl MemoryStore for InMemoryMemoryStore {
         {
             return Err(MemoryError::LimitReached { max });
         }
-        let mut words = search_terms_all(&memory.content);
-        words.extend(memory.tags.iter().flat_map(|tag| search_terms_all(tag)));
+        let mut words = index_words(&memory.content)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        words.extend(memory.tags.iter().flat_map(|tag| index_words(tag)));
         let stored = Memory {
             id: uuid::Uuid::new_v4().simple().to_string(),
             content: memory.content,
@@ -106,19 +108,4 @@ impl MemoryStore for InMemoryMemoryStore {
         rows.retain(|row| !(row.scope.as_deref() == scope && row.memory.id == id));
         Ok(rows.len() < before)
     }
-}
-
-/// Every word of `text`, as [`search_terms`] reads them but without its
-/// bounds: a stored word beyond the search's limits would never be asked
-/// for anyway.
-fn search_terms_all(text: &str) -> HashSet<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            word.to_lowercase()
-                .chars()
-                .take(super::MAX_TERM_CHARS)
-                .collect()
-        })
-        .collect()
 }

@@ -196,5 +196,20 @@ pub fn search_terms(query: &str) -> Vec<String> {
     terms
 }
 
+/// Every word of `text` a search can find it by: the lower-cased runs of
+/// letters and digits, without repeats, each cut at [`MAX_TERM_CHARS`]
+/// characters. A backend indexes these, so what [`search_terms`] asks for is
+/// what was stored, whatever its own tokenizer would have made of the text.
+pub fn index_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let word: String = word.to_lowercase().chars().take(MAX_TERM_CHARS).collect();
+        if !word.is_empty() && !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests;
