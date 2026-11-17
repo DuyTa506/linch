@@ -15,7 +15,7 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, Event, MemoryRunStore, MemorySessionStore, PermissionEngine,
     PermissionMode, PermissionPolicy, Provider, ProviderError, ProviderEvent, ProviderRequest,
-    ProviderStream, Role, RunOptions, ScriptedTurn, Tool, ToolOutputError, ToolRegistry,
+    ProviderStream, Role, RunOptions, ScriptedTurn, SessionId, Tool, ToolOutputError, ToolRegistry,
 };
 use linch_tools::{
     Bash, BashKill, BashOutput, Edit, NewSchedule, Processes, Read, ScheduleBackend, ScheduleEntry,
@@ -191,7 +191,7 @@ impl ScheduleBackend for Fixed {
         Err(ToolOutputError::new("not here"))
     }
 
-    async fn list(&self) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
+    async fn list(&self, _: &SessionId) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
         Ok(vec![ScheduleEntry {
             id: "a".into(),
             prompt: "digest".into(),
@@ -200,7 +200,7 @@ impl ScheduleBackend for Fixed {
         }])
     }
 
-    async fn cancel(&self, _: &str) -> Result<bool, ToolOutputError> {
+    async fn cancel(&self, _: &SessionId, _: &str) -> Result<bool, ToolOutputError> {
         Ok(false)
     }
 }
