@@ -14,8 +14,8 @@ use linch_core::{PermissionLayer, Principal, RunId, RunOptions, RunStatus, Sessi
 use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
-    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_approve, enqueue_run,
-    fire_due_schedules, get_schedule, job, jobs, prune_definitions, prune_history,
+    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_approve, enqueue_resume,
+    enqueue_run, fire_due_schedules, get_schedule, job, jobs, prune_definitions, prune_history,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -798,39 +798,97 @@ async fn an_approve_after_the_history_was_pruned_still_has_an_agent() {
     db.finish().await;
 }
 
-/// What the agent-less job comes to: a factory-only worker takes only jobs
-/// that carry a definition, so it is never taken, never retried and never
-/// failed. It stays queued, counts against the tenant's job cap, and as the
-/// run's one active job it refuses every later approve with `RunBusy`.
+/// The approve of a run past the history retention goes through: the history
+/// row that names the run's definition is kept while the run is suspended, so
+/// a worker with only a factory takes the job and the run goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_agentless_approve_job_is_never_taken_and_blocks_the_run() {
+async fn an_approve_after_the_history_was_pruned_runs_the_run() {
     let Some(db) = TestDb::new("approve_agentless").await else {
         return;
     };
     let run_id = suspended_past_the_history(&db).await;
-    let Ok(id) = enqueue_approve(&db.pool, "default", NS, &run_id, allow_call_0()).await else {
-        db.finish().await;
-        return;
-    };
+    let probe = Probe::new("Write", ToolScope::Write, Hold::None);
     let factory = AdminsOnly {
         pool: db.pool.clone(),
-        probe: Probe::new("Write", ToolScope::Write, Hold::None),
+        probe: probe.clone(),
     };
+    enqueue_approve(&db.pool, "default", NS, &run_id, allow_call_0())
+        .await
+        .unwrap();
     let shutdown = CancellationToken::new();
     let worker =
         Worker::new(db.pool.clone(), config("w2")).definitions([NS.to_owned()], Arc::new(factory));
     let handle = tokio::spawn(worker.run(shutdown.clone()));
-    // Long enough for a worker polling every 50 ms to have taken it.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let info = job(&db.pool, NS, id).await.unwrap().unwrap();
-    assert_eq!(info.state, JobState::Queued, "never taken: {info:?}");
-    assert_eq!(db.status(&run_id).await, RunStatus::AwaitingApproval);
-    let again = enqueue_approve(&db.pool, "default", NS, &run_id, allow_call_0()).await;
-    assert!(
-        matches!(again, Err(WorkerError::RunBusy { .. })),
-        "{again:?}"
-    );
+    wait_until("the approved run completes", || async {
+        db.status(&run_id).await == RunStatus::Completed
+    })
+    .await;
+    assert_eq!(probe.started(), 1, "the write ran for the admin");
     shutdown.cancel();
     handle.await.unwrap().unwrap();
+    // The run ended: the next prune lets go of the row and the definition.
+    prune_history(&db.pool, Duration::ZERO).await.unwrap();
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 1);
+    db.finish().await;
+}
+
+/// A continuation of a run whose definition is gone is refused, rather than
+/// queued without an agent that a worker with only a factory never takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_continuation_whose_definition_is_gone_is_refused() {
+    let Some(db) = TestDb::new("approve_gone").await else {
+        return;
+    };
+    let run_id = suspended_past_the_history(&db).await;
+    db.sql("DELETE FROM linch_worker_agents").await;
+    let refused = enqueue_approve(&db.pool, "default", NS, &run_id, allow_call_0()).await;
+    assert!(
+        matches!(refused, Err(WorkerError::Invalid(_))),
+        "{refused:?}"
+    );
+    let resumed = enqueue_resume(&db.pool, "default", NS, &run_id).await;
+    assert!(
+        matches!(resumed, Err(WorkerError::Invalid(_))),
+        "{resumed:?}"
+    );
+    assert_eq!(db.jobs().await, 0, "nothing was queued");
+    db.finish().await;
+}
+
+/// A job that failed for good keeps its definition while its run is not
+/// terminal, so `enqueue_resume` still has an agent to continue it with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_job_of_a_live_run_keeps_its_definition() {
+    let Some(db) = TestDb::new("failed_live").await else {
+        return;
+    };
+    let run_id = suspended_past_the_history(&db).await;
+    // The run's only job record is a failed one: its history row is gone,
+    // and the run is still not terminal.
+    db.sql("DELETE FROM linch_worker_history").await;
+    let mut failed = request("failed", "unused");
+    failed.agent = Some("def".into());
+    let queued = enqueue(&db.pool, &failed, None).await.unwrap();
+    sqlx::query(
+        "UPDATE linch_worker_jobs SET failed_at = now() - interval '8 days', \
+         error = 'boom', run_id = $1 WHERE id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(queued.0)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let week = Duration::from_secs(7 * 24 * 3600);
+    assert_eq!(prune_history(&db.pool, week).await.unwrap(), 0);
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 0);
+    let kept: Option<String> = sqlx::query_scalar("SELECT agent FROM linch_worker_jobs")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(kept.is_some(), "the failed job lost its definition");
+    let id = enqueue_resume(&db.pool, "default", NS, &run_id)
+        .await
+        .unwrap();
+    assert_ne!(id, queued);
     db.finish().await;
 }

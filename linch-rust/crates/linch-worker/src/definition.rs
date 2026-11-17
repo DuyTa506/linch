@@ -33,10 +33,12 @@ pub(crate) async fn store(
 /// Delete the stored definitions that no schedule, no unfinished job and
 /// no run that is not terminal names, so the config secrets they hold (MCP
 /// env and header values) live no longer than their schedules and runs. A
-/// failed job is never run again, so it lets go of its definition first. A
-/// run suspended for an approval or an answer keeps its job's definition
-/// through the job's history row, for the job that continues it, until
-/// that row is pruned. A worker calls this with [`crate::prune_history`].
+/// failed job is never run again, so it lets go of its definition first,
+/// unless its run is not terminal: `enqueue_resume` continues that run with
+/// the job's definition. A run suspended for an approval or an answer keeps
+/// its job's definition through the job's history row, for the job that
+/// continues it; [`crate::prune_history`] keeps that row while the run is
+/// not terminal. A worker calls this with it.
 ///
 /// A definition a writer is storing right now is locked by that writer
 /// and skipped; one a writer stored after this call read the references
@@ -51,8 +53,11 @@ pub(crate) async fn store(
 pub async fn prune_definitions(pool: &PgPool) -> Result<u64, WorkerError> {
     let mut tx = crate::begin(pool).await?;
     sqlx::query(
-        "UPDATE linch_worker_jobs SET agent = NULL \
-         WHERE failed_at IS NOT NULL AND agent IS NOT NULL",
+        "UPDATE linch_worker_jobs AS j SET agent = NULL \
+         WHERE failed_at IS NOT NULL AND agent IS NOT NULL \
+           AND NOT EXISTS (SELECT 1 FROM linch_runs AS r \
+                           WHERE r.namespace = j.namespace AND r.run_id = j.run_id \
+                             AND r.status NOT IN ('completed', 'failed', 'aborted'))",
     )
     .execute(&mut *tx)
     .await?;
