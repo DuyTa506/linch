@@ -210,6 +210,53 @@ def feed(observer: RunObserver, stream: Sequence[tuple[int, dict[str, Any]]]) ->
         observer.observe(envelope(seq, ts_ms, event))
 
 
+def scheduled_run() -> list[tuple[int, dict[str, Any]]]:
+    fire = {"type": "schedule_fire", "schedule_id": "nightly", "fire_at_ms": 1_762_400_000_000}
+    return [
+        (100, init()),
+        (101, fire),
+        (102, prompt()),
+        (103, context_build()),
+        (110, assistant("tool_use")),
+        (111, usage_event(4, 2)),
+        (112, tool_start("c1")),
+        (113, tool_end("c1", False, 1)),
+        (114, tool_results("c1")),
+        (115, context_build()),
+        (120, assistant("end_turn")),
+        (121, usage_event(6, 1)),
+        (122, result("success")),
+    ]
+
+
+def test_every_span_of_a_scheduled_run_carries_the_schedule_id() -> None:
+    sdk = Sdk()
+    observer = sdk.observer()
+    feed(observer, scheduled_run())
+
+    spans = sdk.spans()
+    for name in ("invoke_agent", "step", "chat m", "execute_tool Echo"):
+        found = all_named(spans, name)
+        assert found, name
+        assert all(attr(span, "linch.schedule.id") == "nightly" for span in found), name
+    run = one(spans, "invoke_agent")
+    assert attr(run, "linch.schedule.fire_at_ms") == 1_762_400_000_000
+    assert all(attr(step, "linch.schedule.fire_at_ms") is None for step in all_named(spans, "step"))
+
+
+def test_a_run_without_a_schedule_has_no_schedule_attribute() -> None:
+    sdk = Sdk()
+    observer = sdk.observer()
+    plain = [step for step in scheduled_run() if step[1]["type"] != "schedule_fire"]
+    feed(observer, plain)
+
+    spans = sdk.spans()
+    assert spans
+    for span in spans:
+        assert attr(span, "linch.schedule.id") is None
+        assert attr(span, "linch.schedule.fire_at_ms") is None
+
+
 @tool(scope="read")
 async def echo(value: str) -> str:
     """Echo the value."""

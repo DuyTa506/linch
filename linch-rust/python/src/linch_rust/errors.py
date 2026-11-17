@@ -277,7 +277,53 @@ class InvalidSchedule(SchedulerError):
         return _field(self.data, "reason")
 
 
+class ProviderInfoError(RpcError):
+    """A question about a provider failed (-32035 to -32037): see
+    `ModelsUnsupported`, `ModelNotFound` and `ProviderRequestFailed`."""
+
+
+class ModelsUnsupported(ProviderInfoError):
+    """The provider has no model list (-32035), such as `scripted`."""
+
+    @property
+    def provider(self) -> str:
+        """The provider's id."""
+        return _field(self.data, "provider")
+
+
+class ModelNotFound(ProviderInfoError):
+    """The provider's list does not hold the model (-32036)."""
+
+    @property
+    def model(self) -> str:
+        """The model id asked for."""
+        return _field(self.data, "model")
+
+
+class ProviderRequestFailed(ProviderInfoError):
+    """The provider could not be asked, or answered with an error (-32037).
+
+    The message names neither the key nor the provider's URL.
+    """
+
+    @property
+    def kind(self) -> str:
+        """`connect`, `transport`, `status`, `invalid_request` or `other`."""
+        return _field(self.data, "kind")
+
+    @property
+    def status(self) -> int | None:
+        """The HTTP status of a `status` failure, else `None`."""
+        try:
+            return int(self.data["status"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+
 _BY_CODE: dict[int, type[RpcError]] = {
+    -32035: ModelsUnsupported,
+    -32036: ModelNotFound,
+    -32037: ProviderRequestFailed,
     -32040: NotBackground,
     -32041: ScheduleNotFound,
     -32042: ScheduleExists,
@@ -313,6 +359,8 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = OpenError
         elif -32034 <= code <= -32020:
             cls = RunError
+        elif -32037 <= code <= -32035:
+            cls = ProviderInfoError
         else:
             cls = RpcError
     return cls(code, str(obj.get("message", "")), obj.get("data"))
