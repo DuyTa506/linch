@@ -264,6 +264,31 @@ async fn a_host_that_sends_endless_output_is_cut_off() {
     );
     assert_eq!(count(&host.kills), 1);
     assert!(count(&host.reads) < 400);
+    let details = error.details.expect("the status is in the details");
+    assert_eq!(details["status"], "output_limit");
+}
+
+/// A flooding background command reads `status: output_limit` from
+/// `BashOutput`, in the error's details (the end event's metadata).
+#[tokio::test]
+async fn a_background_flood_reports_output_limit_in_the_error_details() {
+    let ws = Workspace::new();
+    let chunk = RemoteChunk {
+        stdout: "x".repeat(1 << 20),
+        ..RemoteChunk::default()
+    };
+    let host = Arc::new(Fake::new(StartMode::Ok, ReadMode::Now(chunk), signalled()));
+    let (bash, processes) = bash_on(&ws, &host);
+    let value = json!({"command": "yes", "run_in_background": true});
+    let started = bash.execute(input(value), ctx("s1")).await.unwrap();
+    let id = started.metadata["process_id"].as_str().unwrap().to_owned();
+    let output = BashOutput::new(processes);
+    let value = json!({"process_id": id, "wait_ms": 5_000});
+    let error = output.execute(input(value), ctx("s1")).await.unwrap_err();
+    assert_eq!(error.code.as_deref(), Some("output_limit"));
+    let details = error.details.expect("the status is in the details");
+    assert_eq!(details["status"], "output_limit");
+    assert_eq!(details["process_id"], id);
 }
 
 /// An output flood whose kill the host does not confirm stays `interrupted`:
