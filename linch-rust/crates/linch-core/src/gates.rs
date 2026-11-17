@@ -34,7 +34,7 @@
 //! error. The final tool and tools the agent does not have cannot be
 //! named: the first never runs, so it could never succeed.
 //!
-//! Nothing is checkpointed. [`Gates::of`] reads the state back from the
+//! Nothing is checkpointed. `Gates::of` reads the state back from the
 //! run's `assistant` events (the calls asked for), its `tool_result` user
 //! events (their results, one per batch, durable together) and its
 //! `policy` events (the refusals made and the corrections spent); the live
