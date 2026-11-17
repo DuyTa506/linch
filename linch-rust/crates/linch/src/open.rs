@@ -20,8 +20,8 @@ use linch_providers::{
     ServerOptions, anthropic, deepseek, gemini, openai,
 };
 use linch_tools::{
-    ExecutionBackend, LocalFs, Processes, ReadTracker, SCHEDULE_TOOL_NAMES, TASK_TOOL_NAMES,
-    task_tools, workspace_tools,
+    ExecutionBackend, LocalFs, Processes, ReadTracker, RemoteExec, SCHEDULE_TOOL_NAMES,
+    TASK_TOOL_NAMES, task_tools, workspace_tools,
 };
 
 use crate::config::{
@@ -103,10 +103,36 @@ impl AgentConfig {
     ///         agent cannot be built (a blank model or namespace). MCP
     ///         servers already connected are disconnected first.
     pub async fn open_with(
+        self,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<Hooks>,
+        pools: &PgPools,
+    ) -> Result<OpenedAgent, OpenError> {
+        self.open_with_remote(tools, hooks, pools, None).await
+    }
+
+    /// [`Self::open_with`] with the host that runs the commands of a
+    /// `remote` execution backend, over a connection the caller keeps.
+    ///
+    /// Args:
+    ///     remote: The host of the `remote` backend. Without it that
+    ///         backend does not open, so a worker or a schedule, which have
+    ///         no live connection, refuse such an agent. Unused by the
+    ///         other backends. A `remote` backend whose policy does not
+    ///         share the workspace registers only `Bash`, `BashOutput` and
+    ///         `BashKill`: the file tools would act on the server's
+    ///         directory, not where the commands run.
+    ///
+    /// Raises:
+    ///     OpenError: As for [`Self::open_with`], and
+    ///         [`OpenError::Execution`] when `execution` is `remote` and
+    ///         `remote` is `None`.
+    pub async fn open_with_remote(
         mut self,
         tools: Arc<ToolRegistry>,
         hooks: Arc<Hooks>,
         pools: &PgPools,
+        remote: Option<Arc<dyn RemoteExec>>,
     ) -> Result<OpenedAgent, OpenError> {
         if self.schedule_tools {
             schedule_tools_bound(&self.stores, &tools)?;
@@ -128,7 +154,7 @@ impl AgentConfig {
                 let (reads, processes) = (Arc::clone(&reads), Arc::clone(&processes));
                 let execution = self.bash.then(|| self.execution.unwrap_or_default());
                 let (root, backend) =
-                    register_workspace(&tools, root, reads, processes, execution).await?;
+                    register_workspace(&tools, root, reads, processes, execution, remote).await?;
                 (Some(root), backend)
             }
             None => (None, None),
@@ -349,6 +375,7 @@ async fn register_workspace(
     reads: Arc<ReadTracker>,
     processes: Arc<Processes>,
     execution: Option<ExecutionConfig>,
+    remote: Option<Arc<dyn RemoteExec>>,
 ) -> Result<(String, Option<ExecutionBackend>), OpenError> {
     let bash = execution.is_some();
     // `LocalFs::new` canonicalizes the root and a sandbox checks the
@@ -356,7 +383,7 @@ async fn register_workspace(
     let opened = tokio::task::spawn_blocking(move || {
         let fs = Arc::new(LocalFs::new(root).map_err(OpenError::Workspace)?);
         let config = execution.unwrap_or_default();
-        ExecutionBackend::open(fs, &config).map_err(OpenError::Execution)
+        ExecutionBackend::open_with_host(fs, &config, remote).map_err(OpenError::Execution)
     });
     let backend = match opened.await {
         Ok(backend) => backend?,

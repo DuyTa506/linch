@@ -5,7 +5,10 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, ToolSearch, Workers};
-pub use linch_tools::{DockerPolicy, ExecutionConfig, SandboxPolicy};
+pub use linch_tools::{
+    DockerPolicy, ExecutionConfig, RemoteChunk, RemoteCommand, RemoteError, RemoteExec,
+    RemotePolicy, SandboxPolicy,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::profile::Profile;
@@ -58,8 +61,11 @@ pub struct AgentConfig {
     pub bash: bool,
     /// Where `Bash` runs its commands (see [`ExecutionConfig`]): `local`,
     /// directly as the process's user, when absent; `sandbox` (Landlock,
-    /// seccomp and rlimits) or `docker`. A non-local backend is part of the
-    /// run contract, through `Bash`'s description. Unused without `bash`.
+    /// seccomp and rlimits), `docker`, or `remote` (a host the agent's
+    /// client supplies, which only a host that serves it can open: see
+    /// [`AgentConfig::open_with_remote`]). A non-local backend is part of
+    /// the run contract, through `Bash`'s description. Unused without
+    /// `bash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionConfig>,
     /// Permission rules. Absent: mode `default` (read tools run, write and

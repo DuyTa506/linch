@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 use crate::error::ErrorObject;
 
 mod call;
+mod exec;
 mod hook;
 pub mod monitor;
 mod open;
 mod schedule;
 
 pub use call::{CancelRequestParams, ToolCallParams, tool_code};
+pub use exec::{ExecKillParams, ExecReadParams, ExecStartParams};
 pub use hook::{
     AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
     HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer,
@@ -76,6 +78,14 @@ pub mod method {
     pub const TOOL_CALL: &str = "tool.call";
     /// Server request: one occurrence of a callback's hook point.
     pub const HOOK_CALL: &str = "hook.call";
+    /// Server request: start a command of a `remote` execution backend in
+    /// the client.
+    pub const EXEC_START: &str = "exec.start";
+    /// Server request: take the new output of such a command, waiting a
+    /// while for some.
+    pub const EXEC_READ: &str = "exec.read";
+    /// Server request: kill such a command and answer once it is dead.
+    pub const EXEC_KILL: &str = "exec.kill";
     /// Notification from the server: it no longer waits for the answer to
     /// one of its requests.
     pub const CANCEL_REQUEST: &str = "$/cancelRequest";

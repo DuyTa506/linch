@@ -58,8 +58,8 @@ pub mod project;
 pub use config::{
     AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, DockerPolicy, ExecutionConfig,
     FilesystemConfig, MIN_LEASE_TTL_MS, McpConfig, McpTransportConfig, ModelRates,
-    PricingOverrides, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig, SandboxPolicy,
-    StoreConfig,
+    PricingOverrides, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig, RemoteChunk,
+    RemoteCommand, RemoteError, RemoteExec, RemotePolicy, SandboxPolicy, StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;

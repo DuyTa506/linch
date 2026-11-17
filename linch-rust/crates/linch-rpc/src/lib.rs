@@ -282,9 +282,9 @@
 //! These methods queue runs that a worker runs in the background, never
 //! this connection: `linch-server` with a `worker` section, on the same
 //! database and schema (a stdio server never runs them). Each names an
-//! open `agent` with Postgres stores and no host tools or callbacks
-//! (else `-32040`, `data.reason` `memory_store`, `host_tools` or
-//! `callbacks`). Its namespace scopes the schedules and jobs, and its
+//! open `agent` with Postgres stores, no host tools or callbacks and no
+//! `remote` execution backend (else `-32040`, `data.reason`
+//! `memory_store`, `host_tools`, `callbacks` or `remote_execution`). Its namespace scopes the schedules and jobs, and its
 //! config as opened, without its store DSN, is stored with each one: the
 //! worker opens it again for every attempt and checks it against the
 //! tenant's allowlists again. Its secrets stay in that stored config,
@@ -352,6 +352,35 @@
 //! tool error the model reads: its `message` is shown and its `data` kept
 //! as details. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
+//!
+//! **`exec.start`**, **`exec.read`** and **`exec.kill`** run the commands of
+//! an agent whose config says `"execution": {"backend": "remote"}` in the
+//! client that opened it ([`ExecStartParams`](protocol::ExecStartParams),
+//! [`ExecReadParams`](protocol::ExecReadParams),
+//! [`ExecKillParams`](protocol::ExecKillParams)); the config is all the
+//! declaration there is. `exec.start` `{agent, exec_id, command, cwd?,
+//! env?, background?, session_id}` starts a command: `cwd` is the policy's
+//! (the host's choice when absent) and `env` is the server's allowlisted
+//! variables without its `PATH`, `HOME`, `USER`, `SHELL` and `TMPDIR`, so
+//! no server secret or identity crosses. `exec.read` `{agent, exec_id,
+//! wait_ms}` is a long poll: the host answers at once when the command
+//! printed something or ended, else after `wait_ms`, with
+//! `{"stdout"?, "stderr"?, "exit"?}`, `exit` being `{"code": n}` or
+//! `{"signal": n}` and coming once, after the output it follows; the host
+//! forgets the command then. `exec.kill` `{agent, exec_id}` kills the
+//! command and what it started, and the host answers once it is dead with
+//! the same chunk. The server enforces the timeout and the cancel: it sends
+//! `exec.kill`, and reports the command as timed out or killed only when
+//! the host answered. A host that stops answering reads, errors, closes
+//! its connection or does not confirm a kill makes the call `interrupted`
+//! (`[interrupted ...]`, code `interrupted`): the command's outcome is
+//! unknown and none is invented. A command still running when its
+//! connection closes belongs to a host that is gone, so the host must kill
+//! its commands then. The commands run wherever the host runs them, with
+//! the host's own isolation; the server's `execution` allowlist for a
+//! tenant must list the remote entry exactly. The agent cannot run in a
+//! worker or on a schedule, and with a policy that does not set
+//! `shared_workspace` it has no file tools.
 //!
 //! **`hook.call`** `{agent, point, policy_id, request}`
 //! ([`HookCallParams`](protocol::HookCallParams)) asks a callback about one
@@ -461,7 +490,7 @@
 //! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
 //! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
 //! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
-//! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
+//! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools`, `callbacks` or `remote_execution` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |
 //! | -32043 | job not found | no job with that id in the agent's namespace, or its history was pruned |
