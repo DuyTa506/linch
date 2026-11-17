@@ -12,6 +12,9 @@
 //! - **`tool_choice`:** `auto`, `none`, `required` and a named function.
 //!   In practice all but `none` need `--enable-auto-tool-choice` and
 //!   `--tool-call-parser`; without them the server answers 400.
+//!   Rechecked 2026-11-17 against
+//!   <https://docs.vllm.ai/en/latest/features/tool_calling/>: named,
+//!   `auto`, `required` (vLLM 0.8.3 and later) and `none`.
 //! - **Usage** comes on a last chunk with empty `choices` only with
 //!   `stream_options.include_usage`. `prompt_tokens_details`
 //!   (`cached_tokens`, `created_cache_tokens`) needs
@@ -22,9 +25,11 @@
 //! - **Errors:** `{"error": {"message", "type", "param", "code"}}` with
 //!   the HTTP status as an integer `code`, also as a mid-stream frame
 //!   before `[DONE]`. `finish_reason` may be `abort` or `repetition`.
-//! - **`output_schema`** is refused: the profile sends no
+//! - **`output_schema`** is refused in a request: the profile sends no
 //!   `response_format`, since the server's guided decoding would bind the
 //!   tool-call text to the schema too, and that was not checked live.
+//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
+//!   a schema offers its final tool instead.
 
 use linch_core::{JsonObject, Usage};
 use serde_json::json;

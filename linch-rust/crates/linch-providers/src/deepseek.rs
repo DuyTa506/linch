@@ -10,11 +10,18 @@
 //!   With thinking on, a turn that has no thinking (made with thinking
 //!   off, or by another provider) sends `""`: checked live on 2026-11-06,
 //!   leaving the field out is that 400 and `""` is accepted.
-//! - A forced `tool_choice` (`required` or a named tool) with thinking on
-//!   is a 400, so it fails locally instead.
-//! - `output_schema` is refused. DeepSeek has no JSON-schema response
-//!   format, only `json_object` mode, which does not carry the schema, and
-//!   a forced final tool is refused while thinking is on.
+//! - `tool_choice` takes `none`, `auto`, `required` or a named function; a
+//!   forced one (`required` or named) with thinking on is a 400 (checked
+//!   2026-11-17 against <https://api-docs.deepseek.com/api/create-chat-completion>:
+//!   "required and named tool choices are not supported in thinking
+//!   mode"), so [`Provider::tool_choice_refusal`] refuses it when the agent
+//!   opens and the request fails locally too. Thinking is on unless
+//!   [`Thinking::Disabled`].
+//! - `output_schema` is refused in a request: `response_format` takes
+//!   only `text` or `json_object`, which does not carry the schema
+//!   (<https://api-docs.deepseek.com/guides/json_mode>).
+//!   [`Provider::native_output_schema`] is false, so a run with a schema
+//!   offers its final tool instead, forced only with thinking off.
 
 use std::time::Duration;
 
@@ -104,6 +111,20 @@ impl Provider for DeepSeek {
         (self.options.context_window).unwrap_or(linch_core::DEFAULT_CONTEXT_WINDOW)
     }
 
+    /// DeepSeek has `json_object` mode only, which does not carry the
+    /// schema: a run with one offers its final tool.
+    fn native_output_schema(&self) -> bool {
+        false
+    }
+
+    fn tool_choice_refusal(
+        &self,
+        choice: &ToolChoice,
+        thinking: Option<&Thinking>,
+    ) -> Option<String> {
+        tool_choice_refusal(choice, thinking).map(str::to_owned)
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
@@ -129,23 +150,32 @@ impl Provider for DeepSeek {
     }
 }
 
+/// Why DeepSeek refuses `choice` with `thinking`: a forced choice
+/// (`required` or a named tool) while thinking is on, which is any state
+/// but [`Thinking::Disabled`]; `None` when it takes it.
+pub(crate) fn tool_choice_refusal(
+    choice: &ToolChoice,
+    thinking: Option<&Thinking>,
+) -> Option<&'static str> {
+    let forced = matches!(choice, ToolChoice::Required {} | ToolChoice::Tool { .. });
+    let thinks = !matches!(thinking, Some(Thinking::Disabled {}));
+    (forced && thinks).then_some(
+        "DeepSeek rejects a forced tool_choice while thinking is on; use tool_choice auto, \
+         or disable thinking",
+    )
+}
+
 /// The request body for `request`.
 pub(crate) fn build_payload(request: &ProviderRequest) -> Result<JsonValue, ProviderError> {
     let thinking = !matches!(request.thinking, Some(Thinking::Disabled {}));
-    if thinking
-        && matches!(
-            request.tool_choice,
-            Some(ToolChoice::Required {} | ToolChoice::Tool { .. })
-        )
+    if let Some(refusal) = (request.tool_choice.as_ref())
+        .and_then(|choice| tool_choice_refusal(choice, request.thinking.as_ref()))
     {
-        return Err(invalid(
-            "DeepSeek rejects a forced tool_choice while thinking is on; \
-             use tool_choice auto, or disable thinking",
-        ));
+        return Err(invalid(refusal));
     }
     if request.output_schema.is_some() {
         return Err(invalid(
-            "the DeepSeek adapter does not support output_schema",
+            "the DeepSeek adapter does not support output_schema; a run offers its final tool",
         ));
     }
     let mut messages = payload::messages(&request.system, &request.messages, true)?;

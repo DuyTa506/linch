@@ -8,6 +8,10 @@
 //! - **`reasoning_effort`** is accepted and passed to the template.
 //! - **`tool_choice`:** `auto`, `none` and `required` only. A named
 //!   function silently becomes `auto`, so it fails locally instead.
+//!   Rechecked 2026-11-17 in the source at master: `common/chat.cpp`
+//!   (`common_chat_tool_choice_parse_oaicompat`) parses only those three
+//!   strings, and `tools/server/server-common.cpp` reads a non-string
+//!   `tool_choice` as `auto`.
 //! - **Usage** comes on a last chunk with empty `choices` only with
 //!   `stream_options.include_usage`; `prompt_tokens` includes
 //!   `prompt_tokens_details.cached_tokens` (reported since 2026-03-19).
@@ -20,9 +24,11 @@
 //! - **Errors:** HTTP bodies are `{"error": {"code", "message", "type"}}`; a
 //!   mid-stream error is the same object in a `data:` frame, with no
 //!   `[DONE]` after it.
-//! - **`output_schema`** is refused: the profile sends no
+//! - **`output_schema`** is refused in a request: the profile sends no
 //!   `response_format`, since the server's guided decoding would bind the
 //!   tool-call text to the schema too, and that was not checked live.
+//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
+//!   a schema offers its final tool instead.
 
 use linch_core::JsonObject;
 use serde_json::json;

@@ -173,18 +173,20 @@ pub(crate) fn build_payload(
 }
 
 fn check_tool_choice(profile: &ChatProfile, choice: &ToolChoice) -> Result<(), ProviderError> {
+    match tool_choice_refusal(profile, choice) {
+        None => Ok(()),
+        Some(refusal) => Err(invalid(format!("{} {refusal}", profile.id))),
+    }
+}
+
+/// Why `profile` cannot send `choice`; `None` when it can.
+pub(crate) fn tool_choice_refusal(profile: &ChatProfile, choice: &ToolChoice) -> Option<String> {
     let supported = match choice {
         ToolChoice::Auto {} | ToolChoice::Disabled {} => true,
         ToolChoice::Required {} => profile.tool_choice.required,
         ToolChoice::Tool { .. } => profile.tool_choice.named,
     };
-    if supported {
-        return Ok(());
-    }
-    Err(invalid(format!(
-        "{} does not support this tool_choice; use auto or none",
-        profile.id
-    )))
+    (!supported).then(|| "does not support this tool_choice; use auto or none".to_owned())
 }
 
 fn invalid(message: String) -> ProviderError {

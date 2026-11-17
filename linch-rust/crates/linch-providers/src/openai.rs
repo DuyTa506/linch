@@ -31,9 +31,11 @@
 //!   strict, schema, description?}}`. It shapes only the text answer, so
 //!   the model still calls tools freely. `strict: true` asks the API to
 //!   enforce the schema, which then needs `additionalProperties: false`
-//!   and every property required. The server profiles refuse a schema:
-//!   their guided decoding would bind tool-call text to it as well, which
-//!   was not checked against a live server.
+//!   and every property required. The server profiles send no schema
+//!   (their guided decoding would bind tool-call text to it as well, which
+//!   was not checked against a live server) and refuse one in a request:
+//!   [`Provider::native_output_schema`] is false for them, so a run with a
+//!   schema offers its final tool there instead.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -41,6 +43,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use linch_core::{
     DEFAULT_CONTEXT_WINDOW, JsonObject, Provider, ProviderError, ProviderRequest, ProviderStream,
+    Thinking, ToolChoice,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -186,6 +189,21 @@ impl Provider for OpenAiChat {
                 context::probed_window(self.probed.get(), model)
             }
         }
+    }
+
+    /// Whether the profile sends a `json_schema` `response_format`; a
+    /// server profile does not, so a run there offers its final tool.
+    fn native_output_schema(&self) -> bool {
+        self.profile.json_schema
+    }
+
+    /// The profile's `tool_choice` forms; thinking does not change them.
+    fn tool_choice_refusal(
+        &self,
+        choice: &ToolChoice,
+        _thinking: Option<&Thinking>,
+    ) -> Option<String> {
+        profile::tool_choice_refusal(self.profile, choice)
     }
 
     /// Ask a server for its context window once, unless one is configured.

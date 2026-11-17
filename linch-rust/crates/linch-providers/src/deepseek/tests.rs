@@ -380,3 +380,42 @@ async fn a_huge_error_body_is_read_only_in_part() {
         "{err:?}"
     );
 }
+
+/// The open-time check refuses what the payload builder refuses, and
+/// DeepSeek takes no output schema natively.
+#[test]
+fn deepseek_refuses_at_open_a_forced_choice_while_thinking() {
+    let provider = DeepSeek::new(DeepSeekOptions::new(ApiKey::new(SECRET).unwrap())).unwrap();
+    assert!(!provider.native_output_schema());
+    let named = ToolChoice::Tool {
+        name: "get_weather".into(),
+    };
+    let choices = [
+        ToolChoice::Auto {},
+        ToolChoice::Disabled {},
+        ToolChoice::Required {},
+        named,
+    ];
+    let states = [
+        None,
+        Some(Thinking::Adaptive { display: None }),
+        Some(Thinking::Disabled {}),
+    ];
+    for choice in choices {
+        for state in states.clone() {
+            let refused = provider.tool_choice_refusal(&choice, state.as_ref());
+            let request = ProviderRequest {
+                tool_choice: Some(choice.clone()),
+                tools: vec![weather_tool()],
+                ..thinking(state.clone())
+            };
+            let built = build_payload(&request);
+            assert_eq!(refused.is_some(), built.is_err(), "{choice:?} {state:?}");
+            if let (Some(refused), Err(ProviderError::InvalidRequest { message })) =
+                (refused, built)
+            {
+                assert_eq!(refused, message);
+            }
+        }
+    }
+}
