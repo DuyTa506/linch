@@ -31,6 +31,8 @@ def _alive(pid: int) -> bool:
         return False
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
+    except ProcessLookupError:
+        return False  # reaped between kill() and the read: /proc/<pid>/stat gives ESRCH
     except FileNotFoundError:
         return not Path("/proc/self/stat").exists()  # gone, or there is no /proc
     return state != "Z"
