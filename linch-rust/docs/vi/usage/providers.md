@@ -241,11 +241,12 @@ chối mức; cả hai gửi nguyên mức. Với model vLLM mà template không
 đặt mức trong `request.extra_body.reasoning_effort`: nó thay giá trị đã ánh xạ.
 
 `effort` là một yêu cầu, không phải một đảm bảo. Một lần kiểm tra thật trên vLLM với model
-Qwen3 (2026-11-18, 3 lần chạy mỗi mức, một prompt) cho thấy mọi mức đều được nhận, và số token
-suy luận tăng từ `low` lên `medium` nhưng không tăng thêm trên đó: trung bình là 175 (`low`),
-204 (`medium`), 183 (`high`), 205 (`xhigh`), 175 (`max`), và 150 khi tắt thinking, trong
-phạm vi dao động của một mức. Hãy đo một mức trên model và prompt của bạn trước khi trông
-cậy vào nó để có thêm suy luận.
+Qwen3 (2026-11-18, 3 lần chạy mỗi mức, một prompt) chạy mọi mức đến có kết quả, và số token
+suy luận tăng từ `low` lên `medium` nhưng không tăng thêm trên đó: trung bình là 167 (`low`),
+196 (`medium`), 175 (`high`, gửi là `xhigh`), 197 (`xhigh`) và 167 (`max`, gửi là `xhigh`),
+so với 0 khi tắt thinking. Hai mức được gửi cùng một giá trị mà chênh nhau chừng đó cho thấy
+độ dao động của một mức. Hãy đo một mức trên model và prompt của bạn trước khi trông cậy vào
+nó để có thêm suy luận.
 
 ### `anthropic`
 

@@ -163,7 +163,9 @@ model reads: {"name":"Ada"}
 host reads: {'source': 'crm', 'cache': 'hit'}
 ```
 
-A tool error carries no metadata. A `post_tool_use` callback that replaces
+A tool error has no `metadata` of its own, only `details`, and a `details`
+object reaches the event as `metadata` (a failed `Bash` command's `status` and
+`exit_code` are there). A `post_tool_use` callback that replaces
 the result gives the event the metadata of its replacement; one that
 answers `mutate` keeps the result's metadata and error code and changes only
 its value or error flag.

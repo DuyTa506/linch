@@ -62,10 +62,14 @@ async def _stderr_after_two_connections(liveness: dict[str, int]) -> tuple[str, 
     )
     assert proc.stderr is not None
     try:
-        line = await asyncio.wait_for(proc.stderr.readline(), 30)
-        if b"listening" not in line:  # refused at startup: exit status 2, reason on stderr
-            rest = (await proc.stderr.read()).decode(errors="replace")
-            return f"exit {await proc.wait()}", line.decode(errors="replace") + rest
+        seen = b""
+        while True:  # the startup lines, up to the first "listening" (or the end of stderr)
+            line = await asyncio.wait_for(proc.stderr.readline(), 30)
+            seen += line
+            if not line or b"listening" in line:
+                break
+        if b"listening" not in seen:  # refused at startup: exit status 2, reason on stderr
+            return f"exit {await asyncio.wait_for(proc.wait(), 30)}", seen.decode(errors="replace")
         status = ""
         for _ in range(2):
             status = await asyncio.to_thread(_upgrade, port)

@@ -244,11 +244,13 @@ whose template does not accept `xhigh`, set the level yourself in
 `request.extra_body.reasoning_effort`: it replaces the mapped value.
 
 `effort` is a request, not a guarantee. A live check on vLLM with a Qwen3
-model (2026-11-18, 3 runs per level, one prompt) had every level accepted, and
-the reasoning tokens rose from `low` to `medium` but not above it: the means
-were 175 (`low`), 204 (`medium`), 183 (`high`), 205 (`xhigh`), 175 (`max`),
-and 150 with thinking off, within the spread of one level. Measure a level on
-your model and prompt before relying on it to buy more reasoning.
+model (2026-11-18, 3 runs per level, one prompt) ran every level to a result,
+and the reasoning tokens rose from `low` to `medium` but not above it: the
+means were 167 (`low`), 196 (`medium`), 175 (`high`, sent as `xhigh`), 197
+(`xhigh`) and 167 (`max`, sent as `xhigh`), against 0 with thinking off. Two
+levels sent as the same value differing by that much shows the spread of one
+level. Measure a level on your model and prompt before relying on it to buy
+more reasoning.
 
 ### `anthropic`
 

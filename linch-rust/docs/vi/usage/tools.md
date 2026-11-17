@@ -162,7 +162,8 @@ model reads: {"name":"Ada"}
 host reads: {'source': 'crm', 'cache': 'hit'}
 ```
 
-Lỗi tool không mang metadata. Một callback `post_tool_use` thay thế kết quả sẽ
+Lỗi tool không có `metadata` riêng, chỉ có `details`, và một object `details` tới event
+như `metadata` (`status` và `exit_code` của một lệnh `Bash` thất bại nằm ở đó). Một callback `post_tool_use` thay thế kết quả sẽ
 khiến event mang metadata của kết quả thay thế; một callback
 trả lời `mutate` giữ nguyên metadata và mã lỗi của kết quả và chỉ đổi
 giá trị hoặc cờ lỗi của nó.

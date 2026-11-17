@@ -87,3 +87,17 @@ async def test_closing_the_session_ends_its_background_commands(tmp_path: Path) 
         _, pid = await start(agent)
         await agent.close_session("s1")
         await gone(pid)
+
+
+async def test_a_failed_command_reports_its_status_in_the_tool_end_metadata(
+    tmp_path: Path,
+) -> None:
+    turns = [tool_turn("c1", "Bash", {"command": "echo out; exit 3"}), text_turn("ok")]
+    async with Server() as server:
+        agent = await server.open_agent(agent_config(tmp_path, turns))
+        run = await agent.run("s1", "Run it")
+        [end] = [e.event async for e in run if isinstance(e.event, ToolCallEndEvent)]
+
+    assert end.is_error and end.error_code == "exit_status"
+    assert end.metadata == {"status": "exited", "exit_code": 3, "truncated": False}
+    assert end.result["content"][0]["text"] == "out\n[exit code 3]"
