@@ -260,6 +260,11 @@ A `Job` is a dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
 (once a worker started it), `schedule_id` and `fire_at` (for a fire),
 `attempts`, `failures`, `error`, `created_at`, `finished_at`.
 
+`failures` counts the attempts that failed, the last one of a job that
+`failed` included (a job that gave up after 5 attempts reads `failures: 5`).
+A busy session is a retry, not a failure. It is kept with the live job only:
+a `done` or `superseded` job reads `failures: 0`.
+
 | `state` | Means |
 |---|---|
 | `queued` | Waiting for a worker |

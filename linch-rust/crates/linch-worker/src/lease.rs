@@ -341,10 +341,12 @@ impl JobLease {
     }
 
     /// The job cannot succeed: keep it with `error`, never dequeued again.
+    /// This attempt is the last failed one, so it counts in `failures`.
     pub(crate) async fn fail(&self, pool: &PgPool, error: &str) -> Result<bool, WorkerError> {
         let done = retried(|| {
             sqlx::query(
-                "UPDATE linch_worker_jobs SET failed_at = now(), owner = NULL, error = $3 \
+                "UPDATE linch_worker_jobs SET failed_at = now(), owner = NULL, error = $3, \
+                 failures = failures + 1 \
                  WHERE id = $1 AND attempts = $2",
             )
             .bind(self.job.id.0)

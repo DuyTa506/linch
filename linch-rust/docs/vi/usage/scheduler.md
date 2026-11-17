@@ -246,6 +246,11 @@ Một `Job` là một dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
 (khi một worker đã bắt đầu nó), `schedule_id` và `fire_at` (cho một lần kích hoạt),
 `attempts`, `failures`, `error`, `created_at`, `finished_at`.
 
+`failures` đếm các lần thử đã thất bại, gồm cả lần cuối của một job `failed` (một
+job từ bỏ sau 5 lần thử đọc là `failures: 5`). Một session bận là một lần thử lại,
+không phải một thất bại. Nó chỉ được giữ cùng job còn sống: một job `done` hoặc
+`superseded` đọc là `failures: 0`.
+
 | `state` | Nghĩa là |
 |---|---|
 | `queued` | Đang chờ một worker |
