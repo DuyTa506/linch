@@ -402,6 +402,5 @@ async fn writes_of(world: World) -> u64 {
     let agent = agent_on(provider(world), window_trigger(), clean.clone());
     let (_, status, _) = run(&agent, &clean).await;
     assert_eq!(status, RunStatus::Completed);
-    let writes = clean.log.lock().unwrap().len() as u64;
-    writes
+    clean.log.lock().unwrap().len() as u64
 }
