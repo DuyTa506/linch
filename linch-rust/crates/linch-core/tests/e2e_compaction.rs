@@ -668,6 +668,35 @@ async fn a_reply_that_is_not_a_summary_is_rejected_and_the_run_goes_on() {
     }
 }
 
+/// A model that never gives a usable summary must not be paid for one on
+/// every turn of a long run: a rejected summary is asked again only after
+/// a backoff or up to a cap (the number is the fix's choice; it must be
+/// well under the 10 due turns).
+#[tokio::test]
+async fn a_summary_that_is_always_rejected_is_not_bought_every_turn() {
+    for summary in [Summary::Tool, Summary::Long, Summary::Blank] {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Keyed {
+            turns: big_script(10),
+            summary,
+            ..Keyed::answering()
+        });
+        let agent = compacting_agent(provider.clone(), &Runs::default(), stores.clone());
+        let stream = agent.run("go", RunOptions::new("s1"));
+        let run_id = stream.run_id().clone();
+        finish(stream).await;
+        assert_eq!(status(&stores, &run_id).await, RunStatus::Completed);
+        let calls: u32 = (provider.calls.lock().unwrap().iter())
+            .filter(|(key, _)| key.starts_with("summary"))
+            .map(|(_, n)| n)
+            .sum();
+        assert!(
+            calls <= 3,
+            "{calls} summary calls in 10 turns, all rejected"
+        );
+    }
+}
+
 async fn status(stores: &Stores, run_id: &RunId) -> RunStatus {
     stores.runs.load(NS, run_id).await.unwrap().status
 }
