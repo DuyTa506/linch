@@ -200,6 +200,36 @@ async fn a_cost_cap_counts_the_priced_cost() {
     assert_eq!(message, "run budget exhausted (45 tokens, $0.0600 spent)");
 }
 
+/// A cost cap on a model with no price must not pass in silence: every call
+/// costs "nothing", so the cap could never trip. The agent is refused when
+/// it is built, or its run ends in an error before it spends past the cap.
+#[tokio::test]
+async fn a_cost_cap_on_an_unpriced_model_does_not_pass_in_silence() {
+    let stores = Arc::new(Stores::default());
+    let replay = Arc::new(Replay::new(script(3, 1, "Echo")));
+    let runs = Runs::default();
+    let built = AgentBuilder::new(capped(None, Some(0.05), 0.9))
+        .provider(replay.clone())
+        .tools(registry(vec![Echo::new("Echo", ToolScope::Read, &runs)]))
+        .permissions(policy(SKIP))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .build();
+    let Ok(agent) = built else {
+        return;
+    };
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert_eq!(
+        result.subtype,
+        ResultSubtype::Error,
+        "the run ended in success under a cost cap and no price"
+    );
+}
+
 fn tree() -> Arc<Family> {
     let parent = vec![spawn_turn(None, &["check x"]), text_turn("done")];
     let child = vec![tool_turn(0, 1, "Read"), text_turn("x holds")];
