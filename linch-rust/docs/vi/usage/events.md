@@ -326,7 +326,8 @@ và một `result` có subtype `error` theo sau.
 Một lần thử tool thất bại với một lỗi mà [`spec.tool_retry`](./tools.md#tool_retry)
 retry, và lời gọi chạy lại sau một khoảng chờ: `tool_use_id`, `tool_name`,
 `attempt` (lần sắp chạy, bắt đầu từ 2), `max_attempts`, `error_class` (`code` của
-lỗi, hoặc `timeout`), `error` (thông điệp của lần thử thất bại) và
+lỗi, hoặc `timeout`), `error` (thông điệp của lần thử thất bại, đã qua
+`spec.redaction` khi nó bao phủ kết quả tool rồi cắt còn 512 byte) và
 `delay_ms`. Nó được ghi bền trước khi chờ.
 
 ### `ProviderRetryEvent` (`provider_retry`)

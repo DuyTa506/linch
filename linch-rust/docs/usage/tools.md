@@ -854,12 +854,23 @@ interrupted and does not run it again, so a retry never doubles an effect
 across a restart. A permission check and the `pre_tool_use` callbacks run
 once per call; a `tool_execute` callback runs once per attempt.
 
+Three bounds apply. The event's `error` is the failed attempt's message
+run through `spec.redaction` (when it covers tool results) and then cut to
+512 bytes, since the event is stored and streamed before any
+`post_tool_use` callback sees the failure. A call's retries stop together
+once five minutes have passed since its first attempt began (each attempt
+still has its own `call_timeout_ms`), and a wait is cut to what is left of
+that time. And a host tool that times out is cancelled with a notification
+the client never acknowledges, so the next attempt can start while the old
+handler is still ending: a host tool you declare `idempotent` must cope
+with two calls overlapping.
+
 ### `tool_cache`
 
 `spec.tool_cache` reuses the result of a read tool for an identical call.
 Naming the tools is required: Linch cannot tell a deterministic tool from a
 volatile one, and naming one is your promise that it answers the same for
-the same input whoever asks.
+the same input.
 
 ```python
 config["spec"] = {
@@ -875,21 +886,70 @@ config["spec"] = {
 | `max_entries` | 256 | Entries kept for the namespace; the oldest go first |
 | `max_value_bytes` | 100000 | A result whose JSON is larger is not stored |
 | `invalidate_on_write` | `True` | Whether a `write` or `exec` tool's call clears the namespace's entries, before it starts and after it ends |
+| `scope` | `"session"` | `"session"`: an entry serves only the session that stored it. `"namespace"`: every session of the namespace shares entries |
 
-The key is the agent's `namespace`, the tool name and the canonical input,
-so entries are shared by every session and run of that namespace and never
-cross to another. With Postgres stores the entries live in a table (shared
-by every server of the namespace, surviving restarts); with memory stores
-they live in the agent.
+**What is a key.** The agent's `namespace`, the session (with the default
+`scope`), the tool name and the canonical input. A read tool may answer per
+session (a session's own files, its shell's home), so by default one
+session never gets another's result; `scope: "namespace"` shares entries
+and is your promise that the tool answers alike for everyone. Entries
+never cross namespaces. A write or exec call clears the whole namespace,
+every session's entries, and `max_entries` counts the whole namespace. The
+tool registry has no tool version or digest, so the key has none either:
+when a tool's behaviour changes, old entries live until their `ttl_ms`.
+With Postgres stores the entries live in a table (shared by every server of
+the namespace, surviving restarts); with memory stores they live in the
+agent.
 
-A hit never skips a check. The call has already passed validation, the
-`pre_tool_use` callbacks and permissions, so a call that is denied or blocked
-never reaches the cache. A hit then replaces only the tool's own run:
-`post_tool_use`, redaction and the output schema run on it as on a fresh
-result. Its `tool_call_end` has `cache_hit: true`, and its
-`tool_call_start` is written with that end, not before it, since nothing ran. What is stored is a successful result
-after redaction and before `post_tool_use`, never an error. If the store
-fails, the call is a miss and the model never sees the failure.
+**What is never cached.** A tool that is not `read` scope, polls or asks the
+user, and a tool whose run keeps state for the session: the built-in `Read`
+records what the session saw so `Edit` and `Write` may follow, and a hit
+would skip that. Naming such a tool in `tools` is refused when the agent
+opens. Cache `Grep`, `Glob` and your own host tools.
+
+**A hit never skips a check, and skips only the tool's run.** The call has
+already passed validation, the `pre_tool_use` callbacks and permissions, so
+a call that is denied or blocked never reaches the cache. A hit then
+replaces only the tool's own run: `post_tool_use`, redaction and the output
+schema run on it as on a fresh result. `tool_execute` layers wrap the
+tool's run, so they do **not** run on a hit: a layer that must see every
+result, such as a fail-closed content filter, belongs in `post_tool_use`.
+Its `tool_call_end` has `cache_hit: true`, and its `tool_call_start` is
+written with that end, not before it, since nothing ran.
+
+**What is stored.** The tool's own successful result, after the output
+schema check and `spec.redaction` over tool results and before
+`post_tool_use`, never an error. If `tool_execute` layers are registered, a
+result is stored only when the layers returned it unchanged: a veto or a
+replacement is never cached, so a hit never serves output a layer had
+masked. **Without `spec.redaction` covering tool results the result is
+stored as the tool returned it**, secrets and all, in the agent's memory or
+the Postgres table; configure redaction before caching a tool that can
+return secrets.
+
+**Writes, races and background work.** A `write` or `exec` call clears the
+namespace before it starts and after it ends. Each namespace has an epoch
+that a clear raises, and a lookup remembers it: a read that began before a
+write cannot store its pre-write answer after the write's clear. The first
+call of a tool that starts work outliving the call (`Bash` with
+`run_in_background`, a background subagent) ends caching for the agent
+until it is closed, because nothing says when that work changes what a read
+tool answers. Other servers that share the Postgres table do not see the
+launch, so leave `tool_cache` off an agent that runs background work in a
+workspace other servers cache.
+
+**Store failures.** Every store call is cut off after 2 seconds, and an
+error or a timeout is a miss: the model never sees it. An abort of the run
+also cuts a lookup short. A clear that fails or times out may leave stale
+entries, so caching ends for the agent. The clear after a write is not cut
+by an abort, since the write may already have changed state; it is still
+bounded by the 2 seconds.
+
+**Bounds.** Entries are bounded per namespace (`max_entries`,
+`max_value_bytes`). A Postgres put also deletes a bounded batch of expired
+rows of any namespace, so a namespace nobody uses again does not keep its
+rows. A remote tenant is bounded further: see
+[Server](./server.md#what-admission-refuses-and-why).
 
 ## Related pages
 

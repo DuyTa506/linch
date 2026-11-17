@@ -145,14 +145,22 @@ them:
 these steps. Each one is absent, and costs nothing, when its field is unset:
 
 1. **Cache lookup** (`spec.tool_cache`). A read-scope, non-`polls`,
-   non-`asks_user` tool named by the policy looks up the key
-   `[tool_name, input]` in the agent's namespace (`tool_cache.rs`,
-   `cache_key`). A live entry becomes the result: no durable start before it, no
+   non-`asks_user`, `Tool::cache_safe` tool named by the policy looks up the
+   key `[session?, tool_name, input]` in the agent's namespace
+   (`tool_cache.rs`, `cache_key`; the session is in the key unless
+   `scope` is `namespace`). The lookup returns the entry and the namespace's
+   epoch. A live entry becomes the result: no durable start before it, no
    tool, `cache_hit` on the `tool_call_end`; the start and end are written
-   together, as for any call that runs nothing. A store error is a miss.
+   together, as for any call that runs nothing. Every store call is bounded
+   by `STORE_TIMEOUT` (2 s) and the run abort; an error or a timeout is a
+   miss. After the agent's first `Tool::launches_background` call, or a
+   failed clear, `slot_of` returns nothing and the cache is off for the
+   agent.
 2. **Invalidate.** A write or exec tool clears the namespace first when
    `invalidate_on_write` is set, before `tool_starting`, so a crash during the
-   effect cannot leave an entry from before it.
+   effect cannot leave an entry from before it. A clear raises the
+   namespace's epoch. An abort during this clear stops the call before its
+   start.
 3. **`tool_starting`**, the durable barrier. From here a crash leaves an
    interrupted call that a resume never runs again.
 4. **Attempts** (`invoke`). Each attempt is the tool body wrapped by the
@@ -161,13 +169,28 @@ these steps. Each one is absent, and costs nothing, when its field is unset:
    `spec.tool_retry` covers (`tool_retry.rs`: the tool is `Tool::idempotent`,
    the error `code` or `timeout` is listed, attempts are left) goes to
    `ToolSink::tool_retrying`, which writes and flushes a `tool_retry` event,
-   then waits (`base_delay_ms` doubling up to `max_delay_ms`) and runs again.
-5. **`finish`.** Output schema, redaction, then a fresh successful result is
-   stored in the cache (after redaction, before `post_tool_use`, so a
-   durable table never holds unredacted output and hooks run again on every
-   hit), then `post_tool_use`. A `Mutate` answer changes the value or the
-   error flag and keeps the metadata and error code.
-6. **Invalidate again** after a write or exec call, then `tool_finished`.
+   then waits (`base_delay_ms` doubling up to `max_delay_ms`, cut to what is
+   left of `RETRY_BUDGET`, 5 minutes from the first attempt; no retry once
+   it is spent) and runs again. The event's `error` goes through the
+   redactor, then is cut to `ERROR_BYTES`. A timed-out host tool is
+   abandoned with `$/cancelRequest`, which has no acknowledgement in the
+   protocol, so a retry may overlap the old handler.
+5. **`finish`.** Output schema, redaction, then, when the tool just ran, its
+   result is stored in the cache (`put` is conditional on the epoch the
+   lookup returned, so a clear since the lookup refuses it) after the
+   schema check and redaction and before `post_tool_use`; hooks run again on
+   every hit. With `tool_execute` layers registered, `body` records the
+   tool's own result per attempt (`Raw`) and the result is stored only if
+   the layers returned it unchanged (`untouched`): a veto or `Replace` is
+   never cached, and a hit does not run the layers. Without
+   `spec.redaction` over tool results, what is stored is unredacted; a
+   tenant is refused without it. Then `post_tool_use`. A `Mutate` answer
+   changes the value or the error flag and keeps the metadata and error
+   code; its `content` may not be `null` (a bad answer, since it would read
+   as absent).
+6. **Invalidate again** after a write or exec call (not cut short by the
+   abort: the write may have changed state, and the call is bounded by
+   `STORE_TIMEOUT`), then `tool_finished`.
 
 The `tool_execute` waterfall is the Rust counterpart of Python's
 `tools/execute`: a `ToolMiddleware` gets the call and a `Next`, awaits

@@ -324,8 +324,9 @@ and a `result` of subtype `error` follow.
 A tool attempt failed with an error [`spec.tool_retry`](./tools.md#tool_retry)
 retries, and the call runs again after a wait: `tool_use_id`, `tool_name`,
 `attempt` (the one about to run, from 2), `max_attempts`, `error_class` (the
-error's `code`, or `timeout`), `error` (the failed attempt's message) and
-`delay_ms`. It is durable before the wait.
+error's `code`, or `timeout`), `error` (the failed attempt's message, run
+through `spec.redaction` when it covers tool results and then cut to 512
+bytes) and `delay_ms`. It is durable before the wait.
 
 ### `ProviderRetryEvent` (`provider_retry`)
 
