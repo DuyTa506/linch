@@ -54,6 +54,12 @@ pub const TURN_INDEX: &str = "linch.turn_index";
 pub const RESUMED: &str = "linch.resumed";
 /// `linch.stop_reason`: why the run's loop stopped.
 pub const STOP_REASON: &str = "linch.stop_reason";
+/// `linch.schedule.id`: the schedule whose fire started the run, on every
+/// span of a scheduled run. Rust only: Python Linch has no schedules.
+pub const SCHEDULE_ID: &str = "linch.schedule.id";
+/// `linch.schedule.fire_at_ms`: when that fire was due, in Unix
+/// milliseconds, on the run span only. Rust only.
+pub const SCHEDULE_FIRE_AT: &str = "linch.schedule.fire_at_ms";
 /// `linch.compaction.strategy`: the compaction strategy that ran.
 pub const COMPACTION_STRATEGY: &str = "linch.compaction.strategy";
 /// `linch.cost_usd`: the cost of a call, or of the run, in USD, when the

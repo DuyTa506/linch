@@ -12,6 +12,7 @@ impl Event {
     pub fn type_name(&self) -> &str {
         match self {
             Event::Init(_) => "init",
+            Event::ScheduleFire(_) => "schedule_fire",
             Event::User(_) => "user",
             Event::Assistant(_) => "assistant",
             Event::PartialAssistant(_) => "partial_assistant",

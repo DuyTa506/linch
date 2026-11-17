@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ask_user::AskUserAnswer;
 use crate::canonical::Digest;
 use crate::coordination::Mailbox;
+use crate::events::kinds::ScheduleFireEvent;
 use crate::events::{Envelope, Persistence};
 use crate::gates::Rules;
 use crate::hooks::{ApprovalResponse, Hooks};
@@ -100,6 +101,13 @@ pub struct RunOptions {
     /// event, so a resume or approve uses it again; they ignore this
     /// field. It is not part of the contract.
     pub tool_choice: Option<ToolChoice>,
+    /// The schedule fire that started this run, for a worker's run of a
+    /// scheduled job; `None` for any other. A new run stages it as a
+    /// `schedule_fire` event right after its `init`, in the same write, so
+    /// the run's events name the schedule that made it. A run without it
+    /// writes exactly what it wrote before. Resume and approve ignore this
+    /// field.
+    pub schedule: Option<ScheduleFireEvent>,
 }
 
 impl RunOptions {
@@ -116,6 +124,7 @@ impl RunOptions {
             trace_id: None,
             output_schema: None,
             tool_choice: None,
+            schedule: None,
         }
     }
 }

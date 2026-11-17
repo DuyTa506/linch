@@ -23,6 +23,9 @@ impl RunObserver {
         if let Some(turn) = self.turn {
             attributes.push(KeyValue::new(keys::TURN_INDEX, count(turn)));
         }
+        if let Some(schedule_id) = &self.schedule_id {
+            attributes.push(KeyValue::new(keys::SCHEDULE_ID, schedule_id.clone()));
+        }
         let span_name = format!("{} {name}", keys::EXECUTE_TOOL);
         self.start(parent, span_name, SpanKind::Internal, at, attributes)
     }

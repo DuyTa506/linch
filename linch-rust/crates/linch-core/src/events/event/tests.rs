@@ -290,3 +290,17 @@ fn the_tool_end_is_no_larger_than_the_result() {
         size_of::<ResultEvent>()
     );
 }
+
+/// The wire form of the schedule and model-call kinds, as the Python
+/// client's `test_events.py` reads the same file: each sample decodes and
+/// encodes back to itself, so the file is what the Rust side writes.
+#[test]
+fn the_golden_accounting_samples_round_trip_byte_for_byte() {
+    let samples: Vec<JsonValue> =
+        serde_json::from_str(include_str!("../golden/accounting.json")).unwrap();
+    assert_eq!(samples.len(), 5);
+    for sample in samples {
+        let event: Event = serde_json::from_value(sample.clone()).unwrap();
+        assert_eq!(event.to_value().unwrap(), sample, "{event:?}");
+    }
+}

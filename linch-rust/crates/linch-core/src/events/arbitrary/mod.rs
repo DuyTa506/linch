@@ -16,7 +16,7 @@ mod accounting;
 mod builders;
 
 use super::event::{Event, IgnorableEvent, SubagentEvent};
-use super::kinds::{HookEvent, HookOutcome};
+use super::kinds::{HookEvent, HookOutcome, ScheduleFireEvent};
 use crate::ids::{RunId, SessionId};
 use crate::json::{JsonObject, JsonValue};
 use crate::message::{ContentBlock, Message, Role};
@@ -197,6 +197,14 @@ fn hook_event() -> impl Strategy<Value = HookEvent> {
 pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
     let mut variants: Vec<BoxedStrategy<Event>> = vec![
         builders::init_event().prop_map(Event::Init).boxed(),
+        (short_string(), any::<u64>())
+            .prop_map(|(schedule_id, fire_at_ms)| {
+                Event::ScheduleFire(ScheduleFireEvent {
+                    schedule_id,
+                    fire_at_ms,
+                })
+            })
+            .boxed(),
         builders::user_event().prop_map(Event::User).boxed(),
         builders::assistant_event()
             .prop_map(Event::Assistant)

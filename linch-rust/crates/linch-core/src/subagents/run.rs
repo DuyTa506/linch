@@ -59,6 +59,7 @@ pub(super) async fn run(
         trace_id: ctx.trace_id.clone(),
         output_schema: None,
         tool_choice: None,
+        schedule: None,
     };
     let loaded = child.runs.load(&child.namespace, &child_id).await;
     if loaded.is_ok() {
