@@ -3,10 +3,10 @@ server. Skips without the live environment.
 
 The mechanics (a logged summary, a smaller provider view, a reload from
 Postgres) are asserted for every provider. Recalling early content from the
-summary is an expected failure on both vLLM's Qwen and DeepSeek: the summary
-call sends the conversation as messages under a system prompt only, so the
-model answers the last user message instead of summarizing the conversation
-(`crates/linch-core/src/compaction.rs`, `summary_request`).
+summary (a code word given in the first turns must be answered after
+compaction) is asserted too: the summary call ends with an instruction message,
+so the model summarizes instead of answering the last user message
+(`summary_request` in `crates/linch-core/src/compaction.rs`).
 """
 
 from __future__ import annotations
@@ -109,11 +109,6 @@ async def test_a_long_session_compacts_and_the_view_shrinks(kind: str, pg_dsn: s
         assert built and built[0] < 2 * len(run_ids), "the reloaded view is the compacted one"
 
 
-@pytest.mark.xfail(
-    reason="the summary call has no final instruction message: the model answers the last user "
-    "message instead of summarizing, so early content is lost (summary_request)",
-    strict=False,
-)
 async def test_the_summary_keeps_early_content_for_a_later_question(kind: str, pg_dsn: str) -> None:
     config = compacting(kind, pg_dsn)
     async with Server() as server:

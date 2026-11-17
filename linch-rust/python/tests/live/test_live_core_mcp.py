@@ -119,11 +119,6 @@ async def test_the_mcp_server_is_killed_when_the_server_connection_closes(
 
 
 @needs_live
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding: a stdio MCP server that ignores EOF and SIGTERM outlives a SIGKILLed "
-    "linch-server (Bash has a lifeline watchdog, MCP stdio has none)",
-)
 async def test_the_mcp_server_does_not_outlive_a_sigkilled_sidecar(tmp_path: Path) -> None:
     pid_file = tmp_path / f"mcp-{time.monotonic_ns()}.pid"
     config = make_config(

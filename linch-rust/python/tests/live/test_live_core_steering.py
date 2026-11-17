@@ -5,16 +5,20 @@ Python Linch has `Session.align(prompt)` (`src/linch/session.py:565`, drained by
 active is logged as a user message of subtype `alignment` at the next turn
 boundary, snapshotted into every checkpoint and restored on resume.
 
-linch-rust has NO client method for it: the RPC has no `run.message`, `run.steer`
-or inbox call (`run.start|resume|approve|answer|cancel|events`, `job.*`,
-`schedule.*`, `session.close`, `hook.call`, `tool.call`). The nearest machinery is
-the mailbox (`mailbox: true`): a run drains its session's inbox at its start and
-after each tool batch (`crates/linch-core/src/runner/inbox.rs`), which is exactly
-Python's boundary, but only the model's `send_message` tool can write to it. These
-tests exercise the two workarounds a host has today and document the gap:
+linch-rust steers through `Run.steer` / `Agent.steer` (RPC `run.steer`): the text is
+a user message logged after the tool results of the batch in progress and before
+the next model call, reported as a `user` event of subtype `alignment`. The
+mailbox (`mailbox: true`) is a second way in: a run drains its session's inbox
+at its start and after each tool batch (`crates/linch-core/src/runner/inbox.rs`).
+These tests expect:
 
-* a row inserted into `linch_mailbox` by the host (Postgres stores);
-* a `context_build` callback that reads a host-side queue (per request, not logged).
+* `Run.steer` while a tool call is in flight: the call answers only after the tool
+  batch ends; the model then follows the instruction; an `alignment` user event
+  carries the returned id;
+* a row inserted into `linch_mailbox` by the host (Postgres stores) is applied at
+  the next turn boundary and acked;
+* a `context_build` callback that reads a host-side queue feeds the next request
+  (per request, not logged).
 """
 
 from __future__ import annotations
@@ -31,7 +35,6 @@ from live_core_support import (
     live_server,
     make_config,
     message_text,
-    needs_live,
     needs_pg,
     pg_stores,
     retry_once,
@@ -168,11 +171,48 @@ async def test_a_context_build_callback_can_feed_a_host_queue_into_the_next_requ
     )
 
 
-@needs_live
-async def test_there_is_no_client_method_to_steer_a_run() -> None:
-    """MISSING: pin the gap so the test flips when a steering call is added."""
-    from linch_rust import Agent
+@pytest.mark.parametrize("live", PROVIDERS)
+@retry_once
+async def test_run_steer_during_a_tool_call_is_followed_and_logged_as_an_alignment(
+    live: Live,
+) -> None:
+    release = asyncio.Event()
+    started = asyncio.Event()
 
-    names = {n for n in dir(Agent) + dir(Run) if not n.startswith("_")}
-    steering = {n for n in names if any(w in n for w in ("steer", "align", "inject", "message"))}
-    assert steering == set(), f"a steering method now exists: {steering}"
+    @tool(scope="read")
+    async def slow_task() -> str:
+        """A long task."""
+        started.set()
+        await release.wait()
+        return "task finished"
+
+    async with live_server() as server:
+        agent = await server.open_agent(
+            make_config(live, live.spec(max_turns=5)), tools=[slow_task]
+        )
+        run = await agent.run("s1", PROMPT)
+        envelopes: list[Any] = []
+        pump = asyncio.create_task(collect(run, envelopes, started))
+        async with asyncio.timeout(180):
+            await started.wait()
+            # The call answers once the run has written the steer, at its next step
+            # boundary, which is after the tool batch in progress: send it, then
+            # let the tool finish.
+            steering = asyncio.ensure_future(
+                run.steer("New instruction: end your answer with the word PLUM-91.")
+            )
+            await asyncio.sleep(0.5)
+            assert not steering.done(), "the steer answered before the tool batch ended"
+            release.set()
+            steer_id = await steering
+            await pump
+        result = await run.result()
+
+    alignments = [
+        e.event
+        for e in envelopes
+        if isinstance(e.event, UserEvent) and e.event.subtype == "alignment"
+    ]
+    assert [a.steer_id for a in alignments] == [steer_id]
+    assert "PLUM-91" in message_text(alignments[0].message)
+    assert "PLUM-91" in (result.final_text or "")  # type: ignore[union-attr]

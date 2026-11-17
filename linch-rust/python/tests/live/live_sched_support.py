@@ -3,7 +3,7 @@
 
 Everything skips cleanly without the environment:
 
-- `LINCH_LIVE_VLLM_URL` (for example `http://127.0.0.1:8201/v1`): the vLLM
+- `LINCH_LIVE_VLLM_URL` or `LINCH_TEST_VLLM_URL` (for example `http://127.0.0.1:8201/v1`): the vLLM
   endpoint; the model is `LINCH_LIVE_VLLM_MODEL` or `qwen3.6-35b-a3b`.
 - `DEEPSEEK_API_KEY`: read by the server from its environment; never printed.
 - `LINCH_TEST_PG_DSN`: a Postgres database; each test gets its own schema.
@@ -40,8 +40,12 @@ from linch_rust import (
     find_server,
 )
 
-VLLM_URL = os.environ.get("LINCH_LIVE_VLLM_URL", "")
-VLLM_MODEL = os.environ.get("LINCH_LIVE_VLLM_MODEL", "qwen3.6-35b-a3b")
+VLLM_URL = os.environ.get("LINCH_LIVE_VLLM_URL") or os.environ.get("LINCH_TEST_VLLM_URL") or ""
+VLLM_MODEL = (
+    os.environ.get("LINCH_LIVE_VLLM_MODEL")
+    or os.environ.get("LINCH_TEST_VLLM_MODEL")
+    or "qwen3.6-35b-a3b"
+)
 DEEPSEEK_MODEL = os.environ.get("LINCH_LIVE_DEEPSEEK_MODEL", "deepseek-flash")
 HAS_DEEPSEEK = bool(os.environ.get("DEEPSEEK_API_KEY"))
 PG_DSN = os.environ.get("LINCH_TEST_PG_DSN", "")
@@ -122,6 +126,7 @@ def live_config(
         "spec": {
             "model": name,
             "max_output_tokens": 600,
+            "max_turns": 8,  # a tenant agent needs a run bound (admission `run_bound`)
             "thinking": {"type": "disabled"},
             "system_prompt": "You are a terse test assistant. Follow instructions exactly.",
             **(spec or {}),

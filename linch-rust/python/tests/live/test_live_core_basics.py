@@ -110,20 +110,19 @@ async def test_deepseek_thinking_on_streams_reasoning_off_does_not(live: Live) -
 
 @pytest.mark.parametrize("effort", ["high", "max"])
 @pytest.mark.parametrize("live", ONLY_VLLM)
-async def test_vllm_qwen_refuses_effort_high_and_max_with_a_clean_error(
-    live: Live, effort: str
-) -> None:
-    # Finding: the Qwen chat template behind this vLLM accepts only low, medium
-    # and xhigh; linch-rust forwards `high` and `max` as they are, so the run
-    # ends with a non-retryable 400 instead of mapping them. The failure is
-    # clean (an error event and a result of subtype error, nothing billed).
+@retry_once
+async def test_vllm_effort_high_and_max_map_to_xhigh(live: Live, effort: str) -> None:
+    # The Qwen chat template behind this vLLM accepts only low, medium and xhigh;
+    # linch-rust maps `high` and `max` to `xhigh`, so the run succeeds with reasoning.
     config = make_config(
         live, live.spec(thinking={"type": "enabled"}, effort=effort, max_output_tokens=1500)
     )
     trace = await ask(live, "What is 6 times 7? Answer with the number only.", config=config)
-    [error] = trace.of(ErrorEvent)
-    assert error.error["status"] == 400 and error.error["retryable"] is False
-    assert trace.result.subtype == "error" and trace.result.total_usage["output_tokens"] == 0
+    assert not trace.of(ErrorEvent)
+    assert trace.result.subtype == "success"
+    assert "42" in (trace.result.final_text or "")
+    thinking = [d for d in trace.of(PartialAssistantEvent) if d.delta["kind"] == "thinking"]
+    assert thinking, "vLLM streamed no reasoning with thinking enabled"
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "max"])

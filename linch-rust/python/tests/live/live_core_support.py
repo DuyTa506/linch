@@ -1,7 +1,8 @@
 """Shared pieces of the live core tests: providers, a server, a run driver.
 
 The tests drive a real model through the `linch-server` sidecar. They skip
-without `LINCH_LIVE_VLLM_URL` (vLLM, no key) or `DEEPSEEK_API_KEY` (DeepSeek).
+without `LINCH_LIVE_VLLM_URL` or `LINCH_TEST_VLLM_URL` (vLLM, no key) or
+`DEEPSEEK_API_KEY` (DeepSeek).
 Assertions are on durable facts (events, tool results, files, rows), never on
 the model's wording; a flaky model turn is retried once by `retry_once`.
 """
@@ -38,8 +39,12 @@ from linch_rust import (
 from linch_rust.agent import Answer
 from linch_rust.events import Envelope
 
-VLLM_URL = os.environ.get("LINCH_LIVE_VLLM_URL")
-VLLM_MODEL = os.environ.get("LINCH_LIVE_VLLM_MODEL", "qwen3.6-35b-a3b")
+VLLM_URL = os.environ.get("LINCH_LIVE_VLLM_URL") or os.environ.get("LINCH_TEST_VLLM_URL")
+VLLM_MODEL = (
+    os.environ.get("LINCH_LIVE_VLLM_MODEL")
+    or os.environ.get("LINCH_TEST_VLLM_MODEL")
+    or "qwen3.6-35b-a3b"
+)
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.environ.get("LINCH_LIVE_DEEPSEEK_MODEL", "deepseek-flash")
 PG_DSN = os.environ.get("LINCH_LIVE_PG_DSN") or os.environ.get("LINCH_TEST_PG_DSN")
