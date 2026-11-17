@@ -25,6 +25,7 @@ impl Server {
         options.principal = params.principal;
         options.trace_id = params.trace_id;
         options.output_schema = params.output_schema;
+        options.tool_choice = params.tool_choice;
         options.owner = OWNER.into();
         let cancel = options.cancel.clone();
         let mut tables = lock(&self.0.tables);

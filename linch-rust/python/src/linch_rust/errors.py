@@ -91,7 +91,7 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32033), or failed
+    """The run could not continue durably (-32020 to -32034), or failed
     inside the server (-32603 in `run.end`); it stays resumable."""
 
 
@@ -165,6 +165,21 @@ class InvalidOutputSchema(RunError):
     @property
     def reason(self) -> str:
         """What is wrong with the schema."""
+        try:
+            return str(self.data["reason"])
+        except (TypeError, KeyError):
+            return ""
+
+
+class InvalidToolChoice(RunError):
+    """The `tool_choice` given to `Agent.run` is unusable (-32034): it names a
+    tool the run does not offer, or the agent's provider refuses it (DeepSeek
+    refuses a forced choice while it thinks). No run was created.
+    """
+
+    @property
+    def reason(self) -> str:
+        """What is wrong with the choice."""
         try:
             return str(self.data["reason"])
         except (TypeError, KeyError):
@@ -283,6 +298,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32031: InvalidOutputSchema,
     -32032: InvalidAnswer,
     -32033: RunLeased,
+    -32034: InvalidToolChoice,
 }
 
 
@@ -295,7 +311,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = ProtocolError
         elif -32015 <= code <= -32010:
             cls = OpenError
-        elif -32033 <= code <= -32020:
+        elif -32034 <= code <= -32020:
             cls = RunError
         else:
             cls = RpcError

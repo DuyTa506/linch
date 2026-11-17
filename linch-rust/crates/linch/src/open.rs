@@ -442,8 +442,12 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
         ProviderConfig::Scripted {
             turns,
             context_window,
+            native_output_schema,
         } => {
-            let scripted = ScriptedProvider::new(turns);
+            let mut scripted = ScriptedProvider::new(turns);
+            if !native_output_schema {
+                scripted = scripted.without_native_output_schema();
+            }
             return Ok(Arc::new(match context_window {
                 Some(window) => scripted.with_context_window(window),
                 None => scripted,
