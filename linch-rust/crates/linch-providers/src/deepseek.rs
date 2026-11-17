@@ -12,9 +12,9 @@
 //!   leaving the field out is that 400 and `""` is accepted.
 //! - `tool_choice` takes `none`, `auto`, `required` or a named function; a
 //!   forced one (`required` or named) with thinking on is a 400 (checked
-//!   2026-11-17 against <https://api-docs.deepseek.com/api/create-chat-completion>:
-//!   "required and named tool choices are not supported in thinking
-//!   mode"), so [`Provider::tool_choice_refusal`] refuses it when the agent
+//!   2026-11-17 against <https://api-docs.deepseek.com/api/create-chat-completion>,
+//!   which says thinking mode supports neither `required` nor a named
+//!   choice), so [`Provider::tool_choice_refusal`] refuses it when the agent
 //!   opens and the request fails locally too. Thinking is on unless
 //!   [`Thinking::Disabled`].
 //! - `output_schema` is refused in a request: `response_format` takes

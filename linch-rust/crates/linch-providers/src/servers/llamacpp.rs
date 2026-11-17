@@ -10,8 +10,9 @@
 //!   function silently becomes `auto`, so it fails locally instead.
 //!   Rechecked 2026-11-17 in the source at master: `common/chat.cpp`
 //!   (`common_chat_tool_choice_parse_oaicompat`) parses only those three
-//!   strings, and `tools/server/server-common.cpp` reads a non-string
-//!   `tool_choice` as `auto`.
+//!   strings; a named object is not honoured (by a reading of
+//!   `tools/server/server-common.cpp` it falls back to `auto`, not checked
+//!   against a live server).
 //! - **Usage** comes on a last chunk with empty `choices` only with
 //!   `stream_options.include_usage`; `prompt_tokens` includes
 //!   `prompt_tokens_details.cached_tokens` (reported since 2026-03-19).

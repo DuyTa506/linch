@@ -365,7 +365,10 @@ impl AgentBuilder {
                 registered(name) || final_tool.as_ref().is_some_and(|t| t.name == name)
             };
             let thinking = self.spec.thinking.as_ref();
-            if let Some(problem) = tool_choice_problem(&*provider, choice, thinking, offered) {
+            let toolless = built_tools.definitions().is_empty() && final_tool.is_none();
+            if let Some(problem) =
+                tool_choice_problem(&*provider, choice, thinking, offered, toolless)
+            {
                 return Err(BuildError::Invalid(problem));
             }
         }

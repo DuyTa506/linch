@@ -116,6 +116,10 @@ fn the_summary_request_disables_tools_and_keeps_the_conversation() {
     assert_eq!(request.messages, messages);
     let default = summary_request(&spec, &CompactionSpec::new(1), vec![], vec![]);
     assert_eq!(default.system[0].text, DEFAULT_PROMPT);
+    // A forced choice of the agent never reaches the summary call.
+    spec.tool_choice = Some(ToolChoice::Required {});
+    let forced = summary_request(&spec, &compaction, vec![], vec![]);
+    assert_eq!(forced.tool_choice, Some(ToolChoice::Disabled {}));
 }
 
 #[test]

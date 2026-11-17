@@ -118,14 +118,18 @@ impl RunOptions {
 }
 
 /// Why `choice` cannot be a run's tool choice on `provider` with
-/// `thinking`, `known` saying whether a tool name is one the run offers;
-/// `None` when it can.
+/// `thinking`, `known` saying whether a tool name is one the run offers and
+/// `toolless` that it offers none; `None` when it can.
 pub(crate) fn tool_choice_problem(
     provider: &dyn Provider,
     choice: &ToolChoice,
     thinking: Option<&Thinking>,
     known: impl Fn(&str) -> bool,
+    toolless: bool,
 ) -> Option<String> {
+    if toolless && matches!(choice, ToolChoice::Required {}) {
+        return Some("tool_choice required needs a tool, and the run offers none".into());
+    }
     if let ToolChoice::Tool { name } = choice
         && !known(name)
     {

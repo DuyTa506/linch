@@ -219,22 +219,104 @@ async fn the_agents_tool_choice_goes_with_every_request_a_run_may_replace_it() {
 }
 
 #[tokio::test]
-async fn a_turn_with_no_tools_sends_no_tool_choice() {
+async fn a_turn_with_no_tools_sends_no_tool_choice_and_none_can_be_required() {
+    let toolless = |choice: ToolChoice, provider: Arc<ScriptedProvider>| {
+        let mut spec = spec();
+        spec.tool_choice = Some(choice);
+        let stores = Arc::new(Stores::default());
+        AgentBuilder::new(spec)
+            .provider(provider)
+            .tools(registry(vec![]))
+            .permissions(policy(PermissionMode::SkipDangerous))
+            .run_store(stores.clone())
+            .session_store(stores)
+            .namespace(NS)
+            .build()
+    };
     let provider = Arc::new(ScriptedProvider::new([text_turn("done")]));
-    let mut spec = spec();
-    spec.tool_choice = Some(ToolChoice::Required {});
-    let stores = Arc::new(Stores::default());
-    let agent = AgentBuilder::new(spec)
-        .provider(provider.clone())
-        .tools(registry(vec![]))
-        .permissions(policy(PermissionMode::SkipDangerous))
-        .run_store(stores.clone())
-        .session_store(stores)
-        .namespace(NS)
-        .build()
-        .unwrap();
+    let agent = toolless(ToolChoice::Auto {}, provider.clone()).unwrap();
     finish(agent.run("go", RunOptions::new("s1"))).await;
     assert_eq!(provider.requests()[0].tool_choice, None);
+    let required = toolless(ToolChoice::Required {}, provider);
+    assert!(
+        matches!(&required, Err(BuildError::Invalid(reason)) if reason.contains("offers none")),
+        "a forced choice is never dropped silently"
+    );
+}
+
+/// Records each request's tool choice, and answers as [`Replay`] does.
+struct Recording {
+    replay: Replay,
+    choices: Mutex<Vec<Option<ToolChoice>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Recording {
+    fn id(&self) -> &str {
+        "recording"
+    }
+
+    async fn stream(
+        &self,
+        request: linch_core::ProviderRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<linch_core::ProviderStream, linch_core::ProviderError> {
+        let choice = request.tool_choice.clone();
+        self.choices.lock().unwrap().push(choice);
+        self.replay.stream(request, cancel).await
+    }
+}
+
+/// A run's own tool choice survives a crash at any write: every request,
+/// a resumed run's included, carries it, not the agent's.
+#[tokio::test]
+async fn a_resumed_run_keeps_its_own_tool_choice() {
+    let turns = || vec![tool_turn(0, 1, "Read"), text_turn("done")];
+    let options = || {
+        let mut options = RunOptions::new("s1");
+        options.tool_choice = Some(ToolChoice::Auto {});
+        options
+    };
+    let mut spec = spec();
+    spec.tool_choice = Some(ToolChoice::Tool {
+        name: "Read".into(),
+    });
+    fn agent_on<S: RunStore + SessionStore + 'static>(
+        spec: &AgentSpec,
+        provider: Arc<dyn Provider>,
+        stores: Arc<S>,
+    ) -> Agent {
+        let tools = read(&Runs::default());
+        (builder(spec.clone(), provider, tools, Hooks::default(), stores).build()).unwrap()
+    }
+    let clean = Arc::new(Stores::default());
+    let agent = agent_on(&spec, Arc::new(Replay::new(turns())), clean.clone());
+    finish(agent.run("go", options())).await;
+    let writes = clean.log.lock().unwrap().len() as u64;
+    let mut resumed_calls = 0;
+    for n in 1..=writes {
+        let stores = Arc::new(Stores::default());
+        let provider = Arc::new(Recording {
+            replay: Replay::new(turns()),
+            choices: Mutex::new(Vec::new()),
+        });
+        let faulty = Arc::new(Faulty::new(stores.clone(), n, FaultTiming::After));
+        let stream = agent_on(&spec, provider.clone(), faulty).run("go", options());
+        let run_id = stream.run_id().clone();
+        drain(stream).await;
+        let before = provider.choices.lock().unwrap().len();
+        if let Ok(record) = stores.runs.load(NS, &run_id).await
+            && !record.status.is_terminal()
+        {
+            let agent = agent_on(&spec, provider.clone(), stores.clone());
+            finish(agent.resume(run_id, RunOptions::new("s1"))).await;
+        }
+        let choices = provider.choices.lock().unwrap().clone();
+        resumed_calls += choices.len() - before;
+        let auto = Some(ToolChoice::Auto {});
+        assert!(choices.iter().all(|c| *c == auto), "write {n}: {choices:?}");
+    }
+    assert!(resumed_calls > 0, "some resume called the provider");
 }
 
 /// A provider that refuses a forced choice, as DeepSeek does while it

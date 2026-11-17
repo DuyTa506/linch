@@ -64,7 +64,9 @@ pub(super) async fn new_run(
             tools.resolve(name).is_some() || final_tool.as_ref().is_some_and(|t| t.name == name)
         };
         let thinking = agent.spec.thinking.as_ref();
-        if let Some(reason) = tool_choice_problem(&*agent.provider, choice, thinking, offered) {
+        let toolless = tools.definitions().is_empty() && final_tool.is_none();
+        let provider = &*agent.provider;
+        if let Some(reason) = tool_choice_problem(provider, choice, thinking, offered, toolless) {
             return Err(RunError::InvalidToolChoice { run_id, reason });
         }
     }
