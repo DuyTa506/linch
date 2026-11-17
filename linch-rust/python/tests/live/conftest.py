@@ -5,6 +5,15 @@ from __future__ import annotations
 import pytest
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    # Also registered in pyproject.toml; the installed-wheel run has no pyproject.
+    config.addinivalue_line(
+        "markers",
+        "live: drives a real model through the server; skips without "
+        "LINCH_LIVE_VLLM_URL / DEEPSEEK_API_KEY",
+    )
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Skip the live suites unless the run asks for them with `-m live`.
 

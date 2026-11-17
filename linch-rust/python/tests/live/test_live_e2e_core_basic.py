@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import psycopg
 import pytest
 from e2e_core_support import (
     MODEL,
@@ -29,6 +28,8 @@ pytestmark = [pytest.mark.live, needs_e2e]
 
 
 def run_status(namespace: str, run_id: str) -> str:
+    import psycopg
+
     assert PG_DSN
     with psycopg.connect(PG_DSN) as conn:
         row = conn.execute(
