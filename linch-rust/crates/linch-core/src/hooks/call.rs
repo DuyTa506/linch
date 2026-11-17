@@ -41,7 +41,8 @@ pub enum BeforeProviderCallResponse {
     /// Do not send the call, and take another turn instead: `feedback`
     /// goes to the model first, in a system reminder. Python's
     /// `force_continue` at this point; any earlier rewrite is dropped with
-    /// the call. Stops the chain. Bounded only by `max_turns`.
+    /// the call. Stops the chain. Bounded by `max_turns` and by the loop
+    /// guard's `max_idle_turns` (see [`crate::loop_guard`]).
     ForceContinue {
         /// What the model is told before the next turn's call.
         feedback: String,

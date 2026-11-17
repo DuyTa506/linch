@@ -374,8 +374,9 @@
 //! | `post_turn` | `turn, stop_reason` | `{}` |
 //!
 //! A `before_provider_call` `force_continue` skips the call and sends
-//! `feedback` to the model before another turn, bounded only by
-//! `max_turns`; `retry` is refused there. An `after_provider_call` `retry`
+//! `feedback` to the model before another turn, bounded by `max_turns`
+//! and by `spec.loop_guard.max_idle_turns` (25 turns in a row without a
+//! call by default, always on); `retry` is refused there. An `after_provider_call` `retry`
 //! keeps the response, runs none of its tool calls and sends `feedback` to
 //! the model before another turn. At
 //! `stop`, `continue` is bounded only by `max_turns`, and `retry` (Python's

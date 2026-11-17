@@ -384,9 +384,11 @@ async fn the_tenant_caps_hold_through_the_tool() {
         tool_turn("l1", "ListSchedules", json!({})),
         text_turn("done"),
     ];
-    let agent = rpc
-        .open(on_postgres(config(turns, "acme", dir.path()), &db))
-        .await;
+    let mut opened = on_postgres(config(turns, "acme", dir.path()), &db);
+    // The first three calls are refused in a row, which the loop guard's
+    // failure streak would end the run on.
+    opened["spec"]["loop_guard"] = json!({"max_consecutive_failures": 0});
+    let agent = rpc.open(opened).await;
     // The client takes one place of the two.
     rpc.call(
         method::SCHEDULE_CREATE,
