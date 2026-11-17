@@ -156,6 +156,23 @@ pub mod code {
     /// range, or both or neither of `cron` and `interval_ms`.
     /// `data.reason` says which.
     pub const INVALID_SCHEDULE: i64 = -32044;
+    /// Another client drives the workflow (this connection, another
+    /// connection or another server): a workflow has one driver at a time.
+    /// `workflow.start` wrote nothing; try again once that client
+    /// finishes or its connection ends.
+    pub const WORKFLOW_HELD: i64 = -32045;
+    /// The workflow's budget is spent, so no further agent call starts;
+    /// `data` is `{spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`.
+    /// The calls that finished stay journaled.
+    pub const WORKFLOW_BUDGET: i64 = -32046;
+    /// A `workflow.agent` call did not produce a result: its run failed,
+    /// was aborted, timed out, waits for an approval, or the subagent is
+    /// unknown. `data.kind` is `failed`, `aborted`, `timeout`,
+    /// `approval` or `invalid`.
+    pub const WORKFLOW_CALL_FAILED: i64 = -32047;
+    /// This connection drives no workflow with that id: it never sent
+    /// `workflow.start` for it, or already finished it.
+    pub const WORKFLOW_NOT_FOUND: i64 = -32048;
 }
 
 impl ErrorObject {

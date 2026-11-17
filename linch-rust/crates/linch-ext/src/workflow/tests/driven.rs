@@ -231,3 +231,32 @@ async fn the_live_gate_is_asked_only_for_calls_that_run() {
     assert!(matches!(failed, Err(WorkflowError::LimitExceeded { .. })));
     assert_eq!(fixture.provider.requests().len(), 1);
 }
+
+#[tokio::test]
+async fn a_forked_call_continues_the_conversation_of_an_earlier_call() {
+    let fixture = scripted(vec![text_turn("a"), text_turn("b")]);
+    let store = Arc::new(MemoryJournalStore::default());
+    let session = WorkflowSession::open(&options(&store, "w1", &Recorder::default()))
+        .await
+        .unwrap();
+    let wf = session.context();
+    let first = wf
+        .agent_with(
+            &fixture.agent,
+            AgentCall::new("one", "remember the number 7"),
+        )
+        .await
+        .unwrap();
+    let mut forked = AgentCall::new("two", "what was the number?");
+    forked.fork = Some(first.session_id.clone());
+    let second = wf.agent_with(&fixture.agent, forked).await.unwrap();
+    assert_ne!(first.session_id, second.session_id);
+
+    let requests = fixture.provider.requests();
+    let seen = format!("{:?}", requests[1].messages);
+    assert!(
+        seen.contains("remember the number 7"),
+        "the fork has the prefix"
+    );
+    assert!(seen.contains("what was the number?"));
+}

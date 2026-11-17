@@ -40,6 +40,52 @@ pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 /// store holds up to this much.
 pub const DEFAULT_TOOL_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Workflows a tenant drives at once unless its allowlists say otherwise.
+pub const DEFAULT_MAX_WORKFLOWS: usize = 4;
+
+/// Journal records one workflow of a tenant may hold unless its allowlists
+/// say otherwise.
+pub const DEFAULT_MAX_WORKFLOW_RECORDS: u64 = 10_000;
+
+/// Agent calls one workflow of a tenant may have in flight at once unless
+/// its allowlists say otherwise.
+pub const DEFAULT_MAX_WORKFLOW_FAN_OUT: usize = 8;
+
+/// Bytes of one journal record's value unless the allowlists say
+/// otherwise; larger artifacts go in a file, with a hash in the record.
+pub const DEFAULT_MAX_WORKFLOW_RECORD_BYTES: usize = 1024 * 1024;
+
+/// What a tenant's workflows may do (see [`Allowlists::workflow`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkflowCaps {
+    /// Workflows the tenant drives at once, across its connections.
+    pub max_workflows: usize,
+    /// Journal records one workflow may hold, replayed ones included.
+    pub max_records: u64,
+    /// Agent calls one workflow may have in flight at once.
+    pub max_fan_out: usize,
+    /// Bytes of one record's JSON value.
+    pub max_record_bytes: usize,
+    /// The most tokens a workflow's budget may allow; a workflow that
+    /// names no budget gets it. `None`: no ceiling.
+    pub max_tokens: Option<u64>,
+    /// The most USD a workflow's budget may allow, as for `max_tokens`.
+    pub max_cost_usd: Option<f64>,
+}
+
+impl Default for WorkflowCaps {
+    fn default() -> Self {
+        Self {
+            max_workflows: DEFAULT_MAX_WORKFLOWS,
+            max_records: DEFAULT_MAX_WORKFLOW_RECORDS,
+            max_fan_out: DEFAULT_MAX_WORKFLOW_FAN_OUT,
+            max_record_bytes: DEFAULT_MAX_WORKFLOW_RECORD_BYTES,
+            max_tokens: None,
+            max_cost_usd: None,
+        }
+    }
+}
+
 /// What a tenant may ask for, built with the methods below. A new value
 /// allows the memory stores, the permission modes `default` and
 /// `accept_edits`, the live providers at their public endpoints, the
@@ -66,6 +112,7 @@ pub struct Allowlists {
     pub(crate) max_schedules: Option<u64>,
     pub(crate) min_schedule_interval: Duration,
     pub(crate) max_queued_jobs: Option<u64>,
+    pub(crate) workflow: Option<WorkflowCaps>,
     pub(super) memory: bool,
     pub(super) max_memories: Option<u64>,
     pub(super) provider_endpoints: Vec<Endpoint>,
@@ -251,6 +298,7 @@ impl Allowlists {
             max_schedules: None,
             min_schedule_interval: DEFAULT_MIN_SCHEDULE_INTERVAL,
             max_queued_jobs: None,
+            workflow: None,
             memory: false,
             max_memories: None,
             provider_endpoints: Vec::new(),
@@ -435,6 +483,16 @@ impl Allowlists {
     /// fires have no cap.
     pub fn max_queued_jobs(mut self, max: Option<u64>) -> Self {
         self.max_queued_jobs = max;
+        self
+    }
+
+    /// Whether the tenant may drive directed workflows (`workflow.*`), and
+    /// what one may do. `None` (the default) refuses every `workflow.start`
+    /// (`kind: workflow`): each workflow keeps a database connection for
+    /// its hold and runs its agent calls on the server's provider key, so
+    /// the operator names the caps.
+    pub fn workflow(mut self, caps: Option<WorkflowCaps>) -> Self {
+        self.workflow = caps;
         self
     }
 

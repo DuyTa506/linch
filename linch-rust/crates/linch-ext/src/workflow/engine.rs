@@ -174,6 +174,12 @@ impl WorkflowSession {
         })
     }
 
+    /// Free the workflow's hold and wait until another driver can take it.
+    /// Dropping the session frees it too, but maybe a moment later.
+    pub async fn release(self) {
+        self._hold.release().await;
+    }
+
     /// The context the calls run on.
     pub fn context(&self) -> &WorkflowContext {
         &self.context

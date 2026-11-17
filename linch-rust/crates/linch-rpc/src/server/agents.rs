@@ -75,6 +75,7 @@ impl Server {
             agent: opened,
             place,
             background,
+            journals: Arc::default(),
         };
         lock(&self.0.tables).agents.insert(handle.clone(), opened);
         to_value(&AgentOpened {
@@ -92,6 +93,10 @@ impl Server {
             let mut tables = lock(&self.0.tables);
             tables.agent(&params.agent)?;
             if tables.runs.values().any(|run| run.agent == params.agent)
+                || tables
+                    .workflows
+                    .values()
+                    .any(|run| run.agent_handle == params.agent)
                 || tables.evals.contains_key(&params.agent)
             {
                 return Err(ErrorObject::new(

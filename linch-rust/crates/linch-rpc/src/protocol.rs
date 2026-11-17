@@ -16,6 +16,7 @@ mod hook;
 pub mod monitor;
 mod open;
 mod schedule;
+mod workflow;
 
 pub use call::{CancelRequestParams, ToolCallParams, tool_code};
 pub use hook::{
@@ -28,6 +29,14 @@ pub use open::{HostToolSpec, OpenParams};
 pub use schedule::{
     JobEnqueueParams, JobGetParams, JobInfo, JobListParams, Jobs, ScheduleCreateParams,
     ScheduleDeleted, ScheduleIdParams, ScheduleInfo, ScheduleListParams, Schedules,
+};
+
+pub use workflow::{
+    MAX_WORKFLOW_ID_BYTES, WireRetry, WorkflowAgentParams, WorkflowAgentResult, WorkflowBudget,
+    WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams, WorkflowFinishParams,
+    WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted, WorkflowLimits,
+    WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
+    WorkflowStepBeginParams, WorkflowStepBegun, WorkflowStepCompleteParams,
 };
 
 /// Method and notification names.
@@ -70,6 +79,24 @@ pub mod method {
     pub const JOB_GET: &str = "job.get";
     /// List the jobs of the agent's namespace, newest first.
     pub const JOB_LIST: &str = "job.list";
+    /// Start a workflow, or resume it from its journal.
+    pub const WORKFLOW_START: &str = "workflow.start";
+    /// One journaled agent call of a workflow.
+    pub const WORKFLOW_AGENT: &str = "workflow.agent";
+    /// Begin a journaled step whose function runs in the client.
+    pub const WORKFLOW_STEP_BEGIN: &str = "workflow.step.begin";
+    /// Journal the value of a step begun with `workflow.step.begin`.
+    pub const WORKFLOW_STEP_COMPLETE: &str = "workflow.step.complete";
+    /// Park the workflow at a question, or read its journaled answer.
+    pub const WORKFLOW_INTERRUPT: &str = "workflow.interrupt";
+    /// Abort one agent call of a workflow, or all of them.
+    pub const WORKFLOW_CANCEL: &str = "workflow.cancel";
+    /// End the client's drive of a workflow and store its status.
+    pub const WORKFLOW_FINISH: &str = "workflow.finish";
+    /// Read a stored workflow's status.
+    pub const WORKFLOW_STATUS: &str = "workflow.status";
+    /// Notification: one event of a workflow this connection drives.
+    pub const WORKFLOW_EVENT: &str = "workflow.event";
     /// What a provider supports for a model, from a provider config.
     pub const PROVIDER_CAPABILITIES: &str = "provider.capabilities";
     /// The models a provider's server lists.

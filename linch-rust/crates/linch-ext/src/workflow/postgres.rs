@@ -289,6 +289,16 @@ impl JournalStore for PgJournalStore {
 /// The connection that holds a workflow's advisory lock.
 struct PgHold(Option<sqlx::PgConnection>);
 
+#[async_trait]
+impl super::journal::HoldGuard for PgHold {
+    async fn release(mut self: Box<Self>) {
+        use sqlx::Connection as _;
+        if let Some(connection) = self.0.take() {
+            let _ = connection.close().await;
+        }
+    }
+}
+
 impl Drop for PgHold {
     fn drop(&mut self) {
         use sqlx::Connection as _;

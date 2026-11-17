@@ -505,9 +505,10 @@ fn finish(
             let error = outcome.error.unwrap_or_else(|| "no error event".into());
             Err(failed(format!("agent run {run_id} failed: {error}")))
         }
-        None if outcome.suspended => Err(failed(format!(
-            "agent run {run_id} is waiting for approval; approve it, then resume the workflow"
-        ))),
+        None if outcome.suspended => Err(WorkflowError::AwaitingApproval {
+            name: name.to_owned(),
+            run_id: run_id.to_string(),
+        }),
         None => Err(failed(format!("agent run {run_id} ended without a result"))),
     }
 }

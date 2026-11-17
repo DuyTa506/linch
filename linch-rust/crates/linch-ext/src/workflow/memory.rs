@@ -27,6 +27,11 @@ struct Held {
     key: (String, String),
 }
 
+#[async_trait]
+impl super::journal::HoldGuard for Held {
+    async fn release(self: Box<Self>) {}
+}
+
 impl Drop for Held {
     fn drop(&mut self) {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);

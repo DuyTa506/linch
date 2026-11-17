@@ -128,12 +128,29 @@ pub enum JournalStoreError {
 /// hold keeps a second driver from *claiming* a workflow that a live one
 /// still drives.
 #[derive(Default)]
-pub struct WorkflowHold(Option<Box<dyn std::any::Any + Send + Sync>>);
+pub struct WorkflowHold(Option<Box<dyn HoldGuard>>);
+
+/// What a store keeps for a [`WorkflowHold`]: dropping it frees the
+/// workflow, in the background when that takes a round trip;
+/// [`release`](Self::release) frees it and waits.
+#[async_trait]
+pub trait HoldGuard: Send + Sync + 'static {
+    /// Free the workflow and wait until it is free.
+    async fn release(self: Box<Self>);
+}
 
 impl WorkflowHold {
-    /// A hold that releases `guard` when it drops.
-    pub fn new(guard: impl std::any::Any + Send + Sync) -> Self {
+    /// A hold that frees the workflow when `guard` drops or is released.
+    pub fn new(guard: impl HoldGuard) -> Self {
         Self(Some(Box::new(guard)))
+    }
+
+    /// Free the workflow and wait until another holder can take it. A hold
+    /// that is only dropped frees it too, but maybe a moment later.
+    pub async fn release(mut self) {
+        if let Some(guard) = self.0.take() {
+            guard.release().await;
+        }
     }
 }
 

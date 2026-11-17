@@ -41,6 +41,19 @@ pub enum WorkflowError {
         /// The call that did not run.
         label: String,
     },
+    /// An agent call's run stopped for an approval it cannot get itself:
+    /// approve it ([`Agent::approve`](linch_core::Agent::approve), draining
+    /// the stream), then resume the workflow, which reads the finished
+    /// run's text.
+    #[error(
+        "agent run {run_id} of {name} is waiting for approval; approve it, then resume the workflow"
+    )]
+    AwaitingApproval {
+        /// The call's name.
+        name: String,
+        /// The run that waits.
+        run_id: String,
+    },
     /// The workflow's budget is spent, so no further agent call starts. The
     /// calls that finished stay journaled.
     #[error("workflow budget exhausted ({spent_tokens} tokens, ${spent_usd:.4} spent)")]

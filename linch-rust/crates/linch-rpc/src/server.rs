@@ -41,6 +41,7 @@ mod peer;
 mod provider;
 mod run;
 pub(crate) mod schedule;
+mod workflow;
 
 use crate::lines::Head;
 use connection::Outbox;
@@ -63,6 +64,8 @@ struct State {
     /// The tenant a remote client acts for; `None` for a local client,
     /// which is not checked.
     tenant: Option<Arc<Tenant>>,
+    /// The journal of the workflows of agents with memory stores.
+    journal: Arc<linch::ext::workflow::MemoryJournalStore>,
     /// Postgres pools: the tenant's own for a remote client, else the
     /// process's, shared with its other local connections.
     pools: Arc<PgPools>,
@@ -92,6 +95,8 @@ struct Tables {
     parked: HashMap<RunId, Parked>,
     /// Evals running now, by agent handle.
     evals: HashMap<String, usize>,
+    /// Workflows this connection drives, by workflow id.
+    workflows: HashMap<String, Arc<workflow::Driven>>,
 }
 
 /// A suspended run's place, shared with the task that frees it once the
@@ -107,6 +112,8 @@ struct Opened {
     /// What scheduling it needs: its stored definition, or why it cannot
     /// run in the background.
     background: schedule::Background,
+    /// The journal its workflows use, made on the first one.
+    journals: Arc<workflow::Journals>,
 }
 
 impl Opened {
@@ -145,6 +152,7 @@ impl Server {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),
             tenant,
+            journal: Arc::default(),
             pools,
             peer: Peer::new(outbox.clone()),
             outbox,
@@ -167,6 +175,7 @@ impl Server {
         self.0.calls.wait().await;
         self.0.runs.close();
         self.0.runs.wait().await;
+        self.stop_workflows().await;
         self.0.peer.close();
         let agents: Vec<Opened> = (lock(&self.0.tables).agents.drain())
             .map(|(_, agent)| agent)
@@ -317,6 +326,23 @@ impl Server {
             method::RUN_STEER => self.steer_run(parse(params)?).await.map(Reply::Value),
             method::RUN_CANCEL => to_value(&self.cancel(parse(params)?).await?).map(Reply::Value),
             method::RUN_EVENTS => self.events(parse(params)?).await.map(Reply::Value),
+            method::WORKFLOW_START => self.start_workflow(parse(params)?).await.map(Reply::Value),
+            method::WORKFLOW_AGENT => self.workflow_agent(parse(params)?).await.map(Reply::Value),
+            method::WORKFLOW_STEP_BEGIN => self
+                .workflow_step_begin(parse(params)?)
+                .await
+                .map(Reply::Value),
+            method::WORKFLOW_STEP_COMPLETE => self
+                .workflow_step_complete(parse(params)?)
+                .await
+                .map(Reply::Value),
+            method::WORKFLOW_INTERRUPT => self
+                .workflow_interrupt(parse(params)?)
+                .await
+                .map(Reply::Value),
+            method::WORKFLOW_CANCEL => self.workflow_cancel(parse(params)?).map(Reply::Value),
+            method::WORKFLOW_FINISH => self.workflow_finish(parse(params)?).await.map(Reply::Value),
+            method::WORKFLOW_STATUS => self.workflow_status(parse(params)?).await.map(Reply::Value),
             crate::protocol::monitor::EVAL_RUN => {
                 self.eval_run(parse(params)?).await.map(Reply::Value)
             }

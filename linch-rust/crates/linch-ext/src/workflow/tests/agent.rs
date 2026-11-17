@@ -191,11 +191,10 @@ async fn an_agent_call_waiting_for_approval_finishes_after_the_host_approves() {
     let flow = |wf| review(wf, fixture.agent.clone());
     let run = run_id("w4", 0);
     let first = run_workflow(options(&store, "w4", &Recorder::default()), flow).await;
-    let Err(WorkflowError::Step { source, .. }) = first else {
+    let Err(WorkflowError::AwaitingApproval { run_id, .. }) = first else {
         panic!("{first:?}");
     };
-    let message = source.to_string();
-    assert!(message.contains(run.as_str()) && message.contains("approval"));
+    assert_eq!(run_id, run.as_str());
     assert_eq!(closed(&fixture), 0, "the approval resumes on this session");
 
     let answers = HashMap::from([("c1".to_owned(), ApprovalResponse::Allow)]);
