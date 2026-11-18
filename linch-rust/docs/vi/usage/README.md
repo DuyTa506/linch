@@ -78,6 +78,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Server](./server.md) | Chạy `linch-server` cho các tenant từ xa, và `Server.connect`: token, allowlist, những gì admission từ chối, giới hạn, log (`LINCH_LOG`), kiểm tra liveness cho client đã biến mất |
 | [Workflows](./workflows.md) | Một hàm Python điều hướng một chuỗi lời gọi agent đã biết: fan-out, pipeline, step, interrupt; có journal trong Postgres nên một lần crash resume mà không lặp lại các lời gọi đã xong; handoff giữa các step; `run_or_resume` |
 | [Scheduler](./scheduler.md) | Lịch cron và interval theo múi giờ, heartbeat trên một session, run nền một lần, tool lập lịch mà model gọi, trạng thái job, worker chạy chúng |
+| [Benchmark](../benchmarks.md) | Tốc độ, bộ nhớ mỗi session, hành vi khi crash và lỗi, kết quả chịu tải so với Python Linch: cách thiết lập, số liệu kèm lần chạy, phần chưa giải thích hoặc chưa đo |
 
 Sẽ có sau:
 

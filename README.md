@@ -56,8 +56,10 @@ linch-rust docs path                # where the installed docs are
 
 Status: linch-rust is at 0.1 (latest release 0.1.1), so read its
 [changelog](linch-rust/CHANGELOG.md) before each upgrade. The Python-versus-Rust
-benchmark is still being finalized and is not published; the only measurements so far
-are the SDK's own [sizing numbers](linch-rust/docs/usage/embedding.md#sizing-what-was-measured).
+benchmark, with its setup, method and known gaps, is on the
+[benchmarks page](linch-rust/docs/benchmarks.md)
+([Tiếng Việt](linch-rust/docs/vi/benchmarks.md)); the SDK's own sizing numbers are in
+[Embedding](linch-rust/docs/usage/embedding.md#sizing-what-was-measured).
 
 ## Install
 
