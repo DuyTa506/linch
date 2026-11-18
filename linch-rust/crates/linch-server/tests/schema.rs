@@ -76,9 +76,10 @@ async fn a_database_a_newer_release_migrated_is_refused_with_its_own_exit_code()
     let latest = status(&migrated)["store"]["latest"].as_i64().unwrap();
     let admin = PgPoolOptions::new().connect(&db.base).await.unwrap();
     let sql = format!(
-        "INSERT INTO p11d_schema_cli_newer.linch_migrations \
+        "INSERT INTO {}.linch_migrations \
          (version, description, success, checksum, execution_time) \
          VALUES ({}, 'a later release', true, '\\x00', 0)",
+        db.schema(),
         latest + 2
     );
     sqlx::query(AssertSqlSafe(sql))
@@ -128,9 +129,10 @@ async fn a_worker_on_a_database_a_newer_release_migrated_refuses_to_start() {
     // The worker's own table, so the store gate alone would not catch it.
     let latest = status(&migrated)["worker"]["latest"].as_i64().unwrap();
     let sql = format!(
-        "INSERT INTO p11d_schema_cli_worker.linch_worker_migrations \
+        "INSERT INTO {}.linch_worker_migrations \
          (version, description, success, checksum, execution_time) \
          VALUES ({}, 'a later release', true, '\\x00', 0)",
+        db.schema(),
         latest + 1
     );
     sqlx::query(AssertSqlSafe(sql))
