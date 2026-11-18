@@ -265,6 +265,61 @@ quả cùng checkpoint `ToolResults`, một delivery trước lời gọi của 
 checkpoint, nên một sự cố ở bất kỳ lần ghi nào cũng resume với đúng các con số mà run
 đã có và kích hoạt tại cùng điểm (`tests/e2e_loop_guard.rs`).
 
+### Reliability policy
+
+`spec.policy` (`gates.rs`, đừng nhầm với `reliability.rs`, nơi retry các lời gọi
+provider) giữ các prerequisite và completion gate. Khi không đặt, nó là `None` trên
+spec, không có trên wire và không nằm trong contract digest; khi đặt, nó được xác thực
+lúc build (các tool được nêu phải là của chính agent và không phải final tool của nó,
+không có vòng lặp, mọi gate đều đòi một điều gì đó, mọi check đều biên dịch được) và
+được biên dịch một lần thành `Rules`.
+
+- **Prerequisite** được quyết định trong `scheduler::plan_gated`, ngay sau khi tool
+  được phân giải và trước khi xác thực input, chuỗi `pre_tool_use` và permission: runner
+  truyền vào một gate từ chối lời gọi mà các tool nó yêu cầu chưa thành công, và lời gọi
+  trở thành một `PlannedAction::Error`, như lời gọi của một tool không tồn tại. Không
+  hook hay approval callback nào thấy nó, và bản ghi `plan_decisions` của nó là không
+  có, nên một lần re-plan quyết định lại từ log. Event `policy` của mỗi lời gọi bị từ
+  chối được stage ngay sau plan (`runner/gates.rs`), nên nó commit cùng lần ghi
+  `ToolBatch` của batch, và chỉ khi `Gates` chưa giữ nó, khóa theo response (`Gates`
+  đếm các event `assistant`) và `tool_use_id`, nên một lần re-plan sau sự cố không báo
+  nó hai lần còn một id dùng lại ở lượt sau thì có. Thông báo chỉ nêu tên một tool còn
+  thiếu khi `Runner::snapshot`, tập tool được cung cấp ở lượt này, phân giải được nó.
+- **Gate** được kiểm tra trên cả hai đường hoàn tất: `check_answer` cho câu trả lời văn
+  bản (sau `hear_back`) và `final_call` cho final tool, mỗi cái trước schema, các
+  verifier và chuỗi `stop`. Một lần không đạt stage một event `policy` (`correct`) và
+  quay lại qua `send_back`, bước `ToolResults` được giữ lại mà retry của verifier dùng,
+  nên event, notification và checkpoint commit cùng nhau. Quá `max_corrections`, việc
+  dừng là một lần ghi terminal: event `policy` (`stop`), một `Error` tên
+  `PolicyGateError`, và một `Result` failed với `stop_reason` `error`. Một lời gọi final
+  tool đang được quyết định được trả lời bằng feedback như kết quả lỗi của nó, hoặc
+  `Final answer not taken` khi dừng, nên session vẫn được ghép cặp. Input của final
+  tool được xét như văn bản JSON của nó và như từng chuỗi nó chứa (`gates::leaves`),
+  vì văn bản JSON escape những gì một pattern có thể nêu; một bản viết lại của `stop`
+  được xét lại (`gate_rewrite`), và không đạt ở đó là một `policy` stop terminal không
+  có lần sửa. Một `tool_choice` có hiệu lực mọi lượt bị từ chối khi nó đi cùng một
+  policy mà nó khiến không thỏa (`ReliabilityPolicy::choice_problem`), lúc build và lúc
+  bắt đầu run.
+
+State là `Gates` (`gates.rs`), được gộp như `Watch`: một event `assistant` nêu tên các
+lời gọi của response đó (của các tool mà một rule đếm), event user `tool_result` kế tiếp
+đếm những lời gọi đã thành công (không lỗi, không phải `run_in_background`), và các
+event `policy` ghi lại các lần từ chối đã thực hiện và các lần sửa đã dùng. Run đang
+chạy gộp cùng các event này khi stage chúng (`Runner::stage_seen`), và một lần resume
+gộp các event đã lưu (`start.rs`). Các lần thành công đến từ event kết quả của batch,
+bền vững cùng cả batch, nên một lời gọi trong cùng batch không bao giờ được tính cho
+lời gọi khác và một lần re-plan sau sự cố quyết định giống như lần plan đầu.
+
+Một lượt sửa có một lời gọi provider và không chạy tool nào, nên nó không phải lượt rảnh
+(`Watch::idle_trip` đếm từ lần delivery chính cuối cùng) cũng không phải batch lặp hay
+batch lỗi. Một batch mà mọi lời gọi đều bị từ chối là một batch lỗi, và được tính vào
+`max_consecutive_failures`.
+
+`AgentInner` của một subagent nhận các prerequisite và không nhận gate nào
+(`agent/child.rs`). Test: `tests/e2e_policy.rs`, với một sự cố ở mọi lần ghi của một
+run prerequisite, một gate đạt sau một lần sửa, một gate không bao giờ đạt, và cùng các
+trường hợp đó qua một final tool.
+
 ## Barrier và group commit
 
 Một `Journal` giữ các event và checkpoint của một run trong bộ nhớ và ghi chúng bằng
@@ -575,6 +630,7 @@ thái cuối của chúng, dựng `Result` và gọi `Journal::finish` (`runner/
 | Hook fail closed | `failed` | Một hook `stop` fail closed (`end.rs:66-74`) |
 | Giới hạn đầu ra | `failed` | Response không có văn bản hoặc lời gọi tool trọn vẹn (`end.rs:76-90`) |
 | Giới hạn lượt | `failed` | Đạt `max_turns`, kèm một event `loop_guard` (`end.rs:138-154`) |
+| Policy gate | `failed` | Một completion gate vẫn không đạt sau `max_corrections`, kèm một event `policy` (`stop`) và một `PolicyGateError` ([ở trên](#reliability-policy)) |
 | Loop guard | `failed` | Loop guard kích hoạt, kèm một event `loop_guard` và một `LoopGuardError` (`end.rs:156-170`, [ở trên](#loop-guard)) |
 | Budget | `failed` | Budget không cho phép thêm lời gọi nào (`end.rs:110-122`) |
 | Lỗi provider | `failed` | Lời gọi thất bại, và không có retry hay model fallback nào nhận nó (`turn.rs:343-346`, `runner/retry.rs`) |

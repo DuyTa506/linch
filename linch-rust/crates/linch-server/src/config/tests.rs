@@ -266,3 +266,29 @@ fn a_tenant_is_given_the_tool_cache_and_its_bounds_by_the_config() {
     let zero = ServerConfig::from_json(&text(json!({"max_tool_cache_bytes": 0})));
     assert!(matches!(zero, Err(ConfigError::ZeroCap { .. })));
 }
+
+#[test]
+fn a_tenant_may_have_a_required_policy() {
+    let policy = json!({"prerequisites": [{"tool": "Edit", "requires": ["Read"]}],
+                        "gates": [{"name": "tested", "succeeded": ["Test"]}]});
+    let text = json!({"http": "127.0.0.1:1",
+                      "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                           "allow": {"required_policy": policy}}}});
+    let config = ServerConfig::from_json(&text.to_string()).unwrap();
+    let required = (config.tenants["acme"].allow.required_policy.as_ref()).unwrap();
+    assert_eq!(required.prerequisites[0].tool, "Edit");
+    assert_eq!(required.gates[0].name, "tested");
+    assert!(config.build(no_env).is_ok());
+    let typo = json!({"http": "127.0.0.1:1",
+                      "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                           "allow": {"required_policy": {"gate": []}}}}});
+    assert!(ServerConfig::from_json(&typo.to_string()).is_err());
+    let broken = json!({"http": "127.0.0.1:1",
+                        "tenants": {"acme": {"tokens": [{"value": "t"}],
+                                             "allow": {"required_policy": {"gates": [
+                                                 {"name": "g", "check":
+                                                  {"type": "matches", "pattern": "("}}]}}}}});
+    let config = ServerConfig::from_json(&broken.to_string()).unwrap();
+    let error = config.build(no_env).unwrap_err();
+    assert!(error.to_string().contains("required_policy"), "{error}");
+}

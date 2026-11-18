@@ -123,6 +123,16 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             max_tokens: None,
             max_cost_usd: None,
         }),
+        Event::Policy(PolicyEvent {
+            rule: PolicyRule::Prerequisite,
+            action: PolicyAction::Refuse,
+            tool: Some("Edit".into()),
+            tool_use_id: Some("call_1".into()),
+            gates: vec![],
+            missing: vec!["Read".into()],
+            attempt: 0,
+            detail: "Edit needs Read to succeed first".into(),
+        }),
         Event::ProviderRetry(ProviderRetryEvent {
             model: "m".into(),
             retry: 1,

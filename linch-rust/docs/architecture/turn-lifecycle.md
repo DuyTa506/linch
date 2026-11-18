@@ -279,6 +279,66 @@ and the turn comes from the checkpoint, so a crash at any write resumes with
 the counts the run had and trips at the same point
 (`tests/e2e_loop_guard.rs`).
 
+### The reliability policy
+
+`spec.policy` (`gates.rs`, not to be confused with `reliability.rs`, which
+retries provider calls) holds prerequisites and completion gates. Unset, it
+is `None` on the spec, off the wire and out of the contract digest; set, it
+is validated at build (the tools named must be the agent's own and not its
+final tool, no cycle, every gate asks for something, every check compiles)
+and compiled once into `Rules`.
+
+- **Prerequisites** are decided in `scheduler::plan_gated`, right after the
+  tool resolves and before input validation, the `pre_tool_use` chain and
+  permission: the runner passes a gate that refuses a call whose required
+  tools have not succeeded, and the call becomes a `PlannedAction::Error`,
+  as an unknown tool's. No hook or approval callback sees it, and its
+  `plan_decisions` record is none, so a re-plan decides it again from the
+  log. The `policy` event of each refused call is staged right after the
+  plan (`runner/gates.rs`), so it commits with the batch's `ToolBatch`
+  write, and only when `Gates` does not hold it already, keyed by the
+  response (`Gates` counts `assistant` events) and the `tool_use_id`, so a
+  crash re-plan does not report it twice and a reused id on a later turn
+  does. The message names a missing tool only when `Runner::snapshot`,
+  this turn's offered set, resolves it.
+- **Gates** are checked on both completing routes: `check_answer` for a
+  text answer (after `hear_back`) and `final_call` for the final tool, each
+  before the schema, the verifiers and the `stop` chain. A failure stages a
+  `policy` event (`correct`) and goes back through `send_back`, the held
+  `ToolResults` step a verifier's retry uses, so the event, the
+  notification and the checkpoint commit together. Past `max_corrections`
+  the stop is one terminal write: the `policy` event (`stop`), an `Error`
+  named `PolicyGateError`, and a failed `Result` with `stop_reason`
+  `error`. A final tool call being decided on is answered with the
+  feedback as its error result, or `Final answer not taken` on the stop, so
+  the session stays paired. The final tool's input is judged as its JSON
+  text and as each string it holds (`gates::leaves`), since the JSON text
+  escapes what a pattern may name; a `stop` rewrite is judged again
+  (`gate_rewrite`), and a failure there is a terminal `policy` stop
+  without a correction. A `tool_choice` that holds every turn is refused
+  with a policy it defeats (`ReliabilityPolicy::choice_problem`), at build
+  and at run start.
+
+State is `Gates` (`gates.rs`), folded as `Watch` is: an `assistant` event
+names the calls of its response (those of tools a rule counts), the next
+`tool_result` user event counts the ones that succeeded (not an error, not
+`run_in_background`), and `policy` events record the refusals made and the
+corrections spent. The live run folds the same events as it stages them
+(`Runner::stage_seen`), and a resume folds the stored ones
+(`start.rs`). Successes come from the batch's results event, durable with
+the whole batch, so a call in the same batch never counts for another and a
+re-plan after a crash decides as the first plan did.
+
+A correction turn made a provider call and ran no tool, so it is neither an
+idle turn (`Watch::idle_trip` counts from the last primary delivery) nor a
+repeated or failed batch. A batch in which every call was refused is a
+failed batch, and counts toward `max_consecutive_failures`.
+
+A subagent's `AgentInner` takes the prerequisites and none of the gates
+(`agent/child.rs`). Tests: `tests/e2e_policy.rs`, with a crash at every
+write of a prerequisite run, a gate that passes after a correction, a gate
+that never passes, a rewritten answer, and the same through a final tool.
+
 ## Barriers and group commit
 
 A `Journal` holds one run's events and checkpoint in memory and writes them
@@ -608,6 +668,7 @@ child runs, stages their final status, builds the `Result` and calls
 | Hook failed closed | `failed` | A `stop` hook failed closed (`end.rs:66-74`) |
 | Output limit | `failed` | The response held no text or whole tool call (`end.rs:76-90`) |
 | Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:138-154`) |
+| Policy gate | `failed` | A completion gate still failed after `max_corrections`, with a `policy` event (`stop`) and a `PolicyGateError` ([above](#the-reliability-policy)) |
 | Loop guard | `failed` | The loop guard tripped, with a `loop_guard` event and a `LoopGuardError` (`end.rs:156-170`, [above](#the-loop-guard)) |
 | Budget | `failed` | The budget admits no more calls (`end.rs:110-122`) |
 | Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:343-346`, `runner/retry.rs`) |

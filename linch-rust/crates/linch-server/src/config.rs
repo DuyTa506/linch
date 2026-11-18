@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use linch::{ExecutionConfig, PermissionMode, SystemSection};
+use linch::{ExecutionConfig, PermissionMode, ReliabilityPolicy, SystemSection};
 use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
 use serde::Deserialize;
 use thiserror::Error;
@@ -204,6 +204,14 @@ pub struct AllowConfig {
     /// tenant, each `{"name", "text", "order"?, "cacheable"?}`; a tenant
     /// cannot remove or rename them. None when absent.
     pub system_sections: Vec<SystemSection>,
+    /// The reliability policy (`{"prerequisites", "gates",
+    /// "max_corrections"}`, as a spec's `policy`) every agent of the
+    /// tenant carries: its own `policy` may add rules, and the operator's
+    /// stay. It orders the model's calls, counted from the agent's own
+    /// tool results; it does not bind the tenant's host (a host tool, hook
+    /// or cache can answer a required call), so it is not a security
+    /// boundary. None when absent.
+    pub required_policy: Option<ReliabilityPolicy>,
 }
 
 /// The server config could not be read or set up. No message holds a
@@ -380,7 +388,8 @@ impl AllowConfig {
     ///
     /// Raises:
     ///     AccessError: If a URL or DSN is invalid, a root cannot be
-    ///         resolved, or an MCP entry lists a refused variable.
+    ///         resolved, an MCP entry lists a refused variable, or the
+    ///         required policy has a check that cannot be used.
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
@@ -416,6 +425,12 @@ impl AllowConfig {
         }
         if let Some(backends) = &self.execution {
             allow = allow.execution(backends);
+        }
+        if let Some(policy) = &self.required_policy {
+            if let Some(reason) = policy.compile_problem() {
+                return Err(AccessError::RequiredPolicy { reason });
+            }
+            allow = allow.required_policy(Some(policy.clone()));
         }
         Ok(allow)
     }

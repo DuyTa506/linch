@@ -216,6 +216,7 @@ có, trừ `bash`.
 | `verification` | không có | Các kiểm tra mà câu trả lời cuối cùng phải qua, và ngân sách retry mà chúng dùng chung với các callback `stop`, `{"max_retries"?, "verifiers"?}` ([Bảo mật](./security.md#verifiers)) |
 | `truncation_recovery` | không có: câu trả lời bị cắt là câu cuối | Tiếp tục một câu trả lời văn bản bị giới hạn đầu ra cắt, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
 | `loop_guard` | bật: 3 lời gọi giống nhau với cùng kết quả, 10 input giống nhau, 3 batch lỗi, 25 lượt không có lời gọi | Kết thúc một run bị kẹt, `{"max_identical_tool_calls"?, "max_identical_inputs"?, "max_consecutive_failures"?, "max_idle_turns"?}`, là `LoopGuard` của Python ([bên dưới](#loop_guard)) |
+| `policy` | không có: không kiểm tra gì | Các tool chỉ được chạy sau khi những tool khác đã thành công, và điều một câu trả lời cuối cùng phải thỏa, `{"prerequisites"?, "gates"?, "max_corrections"?}` ([bên dưới](#policy)) |
 
 ### System block
 
@@ -356,6 +357,107 @@ một lần poll đã xong bằng metadata `{"poll_done": true}`.
 Giá trị mặc định không được ghi vào spec, nên bỏ `loop_guard` đi thì giữ nguyên
 [hợp đồng của run](#hợp-đồng-của-run) của một agent từ trước khi có guard, và các run
 của nó vẫn resume được; mọi giá trị khác đều đổi hợp đồng.
+
+### `policy`
+
+`spec.policy` nêu điều một run phải làm theo thứ tự: tool nào chỉ được chạy sau khi
+những tool khác đã thành công (prerequisite), và run phải làm xong những gì trước
+khi được kết thúc (completion gate). Khi không đặt, không có gì được kiểm tra.
+
+```python
+spec = {
+    "model": "deepseek-flash",
+    "policy": {
+        "prerequisites": [{"tool": "Edit", "requires": ["Read"]}],
+        "gates": [
+            {"name": "tested", "succeeded": ["Test"]},
+            {"name": "cites", "check": {"type": "matches", "pattern": "\\[\\d+\\]"}},
+        ],
+        "max_corrections": 2,
+    },
+}
+```
+
+**Prerequisite.** Một lời gọi `tool` được trả lời bằng một kết quả lỗi nêu tên thứ cần
+chạy trước, và không chạy, cho tới khi mọi tool trong `requires` đã thành công trong
+một batch tool trước đó của run. Các lời gọi trong cùng một batch không bao giờ mở
+khóa cho nhau. Một lời gọi được tính là thành công khi kết quả của nó không phải lỗi:
+một lời gọi bị ngắt, một lời gọi bị từ chối và một lần khởi động `run_in_background`
+(chỉ xác nhận) thì không. Việc từ chối diễn ra trước các callback `pre_tool_use` của
+lời gọi và trước permission, nên một lời gọi bị từ chối không hỏi ai phê duyệt. Run
+ghi một event `policy` (`rule` là `prerequisite`, `action` là `refuse`) một lần cho
+mỗi lời gọi bị từ chối (tính theo response và `tool_use_id`, nên một provider dùng lại
+một id ở lượt sau vẫn có event mới). Thông báo gửi model chỉ nêu tên các tool cần chạy
+trước khi run đang cung cấp chúng ở lượt này; với một tool bị `allowed_tools` của skill
+ẩn đi, hoặc bị tool search hoãn, nó chỉ nói rằng một prerequisite chưa thành công
+(`missing` của event vẫn liệt kê chúng).
+
+Một prerequisite là công cụ giúp model làm đúng thứ tự, **không phải ranh giới bảo
+mật**. Nó bảo vệ các lời gọi của một run; một tool có thể khởi động công việc khác
+(`Bash`, một subagent) làm được điều mà một tool bị từ chối sẽ làm. Một lời gọi được
+tính chỉ theo tên tool và kết quả đã render của nó: một host tool của client cùng tên,
+một callback `pre_tool_use` trả lời lời gọi, một callback `post_tool_use` thay kết quả
+và một cache hit đều được tính là thành công. Hãy giữ
+[permission và sandbox](./security.md) cho bảo mật. `ToolPrerequisite` của Python
+Linch là cùng một quy tắc; ở đây các lời gọi của chính một subagent nhận các
+prerequisite của parent trong run của nó.
+
+Một batch bị từ chối thất bại như mọi batch khác: [loop guard](#loop_guard) đếm một
+batch mà mọi lời gọi đều bị từ chối là một batch lỗi, nên một model bỏ qua thông báo
+ba lần liên tiếp sẽ làm run kết thúc.
+
+**Gate.** Một câu trả lời cuối cùng (văn bản, hoặc input của final tool) được kiểm
+tra trước output schema, các verifier và các callback `stop`. Một gate được thỏa khi
+mỗi tool trong `succeeded` đã thành công `min_calls` lần (mặc định 1) trong run, và
+câu trả lời qua được `check`, một trong các [kiểm tra của verifier](./security.md#verifiers).
+Khi một gate không đạt, run tiếp tục: câu trả lời được gửi lại cho model dưới dạng một
+system reminder nêu những gì còn thiếu, một lượt sửa cho lần không đạt đó, trả lời
+cùng lúc mọi gate không đạt. Câu mặc định của một gate `check` chỉ nói câu trả lời
+không thỏa yêu cầu: nó không hiện pattern hay keyword, vốn thuộc về operator. Hãy đặt
+`feedback` để nói với model cần sửa gì; nó được hiện nguyên văn. Một lần sửa là một event
+`policy` (`rule` là `completion`, `action` là `correct`, `attempt` là số lần sửa đã
+dùng). Khi `max_corrections` (2 nếu vắng, tính chung cho mọi gate) đã dùng hết, lần
+không đạt kế tiếp kết thúc run `failed`: một event `policy` có `action` là `stop`, một
+`error` tên `PolicyGateError` và một `result` có subtype `error` mang câu trả lời cuối
+cùng. Một gate không bao giờ cho câu trả lời đi qua, khác với một verifier, thứ chấp
+nhận câu trả lời khi các retry của nó đã hết. `max_corrections: 0` kết thúc run ở lần
+không đạt đầu tiên.
+
+Input của final tool được xét như văn bản JSON của nó và như từng chuỗi nó chứa (key và
+value, ở mọi độ sâu), vì văn bản JSON escape những gì một pattern có thể nêu: một check
+`forbids` không đạt khi nó khớp bất kỳ cái nào, một check `matches` hay `keywords` khi
+nó không đạt trên cái nào. Khi một callback `stop` viết lại câu trả lời, các gate xét
+lại bản viết lại; không đạt ở đó kết thúc run ngay với một event `policy` stop và không
+có lần sửa nào, vì hook đã viết lại một lần sẽ viết lại cả câu trả lời kế tiếp.
+
+Một `tool_choice` có hiệu lực mọi lượt không đi cùng được với các rule mà nó khiến không
+bao giờ thỏa: `none` hoặc một tool được nêu tên với prerequisite hay gate cần tool
+`succeeded`, `required` hoặc một tool được nêu tên với bất kỳ rule nào trừ khi run có
+final tool để kết thúc (`required` cùng final tool thì được; chính final tool chỉ với
+các gate kiểm tra câu trả lời). `agent.open` từ chối agent đó, và một run mang
+`tool_choice` riêng thất bại với `InvalidToolChoice` trước khi ghi gì.
+
+Một lượt sửa có một lời gọi provider và không chạy tool nào, nên loop guard không đếm
+nó là lượt rảnh hay lượt lặp; `max_turns` và budget giới hạn nó như mọi lượt khác. Gate
+không được kiểm tra trên các run kết thúc theo cách khác (giới hạn lượt, budget, một
+lỗi).
+
+`agent.open` từ chối một policy không thể chạy (`OpenError`, code -32011): một tool mà
+agent không có, final tool (lời gọi của nó không bao giờ chạy, nên không bao giờ có thể
+thành công), một vòng lặp prerequisite, hai mục cho cùng một tool, một gate không có cả
+`succeeded` lẫn `check`, một tên gate lặp hoặc trống, hoặc một `check` không biên dịch
+được. `policy: {}` được phép và không làm gì, nhưng nó được đặt, nên nó đổi hợp đồng.
+
+Không có gì được checkpoint. Các lần thành công, các lần từ chối đã thực hiện và các
+lần sửa đã dùng được đọc lại từ log của run khi resume, nên một sự cố ở bất kỳ lần ghi
+nào cũng không thể bỏ qua một gate, dùng một lần sửa hai lần hay báo một lần từ chối hai
+lần. Các run của một subagent nhận các prerequisite, không nhận gate (nó trả lời parent
+bằng văn bản, với các tool riêng của nó). Policy là một phần của
+[hợp đồng của run](#hợp-đồng-của-run): bỏ nó đi thì giữ nguyên hợp đồng của một agent
+từ trước khi có policy, và mọi policy đều đổi hợp đồng. Một tenant từ xa được thêm vào
+policy mà operator của nó yêu cầu; các rule đó được giữ, nhưng chúng ràng buộc thứ tự
+lời gọi của model, không ràng buộc host của tenant
+([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)).
 
 ### `budget`
 

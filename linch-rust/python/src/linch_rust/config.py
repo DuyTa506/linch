@@ -822,6 +822,93 @@ class Verification(TypedDict, total=False):
     verifiers: Sequence[Verifier]
 
 
+class PolicyPrerequisite(TypedDict):
+    """A tool that may only run after others succeeded.
+
+    Attributes:
+        tool: The tool that is held back.
+        requires: Tools that must each have succeeded in an earlier tool
+            batch of the run; at least one.
+    """
+
+    tool: str
+    requires: Sequence[str]
+
+
+class PolicyGate(TypedDict, total=False):
+    """One condition a final answer must meet before the run may end.
+
+    Set `succeeded`, `check`, or both.
+
+    Attributes:
+        name: Names the gate in `PolicyEvent`s; unique. Required.
+        succeeded: Tools that must have succeeded `min_calls` times in the
+            run.
+        min_calls: How many successful calls each of `succeeded` needs.
+            1 when absent.
+        check: A `VerifierCheck` the answer text must pass (for a final
+            tool, its input as JSON text and as each string it holds).
+        feedback: What the model is told when the gate fails; a sentence
+            naming the missing calls, or saying only that the check is not
+            met (never its pattern or keywords) when absent.
+    """
+
+    name: Required[str]
+    succeeded: Sequence[str]
+    min_calls: int
+    check: VerifierCheck
+    feedback: str
+
+
+class Policy(TypedDict, total=False):
+    """Tool order and completion requirements, as `spec.policy`.
+
+    Python Linch's `ReliabilityPolicy` prerequisites and completion gate.
+    Unset, nothing is checked. Set, even empty, it is part of the run
+    contract.
+
+    A **prerequisite** answers a call with an error result naming what to
+    run first, without running the tool, its `pre_tool_use` hooks or the
+    permission system (a `PolicyEvent` with `action` `refuse`). Calls of
+    one batch never unlock each other, and only a successful foreground
+    call counts (not an error, an interrupted call or a `run_in_background`
+    start). It is an ordering aid for the model, not a security boundary:
+    a call counts by its tool name and result alone, so a host tool of that
+    name, a hook that answers the call or a cache hit counts too. Keep
+    permissions and the sandbox for security. A subagent's own calls take
+    the prerequisites too.
+
+    A **gate** holds a final answer (text, or the final tool's input) back
+    until the run did what it must: the answer goes back to the model as
+    one correction turn (`action` `correct`), up to `max_corrections` in
+    the run, then the run ends failed with a `PolicyGateError` (`action`
+    `stop`). Unlike a verifier, a gate never accepts the answer once its
+    corrections are spent. A `tool_choice` that holds every turn and keeps
+    the rules from being met (`none`, a named tool, or `required` without a
+    final tool) is refused with the policy. A correction is neither an idle nor a repeated
+    turn for the loop guard. A subagent's runs do not take the gates. The
+    tools named must be the agent's own, and not its final tool, or the
+    open is refused.
+
+    Attributes:
+        prerequisites: See `PolicyPrerequisite`; at most one entry per
+            tool, no cycles.
+        gates: See `PolicyGate`; all are checked together and one
+            correction answers every gate that fails.
+        max_corrections: Correction turns the gates may spend in one run, in
+            all. 2 when absent; 0 ends the run at the first failure. A
+            remote tenant may ask for at most 16, and its policy is added to
+            the one its operator requires (`required_policy`), never
+            replacing it; a tenant that leaves it out keeps the operator's.
+            The operator's policy orders the model's calls, not the
+            tenant's host.
+    """
+
+    prerequisites: Sequence[PolicyPrerequisite]
+    gates: Sequence[PolicyGate]
+    max_corrections: int
+
+
 class Permissions(TypedDict, total=False):
     """Which tool calls run, ask or are denied, as `AgentConfig.permissions`.
 
@@ -870,8 +957,9 @@ class AgentConfig(TypedDict, total=False):
             `redaction` (see `Redaction`), a `verification` (see
             `Verification`), a `loop_guard` (see `LoopGuard`), `system`
             sections (see `System`), a `context_budget` (see
-            `ContextBudget`), a `tool_retry` (see `ToolRetry`) and a
-            `tool_cache` (see `ToolCache`) go here too.
+            `ContextBudget`), a `tool_retry` (see `ToolRetry`), a
+            `tool_cache` (see `ToolCache`) and a `policy`, the tool order and
+            completion gates (see `Policy`), go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

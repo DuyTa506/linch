@@ -19,6 +19,7 @@ use crate::events::kinds::{
     InitEvent, SkillsLoadedEvent, ToolCallEndEvent, ToolCallStartEvent, UserEvent, UserEventSubtype,
 };
 use crate::events::{Envelope, Event};
+use crate::gates::Gates;
 use crate::hooks::ApprovalResponse;
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError, Recovery, ToolRecovery, reconcile};
@@ -67,6 +68,11 @@ pub(super) async fn new_run(
         let toolless = tools.definitions().is_empty() && final_tool.is_none();
         let provider = &*agent.provider;
         if let Some(reason) = tool_choice_problem(provider, choice, thinking, offered, toolless) {
+            return Err(RunError::InvalidToolChoice { run_id, reason });
+        }
+        let named = final_tool.as_ref().map(|tool| tool.name.as_str());
+        let policy = agent.spec.policy.as_ref();
+        if let Some(reason) = policy.and_then(|policy| policy.choice_problem(choice, named)) {
             return Err(RunError::InvalidToolChoice { run_id, reason });
         }
     }
@@ -507,6 +513,7 @@ pub(super) async fn continue_run(
     runner.verify_retries = crate::verification::retries_spent(&events);
     let polls = runner.agent.snapshot().polls();
     runner.watch = Watch::of(&runner.agent.spec.loop_guard, polls, &events);
+    runner.gates = (runner.agent.gates.clone()).map(|rules| Gates::of(rules, &events));
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
     if let Some(truncation) = &runner.agent.spec.truncation_recovery {

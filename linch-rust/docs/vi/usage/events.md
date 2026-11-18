@@ -329,6 +329,16 @@ retry, và lời gọi chạy lại sau một khoảng chờ: `tool_use_id`, `to
 lỗi, hoặc `timeout`), `error` (thông điệp của lần thử thất bại, đã qua
 `spec.redaction` khi nó bao phủ kết quả tool rồi cắt còn 512 byte) và
 `delay_ms`. Nó được ghi bền trước khi chờ.
+### `PolicyEvent` (`policy`)
+
+[Reliability policy](./agent.md#policy) đã quyết định. `rule` là `prerequisite` hoặc
+`completion`. Một lần từ chối prerequisite (`action` là `refuse`) nêu `tool` và
+`tool_use_id` của lời gọi đã được trả lời bằng một lỗi và không chạy, cùng các tool
+trong `missing` chưa thành công. Một quyết định completion nêu các `gates` mà câu trả lời
+cuối cùng không đạt và các tool chúng còn cần (`missing`): `correct` gửi câu trả lời
+lại cho model cho một lượt nữa, với `attempt` là số lần sửa đã dùng cho tới nay, và
+`stop` kết thúc run `failed` (một `error` tên `PolicyGateError` và một `result` có
+subtype `error` theo sau). `detail` là điều model đã được nói.
 
 ### `ProviderRetryEvent` (`provider_retry`)
 

@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 use super::spec::{self, AgentSpec};
 use super::{Agent, AgentInner, BuildError, Pricing, SessionClose, Versions, tool_choice_problem};
 use crate::coordination::{Mailbox, SendMessageTool};
+use crate::gates::Rules;
 use crate::hooks::Hooks;
 use crate::ids::SessionId;
 use crate::json::JsonObject;
@@ -427,6 +428,25 @@ impl AgentBuilder {
                 return Err(BuildError::Invalid(problem));
             }
         }
+        let gates = match &self.spec.policy {
+            Some(policy) => {
+                let offered = |name: &str| {
+                    registered(name) || final_tool.as_ref().is_some_and(|t| t.name == name)
+                };
+                let named = final_tool.as_ref().map(|tool| tool.name.as_str());
+                if let Some(problem) = policy.problem(offered, named) {
+                    return Err(BuildError::Invalid(problem));
+                }
+                let choice = self.spec.tool_choice.as_ref();
+                if let Some(problem) = choice.and_then(|c| policy.choice_problem(c, named)) {
+                    return Err(BuildError::Invalid(problem));
+                }
+                Some(Arc::new(
+                    Rules::new(policy.clone()).map_err(BuildError::Invalid)?,
+                ))
+            }
+            None => None,
+        };
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
         let tool_cache = self.spec.tool_cache.clone().map(|config| {
@@ -447,6 +467,7 @@ impl AgentBuilder {
             final_tool,
             redactor,
             verifiers,
+            gates,
             tools: self.tools,
             filter: None,
             hooks: self.hooks,

@@ -16,6 +16,7 @@ use crate::ask_user::AskUserAnswer;
 use crate::canonical::Digest;
 use crate::coordination::Mailbox;
 use crate::events::{Envelope, Persistence};
+use crate::gates::Rules;
 use crate::hooks::{ApprovalResponse, Hooks};
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
@@ -170,6 +171,8 @@ pub(crate) struct AgentInner {
     pub(crate) redactor: Option<Arc<Redactor>>,
     /// The spec's `verification`, compiled; `None` without one.
     pub(crate) verifiers: Option<Arc<Verifiers>>,
+    /// The spec's `policy`, compiled; `None` without one.
+    pub(crate) gates: Option<Arc<Rules>>,
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) tools: Arc<ToolRegistry>,
     /// The tools a subagent's run sees of `tools`; `None` for all.

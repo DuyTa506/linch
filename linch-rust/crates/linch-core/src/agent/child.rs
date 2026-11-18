@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::spec::contract_digest;
 use super::{Agent, AgentInner, BuildError, RunOptions};
+use crate::gates::Rules;
 use crate::ids::RunId;
 use crate::message::SystemBlock;
 use crate::registry::ToolSnapshot;
@@ -132,6 +133,17 @@ impl AgentInner {
         spec.verification = None;
         spec.tool_choice = None;
         spec.final_tool_name = None;
+        // Its prerequisites hold over its own calls; its gates are the
+        // parent's answer to meet, with tools the child may not have.
+        spec.policy = (spec.policy.as_ref())
+            .map(|policy| policy.for_child())
+            .filter(|policy| !policy.prerequisites.is_empty());
+        let gates = match &spec.policy {
+            Some(policy) => Some(Arc::new(
+                Rules::new(policy.clone()).map_err(BuildError::Invalid)?,
+            )),
+            None => None,
+        };
         features.remove(FINAL_TOOL_FEATURE);
         let contract = contract_digest(&spec, &tools.contract_tools(), hooks, &features)?;
         Ok(Self {
@@ -140,6 +152,7 @@ impl AgentInner {
             final_tool: None,
             redactor: self.redactor.clone(),
             verifiers: None,
+            gates,
             provider: Arc::clone(&self.provider),
             tools: Arc::clone(&self.tools),
             filter: Some(filter),

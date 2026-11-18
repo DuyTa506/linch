@@ -339,6 +339,30 @@ class VerificationEvent:
 
 
 @dataclass(frozen=True)
+class PolicyEvent:
+    """The reliability policy (`spec.policy`, see `Policy`) decided.
+
+    `rule` is `prerequisite` (a call of `tool`, `tool_use_id`, was answered
+    with an error and not run, because the tools in `missing` have not
+    succeeded yet; `action` is `refuse`) or `completion` (a final answer
+    failed the `gates`; `action` is `correct` while the run's corrections
+    last, then `stop`, which ends the run failed with an `ErrorEvent` named
+    `PolicyGateError`). `attempt` counts the corrections spent once this
+    event is counted. `detail` is what the model was told.
+    """
+
+    type: ClassVar[str] = "policy"
+    rule: str
+    action: str
+    detail: str
+    tool: str | None = None
+    tool_use_id: str | None = None
+    gates: list[str] = field(default_factory=list[str])
+    missing: list[str] = field(default_factory=list[str])
+    attempt: int = 0
+
+
+@dataclass(frozen=True)
 class SkillsLoadedEvent:
     """The skills the model can load: one descriptor dict per skill."""
 
@@ -479,6 +503,7 @@ Event = (
     | ModelFallbackEvent
     | PromptCacheAdvisoryEvent
     | VerificationEvent
+    | PolicyEvent
     | SkillsLoadedEvent
     | SkillInvokedEvent
     | SkillCompletedEvent
@@ -514,6 +539,7 @@ _KINDS: dict[str, type[Any]] = {
         ModelFallbackEvent,
         PromptCacheAdvisoryEvent,
         VerificationEvent,
+        PolicyEvent,
         SkillsLoadedEvent,
         SkillInvokedEvent,
         SkillCompletedEvent,

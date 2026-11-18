@@ -37,6 +37,7 @@ impl Event {
             Event::ChildRunStatus(_) => "child_run_status",
             Event::Workflow(_) => "workflow",
             Event::Verification(_) => "verification",
+            Event::Policy(_) => "policy",
             Event::Hook(_) => "hook",
             Event::Error(_) => "error",
             Event::Result(_) => "result",

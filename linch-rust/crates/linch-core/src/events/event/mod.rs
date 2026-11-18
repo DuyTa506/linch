@@ -98,6 +98,9 @@ pub enum Event {
     Workflow(WorkflowEvent),
     /// A closed-loop gate acted on a would-be-final answer.
     Verification(VerificationEvent),
+    /// The reliability policy refused a tool call, corrected a final
+    /// answer, or ended the run on a gate.
+    Policy(PolicyEvent),
     /// One intercept-hook call. Stream-only.
     Hook(HookEvent),
     /// A terminal or recoverable error payload.
@@ -237,6 +240,7 @@ impl Event {
             "child_run_status" => Ok(Event::ChildRunStatus(payload("child_run_status", obj)?)),
             "workflow" => Ok(Event::Workflow(payload("workflow", obj)?)),
             "verification" => Ok(Event::Verification(payload("verification", obj)?)),
+            "policy" => Ok(Event::Policy(payload("policy", obj)?)),
             "hook" => Ok(Event::Hook(payload("hook", obj)?)),
             "error" => Ok(Event::Error(payload("error", obj)?)),
             "result" => Ok(Event::Result(payload("result", obj)?)),
@@ -321,6 +325,7 @@ impl Event {
             Event::ChildRunStatus(_) => Both,
             Event::Workflow(_) => Both,
             Event::Verification(_) => Both,
+            Event::Policy(_) => Both,
             Event::Error(_) => Both,
             Event::Result(_) => Both,
             Event::Ignorable(_) => Both,
@@ -386,6 +391,7 @@ impl Serialize for Event {
             Event::ChildRunStatus(e) => tagged("child_run_status", e).serialize(serializer),
             Event::Workflow(e) => tagged("workflow", e).serialize(serializer),
             Event::Verification(e) => tagged("verification", e).serialize(serializer),
+            Event::Policy(e) => tagged("policy", e).serialize(serializer),
             Event::Hook(e) => tagged("hook", e).serialize(serializer),
             Event::Error(e) => tagged("error", e).serialize(serializer),
             Event::Result(e) => tagged("result", e).serialize(serializer),

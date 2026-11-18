@@ -327,6 +327,17 @@ retries, and the call runs again after a wait: `tool_use_id`, `tool_name`,
 error's `code`, or `timeout`), `error` (the failed attempt's message, run
 through `spec.redaction` when it covers tool results and then cut to 512
 bytes) and `delay_ms`. It is durable before the wait.
+### `PolicyEvent` (`policy`)
+
+The [reliability policy](./agent.md#policy) decided. `rule` is
+`prerequisite` or `completion`. A prerequisite refusal (`action` `refuse`)
+names the `tool` and `tool_use_id` of the call that was answered with an
+error and not run, and the tools in `missing` that have not succeeded yet.
+A completion decision names the `gates` the final answer failed and the
+tools they still need (`missing`): `correct` sends the answer back to the
+model for another turn, with `attempt` the corrections spent so far, and
+`stop` ends the run `failed` (an `error` named `PolicyGateError` and a
+`result` of subtype `error` follow). `detail` is what the model was told.
 
 ### `ProviderRetryEvent` (`provider_retry`)
 

@@ -21,6 +21,8 @@ from linch_rust import (
     LoopGuardEvent,
     ModelFallbackEvent,
     OpenError,
+    Policy,
+    PolicyEvent,
     Profile,
     ProviderRetry,
     ProviderRetryEvent,
@@ -223,6 +225,85 @@ def test_the_typed_loop_guard_names_every_field_the_server_reads() -> None:
     body = source.split("pub struct LoopGuard {", 1)[1].split("\n}", 1)[0]
     fields = set(re.findall(r"^\s*pub (\w+):", body, re.MULTILINE))
     assert fields == LoopGuard.__optional_keys__
+
+
+POLICY_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/gates.rs"
+POLICY: Policy = {
+    "prerequisites": [{"tool": "update", "requires": ["lookup"]}],
+    "gates": [{"name": "looked-up", "succeeded": ["lookup"]}],
+}
+
+
+async def policy_run(turns: list[dict[str, Any]], policy: Policy) -> list[Envelope]:
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        """Look a value up."""
+        return "found"
+
+    @tool(scope="read")
+    async def update(q: str) -> str:
+        """Update a value."""
+        return "updated"
+
+    cfg = config(turns)
+    cfg["spec"] = {"model": MODEL, "policy": policy}
+    async with Server() as server:
+        agent = await server.open_agent(cfg, tools=[lookup, update])
+        return [envelope async for envelope in await agent.run("s1", "go")]
+
+
+async def test_a_policy_refuses_a_call_and_corrects_an_answer() -> None:
+    turns = [
+        tool_turn("c1", "update", {"q": "a"}),
+        text_turn("done"),
+        tool_turn("c2", "lookup", {"q": "a"}),
+        text_turn("really done"),
+    ]
+    envelopes = await policy_run(turns, POLICY)
+
+    events = [e.event for e in envelopes if isinstance(e.event, PolicyEvent)]
+    assert [(e.rule, e.action) for e in events] == [
+        ("prerequisite", "refuse"),
+        ("completion", "correct"),
+    ]
+    assert (events[0].tool, events[0].tool_use_id, events[0].missing) == (
+        "update",
+        "c1",
+        ["lookup"],
+    )
+    assert (events[1].gates, events[1].attempt) == (["looked-up"], 1)
+    assert final(envelopes).final_text == "really done"
+
+
+async def test_a_gate_that_never_passes_ends_the_run_failed() -> None:
+    envelopes = await policy_run(
+        [text_turn("done")] * 5, {"gates": [{"name": "looked-up", "succeeded": ["lookup"]}]}
+    )
+
+    actions = [e.event.action for e in envelopes if isinstance(e.event, PolicyEvent)]
+    assert actions == ["correct", "correct", "stop"]
+    [error] = [e.event for e in envelopes if isinstance(e.event, ErrorEvent)]
+    assert error.error["name"] == "PolicyGateError"
+    assert (final(envelopes).subtype, final(envelopes).stop_reason) == ("error", "error")
+
+
+async def test_a_policy_that_cannot_run_fails_the_open() -> None:
+    cfg = config([])
+    cfg["spec"] = {
+        "model": MODEL,
+        "policy": {"prerequisites": [{"tool": "update", "requires": ["nothing"]}]},
+    }
+    async with Server() as server:
+        with pytest.raises(OpenError):
+            await server.open_agent(cfg)
+
+
+@pytest.mark.source
+def test_the_typed_policy_names_every_field_the_server_reads() -> None:
+    source = POLICY_RS.read_text(encoding="utf-8")
+    body = source.split("pub struct ReliabilityPolicy {", 1)[1].split("\n}", 1)[0]
+    fields = set(re.findall(r"^\s*pub (\w+):", body, re.MULTILINE))
+    assert fields == Policy.__optional_keys__
 
 
 @pytest.mark.source
