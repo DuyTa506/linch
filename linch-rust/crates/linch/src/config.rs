@@ -463,7 +463,7 @@ impl ProviderConfig {
         }
     }
 
-    /// The body field this provider takes a [`RequestConfig::cache_salt`]
+    /// The body field this provider takes a `RequestConfig::cache_salt`
     /// in, or `None` when its vendor has no field for one: `cache_salt` for
     /// `vllm`, `prompt_cache_key` for `openai-chat` and `openai-responses`.
     /// `deepseek`, `anthropic`, `gemini`, `sglang` and `llamacpp` have none,
