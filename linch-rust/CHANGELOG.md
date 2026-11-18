@@ -56,6 +56,7 @@ The entries below are condensed to one line per area. The full text of each item
   - A binary older than this one cannot resume a run of an agent with `spec.compaction.micro` that crashed during a micro-compaction (the `cleared` checkpoint phase), nor read the events of a run that made a forced compaction (`forced: true`; events refuse unknown fields). Roll back only once those runs have ended.
   - A binary older than this one refuses to resume a run that crashed between such a receipt and its response (an accepted receipt with no `assistant` event, under `provider_pending`): it fails with `MissingAssistant` and resumes nothing wrongly, but an older `linch-worker` marks such a run `failed` (it fails a run on any reconcile error). Roll back only once those runs have been resumed or ended.
   - A workspace agent now also has `BashOutput` and `BashKill` (`bash: false` leaves all three out), so its run contract changes: a run started under an older binary cannot be resumed.
+- Docs: `security.md` (English and Vietnamese) describes the trust boundary (the host authenticates users and asserts principals; any connection of a tenant can act on that tenant's runs by id), untrusted tool, MCP and subagent output, overload behaviour (`max_runs`, provider gate, HTTP and pool timeouts, no run deadline) and telemetry content capture (off by default; tool call input is never scrubbed). No behaviour change.
 
 ### Upgrading
 
