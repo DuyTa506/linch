@@ -67,7 +67,8 @@ Server ─────── one linch-server child process, or a connection to 
 | [Troubleshooting](./troubleshooting.md) | Errors from the server binary to runs and tools, with causes and fixes |
 | [Skills](./skills.md) | The `Skill` tool, the built-in `verify` skill, skills in `config_dir/skills` |
 | [Subagents](./subagents.md) | The `Subagent` tool: foreground and background workers, continue, stop, fork, the mailbox |
-| [Tasks](./tasks.md) | The session task tools |
+| [Tasks](./tasks.md) | The session task tools, and the task ledger shared by sessions |
+| [Long-running agents](./long-running.md) | What differs for an agent that runs for hours: goal contract, task ledger, artifacts, steering, an independent done check, the harness pattern |
 | [Deep agent](./deep-agent.md) | The `deep_agent` preset and its profiles |
 | [Profiles](./profiles.md) | Versioned domain profiles for an agent's runs |
 | [Observability](./observability.md) | OpenTelemetry spans and metrics from the client |

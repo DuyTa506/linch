@@ -44,7 +44,7 @@
 //! - `agent.open`: the `namespace` is the tenant's name or starts with
 //!   `<tenant>/`. Stores are scoped by namespace, so on a shared Postgres
 //!   another tenant's runs and sessions look missing (`-32021`).
-//! - `run.start`, `run.resume`, `run.approve`, `run.answer`, `schedule.create`,
+//! - `run.start`, `run.resume`, `run.approve`, `run.answer`, `run.steer`, `schedule.create`,
 //!   `job.enqueue`: a `principal`, if given, has
 //!   the tenant's name as its `tenant`. The server does not fill one in.
 //! - `agent.open`: the config passes the tenant's [`Allowlists`]:
@@ -264,6 +264,23 @@
 //! run's outcome, errors included, then arrives as notifications. A
 //! `run_id` the connection already drives is refused with `-32002`.
 //!
+//! **`run.steer`** `{agent, run_id, text, id?, principal?}`
+//! ([`SteerParams`](protocol::SteerParams)) sends text to a run that is
+//! going on or waits for an approval or an answer, answered `{queued: true,
+//! id}` ([`Steered`](protocol::Steered)) once the steer is in the run's
+//! journal (a run this process drives writes it at its next step; a
+//! suspended run is claimed for the write and stays suspended). The run
+//! logs it as a user message (`subtype` `alignment`, `steer_id`) after the
+//! tool results of the current batch and before its next model call, or
+//! before it would end on a text answer, which then takes another turn;
+//! `user_prompt_submit` callbacks see it with `source` `"steer"`. `id`
+//! names the steer: sent again, it is taken once. A run another process
+//! drives is `-32033`, a finished one `-32026`, an unknown one (or one of
+//! another tenant) `-32021`, a blank or over-long (16 KiB) text or an
+//! unusable id, or an idle run (queued, or running with no server driving it:
+//! resume it first) `-32035`, and a run with 16 unread steers `-32005` (`kind`
+//! `steers`). It is not routed to another server.
+//!
 //! **`run.cancel`** `{run_id, agent?}` ([`CancelParams`](protocol::CancelParams))
 //! aborts a run the connection drives: it ends with a `result` envelope of
 //! subtype `aborted`. With `agent`, a run the connection does not drive
@@ -389,7 +406,7 @@
 //! | `permission_request` | `tool_use_id, tool_name, input, reason?, principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
 //! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}`, `{"action": "mutate", "content"?, "is_error"?}` |
 //! | `tool_execute` | `tool_use_id, tool_name, input, attempt, phase, token, result?` | `phase` `before`: `{"action": "next", "after"?}` or `{"action": "veto", "result"}`; `phase` `after`: `{"action": "continue"}` or `{"action": "replace", "result"}` |
-//! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
+//! | `user_prompt_submit` | `content` (content blocks), and `source` set to `"steer"` only for a `run.steer` text | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 //! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning; the blocks count against `spec.context_budget` when set, by the callback's `policy_id`, and the event's `budget` reports what was dropped |
 //! | `before_provider_call` | `turn, request` (the provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}` |
 //! | `after_provider_call` | `turn, assembly` (the response just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}` (or `"force_continue"`), `{"action": "block", "reason"}` |
@@ -503,6 +520,7 @@
 //! | -32035 | models unsupported | `provider.models` or `provider.model` on a provider with no model list; `data: {provider}` |
 //! | -32036 | model not found | `provider.model`: the list lacks the model; `data: {model, truncated?}` |
 //! | -32037 | provider request failed | the provider could not be reached or answered with an error; `data: {kind, status?}`, `kind` `unreachable`, `status`, `invalid_request` or `other`; the message is one fixed text per kind: no key, URL or vendor words |
+//! | -32038 | invalid steer | `RunError::InvalidSteer`: the text of a `run.steer` is blank or over 16 KiB, its `id` is not usable, or the run is idle (queued, or running with no server driving it); nothing was written; `data: {reason}` |
 //! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |

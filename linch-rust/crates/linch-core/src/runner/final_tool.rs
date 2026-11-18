@@ -282,6 +282,7 @@ impl Runner {
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::ToolResult,
+            steer_id: None,
         }));
         let phase = Phase::Finishing {
             message: message.clone(),

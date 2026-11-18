@@ -54,6 +54,28 @@ class Workers(TypedDict, total=False):
     max_background: int
 
 
+class TaskLedger(TypedDict, total=False):
+    """A task list every session of the agent shares, shown with each request.
+
+    Needs `tasks`. The task tools then read and write one list instead of
+    one per session, so a session that starts with an empty conversation
+    finds what an earlier one left, and each request carries the open tasks
+    as extra context (never logged). The list is kept like any task: in the
+    Postgres tables, or in the server's memory.
+
+    Attributes:
+        list: The list's id; stored as an empty session of the agent's
+            namespace, so pick an id no run uses as its session id.
+        max_chars: Most characters of ledger text a request carries; 4000
+            when absent, at least 200. The open tasks past it are named as
+            a count. The block's policy id is `linch.tasks.ledger-context`:
+            pin it in `spec.context_budget` so a budget never drops it.
+    """
+
+    list: Required[str]
+    max_chars: int
+
+
 class Filesystem(TypedDict, total=False):
     """The virtual filesystem: `ls`, `read_file`, `write_file` and `edit_file`.
 
@@ -1010,6 +1032,8 @@ class AgentConfig(TypedDict, total=False):
         tasks: Whether the agent has the session task tools (`TaskCreate`,
             `TaskList`, `TaskGet`, `TaskUpdate`), kept in the session store.
             They run without approval in every permission mode.
+        task_ledger: A task list shared by every session of the agent, shown
+            with each request; see `TaskLedger`. Needs `tasks`.
         ask_user: Whether the agent has the `AskUser` tool: a call suspends
             the run with an `input_request` until `Agent.answer`. Off when
             absent.
@@ -1057,6 +1081,7 @@ class AgentConfig(TypedDict, total=False):
     config_dir: str
     filesystem: Filesystem
     tasks: bool
+    task_ledger: TaskLedger
     ask_user: bool
     schedule_tools: bool
     memory: LongTermMemory

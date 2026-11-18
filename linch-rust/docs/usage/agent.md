@@ -181,6 +181,7 @@ absent, except `bash`.
 | `config_dir` | `.linch` | Directory holding `skills/` and `agents/`. A relative path resolves against the workspace, or the server's working directory without one. Unused unless `skills` or `subagents` is on |
 | `filesystem` | none | The virtual filesystem tools and large-result offload ([below](#filesystem)) |
 | `tasks` | `False` | The session task tools `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, which run without approval in every mode ([Tasks](./tasks.md)) |
+| `task_ledger` | none | One task list shared by every session, shown with each request: `{"list", "max_chars"?}`; needs `tasks` ([Tasks](./tasks.md#a-ledger-that-outlives-sessions)) |
 | `deep_agent` | none | The deep agent preset ([below](#deep_agent)) |
 | `profile` | none | A versioned domain role for the agent's runs ([below](#profile)) |
 | `max_provider_concurrency` | none: no limit | The most provider calls its runs, and those of agents on the same provider key and endpoint, make at once; the rest wait their turn ([Providers](./providers.md#limit-concurrent-calls)). Not part of the run contract |

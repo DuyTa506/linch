@@ -95,6 +95,7 @@ async fn tool_turn(
     journal.stage(Event::User(UserEvent {
         message: results.clone(),
         subtype: UserEventSubtype::ToolResult,
+        steer_id: None,
     }));
     let phase = Phase::ToolResults {
         message: results.clone(),

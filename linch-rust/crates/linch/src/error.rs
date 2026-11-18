@@ -58,6 +58,10 @@ pub enum OpenError {
     /// The `memory` config is invalid.
     #[error("memory unusable: {0}")]
     Memory(&'static str),
+    /// `task_ledger` is set without `tasks`, or names a blank list or a
+    /// budget under 200 characters.
+    #[error("task_ledger unusable: {0}")]
+    TaskLedger(&'static str),
     /// The agent itself could not be built.
     #[error(transparent)]
     Build(#[from] BuildError),

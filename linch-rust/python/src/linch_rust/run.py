@@ -103,6 +103,20 @@ class Run:
             raise LinchError(f"run {self.id} ended without a result or suspended event")
         return self._terminal
 
+    async def steer(self, text: str, *, steer_id: str | None = None) -> str:
+        """Send text to this run; see `Agent.steer`.
+
+        Raises:
+            LinchError: The run has no agent handle to steer through.
+            RpcError: `Agent.steer` refused it; the same errors.
+        """
+        if self._agent is None:
+            raise LinchError("this run has no agent handle to steer through")
+        params: dict[str, str] = {"agent": self._agent, "run_id": self.id, "text": text}
+        if steer_id is not None:
+            params["id"] = steer_id
+        return str((await self._conn.request("run.steer", params))["id"])
+
     async def cancel(self) -> bool:
         """Abort the run; it ends with a `result` of subtype `aborted`.
 

@@ -20,6 +20,8 @@ của run sau đó được stream về dưới dạng `Envelope`.
 | `async for envelope in run` | Mọi envelope của lời gọi này, theo thứ tự, kết thúc sau `result` hoặc `suspended` |
 | `await run.result()` | Đọc phần còn lại và trả về `ResultEvent` hoặc `SuspendedEvent` |
 | `await run.cancel()` | Hủy run, đang chạy hay bị tạm dừng; `True` khi nó đã bị hủy |
+| `await agent.steer(run_id, text, *, steer_id=None, principal=None)` | Gửi văn bản cho một run đang chạy; nó đọc văn bản ở ranh giới lượt kế tiếp ([bên dưới](#steer)) |
+| `await run.steer(text, *, steer_id=None)` | Tương tự, cho run này |
 | `await agent.cancel(run_id)` | Hủy một run theo id, kể cả run bị tạm dừng, từ bất kỳ tiến trình nào ([bên dưới](#cancel-a-suspended-run)) |
 | `await agent.events(run_id, after_seq=0)` | Các envelope bền vững của run sau `after_seq`, lấy từ các kho lưu trữ |
 | `run.id` | Run id, dùng cho `resume`, `approve` và `events` |
@@ -127,6 +129,7 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | `InvalidOutputSchema` | -32031 | `output_schema` của run không compile được hoặc root của nó không phải object; `.reason` nêu lý do. Không có run hay session nào được tạo |
 | `InvalidToolChoice` | -32034 | `tool_choice` của run nêu một tool mà run không đưa ra, hoặc provider từ chối nó; `.reason` nêu lý do. Không có run hay session nào được tạo |
 | `InvalidAnswer` | -32032 | Các câu trả lời không khớp với các câu hỏi `AskUser` đang chờ; `.reason` nêu lý do. Không có gì được ghi: run vẫn chờ ([bên dưới](#answer)) |
+| `InvalidSteer` | -32038 | Văn bản của steer để trống hoặc dài hơn 16 KiB, hoặc id của nó không dùng được; `.reason` nêu lý do. Không có gì được ghi |
 | `RunLeased` | -32033 | Một server khác đang điều khiển run (Postgres); `.owner` và `.expires_in` (giây) cho biết lease của ai và còn bao lâu. Không có gì được ghi ([Kho lưu trữ](./stores.md#run-leases)) |
 | `LeaseLost` | -32022 | Một server khác đã tiếp quản run, hoặc đã fail nó, trong khi server này điều khiển; run dừng ở đây mà không ghi gì |
 | `RunError` | -32020 đến -32028 | Việc ghi vào kho hoặc journal thất bại, hoặc trạng thái đã lưu không khớp với nhau; run giữ nguyên ở trạng thái bền vững cuối cùng của nó |
@@ -504,6 +507,58 @@ ghi gì, và `resume` tiếp tục run với câu trả lời đã commit. Một
 đã kết thúc là `RunTerminal`. Với kho Postgres, câu trả lời có thể đến từ một
 process khác hoặc một ngày sau.
 
+## Steer
+
+`agent.steer(run_id, text)` (hoặc `run.steer(text)`) gửi văn bản cho một run trong
+lúc nó làm việc, giống như một người gõ vào cuộc hội thoại. Nó trả về id của steer.
+
+```python
+steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
+```
+
+- **Khi nào model đọc nó.** Văn bản là một message user riêng. Nó được ghi vào log
+  sau các kết quả tool của batch mà run đang ở trong và trước lời gọi model kế
+  tiếp, nên thứ tự assistant rồi đến kết quả mà các provider cần không bao giờ bị
+  phá vỡ. Khi model trả lời mà không gọi tool, một steer đang chờ được ghi vào log
+  trước khi run kết thúc, và run sẽ chạy thêm một lượt thay vì kết thúc. Một event
+  `user` có `subtype` là `alignment` và `steer_id` bằng id được trả về báo việc đã
+  giao; nó cũng có trong `agent.events`.
+- **Cái gì được chấp nhận.** Một run đang chạy, hoặc bị tạm dừng chờ phê duyệt hay
+  chờ câu trả lời. Một run bị tạm dừng giữ steer và đọc nó khi bạn approve hoặc
+  answer; nó vẫn ở trạng thái tạm dừng. Một run đã kết thúc bị từ chối bằng
+  `RunTerminal`, một run không xác định bằng `RunNotFound`. Một run nhàn rỗi
+  (đang xếp hàng, hoặc `running` mà không server nào lái, sau một crash hay một
+  stream bị bỏ) bị từ chối bằng `InvalidSteer`: hãy resume nó trước, rồi mới
+  steer.
+- **Bền vững trước khi trả lời.** Steer là một event `steer_received` trong
+  journal riêng của run (chỉ có trong journal: `agent.events` không bao giờ liệt kê
+  nó). Lời gọi trả về sau khi nó được ghi. Một run do server điều khiển sẽ ghi nó ở
+  bước kế tiếp, nên câu trả lời chờ lời gọi model hoặc batch tool đang chạy, có thể
+  là vài phút sau một tool chạy lâu; hãy đặt timeout phía bạn như với mọi request.
+  Với kho Postgres, một lần crash không làm mất steer đã được trả lời, và một run
+  được resume đọc lại từ journal những gì còn đang chờ: một steer chỉ được ghi vào
+  log một lần, dù lần crash cắt ngang lần ghi nào. Với kho memory không có gì sống
+  sót qua process, nên steer cũng vậy.
+- **Một lời gọi được gửi lại.** `steer_id` đặt tên cho steer (chữ cái, chữ số và
+  `-_.:`, tối đa 128 byte). Gửi lại với cùng id sau khi câu trả lời bị rớt, steer
+  chỉ được nhận một lần. Một lời gọi thất bại vì run đã dừng trước đó (`RunError`,
+  -32023) có thể đã hoặc chưa được ghi; hãy gửi lại với cùng id.
+- **Các server khác.** Một run do server khác điều khiển không được định tuyến tới:
+  lời gọi nhận `RunLeased` (kèm `expires_in`), như `approve`, và run có server đã
+  crash mà lease chưa hết hạn cũng vậy.
+- **Giới hạn.** Tối đa 16 KiB văn bản, không để trống (`InvalidSteer`, -32038,
+  `reason`), và tối đa 16 steer mà run chưa đọc (`LimitReached`, `kind` là
+  `steers`). Một tenant chỉ steer các run của agent của chính nó: run id của
+  namespace khác là `RunNotFound`.
+- **Kiểm tra prompt.** Việc redact prompt và các callback `user_prompt_submit` xem
+  một steer như một prompt, với `source` là `"steer"` trong request của callback.
+  Một steer bị callback chặn sẽ bị bỏ; các bản ghi `hook` của nó được stream.
+
+Khác với `session.align` của Python Linch ở chỗ: lời gọi trả lời khi steer đã bền
+vững, không phải khi nó đã được ghi vào log; văn bản không bao giờ bị tách khỏi một
+message kết quả tool vì steer chờ cả batch; một steer đến trong lúc model đang trả
+lời không bị run làm mất; và `images` không được nhận.
+
 ## Hành động thay cho một principal
 
 `principal` cho biết một run hành động thay cho ai: `{"tenant", "user", "roles"?}`
@@ -598,6 +653,7 @@ ngoài run xảy ra trước khi trạng thái dẫn tới nó được ghi:
   nó không bao giờ bị bỏ qua.
 - Một tool đã được ghi điểm bắt đầu thì không bao giờ được chạy lại khi resume
   ([ở trên](#resume)).
+- Một steer được ghi ở ranh giới bước, trước khi lời gọi của nó trả lời; một run được resume đọc lại những steer còn đang chờ ([Steer](#steer)).
 - Đóng khối `Server`, hoặc server chết, để mỗi run ở trạng thái bền vững cuối cùng
   của nó; run trên Postgres resume được, run trên memory thì mất.
 

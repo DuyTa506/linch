@@ -166,6 +166,7 @@ fn prompt(text: &str) -> UserPromptRequest {
         session_id: SessionId::from("s"),
         run_id: RunId::from("r"),
         content: vec![ContentBlock::text(text)],
+        source: None,
     }
 }
 
@@ -854,6 +855,7 @@ observe_point_test!(
         event: crate::events::Event::User(crate::events::kinds::UserEvent {
             message: crate::message::Message::user_text("hi"),
             subtype: crate::events::kinds::UserEventSubtype::Prompt,
+            steer_id: None,
         }),
     }
 );

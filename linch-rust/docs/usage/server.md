@@ -111,6 +111,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `scripted_provider` | `false` | The `scripted` provider, for tests and evals |
 | `provider_info` | `false` | `provider.capabilities`, `provider.models` and `provider.model`: the model calls send the server's key to the provider's `base_url`, which must be allowed too. `provider.models` and `provider.model` are limited to 10 a minute per tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` sends no key |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands through the agent's execution backend |
+| `task_ledger` | `false` | A config's `task_ledger`: one task list shared by all the tenant's sessions, whose open tasks every request carries ([Tasks](./tasks.md#a-ledger-that-outlives-sessions)) |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |

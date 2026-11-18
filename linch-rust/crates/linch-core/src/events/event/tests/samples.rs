@@ -42,6 +42,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
         Event::User(UserEvent {
             message: crate::message::Message::user_text("hi"),
             subtype: UserEventSubtype::Prompt,
+            steer_id: None,
         }),
         Event::Assistant(AssistantEvent {
             message: crate::message::Message::assistant_text("hi"),
@@ -240,6 +241,10 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             logical_call_id: "lc1".into(),
             usage: Usage::default(),
             cost_usd: None,
+        }),
+        Event::SteerReceived(SteerReceivedEvent {
+            steer_id: "st1".into(),
+            text: "use tabs".into(),
         }),
         Event::Ignorable(IgnorableEvent::new("future_kind", JsonObject::new()).unwrap()),
     ]

@@ -48,6 +48,8 @@ pub mod method {
     pub const RUN_APPROVE: &str = "run.approve";
     /// Answer a run's pending `AskUser` questions and continue it.
     pub const RUN_ANSWER: &str = "run.answer";
+    /// Queue text for a live run to read at its next turn boundary.
+    pub const RUN_STEER: &str = "run.steer";
     /// Cancel an active run.
     pub const RUN_CANCEL: &str = "run.cancel";
     /// Read a run's durable events after a seq.
@@ -294,6 +296,38 @@ pub struct AnswerParams {
 pub struct RunAccepted {
     /// The run the server now drives.
     pub run_id: RunId,
+}
+
+/// Params of `run.steer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SteerParams {
+    /// Agent handle from `agent.open`.
+    pub agent: String,
+    /// The run to steer: running, or suspended for an approval or an answer.
+    pub run_id: RunId,
+    /// What the model reads; not blank, at most [`linch::MAX_STEER_BYTES`]
+    /// bytes.
+    pub text: String,
+    /// Names the steer, so a retried call queues it once; absent: the server
+    /// picks one. Letters, digits and `-_.:`, at most 128 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Caller identity, checked against the tenant's principal rules as for
+    /// the other run methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
+}
+
+/// Result of `run.steer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Steered {
+    /// Always `true`: the steer is durable in the run's journal.
+    pub queued: bool,
+    /// The steer's id, named by the `alignment` `user` event that delivers
+    /// it in `steer_id`.
+    pub id: String,
 }
 
 /// Params of `run.cancel`.

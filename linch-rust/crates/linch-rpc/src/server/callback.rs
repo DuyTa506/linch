@@ -348,7 +348,13 @@ impl Wire for PostToolUse {
 
 impl Wire for UserPromptSubmit {
     fn encode(r: &UserPromptRequest) -> JsonValue {
-        json!({"session_id": r.session_id, "run_id": r.run_id, "content": r.content})
+        let mut request =
+            json!({"session_id": r.session_id, "run_id": r.run_id, "content": r.content});
+        // Only a steer names its source; a new run's prompt stays as it was.
+        if let (Some(source), Some(object)) = (r.source, request.as_object_mut()) {
+            object.insert("source".into(), json!(source));
+        }
+        request
     }
 
     fn decode(value: JsonValue) -> Result<UserPromptResponse, serde_json::Error> {

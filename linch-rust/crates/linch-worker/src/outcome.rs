@@ -66,7 +66,10 @@ pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
         | RunError::PromptBlocked { .. }
         // A retry sends the same schema, or the same tool choice.
         | RunError::InvalidOutputSchema { .. }
-        | RunError::InvalidToolChoice { .. } => Outcome::Fail(chain(error)),
+        | RunError::InvalidToolChoice { .. }
+        // A steer is never a job: it comes through `Agent::steer`, not the queue.
+        | RunError::InvalidSteer { .. }
+        | RunError::SteerQueueFull { .. } => Outcome::Fail(chain(error)),
         // Includes a session append conflict.
         RunError::Store(_) | RunError::Journal(_) => Outcome::Retry(chain(error)),
     }

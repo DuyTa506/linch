@@ -112,6 +112,46 @@ async fn the_model_tracks_its_work_without_asking() {
 }
 
 #[tokio::test]
+async fn a_task_ledger_is_off_the_wire_when_unset_and_shares_one_list_when_set() {
+    let off = config(vec![text("hi")], json!({"tasks": true}));
+    let echoed = serde_json::to_value(&off).unwrap();
+    assert!(echoed.get("task_ledger").is_none(), "{echoed}");
+
+    let turns = vec![
+        call("TaskCreate", json!({"subject": "Ship", "description": "d"})),
+        text("made"),
+        call("TaskList", json!({})),
+        text("listed"),
+    ];
+    let extra = json!({"tasks": true, "task_ledger": {"list": "ledger"}});
+    let on = config(turns, extra);
+    assert_eq!(
+        serde_json::to_value(&on).unwrap()["task_ledger"],
+        json!({"list": "ledger"})
+    );
+    let opened = on.open().await.unwrap();
+    run(&opened, "s1").await;
+    let other = run(&opened, "s2").await;
+    assert_eq!(
+        other.results,
+        ["#1 [pending] Ship"],
+        "one list for every session"
+    );
+}
+
+#[tokio::test]
+async fn a_task_ledger_needs_tasks_and_a_usable_list() {
+    for extra in [
+        json!({"task_ledger": {"list": "l"}}),
+        json!({"tasks": true, "task_ledger": {"list": "  "}}),
+        json!({"tasks": true, "task_ledger": {"list": "l", "max_chars": 10}}),
+    ] {
+        let error = config(vec![text("hi")], extra).open().await.unwrap_err();
+        assert!(matches!(error, linch::OpenError::TaskLedger(_)), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn a_subagent_updates_the_tasks_of_the_session_that_started_it() {
     let turns = vec![
         call("TaskCreate", json!({"subject": "Ship", "description": "d"})),

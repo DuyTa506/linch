@@ -655,6 +655,52 @@ as before, byte for byte (pinned by
 `without_hooks_the_receipt_rides_the_response_write`,
 `crates/linch-core/tests/e2e_durable_receipt.rs`).
 
+## Steering
+
+`Agent::steer` (`agent/steer.rs`, `run.steer` over RPC) puts text into a run
+that is going on. It is a run-control input like approve and cancel, not a
+mailbox message: the model cannot send one.
+
+- **Intake.** A run registers an inbox in the agent's `Steering` map when it
+  starts or continues (`runner/steer.rs`, `attach_steering`); `Agent::steer`
+  sends the text there. At the top of each step the runner drains the inbox
+  (`take_steers`): it stages a journal-only `steer_received` event, flushes
+  once, emits it, then answers `{queued, id}`. So the answer is durable, and
+  waits for the step in progress (a model call or tool batch holds the
+  journal). A resent id is answered without a second event; more than 16
+  unread steers is `SteerQueueFull`.
+- **A suspended run** (approval or answer) that no runner of this process
+  drives is claimed, gets the event written under the claim, and is put back
+  to its status (`steer_stored`). A live lease elsewhere is `RunLeased`; a
+  terminal run `Terminal`. Nothing is routed between servers.
+- **An idle run** (queued, or `running` with nobody driving it: a crashed
+  server, a dropped stream) is refused with `InvalidSteer`, as the owner
+  asked; on a durable store the refusal first claims a `running` run only to
+  tell a live holder elsewhere (`RunLeased`) from none, and releases it.
+  Resume it, then steer.
+- **Delivery.** `Runner::steered` runs where a batch's results are
+  appended (`Step::Results`) and before a text answer would end the run
+  (`received`): it takes one pending steer through the prompt redactor and
+  `user_prompt_submit` (`source` `"steer"`), stages a `user` event of
+  subtype `alignment` carrying `steer_id`, and goes through the same
+  `Phase::ToolResults` checkpoint a stop feedback uses. It never runs
+  between an assistant `tool_use` and its results, because it is only asked
+  after a whole batch was appended. A text answer with a steer pending takes
+  another turn instead of ending.
+- **Resume.** Pending = `steer_received` ids minus `alignment` ids, rebuilt
+  from the journal (`steers_of`), as `Watch` and `Standing` are. There is no
+  ack table. A crash at any write delivers a steer once (`e2e_steer.rs`
+  cuts every write). A steer a `user_prompt_submit` hook blocked is dropped
+  from memory only, so a resume asks the hook again.
+- **Memory stores** keep the event in the process: no crash safety.
+
+Python Linch's `Session.align` (`src/linch/session.py:565`) keeps the text
+in an in-process queue, drained at the top of the turn
+(`loop/runtime.py:327`), and persists the undrained entries on the
+checkpoint as `pending_alignment` for a resume. Here the journal is the
+queue, so there is no second place to keep consistent; `images` are not
+taken.
+
 ## Terminals
 
 Every terminal goes through `Runner::end`: it cancels and awaits the run's

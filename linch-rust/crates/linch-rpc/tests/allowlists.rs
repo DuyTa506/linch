@@ -458,3 +458,21 @@ async fn a_store_pool_may_not_exceed_the_tenants_max_pool_connections() {
     let error = rpc.call(method::AGENT_OPEN, store(Some(default))).await;
     assert_eq!(refusal(error.unwrap_err()), (code::STORE_UNAVAILABLE, None));
 }
+
+#[tokio::test]
+async fn a_task_ledger_needs_the_tenants_allowlist() {
+    use linch::PermissionMode::{Default, SkipDangerous};
+    let ledger = config(json!({"tasks": true, "task_ledger": {"list": "ledger"}}));
+    let modes = [Default, SkipDangerous];
+    let denied = Rpc::remote(acme(|allow| allow.permission_modes(&modes)));
+    let kind = refused(&denied, ledger.clone()).await;
+    assert_eq!(kind.as_deref(), Some("task_ledger"));
+    // The same agent without the ledger opens: only the ledger is refused.
+    let plain = config(json!({"tasks": true}));
+    assert!(denied.call(method::AGENT_OPEN, plain).await.is_ok());
+
+    let allowed = Rpc::remote(acme(|allow| {
+        allow.permission_modes(&modes).task_ledger(true)
+    }));
+    assert!(allowed.call(method::AGENT_OPEN, ledger).await.is_ok());
+}

@@ -42,6 +42,7 @@ impl Event {
             Event::Hook(_) => "hook",
             Event::Error(_) => "error",
             Event::Result(_) => "result",
+            Event::SteerReceived(_) => "steer_received",
             Event::ModelCallDelivery(_) => "model_call_delivery",
             Event::ModelCallReceipt(_) => "model_call_receipt",
             Event::ModelCallUsageSettlement(_) => "model_call_usage_settlement",

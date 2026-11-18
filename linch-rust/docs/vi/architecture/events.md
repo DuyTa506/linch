@@ -40,7 +40,8 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 |---|---|---|---|---|
 | `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục. Event của lúc bắt đầu mang `output_schema` và `tool_choice` riêng của run, và tên final tool của nó (`final_tool`), thứ mà một lần resume đọc lại |
 | `schedule_fire` | `ScheduleFireEvent`, `kinds/lifecycle.rs` | yes | yes | Một run mà worker bắt đầu cho một lần kích hoạt lịch: `schedule_id` và `fire_at_ms` mà nó đến hạn, được stage ngay sau `init` trong cùng một lần ghi, nên không thêm lần ghi nào. Mọi run khác không có nó. Một lần resume không lặp lại nó; nó vẫn nằm trong `run.events` |
-| `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
+| `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment` (một steer, kèm `steer_id`), `notification` |
+| `steer_received` | `SteerReceivedEvent`, `kinds/lifecycle.rs` | no | yes | `steer_id`, `text`: một steer mà run đã chấp nhận, được ghi và flush trước khi trả lời caller; event `alignment` có cùng id đánh dấu nó đã được giao. Một run dựng lại những gì đang chờ từ hai event này (`runner/steer.rs`) |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
 | `usage` | `UsageEvent`, `kinds/control.rs:13` | yes | yes | |

@@ -18,6 +18,8 @@ the run's events then stream in as `Envelope`s.
 | `async for envelope in run` | Every envelope of this call, in order, ending after `result` or `suspended` |
 | `await run.result()` | Read the rest and return the `ResultEvent` or `SuspendedEvent` |
 | `await run.cancel()` | Abort the run, driven or suspended; `True` when it was cancelled |
+| `await agent.steer(run_id, text, *, steer_id=None, principal=None)` | Send text to a run that is going on; it reads it at its next turn boundary ([below](#steer)) |
+| `await run.steer(text, *, steer_id=None)` | The same, for this run |
 | `await agent.cancel(run_id)` | Abort a run by id, a suspended one included, from any process ([below](#cancel-a-suspended-run)) |
 | `await agent.events(run_id, after_seq=0)` | The run's durable envelopes after `after_seq`, from the stores |
 | `run.id` | The run id, for `resume`, `approve` and `events` |
@@ -123,6 +125,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `InvalidOutputSchema` | -32031 | The run's `output_schema` does not compile or its root is not an object; `.reason` says why. No run or session was created |
 | `InvalidToolChoice` | -32034 | The run's `tool_choice` names a tool the run does not offer, or the provider refuses it; `.reason` says why. No run or session was created |
 | `InvalidAnswer` | -32032 | The answers do not fit the pending `AskUser` questions; `.reason` says why. Nothing was written: the run still waits ([below](#answer)) |
+| `InvalidSteer` | -32038 | The steer's text is blank or longer than 16 KiB, its id is not usable, or the run is idle; `.reason` says why. Nothing was written |
 | `RunLeased` | -32033 | Another server drives the run (Postgres); `.owner` and `.expires_in` (seconds) say whose lease and for how long. Nothing was written ([Stores](./stores.md#run-leases)) |
 | `LeaseLost` | -32022 | Another server took the run over, or failed it, while this one drove it; the run stopped here without writing |
 | `RunError` | -32020 to -32028 | A store or journal write failed, or the stored state does not fit together; the run stays at its last durable state |
@@ -501,6 +504,61 @@ and `resume` continues the run with the committed answer. An answer on a
 finished run is `RunTerminal`. With Postgres stores the answer can come from
 another process or a later day.
 
+## Steer
+
+`agent.steer(run_id, text)` (or `run.steer(text)`) sends text to a run while
+it works, the way a person would type into the conversation. It returns the
+steer's id.
+
+```python
+steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
+```
+
+- **When the model reads it.** The text is a user message of its own. It is
+  logged after the tool results of the batch the run is in and before the next
+  model call, so the assistant-to-results order the providers need is never
+  broken. When the model answers without calling a tool, a waiting steer is
+  logged before the run would end, and the run takes another turn instead. A
+  `user` event with `subtype` `alignment` and `steer_id` set to the returned id
+  reports the delivery; it is in `agent.events` too.
+- **What is accepted.** A run that is running, or suspended for an approval or
+  an answer. A suspended run keeps the steer and reads it once you approve or
+  answer; it stays suspended. A run that finished is refused with
+  `RunTerminal`, an unknown one with `RunNotFound`. An idle run (queued, or
+  `running` with no server driving it, after a crash or a dropped stream) is
+  refused with `InvalidSteer`: resume it first, then steer.
+- **Durable before the answer.** The steer is a `steer_received` event in the
+  run's own journal (journal only: `agent.events` never lists it). The call
+  returns after it is written. A run the server drives writes it at its next
+  step, so the answer waits for the model call or tool batch in progress,
+  which can be minutes after a long tool; time out on your side as you would
+  on any request. With Postgres stores a crash does not lose an answered
+  steer, and a resumed run reads what is still pending back from its journal:
+  a steer is logged once, whatever write a crash cut. With memory stores
+  nothing survives the process, so neither does a steer.
+- **A call sent again.** `steer_id` names the steer (letters, digits and
+  `-_.:`, at most 128 bytes). Sent again with the same id after a dropped
+  answer, the steer is taken once. A call that fails with the run stopped
+  first (`RunError`, -32023) may or may not have landed; send it again with
+  the same id.
+- **Other servers.** A run another server drives is not routed to: the call
+  gets `RunLeased` (with `expires_in`), as `approve` does, and so does one for
+  a run whose crashed server's lease has not run out.
+- **Bounds.** At most 16 KiB of text, not blank (`InvalidSteer`, -32038,
+  `reason`), and at most 16 steers a run has not read yet (`LimitReached`,
+  `kind` `steers`). A tenant steers only the runs of its own agents: a run id
+  of another namespace is `RunNotFound`.
+- **Prompt checks.** Prompt redaction and the `user_prompt_submit` callbacks
+  see a steer as they see a prompt, with `source` `"steer"` in the callback's
+  request. A steer a callback blocks is dropped; its `hook` records are
+  streamed.
+
+How it differs from Python Linch's `session.align`: the call answers once the
+steer is durable, not once it is logged; the text is never split from a
+tool-results message because a steer waits for the whole batch; a steer
+arriving while the model answers is not lost to the run; and `images` are not
+taken.
+
 ## Acting for a principal
 
 `principal` says who a run acts for: `{"tenant", "user", "roles"?}` (the
@@ -592,6 +650,7 @@ What that means for you:
   turn, not a retry). The message itself is written only after the
   callbacks, so a callback that redacts it is never bypassed.
 - A tool whose start was recorded is never run again on resume ([above](#resume)).
+- A steer is written at a step boundary, before its call answers; a resumed run reads the pending ones back ([Steer](#steer)).
 - Closing the `Server` block, or the server dying, leaves each run at its last
   durable state; a Postgres run is resumable, a memory run is gone.
 

@@ -61,6 +61,7 @@ pub(crate) use fail::fail;
 pub(crate) use family::{Families, Family};
 pub(crate) use lease::Releases;
 pub(crate) use start::Reply;
+pub(crate) use steer::{Arrival, Steering, steers_of};
 pub(crate) use write::session_log;
 
 mod batch;
@@ -80,6 +81,7 @@ mod progress;
 mod retry;
 mod sink;
 mod start;
+mod steer;
 mod structured;
 mod turn;
 mod write;

@@ -245,6 +245,62 @@ class Agent:
         params: dict[str, Any] = {"agent": self.handle, "run_id": run_id, "answers": wire}
         return await self._start("run.answer", params, principal)
 
+    async def steer(
+        self,
+        run_id: str,
+        text: str,
+        *,
+        steer_id: str | None = None,
+        principal: Principal | None = None,
+    ) -> str:
+        """Send text to a run that is going on; it reads it at its next turn boundary.
+
+        The text is a user message of its own, logged after the tool results
+        of the batch the run is in and before its next model call. When the
+        model answers without calling a tool, it is logged before the run
+        would end, and the run takes another turn. A `user` event with
+        `subtype` `"alignment"` and the returned id in `steer_id` reports the
+        delivery. A run waiting for an approval or an answer takes the steer
+        too and delivers it once it continues; a run that ended refuses.
+
+        The steer is in the run's journal when this returns: with Postgres
+        stores a crash does not lose it, and a resumed run does not read it
+        twice. With memory stores it is lost if the server stops. The run
+        writes it at its next step, so the answer waits for the model call or
+        tool batch in progress. The `user_prompt_submit` callbacks (the
+        request has `source` `"steer"`) and prompt redaction see it as they
+        see a prompt; a callback that blocks it drops it.
+
+        Args:
+            run_id: A run of this agent that is not finished.
+            text: Not blank, at most 16 KiB.
+            steer_id: Names the steer, so a call sent again after a dropped
+                answer is taken once; letters, digits and `-_.:`, at most
+                128 characters. A fresh id when absent.
+            principal: Who steers, checked against a tenant's principal
+                rules as for `run`.
+
+        Returns:
+            The steer's id.
+
+        Raises:
+            InvalidSteer: The text or id is not usable.
+            RunNotFound: No such run in the agent's stores.
+            RunTerminal: The run has finished.
+            RunLeased: Another server drives the run, or a crashed holder's
+                lease has not run out yet.
+            LimitReached: The run holds 16 undelivered steers (`kind` is
+                `steers`).
+            RunError: The run stopped before it took the steer (code
+                -32023); resume it and send the steer again with the same id.
+        """
+        params: dict[str, Any] = {"agent": self.handle, "run_id": run_id, "text": text}
+        if steer_id is not None:
+            params["id"] = steer_id
+        if principal is not None:
+            params["principal"] = dict(principal)
+        return str((await self._conn.request("run.steer", params))["id"])
+
     async def cancel(self, run_id: str) -> bool:
         """Abort a run of this agent, live or suspended.
 

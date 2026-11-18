@@ -282,6 +282,9 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
         accounting::model_call_usage_settlement_event()
             .prop_map(Event::ModelCallUsageSettlement)
             .boxed(),
+        builders::steer_received_event()
+            .prop_map(Event::SteerReceived)
+            .boxed(),
         ignorable_event().boxed(),
     ];
     if depth_budget > 0 {

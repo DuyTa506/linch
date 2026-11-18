@@ -84,7 +84,8 @@ pub enum UserEventSubtype {
     Prompt,
     /// A tool result returned to the model as user content.
     ToolResult,
-    /// A host-injected alignment message.
+    /// Steering text a host sent the run (see [`crate::Agent::steer`]): a
+    /// user message of its own, with the steer's id in `steer_id`.
     Alignment,
     /// A host-injected runtime notification.
     Notification,
@@ -98,6 +99,23 @@ pub struct UserEvent {
     pub message: Message,
     /// Kind of user event represented.
     pub subtype: UserEventSubtype,
+    /// The id of the steer the message delivers, on an `alignment` event;
+    /// a resumed run reads it back to deliver none twice. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer_id: Option<String>,
+}
+
+/// A steer the run accepted (see [`crate::Agent::steer`]), written and made
+/// durable before the caller is answered. A run delivers it as a user
+/// message at its next turn boundary; the `alignment` user event with the
+/// same `steer_id` marks it delivered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SteerReceivedEvent {
+    /// The steer's id.
+    pub steer_id: String,
+    /// What the model will read.
+    pub text: String,
 }
 
 /// A completed assistant response.

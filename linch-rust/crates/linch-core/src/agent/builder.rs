@@ -489,6 +489,7 @@ impl AgentBuilder {
             gate: self.gate,
             mailbox: self.mailbox,
             families: Default::default(),
+            steering: Default::default(),
             releases: Default::default(),
             session_close: self.session_close,
             compact: self.compact,

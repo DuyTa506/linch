@@ -111,6 +111,25 @@ pub enum RunError {
         /// What is wrong with the choice.
         reason: String,
     },
+    /// A steer that cannot be queued: empty, or longer than
+    /// [`super::MAX_STEER_BYTES`], or an id that is not usable. Nothing was
+    /// written.
+    #[error("run {run_id} cannot take this steer: {reason}")]
+    InvalidSteer {
+        /// The run.
+        run_id: RunId,
+        /// What is wrong with the steer.
+        reason: String,
+    },
+    /// The run already holds [`super::MAX_PENDING_STEERS`] undelivered
+    /// steers. Nothing was written; try again once the run has taken them.
+    #[error("run {run_id} already holds {max} undelivered steers")]
+    SteerQueueFull {
+        /// The run.
+        run_id: RunId,
+        /// The cap.
+        max: usize,
+    },
     /// The durable checkpoint, events and session log do not fit together.
     #[error(transparent)]
     Reconcile(#[from] ReconcileError),

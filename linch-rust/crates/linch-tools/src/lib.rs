@@ -33,6 +33,7 @@ pub mod fs;
 mod glob;
 mod grep;
 mod input;
+mod ledger;
 mod memory;
 mod memory_recall;
 mod read;
@@ -53,6 +54,7 @@ pub use fs::{ExecutionFs, FsError, LocalFs};
 pub use glob::Glob;
 pub use grep::Grep;
 pub use input::READ_FIRST_CODE;
+pub use ledger::{DEFAULT_LEDGER_CHARS, LEDGER_POLICY_ID, TaskLedgerContext};
 pub use memory::{
     MEMORY_TOOL_NAMES, MemoryDelete, MemorySave, MemoryScope, MemorySearch, NoPrincipal,
     memory_tools,
@@ -63,7 +65,9 @@ pub use schedules::{
     CancelSchedule, CreateSchedule, ListSchedules, NewSchedule, SCHEDULE_TOOL_NAMES,
     ScheduleBackend, ScheduleEntry, ScheduleTiming, schedule_tools,
 };
-pub use tasks::{TASK_TOOL_NAMES, TaskCreate, TaskGet, TaskList, TaskUpdate, task_tools};
+pub use tasks::{
+    TASK_TOOL_NAMES, TaskCreate, TaskGet, TaskList, TaskUpdate, task_tools, task_tools_in,
+};
 pub use tracker::ReadTracker;
 pub use write::Write;
 

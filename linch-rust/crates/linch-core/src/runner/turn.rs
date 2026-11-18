@@ -14,6 +14,7 @@ use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::retry::Recovered;
+use super::steer::Steers;
 use super::structured::Checked;
 use super::write::session_log;
 use super::{Family, Outbox};
@@ -153,6 +154,8 @@ pub(super) struct Runner {
     pub(super) budget: Option<Meter>,
     /// Peer messages logged in an event that is not durable yet.
     pub(super) peers: Option<HeldPeers>,
+    /// The steers sent to this run (see `runner/steer.rs`).
+    pub(super) steers: Steers,
     /// `stop` retries honoured in this run call (see `runner/hooks.rs`).
     pub(super) final_answer_retries: u32,
     /// Where the run stands on its fallback models and in this turn's
@@ -237,6 +240,7 @@ impl Runner {
             family: None,
             budget: None,
             peers: None,
+            steers: Steers::default(),
             final_answer_retries: 0,
             standing: progress.standing,
             output,
@@ -289,6 +293,9 @@ impl Runner {
     /// as soon as a step made them durable.
     async fn steps(&mut self, mut step: Step) -> Result<(), RunError> {
         loop {
+            // A steer that arrived since the last step is durable before
+            // the caller is answered, whatever step comes next.
+            self.take_steers().await?;
             let next = match step {
                 Step::Prompt {
                     prompt,
@@ -339,14 +346,19 @@ impl Runner {
                             self.loop_guard(trip).await?;
                             None
                         }
-                        None => {
-                            // A cancel that cut it short aborts at the next
-                            // turn's start.
-                            self.post_turn(self.stop_reason).await;
-                            self.turn += 1;
-                            self.summary_calls = 0;
-                            Some(self.turn_start().await)
-                        }
+                        None => match self.steered().await? {
+                            // Another user message first: this turn is not
+                            // over until the steers are in.
+                            Some(next) => Some(next),
+                            None => {
+                                // A cancel that cut it short aborts at the
+                                // next turn's start.
+                                self.post_turn(self.stop_reason).await;
+                                self.turn += 1;
+                                self.summary_calls = 0;
+                                Some(self.turn_start().await)
+                            }
+                        },
                     }
                 }
                 Step::Finishing {
@@ -679,6 +691,11 @@ impl Runner {
             // across two parts is whole only here.
             if stitched && let Some(redactor) = self.agent.response_redactor() {
                 text = redactor.text(&text).into_owned();
+            }
+            // A steer that came in during the last model call is read
+            // before the run ends.
+            if let Some(next) = self.steered().await? {
+                return Ok(Some(next));
             }
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);

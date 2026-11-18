@@ -48,12 +48,14 @@ mod error;
 mod fork;
 mod reload;
 mod spec;
+mod steer;
 mod versions;
 
 pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
 pub use fork::ForkError;
 pub use spec::AgentSpec;
+pub use steer::{MAX_PENDING_STEERS, MAX_STEER_BYTES};
 
 pub(crate) use child::ChildTools;
 pub(crate) use versions::Versions;
@@ -231,6 +233,8 @@ pub(crate) struct AgentInner {
     pub(crate) tool_cache: Option<ToolCacheHandle>,
     /// The inbox each run of a session drains; `None` without one.
     pub(crate) mailbox: Option<Arc<dyn Mailbox>>,
+    /// The inbox of each run this process drives, for [`Agent::steer`].
+    pub(crate) steering: crate::runner::Steering,
     /// The subagent child runs of each run that is live or suspended in
     /// this process (see [`runner::Family`]).
     pub(crate) families: Families,

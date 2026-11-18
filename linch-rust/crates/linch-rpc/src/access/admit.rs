@@ -96,6 +96,10 @@ impl Tenant {
                            skip_dangerous in the tenant's permission_modes";
             return Err(refused("auto_allow", message.into()));
         }
+        if config.task_ledger.is_some() && !allow.task_ledger {
+            let message = "task_ledger is not in the tenant's allowlists (task_ledger)";
+            return Err(refused("task_ledger", message.into()));
+        }
         if let Some(policy) = &mut config.permissions {
             allow.admit_grants(policy)?;
             let root = PathBuf::from(&policy.project_root);

@@ -172,6 +172,46 @@ cập nhật id task của coordinator.
 
 ---
 
+## Một ledger tồn tại qua các session
+
+Task thuộc về một session, nên một session bắt đầu với cuộc hội thoại trống thì
+bắt đầu không có task, và model chỉ thấy chúng nếu gọi `TaskList`. Với một agent làm
+việc qua nhiều session (xem [Agent chạy dài](./long-running.md)), hãy biến danh
+sách thành một ledger:
+
+```python
+config: AgentConfig = {
+    "namespace": "demo",
+    "spec": {"model": "deepseek-flash"},
+    "provider": {"id": "deepseek"},
+    "tasks": True,
+    "task_ledger": {"list": "report-ledger"},
+    "stores": {"type": "postgres", "dsn": "postgres://..."},
+}
+```
+
+- Khi đó mọi session của agent đọc và ghi cùng một danh sách `list`, thay vì mỗi
+  session một danh sách. Danh sách được lưu như một session trống của namespace, nên
+  hãy chọn một id mà không run nào dùng làm session id.
+- Mỗi request mang theo các task đang mở của danh sách (`#id [status] subject`,
+  theo thứ tự id, rồi đến số task đã hoàn thành) như context bổ sung đặt sau cuộc
+  hội thoại, được đọc lại cho mỗi request. Nó không bao giờ được ghi vào log, nên
+  compaction không thể tóm tắt mất nó, và phần prefix đã cache không bị đụng tới.
+  `max_chars` (4000 khi vắng mặt, tối thiểu 200) giới hạn nó; các task đang mở vượt
+  quá mức đó được nêu dưới dạng một con số.
+- Block này đến từ một hook `context_build` với policy id
+  `linch.tasks.ledger-context`. `spec.context_budget` tính nó như mọi block context
+  khác: hãy liệt kê id đó trong `pinned` để một budget không bao giờ bỏ nó.
+- Mặc định nó tắt; một agent không có `task_ledger` ghi và gửi đúng như trước đây.
+  Server nhiều tenant từ chối `task_ledger` trừ khi `allow` của tenant có
+  `task_ledger` ([Server](./server.md)): danh sách lớn lên theo công việc của
+  tenant và mỗi request đều đọc nó.
+- Với kho memory, ledger nằm trong bộ nhớ của server. Với Postgres, nó sống sót qua
+  compaction, một session mới, một lần restart và một lần crash (cùng các hàng mà
+  `TaskCreate` và `TaskUpdate` ghi, mỗi lần một transaction).
+
+---
+
 ## Các trang liên quan
 
 - [Subagent](./subagents.md): các run con và session của chúng

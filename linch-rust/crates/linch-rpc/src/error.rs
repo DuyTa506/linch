@@ -136,6 +136,9 @@ pub mod code {
     /// fixed text per kind: never the key, the provider's URL or the
     /// vendor's own words.
     pub const PROVIDER_REQUEST_FAILED: i64 = -32037;
+    /// `RunError::InvalidSteer`: the steer's text is blank or too long, or its
+    /// id is not usable; `data.reason` says why. Nothing was written.
+    pub const INVALID_STEER: i64 = -32038;
     /// The agent cannot run in the background, so `schedule.create` and
     /// `job.enqueue` refuse it: `data.reason` is `memory_store` (its runs
     /// would live in this connection only), `host_tools` or `callbacks`
@@ -255,6 +258,10 @@ impl From<&RunError> for ErrorObject {
             RunError::InvalidAnswer { reason, .. } => {
                 Self::new(code::INVALID_ANSWER, message).with_data(json!({ "reason": reason }))
             }
+            RunError::InvalidSteer { reason, .. } => {
+                Self::new(code::INVALID_STEER, message).with_data(json!({ "reason": reason }))
+            }
+            RunError::SteerQueueFull { max, .. } => limit_reached("steers", *max),
             RunError::InvalidToolChoice { reason, .. } => {
                 Self::new(code::INVALID_TOOL_CHOICE, message).with_data(json!({ "reason": reason }))
             }
@@ -324,7 +331,8 @@ impl From<&OpenError> for ErrorObject {
             | OpenError::DeepAgent(_)
             | OpenError::Profile(_)
             | OpenError::Memory(_)
-            | OpenError::ScheduleTools(_) => Self::new(code::BUILD_INVALID, message),
+            | OpenError::ScheduleTools(_)
+            | OpenError::TaskLedger(_) => Self::new(code::BUILD_INVALID, message),
             OpenError::Store(_) => Self::new(code::STORE_UNAVAILABLE, message),
             OpenError::Mcp(McpError::Config(_)) => Self::new(code::BUILD_INVALID, message),
             OpenError::Mcp(McpError::Connect { server, .. }) => {

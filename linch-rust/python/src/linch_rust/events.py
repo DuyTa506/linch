@@ -61,11 +61,18 @@ class ScheduleFireEvent:
 
 @dataclass(frozen=True)
 class UserEvent:
-    """A user message: the prompt, tool results, or a runtime notification."""
+    """A user message: the prompt, tool results, a runtime notification, or a steer.
+
+    A steer (`subtype` `"alignment"`) is the text a `steer` call sent, as the
+    model read it, and `steer_id` is the id that call returned. It is a user
+    message of its own, after the tool results of the batch it came in, or
+    after a text answer the steer kept from ending the run.
+    """
 
     type: ClassVar[str] = "user"
     message: JsonObject
     subtype: str
+    steer_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -490,6 +497,24 @@ class ResultEvent:
 
 
 @dataclass(frozen=True)
+class SteerReceivedEvent:
+    """A steer the run accepted, before it reached the model.
+
+    The server writes it to the journal and never streams it, so a client
+    sees it only in envelopes read from a journal. The `user` event with
+    `subtype` `"alignment"` and the same `steer_id` marks it delivered.
+
+    Attributes:
+        steer_id: The id the `steer` call returned.
+        text: The steer's text, after prompt redaction.
+    """
+
+    type: ClassVar[str] = "steer_received"
+    steer_id: str
+    text: str
+
+
+@dataclass(frozen=True)
 class ModelCallDeliveryEvent:
     """One delivery attempt of a model call was dispatched.
 
@@ -594,6 +619,7 @@ Event = (
     | ModelCallDeliveryEvent
     | ModelCallReceiptEvent
     | ModelCallUsageSettlementEvent
+    | SteerReceivedEvent
     | UnknownEvent
 )
 
@@ -634,6 +660,7 @@ _KINDS: dict[str, type[Any]] = {
         ModelCallDeliveryEvent,
         ModelCallReceiptEvent,
         ModelCallUsageSettlementEvent,
+        SteerReceivedEvent,
     )
 }
 

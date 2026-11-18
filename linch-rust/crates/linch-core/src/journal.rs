@@ -238,6 +238,16 @@ impl Journal {
         self.commit(self.pending.len(), checkpoint, None).await
     }
 
+    /// Like [`Self::flush`], moving the run to `status` in the same write.
+    pub(crate) async fn flush_as(
+        &mut self,
+        status: RunStatus,
+    ) -> Result<Vec<Envelope>, JournalError> {
+        let checkpoint = self.held.take().map(|held| held.checkpoint);
+        self.commit(self.pending.len(), checkpoint, Some(status))
+            .await
+    }
+
     /// Session-write barrier: commit the held checkpoint with the events it
     /// covers. Events staged after it stay pending. Writes nothing when no
     /// checkpoint is held.

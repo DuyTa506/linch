@@ -24,6 +24,23 @@ pub use memory::{MemoryConfig, RecallConfig};
 pub(crate) use pricing::pricing;
 pub use pricing::{ModelRates, PricingOverrides};
 
+/// A task list shared by every session of an agent, shown with each request
+/// ([`AgentConfig::task_ledger`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskLedger {
+    /// The list's id. It is stored as an empty session of the agent's
+    /// namespace, so pick one no run uses as its session id.
+    pub list: String,
+    /// Most characters of ledger text a request carries
+    /// ([`linch_tools::DEFAULT_LEDGER_CHARS`] when absent, at least 200); the
+    /// open tasks past it are named as a count. The block's policy id,
+    /// [`linch_tools::LEDGER_POLICY_ID`], can be pinned in
+    /// `spec.context_budget` so a budget never drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
+}
+
 /// Everything needed to open an [`Agent`](linch_core::Agent), as data.
 ///
 /// Decoding rejects unknown fields at every level, so a misspelt or
@@ -117,6 +134,13 @@ pub struct AgentConfig {
     /// `auto_allow` gets their names. Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub tasks: bool,
+    /// Turns the task tools into a ledger that outlives sessions, and shows
+    /// it to the model: every session of the agent shares one task list
+    /// ([`TaskLedger::list`]) instead of keeping its own, and each request
+    /// carries the open tasks as extra context (never logged). Needs
+    /// `tasks`. Off when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_ledger: Option<TaskLedger>,
     /// Whether the agent has the `AskUser` tool (see
     /// [`linch_core::ask_user`]): a call suspends the run with an
     /// `input_request` until the host answers it. Scope `read`, so it runs

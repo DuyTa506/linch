@@ -187,7 +187,8 @@ Một message vai trò user đã vào cuộc hội thoại.
 | Trường | Ý nghĩa |
 |---|---|
 | `message` | `{"role": "user", "content": [blocks]}` |
-| `subtype` | `prompt` (prompt của bạn), `tool_result` (kết quả của một batch tool), `notification` (thông báo của runtime, chẳng hạn một worker nền vừa xong, hoặc phản hồi của một hook đòi thêm một lượt) hoặc `alignment` |
+| `subtype` | `prompt` (prompt của bạn), `tool_result` (kết quả của một batch tool), `notification` (thông báo của runtime, chẳng hạn một worker nền vừa xong, hoặc phản hồi của một hook đòi thêm một lượt) hoặc `alignment` (một [steer](./runs.md#steer): văn bản bạn gửi cho run) |
+| `steer_id` | Trên `alignment`: id mà `steer` đã trả về. Vắng mặt ở các subtype khác |
 
 ### `AssistantEvent` (`assistant`)
 

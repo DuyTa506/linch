@@ -139,6 +139,7 @@ impl Runner {
         self.stage_seen(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::ToolResult,
+            steer_id: None,
         }));
         self.hold_peers(peers);
         self.save(Phase::ToolResults {

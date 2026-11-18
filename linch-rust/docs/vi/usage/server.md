@@ -112,6 +112,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `scripted_provider` | `false` | Provider `scripted`, cho kiểm thử và đánh giá |
 | `provider_info` | `false` | `provider.capabilities`, `provider.models` và `provider.model`: các lời gọi model gửi key của server đến `base_url` của provider, nên `base_url` đó cũng phải được cho phép. `provider.models` và `provider.model` bị giới hạn 10 lần một phút cho mỗi tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` không gửi key |
 | `exec_tools` | `false` | `Bash` cho agent có workspace, chạy lệnh qua execution backend của agent |
+| `task_ledger` | `false` | `task_ledger` của cấu hình: một danh sách task dùng chung cho mọi session của tenant, các task còn mở của nó đi kèm mỗi request ([Tasks](./tasks.md#một-ledger-tồn-tại-qua-các-session)) |
 | `max_runs` | 16 | Số run mà tenant điều khiển cùng lúc, trên tất cả các kết nối của nó |
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
 | `max_connections` | 8 | Số kết nối hành động thay mặt tenant cùng lúc |

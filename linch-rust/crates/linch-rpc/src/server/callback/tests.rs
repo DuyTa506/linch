@@ -188,6 +188,7 @@ fn user_prompt_submit_carries_content_and_reads_each_action() {
         session_id,
         run_id,
         content: vec![ContentBlock::text("hi")],
+        source: None,
     };
     let wire = UserPromptSubmit::encode(&request);
     assert_eq!(
@@ -195,6 +196,12 @@ fn user_prompt_submit_carries_content_and_reads_each_action() {
         json!({"session_id": "s1", "run_id": "r1",
                "content": [{"type": "text", "text": "hi"}]})
     );
+    // A steer says so; a prompt stays byte-identical.
+    let steer = UserPromptRequest {
+        source: Some("steer"),
+        ..request.clone()
+    };
+    assert_eq!(UserPromptSubmit::encode(&steer)["source"], json!("steer"));
     let rewrite = json!({"action": "rewrite", "content": [{"type": "text", "text": "hello"}]});
     assert_eq!(
         UserPromptSubmit::decode(rewrite).unwrap(),
@@ -321,6 +328,7 @@ fn event_emit_carries_the_event_and_answers_like_an_observe_only_point() {
         event: linch::Event::User(linch::events::kinds::UserEvent {
             message: Message::user_text("hi"),
             subtype: linch::events::kinds::UserEventSubtype::Prompt,
+            steer_id: None,
         }),
     };
     assert_eq!(

@@ -199,6 +199,7 @@ impl Runner {
         self.journal.stage(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::Notification,
+            steer_id: None,
         }));
         self.hold_peers(peers);
         self.save(Phase::ToolResults {

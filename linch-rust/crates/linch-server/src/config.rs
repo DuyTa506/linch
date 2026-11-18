@@ -147,6 +147,9 @@ pub struct AllowConfig {
     /// together, at least 1; [`linch_rpc::DEFAULT_TOOL_CACHE_BYTES`]
     /// (64 MiB) when absent.
     pub max_tool_cache_bytes: Option<u64>,
+    /// Whether a config may set `task_ledger` (one task list shared by all
+    /// the tenant's sessions, read on every request); off when absent.
+    pub task_ledger: bool,
     /// Runs the tenant's connections may drive at once, together, at
     /// least 1; [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
     pub max_runs: Option<usize>,
@@ -407,6 +410,7 @@ impl AllowConfig {
             .tool_cache_bytes(
                 (self.max_tool_cache_bytes).unwrap_or(linch_rpc::DEFAULT_TOOL_CACHE_BYTES),
             )
+            .task_ledger(self.task_ledger)
             .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
             .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
             .max_agents(self.max_agents.unwrap_or(linch_rpc::DEFAULT_MAX_AGENTS))
