@@ -487,6 +487,50 @@ bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài,
 Với `MemorySessions`, một run được resume trong process khác sẽ thấy con trỏ nhưng
 không thấy tệp.
 
+<a id="tool-result-cap"></a>
+
+## Giới hạn kết quả tool
+
+`spec.tool_result_cap` (`ToolResultCap`, `crates/linch-core/src/result_cap.rs`) giới hạn những
+gì một kết quả đưa vào provider view và giữ nguyên kết quả trong log. Nó không phải hook
+`post_tool_use`: `Replace` của một hook trở thành kết quả của lời gọi ở mọi nơi (event
+`tool_call_end`, session, khóa của loop guard và của cache), như offload ở trên, nên không thể
+đọc lại kết quả đầy đủ từ log. Cap nằm ở đúng một chỗ nơi view được dựng từ các kết quả của
+một batch.
+
+- **Ở đâu.** `batch` dựng message kết quả từ các kết quả đầy đủ, stage event `user` và lưu
+  checkpoint `ToolResults` cùng nó, tất cả đầy đủ. Sau đó `Runner::append_results`
+  (`runner/write.rs`) hỏi `ToolResultCap::apply` một bản sao. `None` (không phần văn bản nào
+  vượt `max_tokens * 4` byte: một phép kiểm tra độ dài, không cấp phát) thì append message
+  thành một entry như trước. Một bản sao thì được append với message đầy đủ là entry chỉ có
+  trong `full_history` và bản đã cắt là entry chỉ có trong `provider_view`, trong một lần gọi
+  `write_session` (`visible`/`historical` vốn đã là trường của `MessageEntry`; codec không có gì
+  mới). `project` không được dùng: nó ghi toàn bộ view thay thế và báo cho agent biết một lần
+  compaction đã xảy ra (`on_compact`, khiến model phải đọc lại tệp trước khi sửa).
+- **Việc cắt.** Một văn bản cho mỗi kết quả (các phần văn bản nối bằng ký tự xuống dòng, ảnh
+  được giữ), `head_tail` (`compaction/clip.rs`, dùng chung với clip của compaction bắt buộc)
+  quanh `[... N bytes omitted; read them with ReadToolResult(tool_use_id="...", offset=H) ...]`,
+  được tính để văn bản đã cắt cộng marker không quá ngân sách. Hàm thuần của kết quả, id và spec.
+- **Resume.** Checkpoint giữ message đầy đủ, nên run được resume cắt đúng các byte đó.
+  `results_appended` (`journal/reconcile/session.rs`) coi cả hai dạng là đã append: một entry
+  bằng message, hoặc hai entry (bản đầy đủ chỉ ở kiểm toán, bản đã cắt chỉ ở view) trong một
+  lần append mà store ghi trọn hoặc không ghi gì. Một test crash ở mọi lần ghi so sánh cả hai
+  phép chiếu với một run sạch.
+- **Cái gì đọc kết quả đầy đủ.** Mọi thứ được nuôi bằng event hoặc scheduler: event
+  `tool_call_end`, `Watch` (loop guard băm kết quả đầy đủ), tool cache, `Gates`. Cái gì đọc
+  view: `estimate_tokens`, `Anchor::measure`, `tokens_before`/`tokens_after`, micro-compaction,
+  clip, request tóm tắt.
+- **`ReadToolResult`** (`result_cap/reader.rs`) được đăng ký như một built-in (một
+  `Registration` bị dispose nếu build thất bại) chỉ khi đặt cap. Nó lấy session store và
+  namespace từ builder và session id từ `ToolContext`, tải các entry, lấy message historical
+  mới nhất có kết quả tool với id đó, và trả về một cửa sổ byte của văn bản (`window`: ranh giới
+  ký tự, phần cuối lùi lại). Cửa sổ tối đa `budget - min(budget / 2, 512)` byte và phần chân
+  ngắn, nên nó nằm dưới cap. Scope `Read`, `always_load`, `idempotent`. Một child subagent
+  (`ChildTools::keeps`) và overlay `allowed_tools` của skill đều giữ nó.
+- **Hợp đồng.** `tool_result_cap` bị bỏ qua khi `None`, nên digest của `AgentSpec::new("m")`
+  (`a80570d2...c300`) không đổi; khi đặt, nó là một phần của digest, và định nghĩa
+  `ReadToolResult` cũng vậy.
+
 ## AskUser
 
 `AskUser` (`crates/linch-core/src/ask_user.rs`) nằm trong `linch-core`, vì runner phải

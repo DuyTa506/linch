@@ -414,6 +414,28 @@ class TruncationRecovery(TypedDict, total=False):
     feedback: str
 
 
+class ToolResultCap(TypedDict, total=False):
+    """One bound on what a tool result puts in the model's view, as `spec.tool_result_cap`.
+
+    Absent, a result goes in whole. With it, a result of more than
+    `max_tokens` estimated tokens (four bytes per token) shows its head, a
+    marker and its tail in the model's view; the whole result stays in the
+    log and the events, and the agent gets a `ReadToolResult` tool
+    (`tool_use_id`, `offset`, `limit` in bytes) that reads the rest. A call
+    of it is an ordinary tool call in the run's events.
+
+    Attributes:
+        max_tokens: Most estimated tokens of one result's text in the view,
+            the marker included; required, at least 128. The estimate
+            counts 20% to 2x fewer tokens than a provider does.
+        head_fraction: The share of the kept bytes that is the head, from 0
+            to 1; 0.3 when absent.
+    """
+
+    max_tokens: Required[int]
+    head_fraction: float
+
+
 class LoopGuard(TypedDict, total=False):
     """When a stuck run ends, as `spec.loop_guard`.
 
@@ -1012,8 +1034,9 @@ class AgentConfig(TypedDict, total=False):
             `Verification`), a `loop_guard` (see `LoopGuard`), `system`
             sections (see `System`), a `context_budget` (see
             `ContextBudget`), a `tool_retry` (see `ToolRetry`), a
-            `tool_cache` (see `ToolCache`) and a `policy`, the tool order and
-            completion gates (see `Policy`), go here too.
+            `tool_cache` (see `ToolCache`), a `tool_result_cap` (see
+            `ToolResultCap`) and a `policy`, the tool order and completion
+            gates (see `Policy`), go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

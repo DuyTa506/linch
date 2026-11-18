@@ -91,9 +91,13 @@ có trong bảng của adapter; không tính mặc định 128000 của model kh
 được (`-32011`, `compaction.threshold_tokens (N) must be below the context window (W)`), vì
 provider từ chối prompt trước khi ngưỡng đó kích hoạt. Một ngưỡng sát dưới cửa sổ cũng không
 hơn: nó không chừa chỗ cho phần tăng của một lượt, và mỗi prompt chính bị từ chối tiêu một
-lần `max_forced`; khoảng 7/8 cửa sổ trở xuống là an toàn. Một prompt mà provider vẫn từ chối thì được rút ngắn như
+lần `max_forced`; hãy chừa chỗ trống (các test dùng 7/8 cửa sổ, trong một thế giới kịch bản mà ước lượng đếm một nửa). Một prompt mà provider vẫn từ chối thì được rút ngắn như
 [bên dưới](#when-the-prompt-does-not-fit) nói
 ([Kiến trúc](../architecture/compaction.md#due-đo-cái-gì)).
+
+Một kết quả tool vượt [`tool_result_cap`](./tools.md#long-tool-results) bị cắt trong view trước
+khi bất cứ điều nào ở trên đo nó, nên ước lượng, ngưỡng và `tokens_before` đếm những gì model
+đang giữ; kết quả đầy đủ vẫn nằm trong log.
 
 Spec compaction là một phần của [run contract](./agent.md#the-run-contract): một run bắt
 đầu dưới một cài đặt không được resume dưới một cài đặt khác.

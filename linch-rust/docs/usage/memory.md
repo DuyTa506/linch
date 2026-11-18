@@ -95,10 +95,14 @@ summary call at a turn's start sends the whole view, so keep a
 default of an unknown model) does not open (`-32011`, `compaction.threshold_tokens (N)
 must be below the context window (W)`), because the provider refuses the prompt before
 such a trigger fires. A trigger just under the window is no better: it leaves no room for
-a turn's growth, and each refused primary prompt spends `max_forced`; about 7/8 of the
-window or less is safe. A prompt the provider still refuses
+a turn's growth, and each refused primary prompt spends `max_forced`; leave headroom (the
+tests use 7/8 of the window, in a scripted world whose estimate counts half). A prompt the provider still refuses
 is shortened as [below](#when-the-prompt-does-not-fit) says
 ([Architecture](../architecture/compaction.md#what-due-measures)).
+
+A tool result over [`tool_result_cap`](./tools.md#long-tool-results) is cut in
+the view before any of this measures it, so the estimate, the trigger and
+`tokens_before` count what the model holds; the whole result stays in the log.
 
 The compaction spec is part of the [run contract](./agent.md#the-run-contract):
 a run started under one setting is not resumed under another.

@@ -498,6 +498,57 @@ file back is never offloaded again (`offload.rs:51-62`).
 With `MemorySessions`, a run resumed in another process finds the pointer but
 not the file.
 
+## Tool result cap
+
+`spec.tool_result_cap` (`ToolResultCap`, `crates/linch-core/src/result_cap.rs`)
+bounds what one result puts in the provider view and keeps the whole result in
+the log. It is not a `post_tool_use` hook: a hook's `Replace` becomes the call's
+result everywhere (the `tool_call_end` event, the session, the loop guard's
+and the cache's keys), as the offload above does, so the whole result could
+not be read back from the log. The cap sits at the one place the view is made
+from a batch's results.
+
+- **Where.** `batch` builds the results message from the whole results, stages
+  the `user` event and saves the `ToolResults` checkpoint with it, all whole.
+  `Runner::append_results` (`runner/write.rs`) then asks `ToolResultCap::apply`
+  for a copy. `None` (no text part over `max_tokens * 4` bytes: a length check,
+  no allocation) appends the message as one entry, as before. A copy is
+  appended with the whole message as an entry in `full_history` only and the
+  cut copy as an entry in `provider_view` only, in one `write_session` call
+  (`visible`/`historical` are fields of `MessageEntry` already; nothing new in
+  the codec). `project` is not used: it writes the whole replacement view and
+  tells the agent a compaction happened (`on_compact`, which makes the model
+  read files again before an edit).
+- **The cut.** One text per result (the text parts joined by a newline, images
+  kept), `head_tail` (`compaction/clip.rs`, shared with the clip of a forced
+  compaction) around `[... N bytes omitted; read them with
+  ReadToolResult(tool_use_id="...", offset=H) ...]`, sized so the cut text and
+  the marker are at most the budget. A pure function of the result, the id and
+  the spec.
+- **Resume.** The checkpoint holds the whole message, so a resumed run cuts the
+  same bytes. `results_appended` (`journal/reconcile/session.rs`) takes either
+  shape as appended: one entry equal to the message, or two entries (the whole
+  one in the audit only, the cut one in the view only) in one append, which the
+  store lands whole or not at all. A crash test at every write checks both
+  projections against a clean run.
+- **What reads whole results.** Everything fed by events or the scheduler: the
+  `tool_call_end` event, `Watch` (the loop guard hashes the whole result), the
+  tool cache, `Gates`. What reads the view: `estimate_tokens`, `Anchor::measure`,
+  `tokens_before`/`tokens_after`, micro-compaction, the clip, the summary
+  request.
+- **`ReadToolResult`** (`result_cap/reader.rs`) is registered as a built-in
+  (a `Registration` that is disposed if the build fails) only when the cap is
+  set. It takes the session store and namespace from the builder and the
+  session id from `ToolContext`, loads the entries, takes the latest
+  historical message with a tool result of the id, and returns a byte window of
+  its text (`window`: character boundaries, the end moved back). The window is
+  at most `budget - min(budget / 2, 512)` bytes and the footer is short, so it
+  stays under the cap. `Read` scope, `always_load`, `idempotent`. A subagent
+  child (`ChildTools::keeps`) and a skill's `allowed_tools` overlay keep it.
+- **Contract.** `tool_result_cap` is skipped when `None`, so the digest of
+  `AgentSpec::new("m")` (`a80570d2...c300`) is unchanged; set, it is part of the
+  digest, and so is the `ReadToolResult` definition.
+
 ## AskUser
 
 `AskUser` (`crates/linch-core/src/ask_user.rs`) lives in `linch-core`,

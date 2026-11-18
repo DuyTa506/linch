@@ -219,6 +219,7 @@ absent, except `bash`.
 | `policy` | none: nothing is checked | Tools that may only run after others succeeded, and what a final answer must satisfy, `{"prerequisites"?, "gates"?, "max_corrections"?}` ([below](#policy)) |
 | `tool_retry` | none: a failed call is not run again | Run a tool again after an error result whose `code` is listed, for tools that declare themselves idempotent, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "retry_on"?, "tools"?}` ([Tools](./tools.md#tool_retry)) |
 | `tool_cache` | none: every call runs | Serve an identical call of a named read tool from a cache, `{"tools", "ttl_ms"?, "max_entries"?, "max_value_bytes"?, "invalidate_on_write"?, "scope"?}` ([Tools](./tools.md#tool_cache)) |
+| `tool_result_cap` | none: a result goes in whole | Cut a tool result that weighs more than `max_tokens` estimated tokens to its head and tail around a marker in the model's view, keep the whole in the log, and add the `ReadToolResult` tool, `{"max_tokens", "head_fraction"?}` ([Tools](./tools.md#long-tool-results)) |
 
 ### System blocks
 
