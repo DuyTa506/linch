@@ -65,7 +65,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     vision: Support::ModelDependent,
     streams_tool_arguments: true,
     prompt_cache: PromptCache::Automatic,
-    cache_isolation: None,
+    cache_isolation: Some("cache_salt"),
     stop_sequences: true,
     models: ModelList {
         row: OpenAiRow {

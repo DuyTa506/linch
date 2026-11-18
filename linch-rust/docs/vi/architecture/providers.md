@@ -296,7 +296,7 @@ nó lên body lỗi HTTP và lên một lỗi đến ngay trong stream:
 | Gemini (`gemini/http.rs`) | 400 | không có | `exceeds the maximum number of tokens allowed` |
 | DeepSeek (`deepseek.rs`) | 400 | không có | `maximum context length` |
 | vLLM (server profile) | 400 | không có | `maximum context length` |
-| SGLang (server profile) | 400 | không có | `maximum context length`, `exceeds the maximum allowed length` |
+| SGLang (server profile) | 400 | không có | `maximum context length`, `exceeds the maximum allowed length`, `is longer than the model's context length` |
 | llama.cpp (server profile) | 400 | `exceed_context_size_error` | `exceeds the available context size`, `larger than the max context size` |
 
 Status 413 của Anthropic nghĩa là body quá lớn tính theo byte, điều mà compaction có thể

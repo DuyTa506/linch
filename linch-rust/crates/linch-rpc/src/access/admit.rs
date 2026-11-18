@@ -53,7 +53,7 @@ impl Tenant {
         }
         if provider.cache_isolation_field().is_none() {
             let message = "the tenant's prompt cache is isolated, and this provider has no \
-                           request field for it (only vllm, openai-chat and openai-responses do)";
+                           request field for it (only vllm, sglang, openai-chat and openai-responses do)";
             return Err(refused("cache_isolation", message.into()));
         }
         if let Some(request) = provider.request_mut() {
