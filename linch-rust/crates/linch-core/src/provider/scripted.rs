@@ -19,9 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::client::DEFAULT_CONTEXT_WINDOW;
 use super::{
-    MessageEndEvent, MessageStartEvent, Provider, ProviderError, ProviderEvent, ProviderRequest,
-    ProviderStream, TextDeltaEvent, ThinkingDeltaEvent, ToolUseEndEvent, ToolUseInputDeltaEvent,
-    ToolUseStartEvent,
+    ContextSource, MessageEndEvent, MessageStartEvent, Provider, ProviderCapabilities,
+    ProviderError, ProviderEvent, ProviderRequest, ProviderStream, TextDeltaEvent,
+    ThinkingDeltaEvent, ToolChoiceCaps, ToolUseEndEvent, ToolUseInputDeltaEvent, ToolUseStartEvent,
 };
 use crate::json::JsonValue;
 use crate::run::StopReason;
@@ -178,6 +178,8 @@ pub struct ScriptedProvider {
     state: Mutex<State>,
     /// The context window it reports for every model.
     window: u64,
+    /// Whether the host set `window`, which makes it a known one.
+    window_set: bool,
     /// What [`Provider::native_output_schema`] reports.
     native: bool,
 }
@@ -201,6 +203,7 @@ impl ScriptedProvider {
                 requests: Vec::new(),
             }),
             window: DEFAULT_CONTEXT_WINDOW,
+            window_set: false,
             native: true,
         }
     }
@@ -209,6 +212,7 @@ impl ScriptedProvider {
     /// set), for tests of what derives from it.
     pub fn with_context_window(mut self, window: u64) -> Self {
         self.window = window;
+        self.window_set = true;
         self
     }
 
@@ -280,6 +284,22 @@ impl Provider for ScriptedProvider {
 
     fn native_output_schema(&self) -> bool {
         self.native
+    }
+
+    /// The window [`ScriptedProvider::with_context_window`] set is a
+    /// configured one; without it the window is the default, a guess.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        let mut capabilities = ProviderCapabilities::undeclared(
+            self.id(),
+            model,
+            self.window,
+            self.native,
+            ToolChoiceCaps::probe(|choice, thinking| self.tool_choice_refusal(choice, thinking)),
+        );
+        if self.window_set {
+            capabilities.context_source = ContextSource::Configured;
+        }
+        capabilities
     }
 
     async fn stream(

@@ -47,7 +47,7 @@ compacts. The fields, typed as `Compaction`:
 
 | Field | Default | What it controls |
 |---|---|---|
-| `threshold_tokens` | none: follow the context window | Compact a view measured at this many tokens or more: the estimate (about four characters per token, 1000 per image), or, once the provider has reported usage, its last reported prompt tokens plus the estimate of what followed, whichever is larger. Without it, compact when that measure plus an output reserve reaches 80% of the provider's [context window](./providers.md#context-window) |
+| `threshold_tokens` | none: follow the context window | Compact a view measured at this many tokens or more: the estimate (about four characters per token, 1000 per image), or, once the provider has reported usage, its last reported prompt tokens plus the estimate of what followed, whichever is larger. Without it, compact when that measure plus an output reserve reaches 80% of the provider's [context window](./providers.md#context-window). With it, it must be below that window when the window is known (see [below](#when-the-prompt-does-not-fit)) |
 | `keep_recent_turns` | `10` | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | the built-in prompt | Instructions for the summary call. `DETAILED_COMPACTION_PROMPT` is Python Linch's `DetailedCompaction` (below) |
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
@@ -90,7 +90,13 @@ report uses the estimate. The report is read back from the run's events on a
 resume. The `compaction` event keeps its estimates in `tokens_before` and
 `tokens_after`, and adds `measured_tokens` when the measure was higher. A
 summary call at a turn's start sends the whole view, so keep a
-`threshold_tokens` well under the window; a prompt the provider still refuses
+`threshold_tokens` well under the window: one at or above a known window
+(configured, reported by the server, or in the adapter's table; not the 128000
+default of an unknown model) does not open (`-32011`, `compaction.threshold_tokens (N)
+must be below the context window (W)`), because the provider refuses the prompt before
+such a trigger fires. A trigger just under the window is no better: it leaves no room for
+a turn's growth, and each refused primary prompt spends `max_forced`; about 7/8 of the
+window or less is safe. A prompt the provider still refuses
 is shortened as [below](#when-the-prompt-does-not-fit) says
 ([Architecture](../architecture/compaction.md#what-due-measures)).
 

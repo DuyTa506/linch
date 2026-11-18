@@ -48,7 +48,7 @@ compact. Các trường, có kiểu `Compaction`:
 
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
-| `threshold_tokens` | không có: theo context window | Compact một view có số đo từ số token này trở lên: ước lượng (khoảng bốn ký tự mỗi token, 1000 mỗi ảnh), hoặc, khi provider đã báo usage, số token prompt nó báo gần nhất cộng với ước lượng phần phát sinh sau đó, lấy số lớn hơn. Nếu không có, compact khi số đo đó cộng với phần dự trữ cho đầu ra đạt 80% [context window](./providers.md#context-window) của provider |
+| `threshold_tokens` | không có: theo context window | Compact một view có số đo từ số token này trở lên: ước lượng (khoảng bốn ký tự mỗi token, 1000 mỗi ảnh), hoặc, khi provider đã báo usage, số token prompt nó báo gần nhất cộng với ước lượng phần phát sinh sau đó, lấy số lớn hơn. Nếu không có, compact khi số đo đó cộng với phần dự trữ cho đầu ra đạt 80% [context window](./providers.md#context-window) của provider. Khi có nó, nó phải thấp hơn cửa sổ nếu cửa sổ đã biết (xem [bên dưới](#when-the-prompt-does-not-fit)) |
 | `keep_recent_turns` | `10` | Số lượt assistant được giữ nguyên văn sau bản tóm tắt; tối thiểu 1 |
 | `prompt` | prompt tích hợp sẵn | Chỉ dẫn cho lời gọi tóm tắt. `DETAILED_COMPACTION_PROMPT` là `DetailedCompaction` của Python Linch (bên dưới) |
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
@@ -86,7 +86,12 @@ một run mà lượt đầu hoặc lần compact gần nhất không để lạ
 Báo cáo được đọc lại từ các event của run khi resume. Event `compaction` vẫn giữ các giá trị
 ước lượng trong `tokens_before` và `tokens_after`, và thêm `measured_tokens` khi số đo cao hơn.
 Lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên hãy đặt `threshold_tokens` thấp hơn cửa sổ
-khá nhiều; một prompt mà provider vẫn từ chối thì được rút ngắn như
+khá nhiều: một giá trị bằng hoặc trên một cửa sổ đã biết (được cấu hình, do server báo, hoặc
+có trong bảng của adapter; không tính mặc định 128000 của model không rõ) làm agent không mở
+được (`-32011`, `compaction.threshold_tokens (N) must be below the context window (W)`), vì
+provider từ chối prompt trước khi ngưỡng đó kích hoạt. Một ngưỡng sát dưới cửa sổ cũng không
+hơn: nó không chừa chỗ cho phần tăng của một lượt, và mỗi prompt chính bị từ chối tiêu một
+lần `max_forced`; khoảng 7/8 cửa sổ trở xuống là an toàn. Một prompt mà provider vẫn từ chối thì được rút ngắn như
 [bên dưới](#when-the-prompt-does-not-fit) nói
 ([Kiến trúc](../architecture/compaction.md#due-đo-cái-gì)).
 

@@ -314,8 +314,11 @@ Without `threshold_tokens` (`"compaction": {}` turns it on), the run compacts as
 Python Linch does: when the estimate plus an output reserve reaches 80% of the
 provider's [context window](./providers.md#context-window) for the spec's model.
 The reserve is `spec.max_output_tokens` when set, else a fifth of the window,
-at least 1 and at most 32768. A `threshold_tokens` replaces that rule and
-ignores the window.
+at least 1 and at most 32768. A `threshold_tokens` replaces that rule. It
+must be below the window when the window is known (configured, reported by the
+server, or in the adapter's table; the 128000 default of an unknown model is a
+guess and is not checked): `agent.open` fails with `-32011`,
+`compaction.threshold_tokens (N) must be below the context window (W)`.
 
 Compaction makes one extra provider call on the agent's provider and model,
 and the run reports it with a `compaction` [event](./events.md). With

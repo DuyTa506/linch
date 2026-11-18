@@ -132,15 +132,19 @@ chậm gì cả.
   (`compaction::measure_after`). Event mang số đo dưới tên `measured_tokens` (không có trên
   dây khi ước lượng là số đo), nên resume đọc lại đúng phán đoán đó.
 
-Khoảng trống đã biết: lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên một ngưỡng vượt quá
-mức vừa cửa sổ (một `threshold_tokens` gần hoặc trên cửa sổ) khiến lời gọi đó bị từ chối.
-Bản tóm tắt khi đó đi lại như một bản bắt buộc (chỉ phần đã gộp, đã cắt, mỗi lần từ chối
-giảm một nửa), không tiêu `max_forced`, nên lần từ chối đó không còn kết thúc run; nó vẫn
-tốn một request bị từ chối ở mỗi lượt đến hạn như vậy. Điều mà một ngưỡng bằng hoặc trên
-cửa sổ vẫn để mặc cho may rủi là một prompt chính bị từ chối (view lớn quá cửa sổ giữa hai
-lần đo), điều này ép một bản tóm tắt và tiêu `max_forced`: một run chỉ compact theo cách đó
-kết thúc `failed` ở lần thứ tư (`max_forced` mặc định 3), nên ngưỡng như vậy cần
-`max_forced` cao hơn. Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi tóm tắt.
+Một `threshold_tokens` bằng hoặc trên một cửa sổ đã biết thì agent không build
+(`CompactionSpec::window_problem`, kiểm tra trong `AgentBuilder::build` với
+`Provider::capabilities`; cửa sổ có `context_source` là `default` chỉ là phỏng đoán nên
+không được kiểm tra): ngưỡng như vậy không bao giờ kích hoạt, vì provider từ chối prompt
+trước, và mỗi lần từ chối ép một bản tóm tắt và tiêu `max_forced`. Khoảng trống đã biết:
+lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên một ngưỡng gần cửa sổ khiến lời gọi đó bị
+từ chối. Bản tóm tắt khi đó đi lại như một bản bắt buộc (chỉ phần đã gộp, đã cắt, mỗi lần
+từ chối giảm một nửa), không tiêu `max_forced`, nên lần từ chối đó không còn kết thúc run;
+nó vẫn tốn một request bị từ chối ở mỗi lượt đến hạn như vậy. Điều mà một ngưỡng ít chỗ
+trống dưới cửa sổ vẫn để mặc cho may rủi là một prompt chính bị từ chối (view lớn quá cửa
+sổ giữa hai lần đo), điều này ép một bản tóm tắt và tiêu `max_forced`: một run chỉ compact
+theo cách đó kết thúc `failed` ở lần thứ tư (`max_forced` mặc định 3), nên ngưỡng cần chừa
+chỗ cho phần tăng của một lượt (trong các test là 7/8 cửa sổ trở xuống). Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi tóm tắt.
 Một ngưỡng thấp hơn trọng lượng của các lượt được giữ và overhead của provider bị giữ sau
 hai bản tóm tắt, như ở trên. Trường hợp kích thước tự nó kết thúc `failed` là prompt mà
 system prompt, tool và lượt cuối, sau khi cắt, vẫn vượt cửa sổ.
@@ -531,7 +535,7 @@ hồi của nó đã bền vững (`truncation.rs`, `runner/start.rs:537-539`).
   resume về cùng một kết quả.
 - `crates/linch-core/tests/e2e_compaction_estimator.rs`: ngoài anchor, một kết quả khổng lồ
   trong phần đã gộp (request tóm tắt bị cắt và thử lại), trong lượt cuối (bị cắt trong
-  view, còn nguyên trong session), một ngưỡng bằng cửa sổ, một bản tóm tắt bị từ chối ở mọi
+  view, còn nguyên trong session), một ngưỡng gần cửa sổ, một bản tóm tắt bị từ chối ở mọi
   kích thước, một overhead tự nó đã vượt cửa sổ, một request tóm tắt ở đầu lượt được ghim
   từng byte (`tests/golden/compaction_proactive_request.json`), và một lần crash ở mọi lần
   ghi của từng cái, gồm cả việc giữ được đọc lại từ `measured_tokens`.

@@ -320,7 +320,10 @@ giống như Python Linch: khi giá trị ước tính cộng với phần dự 
 80% [context window](./providers.md#context-window) của provider cho model trong
 spec. Phần dự trữ là `spec.max_output_tokens` nếu được đặt, nếu không thì bằng một
 phần năm cửa sổ, tối thiểu 1 và tối đa 32768. `threshold_tokens` thay thế quy tắc
-đó và bỏ qua cửa sổ.
+đó. Nó phải thấp hơn cửa sổ nếu cửa sổ đã biết (được cấu hình, do server báo, hoặc có trong
+bảng của adapter; mặc định 128000 của model không rõ chỉ là phỏng đoán và không được kiểm
+tra): `agent.open` thất bại với `-32011`,
+`compaction.threshold_tokens (N) must be below the context window (W)`.
 
 Compaction thực hiện thêm một lời gọi provider trên provider và model của agent,
 và run báo cáo nó bằng một [event](./events.md) `compaction`. Khi compaction bật, một prompt bị
