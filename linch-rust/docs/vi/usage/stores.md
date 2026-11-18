@@ -110,7 +110,9 @@ hãy cấp cho máy chạy server đường mạng và thông tin xác thực.
 
 Agent đầu tiên mở trên một DSN sẽ kết nối và áp dụng các migration. Việc này an toàn
 ở mọi lần khởi động: các migration đã áp dụng được bỏ qua, và các lần mở đồng thời
-chờ trên một khóa cơ sở dữ liệu. Các phiên bản đã áp dụng được ghi trong
+chờ trên một khóa cơ sở dữ liệu. Một schema đã được migrate đủ chỉ bị đọc, trong một
+truy vấn, và không lấy khóa: một agent mở trên nó không phải chờ lần mở khác, hay một
+migration còn đang chạy. Các phiên bản đã áp dụng được ghi trong
 `linch_migrations`, nên bảng của công cụ migration riêng của bạn trong cùng schema
 sẽ không xung đột.
 
@@ -176,6 +178,13 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
   `open_agent` bị từ chối (`NotAllowed`, `kind == "pool_connections"`). Một cấu hình
   không có `max_connections` nhận kích thước mặc định hoặc mức trần, tùy giá trị nào
   nhỏ hơn ([Server](./server.md#config)).
+- Mỗi store Postgres (một store cho mỗi agent đã mở) còn giữ **một kết nối riêng** nằm
+  ngoài pool, dùng để gia hạn và release lease của run ([Run leases](#run-leases)), nên
+  heartbeat của một run không bao giờ phải xếp hàng sau việc của run. Nó được mở ở lần
+  gia hạn đầu tiên và được tính vào `max_connections` của chính Postgres: hãy dự trù
+  `max_connections` cộng 1 cho mỗi agent mở trên một pool, và thêm một cho heartbeat job
+  của worker. (Một workflow đang được giữ trên server chiếm thêm một backend, nằm ngoài
+  pool: N workflow đang chạy là N kết nối thêm.)
 - Một kết nối nhàn rỗi từ một giây trở lên được kiểm tra trước lần ghi kế tiếp và bị
   thay nếu cơ sở dữ liệu đã đóng nó (do khởi động lại, failover, hoặc idle timeout),
   nên một run đã chờ một lệnh gọi mô hình dài vẫn ghi được câu trả lời của nó. Một
@@ -198,14 +207,28 @@ ghi gì; `.owner` là id của server đang giữ nó (mờ đục: 8 ký tự h
   đó trước khi thoát.
 - Một server crash hoặc treo không release gì. Các run của nó bị từ chối trong tối đa
   độ dài lease (mặc định 30 s), rồi server nào cũng resume được.
-- Nếu một server bị đứng lâu hơn lease của nó (một lần tạm dừng dài, mất mạng), server
-  khác có thể tiếp quản các run của nó. Khi nó tỉnh lại, lần ghi kế tiếp của nó bị từ
-  chối và run kết thúc với `LeaseLost` (mã -32022) mà không ghi gì: bên điều khiển mới
-  của run sở hữu nó.
-- Lease chỉ được gia hạn khi run còn tiến triển trên server của nó. Một client ngừng đọc
-  event của một run đủ lâu để hàng đợi của server đầy (xem
-  [backpressure](../architecture/rpc.md#backpressure)) sẽ làm run tạm dừng, và sau trọn một lease, server khác có thể
-  tiếp quản nó; run bị tạm dừng sau đó kết thúc với `LeaseLost` khi nó chạy tiếp.
+- Nếu một server bị đứng lâu hơn lease của nó (một tiến trình bị đóng băng, mất mạng
+  tới cơ sở dữ liệu), server khác có thể tiếp quản các run của nó. Khi nó tỉnh lại, lần
+  ghi kế tiếp của nó bị từ chối và run kết thúc với `LeaseLost` (mã -32022) mà không ghi
+  gì: bên điều khiển mới của run sở hữu nó.
+- Lease được gia hạn chừng nào run còn sống trên server của nó, mỗi một phần ba lease,
+  bởi một task riêng: nó không chờ run, không chờ stream được đọc, không chờ pool. Ba
+  việc từng làm một run mất lease khi server của nó vẫn khỏe, nay không còn nữa:
+  - Một pool mà mọi kết nối đều bận (khóa hàng, đĩa chậm). Việc gia hạn dùng kết nối
+    riêng của store, và bỏ cuộc sau một phần ba lease (cũng đặt làm `statement_timeout`
+    của câu lệnh), nên một lần gia hạn kẹt chỉ tốn một nhịp; nhịp kế tiếp đến hạn sau
+    một phần ba lease kể từ lúc nhịp trước bắt đầu. Một lần gia hạn thất bại vì lý do
+    khác (cơ sở dữ liệu không với tới được) được thử lại ở nhịp sau, trên kết nối mới
+    nếu kết nối cũ đã hỏng.
+  - Một client ngừng đọc event của một run đủ lâu để hàng đợi của server đầy (xem
+    [backpressure](../architecture/rpc.md#backpressure)). Run tạm dừng chờ client đó
+    nhưng vẫn thuộc server của nó: không server nào khác resume được nó khi kết nối còn
+    sống, và nó chạy tiếp khi client đọc lại. Một kết nối HTTP không đọc gì bị ping của
+    [liveness](./server.md#liveness) kết thúc, và các run của nó bị drop (resume được từ
+    trạng thái bền vững cuối cùng); một client Unix socket hoặc stdio không bao giờ đọc
+    lại giữ run của nó cho đến khi đóng.
+  - Một stream không ai poll (một host thư viện đã ngừng đọc): run không tiến lên, nhưng
+    giữ lease cho đến khi stream bị drop.
 - `stores.lease_ttl_ms` đặt độ dài lease, tối thiểu 1000. Ngắn hơn nghĩa là các run của
   một server đã crash được giải phóng sớm hơn, đổi lại thêm một lần ghi nhỏ cho mỗi run
   đang chạy mỗi một phần ba của nó.

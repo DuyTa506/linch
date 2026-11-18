@@ -108,8 +108,11 @@ connects; give the server's host the network path and credentials.
 
 The first agent that opens on a DSN connects and applies the migrations. This
 is safe on every start: applied migrations are skipped, and concurrent opens
-wait on a database lock. Applied versions are recorded in `linch_migrations`,
-so your own migration tool's table in the same schema does not collide.
+wait on a database lock. A schema that is already fully migrated is only read,
+in one query, and takes no lock: an agent that opens on it does not wait for
+another open, or for a migration still running. Applied versions are recorded in
+`linch_migrations`, so your own migration tool's table in the same schema does
+not collide.
 
 | Table | Holds |
 |---|---|
@@ -178,6 +181,14 @@ Schema details, write paths and the refusal rules are in the
   `open_agent` is refused (`NotAllowed`, `kind == "pool_connections"`). A
   config without `max_connections` gets the default size or the cap,
   whichever is smaller ([Server](./server.md#config)).
+- Each Postgres store (one per open agent) also keeps **one connection of its
+  own** outside the pool, for renewing and releasing run leases ([Run
+  leases](#run-leases)), so a run's heartbeat never queues behind run work.
+  It opens on the first renewal and counts against Postgres's own
+  `max_connections`: budget `max_connections` plus 1 for every agent opened on
+  a pool, and one more for a worker's job heartbeat. (A workflow that is held
+  on a server takes one more backend each, outside the pool: N running
+  workflows are N extra connections.)
 - A connection that sat idle for a second or more is checked before its next
   write and replaced if the database closed it (a restart, a failover, an
   idle timeout), so a run that waited on a long model call still writes its
@@ -203,15 +214,31 @@ that holds it (opaque: 8 random hex characters, or the server's `server_id`;
 - A server that crashed or hung releases nothing. Its runs are refused for
   up to the lease's length (30 s by default), then any server can resume
   them.
-- If a server stalls longer than its lease (a long pause, a lost network),
-  another server can take its runs over. When it wakes, its next write is
-  refused and its run ends with `LeaseLost` (code -32022) without writing
-  anything: the run's new driver owns it.
-- The lease is renewed only while the run makes progress on its server. A
-  client that stops reading a run's events long enough for the server's
-  queue to fill ([backpressure](../architecture/rpc.md#backpressure)) pauses the run,
-  and after a whole lease another server can take it over; the paused run
-  then ends with `LeaseLost` when it goes on.
+- If a server stalls longer than its lease (a frozen process, a lost network
+  to the database), another server can take its runs over. When it wakes, its
+  next write is refused and its run ends with `LeaseLost` (code -32022)
+  without writing anything: the run's new driver owns it.
+- The lease is renewed for as long as the run lives on its server, a third of
+  the lease apart, by a task of its own: it does not wait for the run, for
+  the stream to be read, or for the pool. Three things used to cost a run its
+  lease while its server was healthy, and no longer do:
+  - A pool whose connections are all busy (a row lock, a slow disk). A
+    renewal uses the store's own connection, and gives up after a third of the
+    lease (also as the statement's `statement_timeout`), so one stuck renewal
+    costs one beat; the next is due a third of the lease after the previous
+    one began. A renewal that fails for another reason (the database is
+    unreachable) is tried again at the next beat, on a new connection if the
+    old one broke.
+  - A client that stops reading a run's events, long enough for the server's
+    queue to fill ([backpressure](../architecture/rpc.md#backpressure)). The
+    run pauses on that client but stays its server's: no other server can
+    resume it while the connection lives, and it goes on when the client reads
+    again. A HTTP connection that reads nothing is ended by the
+    [liveness](./server.md#liveness) ping, which drops its runs (resumable
+    from their last durable state); a Unix socket or stdio client that never
+    reads again holds its run until it closes.
+  - A stream nobody polls (a library host that stopped reading): the run does
+    not advance, but it keeps its lease until its stream is dropped.
 - `stores.lease_ttl_ms` sets the lease's length, at least 1000. Shorter means
   a crashed server's runs are free sooner, against one more small write per
   running run each third of it.

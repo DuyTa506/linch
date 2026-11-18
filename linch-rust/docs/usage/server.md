@@ -470,6 +470,15 @@ Ending a connection is the same as its input ending: its runs are dropped (a
 Postgres run keeps its last durable state and can be resumed), its calls are
 answered, and its places are freed.
 
+A client that stays connected but **stops reading** (its socket buffers and
+the server's queue of 1024 messages fill) pauses its runs, and keeps them: a
+run's lease is renewed by a task of its own, so no other server can take the
+run over while the connection lives ([Run leases](./stores.md#run-leases)).
+A WebSocket that reads nothing cannot take a ping either: it is ended when a
+ping cannot be sent within `pong_timeout_ms`, and its runs are dropped as above.
+There is no write timeout on a Unix socket or stdio: a local client that never
+reads again holds its runs until it closes.
+
 **A client that is busy but alive must keep its event loop running.** The
 pong comes from the client's WebSocket code, which runs on its event loop. A
 Python client whose loop is blocked for longer than `pong_timeout_ms` (60 s by
