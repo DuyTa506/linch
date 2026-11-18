@@ -162,10 +162,17 @@ where the table says so:
 | `post_turn` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/turn.rs:402-421`) | open |
 | `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`, `event_emit` | Every hook runs; failures are only recorded. Cannot fail closed (`hooks/observe.rs`). `event_emit` fires once per event about to be delivered to the caller, but only one that is both streamed and durably logged: never for a hook's own record, and never for a stream-only delta or tool-progress event (`runner/hooks.rs`) | open |
 
-The defaults are in `HookPoint::default_fail_mode` (`policy.rs:193-221`).
-Failure handling is in `Entry::invoke` and `failed` (`hooks/chain.rs:208-259`):
-a hook that errors or times out is skipped when open, and turned into the
-point's blocking answer when closed.
+The defaults are in `HookPoint::default_fail_mode` (`policy.rs`).
+Failure handling is in `Entry::invoke` and `failed` (`hooks/chain.rs`):
+a hook that errors, panics or times out is skipped when open, and turned into the
+point's blocking answer when closed. A panic is caught around the hook's call
+and counts as an error: the record says `the hook panicked` and the closed
+text names only the policy id, as the panic text could carry a secret. A hook
+that sets no timeout gets `HookPoint::default_timeout` at registration:
+30 seconds at the closed gates `pre_tool_use` and `permission_request`, none at
+the other points. It is applied when the hook is registered, not stored in the
+spec, so run contract digests do not change. `tool_execute` is a middleware
+waterfall around the tool's own run, with no timeout of its own.
 
 Hooks are not barriers. Nothing is flushed around a chain, and a chain with no
 hook is skipped before its request is built, so a run without hooks does no

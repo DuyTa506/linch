@@ -2,8 +2,11 @@
 //! modes and records. The per-point `run` methods live with each point's
 //! types and decide what a response does to the chain.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+use futures::FutureExt as _;
 
 use crate::policy::{FailMode, HookPoint};
 use crate::registration::Registration;
@@ -149,7 +152,7 @@ impl<P: Point> HookChain<P> {
             policy_id: Arc::from(policy_id),
             policy_version: hook.policy_version(),
             matcher,
-            timeout: hook.timeout(),
+            timeout: hook.timeout().or_else(|| P::POINT.default_timeout()),
             fail_mode,
             hook,
         };
@@ -215,25 +218,34 @@ impl<P: Point> Entry<P> {
         {
             return Step::Skip;
         }
-        let call = self.hook.call(request);
+        // A hook that panics fails like one that errors; what it said
+        // stays out of the record, as it could carry a secret.
+        let call = AssertUnwindSafe(async { self.hook.call(request).await }).catch_unwind();
         let answer = match self.timeout {
             Some(limit) => tokio::time::timeout(limit, call).await.map_err(|_| limit),
             None => Ok(call.await),
         };
         let fail_mode = self.fail_mode;
         let (status, step) = match answer {
-            Ok(Ok(response)) => (
+            Ok(Ok(Ok(response))) => (
                 HookStatus::Answered {
                     verdict: P::verdict(&response),
                 },
                 Step::Answer(response),
             ),
-            Ok(Err(error)) => (
+            Ok(Ok(Err(error))) => (
                 HookStatus::Failed {
                     error: error.to_string(),
                     fail_mode,
                 },
                 self.failed("failed"),
+            ),
+            Ok(Err(_panic)) => (
+                HookStatus::Failed {
+                    error: "the hook panicked".into(),
+                    fail_mode,
+                },
+                self.failed("panicked"),
             ),
             Err(after) => (
                 HookStatus::TimedOut { after, fail_mode },

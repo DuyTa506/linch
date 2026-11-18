@@ -115,9 +115,14 @@ def callback(
             fail mode changes, so a resumed run notices.
         matcher: Tool-name globs (`*`, `?`), only at the three tool points;
             evaluated in the server, so a miss never crosses the connection.
-        timeout: Seconds the server waits for an answer; no limit when absent.
+        timeout: Seconds the server waits for an answer. When absent, the
+            gates `pre_tool_use` and `permission_request` wait 30 seconds,
+            and every other point has no limit.
         fail_mode: `closed` turns a failure into the point's blocking answer,
-            `open` skips the callback; the point's default when absent.
+            `open` skips the callback; the point's default when absent. A
+            callback that guards something (a redaction, a filter) at a point
+            that fails open lets the data through when it fails: set
+            `closed` where the point allows it.
 
     Returns:
         A decorator that turns the function into a `Callback`.
