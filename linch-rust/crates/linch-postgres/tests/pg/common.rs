@@ -1,7 +1,7 @@
 //! A fresh Postgres schema per test, plus small record builders.
 //!
 //! Tests read the database from `LINCH_TEST_PG_DSN` and skip without it.
-//! Each test gets its own schema (`p7_<name>`, reset at start and dropped at
+//! Each test gets its own schema (`p7_<pid>_<name>`, reset at start and dropped at
 //! the end) through the pool's `search_path`, so tests run in parallel and
 //! the conformance namespaces start empty on every run.
 
@@ -35,7 +35,7 @@ impl TestDb {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p7_{name}");
+        let schema = format!("p7_{}_{name}", std::process::id());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&dsn)

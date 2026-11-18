@@ -109,8 +109,10 @@ connects; give the server's host the network path and credentials.
 Run the migrations as a deploy step ([below](#migrations-as-a-deploy-step)).
 An agent that opens on a DSN also applies any that are missing, so a
 development setup needs nothing else; that is safe on every start: applied
-migrations are skipped, and concurrent opens wait on a database lock. Applied
-versions are recorded in `linch_migrations` (the worker's in
+migrations are skipped, and concurrent opens wait on a database lock. A schema
+that is already fully migrated is only read, in one query, and takes no lock: an
+agent that opens on it does not wait for another open, or for a migration still
+running. Applied versions are recorded in `linch_migrations` (the worker's in
 `linch_worker_migrations`), so your own migration tool's table in the same
 schema does not collide.
 
@@ -255,6 +257,14 @@ before an upgrade, and let suspended runs finish first.
   `open_agent` is refused (`NotAllowed`, `kind == "pool_connections"`). A
   config without `max_connections` gets the default size or the cap,
   whichever is smaller ([Server](./server.md#config)).
+- Each Postgres store (one per open agent) also keeps **one connection of its
+  own** outside the pool, for renewing and releasing run leases ([Run
+  leases](#run-leases)), so a run's heartbeat never queues behind run work.
+  It opens on the first renewal and counts against Postgres's own
+  `max_connections`: budget `max_connections` plus 1 for every agent opened on
+  a pool, and one more for a worker's job heartbeat. (A workflow that is held
+  on a server takes one more backend each, outside the pool: N running
+  workflows are N extra connections.)
 - A connection that sat idle for a second or more is checked before its next
   write and replaced if the database closed it (a restart, a failover, an
   idle timeout), so a run that waited on a long model call still writes its
@@ -268,7 +278,8 @@ Postgres has one limit for everything that connects: its `max_connections`
 fleet can open at once:
 
 ```text
-connections = servers x (tenants x max_pool_connections + worker pool)
+connections = servers x (tenants x (max_pool_connections + agents per tenant)
+                         + worker pool + worker lease connection)
               + extras
 ```
 
@@ -283,8 +294,13 @@ connections = servers x (tenants x max_pool_connections + worker pool)
   the cores of the server's machine clamped to 10 to 32. A pool opens its
   connections as runs need them, so a quiet tenant holds few, but a busy
   one can reach the maximum.
+- **agents per tenant** is how many agents the tenant has open: each one's
+  store keeps a [lease connection](#run-leases) of its own outside the pool
+  (+1 per `PgRunStore`).
 - **worker pool** is `worker.max_connections` (the same default) for a
-  server with a `worker` section, and 0 without.
+  server with a `worker` section, and 0 without. A worker also keeps one
+  lease connection for its job heartbeat (+1 per worker; 0 without a
+  `worker` section).
 - **extras**: the migration lock takes one connection outside the pool while a
   pool connects and migrates (concurrent opens of one schema each need one for
   that moment); a [workflow](./workflows.md) that is running holds one more,
@@ -292,12 +308,13 @@ connections = servers x (tenants x max_pool_connections + worker pool)
   lock); the worker's `LISTEN` holds one connection for as long as it runs
   (leave room for it in `worker.max_connections`).
 
-Worked example: 3 servers, each with 5 tenants at the default 10-connection
-pool and a worker pool of 10 connections, need `3 x (5 x 10 + 10) = 180`
-connections at the most, against Postgres's 100. Set `max_pool_connections`
-to 4 for each tenant and `worker.max_connections` to 4, and it is `3 x (5 x 4
-+ 4) = 72`, which fits with room for 4 running workflows, an admin session
-and a deploy's `migrate`. Plan about two connections per run in flight at
+Worked example: 3 servers, each with 5 tenants (one agent each) at the
+default 10-connection pool and a worker pool of 10 connections, need
+`3 x (5 x (10 + 1) + 10 + 1) = 198` connections at the most, against
+Postgres's 100. Set `max_pool_connections` to 3 for each tenant and
+`worker.max_connections` to 3, and it is `3 x (5 x (3 + 1) + 3 + 1) = 72`,
+which fits with room for 4 running workflows, an admin session and a deploy's
+`migrate`. Plan about two connections per run in flight at
 once, per pool; a pool smaller than that makes runs wait, and past 30 s fail
 with `pool timed out` (above).
 
@@ -354,15 +371,31 @@ that holds it (opaque: 8 random hex characters, or the server's `server_id`;
 - A server that crashed or hung releases nothing. Its runs are refused for
   up to the lease's length (30 s by default), then any server can resume
   them.
-- If a server stalls longer than its lease (a long pause, a lost network),
-  another server can take its runs over. When it wakes, its next write is
-  refused and its run ends with `LeaseLost` (code -32022) without writing
-  anything: the run's new driver owns it.
-- The lease is renewed only while the run makes progress on its server. A
-  client that stops reading a run's events long enough for the server's
-  queue to fill ([backpressure](../architecture/rpc.md#backpressure)) pauses the run,
-  and after a whole lease another server can take it over; the paused run
-  then ends with `LeaseLost` when it goes on.
+- If a server stalls longer than its lease (a frozen process, a lost network
+  to the database), another server can take its runs over. When it wakes, its
+  next write is refused and its run ends with `LeaseLost` (code -32022)
+  without writing anything: the run's new driver owns it.
+- The lease is renewed for as long as the run lives on its server, a third of
+  the lease apart, by a task of its own: it does not wait for the run, for
+  the stream to be read, or for the pool. Three things used to cost a run its
+  lease while its server was healthy, and no longer do:
+  - A pool whose connections are all busy (a row lock, a slow disk). A
+    renewal uses the store's own connection, and gives up after a third of the
+    lease (also as the statement's `statement_timeout`), so one stuck renewal
+    costs one beat; the next is due a third of the lease after the previous
+    one began. A renewal that fails for another reason (the database is
+    unreachable) is tried again at the next beat, on a new connection if the
+    old one broke.
+  - A client that stops reading a run's events, long enough for the server's
+    queue to fill ([backpressure](../architecture/rpc.md#backpressure)). The
+    run pauses on that client but stays its server's: no other server can
+    resume it while the connection lives, and it goes on when the client reads
+    again. A HTTP connection that reads nothing is ended by the
+    [liveness](./server.md#liveness) ping, which drops its runs (resumable
+    from their last durable state); a Unix socket or stdio client that never
+    reads again holds its run until it closes.
+  - A stream nobody polls (a library host that stopped reading): the run does
+    not advance, but it keeps its lease until its stream is dropped.
 - `stores.lease_ttl_ms` sets the lease's length, at least 1000. Shorter means
   a crashed server's runs are free sooner, against one more small write per
   running run each third of it.

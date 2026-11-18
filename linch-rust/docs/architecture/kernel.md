@@ -237,8 +237,9 @@ every store key, so two agents with different namespaces never share runs or
 sessions even on one database (`builder.rs:117-121`,
 [stores](./stores.md#keys-and-tenancy)). Many agents run on one Tokio runtime.
 A run advances only while its stream is polled (`runner.rs:39-40`), and the
-core spawns one kind of task: the one that drives the background subagents of
-a suspended run (`runner.rs:41-44`).
+core spawns three kinds of task: the one that drives the background subagents
+of a suspended run, the heartbeat that renews a run's lease while the run
+lives, and the one-write release of a dropped run's lease (`runner.rs:39-45`).
 
 A registry or hook chain that you add must follow the same rules: it lives in
 `AgentInner` or on a value the builder takes, it hands out `Registration`s,

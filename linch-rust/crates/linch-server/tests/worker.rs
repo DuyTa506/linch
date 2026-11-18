@@ -253,6 +253,21 @@ async fn all_ended(pool: &PgPool) {
     }
 }
 
+/// Wait until the schedules of the schema have fired at least `n` times in
+/// all; the number of fires then.
+async fn fired(pool: &PgPool, n: i64) -> i64 {
+    let fires = "SELECT coalesce(sum(fires), 0)::bigint FROM linch_worker_schedules";
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let now = scalar(pool, fires).await;
+        if now >= n {
+            return now;
+        }
+        assert!(Instant::now() < deadline, "only {now} of {n} fires");
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_fire_runs_once_across_a_killed_server() {
     let Some(db) = TestDb::empty("fire_crash").await else {
@@ -267,17 +282,18 @@ async fn each_fire_runs_once_across_a_killed_server() {
     let create = json!({"agent": agent, "id": "tick", "prompt": "Tick.", "interval_ms": 250});
     let created: ScheduleInfo = a.call(method::SCHEDULE_CREATE, &create).await.unwrap();
     assert_eq!(created.fires, 0);
-    sleep(Duration::from_millis(1300)).await;
+    let pool = pool(&db).await;
+    // Wait for fires, not for time: a loaded disk delays each one.
+    let before = fired(&pool, 3).await;
     // Down for a while: the fires it misses coalesce into the next one.
     crash(first).await;
     sleep(Duration::from_millis(700)).await;
     let (second, socket) = server(dir.path(), "b", &config).await;
-    sleep(Duration::from_millis(1500)).await;
     let b = client(&socket).await;
     let agent = open(&b, &agent_config(&db, turns, json!({}))).await;
+    fired(&pool, before + 2).await;
     let pause = json!({"agent": agent, "id": "tick"});
     let paused: ScheduleInfo = b.call(method::SCHEDULE_PAUSE, &pause).await.unwrap();
-    let pool = pool(&db).await;
     all_ended(&pool).await;
     terminate(second).await;
 

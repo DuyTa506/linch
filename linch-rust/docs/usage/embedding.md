@@ -24,7 +24,12 @@ platform.
 - **Leases and takeover.** One server drives a run at a time; a crashed
   server's run is free after the lease's length (30 s by default), and a
   server that stops cleanly releases its runs at once ([Run
-  leases](./stores.md#run-leases)).
+  leases](./stores.md#run-leases)). The lease is renewed by a task of its own
+  on a dedicated connection that each open agent's store keeps outside its
+  pool (count one more per agent in the [connection
+  budget](./stores.md#connection-budget)), so a client that stops reading its
+  stream, or a pool whose connections are all busy, does not lose the run to
+  another server.
 - **Group commit.** Writes are committed together at the barriers above, not
   one per event.
 - **Tenant admission.** A server with tenants checks every agent config

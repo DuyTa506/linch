@@ -61,6 +61,30 @@ async fn a_schema_ahead_of_the_binary_is_refused_with_the_versions() {
 }
 
 #[tokio::test]
+async fn a_gap_or_a_changed_checksum_is_not_current_though_the_newest_is_applied() {
+    let Some(db) = TestDb::migrated("schema_gap").await else {
+        return;
+    };
+    let sql = format!("UPDATE {MIGRATIONS_TABLE} SET checksum = '\\x00' WHERE version = 1");
+    sqlx::query(AssertSqlSafe(sql))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let changed = schema_version(&db.pool).await.unwrap();
+    assert_eq!(changed.applied, Some(changed.latest));
+    assert!(!changed.is_current(), "a changed checksum is not current");
+    let sql = format!("DELETE FROM {MIGRATIONS_TABLE} WHERE version = 2");
+    sqlx::query(AssertSqlSafe(sql))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let gap = schema_version(&db.pool).await.unwrap();
+    assert_eq!(gap.applied, Some(gap.latest));
+    assert!(!gap.is_current(), "a gap is not current");
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn a_dirty_migration_is_not_counted_as_applied() {
     let Some(db) = TestDb::migrated("schema_dirty").await else {
         return;

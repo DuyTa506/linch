@@ -231,7 +231,9 @@ pub trait RunStore: Send + Sync {
 
     /// How long a claim holds without a renewal; `None` when claims never
     /// expire and are never refused (the memory stores). A run's driver
-    /// renews its lease every third of it while the run is polled.
+    /// renews its lease every third of it for as long as the run lives,
+    /// whether or not its stream is polled; a renewal that takes longer
+    /// than a third of it is given up.
     ///
     /// A wrapper store must forward this, [`RunStore::renew`],
     /// [`RunStore::release`] and [`RunStore::seize`], or the runs behind it

@@ -1,7 +1,7 @@
 //! A fresh Postgres schema per test.
 //!
 //! Tests read the database from `LINCH_TEST_PG_DSN` and skip without it.
-//! Each test gets its own schema (`p10w_<name>`, reset at start and dropped
+//! Each test gets its own schema (`p10w_<pid>_<name>`, reset at start and dropped
 //! at the end) through the pool's `search_path`, so tests run in parallel.
 
 use std::future::Future;
@@ -29,7 +29,7 @@ impl TestDb {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p10w_{name}");
+        let schema = format!("p10w_{}_{name}", std::process::id());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&dsn)

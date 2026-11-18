@@ -80,11 +80,17 @@ process.
   (`resume_child`) take the run over (`runner/start.rs:214-248`,
   `runner/fail.rs:28`).
 - **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:55`)
-  renews the lease every third of the TTL on a timer, next to the run in
-  the run future (`lease.rs:90-105`, `lease.rs:139-158`), so a long model
-  call, a tool or a retry back-off keeps it; it beats only while the
-  stream is polled, so a host that stalls or crashes lets it run out. One
-  small `UPDATE` per interval per running run; nothing on commits.
+  renews the lease every third of the TTL from a task of its own, spawned
+  when the run is driven and aborted when the run ends or is dropped, so
+  a long model call, a tool or a retry back-off keeps it, and so does a
+  stream nobody polls (a client that stopped reading). A host that
+  freezes or crashes stops its heartbeat with it, and the lease runs
+  out. Each beat is due a third of the TTL after the previous one began,
+  and gives up on a renewal that outlasts that third; a task that
+  panics ends the run with `LeaseLost`. On Postgres a renewal runs on the
+  store's own `LeaseLine` connection, bounded by the same third (also as
+  `statement_timeout`), never in the pool. One small `UPDATE` per interval
+  per running run; nothing on commits.
 - **Confirmed loss.** A renewal that finds the epoch moved ends the run at
   once with `LeaseLost` (a journal error, as a fenced write is), unless
   the journal already moved the run out of `running` (`Journal::settled`).

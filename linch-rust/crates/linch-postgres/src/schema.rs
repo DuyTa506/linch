@@ -1,7 +1,8 @@
 //! The schema version gate: what migrations the database has applied, read
 //! without writing, against the ones this binary embeds.
 
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::migrate::Migrator;
+use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 use thiserror::Error;
 
 use crate::{MIGRATIONS_TABLE, MigrateError, migrator};
@@ -15,12 +16,17 @@ pub struct SchemaVersion {
     pub applied: Option<i64>,
     /// The newest migration this binary embeds.
     pub latest: i64,
+    /// Whether the applied migrations are exactly the embedded ones, each
+    /// with the embedded checksum: the answer `migrate`'s read-only path
+    /// acts on.
+    complete: bool,
 }
 
 impl SchemaVersion {
-    /// Whether every migration this binary embeds is applied.
+    /// Whether every migration this binary embeds is applied, and nothing
+    /// else.
     pub fn is_current(&self) -> bool {
-        self.applied == Some(self.latest)
+        self.complete
     }
 }
 
@@ -64,49 +70,36 @@ pub enum SchemaError {
 ///     SchemaError: `Newer` when the database holds a migration this binary
 ///         does not embed; `Database` when the read fails.
 pub async fn schema_version(pool: &PgPool) -> Result<SchemaVersion, SchemaError> {
-    let known: Vec<i64> = migrator()
-        .iter()
-        .map(|migration| migration.version)
-        .collect();
-    check_table(pool, MIGRATIONS_TABLE, &known).await
+    check_table(pool, MIGRATIONS_TABLE, &migrator()).await
 }
 
-/// [`schema_version`] for any migration table, against the `known`
-/// versions its binary embeds (the worker crate checks its own table this
-/// way).
+/// [`schema_version`] for any migration table, against the `migrator` its
+/// binary embeds (the worker crate checks its own table this way).
 ///
 /// Args:
 ///     pool: Pool for the database (and `search_path` schema) to read.
 ///     table: The migration table.
-///     known: Every version the binary embeds.
+///     migrator: Every migration the binary embeds.
 ///
 /// Raises:
 ///     SchemaError: As [`schema_version`].
 pub async fn check_table(
     pool: &PgPool,
     table: &str,
-    known: &[i64],
+    migrator: &Migrator,
 ) -> Result<SchemaVersion, SchemaError> {
-    let latest = known.iter().copied().max().unwrap_or(0);
-    // One connection for both reads: a second acquire right after the first
-    // release would open another connection of the pool.
+    let latest = migrator.iter().map(|m| m.version).max().unwrap_or(0);
     let mut connection = pool.acquire().await?;
-    let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(table)
-        .fetch_one(&mut *connection)
-        .await?;
-    if !exists {
-        return Ok(SchemaVersion {
-            applied: None,
-            latest,
-        });
-    }
-    // `table` is a constant of a Linch crate, never a tenant's text.
-    let sql = format!("SELECT version FROM {table} WHERE success ORDER BY version");
-    let applied: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(sql))
-        .fetch_all(&mut *connection)
-        .await?;
-    if let Some(unknown) = applied.iter().copied().filter(|v| !known.contains(v)).max() {
+    let rows = applied(&mut connection, table).await?;
+    let succeeded = || {
+        rows.iter()
+            .filter(|(_, success, _)| *success)
+            .map(|(version, ..)| *version)
+    };
+    if let Some(unknown) = succeeded()
+        .filter(|v| !migrator.iter().any(|m| m.version == *v))
+        .max()
+    {
         return Err(SchemaError::Newer {
             table: table.to_owned(),
             applied: unknown,
@@ -114,7 +107,67 @@ pub async fn check_table(
         });
     }
     Ok(SchemaVersion {
-        applied: applied.last().copied(),
+        applied: succeeded().max(),
         latest,
+        complete: is_complete(&rows, migrator),
     })
+}
+
+/// Whether `table` of the connection's own schema holds exactly the
+/// migrations of `migrator`. Any other answer (a missing table, a missing,
+/// extra or changed migration, a failed read) is `false`: `migrate` then
+/// takes its locked path, which applies what is missing and reports the
+/// rest.
+pub(crate) async fn is_applied(pool: &PgPool, table: &str, migrator: &Migrator) -> bool {
+    let Ok(mut connection) = pool.acquire().await else {
+        return false;
+    };
+    match applied(&mut connection, table).await {
+        Ok(rows) => is_complete(&rows, migrator),
+        Err(_) => false,
+    }
+}
+
+/// One row of a migration table: version, success, checksum.
+type AppliedRow = (i64, bool, Vec<u8>);
+
+/// The one definition of "the applied set equals the embedded set": the same
+/// versions, in order, each successful and with the embedded checksum.
+fn is_complete(applied: &[AppliedRow], migrator: &Migrator) -> bool {
+    applied.len() == migrator.migrations.len()
+        && applied.iter().zip(migrator.iter()).all(|(row, embedded)| {
+            let (version, success, checksum) = row;
+            *success && *version == embedded.version && checksum[..] == embedded.checksum[..]
+        })
+}
+
+/// The rows of `table` in the connection's own schema, oldest first, in one
+/// query; the table must be the one in `current_schema()`. A table that does
+/// not exist (anywhere on the `search_path`) has none.
+async fn applied(
+    connection: &mut PgConnection,
+    table: &str,
+) -> Result<Vec<AppliedRow>, sqlx::Error> {
+    // `table` is a constant of a Linch crate, never a tenant's text.
+    let sql = format!(
+        "SELECT m.version, m.success, m.checksum FROM {table} m \
+         WHERE '{table}'::regclass = ( \
+             SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname = '{table}' AND n.nspname = current_schema()) \
+         ORDER BY m.version"
+    );
+    match sqlx::query_as(AssertSqlSafe(sql))
+        .fetch_all(connection)
+        .await
+    {
+        // undefined_table
+        Err(error)
+            if error
+                .as_database_error()
+                .is_some_and(|e| e.code().as_deref() == Some("42P01")) =>
+        {
+            Ok(Vec::new())
+        }
+        other => other,
+    }
 }

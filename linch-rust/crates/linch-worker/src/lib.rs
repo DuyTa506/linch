@@ -177,11 +177,7 @@ fn migrator() -> Migrator {
 ///     SchemaError: `Newer` when the database holds a worker migration this
 ///         binary does not embed; `Database` when the read fails.
 pub async fn schema_version(pool: &PgPool) -> Result<SchemaVersion, SchemaError> {
-    let known: Vec<i64> = migrator()
-        .iter()
-        .map(|migration| migration.version)
-        .collect();
-    linch_postgres::check_table(pool, MIGRATIONS_TABLE, &known).await
+    linch_postgres::check_table(pool, MIGRATIONS_TABLE, &migrator()).await
 }
 
 /// Create or upgrade the queue and schedule tables in the pool's database.

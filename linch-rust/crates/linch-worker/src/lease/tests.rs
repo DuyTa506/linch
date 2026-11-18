@@ -122,7 +122,8 @@ async fn under_repeatable_read_a_fenced_write_behind_an_update_lands() {
     let pool = &db.repeatable_read;
     let timeout = Duration::from_secs(30);
     let lease = db.held("heartbeat").await;
-    let done = db.behind_an_update(&lease, lease.heartbeat(pool, timeout));
+    let line = LeaseLine::new(pool, timeout / 3);
+    let done = db.behind_an_update(&lease, lease.heartbeat(&line, timeout));
     let done = done.await;
     assert!(matches!(done, Ok(true)), "heartbeat: {done:?}");
     let lease = db.held("record_run").await;
@@ -140,5 +141,25 @@ async fn under_repeatable_read_a_fenced_write_behind_an_update_lands() {
     let lease = db.held("fail").await;
     let done = db.behind_an_update(&lease, lease.fail(pool, "error")).await;
     assert!(matches!(done, Ok(true)), "fail: {done:?}");
+    db.finish().await;
+}
+
+/// The job heartbeat has a connection of its own: with every connection of
+/// the pool held, it still lands, where a heartbeat in the pool would wait.
+#[tokio::test]
+async fn a_heartbeat_lands_while_the_pool_is_exhausted() {
+    let Some(db) = Db::new("hb_pool").await else {
+        return;
+    };
+    let lease = db.held("hb_pool").await;
+    let timeout = Duration::from_secs(30);
+    let line = LeaseLine::new(&db.repeatable_read, timeout / 3);
+    let held = [
+        db.repeatable_read.acquire().await.unwrap(),
+        db.repeatable_read.acquire().await.unwrap(),
+    ];
+    let done = lease.heartbeat(&line, timeout).await;
+    assert!(matches!(done, Ok(true)), "{done:?}");
+    drop(held);
     db.finish().await;
 }

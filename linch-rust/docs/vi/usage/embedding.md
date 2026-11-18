@@ -21,7 +21,11 @@ của bạn và nền tảng của nó.
   nhiều nhất là lệnh gọi đang chạy dở ([Run](./runs.md), [Kho lưu trữ](./stores.md)).
 - **Lease và tiếp quản.** Mỗi lúc chỉ một server điều khiển một run; run của một server bị
   crash được giải phóng sau độ dài lease (mặc định 30 s), và một server dừng bình thường giải
-  phóng các run của nó ngay lập tức ([Run leases](./stores.md#run-leases)).
+  phóng các run của nó ngay lập tức ([Run leases](./stores.md#run-leases)). Lease được gia hạn
+  bởi một task riêng trên một kết nối chuyên dụng mà store của mỗi agent đang mở giữ ngoài pool
+  của nó (hãy tính thêm một cho mỗi agent trong [ngân sách kết nối](./stores.md#ngân-sách-kết-nối)),
+  nên một client ngừng đọc stream của nó, hoặc một pool có mọi kết nối đều bận, không làm mất run
+  vào tay server khác.
 - **Group commit.** Các lần ghi được commit cùng nhau tại các barrier ở trên, không phải mỗi
   event một lần.
 - **Kiểm duyệt tenant.** Một server có tenant kiểm tra mọi cấu hình agent với allowlist và

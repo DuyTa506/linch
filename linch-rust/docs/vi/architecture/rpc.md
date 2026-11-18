@@ -262,7 +262,9 @@ Không có buffer nào tăng không giới hạn trên server:
    Writer chờ transport, nên một client đọc chậm sẽ làm đầy nó.
 2. Task của một run chờ chỗ trống trước khi poll stream của run lần nữa, và
    một run chỉ tiến lên khi stream của nó được poll (lõi không spawn task nào
-   cho nó), nên run tạm dừng. Một request của server đang chờ chỗ trống tính thời gian
+   cho nó), nên run tạm dừng. Heartbeat lease của nó là một task riêng, nên run vẫn
+   thuộc server của nó trong lúc chờ: không server nào khác resume được nó, và nó chạy
+   tiếp khi client đọc lại. Một request của server đang chờ chỗ trống tính thời gian
    đó vào timeout của nó.
 3. Việc đọc dừng ở 64 lời gọi đang bay.
 4. Client Rust giữ tối đa 1024 notification chưa đọc

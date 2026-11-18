@@ -3,10 +3,14 @@
 //! A store whose claims expire ([`RunStore::lease_ttl`]) refuses a claim
 //! from another holder while the lease is alive. [`Held`] renews it every
 //! third of the TTL, on a timer, so a long model call, a tool or a retry
-//! back-off never lets it lapse. The heartbeat is part of the run future:
-//! it beats only while the caller polls the stream, so a stream nobody
-//! polls (a stalled or crashed host) lets its lease run out and another
-//! process takes the run over.
+//! back-off never lets it lapse. The heartbeat is a task of its own, tied to
+//! the run: it beats while the run future lives, whether or not the caller
+//! polls the stream, so a consumer that stops reading (a client whose
+//! socket is full) does not lose the run to another process, which would
+//! pay for the model call again. A host that stops (a crash, a frozen
+//! process) stops its heartbeat with it and lets the lease run out. A beat
+//! begins a third of the TTL after the one before it began, and gives up on
+//! a renewal that outlasts that third, so one stuck renewal costs one beat.
 //!
 //! A renewal that finds the epoch moved (another holder seized the run)
 //! ends the run at once with `LeaseLost`, as a fenced write would, unless
@@ -24,6 +28,7 @@ use std::time::Duration;
 
 use futures::future::{Either, select};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::agent::{AgentInner, RunError};
 use crate::journal::{Journal, JournalError};
@@ -50,6 +55,24 @@ impl Releases {
     }
 }
 
+/// The heartbeat task of a run; it ends with its owner.
+struct Beat(JoinHandle<StoreError>);
+
+impl Beat {
+    /// Stop the task and wait until it is gone, so no renewal of it is
+    /// still in flight.
+    async fn stop(&mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for Beat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The lease of one claimed run: renewed while the run is driven, released
 /// when the run stops without settling.
 pub(super) struct Held {
@@ -62,6 +85,8 @@ pub(super) struct Held {
     settled: Option<Arc<AtomicBool>>,
     /// The run future returned `Ok`, or the lease is gone: nothing to release.
     done: bool,
+    /// The heartbeat, from the first [`Self::drive`].
+    beat: Option<Beat>,
 }
 
 impl Held {
@@ -74,6 +99,7 @@ impl Held {
             ttl: agent.runs.lease_ttl(),
             settled: None,
             done: false,
+            beat: None,
         }
     }
 
@@ -82,11 +108,12 @@ impl Held {
         self.settled = Some(journal.settled());
     }
 
-    /// Drive `run` with the lease renewed next to it.
+    /// Drive `run` with the lease renewed beside it, by a task of its own.
     ///
     /// Returns:
     ///     What `run` returned, or a `LeaseLost` journal error once a
-    ///     renewal found the run claimed by another holder.
+    ///     renewal found the run claimed by another holder (or the
+    ///     heartbeat task itself failed).
     pub(super) async fn drive(
         &mut self,
         run: impl Future<Output = Result<(), RunError>>,
@@ -94,11 +121,23 @@ impl Held {
         let Some(ttl) = self.ttl else {
             return run.await;
         };
-        let beat = beat(&*self.store, &self.lease, ttl, self.settled.clone());
-        let result = match select(pin!(run), pin!(beat)).await {
+        let (store, lease) = (Arc::clone(&self.store), self.lease.clone());
+        let beating = tokio::spawn(beat(store, lease, ttl, self.settled.clone()));
+        let heartbeat = &mut self.beat.insert(Beat(beating)).0;
+        let result = match select(pin!(run), heartbeat).await {
             Either::Left((result, _)) => result,
-            Either::Right((lost, _)) => Err(RunError::Journal(JournalError::Store(lost))),
+            Either::Right((lost, _)) => {
+                // A task that died (a panic) cannot keep the lease.
+                let lost = lost.unwrap_or_else(|_| StoreError::LeaseLost {
+                    run_id: self.lease.run_id.clone(),
+                    epoch: self.lease.epoch,
+                });
+                Err(RunError::Journal(JournalError::Store(lost)))
+            }
         };
+        if let Some(heartbeat) = &self.beat {
+            heartbeat.0.abort();
+        }
         // A lost lease is not ours to release.
         self.done = result.is_ok() || lost(&result);
         result
@@ -107,6 +146,7 @@ impl Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
+        let mut beat = self.beat.take();
         let settled = (self.settled.as_ref()).is_some_and(|flag| flag.load(Ordering::SeqCst));
         if self.ttl.is_none() || self.done || settled {
             return;
@@ -119,6 +159,11 @@ impl Drop for Held {
         };
         let (store, lease) = (Arc::clone(&self.store), self.lease.clone());
         self.releases.push(runtime.spawn(async move {
+            // The heartbeat first, so a renewal cannot land after the
+            // release and hold the lease for another TTL.
+            if let Some(beat) = &mut beat {
+                beat.stop().await;
+            }
             let _ = store.release(&lease).await;
         }));
     }
@@ -133,19 +178,24 @@ fn lost(result: &Result<(), RunError>) -> bool {
     )
 }
 
-/// Renew `lease` every third of `ttl`; resolve only once a renewal finds
-/// it lost while the run has not settled. A renewal that fails otherwise
-/// (the database is unreachable) is tried again at the next beat.
+/// Renew `lease` every third of `ttl`, each beat a third of `ttl` after the
+/// one before it began; resolve only once a renewal finds it lost while the
+/// run has not settled. A renewal that fails otherwise (the database is
+/// unreachable) or outlasts its third is given up, and the next beat tries
+/// again.
 async fn beat(
-    store: &dyn RunStore,
-    lease: &Lease,
+    store: Arc<dyn RunStore>,
+    lease: Lease,
     ttl: Duration,
     settled: Option<Arc<AtomicBool>>,
 ) -> StoreError {
     let every = ttl / 3;
+    let mut due = Instant::now() + every;
     loop {
-        tokio::time::sleep(every).await;
-        if let Err(error @ StoreError::LeaseLost { .. }) = store.renew(lease).await {
+        tokio::time::sleep_until(due).await;
+        due = Instant::now() + every;
+        let renewed = tokio::time::timeout(every, store.renew(&lease)).await;
+        if let Ok(Err(error @ StoreError::LeaseLost { .. })) = renewed {
             let settled = settled.as_ref().is_some_and(|f| f.load(Ordering::SeqCst));
             if !settled {
                 return error;
