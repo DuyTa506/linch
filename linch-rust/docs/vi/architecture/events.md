@@ -48,6 +48,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `tool_call_start` | `ToolCallStartEvent`, `kinds/tooling.rs:11` | yes | yes | |
 | `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` và `is_error` nằm trong `result`. `cache_hit` (bị bỏ khi false) đánh dấu một kết quả do `spec.tool_cache` phục vụ: `tool_call_start` của nó được ghi cùng với event này, không phải trước đó |
 | `tool_retry` | `ToolRetryEvent`, `kinds/tooling.rs` | yes | yes | Một `tool_retry` của spec (`crates/linch-core/src/tool_retry.rs`): được flush trước khi chờ và trước lần thử kế tiếp, nên một lần crash sau nó để lại một lời gọi đã bắt đầu mà một lần resume báo là bị gián đoạn và không bao giờ chạy lại |
+| `tool_interrupted` | `ToolInterruptedEvent`, `kinds/tooling.rs` | yes | yes | Một lời gọi đã bắt đầu mà phần end bị một crash làm mất: được resume ghi (`runner/batch.rs`, `runner/cancel.rs`) cạnh placeholder `tool_call_end` (`error_code` `tool_interrupted`), để host tìm ra các lời gọi có tác động không rõ; lời gọi không chạy lại |
 | `tool_progress` | `ToolProgressEvent`, `kinds/tooling.rs:98` | no | yes | |
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
 | `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | Một event cho mỗi lời gọi `AskUser`, trước một `suspended` có trạng thái `awaiting_input`; `questions` là trường mới và bị bỏ khi rỗng |
@@ -68,6 +69,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:80` | yes | yes | Không bao giờ nằm trong log của run: các workflow của `linch-ext` chuyển nó cho event sink của chúng ([extensions](./ext.md)) |
 | `verification` | `VerificationEvent`, `kinds/control.rs:209` | yes | yes | Các cổng kiểm tra câu trả lời (`runner/structured.rs`): việc kiểm tra output schema, `verifier` là `output_schema`; một verifier tích hợp sẵn, `name` của nó; một lần retry của hook `stop` dưới `spec.verification`, `policy_id` của nó (`runner/hooks.rs`). `retry` được stage với phản hồi bên cạnh, `stop` trong lần ghi terminal, `exhausted` với câu trả lời được chấp nhận. Một lần resume đếm các lần retry đã dùng từ những event này, của schema tách riêng khỏi phần còn lại |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
+| `cache_diagnostic` | `CacheDiagnosticEvent`, `kinds/control.rs` | no | yes | Chỉ khi `monitoring.cache_diagnostic` bật: `CacheWatch` của run (`crates/linch-core/src/cache_diagnostic.rs`) băm mỗi request (system, tool, từng message) và chỉ giữ mã băm, rồi so với lời gọi đã trả lời trước. Runner ghi nhận request sau `stage_context` và chốt nó sau `provider_call_stop` (`runner/cache.rs`, hai lời gọi trong `dispatch`), rồi stage event ở dạng stream-only: không ghi, không barrier, không seq. Nó không phải hook vì mọi hook đều vào contract digest (`Hooks::policy_digest`) và bật một chẩn đoán không được làm run đã dừng không resume được. Khi tắt, watch là `None` và không có gì được băm |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | Kết quả terminal |
 | `model_call_delivery` | `ModelCallDeliveryEvent`, `model_call.rs:33` | yes | no | |
@@ -109,7 +111,7 @@ phân loại.
 
 | Lớp | Các loại | Đi đến đâu |
 |---|---|---|
-| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` trả nó ngay lập tức với seq bền vững gần nhất và không bao giờ lưu nó (`crates/linch-core/src/journal.rs:136-143`). Tiến độ của tool đi thẳng vào outbox của stream (`crates/linch-core/src/runner/sink.rs:184-189`) |
+| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook`, `cache_diagnostic` | `Journal::stage` trả nó ngay lập tức với seq bền vững gần nhất và không bao giờ lưu nó (`crates/linch-core/src/journal.rs:136-143`). Tiến độ của tool đi thẳng vào outbox của stream (`crates/linch-core/src/runner/sink.rs:184-189`) |
 | `Both` | mọi loại đã biết khác, và `IgnorableEvent` | Được stage với seq kế tiếp, giữ đến lần ghi barrier kế tiếp, rồi được delivery theo thứ tự seq (`journal.rs:328-334`) |
 | `JournalOnly` | ba loại `model_call_*` | Được stage với seq kế tiếp và lưu như `Both`, nhưng không bao giờ được delivery. `Agent::events` cũng bỏ chúng ra (`crates/linch-core/src/agent.rs:401-417`), và method RPC `run.events`, vốn gọi nó, cũng vậy |
 

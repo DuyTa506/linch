@@ -20,7 +20,7 @@ from linch_rust import (
     UsageEvent,
 )
 
-STREAM_ONLY = {"partial_assistant", "tool_progress", "hook"}
+STREAM_ONLY = {"partial_assistant", "tool_progress", "hook", "cache_diagnostic"}
 
 
 async def test_a_run_streams_its_envelopes_then_its_result() -> None:

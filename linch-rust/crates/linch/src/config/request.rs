@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use linch_core::{JsonObject, ProviderError};
-use linch_providers::{ChatOptions, RequestOptions};
+use linch_providers::{CacheSalt, ChatOptions, RequestOptions};
 use serde::{Deserialize, Serialize};
 
 use super::redact;
@@ -42,12 +42,20 @@ pub struct RequestConfig {
     /// when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<std::num::NonZeroU64>,
+    /// Keeps the agent's prompt-prefix cache apart from other tenants'
+    /// ([`RequestOptions::cache_salt`]). A server sets it at admission from
+    /// the tenant's name; a config cannot carry it (it is neither read nor
+    /// written), so a stored definition never holds it and a worker derives
+    /// it again.
+    #[serde(skip)]
+    pub cache_salt: Option<CacheSalt>,
 }
 
 impl RequestConfig {
-    /// Whether nothing is set: no body fields, headers or timeout.
+    /// Whether nothing is set: no body fields, headers or timeout. The
+    /// cache salt is not part of the config, so it does not count.
     pub fn is_default(&self) -> bool {
-        self == &Self::default()
+        self.extra_body.is_empty() && self.default_headers.is_empty() && self.timeout_ms.is_none()
     }
 
     /// Whether a header replaces the provider key.
@@ -64,6 +72,7 @@ impl RequestConfig {
         let mut options = RequestOptions::default();
         options.extra_body = self.extra_body.clone();
         options.timeout = self.timeout_ms.map(|ms| Duration::from_millis(ms.get()));
+        options.cache_salt = self.cache_salt.clone();
         for (name, value) in &self.default_headers {
             options = options.header(name, value)?;
         }
@@ -80,6 +89,7 @@ impl fmt::Debug for RequestConfig {
                 &self.default_headers.keys().collect::<Vec<_>>(),
             )
             .field("timeout_ms", &self.timeout_ms)
+            .field("cache_salt", &self.cache_salt)
             .finish()
     }
 }

@@ -26,6 +26,14 @@
 //! The crate is Unix-only: a stdio server leads its own process group, which
 //! is killed as a whole when the server closes.
 
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used
+)]
+
 mod catalog;
 pub mod codes;
 mod config;

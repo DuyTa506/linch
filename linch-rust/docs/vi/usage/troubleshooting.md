@@ -129,7 +129,7 @@ Thông báo không bao giờ chứa DSN.
 | Thông báo (fragment) | Mã | Nguyên nhân | Cách khắc phục |
 |---|---|---|---|
 | `the database schema is newer than this binary: linch_migrations holds migration <n>, the newest this binary knows is <m>` | -32016 (`SchemaNewer`; `.table`, `.applied`, `.latest`) | Một bản phát hành mới hơn đã migrate cơ sở dữ liệu này; không có gì được đọc hay ghi | Nâng cấp server này lên bản phát hành đã migrate nó, hoặc khôi phục cơ sở dữ liệu từ trước lần migrate ([Stores: Migration như một bước deploy](./stores.md#migration-như-một-bước-deploy)) |
-| `pool timed out after 30s: raise max_pool_connections or lower concurrent runs` | -32020 (ở cuối một run) | Mọi kết nối của pool đều bận trong 30 giây; server cũng ghi log tenant và mức sử dụng của pool | Tăng `stores.max_connections` trong giới hạn của cơ sở dữ liệu, hoặc giảm số run đồng thời ([Stores: Ngân sách kết nối](./stores.md#ngân-sách-kết-nối)); resume run |
+| `pool timed out after 30s: raise max_pool_connections or lower concurrent runs; a run already created stays at its last durable state: resume it` | -32020 hoặc -32024 (ở cuối một run) | Mọi kết nối của pool đều bận trong 30 giây; server cũng ghi log tenant và mức sử dụng của pool | Tăng `stores.max_connections` trong giới hạn của cơ sở dữ liệu, hoặc giảm số run đồng thời ([Stores: Ngân sách kết nối](./stores.md#ngân-sách-kết-nối)); resume run |
 
 Nếu kết nối bị đứt giữa chừng một run, stream của run đó kết thúc với `RunError`
 (mã -32020); run giữ nguyên ở trạng thái bền vững cuối cùng và có thể được resume.
@@ -234,7 +234,7 @@ vẫn tiếp tục.
 | `Tool call denied: <tool> denied by <kind> rule in layer "<layer>"` | Một quy tắc quyền đã từ chối lệnh gọi | Đổi quy tắc nếu lệnh gọi nên chạy ([Tool](./tools.md#permission-rules)) |
 | `Read <path> before changing it.` | `Write` lên một tệp có sẵn hoặc `Edit` mà chưa có `Read` trong session này, hoặc sau `close_session` hay khi khởi động lại | Đúng như dự kiến; mô hình đọc, rồi mới ghi |
 | `Read this file again before editing it.` / `... before writing it.` | Tệp thay đổi trên đĩa sau khi model đọc | Đúng như dự kiến; mô hình đọc lại rồi thử lại |
-| `Tool execution was interrupted before a result was recorded; not re-running automatically on resume.` | Tiến trình đã chết trong khi lệnh gọi đang chạy | Kiểm tra xem tác động đã xảy ra chưa trước khi hành động tiếp |
+| `Tool execution was interrupted before a result was recorded; its effect is unknown, and it is not re-run automatically on resume.` | Tiến trình đã chết trong khi lệnh gọi đang chạy | Kiểm tra xem tác động đã xảy ra chưa trước khi hành động tiếp |
 | `Background process <id> no longer exists in this session: ...` (code `no_such_process`) | `BashOutput` hoặc `BashKill` nêu tên một id mà agent handle này không biết: session đã đóng, server đã khởi động lại, hoặc một handle khác đã khởi động nó | Đúng như dự kiến sau khi khởi động lại; model khởi động lại lệnh ([Tool](./tools.md#lệnh-chạy-nền)) |
 | `4 background processes already run in this session; ...` (code `too_many_processes`) | Một lệnh `Bash` chạy nền thứ năm trong một session | Model đọc hoặc kill một lệnh trước |
 | `AskUser is not available here: this run cannot wait for the user...` | Một subagent gọi `AskUser` | Đúng như dự kiến; chỉ run cấp cao nhất mới hỏi được |

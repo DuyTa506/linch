@@ -584,6 +584,12 @@
 //! and the server returns.
 
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic
+)]
 
 mod access;
 mod background;
@@ -599,8 +605,8 @@ pub use access::{
     Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS,
     DEFAULT_MAX_RUNS, DEFAULT_MAX_WORKFLOW_FAN_OUT, DEFAULT_MAX_WORKFLOW_RECORD_BYTES,
     DEFAULT_MAX_WORKFLOW_RECORDS, DEFAULT_MAX_WORKFLOWS, DEFAULT_MIN_SCHEDULE_INTERVAL,
-    DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens, WorkflowCaps,
-    new_server_id,
+    DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS, MIN_SECRET_BYTES, McpCommand, Tenant, Tokens,
+    WorkflowCaps, new_server_id,
 };
 pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};

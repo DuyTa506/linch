@@ -230,6 +230,136 @@ chối sẽ làm, và một lời gọi được tính chỉ theo tên tool và 
 host tool cùng tên, một hook trả lời lời gọi, hay một cache hit cũng được tính).
 Permission, redaction và [sandbox](./sandbox.md) mới là các hàng rào.
 
+## Ranh giới tin cậy
+
+Kết nối là ranh giới tin cậy, và tenant là thứ nó mang theo. Host tự xác thực người
+dùng của mình và khẳng định principal mà một run hành động thay mặt; linch không xác
+thực người dùng. Server chỉ kiểm tra một điều về principal: `tenant` của nó phải là
+tenant của kết nối (`admit_principal`, `linch-rpc/src/access/admit.rs:216-224`). Nó
+không kiểm tra `user` hay `roles`.
+
+Hệ quả:
+
+- Mọi kết nối của một tenant đều có thể `resume`, `approve`, `answer`, `cancel` và đọc
+  `events` của mọi run của tenant đó, khi biết run id. `cancel` và `events` hoàn toàn
+  không nhận principal (`linch-rpc/src/server/run.rs:91-126`,
+  `server/agents.rs:136-143`).
+- Một lời tiếp tục run hành động thay mặt principal mà nó nêu tên, thay cho principal
+  của chính run ([Run](./runs.md#hành-động-thay-cho-một-principal)). Duyệt một run đang treo bằng
+  principal khác (một admin duyệt run của người dùng) là một luồng có chủ đích.
+- Workflow khác: journal của nó từ chối một claim nêu principal khác với principal nó
+  được khởi động cho (`PrincipalMismatch`, `linch-ext/src/workflow/conformance.rs:16`).
+  Run không có kiểm tra như vậy.
+
+Vì vậy host phải:
+
+- Ánh xạ danh tính người dùng của chính mình sang các principal nó truyền, và không bao
+  giờ để người dùng cuối chọn `principal` hay `run_id` của một lời gọi tới linch.
+- Cấp quyền trước khi gọi linch: kiểm tra người dùng này được chạm vào run này, rồi mới
+  gọi. Giữ run id không đoán được (một id do caller chọn như `order-42-reply` thì đoán
+  được); server không ngăn một kết nối nêu tên run khác của tenant mình.
+- Cho mỗi miền tin cậy một tenant riêng. Hai bên không được thấy run của nhau thì thuộc
+  hai tenant, không phải hai principal.
+
+## Nội dung không đáng tin
+
+Kết quả tool, kết quả MCP và câu trả lời của subagent quay lại model dưới dạng văn bản
+thường. Chỉ memory recall được rào: nó nằm trong `<memory-data untrusted="true">` và văn
+bản đã lưu được escape (`linch-tools/src/memory_recall.rs:35`). Vì vậy văn bản mà một
+trang web, một file, một email hay hệ thống khác đưa vào kết quả tool có thể bảo model
+phải làm gì (prompt injection), và model có thể làm theo.
+
+**Những gì phê duyệt và permission vẫn chặn**
+
+- Một lời gọi tool bị tiêm được quyết định như mọi lời gọi khác: bởi permission mode và
+  rule, theo từng lời gọi, không theo điều nội dung nói ([Permission mode](#permission-mode)).
+  Một lời gọi cần hỏi sẽ treo run.
+- Nội dung không đổi được principal, permission hay hook của run: chúng đến từ option
+  của run, không từ transcript.
+- Một tool MCP được coi là scope `exec` trừ khi server được cấu hình `trust_annotations`,
+  vì `readOnlyHint` của server là không đáng tin (`linch-mcp/src/config.rs:152`, mặc
+  định `false` ở `:173`). Ở mode `default` nó hỏi trước khi chạy
+  ([Tool](./tools.md#mcp-tool)).
+
+**Những gì chúng không chặn**
+
+- Lái model tới bất kỳ tool nào mà policy đã cho chạy không cần hỏi: tool đọc,
+  `auto_allow`, một allow rule, `accept_edits` cho chỉnh sửa trong project, và mọi lời
+  gọi ở `skip_dangerous`. Gồm cả việc rò rỉ qua một tool được phép (một tool đọc lấy
+  một URL dựng từ dữ liệu riêng tư, một tool ghi lưu nó ở chỗ người khác đọc được).
+- Một hook `post_tool_use` thấy kết quả bị tiêm nhưng mặc định fail open: hook crash
+  hoặc hết giờ thì kết quả đi qua ([Callback](./agent.md#callback)).
+- Câu trả lời của subagent tới parent không có nhãn, và child chạy với permission của
+  parent.
+- Kernel bọc phản hồi của chính nó trong thẻ `<system-reminder>`
+  (`linch-core/src/skills.rs:162`). Output của tool không bị escape, nên một kết quả có
+  thể chứa văn bản giả dạng wrapper như vậy. Hiện kernel không vô hiệu hóa nó. Host cần
+  thì có thể lọc hoặc viết lại kết quả trong một hook `post_tool_use` với
+  `fail_mode: "closed"`.
+
+**Hướng dẫn cho host.** Đây là hướng dẫn, không phải đảm bảo.
+
+- Cho mỗi agent ít tool nhất đủ làm việc. Đừng cùng lúc cho một agent đầu vào không
+  đáng tin, dữ liệu nhạy cảm và một đường giao tiếp ra ngoài mà không có phê duyệt ở
+  bước cuối; nếu agent cần cả ba, hãy đòi phê duyệt cho các lời gọi ghi, thực thi hoặc
+  chạm mạng.
+- Đòi phê duyệt (mode `default` hoặc một rule `ask`) cho tool ghi, exec và mạng chạy trên
+  dữ liệu từ nguồn không đáng tin. Ở đó nên chọn `default` hơn `skip_dangerous`.
+- Đặt `fail_mode: "closed"` trên mọi hook bảo vệ dữ liệu.
+- Giữ bí mật ngoài input của tool: input của một lời gọi tool không bao giờ bị
+  [redaction](#redaction) che và bị [telemetry](#telemetry-ghi-nội-dung) ghi lại. Đưa
+  credential cho tool qua config của chính tool, không qua model.
+
+## Hành vi khi quá tải
+
+Chuyện gì xảy ra khi một tài nguyên đầy, theo code tại thời điểm viết:
+
+| Tài nguyên | Mặc định | Khi đầy | Chờ bao lâu | Lỗi |
+|---|---|---|---|---|
+| `max_runs` của tenant | 16 (`linch-rpc/src/access/allowlists.rs:18`) | `run`, `resume` hoặc `approve` bị từ chối; không gì được khởi động | Không chờ: `try_acquire_owned` trả lời ngay (`access.rs:115-117`, `:291-299`) | `LimitReached` -32005, `kind: runs` |
+| Cổng đồng thời của provider (`max_provider_concurrency`) | Không giới hạn | Lời gọi vào một hàng đợi vào trước ra trước | Không giới hạn thời gian; chỉ cancel của run mới kết thúc việc chờ (`linch-core/src/provider/gate.rs:87-92`). Hàng đợi không giới hạn độ dài và không loại bỏ gì | Không có |
+| HTTP provider | Connect 30 s, read 300 s (`linch-providers/src/clients.rs:132-133`) | Lời gọi thất bại | Đúng timeout; `request.timeout_ms` thay timeout read ([Provider](./providers.md)) | Một lỗi provider ([Lỗi và retry](./providers.md#lỗi-và-thử-lại)) |
+| Pool Postgres | 30 s để lấy một kết nối (`linch_postgres::ACQUIRE_TIMEOUT`) | Lời gọi store thất bại với `pool timed out after 30s: raise max_pool_connections or lower concurrent runs` | 30 s | `RunError` -32020 (-32024 khi nó kết thúc một lần ghi journal) |
+| Thời gian chạy của run | Không có hạn chót | Run vẫn tiếp tục | Đến khi `max_turns`, ngân sách hoặc một cancel kết thúc nó | Không có |
+
+Một run không có hạn chót theo đồng hồ. Các giới hạn là `max_turns` và ngân sách, và
+server từ chối agent của tenant không có cái nào (`run_bound`,
+[Server](./server.md#những-gì-admission-từ-chối-và-lý-do)). Một run chờ ở cổng chờ mà không có
+đồng hồ nào, nên một provider bão hòa có thể làm các run trong hàng chờ lâu bằng thời
+gian bão hòa.
+
+Host nên:
+
+- Đặt `max_provider_concurrency` (trên agent, hoặc làm giới hạn của tenant) bằng mức key
+  của provider cho phép, để hàng đợi nằm trước cổng thay vì trong rate limiter của
+  provider.
+- Đặt `max_turns` và một ngân sách cho mọi agent.
+- Áp hạn chót từ host: cancel run (`agent.cancel`) khi đến hạn; cancel cũng kết thúc việc
+  chờ ở cổng.
+- Tự xếp hàng công việc vượt `max_runs` ở phía host, vì server từ chối nó.
+
+## Telemetry ghi nội dung
+
+Mặc định nội dung không có trong trace. `linch-otel` chỉ ghi prompt, câu trả lời, input
+và kết quả của tool khi capture bật: đặt
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (công tắc được đọc bởi
+`capture_content_from_env`, `linch-otel/src/lib.rs:35-38`; tên nằm ở `keys.rs:90-92`),
+hoặc `RunObserver::capture_content` trong một host dạng thư viện.
+
+Khi bật, các attribute này mang nội dung: `gen_ai.input.messages`,
+`gen_ai.output.messages`, `gen_ai.tool.call.arguments` và `gen_ai.tool.call.result`
+([Observability](./observability.md#ghi-lại-nội-dung)).
+
+- `linch-otel` không áp redaction và không giới hạn kích thước cho chúng.
+- [`spec.redaction`](#redaction) che response và kết quả tool trước khi ghi log, nên các
+  attribute đó mang văn bản đã che khi host đã bật redaction. Input của một lời gọi tool
+  không bao giờ bị che, nên `gen_ai.tool.call.arguments` có thể mang một bí mật mà model
+  được đưa hoặc tự bịa vào lời gọi, vào trace của bạn và nơi lưu chúng.
+
+Giữ capture tắt ở production. Khi cần, hãy che ở OpenTelemetry collector (một processor
+xóa hoặc che các attribute này) và giới hạn kích thước ở đó, và coi backend trace là nơi
+giữ dữ liệu người dùng.
+
 ## Các trang liên quan
 
 - [Tool](./tools.md): quy tắc quyền, phê duyệt.
@@ -239,3 +369,5 @@ Permission, redaction và [sandbox](./sandbox.md) mới là các hàng rào.
 - [Structured output](./structured-output.md): output schema và các retry của nó.
 - [Event](./events.md): `verification`, `error`, `partial_assistant`, `tool_progress`.
 - [Server](./server.md): tenant và các allowlist của chúng.
+- [Run](./runs.md#hành-động-thay-cho-một-principal): principal mà một run hành động thay mặt.
+- [Observability](./observability.md#ghi-lại-nội-dung): những gì telemetry ghi lại.

@@ -1849,6 +1849,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "hmac",
  "linch",
  "linch-worker",
  "rmcp",

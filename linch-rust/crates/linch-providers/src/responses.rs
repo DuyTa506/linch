@@ -216,6 +216,9 @@ impl Provider for OpenAiResponses {
     ) -> Result<ProviderStream, ProviderError> {
         let mut body = payload::build_payload(&request, &self.options)?;
         self.options.request.merge_body(&mut body);
+        self.options
+            .request
+            .apply_cache_salt(&mut body, "prompt_cache_key");
         let url = format!("{}/responses", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
         let overflow = &crate::overflow::RESPONSES;

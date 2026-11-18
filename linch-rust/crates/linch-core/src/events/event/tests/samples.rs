@@ -82,6 +82,10 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             error: "busy".into(),
             delay_ms: 200,
         }),
+        Event::ToolInterrupted(ToolInterruptedEvent {
+            tool_use_id: "c1".into(),
+            tool_name: "Write".into(),
+        }),
         Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),
             tool_name: "Read".into(),
@@ -203,6 +207,13 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             outcome: HookOutcome::Answered {
                 verdict: "continue".into(),
             },
+        }),
+        Event::CacheDiagnostic(CacheDiagnosticEvent {
+            reason: CacheMissReason::PrefixChanged,
+            previous_cached: 2048,
+            cached: 512,
+            prompt_tokens: 4096,
+            first_changed_message: Some(3),
         }),
         Event::Error(ErrorEvent {
             error: JsonObject::new(),

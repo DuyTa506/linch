@@ -35,6 +35,7 @@ from linch_rust import (
     SuspendedEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolInterruptedEvent,
     UserEvent,
     tool,
 )
@@ -118,12 +119,16 @@ async def test_a_run_resumes_on_a_new_server_after_a_kill(pg_dsn: str) -> None:
     # and the same result is paired in the session.
     [ended] = [e for e in events if isinstance(e, ToolCallEndEvent)]
     assert ended.tool_use_id == "call_1" and ended.result["is_error"]
+    # The end is marked so a host can find the calls whose effect is unknown.
+    assert ended.error_code == "tool_interrupted"
+    [marked] = [e for e in events if isinstance(e, ToolInterruptedEvent)]
+    assert (marked.tool_use_id, marked.tool_name) == ("call_1", "wait")
     # Each call of the run starts with an `init`; the resume's says so.
     assert [e.resumed for e in events if isinstance(e, InitEvent)] == [False, True]
     [placeholder] = [e for e in events if isinstance(e, UserEvent) and e.subtype == "tool_result"]
     [block] = placeholder.message["content"]
     assert block["tool_use_id"] == "call_1" and block["is_error"]
-    assert "interrupted" in block["content"][0]["text"]
+    assert "its effect is unknown" in block["content"][0]["text"]
 
 
 async def test_an_approve_sent_again_after_a_kill_points_to_resume(pg_dsn: str) -> None:

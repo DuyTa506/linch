@@ -62,7 +62,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` khi kết nối đang điều khiển một run của nó | `{}` sau khi các MCP server của nó đã tắt |
 | `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (quên các lần đọc của session, kill các lệnh `Bash` chạy nền của nó) | `{}` |
-| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, rồi các notification |
+| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:19-48`) | `RunAccepted` `{run_id}`, chỉ được gửi khi run đã được lưu (`Server::until_stored`: `init` của stream, đến sau commit của create) hoặc đã kết thúc bằng lỗi, rồi các notification. `run.resume`, `run.approve` và `run.answer` trả lời ngay |
 | `run.resume` | `ResumeParams` (`protocol.rs:215`) | `run.rs:45-50`, qua `claim` | như trên |
 | `run.approve` | `ApproveParams` (`protocol.rs:228`) | `run.rs:52-58`, qua `claim` | như trên |
 | `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
@@ -116,7 +116,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32001 | `AGENT_NOT_FOUND` | `AgentNotFound` | Không agent nào đang mở có handle đó |
 | -32002 | `RUN_BUSY` | `RunBusy` | Connection đã điều khiển run đó, hoặc `agent.close` nêu một agent đang có run |
 | -32003 | `UNAUTHENTICATED` | `Unauthenticated` | Message đầu tiên của socket không phải `connection.auth` với token đã biết; server đóng connection |
-| -32004 | `NOT_ALLOWED` | `NotAllowed` | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó (bảng trong [Server](../usage/server.md#những-gì-admission-từ-chối-và-lý-do)), trong đó có `run_bound` và `workflow_principal` |
+| -32004 | `NOT_ALLOWED` | `NotAllowed` | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó (bảng trong [Server](../usage/server.md#những-gì-admission-từ-chối-và-lý-do)), trong đó có `run_bound`, `workflow_principal` và `cache_isolation` |
 | -32005 | `LIMIT_REACHED` | `LimitReached` | Đã chạm một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` hoặc `steers` (một run có 16 steer đang chờ), hoặc `provider_calls`, một tốc độ: tối đa `max` lời gọi `provider.models` và `provider.model` mỗi `per_seconds` (60) cho tenant |
 | -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: thiếu một binding bắt buộc |
 | -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: config không hợp lệ, hoặc lỗi workspace, policy hay tool. Trong đó có: `budget.max_cost_usd` trên một model không có giá (model chính hoặc một mục `fallback_models`; thông báo nêu tên model), `spec.call_timeout_ms` dưới 100, và `workflow.start` có `max_cost_usd` cho agent có model chưa có giá |
@@ -127,8 +127,8 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32016 | `SCHEMA_NEWER` | `OpenError::SchemaNewer` | Database có một migration mà server này không nhúng (một bản phát hành mới hơn đã migrate nó); chưa đọc hay ghi gì; `data: {table, applied, latest}` |
 | -32020 | `STORE` | `RunError` | Một lỗi store không nằm trong danh sách dưới (cả một connection database rớt giữa run) |
 | -32021 | `NOT_FOUND` | `RunNotFound` | Không có run hay session như vậy; cũng là `run.report` và `workflow.status` của một id mà namespace của agent không có |
-| -32022 | `LEASE_LOST` | `LeaseLost` | Từ một claim hoặc một lần ghi journal bị fence: một process khác đã nhận run, hoặc làm nó thất bại. Run dừng ở đây mà không ghi |
-| -32023 | `CONFLICT` | `RunExists` | Một run id tự chọn đã được lưu |
+| -32022 | `LEASE_LOST` | `LeaseLost` | Từ một claim, một lần ghi journal bị fence, hoặc một lần append session thấy session dài hơn lúc run này để lại sau khi một owner khác đã claim run (runner kiểm tra epoch của run khi gặp conflict đó): một process khác đã nhận run, hoặc làm nó thất bại. Run dừng ở đây mà không ghi |
+| -32023 | `CONFLICT` | `RunExists` | Một run id tự chọn đã được lưu (cũng là một conflict khi append session trong lúc run này còn giữ lease, điều chỉ một bên ghi khác của cùng session mới gây ra) |
 | -32024 | `JOURNAL` | `RunError` | Một lần ghi journal thất bại |
 | -32025 | `CONTRACT_MISMATCH` | `ContractMismatch` | Contract của agent khác contract của run; `data.expected` là contract mà run bắt đầu và `data.found` là của agent này |
 | -32026 | `TERMINAL` | `RunTerminal` | Run đã kết thúc; `data.status` là trạng thái cuối |

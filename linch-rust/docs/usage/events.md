@@ -153,7 +153,7 @@ reads exactly what it missed.
 
 | Kind | Stored and replayed |
 |---|---|
-| `partial_assistant`, `tool_progress`, `hook` | No: sent at once, never replayed |
+| `partial_assistant`, `tool_progress`, `hook`, `cache_diagnostic` | No: sent at once, never replayed |
 | Every other kind | Yes: sent once it is durable |
 
 A run's stream ends with `result` (finished) or `suspended` (waiting for
@@ -266,7 +266,7 @@ A tool call finished.
 | `duration_ms` | How long the call took |
 | `canonical_output` | The structured value, for tools that declare an output schema; `None` otherwise |
 | `metadata` | Details for the host only, never shown to the model: what a host tool returned in [`ToolOutput.metadata`](./tools.md#metadata-for-the-host), or where an offloaded result went; for a failed call, the error's `details` object (a `Bash` command's `status` and `exit_code`, see [Workspace tools](./tools.md#workspace-tools)); `None` for a tool that set none |
-| `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise |
+| `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise. `tool_interrupted` marks the stand-in end of a call whose start was durable when a crash came: its effect is unknown and it is never run again ([Runs: Tools run at most once](./runs.md#tools-run-at-most-once-never-exactly-once)) |
 | `cache_hit` | Whether [`spec.tool_cache`](./tools.md#tool_cache) served the result: the tool did not run, and the call's `tool_call_start` is written with this event, not before it. `False` otherwise |
 | `tool_use_id` | Property: `result["tool_use_id"]` |
 | `is_error` | Property: whether the result is a tool error |
@@ -356,6 +356,17 @@ retries, and the call runs again after a wait: `tool_use_id`, `tool_name`,
 error's `code`, or `timeout`), `error` (the failed attempt's message, run
 through `spec.redaction` when it covers tool results and then cut to 512
 bytes) and `delay_ms`. It is durable before the wait.
+
+### `ToolInterruptedEvent` (`tool_interrupted`)
+
+A call that started and whose end a crash lost: `tool_use_id` and
+`tool_name`. A resume writes it with the `tool_call_end` that stands in for
+the lost one (an error whose `error_code` is `tool_interrupted`, and whose
+text tells the model the effect is unknown), then does not run the call
+again. Its `tool_use_id` is the same after the resume: the key to ask the
+system the tool talks to whether the effect landed ([Runs: Tools run at most
+once](./runs.md#tools-run-at-most-once-never-exactly-once)). An older client
+reads it as an unknown event.
 ### `PolicyEvent` (`policy`)
 
 The [reliability policy](./agent.md#policy) decided. `rule` is
@@ -412,6 +423,29 @@ One [callback](./agent.md#callbacks) call and how it ended.
 | `point`, `policy_id`, `policy_version` | Which callback |
 | `tool_use_id` | The call it was about, at the tool points; else `None` |
 | `outcome` | `{"status": "answered", "verdict"}`, `{"status": "failed", "error", "fail_mode"}` or `{"status": "timed_out", "timeout_ms", "fail_mode"}` |
+
+### `CacheDiagnosticEvent` (`cache_diagnostic`), stream-only
+
+Why the provider's prompt cache read what it did on a call, against the run's
+previous call. It is sent only when the agent's
+[`monitoring.cache_diagnostic`](./providers.md#find-out-why-a-cache-missed) is
+on, never stored, never replayed and never part of the run contract. With it
+off, nothing is hashed and the stream, the log and the writes are exactly what
+they were.
+
+| Field | What it is |
+|---|---|
+| `reason` | The first check that holds, in this order: `model_changed`, `provider_changed`, `ttl_expired` (more time than the provider keeps an entry: Anthropic's 5 minutes, or 1 hour when the request asks; no other adapter declares one), `system_changed`, `tools_changed`, `compaction` (the conversation got shorter), `prefix_changed` (an earlier message differs), `low_read` (the prefix is the same, yet the provider read under half of the previous call's input tokens) or `none` |
+| `previous_cached` | Tokens the previous call read from the cache |
+| `cached` | Tokens this call read from the cache |
+| `prompt_tokens` | Input tokens of this call, cached and not |
+| `first_changed_message` | Index of the first message that differs from the previous request's, or `None` |
+
+One event follows each provider call that reports input tokens, from the
+second call of a run call on (a resumed run has nothing in memory to compare
+with, so its first call says nothing). A call under 1024 input tokens (2048 for
+OpenAI) says nothing, since no provider caches less. The event holds counts
+and an index, never text or a hash.
 
 ### `ErrorEvent` (`error`)
 

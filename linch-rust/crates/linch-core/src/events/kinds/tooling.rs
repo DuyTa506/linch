@@ -124,6 +124,22 @@ pub struct ToolRetryEvent {
     pub delay_ms: u64,
 }
 
+/// A call whose start was durable when its run crashed, and whose end never
+/// was: its effect is unknown and a resume does not run it again.
+///
+/// Written with the `tool_call_end` that stands in for the lost one (an error
+/// result with the code `tool_interrupted`), so a host finds the calls to
+/// reconcile by this event alone. `tool_use_id` is stable across the resume:
+/// the key to ask the system the tool talks to whether its effect landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolInterruptedEvent {
+    /// Identifier of the interrupted tool call.
+    pub tool_use_id: String,
+    /// Name of the tool that started.
+    pub tool_name: String,
+}
+
 /// Transient progress reported by an in-flight tool invocation.
 ///
 /// Progress is observational only: it is never added to provider history

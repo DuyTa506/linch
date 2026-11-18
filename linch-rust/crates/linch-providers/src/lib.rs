@@ -5,6 +5,13 @@
 //! their own and never put credentials into errors or logs.
 
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used
+)]
 
 pub mod anthropic;
 mod api_key;
@@ -41,6 +48,6 @@ pub use deepseek::{DeepSeek, DeepSeekOptions};
 pub use gemini::{Gemini, GeminiOptions};
 pub use openai::{OpenAiChat, OpenAiChatOptions};
 pub use pricing::{ModelPricing, cost, model_pricing};
-pub use request::{ChatOptions, RequestOptions, is_key_header};
+pub use request::{CacheSalt, ChatOptions, RequestOptions, is_key_header};
 pub use responses::{OpenAiResponses, ReasoningSummary, ResponsesOptions};
 pub use servers::{Server, ServerOptions};

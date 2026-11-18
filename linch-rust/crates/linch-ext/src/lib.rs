@@ -17,6 +17,7 @@
 //! (`workflow::PgJournalStore`) and `migrate`, which creates its tables.
 
 #![forbid(unsafe_code)]
+#![deny(clippy::todo, clippy::unimplemented, clippy::panic)]
 
 pub mod deep_agent;
 pub mod evals;

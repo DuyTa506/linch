@@ -156,7 +156,10 @@ class Agent:
                 keeps it. None keeps the agent's.
 
         Returns:
-            The started run; iterate it or await `Run.result()`.
+            The started run; iterate it or await `Run.result()`. The call
+            returns once the run is stored, so its id exists after any crash
+            that follows (a refused start returns too, and the refusal ends
+            the stream).
 
         Raises:
             RunBusy: This server already drives a run with `run_id`.
@@ -364,8 +367,8 @@ class Agent:
     async def events(self, run_id: str, after_seq: int = 0) -> list[Envelope]:
         """Return a run's durable envelopes with a seq above `after_seq`, in order.
 
-        Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) are
-        never replayed.
+        Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`,
+        `cache_diagnostic`) are never replayed.
 
         Raises:
             RunError: The stores could not be read, or the run is unknown.

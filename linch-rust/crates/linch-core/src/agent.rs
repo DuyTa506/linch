@@ -228,6 +228,9 @@ pub(crate) struct AgentInner {
     /// The cap on concurrent provider calls this agent's runs share, its
     /// subagents' included; `None` for no cap. Not part of the contract.
     pub(crate) gate: Option<ProviderGate>,
+    /// Whether each run compares its provider calls for the prompt cache
+    /// (see `crate::cache_diagnostic`). Not part of the contract.
+    pub(crate) cache_diagnostic: bool,
     /// The cache of tool results (see [`crate::tool_cache`]); `None`
     /// without `spec.tool_cache`, and for a subagent's agent.
     pub(crate) tool_cache: Option<ToolCacheHandle>,

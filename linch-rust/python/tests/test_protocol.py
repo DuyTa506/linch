@@ -296,6 +296,16 @@ def test_error_codes_map_to_the_exception_tree(code: int, cls: type[RpcError]) -
     assert (error.code, error.message, error.data) == (code, "boom", {"status": "completed"})
 
 
+def test_a_fenced_writer_is_lease_lost_and_a_duplicate_run_id_is_run_exists() -> None:
+    # A session append that lost to the new owner's entries reports the lease,
+    # whichever write found out; only a chosen run id already stored is a conflict.
+    fenced = error_from({"code": -32022, "message": "lease on run r1 lost (epoch 1)"})
+    duplicate = error_from({"code": -32023, "message": "conflict: run r1 already exists in ns"})
+
+    assert type(fenced) is LeaseLost and isinstance(fenced, RunError)
+    assert type(duplicate) is RunExists and not isinstance(duplicate, LeaseLost)
+
+
 def test_a_pruned_run_is_a_run_not_found_that_names_its_id() -> None:
     error = error_from({"code": -32050, "message": "gone", "data": {"run_id": "r-1"}})
 

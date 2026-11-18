@@ -8,6 +8,7 @@ use crate::catalog::{self, Catalog};
 use crate::events::Event;
 use crate::events::kinds::UsageEvent;
 use crate::events::model_call::ModelCallReceiptEvent;
+use crate::journal::JournalError;
 use crate::message::Message;
 use crate::run::{Checkpoint, Phase};
 use crate::session_log::{LogEntry, MessageEntry, SessionLog};
@@ -103,8 +104,28 @@ impl Runner {
         self.outbox.deliver(ready).await;
         let (sessions, namespace) = (&self.agent.sessions, &self.agent.namespace);
         let session = &self.run.session_id;
-        self.session_len = (sessions.append(namespace, session, self.session_len, entries)).await?;
+        let appended = sessions.append(namespace, session, self.session_len, entries);
+        match appended.await {
+            Ok(len) => self.session_len = len,
+            Err(error @ StoreError::Conflict { .. }) => return Err(self.fenced_or(error).await),
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
+    }
+
+    /// The error of a session append that found the session longer than
+    /// this run wrote it: the lost lease when another owner has claimed the
+    /// run since (its entries moved the session, and this writer is fenced
+    /// out), else `conflict` itself.
+    async fn fenced_or(&self, conflict: StoreError) -> RunError {
+        let lease = self.journal.lease();
+        match self.agent.runs.load(&lease.namespace, &lease.run_id).await {
+            Ok(record) if record.epoch != lease.epoch => {
+                let (run_id, epoch) = (lease.run_id.clone(), lease.epoch);
+                JournalError::Store(StoreError::LeaseLost { run_id, epoch }).into()
+            }
+            _ => conflict.into(),
+        }
     }
 
     /// Save a checkpoint for `phase` and deliver what a write-through made

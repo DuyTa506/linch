@@ -130,7 +130,9 @@ class ToolCallEndEvent:
     result went; for a failed call, the error's `details` object, such as a
     `Bash` command's `status` and `exit_code`); `None` for a tool that set
     none. `error_code` is a failed call's machine-readable code, `None`
-    without one.
+    without one; `tool_interrupted` marks the stand-in end of a call that a
+    crash interrupted after its start: its effect is unknown and it is not
+    run again, so reconcile it with `ToolContext.idempotency_key`.
     `cache_hit` is set when `spec.tool_cache` served the result: the tool
     did not run, and the call has no durable start.
     """
@@ -153,6 +155,22 @@ class ToolCallEndEvent:
     def is_error(self) -> bool:
         """Whether the result is a tool error."""
         return bool(self.result.get("is_error", False))
+
+
+@dataclass(frozen=True)
+class ToolInterruptedEvent:
+    """A call a crash interrupted: it started, its end was never durable.
+
+    Written by the resume that finds it, with the `ToolCallEndEvent` (an
+    error whose `error_code` is `tool_interrupted`) that stands in for the
+    lost end. The tool's effect is unknown and the call is not run again:
+    reconcile it, keyed by `tool_use_id` (the same after the resume; see
+    `ToolContext.idempotency_key`).
+    """
+
+    type: ClassVar[str] = "tool_interrupted"
+    tool_use_id: str
+    tool_name: str
 
 
 @dataclass(frozen=True)
@@ -489,6 +507,35 @@ class HookEvent:
 
 
 @dataclass(frozen=True)
+class CacheDiagnosticEvent:
+    """What the provider's prompt cache did on one call, against the run's previous call.
+
+    Emitted only when the agent's `monitoring.cache_diagnostic` is on. Stream-only:
+    it is not stored, and `Agent.events` does not return it. It holds counts and an
+    index, never text.
+
+    Attributes:
+        reason: The first check that held, in this order: `model_changed`,
+            `provider_changed`, `ttl_expired`, `system_changed`, `tools_changed`,
+            `compaction`, `prefix_changed`, `low_read` (the prefix is the same yet
+            the provider read under half of what the previous call could have
+            left), or `none`.
+        previous_cached: Tokens the previous call read from the cache.
+        cached: Tokens this call read from the cache.
+        prompt_tokens: Input tokens of this call, cached and not.
+        first_changed_message: Index of the first message that differs from the
+            previous request's, or `None` when none does.
+    """
+
+    type: ClassVar[str] = "cache_diagnostic"
+    reason: str
+    previous_cached: int
+    cached: int
+    prompt_tokens: int
+    first_changed_message: int | None = None
+
+
+@dataclass(frozen=True)
 class ErrorEvent:
     """An error the run recorded, such as a provider failure."""
 
@@ -618,6 +665,7 @@ Event = (
     | ToolCallStartEvent
     | ToolCallEndEvent
     | ToolRetryEvent
+    | ToolInterruptedEvent
     | ToolProgressEvent
     | PermissionRequestEvent
     | InputRequestEvent
@@ -638,6 +686,7 @@ Event = (
     | SubagentEvent
     | ChildRunStatusEvent
     | HookEvent
+    | CacheDiagnosticEvent
     | ErrorEvent
     | ResultEvent
     | ModelCallDeliveryEvent
@@ -659,6 +708,7 @@ _KINDS: dict[str, type[Any]] = {
         ToolCallStartEvent,
         ToolCallEndEvent,
         ToolRetryEvent,
+        ToolInterruptedEvent,
         ToolProgressEvent,
         PermissionRequestEvent,
         InputRequestEvent,
@@ -679,6 +729,7 @@ _KINDS: dict[str, type[Any]] = {
         SubagentEvent,
         ChildRunStatusEvent,
         HookEvent,
+        CacheDiagnosticEvent,
         ErrorEvent,
         ResultEvent,
         ModelCallDeliveryEvent,

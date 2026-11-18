@@ -24,8 +24,10 @@
 use super::turn::{Runner, Step};
 use crate::agent::RunError;
 use crate::events::Event;
-use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, UserEvent, UserEventSubtype};
-use crate::journal::{Recovery, ToolRecovery};
+use crate::events::kinds::{
+    ToolCallEndEvent, ToolCallStartEvent, ToolInterruptedEvent, UserEvent, UserEventSubtype,
+};
+use crate::journal::{INTERRUPTED_TOOL_CODE, Recovery, ToolRecovery};
 use crate::message::{ContentBlock, Message, Role, ToolResultBlock};
 use crate::run::Phase;
 use crate::scheduler::ABORTED;
@@ -132,12 +134,14 @@ impl Runner {
     fn abort_calls(&mut self, calls: Vec<ToolRecovery>) -> Message {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
-            let (tool_name, result) = match call {
+            let (tool_name, result, error_code) = match call {
                 ToolRecovery::Done(result) => {
                     results.push(ContentBlock::ToolResult(result));
                     continue;
                 }
-                ToolRecovery::Interrupted { tool_name, result } => (tool_name, result),
+                ToolRecovery::Interrupted { tool_name, result } => {
+                    (tool_name, result, Some(INTERRUPTED_TOOL_CODE.to_owned()))
+                }
                 ToolRecovery::Replan(block) => {
                     let summary = match self.snapshot.resolve(&block.name) {
                         Some(tool) => tool.tool().summarize(&block.input),
@@ -150,16 +154,23 @@ impl Runner {
                         summary,
                     }));
                     let result = ToolResultBlock::text(&block.id, ABORTED, true);
-                    (block.name, result)
+                    (block.name, result, None)
                 }
             };
+            if error_code.is_some() {
+                self.journal
+                    .stage(Event::ToolInterrupted(ToolInterruptedEvent {
+                        tool_use_id: result.tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                    }));
+            }
             self.journal.stage(Event::ToolCallEnd(ToolCallEndEvent {
                 tool_name,
                 result: result.clone(),
                 duration_ms: 0,
                 canonical_output: None,
                 metadata: None,
-                error_code: None,
+                error_code,
                 cache_hit: false,
             }));
             results.push(ContentBlock::ToolResult(result));

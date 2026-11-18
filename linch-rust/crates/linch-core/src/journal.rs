@@ -51,7 +51,9 @@ mod reconcile;
 #[cfg(test)]
 mod tests;
 
-pub use reconcile::{INTERRUPTED_TOOL_TEXT, ReconcileError, Recovery, ToolRecovery, reconcile};
+pub use reconcile::{
+    INTERRUPTED_TOOL_CODE, INTERRUPTED_TOOL_TEXT, ReconcileError, Recovery, ToolRecovery, reconcile,
+};
 
 /// A journal write failed or was refused.
 #[derive(Debug, Error)]

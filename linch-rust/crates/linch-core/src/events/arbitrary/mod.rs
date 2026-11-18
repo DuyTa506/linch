@@ -222,6 +222,9 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
         builders::tool_retry_event()
             .prop_map(Event::ToolRetry)
             .boxed(),
+        builders::tool_interrupted_event()
+            .prop_map(Event::ToolInterrupted)
+            .boxed(),
         builders::tool_progress_event()
             .prop_map(Event::ToolProgress)
             .boxed(),
@@ -271,6 +274,9 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
             .prop_map(Event::Verification)
             .boxed(),
         hook_event().prop_map(Event::Hook).boxed(),
+        builders::cache_diagnostic_event()
+            .prop_map(Event::CacheDiagnostic)
+            .boxed(),
         builders::error_event().prop_map(Event::Error).boxed(),
         accounting::result_event().prop_map(Event::Result).boxed(),
         accounting::model_call_delivery_event()

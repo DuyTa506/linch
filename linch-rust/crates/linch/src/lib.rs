@@ -45,6 +45,12 @@
 //! [`close`](OpenedAgent::close) disconnects the MCP servers.
 
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic
+)]
 
 mod agent_memory;
 mod config;
@@ -60,9 +66,9 @@ pub mod project;
 pub use config::{
     AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, DockerPolicy, ExecutionConfig,
     FilesystemConfig, MIN_LEASE_TTL_MS, McpConfig, McpTransportConfig, MemoryConfig, ModelRates,
-    PricingOverrides, ProviderConfig, ReasoningSummaryConfig, RecallConfig, ReconnectConfig,
-    RemoteChunk, RemoteCommand, RemoteError, RemoteExec, RemotePolicy, SandboxPolicy, StoreConfig,
-    TaskLedger,
+    MonitoringConfig, PricingOverrides, ProviderConfig, ReasoningSummaryConfig, RecallConfig,
+    ReconnectConfig, RemoteChunk, RemoteCommand, RemoteError, RemoteExec, RemotePolicy,
+    SandboxPolicy, StoreConfig, TaskLedger,
 };
 pub use error::OpenError;
 pub use linch_core::*;
