@@ -41,6 +41,9 @@ struct World {
     /// Characters of the first tool turn's value, and the growth per turn.
     base: usize,
     grow: usize,
+    /// A turn whose tool returns this many characters, from a call that
+    /// names the size, so the big result is not also a big call.
+    giant: Option<(usize, usize)>,
 }
 
 /// Twice the estimate and 1500 over, tool results growing with the run.
@@ -51,6 +54,7 @@ const UNDERCOUNTED: World = World {
     turns: 30,
     base: 300,
     grow: 40,
+    giant: None,
 };
 
 /// What the provider saw, by request kind.
@@ -61,6 +65,8 @@ struct Seen {
     refused_primary: u32,
     refused_summaries: u32,
     biggest: u64,
+    /// Every summary request served, as the provider got it.
+    summary_requests: Vec<serde_json::Value>,
     /// Messages and real tokens of the last primary request served.
     last: Option<(usize, u64)>,
     /// Primary requests sent at a turn's start whose previous request's
@@ -137,6 +143,7 @@ impl Provider for Counting {
             turns,
             base,
             grow,
+            giant,
         } = self.world;
         let real = estimate(&request.messages) * num / den + overhead;
         let summarizing = is_summary_call(&request);
@@ -154,6 +161,8 @@ impl Provider for Counting {
         seen.biggest = seen.biggest.max(real);
         let turn = if summarizing {
             seen.summaries += 1;
+            seen.summary_requests
+                .push(serde_json::to_value(&request).unwrap());
             let n = request.messages.len();
             TurnBuilder::new(MODEL)
                 .text(format!("summary of {n} messages"))
@@ -183,7 +192,10 @@ impl Provider for Counting {
             seen.last = Some((request.messages.len(), real));
             match primary_turn(&request) {
                 t if t < turns => {
-                    let value = json!({"value": format!("v{t}{}", "x".repeat(base + grow * t))});
+                    let value = match giant {
+                        Some((at, chars)) if at == t => json!({"chars": chars}),
+                        _ => json!({"value": format!("v{t}{}", "x".repeat(base + grow * t))}),
+                    };
                     TurnBuilder::new(MODEL)
                         .text("working")
                         .tool_call(&format!("call_{t}_0"), "Read", &value)
@@ -304,6 +316,32 @@ async fn a_long_run_survives_an_estimator_that_undercounts() {
     assert!(seen.missed.is_empty(), "{:?}", seen.missed);
     // A measure above the estimate rides the event.
     assert!(compactions.iter().any(|c| c.2.is_some()), "{stats}");
+}
+
+/// A proactive summary request is the bytes a provider's cache holds from
+/// the last primary call, so what compaction does when a prompt is refused
+/// (clipping, retries) never reaches it: the first one of this run is
+/// pinned against a golden file. Bless it with `LINCH_BLESS=1`.
+#[tokio::test]
+async fn a_proactive_summary_request_keeps_its_bytes() {
+    let stores = Arc::new(Stores::default());
+    let provider = provider(UNDERCOUNTED);
+    let agent = agent_on(provider.clone(), window_trigger(), stores.clone());
+    let (_, status, _) = run(&agent, &stores).await;
+    assert_eq!(status, RunStatus::Completed);
+    let seen = provider.seen.lock().unwrap();
+    let first = seen.summary_requests.first().expect("a proactive summary");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/compaction_proactive_request.json"
+    );
+    if std::env::var_os("LINCH_BLESS").is_some() {
+        let text = serde_json::to_string_pretty(first).unwrap();
+        std::fs::write(path, text + "\n").unwrap();
+    }
+    let golden: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(first, &golden);
 }
 
 /// A provider that reports less than the view weighs (a count that leaves

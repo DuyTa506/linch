@@ -33,7 +33,8 @@ pub const MODEL: &str = "scripted-model";
 /// Runs per `tool_use_id`, shared by every tool of one test.
 pub type Runs = Arc<Mutex<HashMap<String, u32>>>;
 
-/// A tool that returns its `value` input and counts each run.
+/// A tool that returns its `value` input (or, given `chars`, that many
+/// characters, so a big result needs no big call) and counts each run.
 pub struct Echo {
     name: &'static str,
     scope: ToolScope,
@@ -85,6 +86,10 @@ impl Tool for Echo {
         ctx.report_progress("echoing", None);
         if let Some(token) = &self.cancel_on_run {
             token.cancel();
+        }
+        if let Some(chars) = input.get("chars").and_then(JsonValue::as_u64) {
+            let text = format!("v{}", "x".repeat(usize::try_from(chars).unwrap()));
+            return Ok(ToolOutput::new(json!(text)));
         }
         Ok(ToolOutput::new(input["value"].clone()))
     }
