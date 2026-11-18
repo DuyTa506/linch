@@ -13,7 +13,7 @@ exception class tells you its family:
 |---|---|---|
 | `ProtocolError` | -32700 to -32600 | A config or declaration the server cannot read |
 | `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed |
-| `RunError` and its subclasses | -32020 to -32032 | The end of a run's stream, or `agent.events` |
+| `RunError` and its subclasses | -32020 to -32033 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
 | `ConnectionClosed` | none | Any call or stream, when the server went away |
 | `LinchError` | none | The base of all of these, and misuse of `Server` |
@@ -127,6 +127,8 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | An approve or answer sent again after it was committed (your process or the connection died), or an answer to a run waiting for an approval | Call `agent.resume(run_id)` ([Runs](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | the callback's reason, in `.reason` | A `user_prompt_submit` callback blocked the prompt | Nothing was written; change the prompt or the callback |
 | `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` got a schema that does not compile, or whose root is not `{"type": "object"}` | Nothing was written; fix the schema ([Structured output](./structured-output.md)) |
+| `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Another server (another agent handle) drives the run on Postgres, or crashed less than a lease ago | Wait for that run to stop, or retry after `.expires_in` seconds ([Stores](./stores.md#run-leases)) |
+| `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Another server took the run over (this one stalled past its lease) or failed it | Nothing to fix here: the run's new driver has it. If this server was paused, check for long GC or network pauses, or raise `stores.lease_ttl_ms` |
 | `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (the reason in `.reason`) | `agent.answer` named a request that is not pending, left a question unanswered, or gave a list to a single-select question | Nothing was written and the run still waits; answer again ([Tools](./tools.md#ask-the-user)) |
 
 Raised by the call itself:

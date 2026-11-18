@@ -14,8 +14,9 @@ bạn viết một store, đổi một đường ghi hoặc một migration, ho�
 Linch bản Python mô tả cùng mô hình ở
 [run bền vững, lease và checkpoint](../../../../docs/architecture/subsystems.md#33-durable-runs-leases-and-checkpoints).
 Điểm khác trong Rust: một lời gọi `commit` là cách ghi duy nhất vào một run đang chạy,
-Postgres là backend bền vững duy nhất, và các lần ghi Postgres trên đường nóng là các
-câu lệnh đơn.
+Postgres là backend bền vững duy nhất, các lần ghi Postgres trên đường nóng là các
+câu lệnh đơn, và một lease thuộc về một instance store (một holder cho mỗi agent), không
+thuộc về một tên owner.
 
 ## Khóa và đa tenant
 
@@ -27,18 +28,22 @@ gốc trong cây của một lời gọi.
 
 ## Run store
 
-`RunStore` (`crates/linch-core/src/store.rs:163`):
+`RunStore` (`crates/linch-core/src/store.rs:183`):
 
 | Method | Hợp đồng |
 |---|---|
-| `create(NewRun)` | Một lần ghi: hàng run ở trạng thái `pending`, epoch 0, cùng checkpoint đầu tiên và các event của nó (seq bắt đầu từ 1). `Conflict` khi id đã tồn tại; `SessionBusy` khi namespace đã có một run chưa terminal của session đó. Việc kiểm tra và việc chèn là một bước nguyên tử (`store.rs:164-171`) |
-| `claim(namespace, run_id, owner)` | Nhận quyền sở hữu: epoch + 1, trạng thái `running`, một `Lease`. Là cách duy nhất để sang `running`, kể cả từ `awaiting_*`. Bị từ chối với một run đã terminal |
+| `create(NewRun)` | Một lần ghi: hàng run ở trạng thái `pending`, epoch 0, cùng checkpoint đầu tiên và các event của nó (seq bắt đầu từ 1). `Conflict` khi id đã tồn tại; `SessionBusy` khi namespace đã có một run chưa terminal của session đó. Việc kiểm tra và việc chèn là một bước nguyên tử (`store.rs:184-191`) |
+| `claim(namespace, run_id, owner)` | Nhận quyền sở hữu: epoch + 1, trạng thái `running`, một `Lease`. Là cách duy nhất để sang `running`, kể cả từ `awaiting_*`. Bị từ chối với một run đã terminal, và, trên một store có lease TTL, với `RunLeased` khi một holder khác vẫn đang duy trì lease của run (`store.rs:193-205`) |
+| `seize(namespace, run_id, owner)` | `claim`, nhưng cũng qua mặt cả lease còn sống của một holder khác. Dành cho `Agent::fail` và một run cha lấy lại các run con của nó (`store.rs:207-217`) |
+| `lease_ttl()` | Một claim giữ được bao lâu khi không có lần gia hạn; `None` (mặc định) khi claim không bao giờ hết hạn (`store.rs:219-228`) |
+| `renew(&Lease)` / `release(&Lease)` | Gia hạn lease thêm một TTL đầy đủ; kết thúc nó sớm. Cả hai khớp epoch của lease; một lần gia hạn sau một claim muộn hơn là `LeaseLost`. Mặc định là no-op (`store.rs:230-244`) |
 | `load` | `RunRecord` hiện tại |
 | `commit(&Lease, Commit)` | Một lần ghi nguyên tử gồm các event (seq nối tiếp `last_seq` không có khoảng trống), một checkpoint tùy chọn và một trạng thái tùy chọn. Chỉ được chấp nhận trên một run `running` dưới epoch hiện tại. Một trạng thái terminal là cuối cùng |
 | `events(namespace, run_id, after_seq)` | Các event đã commit sau `after_seq`, theo thứ tự |
 
-`StoreError` (`store.rs:104`) đặt tên cho từng lần từ chối: `NotFound`, `LeaseLost`,
-`Conflict`, `SessionBusy`, `SeqGap`, `InvalidTransition` và `Backend`. Một lần ghi bị
+`StoreError` (`store.rs:112`) đặt tên cho từng lần từ chối: `NotFound`, `LeaseLost`,
+`Conflict`, `SessionBusy`, `RunLeased` (`{run_id, owner, expires_in}`),
+`SeqGap`, `InvalidTransition` và `Backend`. Một lần ghi bị
 từ chối không thay đổi gì.
 
 ### Một run đang chạy cho mỗi session
@@ -52,11 +57,48 @@ Các trạng thái terminal là `completed`, `failed` và `aborted`
 
 ### Fencing
 
-`claim` luôn thắng và cộng 1 vào epoch; mọi `commit` sau đó dưới một lease cũ hơn đều
-thất bại với `LeaseLost`. Không có hết hạn và không có heartbeat trong store: một worker
-đang giữ một run bị fence bởi lần claim kế tiếp, không bao giờ bởi một timeout. Worker
-thêm các visibility timeout lên trên
+Mỗi claim cộng 1 vào epoch; mọi `commit` sau đó dưới một lease cũ hơn đều
+thất bại với `LeaseLost`, nên một holder đã mất run không bao giờ ghi vào nó được nữa.
+Các commit chỉ bị fence bởi epoch: một holder có lease đã hết hạn nhưng chưa ai claim
+từ đó vẫn ghi tiếp được. Worker thêm các visibility timeout lên trên
 ([worker](./worker.md#lease-và-fencing)).
+
+### Leases
+
+Một store có claim hết hạn (`lease_ttl()` là `Some`) còn ngăn hai process cùng điều khiển
+một run. `RunLeaseConflictError` của Linch bản Python là cùng quy tắc; Rust khóa nó theo
+holder, không theo tên owner, vì `RunOptions::owner` mặc định là `linch` ở mọi process.
+
+- **Holder.** Mỗi `PgRunStore` tạo bằng `PgRunStore::new` là một holder, được các bản
+  clone của nó dùng chung, nên mỗi agent (và các subagent của nó) là một holder. Một
+  claim qua holder của một lease còn sống tiếp quản run ngay lập tức, như khi không có
+  lease: một host đã drop một stream resume nó ngay.
+- **Từ chối.** Một claim qua holder khác khi run đang `running` và lease của nó chưa
+  hết hạn bị từ chối với `RunLeased`, không ghi gì. Một run suspended, pending hoặc đã
+  release không từ chối ai. `seize` không bao giờ bị từ chối: `Agent::fail` và một run
+  cha resume các run con của nó (`resume_child`) tiếp quản run
+  (`runner/start.rs:214-248`, `runner/fail.rs:28`).
+- **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:55`)
+  gia hạn lease mỗi một phần ba TTL theo bộ hẹn giờ, cạnh run trong run future
+  (`lease.rs:90-105`, `lease.rs:139-158`), nên một lần gọi model dài, một tool hay một
+  back-off retry vẫn giữ được nó; nó chỉ đập khi stream được poll, nên một host bị
+  treo hoặc sập để lease hết hạn. Một `UPDATE` nhỏ cho mỗi khoảng, mỗi run đang chạy;
+  không có gì thêm trên các commit.
+- **Mất lease được xác nhận.** Một lần gia hạn thấy epoch đã đổi kết thúc run ngay với
+  `LeaseLost` (một lỗi journal, như một lần ghi bị fence), trừ khi journal đã chuyển
+  run ra khỏi `running` (`Journal::settled`).
+- **Release.** Một run dừng mà không suspend hay kết thúc (một lỗi, một stream bị drop)
+  release lease của nó từ `Drop` của `Held`, trong một task sinh ra ghi một lần, để
+  process khác không phải chờ hết TTL (`lease.rs:108-125`). Agent giữ từng task release
+  đó, và `Agent::released` (`crates/linch-core/src/agent.rs:452`) chờ chúng;
+  `OpenedAgent::close` chờ tối đa `RELEASE_WAIT` (5 s, `crates/linch/src/open.rs:348`)
+  trước khi ngắt kết nối, nên một `linch-server` thoát sau khi drop các run của nó vẫn
+  giải phóng chúng. Một sự cố sập không release gì; lease tự hết hạn.
+- **Store trong bộ nhớ** không có TTL: chúng không bao giờ từ chối một claim, không
+  khởi động bộ hẹn giờ và không ghi thêm gì. Chúng dành cho một process.
+
+Một store bọc ngoài phải chuyển tiếp `lease_ttl`, `renew`, `release` và `seize`
+(`store/faulty.rs` có làm), nếu không các run phía sau nó mất lease.
 
 ## Session store
 
@@ -86,9 +128,10 @@ dữ liệu của session: chỉ các lời gọi tool và kết quả của ch�
 
 | Suite | Cho | Ở đâu |
 |---|---|---|
-| `run_store_suite` | `RunStore` | `crates/linch-core/src/store/conformance.rs:33` |
+| `run_store_suite` | `RunStore` | `crates/linch-core/src/store/conformance.rs:37` |
 | `run_admission_suite` | `RunStore` (một run đang chạy cho mỗi session) | `store/conformance/admission.rs:12` |
-| `session_store_suite` | `SessionStore` | `store/conformance.rs:42` |
+| `run_lease_suite` | Hai handle (hai holder) trên một `RunStore` có claim hết hạn | `store/conformance/lease.rs:25` |
+| `session_store_suite` | `SessionStore` | `store/conformance.rs:46` |
 | `task_store_suite` | `SessionStore + TaskStore` | `store/conformance/tasks.rs:14` |
 | `backend_suite` | `FileBackend` | `crates/linch-core/src/vfs/conformance.rs:11` |
 
@@ -107,9 +150,12 @@ và một commit bị từ chối không thay đổi gì.
 cùng các suite. Chúng đếm mọi lần ghi thành công, theo từng method (`writes()`,
 `memory.rs:68`, `memory.rs:246`), để một test hoặc bench có thể khẳng định số lần ghi
 store cho mỗi lượt; các lần ghi bị từ chối và các lần ghi task không được đếm.
-`store::faulty::Faulty` (`crates/linch-core/src/store/faulty.rs:43`)
+`store::faulty::Faulty` (`crates/linch-core/src/store/faulty.rs:45`)
 bọc một trong hai và làm lần ghi thứ `n` thất bại, trước hoặc sau khi nó được ghi, cho
-các test sự cố.
+các test sự cố; các lần gia hạn và release lease đi qua mà không được đếm.
+
+Các store trong bộ nhớ dành cho một process: chúng không có lease TTL, nên một claim
+luôn thắng và fence lease trước đó, bất kể handle nào hỏi.
 
 <a id="postgres-stores"></a>
 
@@ -120,7 +166,7 @@ các test sự cố.
 
 ### Schema và migration
 
-`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:227`) tạo hoặc nâng cấp
+`migrate(&pool)` (`crates/linch-postgres/src/lib.rs:234`) tạo hoặc nâng cấp
 các bảng. Nó an toàn ở mỗi lần khởi động: các migration đã áp dụng bị bỏ qua và các bên
 gọi đồng thời được tuần tự hóa bằng một advisory lock. Các phiên bản đã áp dụng được ghi
 trong `linch_migrations` (`lib.rs:62`), không phải bảng mặc định của sqlx, nên các
@@ -135,6 +181,7 @@ schema và bắt đầu bằng `linch_`, nên `search_path` của kết nối ch
 | `0003_files.sql` | `linch_files`, với `path` ở dạng `COLLATE "C"` để khóa chính sắp xếp theo byte và phục vụ quét theo tiền tố |
 | `0004_tasks.sql` | `linch_sessions.next_task_id`, `linch_tasks`, `linch_task_edges` |
 | `0005_mailbox.sql` | `linch_mailbox` (`PgMailbox`: message giữa các peer theo namespace và người nhận, được một lần drain giữ lease, bị xóa bởi ack của nó) |
+| `0006_run_leases.sql` | `linch_runs.lease_holder` và `lease_until`, nullable, không default, không đánh chỉ mục: thêm chúng không viết lại hàng nào, và một lần gia hạn vẫn là một update chỉ trên heap. NULL nghĩa là không có lease còn sống |
 
 Payload JSON (checkpoint, envelope, log entry, metadata của task) là `TEXT`, không phải
 `JSONB`: JSONB sắp xếp lại khóa và viết lại số, mà các store phải trả về đúng những gì đã
@@ -142,17 +189,18 @@ ghi, vì byte của message đi vào prompt cache và digest
 (`migrations/0001_stores.sql:1-3`). Các hàng được giải mã nghiêm ngặt; một hàng không giải
 mã được là một lỗi (`crates/linch-postgres/src/codec.rs:1-4`).
 Migration chỉ được nối thêm: thêm một tệp mới và một mục `Migration::new`
-(`lib.rs:169-211`), không bao giờ sửa một migration đã áp dụng, vì `migrate` thất bại khi
+(`lib.rs:169-213`), không bao giờ sửa một migration đã áp dụng, vì `migrate` thất bại khi
 một migration đã áp dụng khác với bản nhúng.
 
 ### Đường ghi
 
 | Ghi | Hình dạng |
 |---|---|
-| `commit` của run | Một câu lệnh autocommit (`crates/linch-postgres/src/run.rs:72-82`): một `UPDATE` chỉ di chuyển hàng run dưới epoch của lease, khi đang `running`, và khi `last_seq` đúng là giá trị mà các event nối tiếp; các event được chèn từ hàng đã di chuyển, nên chúng được ghi cùng với nó hoặc không được ghi |
+| `commit` của run | Một câu lệnh autocommit (`crates/linch-postgres/src/run.rs:140-150`): một `UPDATE` chỉ di chuyển hàng run dưới epoch của lease, khi đang `running`, và khi `last_seq` đúng là giá trị mà các event nối tiếp; các event được chèn từ hàng đã di chuyển, nên chúng được ghi cùng với nó hoặc không được ghi |
 | `append` của session | Một câu lệnh autocommit (`crates/linch-postgres/src/session.rs:17-24`): độ dài chỉ di chuyển từ `expected_len`, và các entry được chèn từ hàng đã di chuyển tại các vị trí `expected_len + n - 1` |
-| `create` của run | Một transaction: chèn hàng với `ON CONFLICT (namespace, run_id) DO NOTHING`, rồi đến các event đầu tiên (`run.rs:182`) |
-| `claim` của run | Một transaction khóa hàng bằng `FOR UPDATE`, rồi đặt trạng thái, epoch và owner (`run.rs:259`) |
+| `create` của run | Một transaction: chèn hàng với `ON CONFLICT (namespace, run_id) DO NOTHING`, rồi đến các event đầu tiên (`run.rs:334`) |
+| `claim` / `seize` của run | Một transaction khóa hàng bằng `FOR UPDATE` và đọc lease của nó theo đồng hồ cơ sở dữ liệu (`clock_timestamp()`), từ chối lease còn sống của holder khác (chỉ `claim`), rồi đặt trạng thái, epoch, owner, holder và `lease_until` (`run.rs:90-104`, `run.rs:250-300`) |
+| `renew` / `release` lease | Mỗi cái một câu lệnh autocommit, khớp theo epoch: `lease_until` bằng một TTL kể từ bây giờ, hoặc NULL. Một lần gia hạn không khớp hàng nào là `LeaseLost` (`run.rs:106-113`, `run.rs:305-331`) |
 | Ghi task | Một transaction khóa hàng session trước, nên các lần ghi task của một session được tuần tự hóa: id ra theo thứ tự không có khoảng trống và một lần claim có một bên thắng (`crates/linch-postgres/src/tasks.rs:1-8`) |
 | `edit` của file | Một transaction khóa hàng file bằng `FOR UPDATE` (`crates/linch-postgres/src/files.rs:1-6`) |
 
@@ -165,12 +213,12 @@ lần thử (`lib.rs:153-166`).
 Việc nhận run (admission) được thực thi bởi chỉ mục unique một phần, không phải bởi một
 lần đọc. Một vi phạm `linch_runs_one_live_per_session` đọc id của run đang chạy và trả về
 `SessionBusy`; nếu run đó đã kết thúc trong khoảng giữa, việc chèn được thử lại, tối đa ba
-lần (`run.rs:128-152`, `run.rs:222-244`).
+lần (`run.rs:196-220`, `run.rs:374-396`).
 
 ### Phân loại từ chối
 
 Khi câu lệnh của một commit không di chuyển hàng nào, store đọc hàng thêm một lần và đặt
-tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`run.rs:86-102`,
+tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`run.rs:154-170`,
 `codec.rs:120`):
 
 1. không có hàng: `NotFound`;
@@ -181,7 +229,7 @@ tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`
 
 Nếu lần đọc không thấy gì sai, hàng đã di chuyển sau lần ghi bị từ chối và commit được
 thử lại. Sau ba lần thử thì là `Conflict` ("kept changing during a commit")
-(`run.rs:320-354`). Một commit mà không hàng nào có thể nhận (trạng thái `pending`, một
+(`run.rs:472-506`). Một commit mà không hàng nào có thể nhận (trạng thái `pending`, một
 event của run khác, hoặc các seq không nối tiếp nhau) bỏ qua câu lệnh và đi thẳng tới lần
 đọc. Một lần append của session đọc độ dài theo cách tương tự: `NotFound`, hoặc `Conflict`
 nêu cả hai độ dài (`session.rs:146-168`).
@@ -263,7 +311,7 @@ và mọi checkpoint đều như trên.
 Một lời gọi không chạy gì (bị từ chối, được hook phục vụ, bị abort trước khi bắt đầu)
 không thêm barrier: phần bắt đầu và kết thúc của nó đi cùng lần ghi kế tiếp. Một lượt cuối
 chỉ có văn bản kết thúc bằng một lần ghi terminal duy nhất mang theo các event đang chờ,
-`Result` và trạng thái cùng nhau (`journal.rs:233-238`).
+`Result` và trạng thái cùng nhau (`journal.rs:249-251`).
 
 ## Ví dụ
 
@@ -273,9 +321,11 @@ nhớ, còn hai hàm kia cần một cơ sở dữ liệu:
 ```rust
 use std::error::Error;
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 use linch_core::store::conformance::{
-    run_admission_suite, run_store_suite, session_store_suite, task_store_suite,
+    run_admission_suite, run_lease_suite, run_store_suite, session_store_suite,
+    task_store_suite,
 };
 use linch_core::vfs::conformance::backend_suite;
 use linch_core::{MemoryRunStore, MemorySessionStore};
@@ -297,6 +347,11 @@ async fn check_postgres(dsn: &str) -> Result<(), Box<dyn Error>> {
     let runs = PgRunStore::new(pool.clone());
     run_store_suite(&runs).await;
     run_admission_suite(&runs).await;
+    // Two stores are two lease holders, as two processes are.
+    let ttl = Duration::from_millis(600);
+    let a = PgRunStore::new(pool.clone()).with_lease_ttl(ttl);
+    let b = PgRunStore::new(pool.clone()).with_lease_ttl(ttl);
+    run_lease_suite(&a, &b).await;
     let sessions = PgSessionStore::new(pool.clone());
     session_store_suite(&sessions).await;
     task_store_suite(&sessions).await;
@@ -318,7 +373,11 @@ async fn main() {
 ```
 
 Các test Postgres (`crates/linch-postgres/tests/pg/`) chạy các suite này cùng các
-trường hợp từ chối, admission, sự cố và cô lập, mỗi test trong schema riêng của nó.
+trường hợp từ chối, admission, sự cố và cô lập, mỗi test trong schema riêng của nó;
+`tests/pg/lease.rs` điều khiển hai agent trên một cơ sở dữ liệu như hai process (một
+holder còn sống giữ run của nó, run của một holder đã chết bị tiếp quản sau TTL của nó,
+một lần gọi model dài hơn TTL vẫn giữ lease, một holder bị fence không ghi gì, `fail`
+dừng một holder còn sống, một run bị drop rảnh ngay).
 Mỗi test bị bỏ qua khi `LINCH_TEST_PG_DSN` chưa được đặt.
 Mỗi test mở khoảng sáu kết nối, nên trên máy có từ 16 core trở lên hãy chạy với
 `RUST_TEST_THREADS=8` để không vượt `max_connections` 100 của Postgres.

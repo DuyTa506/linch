@@ -248,7 +248,9 @@ fn agent_with(pool: &PgPool, probe: Probe, provider: Arc<dyn Provider>) -> Agent
         .provider(provider)
         .tools(Arc::new(registry))
         .permissions(PermissionEngine::new(policy).unwrap())
-        .run_store(Arc::new(PgRunStore::new(pool.clone())))
+        .run_store(Arc::new(
+            PgRunStore::new(pool.clone()).with_lease_ttl(crate::common::RUN_LEASE),
+        ))
         .session_store(Arc::new(PgSessionStore::new(pool.clone())))
         .namespace(NS)
         .build()

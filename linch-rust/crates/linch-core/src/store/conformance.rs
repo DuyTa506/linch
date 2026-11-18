@@ -13,16 +13,20 @@
 //! - `commit` is accepted only on a `running` run, under the current epoch;
 //! - a terminal status is final, and a rejected commit changes nothing;
 //! - a session holds at most one run that is not terminal, per namespace
-//!   ([`run_admission_suite`]).
+//!   ([`run_admission_suite`]);
+//! - on a store whose claims expire, a live lease of another holder
+//!   refuses a claim ([`run_lease_suite`]).
 
 mod admission;
 mod fixtures;
+mod lease;
 mod tasks;
 
 pub use admission::run_admission_suite;
 use fixtures::{
     checkpoint, checkpoint_at, commit_shapes, entry, envelope, lease_for, new_run, same_record,
 };
+pub use lease::run_lease_suite;
 pub use tasks::task_store_suite;
 
 use crate::ids::{RunId, SessionId};

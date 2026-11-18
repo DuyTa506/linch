@@ -50,7 +50,7 @@ pub use codec::CodecError;
 pub use files::PgFileBackend;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
 pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};
-pub use run::PgRunStore;
+pub use run::{DEFAULT_RUN_LEASE_TTL, PgRunStore};
 pub use session::PgSessionStore;
 pub use sqlx::PgPool;
 pub use sqlx::migrate::MigrateError;
@@ -201,6 +201,13 @@ fn migrator() -> Migrator {
             Cow::Borrowed("mailbox"),
             MigrationType::Simple,
             include_str!("../migrations/0005_mailbox.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            6,
+            Cow::Borrowed("run leases"),
+            MigrationType::Simple,
+            include_str!("../migrations/0006_run_leases.sql").into_sql_str(),
             false,
         ),
     ];

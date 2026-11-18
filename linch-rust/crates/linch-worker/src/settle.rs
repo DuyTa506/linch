@@ -36,7 +36,7 @@ pub(crate) async fn settle(shared: &Shared, lease: &JobLease, outcome: Outcome) 
         Outcome::Retry(error) => retry(shared, lease, &error, true).await,
         Outcome::Busy(error) => {
             let delay = backoff(shared.retry_delay, lease.attempt());
-            tracing::info!(job = id, %error, ?delay, "waiting for the session's run to end");
+            tracing::info!(job = id, %error, ?delay, "the session or the run is busy; trying again later");
             lease.release(pool, delay, &error, false).await
         }
         Outcome::Fail(error) => {

@@ -9,6 +9,14 @@
 //! write is a group-commit barrier by construction.
 //!
 //! [`TaskStore`] keeps the session tasks; the session stores implement it.
+//!
+//! A store whose claims expire ([`RunStore::lease_ttl`]) also keeps two
+//! processes from driving one run at once: a claim is refused while
+//! another holder keeps its lease alive, and the run's driver renews the
+//! lease on a timer. The memory stores are for one process and never
+//! refuse a claim.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -137,6 +145,18 @@ pub enum StoreError {
         /// Its run that is not terminal.
         run_id: RunId,
     },
+    /// Another holder (another process) drives the run and keeps its lease
+    /// alive; nothing was written. Try again once that holder stops: at
+    /// the latest when its lease runs out, `expires_in` from now.
+    #[error("run {run_id} is held by {owner:?} for up to {expires_in:?} more")]
+    RunLeased {
+        /// The run that was asked for.
+        run_id: RunId,
+        /// Owner name the holder claimed under.
+        owner: String,
+        /// How long the holder's lease runs without another renewal.
+        expires_in: Duration,
+    },
     /// Event seqs did not continue the stored sequence.
     #[error("event seq gap: expected {expected}, got {got}")]
     SeqGap {
@@ -172,12 +192,56 @@ pub trait RunStore: Send + Sync {
 
     /// Take ownership of a run, fencing out any earlier lease. A suspended
     /// (`awaiting_*`) run becomes `running` only through a claim.
+    ///
+    /// A store with a [`RunStore::lease_ttl`] refuses, writing nothing,
+    /// with [`StoreError::RunLeased`] while the run is `running` under an
+    /// unexpired lease another holder took; a claim through the holder that
+    /// holds it fences that lease out as before.
     async fn claim(
         &self,
         namespace: &str,
         run_id: &RunId,
         owner: &str,
     ) -> Result<Lease, StoreError>;
+
+    /// Like [`RunStore::claim`], but also over a live lease of another
+    /// holder, which is fenced out. For failing a run for good and for a
+    /// parent taking its child runs back.
+    async fn seize(
+        &self,
+        namespace: &str,
+        run_id: &RunId,
+        owner: &str,
+    ) -> Result<Lease, StoreError> {
+        self.claim(namespace, run_id, owner).await
+    }
+
+    /// How long a claim holds without a renewal; `None` when claims never
+    /// expire and are never refused (the memory stores). A run's driver
+    /// renews its lease every third of it while the run is polled.
+    ///
+    /// A wrapper store must forward this, [`RunStore::renew`],
+    /// [`RunStore::release`] and [`RunStore::seize`], or the runs behind it
+    /// lose their leases.
+    fn lease_ttl(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Extend `lease` by a whole [`RunStore::lease_ttl`] from now.
+    ///
+    /// Raises:
+    ///     StoreError: `LeaseLost` once a later claim moved the epoch.
+    async fn renew(&self, lease: &Lease) -> Result<(), StoreError> {
+        let _ = lease;
+        Ok(())
+    }
+
+    /// End `lease` early, so another holder may claim the run at once. A
+    /// lease a later claim fenced out is left alone.
+    async fn release(&self, lease: &Lease) -> Result<(), StoreError> {
+        let _ = lease;
+        Ok(())
+    }
 
     /// Read the current record.
     async fn load(&self, namespace: &str, run_id: &RunId) -> Result<RunRecord, StoreError>;

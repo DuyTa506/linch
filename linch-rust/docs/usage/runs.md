@@ -121,6 +121,8 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `SessionBusy` | -32030 | The session has a live run |
 | `InvalidOutputSchema` | -32031 | The run's `output_schema` does not compile or its root is not an object; `.reason` says why. No run or session was created |
 | `InvalidAnswer` | -32032 | The answers do not fit the pending `AskUser` questions; `.reason` says why. Nothing was written: the run still waits ([below](#answer)) |
+| `RunLeased` | -32033 | Another server drives the run (Postgres); `.owner` and `.expires_in` (seconds) say whose lease and for how long. Nothing was written ([Stores](./stores.md#run-leases)) |
+| `LeaseLost` | -32022 | Another server took the run over, or failed it, while this one drove it; the run stopped here without writing |
 | `RunError` | -32020 to -32028 | A store or journal write failed, or the stored state does not fit together; the run stays at its last durable state |
 | `ConnectionClosed` | none | The server went away mid-stream |
 
@@ -219,7 +221,23 @@ Which handle can resume depends on the stores:
 - **Memory stores**: the run lives in the agent handle that started it. Resume
   and approve or answer it through that same `Agent`; it is gone when the server stops.
 - **Postgres stores**: any agent opened with the same config and tools (so the
-  same contract), on any server, can resume it.
+  same contract), on any server, can resume it, but not while another
+  server drives it: that resume is refused with `RunLeased`. A server that
+  crashed holds its runs until their leases run out (30 s by default, see
+  [Run leases](./stores.md#run-leases)); retry after `.expires_in` seconds:
+
+```python
+from linch_rust import RunLeased
+
+
+async def resume_when_free(agent, run_id):
+    while True:
+        run = await agent.resume(run_id)
+        try:
+            return await run.result()
+        except RunLeased as leased:
+            await asyncio.sleep(leased.expires_in or 1)
+```
 
 On Postgres, after a crash (this reads the DSN from `DATABASE_URL`):
 

@@ -114,14 +114,19 @@ Two fences protect a run, one per layer:
   three tries in all (`lease.rs:57-87`).
 - **The run.** Driving the run claims it in the run store, which adds 1 to its
   epoch and fences out every earlier holder
-  ([stores](./stores.md#fencing)).
+  ([stores](./stores.md#fencing)). `PgRunStore` also leases the run to the
+  worker's agent ([leases](./stores.md#leases)): while another process
+  drives the run and renews its lease, a claim is refused with `RunLeased`,
+  and the job waits (`Busy`). Keep the run lease no longer than the
+  visibility timeout (both 30 s by default), so a job taken over after its
+  worker went quiet finds the run free.
 
 While the run streams, `keep_alive` extends the job's visibility every third
 of the timeout (`crates/linch-worker/src/execute.rs:151-172`). The job is lost
 when a heartbeat finds another holder, or when no extension lands within a
 whole timeout of the last confirmed one. Losing the job drops the run stream,
-which is a crash for the run: it stays resumable, and the next worker's claim
-fences this one out by epoch. The worker never cancels the run's token for
+which is a crash for the run: it stays resumable, its run lease is released,
+and the next worker's claim fences this one out by epoch. The worker never cancels the run's token for
 this, because a cancel ends the run `aborted` (`execute.rs:5-9`).
 
 ### Choosing run, resume or approve
@@ -156,7 +161,7 @@ which `settle` (`settle.rs:32`) applies:
 |---|---|---|
 | `Done` | Stream ended at `Result` or `Suspended`; run terminal | Deleted |
 | `Retry` | A store or journal error, including a session append conflict; no agent for the namespace | Released with back-off, counting a failure |
-| `Busy` | A start job whose session has a live run (`SessionBusy`) | Released with back-off, not counting a failure |
+| `Busy` | A start job whose session has a live run (`SessionBusy`), or a run another process holds a live lease on (`RunLeased`) | Released with back-off, not counting a failure |
 | `Fail` | A late approve (`NotSuspended`), a blocked prompt, undecodable approvals, a missing run | Failed for good |
 | `FailRun` | The run's state does not reconcile, or its contract differs from the agent's | The run is failed through `Agent::fail`, then the job |
 | `Fenced` | `LeaseLost`: another owner claimed the run | Deleted without a retry, which would take the run back |
@@ -265,7 +270,9 @@ listener; see [connecting and sizing a pool](./stores.md#connecting-and-sizing-a
 
 `crates/linch-worker/tests/pg/` covers one job per run, exclusive holds and
 queue limits, retries and back-off, busy sessions, suspend and approve,
-takeover after a lost heartbeat, schedule firing, and the `READ COMMITTED`
+takeover after a lost heartbeat (the test agents lease runs for 1.5 s,
+under the 3 s visibility timeout of a worker a test means to lose),
+schedule firing, and the `READ COMMITTED`
 pin; `crates/linch-worker/src/lease/tests.rs` runs each fenced write behind
 another update of its job row under `REPEATABLE READ`. Each test skips when
 `LINCH_TEST_PG_DSN` is unset.

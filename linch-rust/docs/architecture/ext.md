@@ -168,7 +168,9 @@ An `agent` call runs on its own session with a run id derived from the
 workflow, the call's key, its occurrence and a generation
 (`crates/linch-ext/src/workflow/agent.rs:138`). After a crash, the next
 `run_workflow` continues that run instead of starting over, so a model call is
-never paid twice. A run that failed or was aborted is never continued: the
+never paid twice. If the run is still leased to the runner that crashed
+(Postgres, less than a lease ago), the call waits until the lease runs out
+or the workflow is cancelled, instead of failing. A run that failed or was aborted is never continued: the
 call fails, and the next resume starts a fresh run with the next generation.
 A run that stops for approval fails the call; approve it with `Agent::approve`,
 then resume the workflow, which reads the finished run's text. Step timeouts

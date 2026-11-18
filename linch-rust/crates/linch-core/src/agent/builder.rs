@@ -345,6 +345,7 @@ impl AgentBuilder {
             pricing: self.pricing,
             mailbox: self.mailbox,
             families: Default::default(),
+            releases: Default::default(),
             session_close: self.session_close,
             registrations: built_ins.take(),
             reloads: Default::default(),

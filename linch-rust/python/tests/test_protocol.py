@@ -11,6 +11,7 @@ import pytest
 from linch_rust import (
     AgentNotFound,
     ConnectionClosed,
+    LeaseLost,
     LinchError,
     NotSuspended,
     OpenError,
@@ -19,6 +20,7 @@ from linch_rust import (
     ResultEvent,
     RpcError,
     RunError,
+    RunLeased,
     RunTerminal,
     SessionBusy,
     ToolCallEndEvent,
@@ -257,6 +259,8 @@ def test_envelopes_and_results_carry_their_time_and_cost() -> None:
         (-32027, NotSuspended),
         (-32024, RunError),
         (-32030, SessionBusy),
+        (-32022, LeaseLost),
+        (-32033, RunLeased),
         (-1, RpcError),
     ],
 )
@@ -282,3 +286,13 @@ def test_a_busy_session_names_its_live_run() -> None:
     assert (error.session_id, error.run_id) == ("s1", "live-1")
     bare = error_from({"code": -32030, "message": "busy"})
     assert isinstance(bare, SessionBusy) and bare.run_id == ""
+
+
+def test_a_leased_run_names_its_holder_and_when_its_lease_runs_out() -> None:
+    data = {"run_id": "r1", "owner": "worker-2", "expires_in_ms": 12_500}
+    error = error_from({"code": -32033, "message": "leased", "data": data})
+
+    assert isinstance(error, RunLeased) and isinstance(error, RunError)
+    assert (error.run_id, error.owner, error.expires_in) == ("r1", "worker-2", 12.5)
+    bare = error_from({"code": -32033, "message": "leased"})
+    assert isinstance(bare, RunLeased) and bare.expires_in is None and bare.owner == ""

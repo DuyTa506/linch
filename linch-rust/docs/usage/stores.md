@@ -24,6 +24,7 @@ server owns the stores; your process never connects to them.
 | After the server stops | Gone | Kept; a new server continues them |
 | Who can resume or approve a run | The `Agent` that started it | Any agent with the same config and tools (the same [contract](./agent.md#the-run-contract)) on any server |
 | One live run per session | Per agent handle | Across every server on the database, per namespace |
+| One driver per run | No: each process has its own runs | Yes: a run another server drives is refused with `RunLeased` ([Run leases](#run-leases)) |
 | Virtual filesystem files | Per session, dropped by `close_session` | Shared by every session of the namespace |
 | Session tasks | In memory | In the database |
 | Use it for | Tests, notebooks, development | Services, long or approval-gated runs, more than one process |
@@ -117,6 +118,12 @@ so your own migration tool's table in the same schema does not collide.
 | `linch_files` | The virtual filesystem, per namespace |
 | `linch_tasks`, `linch_task_edges` | Session tasks and their dependencies |
 
+Migration 6 adds two nullable columns to `linch_runs` (`lease_holder`,
+`lease_until`) for [run leases](#run-leases). It rewrites no rows and takes
+no long lock. A server of an earlier version refuses to start on a database
+migrated past it, as with every migration: upgrade every server before one
+of them restarts on the old version.
+
 - The role in the DSN needs to create tables and indexes in its schema the
   first time; after that it only reads and writes rows.
 - A migration that does not finish within 30 seconds fails the open with
@@ -175,6 +182,45 @@ Schema details, write paths and the refusal rules are in the
   idle timeout), so a run that waited on a long model call still writes its
   answer. A connection that fails in the middle of a write stops the run at
   its last durable state; resume it.
+
+### Run leases
+
+On Postgres, one server drives a run at a time. The agent that starts,
+resumes, approves or answers a run holds its lease and renews it every third
+of the lease's length while it drives the run, so a long model call or tool
+keeps it. Until that run stops, ends, or waits for an approval or an
+answer, another agent's `resume`, `approve` or `answer` is refused with
+`RunLeased` (code -32033) and writes nothing; `.owner` names the holder's
+owner and `.expires_in` the seconds its lease has left.
+
+- A run whose stream ended with an error, or whose connection dropped, is
+  released at once: another server can resume it right away. So are the
+  runs of a server that exits normally (its input closed, `async with
+  Server()` left): it waits up to 5 s for those releases before it exits.
+- A server that crashed or hung releases nothing. Its runs are refused for
+  up to the lease's length (30 s by default), then any server can resume
+  them.
+- If a server stalls longer than its lease (a long pause, a lost network),
+  another server can take its runs over. When it wakes, its next write is
+  refused and its run ends with `LeaseLost` (code -32022) without writing
+  anything: the run's new driver owns it.
+- The lease is renewed only while the run makes progress on its server. A
+  client that stops reading a run's events long enough for the server's
+  queue to fill ([backpressure](../architecture/rpc.md#backpressure)) pauses the run,
+  and after a whole lease another server can take it over; the paused run
+  then ends with `LeaseLost` when it goes on.
+- `stores.lease_ttl_ms` sets the lease's length, at least 1000. Shorter means
+  a crashed server's runs are free sooner, against one more small write per
+  running run each third of it.
+- The same agent handle never waits on its own lease: a run whose stream you
+  dropped resumes at once through it.
+
+```python
+{"type": "postgres", "dsn": "postgres://user:pass@db:5432/linch", "lease_ttl_ms": 10000}
+```
+
+Memory stores have no leases: each process has its own runs, and the agent
+that holds them is the only one that can drive them.
 
 ## The virtual filesystem
 

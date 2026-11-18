@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use linch_core::ask_user::AskUser;
 use linch_core::{
@@ -263,12 +264,16 @@ impl OpenedAgent {
         &self.mcp
     }
 
-    /// Disconnect every MCP server and wait for each to close (a stdio
-    /// server's process to exit). Clones of the agent keep working, but
-    /// the MCP tools are no longer registered; the workspace and virtual
-    /// filesystem tools and the offload hook stay. The Postgres pool is not
-    /// closed: other agents may share it, and it goes once nothing uses it.
+    /// Wait (at most [`RELEASE_WAIT`]) for the lease releases of runs
+    /// that were dropped, so another process can resume them at once (see
+    /// [`Agent::released`]); then disconnect every MCP server and wait for
+    /// each to close (a stdio server's process to exit). Clones of the
+    /// agent keep working, but the MCP tools are no longer registered; the
+    /// workspace and virtual filesystem tools and the offload hook stay.
+    /// The Postgres pool is not closed: other agents may share it, and it
+    /// goes once nothing uses it.
     pub async fn close(self) {
+        let _ = tokio::time::timeout(RELEASE_WAIT, self.agent.released()).await;
         drop(self.pool);
         disconnect(self.mcp).await;
     }
@@ -337,6 +342,11 @@ async fn register_workspace(
     Ok(canonical)
 }
 
+/// The longest [`OpenedAgent::close`] waits for the lease releases of
+/// dropped runs: each is one small write, so a database that does not take
+/// it within this long leaves those runs to wait out their leases.
+pub const RELEASE_WAIT: Duration = Duration::from_secs(5);
+
 /// The workspace tools that run commands, which the `bash` switch turns off
 /// together.
 const BASH_TOOLS: [&str; 3] = ["Bash", "BashOutput", "BashKill"];
@@ -361,10 +371,15 @@ async fn stores(config: StoreConfig, pools: &PgPools) -> Result<Stores, OpenErro
         StoreConfig::Postgres {
             dsn,
             max_connections,
+            lease_ttl_ms,
         } => {
             let (shared, pool) = pools.get(&dsn, max_connections).await?;
             let sessions = Arc::new(PgSessionStore::new(pool.clone()));
-            let runs = Arc::new(PgRunStore::new(pool));
+            let runs = PgRunStore::new(pool);
+            let runs = Arc::new(match lease_ttl_ms {
+                Some(ms) => runs.with_lease_ttl(Duration::from_millis(ms)),
+                None => runs,
+            });
             Ok((runs, sessions.clone(), sessions, Some(shared)))
         }
     }

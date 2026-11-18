@@ -373,7 +373,11 @@ class AgentConfig(TypedDict, total=False):
             handle) or `{"type": "postgres", "dsn": ...}`, with an optional
             `max_connections`: the pool size, by default the server's number
             of cores between 10 and 32. A remote tenant may ask for at most
-            its `max_pool_connections`.
+            its `max_pool_connections`. An optional `lease_ttl_ms` (at
+            least 1000, 30000 by default) sets how long a run claim holds
+            without a renewal: another server's resume of a run this agent
+            drives gets `RunLeased` until the run stops or its lease runs
+            out.
         workspace: An existing directory, the root of the built-in tools
             `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
             `BashKill`; a relative path resolves against the server's working directory. Absent: no

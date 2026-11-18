@@ -89,7 +89,7 @@ docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
 | -32004 | A tenant check refused; `data.kind` names it |
 | -32005 | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 to -32015 | `agent.open`: `BuildError`s, provider, store and MCP server unavailable |
-| -32020 to -32032 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema`, an answer that does not fit (`-32032`, `data.reason`) |
+| -32020 to -32033 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema`, an answer that does not fit (`-32032`, `data.reason`), a lost lease (`-32022`, from a claim or a fenced journal write), a run another process leases (`-32033`, `data: {run_id, owner, expires_in_ms}`) |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to

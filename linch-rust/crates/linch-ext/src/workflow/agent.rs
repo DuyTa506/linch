@@ -1,7 +1,11 @@
 //! Journaled agent calls: an agent's run on a prompt, as a workflow call
 //! whose final text is journaled and whose run a resume continues.
 
+use std::pin::pin;
+use std::time::Duration;
+
 use futures::StreamExt;
+use futures::future::{Either, select};
 use linch_core::events::kinds::{ResultSubtype, WorkflowKind};
 use linch_core::{
     Agent, Event, JsonObject, JsonValue, RunError, RunId, RunOptions, RunStream, SessionId,
@@ -40,7 +44,10 @@ impl WorkflowContext {
     /// which reads the finished run's text. A run the agent can no longer
     /// continue (say, a [`RunError::ContractMismatch`] after the agent
     /// changed) fails the call on every resume until the host ends it with
-    /// [`Agent::fail`]. The workflow's cancel token
+    /// [`Agent::fail`]. A run another process still holds the lease of
+    /// (a runner that crashed less than a lease ago) is waited for, until
+    /// its lease runs out or the workflow is cancelled. The workflow's
+    /// cancel token
     /// aborts the run; step timeouts and retries do not apply, the
     /// workflow deadline does.
     ///
@@ -114,7 +121,18 @@ impl WorkflowContext {
                 }
                 Err(error) => break (run_id, Err(error)),
             };
-            break (run_id, drive(stream).await);
+            match drive(stream).await {
+                // The run's lease is another process's: a runner that
+                // crashed holds it until it runs out. Wait, then look again.
+                Err(RunError::Store(StoreError::RunLeased { expires_in, .. })) => {
+                    let wait = pin!(tokio::time::sleep(expires_in.max(LEASE_POLL)));
+                    let cancelled = pin!(self.inner.cancel.cancelled());
+                    if let Either::Right(_) = select(wait, cancelled).await {
+                        self.check_cancel(&label)?;
+                    }
+                }
+                driven => break (run_id, driven),
+            }
         };
         // A run that ended never continues on its session, while a run
         // waiting for an approval does.
@@ -134,6 +152,10 @@ impl WorkflowContext {
         Ok(text)
     }
 }
+
+/// The shortest wait before an agent call looks again at a run another
+/// process leases.
+const LEASE_POLL: Duration = Duration::from_millis(100);
 
 /// The id of the run that attempt `generation` of an `agent` call makes:
 /// the same on every resume, and distinct per workflow and call.

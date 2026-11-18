@@ -56,12 +56,13 @@ mod profile;
 pub mod project;
 
 pub use config::{
-    AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, FilesystemConfig, McpConfig,
-    McpTransportConfig, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig, StoreConfig,
+    AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, FilesystemConfig, MIN_LEASE_TTL_MS,
+    McpConfig, McpTransportConfig, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig,
+    StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;
-pub use open::OpenedAgent;
+pub use open::{OpenedAgent, RELEASE_WAIT};
 pub use pools::PgPools;
 pub use profile::{Profile, ProfileError};
 

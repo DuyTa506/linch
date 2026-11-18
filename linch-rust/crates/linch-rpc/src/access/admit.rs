@@ -81,6 +81,7 @@ impl Tenant {
         if let StoreConfig::Postgres {
             dsn,
             max_connections,
+            ..
         } = &mut config.stores
         {
             if !PgTarget::parse(dsn)

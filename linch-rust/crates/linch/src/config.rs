@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use linch_core::{AgentSpec, PermissionPolicy, ScriptedTurn, ToolSearch, Workers};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::profile::Profile;
 
@@ -296,7 +296,33 @@ pub enum StoreConfig {
         /// that pool share its size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_connections: Option<NonZeroU32>,
+        /// How long a run claim of this agent holds without a renewal, in
+        /// milliseconds, at least [`MIN_LEASE_TTL_MS`];
+        /// [`linch_postgres::DEFAULT_RUN_LEASE_TTL`] (30 s) when absent.
+        /// While a run is driven its lease is renewed every third of it;
+        /// another process's resume of the run is refused until the lease
+        /// is released or runs out, so this is the longest a run waits
+        /// after its holder crashed.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lease_ttl_ms"
+        )]
+        lease_ttl_ms: Option<u64>,
     },
+}
+
+/// The shortest `stores.lease_ttl_ms`: renewals every third of it, so at
+/// most three small writes a second per running run.
+pub const MIN_LEASE_TTL_MS: u64 = 1000;
+
+fn lease_ttl_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    let ttl = u64::deserialize(deserializer)?;
+    if ttl < MIN_LEASE_TTL_MS {
+        let message = format!("lease_ttl_ms {ttl} is below the minimum {MIN_LEASE_TTL_MS}");
+        return Err(serde::de::Error::custom(message));
+    }
+    Ok(Some(ttl))
 }
 
 impl Default for StoreConfig {
@@ -310,11 +336,14 @@ impl fmt::Debug for StoreConfig {
         match self {
             Self::Memory {} => f.write_str("Memory"),
             Self::Postgres {
-                max_connections, ..
+                max_connections,
+                lease_ttl_ms,
+                ..
             } => f
                 .debug_struct("Postgres")
                 .field("dsn", &"[redacted]")
                 .field("max_connections", max_connections)
+                .field("lease_ttl_ms", lease_ttl_ms)
                 .finish(),
         }
     }

@@ -3,7 +3,7 @@
 use std::error::Error;
 
 use linch::mcp::McpError;
-use linch::{BuildError, JsonValue, OpenError, RunError, StoreError};
+use linch::{BuildError, JournalError, JsonValue, OpenError, RunError, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -71,7 +71,9 @@ pub mod code {
     pub const STORE: i64 = -32020;
     /// `StoreError::NotFound`: no such run or session.
     pub const NOT_FOUND: i64 = -32021;
-    /// `StoreError::LeaseLost`: another claim fenced this run out.
+    /// `StoreError::LeaseLost`, from a claim or a journal write: another
+    /// claim fenced this run out (another process took it over, or failed
+    /// it). The run stopped here without writing; its new holder drives it.
     pub const LEASE_LOST: i64 = -32022;
     /// `StoreError::Conflict`, for example a chosen run id that is already
     /// stored.
@@ -106,6 +108,11 @@ pub mod code {
     /// run's pending input requests; `data.reason` says why. Nothing was
     /// written: the run still awaits input.
     pub const INVALID_ANSWER: i64 = -32032;
+    /// `StoreError::RunLeased`: another process drives the run and keeps
+    /// its lease alive, so `run.resume`, `run.approve` or `run.answer`
+    /// wrote nothing. `data` is `{run_id, owner, expires_in_ms}`: try again
+    /// once that holder stops, at the latest after `expires_in_ms`.
+    pub const RUN_LEASED: i64 = -32033;
 }
 
 impl ErrorObject {
@@ -161,7 +168,19 @@ impl From<&RunError> for ErrorObject {
                 Self::new(code::SESSION_BUSY, message)
                     .with_data(json!({ "session_id": session_id, "run_id": run_id }))
             }
+            RunError::Store(StoreError::RunLeased {
+                run_id,
+                owner,
+                expires_in,
+            }) => Self::new(code::RUN_LEASED, message).with_data(json!({
+                "run_id": run_id,
+                "owner": owner,
+                "expires_in_ms": u64::try_from(expires_in.as_millis()).unwrap_or(u64::MAX),
+            })),
             RunError::Store(store) => Self::new(store_code(store), message),
+            RunError::Journal(JournalError::Store(StoreError::LeaseLost { .. })) => {
+                Self::new(code::LEASE_LOST, message)
+            }
             RunError::Journal(_) => Self::new(code::JOURNAL, message),
             // The message names the run's contract first, then the agent's;
             // the data reads the same way: the run expected its own contract
@@ -234,6 +253,31 @@ fn build_code(error: &BuildError) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leased_run_names_its_holder_and_a_fenced_write_is_lease_lost() {
+        let leased = RunError::Store(StoreError::RunLeased {
+            run_id: "r1".into(),
+            owner: "worker-2".into(),
+            expires_in: std::time::Duration::from_millis(12_500),
+        });
+        let object = ErrorObject::from(&leased);
+        assert_eq!(object.code, code::RUN_LEASED);
+        let data = object.data.unwrap();
+        assert_eq!(
+            (&data["run_id"], &data["owner"], &data["expires_in_ms"]),
+            (&json!("r1"), &json!("worker-2"), &json!(12_500))
+        );
+        let fenced = RunError::Journal(JournalError::Store(StoreError::LeaseLost {
+            run_id: "r1".into(),
+            epoch: 1,
+        }));
+        assert_eq!(ErrorObject::from(&fenced).code, code::LEASE_LOST);
+        assert_eq!(
+            ErrorObject::from(&RunError::Journal(JournalError::Poisoned)).code,
+            code::JOURNAL
+        );
+    }
 
     #[test]
     fn a_contract_mismatch_names_its_digests_in_the_order_of_its_message() {

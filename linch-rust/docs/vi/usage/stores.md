@@ -25,6 +25,7 @@ lưu trữ; tiến trình của bạn không bao giờ kết nối trực tiếp
 | Sau khi server dừng | Mất | Được giữ; một server mới tiếp tục chúng |
 | Ai có thể resume hoặc phê duyệt một run | `Agent` đã bắt đầu nó | Bất kỳ agent nào có cùng cấu hình và tool (cùng [hợp đồng](./agent.md#the-run-contract)) trên bất kỳ server nào |
 | Một run đang chạy cho mỗi session | Theo từng handle của agent | Trên mọi server dùng cơ sở dữ liệu, theo từng namespace |
+| Một bên điều khiển cho mỗi run | Không: mỗi tiến trình có các run riêng | Có: một run mà server khác đang điều khiển bị từ chối với `RunLeased` ([Run leases](#run-leases)) |
 | Tệp của hệ thống tệp ảo | Theo từng session, bị bỏ khi `close_session` | Dùng chung cho mọi session của namespace |
 | Task của session | Trong bộ nhớ | Trong cơ sở dữ liệu |
 | Dùng cho | Kiểm thử, notebook, phát triển | Dịch vụ, run dài hoặc có chờ phê duyệt, nhiều hơn một tiến trình |
@@ -120,6 +121,12 @@ sẽ không xung đột.
 | `linch_files` | Hệ thống tệp ảo, theo từng namespace |
 | `linch_tasks`, `linch_task_edges` | Task của session và các phụ thuộc của chúng |
 
+Migration 6 thêm hai cột nullable vào `linch_runs` (`lease_holder`, `lease_until`) cho
+[run leases](#run-leases). Nó không viết lại hàng nào và không giữ khóa lâu. Một server
+của phiên bản cũ hơn từ chối khởi động trên một cơ sở dữ liệu đã migrate vượt qua nó,
+như với mọi migration: hãy nâng cấp mọi server trước khi một trong số chúng khởi động
+lại trên phiên bản cũ.
+
 - Role trong DSN cần quyền tạo bảng và index trong schema của nó ở lần đầu; sau đó
   nó chỉ đọc và ghi các hàng.
 - Một migration không hoàn tất trong 30 giây làm việc mở thất bại với `OpenError`
@@ -173,6 +180,42 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
   nên một run đã chờ một lệnh gọi mô hình dài vẫn ghi được câu trả lời của nó. Một
   kết nối lỗi giữa chừng một lần ghi sẽ dừng run ở trạng thái bền vững cuối cùng;
   hãy resume nó.
+
+### Run leases
+
+Trên Postgres, mỗi lúc chỉ một server điều khiển một run. Agent bắt đầu, resume,
+approve hoặc answer một run giữ lease của nó và gia hạn mỗi một phần ba độ dài lease
+trong khi điều khiển run, nên một lần gọi mô hình hay tool dài vẫn giữ được nó. Cho đến
+khi run đó dừng, kết thúc, hoặc chờ một phê duyệt hay một câu trả lời, `resume`,
+`approve` hoặc `answer` của agent khác bị từ chối với `RunLeased` (mã -32033) và không
+ghi gì; `.owner` nêu owner của holder và `.expires_in` là số giây lease của nó còn lại.
+
+- Một run có stream kết thúc với lỗi, hoặc có kết nối bị đứt, được release ngay: server
+  khác có thể resume nó liền. Các run của một server thoát bình thường (đầu vào của nó
+  đóng, rời khỏi `async with Server()`) cũng vậy: nó chờ tối đa 5 s cho các lần release
+  đó trước khi thoát.
+- Một server crash hoặc treo không release gì. Các run của nó bị từ chối trong tối đa
+  độ dài lease (mặc định 30 s), rồi server nào cũng resume được.
+- Nếu một server bị đứng lâu hơn lease của nó (một lần tạm dừng dài, mất mạng), server
+  khác có thể tiếp quản các run của nó. Khi nó tỉnh lại, lần ghi kế tiếp của nó bị từ
+  chối và run kết thúc với `LeaseLost` (mã -32022) mà không ghi gì: bên điều khiển mới
+  của run sở hữu nó.
+- Lease chỉ được gia hạn khi run còn tiến triển trên server của nó. Một client ngừng đọc
+  event của một run đủ lâu để hàng đợi của server đầy (xem
+  [backpressure](../architecture/rpc.md#backpressure)) sẽ làm run tạm dừng, và sau trọn một lease, server khác có thể
+  tiếp quản nó; run bị tạm dừng sau đó kết thúc với `LeaseLost` khi nó chạy tiếp.
+- `stores.lease_ttl_ms` đặt độ dài lease, tối thiểu 1000. Ngắn hơn nghĩa là các run của
+  một server đã crash được giải phóng sớm hơn, đổi lại thêm một lần ghi nhỏ cho mỗi run
+  đang chạy mỗi một phần ba của nó.
+- Cùng một agent handle không bao giờ chờ lease của chính nó: một run bạn đã drop
+  stream resume ngay qua nó.
+
+```python
+{"type": "postgres", "dsn": "postgres://user:pass@db:5432/linch", "lease_ttl_ms": 10000}
+```
+
+Store memory không có lease: mỗi tiến trình có các run riêng, và agent giữ chúng là
+agent duy nhất điều khiển được chúng.
 
 <a id="the-virtual-filesystem"></a>
 

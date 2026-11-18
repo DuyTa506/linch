@@ -4,16 +4,24 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::SeqCst;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use linch_core::events::kinds::UserEventSubtype::Prompt;
 use linch_core::hooks::ApprovalResponse;
 use linch_core::provider::scripted::ScriptedError;
-use linch_core::{Event, RunOptions, ScriptedTurn, SessionId};
+use linch_core::{
+    AgentBuilder, AgentSpec, Commit, Envelope, Event, Lease, MemoryRunStore, MemorySessionStore,
+    NewRun, PermissionEngine, PermissionMode, PermissionPolicy, RunId, RunOptions, RunRecord,
+    RunStore, ScriptedProvider, ScriptedTurn, SessionId, StoreError,
+};
 use serde_json::json;
 
 use super::*;
-use crate::test_support::{drain, scripted, text_turn, tool_turn};
+use crate::test_support::{MODEL, drain, scripted, text_turn, tool_turn};
 use crate::workflow::agent::agent_run_id;
 
 const PROMPT: &str = "review the diff";
@@ -214,4 +222,84 @@ async fn a_cancelled_workflow_starts_no_agent_run() {
         "{outcome:?}"
     );
     assert!(fixture.provider.requests().is_empty());
+}
+
+/// A memory run store whose first workflow claims find the run leased to
+/// a runner that crashed.
+struct LeasedElsewhere {
+    inner: MemoryRunStore,
+    refusals: AtomicU32,
+}
+
+#[async_trait]
+impl RunStore for LeasedElsewhere {
+    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
+        self.inner.create(run).await
+    }
+
+    async fn claim(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
+        let refuse = (self.refusals).try_update(SeqCst, SeqCst, |n| n.checked_sub(1));
+        if owner == "workflow" && refuse.is_ok() {
+            return Err(StoreError::RunLeased {
+                run_id: run_id.clone(),
+                owner: "crashed-runner".into(),
+                expires_in: Duration::from_millis(20),
+            });
+        }
+        self.inner.claim(ns, run_id, owner).await
+    }
+
+    async fn load(&self, ns: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
+        self.inner.load(ns, run_id).await
+    }
+
+    async fn commit(&self, lease: &Lease, commit: Commit) -> Result<(), StoreError> {
+        self.inner.commit(lease, commit).await
+    }
+
+    async fn events(
+        &self,
+        ns: &str,
+        run_id: &RunId,
+        after_seq: u64,
+    ) -> Result<Vec<Envelope>, StoreError> {
+        self.inner.events(ns, run_id, after_seq).await
+    }
+}
+
+/// After a crash, the call's run is still leased to the crashed runner for
+/// a while: the call waits that out instead of failing.
+#[tokio::test]
+async fn a_crashed_agent_call_waits_out_the_crashed_runners_lease() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_turn("done")]));
+    let runs = Arc::new(LeasedElsewhere {
+        inner: MemoryRunStore::default(),
+        refusals: AtomicU32::new(2),
+    });
+    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let agent = AgentBuilder::new(AgentSpec::new(MODEL))
+        .provider(provider.clone())
+        .permissions(PermissionEngine::new(policy).unwrap())
+        .run_store(runs.clone())
+        .session_store(Arc::new(MemorySessionStore::default()))
+        .namespace(crate::test_support::NS)
+        .build()
+        .unwrap();
+    let run = run_id("w9", 0);
+    let options_for_crash = RunOptions {
+        run_id: Some(run.clone()),
+        ..RunOptions::new(SessionId::new(run.as_str()))
+    };
+    // The crash: the run is created, and dropped before its model call.
+    let mut stream = agent.run(PROMPT, options_for_crash);
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+
+    let store = Arc::new(MemoryJournalStore::default());
+    let flow = |wf| review(wf, agent.clone());
+    let resumed = run_workflow(options(&store, "w9", &Recorder::default()), flow).await;
+    assert_eq!(resumed.unwrap(), "done");
+    let left = runs.refusals.load(SeqCst);
+    assert_eq!(left, 0, "refused twice, then the call went on");
+    assert_eq!(provider.requests().len(), 1, "no model call twice");
 }

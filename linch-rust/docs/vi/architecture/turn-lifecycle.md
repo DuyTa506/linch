@@ -321,7 +321,11 @@ nó bị từ chối bằng một kết quả lỗi trước khi batch chạy (`
    không fence một owner đang sống, và chạy lại sau claim
    (`start.rs:189-207`, `414-439`).
 3. `claim` lấy lease và cộng 1 vào epoch, thứ fence owner trước đó
-   ([stores](./stores.md#fencing)) (`start.rs:196-205`).
+   ([stores](./stores.md#fencing)); một run con thì bị seize thay vì claim
+   (`start.rs:233-247`). Trên một store có claim hết hạn, một run mà bên giữ khác
+   vẫn đang duy trì sẽ bị từ chối với `RunLeased` trước khi có gì được ghi, và từ
+   đây run future gia hạn lease rồi release nó nếu run dừng mà chưa settle
+   ([leases](./stores.md#leases), `runner/lease.rs`).
 4. `reconcile` đọc checkpoint, các event và session log, rồi trả về việc cần làm tiếp
    theo. Nó là hàm thuần (`journal/reconcile.rs:149-169`).
 5. Một event `init` mới với `resumed: true` được stage. Nó đi cùng barrier đầu tiên

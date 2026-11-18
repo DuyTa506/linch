@@ -23,12 +23,12 @@ use crate::common::TestDb;
 const MODEL: &str = "scripted-model";
 
 /// A scripted provider whose calls wait until the test opens the gate.
-struct Gated {
-    inner: ScriptedProvider,
+pub(crate) struct Gated {
+    pub(crate) inner: ScriptedProvider,
     /// Notified when a call reaches the gate.
-    entered: Notify,
+    pub(crate) entered: Notify,
     /// One permit per call let through.
-    open: Semaphore,
+    pub(crate) open: Semaphore,
 }
 
 #[async_trait]

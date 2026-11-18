@@ -6,6 +6,14 @@
 //! names the refusal in linch-core's order: not found, lease epoch, status,
 //! event run ids, then seqs. `create` and `claim` are transactions that
 //! lock the run row first. A rejected or interrupted write changes nothing.
+//!
+//! Each store instance is one lease holder. A claim records it and a lease
+//! [`DEFAULT_RUN_LEASE_TTL`] long on the database clock; a claim through
+//! another instance is refused while the run is `running` under a lease
+//! that has not run out. Renewals and releases are single statements that
+//! match the lease's epoch. Commits are fenced by the epoch alone.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use linch_core::{
@@ -18,19 +26,59 @@ use crate::codec::{
     not_found, parse_contract, parse_status, status_name, to_i64, to_u64,
 };
 
+/// How long a run claim holds without a renewal, unless set with
+/// [`PgRunStore::with_lease_ttl`]. A run's driver renews it every third
+/// (10 s); a holder that stops (a crash, a stream nobody polls) keeps other
+/// processes from its run for at most this long. It matches the worker's
+/// default visibility timeout, so a job taken over after its worker went
+/// quiet finds the run free at about the same time.
+pub const DEFAULT_RUN_LEASE_TTL: Duration = Duration::from_secs(30);
+
 /// A [`RunStore`] backed by Postgres.
 ///
 /// Records are keyed by `(namespace, run_id)`. Run [`crate::migrate`] on the
 /// database before the first call.
+///
+/// Each store made with [`PgRunStore::new`] is its own lease holder, and its
+/// clones share it: runs claimed through it are refused to every other
+/// store while their leases live. Build one per agent or per process.
 #[derive(Debug, Clone)]
 pub struct PgRunStore {
     pool: PgPool,
+    /// This store's identity in `lease_holder`.
+    holder: String,
+    lease_ttl: Duration,
 }
 
 impl PgRunStore {
-    /// A store that runs its queries on `pool`.
+    /// A store that runs its queries on `pool`: a new lease holder, with
+    /// leases [`DEFAULT_RUN_LEASE_TTL`] long.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            holder: uuid::Uuid::new_v4().to_string(),
+            lease_ttl: DEFAULT_RUN_LEASE_TTL,
+        }
+    }
+
+    /// The same store with leases `ttl` long: the longest another process
+    /// waits for a run whose holder stopped, against one renewal per
+    /// running run every third of it.
+    ///
+    /// Raises:
+    ///     Panics: If `ttl` is shorter than a millisecond.
+    pub fn with_lease_ttl(mut self, ttl: Duration) -> Self {
+        assert!(
+            ttl >= Duration::from_millis(1),
+            "a run lease lasts at least 1 ms"
+        );
+        self.lease_ttl = ttl;
+        self
+    }
+
+    /// The lease length in milliseconds, for SQL.
+    fn ttl_ms(&self) -> f64 {
+        self.lease_ttl.as_secs_f64() * 1000.0
     }
 }
 
@@ -39,18 +87,38 @@ type RecordRow = (String, Option<String>, String, String, i64, String, i64);
 const STATE: &str = "SELECT status, epoch, last_seq FROM linch_runs \
                      WHERE namespace = $1 AND run_id = $2";
 
-const LOCK: &str = "SELECT status, epoch, last_seq FROM linch_runs \
-                    WHERE namespace = $1 AND run_id = $2 FOR UPDATE";
+/// A claim's read, with the row locked: the run's status and epoch, its
+/// lease's owner and holder, and the whole milliseconds its lease has left
+/// (0 for none: `GREATEST` skips a NULL).
+const CLAIM_LOCK: &str = "SELECT status, epoch, owner, lease_holder, \
+                          GREATEST(0, ceil(extract(epoch FROM lease_until - clock_timestamp()) \
+                          * 1000))::bigint \
+                          FROM linch_runs WHERE namespace = $1 AND run_id = $2 FOR UPDATE";
 
-/// Status, epoch and last seq of a run row, read with [`STATE`] or, in a
-/// transaction, locked with [`LOCK`].
+type ClaimRow = (String, i64, Option<String>, Option<String>, i64);
+
+/// A claim's write: status `running`, the new epoch, and a fresh lease.
+const CLAIM: &str = "UPDATE linch_runs SET status = $3, epoch = $4, owner = $5, \
+                     lease_holder = $6, \
+                     lease_until = clock_timestamp() + $7::float8 * interval '1 millisecond' \
+                     WHERE namespace = $1 AND run_id = $2";
+
+/// A renewal: a whole TTL from now, only under the lease's epoch.
+const RENEW: &str = "UPDATE linch_runs \
+                     SET lease_until = clock_timestamp() + $4::float8 * interval '1 millisecond' \
+                     WHERE namespace = $1 AND run_id = $2 AND epoch = $3";
+
+/// A release: no live lease, only under the lease's epoch.
+const RELEASE: &str = "UPDATE linch_runs SET lease_until = NULL \
+                       WHERE namespace = $1 AND run_id = $2 AND epoch = $3";
+
+/// Status, epoch and last seq of a run row, read with [`STATE`].
 async fn run_state<'e>(
     db: impl PgExecutor<'e>,
-    sql: &'static str,
     namespace: &str,
     run_id: &RunId,
 ) -> Result<(RunStatus, u64, u64), StoreError> {
-    let row: Option<(String, i64, i64)> = sqlx::query_as(sql)
+    let row: Option<(String, i64, i64)> = sqlx::query_as(STATE)
         .bind(namespace)
         .bind(run_id.as_str())
         .fetch_optional(db)
@@ -178,6 +246,90 @@ impl PgRunStore {
         Ok(moved == 1)
     }
 
+    /// Claim `run_id`; over another holder's live lease only when `force`.
+    async fn take(
+        &self,
+        namespace: &str,
+        run_id: &RunId,
+        owner: &str,
+        force: bool,
+    ) -> Result<Lease, StoreError> {
+        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
+        let row: Option<ClaimRow> = sqlx::query_as(CLAIM_LOCK)
+            .bind(namespace)
+            .bind(run_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?;
+        let (status, epoch, held_by, holder, left_ms) =
+            row.ok_or_else(|| not_found("run", namespace, run_id.as_str()))?;
+        let (status, epoch) = (parse_status(&status)?, to_u64(epoch, "epoch")?);
+        if status.is_terminal() {
+            return Err(StoreError::InvalidTransition {
+                from: status,
+                to: RunStatus::Running,
+            });
+        }
+        let live = status == RunStatus::Running && left_ms > 0;
+        if live && !force && holder.as_deref() != Some(self.holder.as_str()) {
+            return Err(StoreError::RunLeased {
+                run_id: run_id.clone(),
+                owner: held_by.unwrap_or_default(),
+                expires_in: Duration::from_millis(to_u64(left_ms, "lease")?),
+            });
+        }
+        let epoch = epoch + 1;
+        sqlx::query(CLAIM)
+            .bind(namespace)
+            .bind(run_id.as_str())
+            .bind(status_name(RunStatus::Running))
+            .bind(to_i64(epoch, "epoch")?)
+            .bind(owner)
+            .bind(&self.holder)
+            .bind(self.ttl_ms())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(Lease {
+            namespace: namespace.to_owned(),
+            run_id: run_id.clone(),
+            owner: owner.to_owned(),
+            epoch,
+        })
+    }
+
+    /// Run [`RENEW`] (with the TTL) or [`RELEASE`] under `lease`'s epoch;
+    /// whether a row matched. A serialization failure wrote nothing and is
+    /// tried again.
+    async fn lease_write(
+        &self,
+        sql: &'static str,
+        ttl_ms: Option<f64>,
+        lease: &Lease,
+    ) -> Result<bool, StoreError> {
+        // No row holds an epoch past i64::MAX.
+        let Ok(epoch) = i64::try_from(lease.epoch) else {
+            return Ok(false);
+        };
+        let mut cause = None;
+        for _ in 0..crate::WRITE_TRIES {
+            let query = (sqlx::query(sql).bind(&lease.namespace))
+                .bind(lease.run_id.as_str())
+                .bind(epoch);
+            let query = match ttl_ms {
+                Some(ms) => query.bind(ms),
+                None => query,
+            };
+            match query.execute(&self.pool).await {
+                Ok(done) => return Ok(done.rows_affected() == 1),
+                Err(error) if crate::serialization_failure(&error) => cause = Some(error),
+                Err(error) => return Err(backend(error)),
+            }
+        }
+        Err(backend(cause.expect("WRITE_TRIES is not 0")))
+    }
+
     /// Insert the run row and its first events in one transaction.
     async fn insert(&self, run: &NewRun, checkpoint: &str) -> Result<Insert, StoreError> {
         let events = encode_events(&run.events)?;
@@ -262,34 +414,34 @@ impl RunStore for PgRunStore {
         run_id: &RunId,
         owner: &str,
     ) -> Result<Lease, StoreError> {
-        let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
-        let (status, epoch, _) = run_state(&mut *tx, LOCK, namespace, run_id).await?;
-        if status.is_terminal() {
-            return Err(StoreError::InvalidTransition {
-                from: status,
-                to: RunStatus::Running,
-            });
+        self.take(namespace, run_id, owner, false).await
+    }
+
+    async fn seize(
+        &self,
+        namespace: &str,
+        run_id: &RunId,
+        owner: &str,
+    ) -> Result<Lease, StoreError> {
+        self.take(namespace, run_id, owner, true).await
+    }
+
+    fn lease_ttl(&self) -> Option<Duration> {
+        Some(self.lease_ttl)
+    }
+
+    async fn renew(&self, lease: &Lease) -> Result<(), StoreError> {
+        match self.lease_write(RENEW, Some(self.ttl_ms()), lease).await? {
+            true => Ok(()),
+            false => Err(StoreError::LeaseLost {
+                run_id: lease.run_id.clone(),
+                epoch: lease.epoch,
+            }),
         }
-        let epoch = epoch + 1;
-        sqlx::query(
-            "UPDATE linch_runs SET status = $3, epoch = $4, owner = $5 \
-             WHERE namespace = $1 AND run_id = $2",
-        )
-        .bind(namespace)
-        .bind(run_id.as_str())
-        .bind(status_name(RunStatus::Running))
-        .bind(to_i64(epoch, "epoch")?)
-        .bind(owner)
-        .execute(&mut *tx)
-        .await
-        .map_err(backend)?;
-        tx.commit().await.map_err(backend)?;
-        Ok(Lease {
-            namespace: namespace.to_owned(),
-            run_id: run_id.clone(),
-            owner: owner.to_owned(),
-            epoch,
-        })
+    }
+
+    async fn release(&self, lease: &Lease) -> Result<(), StoreError> {
+        self.lease_write(RELEASE, None, lease).await.map(|_| ())
     }
 
     async fn load(&self, namespace: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
@@ -338,7 +490,7 @@ impl RunStore for PgRunStore {
             match written {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
-                    let state = run_state(&self.pool, STATE, namespace, run_id).await?;
+                    let state = run_state(&self.pool, namespace, run_id).await?;
                     // `Ok`: the row moved after the refused write.
                     refusal(lease, &commit, state)?;
                 }

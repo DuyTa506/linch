@@ -169,7 +169,9 @@ Một lời gọi `agent` chạy trên session riêng của nó với run id suy
 workflow, khóa của lời gọi, lần xuất hiện của nó và một generation
 (`crates/linch-ext/src/workflow/agent.rs:138`). Sau một sự cố, lần
 `run_workflow` kế tiếp tiếp tục run đó thay vì bắt đầu lại, nên một lời gọi model không
-bao giờ bị trả phí hai lần. Một run đã thất bại hoặc bị abort không bao giờ được tiếp
+bao giờ bị trả phí hai lần. Nếu run vẫn còn lease của runner đã sập (Postgres, chưa
+quá một lease), lời gọi chờ đến khi lease hết hạn hoặc workflow bị hủy, thay vì thất bại.
+Một run đã thất bại hoặc bị abort không bao giờ được tiếp
 tục: lời gọi thất bại, và lần resume kế tiếp bắt đầu một run mới với generation tiếp
 theo. Một run dừng để chờ phê duyệt làm lời gọi thất bại; hãy approve nó bằng
 `Agent::approve`, rồi resume workflow, thứ đọc văn bản của run đã xong. Timeout và retry

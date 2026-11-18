@@ -11,8 +11,9 @@ pub(crate) enum Outcome {
     Done,
     /// Try again after the retry delay, counting a failure.
     Retry(String),
-    /// A start job whose session has a live run: try again later, without
-    /// counting a failure.
+    /// A start job whose session has a live run, or a job whose run another
+    /// process holds a live lease on: try again later, without counting a
+    /// failure.
     Busy(String),
     /// The job can never succeed: keep it, failed, with this error.
     Fail(String),
@@ -45,6 +46,9 @@ pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
         Some(StoreError::LeaseLost { .. }) => return Outcome::Fenced(chain(error)),
         // Nothing was written; the job waits for that run.
         Some(StoreError::SessionBusy { .. }) => return Outcome::Busy(chain(error)),
+        // Another process drives the run; nothing was written. The job
+        // waits until that holder stops or its lease runs out.
+        Some(StoreError::RunLeased { .. }) => return Outcome::Busy(chain(error)),
         _ => {}
     }
     match error {
@@ -107,6 +111,12 @@ mod tests {
             run_id: RunId::new("r0"),
         });
         assert!(matches!(classify(&busy), Outcome::Busy(text) if text.contains("busy")));
+        let leased = RunError::Store(StoreError::RunLeased {
+            run_id: run(),
+            owner: "worker-2".into(),
+            expires_in: std::time::Duration::from_secs(12),
+        });
+        assert!(matches!(classify(&leased), Outcome::Busy(text) if text.contains("worker-2")));
         let reconcile = RunError::Reconcile(ReconcileError::MissingToolCalls);
         assert!(fails_run(classify(&reconcile)));
     }

@@ -27,7 +27,7 @@ use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
-use crate::runner::{self, Families, RunStream};
+use crate::runner::{self, Families, Releases, RunStream};
 use crate::skills::SkillSet;
 use crate::store::{RunStore, SessionStore};
 use crate::structured::OutputContract;
@@ -173,6 +173,8 @@ pub(crate) struct AgentInner {
     /// The subagent child runs of each run that is live or suspended in
     /// this process (see [`runner::Family`]).
     pub(crate) families: Families,
+    /// The lease releases of runs dropped mid-run, still in flight.
+    pub(crate) releases: Releases,
     session_close: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
@@ -290,6 +292,13 @@ impl Agent {
     /// A run waiting for approval plans its tool calls again with the
     /// decisions recorded so far, and suspends again if one still needs an
     /// answer.
+    ///
+    /// On a run store whose claims expire (Postgres), a run another process
+    /// drives is not taken from it: the stream ends with
+    /// `RunError::Store(StoreError::RunLeased { .. })` and nothing is
+    /// written. Try again once that holder stops, at the latest when its
+    /// lease runs out. A run this agent's own store holds is taken over at
+    /// once, as on the memory stores.
     pub fn resume(&self, run_id: RunId, options: RunOptions) -> RunStream {
         runner::resume(Arc::clone(&self.inner), run_id, None, options)
     }
@@ -303,9 +312,10 @@ impl Agent {
     /// approve (after a timeout, a crash, or a second click) gets
     /// `NotSuspended`, and the host continues the run with [`Agent::resume`],
     /// under the committed decisions. Two approves that race on one
-    /// suspended run can still both pass this check: the later claim fences
-    /// the earlier approve, then gets `NotSuspended`, which leaves the run
-    /// `running` for a resume.
+    /// suspended run can still both pass this check. Through one store the
+    /// later claim fences the earlier approve, then gets `NotSuspended`,
+    /// which leaves the run `running` for a resume; from another process,
+    /// on a store whose claims expire, the later one gets `RunLeased`.
     ///
     /// Args:
     ///     run_id: A run whose checkpoint is awaiting approval.
@@ -355,8 +365,10 @@ impl Agent {
     /// Mark `run_id` failed for good, when it can never continue (its
     /// durable state does not reconcile, or no agent has its contract).
     ///
-    /// It claims the run, which fences out any live owner: that owner's
-    /// next write fails with a lost lease. Then one write commits an
+    /// It seizes the run ([`RunStore::seize`]), which fences out any live
+    /// owner, in this process or another: that owner's next write fails
+    /// with a lost lease, and on a store whose claims expire its next
+    /// heartbeat stops it. Then one write commits an
     /// `Error` holding `reason`, the `Result` (subtype `error`, with the
     /// checkpoint's usage) and status `failed`. The contract is not
     /// checked. A run whose last provider or summary call may be in flight
@@ -430,6 +442,15 @@ impl Agent {
         run_id: &RunId,
     ) -> Option<impl Future<Output = ()> + Send + use<>> {
         self.inner.family(run_id)?.parked_children()
+    }
+
+    /// Wait until the lease releases of this agent's runs that were dropped
+    /// or stopped by an error have landed (or failed), so another process
+    /// can resume them at once. Call it before the process exits after
+    /// dropping run streams; a release cut off by the exit leaves the run
+    /// to wait out its lease. Nothing to wait for on the memory stores.
+    pub async fn released(&self) {
+        self.inner.releases.wait().await;
     }
 
     /// The status of `run_id`, from its record alone.
