@@ -180,6 +180,11 @@ pub mod code {
     /// its first step with answers that have nothing to answer. Nothing was
     /// claimed; start it without `resume`, or use Postgres stores.
     pub const WORKFLOW_NO_JOURNAL: i64 = -32049;
+    /// The run existed and a retention pass deleted it (its record and its
+    /// events), so no read, resume or approve of it can succeed. The server
+    /// keeps a record of what it pruned for a bounded time; after that the
+    /// run reads as not found (`-32021`).
+    pub const RUN_PRUNED: i64 = -32050;
 }
 
 impl ErrorObject {
@@ -253,6 +258,12 @@ impl From<&RunError> for ErrorObject {
                 "owner": owner,
                 "expires_in_ms": u64::try_from(expires_in.as_millis()).unwrap_or(u64::MAX),
             })),
+            RunError::Store(StoreError::NotFound {
+                kind: "run",
+                id,
+                pruned: true,
+                ..
+            }) => Self::new(code::RUN_PRUNED, message).with_data(json!({ "run_id": id })),
             RunError::Store(store) => Self::new(store_code(store), message),
             RunError::Journal(JournalError::Store(StoreError::LeaseLost { .. })) => {
                 Self::new(code::LEASE_LOST, message)
@@ -402,6 +413,25 @@ mod tests {
             ErrorObject::from(&RunError::Journal(JournalError::Poisoned)).code,
             code::JOURNAL
         );
+    }
+
+    #[test]
+    fn a_run_a_retention_pass_deleted_has_a_code_of_its_own() {
+        let not_found = |pruned| {
+            RunError::Store(StoreError::NotFound {
+                kind: "run",
+                namespace: "ns".into(),
+                id: "r1".into(),
+                pruned,
+            })
+        };
+        let pruned = ErrorObject::from(&not_found(true));
+        assert_eq!(pruned.code, code::RUN_PRUNED);
+        assert_eq!(pruned.data.unwrap()["run_id"], json!("r1"));
+        assert!(pruned.message.contains("retention"), "{}", pruned.message);
+        let missing = ErrorObject::from(&not_found(false));
+        assert_eq!(missing.code, code::NOT_FOUND);
+        assert!(missing.data.is_none());
     }
 
     #[test]

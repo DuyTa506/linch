@@ -567,6 +567,7 @@
 //! | -32047 | workflow call failed | a `workflow.agent` call's run failed, was aborted, timed out or waits for an approval, or its subagent is unknown; `data: {kind}` |
 //! | -32048 | workflow not found | this connection drives no workflow with that id |
 //! | -32049 | workflow has no journal | `workflow.start` carried `resume` answers for a workflow whose journal holds nothing (it never ran, or a memory-store agent's journal ended with its connection); nothing was claimed; `data: {run_id}` |
+//! | -32050 | run pruned | `StoreError::NotFound` of a run that a retention pass deleted (its record and events); `data: {run_id}`; the server remembers it for the tombstone period, then the run reads as not found (`-32021`) |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
