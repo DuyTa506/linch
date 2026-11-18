@@ -158,6 +158,22 @@ class ToolCallEndEvent:
 
 
 @dataclass(frozen=True)
+class ToolInterruptedEvent:
+    """A call a crash interrupted: it started, its end was never durable.
+
+    Written by the resume that finds it, with the `ToolCallEndEvent` (an
+    error whose `error_code` is `tool_interrupted`) that stands in for the
+    lost end. The tool's effect is unknown and the call is not run again:
+    reconcile it, keyed by `tool_use_id` (the same after the resume; see
+    `ToolContext.idempotency_key`).
+    """
+
+    type: ClassVar[str] = "tool_interrupted"
+    tool_use_id: str
+    tool_name: str
+
+
+@dataclass(frozen=True)
 class ToolRetryEvent:
     """A tool attempt failed with an error `spec.tool_retry` retries.
 
@@ -620,6 +636,7 @@ Event = (
     | ToolCallStartEvent
     | ToolCallEndEvent
     | ToolRetryEvent
+    | ToolInterruptedEvent
     | ToolProgressEvent
     | PermissionRequestEvent
     | InputRequestEvent
@@ -661,6 +678,7 @@ _KINDS: dict[str, type[Any]] = {
         ToolCallStartEvent,
         ToolCallEndEvent,
         ToolRetryEvent,
+        ToolInterruptedEvent,
         ToolProgressEvent,
         PermissionRequestEvent,
         InputRequestEvent,

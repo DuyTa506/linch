@@ -1,8 +1,9 @@
 //! A tool whose start is durable and whose end is lost to a crash is never
 //! run again (at most once). The model gets an error result for its
 //! `tool_use_id` that says the effect is unknown, in the session so the
-//! transcript stays paired; the journal marks the end with the error code
-//! `tool_interrupted` so a host can reconcile.
+//! transcript stays paired; the journal marks it with a `tool_interrupted`
+//! event and the error code `tool_interrupted` on the stand-in end, so a host
+//! can reconcile.
 
 mod common;
 
@@ -71,6 +72,9 @@ async fn a_tool_whose_end_was_lost_is_reported_unknown_and_not_run_again() {
             let session = messages(&*stores, "s1").await;
             let placeholders = error_results(&session);
             let ends = tool_ends(&stores, &run_id).await;
+            let events = interrupted_events(&stores, &run_id).await;
+            let ids: Vec<&String> = placeholders.iter().map(|(id, _)| id).collect();
+            assert_eq!(events.iter().collect::<Vec<_>>(), ids, "{context}: events");
             let marked: Vec<_> = ends.iter().filter(|(_, code)| code.is_some()).collect();
             assert_eq!(
                 placeholders.len(),
@@ -94,6 +98,17 @@ async fn a_tool_whose_end_was_lost_is_reported_unknown_and_not_run_again() {
         interrupted > 0,
         "a crash left a started call without an end"
     );
+}
+
+/// The `tool_use_id` of every `tool_interrupted` event of the run, in order.
+async fn interrupted_events(stores: &Stores, run_id: &RunId) -> Vec<String> {
+    let events = stores.runs.events(NS, run_id, 0).await.unwrap();
+    (events.into_iter())
+        .filter_map(|envelope| match envelope.event {
+            Event::ToolInterrupted(event) => Some(event.tool_use_id),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every `tool_call_end` of the run: the call id and its error code.

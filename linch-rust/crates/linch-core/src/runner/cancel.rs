@@ -24,7 +24,9 @@
 use super::turn::{Runner, Step};
 use crate::agent::RunError;
 use crate::events::Event;
-use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent, UserEvent, UserEventSubtype};
+use crate::events::kinds::{
+    ToolCallEndEvent, ToolCallStartEvent, ToolInterruptedEvent, UserEvent, UserEventSubtype,
+};
 use crate::journal::{INTERRUPTED_TOOL_CODE, Recovery, ToolRecovery};
 use crate::message::{ContentBlock, Message, Role, ToolResultBlock};
 use crate::run::Phase;
@@ -155,6 +157,13 @@ impl Runner {
                     (block.name, result, None)
                 }
             };
+            if error_code.is_some() {
+                self.journal
+                    .stage(Event::ToolInterrupted(ToolInterruptedEvent {
+                        tool_use_id: result.tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                    }));
+            }
             self.journal.stage(Event::ToolCallEnd(ToolCallEndEvent {
                 tool_name,
                 result: result.clone(),

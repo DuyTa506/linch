@@ -9,7 +9,8 @@ use crate::agent::RunError;
 use crate::ask_user::{self, CANNOT_WAIT};
 use crate::events::kinds::{
     InputRequestEvent, InputRequestKind, PermissionRequestEvent, PermissionRequestItem,
-    SuspendStatus, SuspendedEvent, ToolCallEndEvent, UserEvent, UserEventSubtype,
+    SuspendStatus, SuspendedEvent, ToolCallEndEvent, ToolInterruptedEvent, UserEvent,
+    UserEventSubtype,
 };
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
@@ -47,6 +48,11 @@ impl Runner {
         // the next barrier.
         for call in &calls {
             if let ToolRecovery::Interrupted { tool_name, result } = call {
+                self.journal
+                    .stage(Event::ToolInterrupted(ToolInterruptedEvent {
+                        tool_use_id: result.tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                    }));
                 self.journal.stage(Event::ToolCallEnd(ToolCallEndEvent {
                     tool_name: tool_name.clone(),
                     result: result.clone(),
