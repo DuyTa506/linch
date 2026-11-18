@@ -19,6 +19,7 @@ use crate::error::{WorkerError, chain, non_blank};
 use crate::execute::{Shared, execute};
 use crate::factory::AgentFactory;
 use crate::lease::{Served, dequeue};
+use crate::retention::{Retention, prune_retained};
 use crate::schedule::fire_due_schedules;
 use crate::status::prune_history;
 
@@ -58,6 +59,10 @@ pub struct WorkerConfig {
     /// `None` keeps them. The worker prunes them at most once every 10
     /// minutes.
     pub history_retention: Option<Duration>,
+    /// What to delete of ended runs and idle sessions, and how often; `None`
+    /// (the default) deletes none. A pass runs in a task of its own, so it
+    /// never delays a poll, and one pass at a time runs across the fleet.
+    pub retention: Option<Retention>,
 }
 
 impl WorkerConfig {
@@ -73,6 +78,7 @@ impl WorkerConfig {
             poll_interval: Duration::from_secs(1),
             retry_delay: Duration::from_secs(5),
             history_retention: Some(HISTORY_RETENTION),
+            retention: None,
         }
     }
 
@@ -86,6 +92,9 @@ impl WorkerConfig {
         }
         if self.max_jobs == 0 {
             return Err(WorkerError::Invalid("max_jobs must be at least 1".into()));
+        }
+        if let Some(retention) = &self.retention {
+            retention.check()?;
         }
         let ms = Duration::from_millis(1);
         if self.visibility_timeout < ms * 3 || self.poll_interval < ms {
@@ -195,6 +204,8 @@ impl Worker {
         let mut jobs = JoinSet::new();
         let mut fired = None;
         let mut pruned = None;
+        let mut retained = None;
+        let mut retention_pass: Option<AbortOnDrop> = None;
         while !shutdown.is_cancelled() {
             if schedules_due(fired, self.config.poll_interval) {
                 fired = Some(Instant::now());
@@ -212,6 +223,16 @@ impl Worker {
                 if let Err(error) = prune_definitions(&shared.pool).await {
                     tracing::warn!(error = chain(&error), "pruning agent definitions failed");
                 }
+            }
+            if let Some(retention) = &self.config.retention
+                && retention_pass.as_ref().is_none_or(AbortOnDrop::is_finished)
+                && schedules_due(retained, retention.interval)
+            {
+                retained = Some(Instant::now());
+                let (pool, retention) = (shared.pool.clone(), retention.clone());
+                retention_pass = Some(AbortOnDrop(tokio::spawn(retention_pass_of(
+                    pool, retention,
+                ))));
             }
             poll(&self.config, &shared, &served, &mut jobs).await;
             tokio::select! {
@@ -296,8 +317,33 @@ async fn listen(mut listener: PgListener, wake: Arc<Notify>) {
     }
 }
 
-/// Aborts the task when dropped, so an abandoned worker leaves no listener.
+/// One retention pass, logged; a failed pass is tried again at the next
+/// interval, after what its batches committed.
+async fn retention_pass_of(pool: PgPool, retention: Retention) {
+    match prune_retained(&pool, &retention).await {
+        Ok(done) => tracing::info!(
+            runs = done.runs,
+            events = done.events,
+            sessions = done.sessions,
+            entries = done.entries,
+            tombstones = done.tombstones,
+            contended = done.contended,
+            "retention pass done"
+        ),
+        Err(error) => tracing::warn!(error = chain(&error), "retention pass failed"),
+    }
+}
+
+/// Aborts the task when dropped, so an abandoned worker leaves no listener
+/// and no pass; a pass stopped between its batches leaves every run and
+/// session whole or gone.
 struct AbortOnDrop(JoinHandle<()>);
+
+impl AbortOnDrop {
+    fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
