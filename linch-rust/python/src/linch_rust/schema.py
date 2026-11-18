@@ -30,15 +30,19 @@ class SchemaVersion:
     Attributes:
         applied: The newest applied migration; `None` while nothing is.
         latest: The newest migration the server binary embeds.
+        current: Whether the applied migrations are exactly the embedded ones,
+            as the server decided: a gap or a changed migration is not current
+            though `applied == latest`.
     """
 
     applied: int | None
     latest: int
+    current: bool
 
     @property
     def is_current(self) -> bool:
-        """Whether every migration the server embeds is applied."""
-        return self.applied == self.latest
+        """Whether every migration the server embeds is applied, and nothing else."""
+        return self.current
 
 
 @dataclass(frozen=True)
@@ -156,7 +160,9 @@ async def _run(
 def _status(report: dict[str, Any]) -> SchemaStatus:
     def version(item: dict[str, Any]) -> SchemaVersion:
         applied = item["applied"]
-        return SchemaVersion(None if applied is None else int(applied), int(item["latest"]))
+        return SchemaVersion(
+            None if applied is None else int(applied), int(item["latest"]), bool(item["current"])
+        )
 
     return SchemaStatus(version(report["store"]), version(report["worker"]))
 

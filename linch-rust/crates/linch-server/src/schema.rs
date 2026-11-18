@@ -44,8 +44,8 @@ pub struct SchemaOutcome {
 ///
 /// Returns:
 ///     The exit status and what to print. stdout is one JSON line:
-///     `{"current": bool, "store": {"applied": n|null, "latest": n},
-///     "worker": {...}}`, or `{"newer": {"table", "applied", "latest"}}`
+///     `{"current": bool, "store": {"applied": n|null, "latest": n,
+///     "current": bool}, "worker": {...}}`, or `{"newer": {"table", "applied", "latest"}}`
 ///     for a database a newer release migrated. No text holds the DSN.
 pub async fn run_schema(action: SchemaAction, dsn: &str) -> SchemaOutcome {
     let status = match action {
@@ -88,8 +88,7 @@ pub async fn run_schema(action: SchemaAction, dsn: &str) -> SchemaOutcome {
 }
 
 fn report(status: &SchemaStatus) -> String {
-    let version =
-        |v: &linch::postgres::SchemaVersion| json!({ "applied": v.applied, "latest": v.latest });
+    let version = |v: &linch::postgres::SchemaVersion| json!({ "applied": v.applied, "latest": v.latest, "current": v.is_current() });
     json!({
         "current": status.is_current(),
         "store": version(&status.store),

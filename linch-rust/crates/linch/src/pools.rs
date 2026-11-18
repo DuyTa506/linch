@@ -219,8 +219,16 @@ async fn connect(dsn: &str, max_connections: NonZeroU32) -> Result<PgPool, OpenE
 
 /// Refuse a schema a newer release migrated, then apply the migrations.
 async fn prepare(pool: &PgPool) -> Result<(), OpenError> {
-    linch_postgres::schema_version(pool).await.map_err(gate)?;
-    match linch_postgres::migrate(pool).await {
+    // One read serves both: a current schema is done, and a schema that is
+    // not goes straight to the locked migrations.
+    if linch_postgres::schema_version(pool)
+        .await
+        .map_err(gate)?
+        .is_current()
+    {
+        return Ok(());
+    }
+    match linch_postgres::migrate_locked(pool).await {
         Ok(()) => Ok(()),
         // A newer release migrated between the check and the migrate.
         Err(error @ MigrateError::VersionMissing(_)) => {

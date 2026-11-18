@@ -166,7 +166,8 @@ linch-server --check --config /etc/linch/linch-server.json  # the DSN of its wor
 ```
 
 Each prints one JSON line, `{"current": true, "store": {"applied": 10,
-"latest": 10}, "worker": {"applied": 7, "latest": 7}}`, and exits with a
+"latest": 10, "current": true}, "worker": {"applied": 7, "latest": 7,
+"current": true}}`, and exits with a
 status a script can branch on:
 
 | Exit | Meaning |
@@ -175,7 +176,7 @@ status a script can branch on:
 | 1 | The database could not be reached, or a migration failed |
 | 2 | A bad command line or config, or an unset variable |
 | 3 | The database holds a migration this binary does not know: a newer release migrated it |
-| 4 | `--check` only: the schema is behind this binary; run `--migrate` |
+| 4 | `--check` only: the schema is behind this binary, or differs from it (a migration missing or changed); run `--migrate` |
 
 `migrate` covers both migration tables, the stores' and the worker's. It is
 safe to repeat and to run from several hosts at once. In Rust it is
@@ -311,10 +312,12 @@ connections = servers x (tenants x (max_pool_connections + agents per tenant)
 Worked example: 3 servers, each with 5 tenants (one agent each) at the
 default 10-connection pool and a worker pool of 10 connections, need
 `3 x (5 x (10 + 1) + 10 + 1) = 198` connections at the most, against
-Postgres's 100. Set `max_pool_connections` to 3 for each tenant and
-`worker.max_connections` to 3, and it is `3 x (5 x (3 + 1) + 3 + 1) = 72`,
-which fits with room for 4 running workflows, an admin session and a deploy's
-`migrate`. Plan about two connections per run in flight at
+Postgres's 100. Set `max_pool_connections` to 4 for each tenant and
+`worker.max_connections` to 4, and it is `3 x (5 x (4 + 1) + 4 + 1) = 90`,
+which fits, tightly: with 4 running workflows, an admin session and a deploy's
+`migrate` it is 96 of the 97 connections a default Postgres leaves after
+`superuser_reserved_connections`. Use 3 for each (`3 x (5 x (3 + 1) + 3 + 1)
+= 72`) for more room. Plan about two connections per run in flight at
 once, per pool; a pool smaller than that makes runs wait, and past 30 s fail
 with `pool timed out` (above).
 
