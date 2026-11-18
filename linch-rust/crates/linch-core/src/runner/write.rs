@@ -25,29 +25,6 @@ impl Runner {
         Ok(())
     }
 
-    /// Session write: append the results message of a tool batch. With
-    /// `spec.tool_result_cap`, a message with a result over the cap lands as
-    /// two entries in one write: the whole message for the audit projection
-    /// only, then the cut one for the provider view only. Anything else lands
-    /// as one entry, as [`Self::append`] writes it.
-    pub(super) async fn append_results(&mut self, message: Message) -> Result<(), RunError> {
-        let cap = self.agent.spec.tool_result_cap.as_ref();
-        let Some(capped) = cap.and_then(|cap| cap.apply(&message)) else {
-            return self.append(message).await;
-        };
-        let entries = vec![
-            entry_in(&message, false, true),
-            entry_in(&capped, true, false),
-        ];
-        self.write_session(entries).await?;
-        if let Some(catalog) = &mut self.catalog {
-            catalog.apply(&message);
-        }
-        self.log.append(message, false, true);
-        self.log.append(capped, true, false);
-        Ok(())
-    }
-
     /// Session write: append the run's `prompt`, after the session's
     /// frozen prefix when the session has none yet (its first prompt).
     async fn append_opening(&mut self, prompt: Message) -> Result<(), RunError> {
@@ -200,15 +177,10 @@ impl Runner {
 
 /// The log entry of `message`, in both projections.
 fn entry(message: &Message) -> LogEntry {
-    entry_in(message, true, true)
-}
-
-/// The log entry of `message`, in the projections it names.
-fn entry_in(message: &Message, visible: bool, historical: bool) -> LogEntry {
     LogEntry::Message(MessageEntry {
         message: Arc::new(message.clone()),
-        visible,
-        historical,
+        visible: true,
+        historical: true,
     })
 }
 

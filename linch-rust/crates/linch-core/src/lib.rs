@@ -40,7 +40,6 @@ pub mod redaction;
 pub mod registration;
 pub mod registry;
 pub mod reliability;
-pub mod result_cap;
 pub mod run;
 pub mod runner;
 pub mod scheduler;
@@ -113,7 +112,6 @@ pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
 };
 pub use reliability::ProviderRetry;
-pub use result_cap::ToolResultCap;
 pub use run::{Checkpoint, Ending, Phase, RunStatus, StopReason, ToolDecisionRecord};
 pub use runner::RunStream;
 pub use scheduler::{

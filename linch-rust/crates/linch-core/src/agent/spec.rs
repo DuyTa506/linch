@@ -19,7 +19,6 @@ use crate::provider::{
 };
 use crate::redaction::RedactionSpec;
 use crate::reliability::ProviderRetry;
-use crate::result_cap::ToolResultCap;
 use crate::system::SystemConfig;
 use crate::tool::ToolScope;
 use crate::tool_cache::ToolCache;
@@ -194,15 +193,6 @@ pub struct AgentSpec {
     /// before this existed. A subagent's runs do not use it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_cache: Option<ToolCache>,
-    /// Bounds the tokens one tool result puts in the model's view: a larger
-    /// result shows its head and tail around a marker, the whole result
-    /// stays in the log, and the agent gets the `ReadToolResult` tool to
-    /// read the rest (see [`crate::result_cap`]). `None` (the default) cuts
-    /// nothing and is left off the wire, so a spec that does not set it
-    /// keeps the contract of a spec written before this existed. A
-    /// subagent's runs take it too.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_result_cap: Option<ToolResultCap>,
     /// Which tools must succeed before another may run, and what a run must
     /// have done before it may end (see [`crate::gates`]). `None` (the
     /// default) checks nothing and is left off the wire, so a spec that
@@ -247,7 +237,6 @@ impl AgentSpec {
             final_tool_name: None,
             tool_retry: None,
             tool_cache: None,
-            tool_result_cap: None,
             policy: None,
         }
     }
@@ -695,39 +684,6 @@ mod tests {
             let ok = read.is_ok_and(|spec| spec.tool_cache.is_some_and(|c| c.problem().is_none()));
             assert!(!ok, "{refused}");
         }
-    }
-
-    /// A spec without `tool_result_cap` has the wire form and contract it had
-    /// before the field existed (the golden digest); a cap is a contract of
-    /// its own, and a head share is part of it.
-    #[test]
-    fn tool_result_cap_is_off_the_wire_and_the_contract_unless_set() {
-        let hooks = crate::hooks::Hooks::default().policy_digest();
-        let none = JsonObject::new();
-        let unset = AgentSpec::new("m");
-        assert_eq!(unset.tool_result_cap, None);
-        let wire = serde_json::to_value(&unset).unwrap();
-        assert_eq!(wire, json!({"model": "m", "max_tool_concurrency": 4}));
-        let golden = "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300";
-        let base = contract_digest(&unset, &[], hooks, &none).unwrap();
-        assert_eq!(base.to_string(), golden);
-        let mut digests = Vec::new();
-        for cap in [
-            json!({"max_tokens": 8000}),
-            json!({"max_tokens": 4000}),
-            json!({"max_tokens": 8000, "head_fraction": 0.5}),
-        ] {
-            let read: AgentSpec =
-                serde_json::from_value(json!({"model": "m", "tool_result_cap": cap})).unwrap();
-            let wire = serde_json::to_value(&read).unwrap();
-            assert!(wire.get("tool_result_cap").is_some(), "{wire}");
-            assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), read);
-            let digest = contract_digest(&read, &[], hooks, &none).unwrap();
-            assert_ne!(base, digest, "{cap}");
-            digests.push(digest);
-        }
-        assert_ne!(digests[0], digests[1]);
-        assert_ne!(digests[0], digests[2]);
     }
 
     /// RED: a tenant server sets `quota` (the tenant's name and the

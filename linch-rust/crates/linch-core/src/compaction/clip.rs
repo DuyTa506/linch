@@ -206,29 +206,6 @@ fn shrink(owned: &mut [Message], touched: &mut [bool], results: bool, excess: us
     total
 }
 
-/// The first `head` bytes of `text`, then `marker(omitted, head_len)`, then
-/// its last `tail` bytes, each cut moved to a character boundary (the head
-/// back, the tail forward), so what is kept is never more than asked.
-/// `omitted` is the bytes between them and `head_len` the head's length.
-pub(crate) fn head_tail(
-    text: &str,
-    head: usize,
-    tail: usize,
-    marker: impl FnOnce(usize, usize) -> String,
-) -> String {
-    let len = text.len();
-    let mut head = head.min(len);
-    while !text.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail_at = len.saturating_sub(tail).max(head);
-    while !text.is_char_boundary(tail_at) {
-        tail_at += 1;
-    }
-    let (head_text, tail_text) = (&text[..head], &text[tail_at..]);
-    format!("{head_text}{}{tail_text}", marker(tail_at - head, head))
-}
-
 /// Cut `text` to `cap` bytes of head and tail around a marker, unless that
 /// would not make it shorter. Returns the bytes it took out, the marker
 /// counted.
@@ -237,8 +214,20 @@ fn cut(text: &mut String, cap: usize) -> usize {
     if len <= cap + MARKER_BOUND {
         return 0;
     }
-    let marker = |omitted: usize, _: usize| format!("\n[... {omitted} bytes omitted ...]\n");
-    let clipped = head_tail(text, cap / 2, cap - cap / 2, marker);
+    let mut head = cap / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = len - (cap - cap / 2);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    let omitted = tail - head;
+    let clipped = format!(
+        "{}\n[... {omitted} bytes omitted ...]\n{}",
+        &text[..head],
+        &text[tail..]
+    );
     let gone = len - clipped.len();
     *text = clipped;
     gone

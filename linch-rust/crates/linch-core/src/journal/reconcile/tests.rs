@@ -1,7 +1,6 @@
 //! The reconcile table: every phase against every store state that matters.
 
 mod compaction;
-mod results;
 
 use std::sync::Arc;
 

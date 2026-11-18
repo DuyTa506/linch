@@ -16,7 +16,7 @@ mod session;
 mod tests;
 
 use crate::compaction::Forced;
-use session::{appended, cleared, projected, prompt_appended, results_appended, unchanged};
+use session::{appended, cleared, projected, prompt_appended, unchanged};
 
 /// Result text for a tool that started but has no durable end.
 pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a result was \
@@ -269,7 +269,7 @@ pub fn reconcile(
             })
         }
         Phase::ToolResults { message } => Ok(Recovery::ToolResults {
-            appended: results_appended(checkpoint, session, message)?,
+            appended: appended(checkpoint, session, message)?,
             message: message.clone(),
         }),
         Phase::CompactionPending { attempt } => {
