@@ -466,23 +466,40 @@ mỗi session một backend bộ nhớ mới (gọi `forget` khi nó kết thúc
 `vfs::PROMPT` (`tools.rs:24`) dạy model về hệ thống tệp ảo; host
 thêm nó vào system prompt khi cung cấp các tool này.
 
-`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:72`) là một hook
-`post_tool_use`. Một kết quả thành công có giá trị là chuỗi và ước lượng vượt
-`threshold_tokens` (bốn byte cho mỗi token) được ghi nguyên vẹn vào
-`/offload/{tool}_{tool_use_id}.txt` và được thay bằng 10 dòng đầu (tối đa 2000 byte) cùng
-một con trỏ mà model có thể theo bằng `read_file`. Lỗi, giá trị có cấu trúc và
-bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài, nên đọc lại một tệp
-đã chuyển ra ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:51-62`).
+`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) là một hook
+`post_tool_use`. Một kết quả ước lượng vượt `threshold_tokens` (bốn byte cho mỗi token)
+được ghi nguyên vẹn vào `/offload/{tool}_{tool_use_id}.txt` và được thay bằng 10 dòng đầu
+(tối đa 2000 byte; con trỏ ghi "cut at 2000 bytes" khi số byte kết thúc phần xem trước) cùng
+một con trỏ mà model có thể theo bằng `read_file`. Ba loại được phủ (`offload.rs:152`,
+`offload.rs:190`):
+
+- Một chuỗi được lưu nguyên.
+- Một giá trị có cấu trúc được ước lượng theo JSON chính tắc gọn của nó, lưu dưới dạng JSON định
+  dạng đẹp (mỗi giá trị một dòng, để `read_file` phân trang được) và được thay bằng cùng con trỏ
+  dưới dạng chuỗi; metadata của nó có thêm các kích thước và `original_kind: "json"`, không bao
+  giờ có chính giá trị.
+- Thông báo của một lỗi được lưu và thay bằng con trỏ, qua `PostToolUseResponse::Replace` mang
+  một `Err`: `code` được giữ, nên loop guard phân loại nó như trước (việc thử lại của tool chạy
+  trước hook, nên lỗi nào được thử lại không đổi), và `details` có thêm các kích thước và đường
+  dẫn khi nó là một đối tượng hoặc vắng mặt.
+
+Bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài, nên đọc lại một tệp đã chuyển ra
+ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:254`). `read_file` trả về tối đa
+16384 byte của một dòng mỗi lần gọi (`tools.rs:277`), và kết thúc một dòng bị cắt bằng lời gọi để
+đọc tiếp (`byte_offset`), nên một dòng rất dài được phân trang như nhiều dòng ngắn; một tệp không
+có dòng nào dài hơn được đọc đúng từng byte như khi lưu.
 
 - Từ đó trở đi, bản thay thế là kết quả của lời gọi: event kết thúc tool,
   session log và các request sau đều giữ con trỏ, không giữ payload.
 - Việc ghi vào backend hoàn tất trước khi hook trả lời, nên một con trỏ đã được ghi log
   nêu tên một tệp đã được ghi khi backend là bền vững. Một sự cố giữa lúc ghi
   và phần kết thúc của tool để lại một tệp không được tham chiếu; một lần thử lại lời gọi
-  ghi cùng đường dẫn đó (`offload.rs:9-17`).
-- Hook fail open (`offload.rs:119`): một lỗi lưu trữ hiện trong hook
+  ghi cùng đường dẫn đó (`offload.rs:12-20`).
+- Hook fail open (`offload.rs:245`): một lỗi lưu trữ hiện trong hook
   record và kết quả gốc đi tới model.
-- Policy id `linch.vfs.offload`, phiên bản 1, của nó là một phần của run contract.
+- Policy id `linch.vfs.offload`, phiên bản 2, của nó là một phần của run contract. Phiên bản
+  đổi khi phạm vi hook phủ đổi, và schema của `read_file` cũng nằm trong contract, nên một run đã
+  lưu của agent có `filesystem` không thể resume qua một thay đổi như vậy (`ContractMismatch`).
 
 Với `MemorySessions`, một run được resume trong process khác sẽ thấy con trỏ nhưng
 không thấy tệp.

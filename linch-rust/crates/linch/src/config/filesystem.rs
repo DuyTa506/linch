@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemConfig {
-    /// Move a text tool result estimated above this many tokens (four bytes
+    /// Move a tool result (a string, a structured value or an error message)
+    /// estimated above this many tokens (four bytes
     /// per token) into the filesystem, leaving its first lines and its path
     /// in the result (see [`linch_tools::vfs::ResultOffload`]). Absent,
     /// with no `offload_threshold_fraction` either: results are never

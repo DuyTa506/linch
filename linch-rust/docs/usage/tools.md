@@ -702,9 +702,10 @@ the tool list and the run contract are as before. Everything else is in
 `filesystem: {}` adds `ls`, `read_file`, `write_file` and `edit_file` over
 text files that live in the stores, not on disk: scratch notes, plans, and
 tool results too large for the conversation. With
-`offload_threshold_tokens`, a text result estimated above that many tokens is
-written to `/offload/<tool>_<tool_use_id>.txt` and the model gets its first
-lines and the path:
+`offload_threshold_tokens`, a result estimated above that many tokens (a
+string, a structured value or an error) is written to
+`/offload/<tool>_<tool_use_id>.txt` and the model gets its first lines and the
+path:
 
 ```python
 import asyncio
@@ -755,9 +756,8 @@ read_file: 27 chars, ends 'api line 1999\napi line 2000'
 `ls` and `read_file` are read-scope; `write_file` and `edit_file` are
 write-scope, so they ask in mode `default`. A virtual file holds at most
 10 MiB: a `write_file` or an `edit_file` (`replace_all` included) that would
-make it larger gets a `too_large` error and changes nothing. Errors, results whose value is
-not a string (a host tool's dict, say) and the filesystem tools' own results
-are never offloaded. Where the files live
+make it larger gets a `too_large` error and changes nothing. The filesystem
+tools' own results are never offloaded. Where the files live
 follows the stores: per session in memory, or shared by every session of the
 namespace in Postgres ([Stores](./stores.md#the-virtual-filesystem)).
 
@@ -774,16 +774,36 @@ their own output:
 | `Glob` | 1000 paths |
 | An MCP tool | 30000 bytes of result text |
 | `memory_recall` | 8 KiB of recalled context per request |
-| `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (the offload below keeps the pointer small, but `read_file` is line-based too, so reading that line back returns it whole) |
+| `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (a known gap: the offload below reaches the result of `Read` and `read_file` pages a long line, but `Read` itself does not cut one) |
 
 A host tool has no bound of its own. For these, and for any result a bound
 above lets through, the one mechanism is the filesystem offload:
 `filesystem: {"offload_threshold_tokens": 8000}` (or
-`offload_threshold_fraction`) writes a text result estimated above the
-threshold to a file and leaves the model its first ten lines (at most 2000
-bytes) and the path
-([Virtual filesystem](#virtual-filesystem)). 8000 is the recommended value:
-a result under it, about 32 KB, is cheap enough to keep whole.
+`offload_threshold_fraction`) writes a result estimated above the threshold
+to a file and leaves the model its first ten lines (at most 2000 bytes; the
+pointer says "cut at 2000 bytes" when the bytes ended the preview) and the
+path ([Virtual filesystem](#virtual-filesystem)). 8000 is the recommended
+value: a result under it, about 32 KB, is cheap enough to keep whole. It
+covers:
+
+- **A string**, stored as it is.
+- **A structured value** (a host or MCP tool's JSON object or array),
+  estimated by its compact JSON and stored as pretty-printed JSON, one value
+  per line, so `read_file` pages it by lines. The model sees the pointer, a
+  string; the call's `metadata` keeps the sizes only (`original_tokens`,
+  `original_bytes`, `offloaded_to`, `original_kind: "json"`), never the value.
+- **An error**: a message above the threshold is stored whole, and the model
+  sees its first lines and the path as the message of the same error. The
+  error `code` and its `details` stay (the details gain `offloaded_to`,
+  `original_tokens` and `original_bytes` when they are an object or absent),
+  so retries and the loop guard classify it as before.
+- **One huge line** (minified JSON or XML, base64, a protobuf sent as text):
+  it is offloaded as a string, and `read_file` returns at most 16384 bytes of
+  a line per call, cut on a character boundary and ending with the call that
+  continues it, for example
+  `[line 1 continues at byte 16384; read_file(path="/offload/x.txt", offset=1, limit=1, byte_offset=16384)]`.
+  `byte_offset` is the byte of the line to start from and needs `limit=1`;
+  a file whose lines are all shorter reads exactly as it is stored.
 
 In a scripted run of 30 turns, each with a tool result of 2, 12, 60 or 200 KB
 and no compaction, the last request weighed 484956 estimated tokens without a
@@ -794,8 +814,15 @@ each result in the view, not with a live model and not with the offload
 itself; the offload keeps only ten lines of a long result, so the saving is
 at least as large, less what the model chooses to read back.
 
-Offload does not reach every result: an error, a value that is not a string
-and the four filesystem tools' own results pass through whole. With memory
+Offload does not reach every result. Results under the threshold are kept
+whole, and many of them add up; compaction is what trims those. The four
+filesystem tools' own results pass through whole. A tool cannot return an
+image or binary data as JSON, so there is nothing of that kind to offload.
+`Read`'s own lines are not cut (see the table). A `read_file` with no `offset` or `limit` returns a whole file of short lines, however long (a structured value is longer pretty-printed than it was), which is why the pointer asks for `offset` and `limit`. The `details` of an error are
+for the host and never reach the model, so they are not offloaded. The agent's
+[run contract](./agent.md#the-run-contract) holds the hook's policy version
+and `read_file`'s schema, so a run stored before a change of either cannot be
+resumed (`ContractMismatch`). With memory
 stores the files live only as long as the process, so a run resumed elsewhere
 finds the pointer but not the file ([Stores](./stores.md#the-virtual-filesystem)).
 

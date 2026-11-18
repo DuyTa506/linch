@@ -117,6 +117,63 @@ async fn the_sessions_of_a_namespace_share_its_postgres_files() {
     db.drop().await;
 }
 
+/// One minified line, offloaded into Postgres and paged back by byte.
+#[tokio::test]
+async fn a_minified_line_is_offloaded_into_postgres_and_paged_back_by_byte() {
+    let Some(db) = TestDb::empty("vfs_one_line").await else {
+        return;
+    };
+    let workspace = tempfile::tempdir().unwrap();
+    let line = format!("{}MARK{}", "a".repeat(20_000), "b".repeat(280_000));
+    std::fs::write(workspace.path().join("min.json"), &line).unwrap();
+    let open = |turns: Vec<Value>| {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "namespace": "p10a-tenant",
+            "spec": {"model": MODEL},
+            "provider": {"id": "scripted", "turns": turns},
+            "stores": {"type": "postgres", "dsn": db.dsn},
+            "permissions": {"mode": "accept_edits", "project_root": "/"},
+            "workspace": workspace.path(),
+            "filesystem": {"offload_threshold_tokens": 100},
+        }))
+        .unwrap();
+        config.open()
+    };
+    let path = "/offload/Read_call_1.txt";
+    let turns = vec![
+        call("call_1", "Read", json!({"file_path": "min.json"})),
+        text("Read."),
+    ];
+    let opened = open(turns).await.unwrap();
+    let pointer = tool_result(opened.agent(), "s1").await;
+    assert!(
+        pointer.len() < 4_000,
+        "the pointer is small: {}",
+        pointer.len()
+    );
+    assert!(!pointer.contains("MARK"), "{pointer}");
+    opened.close().await;
+
+    let first = json!({"path": path, "offset": 1, "limit": 1});
+    let second = json!({"path": path, "offset": 1, "limit": 1, "byte_offset": 16384});
+    for (n, (read, wanted)) in [(first, "continues at byte 16384;"), (second, "MARK")]
+        .into_iter()
+        .enumerate()
+    {
+        let turns = vec![call("call_2", "read_file", read), text("Read.")];
+        let opened = open(turns).await.unwrap();
+        let page = tool_result(opened.agent(), &format!("s{}", n + 2)).await;
+        assert!(
+            page.contains(wanted),
+            "page {n}: {}",
+            &page[page.len() - 200..]
+        );
+        assert!(page.len() < 17_000, "page {n} holds {} bytes", page.len());
+        opened.close().await;
+    }
+    db.drop().await;
+}
+
 #[tokio::test]
 async fn an_offloaded_result_outlives_the_agent_and_stays_out_of_the_workspace() {
     let Some(db) = TestDb::empty("vfs_offload").await else {
