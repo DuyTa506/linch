@@ -1097,6 +1097,8 @@ class _AuxiliaryResponse:
         self.usage: Usage | None = None
         self.text = bytearray()
         self.rejection_reason: str | None = None
+        #: A summary of this many bytes or more is rejected (``not_smaller``).
+        self.reject_text_bytes_at: int | None = None
         self.protocol_failure: ProviderError | None = None
         self.open_tools: set[str] = set()
         self.seen_tools: set[str] = set()
@@ -1193,6 +1195,10 @@ class _AuxiliaryResponse:
         if not text:
             self.reject("empty_output")
             return None
+        limit = self.reject_text_bytes_at
+        if limit is not None and len(text.encode("utf-8")) >= limit:
+            self.reject("not_smaller")
+            return None
         return text
 
 
@@ -1248,6 +1254,7 @@ class _AccountedAuxiliaryCaller:
         messages: list[Message],
         max_output_tokens: int,
         signal: AbortContext,
+        reject_text_bytes_at: int | None = None,
     ) -> AuxiliaryTextResult:
         request = ProviderRequest(
             model=model,
@@ -1262,6 +1269,7 @@ class _AccountedAuxiliaryCaller:
             else None,
         )
         delivery = _AuxiliaryDelivery(self, request, logical_call_id, signal)
+        delivery.response.reject_text_bytes_at = reject_text_bytes_at
         stream = delivery.stream()
         try:
             async for _ in stream:

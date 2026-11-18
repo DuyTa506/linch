@@ -179,7 +179,10 @@ async def test_summary_request_disables_thinking_only_when_supported(
         assert result.receipt.disposition == "accepted"
     else:
         result = await summarize_with_provider(
-            provider, "requested-model", [Message("user", [TextBlock("Earlier.")])], AbortContext()
+            provider,
+            "requested-model",
+            [Message("user", [TextBlock("Earlier. " * 20)])],
+            AbortContext(),
         )
         assert result == "Paid summary."
 

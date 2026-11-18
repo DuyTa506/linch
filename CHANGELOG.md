@@ -9,7 +9,16 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ### Fixed
 
-
+- The compaction summary no longer loses early content. The summary request ended with the
+  folded history's last user message, which the model answered ("Acknowledged. Received log
+  excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard
+  against instructions inside the conversation, the summary prompt and, when the folded part
+  already begins with a summary, a note to update it (`linch.compaction.summary_instruction`).
+  A summary is rejected unless the view after it (header, text and the kept recent turns) is
+  estimated strictly smaller than the view before it, as linch-rust's `compaction::rejection`
+  decides: four bytes per token over the whole view, not the serialized message (receipt
+  `rejected`, reason `not_smaller`, usage still billed; `summarize_with_provider` raises
+  `ProviderError` and takes the kept turns as `kept`).
 - OpenAI-compatible providers replay tool-call arguments as UTF-8 literal JSON
   (`ensure_ascii=False`) instead of `\uXXXX` escapes, so non-ASCII arguments keep their
   form and token count across turns.

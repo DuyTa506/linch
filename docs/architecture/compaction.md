@@ -44,6 +44,24 @@ live listing. Reinjected listings and invoked-skill reminders are provider-view-
 only log entries (`historical=False`); they do not add duplicate skill bodies to
 `full_history`.
 
+The summary request is the folded messages plus one trailing user message: the
+guard against instructions inside the conversation, the summary prompt, and, when
+the folded part already begins with an earlier summary, a note to update it
+(`summary_instruction`). Without it the request ends with the user's last folded
+message, which a model answers or acknowledges instead of summarizing, and early
+facts are lost. The system block stays the summary prompt. A summary is
+rejected unless the view after it (the header, the text and the kept recent
+turns) is estimated strictly smaller than the view before it (the folded and the
+kept messages), at four bytes per token over the whole view as linch-rust's
+`compaction::rejection` counts it, so one kept byte can move the boundary by up
+to three summary bytes: the accounted receipt is `rejected` with reason
+`not_smaller` and the usage is still billed; the direct helper raises
+`ProviderError` (`summarize_with_provider(..., kept=...)` takes the kept turns). The instruction text is shared
+with linch-rust through `tests/compaction/fixtures/compaction_request.json`.
+Python Linch does not yet copy the user's messages verbatim into the summary, nor
+share the primary call's cached prefix, as linch-rust does: the paid-result
+replay rebuilds a view from the receipt text and the recent messages only.
+
 The direct `summarize_with_provider(...)` helper remains available for
 standalone callers with its existing provider-stream behavior. The normal run
 path wraps built-in strategies and compliant custom strategies in the

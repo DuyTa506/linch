@@ -300,12 +300,15 @@ async def test_reactive_micro_then_forced_on_context_length_error() -> None:
 async def test_ladder_disabled_is_byte_identical() -> None:
     from linch import DetailedCompaction
 
+    # The folded part must be larger than the summary, or the summary is rejected.
+    PROMPT = "go " * 100
+
     # Single forced retry succeeds (existing behavior).
     provider = LadderProvider([("tool", 100), ("raise_cle", 0), ("text", 0)])
     agent = _make_agent(provider, compaction=DetailedCompaction(keep_recent_turns=1))
     session = await agent.session()
 
-    events = [event async for event in session.run("go")]
+    events = [event async for event in session.run(PROMPT)]
     compactions = [e for e in events if e.type == "compaction"]
     assert [e.strategy for e in compactions] == ["detailed-continuation-keep-recent-10"]
     assert events[-1].subtype == "success"
@@ -315,7 +318,7 @@ async def test_ladder_disabled_is_byte_identical() -> None:
     agent2 = _make_agent(provider2, compaction=DetailedCompaction(keep_recent_turns=1))
     session2 = await agent2.session()
 
-    events2 = [event async for event in session2.run("go")]
+    events2 = [event async for event in session2.run(PROMPT)]
     compactions2 = [e for e in events2 if e.type == "compaction"]
     assert len(compactions2) == 1
     assert events2[-1].type == "result"
