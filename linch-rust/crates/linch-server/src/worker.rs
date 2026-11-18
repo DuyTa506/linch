@@ -7,6 +7,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use linch::postgres::SchemaError;
 use linch_rpc::{BackgroundAgents, Tenant};
 use linch_worker::{Retention, Worker, WorkerConfig, WorkerError};
 use thiserror::Error;
@@ -26,6 +27,10 @@ pub enum WorkerStartError {
     /// The database could not be reached or migrated.
     #[error("worker: cannot prepare the database: {0}")]
     Database(String),
+    /// The database holds a migration this server does not embed: a newer
+    /// release migrated it.
+    #[error("worker: {0}")]
+    SchemaNewer(SchemaError),
 }
 
 /// A worker serving the tenants' and the local roots' jobs in one
@@ -81,6 +86,14 @@ impl BackgroundWorker {
         let pool = linch::postgres::connect(&dsn, linch::postgres::CONNECT_TIMEOUT, size)
             .await
             .map_err(|error| database(&error))?;
+        // Before any migration or job: a database a newer release migrated
+        // is not this server's to touch.
+        let gate = |error: SchemaError| match error {
+            SchemaError::Newer { .. } => WorkerStartError::SchemaNewer(error),
+            other => database(&other),
+        };
+        linch::postgres::schema_version(&pool).await.map_err(gate)?;
+        linch_worker::schema_version(&pool).await.map_err(gate)?;
         (linch::postgres::migrate(&pool).await).map_err(|error| database(&error))?;
         (linch_worker::migrate(&pool).await).map_err(|error| database(&error))?;
         let mut factory = BackgroundAgents::new(dsn);

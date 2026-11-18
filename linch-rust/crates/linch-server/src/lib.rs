@@ -84,6 +84,19 @@
 //!  "tenants": {"acme": {"allow": {"max_schedules": 10, "max_queued_jobs": 100}}}}
 //! ```
 //!
+//! # Schema as a deploy step
+//!
+//! `linch-server --migrate` applies every migration this binary embeds
+//! (the stores' and the worker's) and `linch-server --check` reads what is
+//! applied and writes nothing; each takes `--dsn-env NAME` (the DSN is
+//! in that environment variable, never on the command line) or `--config
+//! FILE` (the DSN of its `worker` section). stdout is one JSON line,
+//! `{"current": bool, "store": {"applied", "latest"}, "worker": {...}}`.
+//! Exit status: 0 current, 1 the database cannot be reached or a migration
+//! failed, 2 a bad command line or config, 3 the database holds a
+//! migration this binary does not know (a newer release migrated it), 4
+//! (`--check`) the schema is behind this binary.
+//!
 //! # Transports
 //!
 //! - **Socket:** newline-delimited JSON-RPC as on stdio. The first line
@@ -114,6 +127,7 @@ mod http;
 mod listen;
 mod liveness;
 mod logging;
+mod schema;
 mod worker;
 
 pub use config::{
@@ -124,4 +138,7 @@ pub use http::{HEADER_READ_TIMEOUT, MAX_PENDING_UPGRADES, PATH};
 pub use listen::Listeners;
 pub use liveness::LivenessConfig;
 pub use logging::{init_logging, log_filter};
+pub use schema::{
+    EXIT_BEHIND, EXIT_CURRENT, EXIT_FAILED, EXIT_NEWER, SchemaAction, SchemaOutcome, run_schema,
+};
 pub use worker::{BackgroundWorker, WorkerStartError};

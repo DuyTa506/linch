@@ -72,6 +72,10 @@ pub mod code {
     /// An MCP server of the config could not be connected; `data.server`
     /// names it.
     pub const MCP_UNAVAILABLE: i64 = -32015;
+    /// The database holds a migration this server does not know: a newer
+    /// release migrated it. Nothing was read or written; `data` is
+    /// `{table, applied, latest}`.
+    pub const SCHEMA_NEWER: i64 = -32016;
     /// `RunError::Store`, any store failure not listed below.
     pub const STORE: i64 = -32020;
     /// `StoreError::NotFound`: no such run or session.
@@ -369,6 +373,12 @@ impl From<&OpenError> for ErrorObject {
             | OpenError::ScheduleTools(_)
             | OpenError::TaskLedger(_) => Self::new(code::BUILD_INVALID, message),
             OpenError::Store(_) => Self::new(code::STORE_UNAVAILABLE, message),
+            OpenError::SchemaNewer {
+                table,
+                applied,
+                latest,
+            } => Self::new(code::SCHEMA_NEWER, message)
+                .with_data(json!({ "table": table, "applied": applied, "latest": latest })),
             OpenError::Mcp(McpError::Config(_)) => Self::new(code::BUILD_INVALID, message),
             OpenError::Mcp(McpError::Connect { server, .. }) => {
                 Self::new(code::MCP_UNAVAILABLE, message).with_data(json!({ "server": server }))
@@ -412,6 +422,24 @@ mod tests {
         assert_eq!(
             ErrorObject::from(&RunError::Journal(JournalError::Poisoned)).code,
             code::JOURNAL
+        );
+    }
+
+    #[test]
+    fn a_schema_newer_than_the_binary_has_a_code_of_its_own() {
+        let newer = OpenError::SchemaNewer {
+            table: "linch_migrations".into(),
+            applied: 14,
+            latest: 10,
+        };
+        let object = ErrorObject::from(&newer);
+        assert_eq!(object.code, code::SCHEMA_NEWER);
+        assert_eq!(code::SCHEMA_NEWER, -32016);
+        assert!(object.message.contains("newer"), "{}", object.message);
+        let data = object.data.unwrap();
+        assert_eq!(
+            (&data["table"], &data["applied"], &data["latest"]),
+            (&json!("linch_migrations"), &json!(14), &json!(10))
         );
     }
 

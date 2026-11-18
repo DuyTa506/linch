@@ -10,6 +10,7 @@ mod retention;
 mod retry;
 mod schedule;
 mod scheduler;
+mod schema;
 mod session;
 mod suspend;
 mod takeover;

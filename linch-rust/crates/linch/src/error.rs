@@ -40,6 +40,21 @@ pub enum OpenError {
     /// Connecting to Postgres or applying the migrations failed.
     #[error("Postgres stores could not be opened: {0}")]
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The database holds a migration this binary does not embed: a newer
+    /// release migrated it. Nothing was read or written; upgrade this
+    /// binary.
+    #[error(
+        "the database schema is newer than this binary: {table} holds migration {applied}, \
+         the newest this binary knows is {latest}; upgrade this binary"
+    )]
+    SchemaNewer {
+        /// The migration table that holds it.
+        table: String,
+        /// The newest applied migration.
+        applied: i64,
+        /// The newest migration this binary embeds.
+        latest: i64,
+    },
     /// An MCP server's config is invalid or its first connect failed. The
     /// servers connected before it are disconnected again.
     #[error("MCP server unusable: {0}")]

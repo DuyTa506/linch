@@ -16,5 +16,6 @@ mod migrations;
 mod pool;
 mod refusals;
 mod retention;
+mod schema;
 mod tasks;
 mod tool_cache;
