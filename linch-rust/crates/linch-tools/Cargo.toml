@@ -34,4 +34,4 @@ seccompiler = "0.5.0"
 
 [dev-dependencies]
 futures = { version = "0.3.34", default-features = false, features = ["std"] }
-tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "sync", "test-util", "time"] }

@@ -4,9 +4,10 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use linch::{Agent, JsonObject, JsonValue};
+use linch::{Agent, JsonObject, JsonValue, RemoteExec};
 use serde_json::json;
 
+use super::exec::HostExec;
 use super::schedule::Background;
 use super::{Opened, Server, Tables, callback, host, lock, to_value};
 use crate::error::{ErrorObject, code};
@@ -49,9 +50,13 @@ impl Server {
             None => None,
         };
         let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
+        // A `remote` backend runs its commands in this connection's client.
+        let remote = params.config.runs_bash_remotely();
+        let remote =
+            remote.then(|| Arc::new(HostExec::new(&handle, &self.0.peer)) as Arc<dyn RemoteExec>);
         let opened = params
             .config
-            .open_with(tools, hooks, &self.0.pools)
+            .open_with_remote(tools, hooks, &self.0.pools, remote)
             .await
             .map_err(|error| {
                 let error = ErrorObject::from(&error);

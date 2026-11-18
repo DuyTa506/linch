@@ -49,7 +49,10 @@ use linch_core::Tool;
 
 pub use bash::{Bash, BashKill, BashOutput, MAX_RUNNING, NO_SUCH_PROCESS_CODE, Processes};
 pub use edit::Edit;
-pub use exec::{DockerPolicy, ExecutionBackend, ExecutionConfig, ExecutionError, SandboxPolicy};
+pub use exec::{
+    DockerPolicy, ExecutionBackend, ExecutionConfig, ExecutionError, Exit, RemoteChunk,
+    RemoteCommand, RemoteError, RemoteExec, RemotePolicy, SandboxPolicy,
+};
 pub use fs::{ExecutionFs, FsError, LocalFs};
 pub use glob::Glob;
 pub use grep::Grep;
@@ -84,14 +87,20 @@ pub fn workspace_tools(
 ) -> Vec<Arc<dyn Tool>> {
     let bash = Bash::in_backend(backend).with_processes(Arc::clone(&processes));
     let fs: Arc<dyn ExecutionFs> = backend.fs().clone();
-    vec![
+    let files: Vec<Arc<dyn Tool>> = vec![
         Arc::new(Read::new(fs.clone(), reads.clone())),
         Arc::new(Write::new(fs.clone(), reads.clone())),
         Arc::new(Edit::new(fs.clone(), reads)),
         Arc::new(Grep::new(fs.clone())),
         Arc::new(Glob::new(fs)),
+    ];
+    let commands: [Arc<dyn Tool>; 3] = [
         Arc::new(bash),
         Arc::new(BashOutput::new(Arc::clone(&processes))),
         Arc::new(BashKill::new(processes)),
-    ]
+    ];
+    // A remote host that does not share the workspace has no file tools:
+    // they would act on the server's directory, not where commands run.
+    let files = files.into_iter().filter(|_| backend.has_file_tools());
+    files.chain(commands).collect()
 }

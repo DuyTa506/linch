@@ -33,6 +33,7 @@ use crate::protocol::{RunAccepted, method};
 mod agents;
 mod callback;
 mod connection;
+mod exec;
 mod host;
 mod login;
 mod monitor;

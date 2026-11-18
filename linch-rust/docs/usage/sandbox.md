@@ -14,6 +14,7 @@ agent config picks another backend:
 | `local` (default) | Directly as the server's user | Nothing |
 | `sandbox` | Under Landlock, a seccomp filter and rlimits, with a private home per session | Linux 6.12 or later (Landlock ABI 6) and `prlimit` (util-linux); no root, no user namespaces, no daemon |
 | `docker` | In a fresh `docker run --rm` container per command | A `docker` client and a daemon the server's user can reach |
+| `remote` | On a host your client supplies, not on the server (see [Remote execution](./remote-execution.md)) | A client connection that serves the commands |
 
 The choice applies to `Bash` in the foreground and in the background, so to
 `BashOutput` and `BashKill` too. The file tools (`Read`, `Write`, `Edit`,

@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::pin::pin;
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -15,7 +16,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::Capture;
-use crate::exec::Cleanup;
+use crate::exec::{Cleanup, Exit, RemoteRun};
 
 /// How long to keep reading after the group is killed. Only a process that
 /// left the group (`setsid`) can hold a pipe open past this.
@@ -37,13 +38,28 @@ pub(crate) const LIFELINE: &str = "exec 3<&0 </dev/null; (read -r _ <&3; kill -K
 
 /// Why the command stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum End {
+pub(crate) enum End {
     /// The shell exited on its own.
-    Exited(ExitStatus),
+    Exited(Exit),
     /// The timeout fired first.
     TimedOut,
     /// The call was cancelled (or the process killed) first.
     Aborted,
+    /// A remote command printed more than the server takes, and the host
+    /// confirmed the kill.
+    OutputLimit,
+    /// A remote host stopped answering, or did not confirm a kill, so how
+    /// the command ended is not known.
+    Interrupted,
+}
+
+impl From<std::process::ExitStatus> for Exit {
+    fn from(status: std::process::ExitStatus) -> Self {
+        match status.code() {
+            Some(code) => Self::Code(code),
+            None => Self::Signal(status.signal().unwrap_or(0)),
+        }
+    }
 }
 
 /// A finished command.
@@ -61,7 +77,7 @@ pub(super) struct Finished {
 /// is cancelled, the whole group gets `SIGKILL`, so nothing it started
 /// outlives the call. Dropping the returned future kills the group too.
 pub(super) async fn run(
-    spawned: Spawned,
+    spawned: Started,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> io::Result<Finished> {
@@ -82,12 +98,49 @@ pub(super) async fn run(
     })
 }
 
-/// A command the execution backend started, with what to run once its
-/// group is killed before it exited (a container to remove).
+/// A command the execution backend started on this machine, with what to
+/// run once its group is killed before it exited (a container to remove).
 #[derive(Debug)]
 pub(crate) struct Spawned {
     pub child: Child,
     pub cleanup: Option<Cleanup>,
+}
+
+/// A command an execution backend started: a child of this process, or
+/// one a host runs elsewhere.
+// One value per command, moved once into `supervise`: boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub(crate) enum Started {
+    /// A child of this process, supervised through its process group.
+    Process(Spawned),
+    /// A command on a remote host, supervised through its connection.
+    Remote(RemoteRun),
+}
+
+impl From<Spawned> for Started {
+    fn from(spawned: Spawned) -> Self {
+        Self::Process(spawned)
+    }
+}
+
+impl Started {
+    /// The command's process id on this machine; `None` for a remote one.
+    pub(super) fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Process(spawned) => spawned.child.id(),
+            Self::Remote(_) => None,
+        }
+    }
+
+    /// The local command, for a test of a local shell.
+    #[cfg(test)]
+    pub(crate) fn into_process(self) -> Spawned {
+        match self {
+            Self::Process(spawned) => spawned,
+            Self::Remote(_) => panic!("a local command"),
+        }
+    }
 }
 
 /// The arguments of `/bin/sh` for `command`: `-c` and the command, or with
@@ -145,11 +198,29 @@ pub(crate) fn start(
         .spawn()
 }
 
+/// Pump the command's output into `on_out` and `on_err` until it exits,
+/// times out or `cancel` fires, then stop it. A remote command is stopped
+/// through its host, which must confirm (see [`RemoteRun::supervise`]).
+pub(super) async fn supervise(
+    started: Started,
+    timeout: Duration,
+    cancel: &CancellationToken,
+    on_out: impl FnMut(&[u8]),
+    on_err: impl FnMut(&[u8]),
+) -> io::Result<End> {
+    match started {
+        Started::Process(spawned) => {
+            supervise_process(spawned, timeout, cancel, on_out, on_err).await
+        }
+        Started::Remote(run) => Ok(run.supervise(timeout, cancel, on_out, on_err).await),
+    }
+}
+
 /// Pump `child`'s output into `on_out` and `on_err` until it exits, times
 /// out or `cancel` fires; then kill its whole group, drain what is left,
 /// reap the shell and, unless it exited, run the cleanup. Dropping the
 /// future kills the group too and starts the cleanup.
-pub(super) async fn supervise(
+async fn supervise_process(
     spawned: Spawned,
     timeout: Duration,
     cancel: &CancellationToken,
@@ -175,7 +246,7 @@ pub(super) async fn supervise(
         let end = loop {
             tokio::select! {
                 biased;
-                status = child.wait() => break End::Exited(status?),
+                status = child.wait() => break End::Exited(status?.into()),
                 () = cancel.cancelled() => break End::Aborted,
                 () = tokio::time::sleep_until(deadline) => break End::TimedOut,
                 () = &mut pumps, if !pumped => pumped = true,

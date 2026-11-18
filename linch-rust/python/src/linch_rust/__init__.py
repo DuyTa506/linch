@@ -40,6 +40,7 @@ from .config import (
     ProviderRetry,
     Redaction,
     RedactionRule,
+    RemoteExecution,
     SandboxExecution,
     System,
     SystemSection,
@@ -137,6 +138,7 @@ from .events import (
     VerificationEvent,
     WorkflowEvent,
 )
+from .exec_host import ExecChunk, ExecStart, ExecutionHost, SubprocessHost
 from .monitor import (
     CaseResult,
     CustomScorer,
@@ -236,6 +238,7 @@ __all__ = [
     "TaskLedger",
     "LocalExecution",
     "LoopGuard",
+    "RemoteExecution",
     "SandboxExecution",
     "HookEvent",
     "HostTool",
@@ -320,6 +323,10 @@ __all__ = [
     "ToolChoice",
     "ToolContext",
     "ToolError",
+    "SubprocessHost",
+    "ExecutionHost",
+    "ExecStart",
+    "ExecChunk",
     "ToolOutput",
     "ToolProgressEvent",
     "ToolRetry",

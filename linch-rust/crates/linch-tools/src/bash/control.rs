@@ -1,6 +1,5 @@
 //! `BashOutput` and `BashKill`: read and stop a background command.
 
-use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,8 +11,9 @@ use linch_core::{
 use serde_json::json;
 
 use super::background::{Proc, Processes, Unread};
-use super::fit;
 use super::process::End;
+use super::{DEADLINE_MARGIN, INTERRUPTED, OUTPUT_LIMIT, fit};
+use crate::exec::Exit;
 use crate::input::{coded, optional_count, schema, string};
 
 /// Longest `wait_ms` a `BashOutput` call may ask for, in milliseconds.
@@ -110,6 +110,7 @@ impl Tool for BashOutput {
         let wait = fit(
             Duration::from_millis(wait_ms.min(MAX_WAIT_MS)),
             ctx.deadline,
+            |_| DEADLINE_MARGIN,
         );
         if wait_ms > 0 && proc.is_running() {
             tokio::select! {
@@ -192,21 +193,18 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
             );
             (line, None)
         }
-        Some(End::Exited(status)) => match (status.code(), status.signal()) {
-            (Some(code), _) => {
-                metadata.insert("status".into(), "exited".into());
-                metadata.insert("exit_code".into(), code.into());
-                metadata.insert(POLL_DONE.into(), true.into());
-                let failure = (code != 0).then(|| ("exit_status", json!({"exit_code": code})));
-                (format!("[exit code {code}]"), failure)
-            }
-            (None, signal) => {
-                metadata.insert("status".into(), "exited".into());
-                let signal = signal.unwrap_or(0);
-                let failure = Some(("exit_status", json!({"signal": signal})));
-                (format!("[killed by signal {signal}]"), failure)
-            }
-        },
+        Some(End::Exited(Exit::Code(code))) => {
+            metadata.insert("status".into(), "exited".into());
+            metadata.insert("exit_code".into(), code.into());
+            metadata.insert(POLL_DONE.into(), true.into());
+            let failure = (code != 0).then(|| ("exit_status", json!({"exit_code": code})));
+            (format!("[exit code {code}]"), failure)
+        }
+        Some(End::Exited(Exit::Signal(signal))) => {
+            metadata.insert("status".into(), "exited".into());
+            let failure = Some(("exit_status", json!({"signal": signal})));
+            (format!("[killed by signal {signal}]"), failure)
+        }
         Some(End::TimedOut) => {
             metadata.insert("status".into(), "timed_out".into());
             let ms = proc.timeout.as_millis();
@@ -217,6 +215,14 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
             metadata.insert("status".into(), "killed".into());
             metadata.insert(POLL_DONE.into(), true.into());
             ("[killed; process group killed]".into(), None)
+        }
+        Some(End::OutputLimit) => {
+            metadata.insert("status".into(), "output_limit".into());
+            (OUTPUT_LIMIT.into(), Some(("output_limit", JsonValue::Null)))
+        }
+        Some(End::Interrupted) => {
+            metadata.insert("status".into(), "interrupted".into());
+            (INTERRUPTED.into(), Some(("interrupted", JsonValue::Null)))
         }
     };
     let mut parts = Vec::new();
