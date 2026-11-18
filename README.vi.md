@@ -56,8 +56,10 @@ linch-rust docs path                # nơi cài đặt tài liệu
 
 Trạng thái: linch-rust đang ở phiên bản 0.1 (bản phát hành mới nhất là 0.1.1), nên hãy
 đọc [changelog](linch-rust/CHANGELOG.md) của nó trước mỗi lần nâng cấp. Benchmark so
-sánh Python và Rust vẫn đang được hoàn thiện và chưa được công bố; số đo duy nhất đã
-công bố cho đến nay là [số liệu định cỡ](linch-rust/docs/vi/usage/embedding.md#định-cỡ-những-gì-đã-được-đo) của chính SDK.
+sánh Python và Rust, cùng cách đo và các khoảng trống đã biết, nằm ở
+[trang benchmark](linch-rust/docs/vi/benchmarks.md)
+([English](linch-rust/docs/benchmarks.md)); số liệu định cỡ của chính SDK nằm ở
+[Embedding](linch-rust/docs/vi/usage/embedding.md#định-cỡ-những-gì-đã-được-đo).
 
 ## Cài đặt
 
