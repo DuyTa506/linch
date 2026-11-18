@@ -50,6 +50,7 @@ pub(super) async fn new_run(
     }
     let session_id = options.session_id;
     let prompt = hooks::submit(&agent, &outbox, &session_id, &run_id, prompt).await?;
+    hooks::agent_start(&agent, &outbox, &session_id, &run_id, &prompt).await;
     let sessions = &agent.sessions;
     let entries = match sessions.load(&namespace, &session_id).await {
         Ok(entries) => entries,

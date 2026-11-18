@@ -26,7 +26,8 @@ use crate::events::kinds::{
     SkillCompletedEvent, SkillInvokedEvent, ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent,
 };
 use crate::events::{Envelope, Event, Persistence, WIRE_VERSION, now_ms};
-use crate::ids::RunId;
+use crate::hooks::{Hooks, ToolUseStartRequest, ToolUseStopRequest};
+use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError};
 use crate::json::JsonValue;
 use crate::scheduler::{CallOutcome, PlannedAction, PlannedCall, ToolSink};
@@ -39,6 +40,8 @@ pub(super) struct JournalSink<'a> {
     journal: tokio::sync::Mutex<&'a mut Journal>,
     outbox: &'a Outbox,
     run_id: RunId,
+    session_id: SessionId,
+    hooks: &'a Hooks,
     /// Last durable seq, for progress envelopes (sync, so no journal lock).
     durable: AtomicU64,
     /// Calls whose tool started, so `tool_finished` knows which ones ran.
@@ -55,16 +58,75 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl<'a> JournalSink<'a> {
-    pub(super) fn new(journal: &'a mut Journal, outbox: &'a Outbox, run_id: RunId) -> Self {
+    pub(super) fn new(
+        journal: &'a mut Journal,
+        outbox: &'a Outbox,
+        run_id: RunId,
+        session_id: SessionId,
+        hooks: &'a Hooks,
+    ) -> Self {
         let durable = AtomicU64::new(journal.durable_seq());
         Self {
             journal: tokio::sync::Mutex::new(journal),
             outbox,
             run_id,
+            session_id,
+            hooks,
             durable,
             started: Mutex::new(HashSet::new()),
             inbox: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Run `tool_use_start` for a call about to run.
+    async fn tool_use_start(&self, call: &PlannedCall) {
+        let chain = &self.hooks.tool_use_start;
+        if chain.is_empty() {
+            return;
+        }
+        let request = ToolUseStartRequest {
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
+            tool_use_id: call.tool_use_id.clone(),
+            tool_name: call.tool_name.clone(),
+            input: call.input.clone(),
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        let seq = self.durable.load(Ordering::SeqCst);
+        push_records(
+            self.outbox,
+            &self.run_id,
+            seq,
+            records,
+            Some(&call.tool_use_id),
+        );
+    }
+
+    /// Run `tool_use_stop` for a call that finished running.
+    async fn tool_use_stop(&self, call: &PlannedCall, outcome: &CallOutcome) {
+        let chain = &self.hooks.tool_use_stop;
+        if chain.is_empty() {
+            return;
+        }
+        let request = ToolUseStopRequest {
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
+            tool_use_id: call.tool_use_id.clone(),
+            tool_name: call.tool_name.clone(),
+            is_error: outcome.block.is_error,
+            duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
+        };
+        let mut records = Vec::new();
+        chain.run_into(&request, &mut records).await;
+        let seq = self.durable.load(Ordering::SeqCst);
+        push_records(
+            self.outbox,
+            &self.run_id,
+            seq,
+            records,
+            Some(&call.tool_use_id),
+        );
     }
 
     /// Stage the inbox, then `events`, then flush when `barrier` is set.
@@ -136,7 +198,9 @@ impl ToolSink for JournalSink<'_> {
 
     async fn tool_starting(&self, call: &PlannedCall) -> Result<(), JournalError> {
         lock(&self.started).insert(call.tool_use_id.clone());
-        self.write(start_events(call), true).await
+        self.write(start_events(call), true).await?;
+        self.tool_use_start(call).await;
+        Ok(())
     }
 
     async fn tool_finished(
@@ -178,7 +242,9 @@ impl ToolSink for JournalSink<'_> {
         });
         let mut events = if ran { Vec::new() } else { start_events(call) };
         events.extend([end].into_iter().chain(completed));
-        self.write(events, ran).await
+        self.write(events, ran).await?;
+        self.tool_use_stop(call, outcome).await;
+        Ok(())
     }
 
     fn tool_event(&self, _call: &PlannedCall, event: Event) {

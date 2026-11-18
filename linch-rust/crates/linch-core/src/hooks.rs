@@ -16,13 +16,19 @@
 //! [`PreToolUseOutcome::Run`] only comes from a chain that ran every
 //! matching hook.
 //!
-//! Observe-only lifecycle points are the event stream, not hooks, and
-//! Python's `AfterProviderCall` is gone (provider retries live in the
-//! reliability policy). Script hooks and RPC callbacks implement [`Hook`]
+//! Twelve further points observe only (`observe`): `agent_start`,
+//! `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`,
+//! `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
+//! `post_compact`, `subagent_start`, `subagent_stop`. A hook there answers
+//! `()` and cannot fail closed; Python's `AfterProviderCall` is gone
+//! (provider retries live in the reliability policy), and
+//! `before_provider_call`, `before_final_answer` and `event_emit` have no
+//! Rust hook point yet. Script hooks and RPC callbacks implement [`Hook`]
 //! later; they are not part of this module.
 
 mod chain;
 mod hook;
+mod observe;
 mod tool;
 mod turn;
 
@@ -37,6 +43,13 @@ use crate::policy::HookPoint;
 
 pub use chain::{ChainResult, HookChain, HookRecord, HookStatus};
 pub use hook::{CallbackError, Hook, HookError, Point, ToolMatcher};
+pub use observe::{
+    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, PostCompact, PostCompactRequest,
+    PostToolUseFailure, PostToolUseFailureRequest, PreCompact, PreCompactRequest,
+    ProviderCallStart, ProviderCallStartRequest, ProviderCallStop, ProviderCallStopRequest,
+    SubagentStart, SubagentStartRequest, SubagentStop, SubagentStopRequest, ToolUseStart,
+    ToolUseStartRequest, ToolUseStop, ToolUseStopRequest, TurnStart, TurnStartRequest,
+};
 pub use tool::{
     ApprovalRequest, ApprovalResponse, PermissionRequest, PostToolUse, PostToolUseRequest,
     PostToolUseResponse, PreToolUse, PreToolUseOutcome, PreToolUseRequest, PreToolUseResponse,
@@ -67,6 +80,30 @@ pub struct Hooks {
     pub stop: HookChain<Stop>,
     /// Hooks at [`HookPoint::PostTurn`].
     pub post_turn: HookChain<PostTurn>,
+    /// Hooks at [`HookPoint::AgentStart`].
+    pub agent_start: HookChain<AgentStart>,
+    /// Hooks at [`HookPoint::AgentStop`].
+    pub agent_stop: HookChain<AgentStop>,
+    /// Hooks at [`HookPoint::TurnStart`].
+    pub turn_start: HookChain<TurnStart>,
+    /// Hooks at [`HookPoint::ProviderCallStart`].
+    pub provider_call_start: HookChain<ProviderCallStart>,
+    /// Hooks at [`HookPoint::ProviderCallStop`].
+    pub provider_call_stop: HookChain<ProviderCallStop>,
+    /// Hooks at [`HookPoint::ToolUseStart`].
+    pub tool_use_start: HookChain<ToolUseStart>,
+    /// Hooks at [`HookPoint::ToolUseStop`].
+    pub tool_use_stop: HookChain<ToolUseStop>,
+    /// Hooks at [`HookPoint::PostToolUseFailure`].
+    pub post_tool_use_failure: HookChain<PostToolUseFailure>,
+    /// Hooks at [`HookPoint::PreCompact`].
+    pub pre_compact: HookChain<PreCompact>,
+    /// Hooks at [`HookPoint::PostCompact`].
+    pub post_compact: HookChain<PostCompact>,
+    /// Hooks at [`HookPoint::SubagentStart`].
+    pub subagent_start: HookChain<SubagentStart>,
+    /// Hooks at [`HookPoint::SubagentStop`].
+    pub subagent_stop: HookChain<SubagentStop>,
 }
 
 impl Hooks {
@@ -75,12 +112,15 @@ impl Hooks {
     /// Covers every `(point, policy_id, policy_version)` triple, point by
     /// point in a fixed order (`user_prompt_submit`, `context_build`,
     /// `pre_tool_use`, `permission_request`, `post_tool_use`, `stop`,
-    /// `post_turn`) and in chain order within a point, duplicates kept. The
-    /// order of a point's hooks decides what its chain does (a rewrite feeds
-    /// the next hook, a block stops it), so reordering them, or registering
-    /// one twice, changes the digest; the order of registrations across
-    /// points does not. A resumed run compares it with the digest it started
-    /// with.
+    /// `post_turn`, `agent_start`, `agent_stop`, `turn_start`,
+    /// `provider_call_start`, `provider_call_stop`, `tool_use_start`,
+    /// `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
+    /// `post_compact`, `subagent_start`, `subagent_stop`) and in chain order
+    /// within a point, duplicates kept. The order of a point's hooks decides
+    /// what its chain does (a rewrite feeds the next hook, a block stops
+    /// it), so reordering them, or registering one twice, changes the
+    /// digest; the order of registrations across points does not. A resumed
+    /// run compares it with the digest it started with.
     pub fn policy_digest(&self) -> Digest {
         let triples = [
             self.user_prompt_submit.policies(),
@@ -90,6 +130,18 @@ impl Hooks {
             self.post_tool_use.policies(),
             self.stop.policies(),
             self.post_turn.policies(),
+            self.agent_start.policies(),
+            self.agent_stop.policies(),
+            self.turn_start.policies(),
+            self.provider_call_start.policies(),
+            self.provider_call_stop.policies(),
+            self.tool_use_start.policies(),
+            self.tool_use_stop.policies(),
+            self.post_tool_use_failure.policies(),
+            self.pre_compact.policies(),
+            self.post_compact.policies(),
+            self.subagent_start.policies(),
+            self.subagent_stop.policies(),
         ]
         .into_iter()
         .flatten()

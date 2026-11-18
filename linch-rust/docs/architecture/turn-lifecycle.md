@@ -20,8 +20,9 @@ What differs in Rust:
   the run where it stands, like a crash (`runner.rs:83-87`).
 - Python's loop guard (repeated calls, repeated failures) is not in the
   runner. It emits `loop_guard` only for `max_turns` (`runner/end.rs:93-108`).
-- Hook points are the seven in the [kernel](./kernel.md#hook-chains). Python's
-  `AfterProviderCall` is gone (`hooks.rs:19-21`).
+- Hook points are the nineteen in the [kernel](./kernel.md#hook-chains),
+  twelve of which only observe. Python's `AfterProviderCall` is gone
+  (`hooks.rs:19-21`).
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -52,6 +53,20 @@ What differs in Rust:
 8. **Branch on the tool calls** of the response (below).
 9. **Append the tool results**, run `post_turn`, and start the next turn
    (`turn.rs:217-226`).
+
+The observe-only points thread through these same steps: `agent_start` fires
+once, right after the prompt is accepted and before the first turn
+(`runner/start.rs`); `turn_start` opens step 1 of every turn
+(`runner/turn.rs`); `provider_call_start`/`provider_call_stop` bracket step 5
+(`runner/turn.rs`); `pre_compact`/`post_compact` bracket a compaction that
+actually runs, before step 1 (`runner/compact.rs`); `tool_use_start`/
+`tool_use_stop` bracket a tool call that actually runs, and
+`post_tool_use_failure` fires beside `post_tool_use` when its result is an
+error (`runner/sink.rs`, `scheduler/execute.rs`); `agent_stop` fires once, at
+the very end of every run, success or failure (`runner/end.rs`).
+`subagent_start`/`subagent_stop` fire the same way on the parent's hooks,
+around a subagent child run (`subagents/run.rs`, `subagents/background.rs`).
+None of them can change what they observe.
 
 A call that fails ends the run as failed with one terminal write that carries
 the receipt, the usage, the `Error`, the status and the `Result`

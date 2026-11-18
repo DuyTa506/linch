@@ -6,6 +6,17 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+### Added
+
+- Twelve observe-only hook points, for parity with Python's lifecycle hooks:
+  `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`,
+  `provider_call_stop`, `tool_use_start`, `tool_use_stop`,
+  `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`,
+  `subagent_stop`. Each answers `()` (`{}` on the wire), can never fail
+  closed, and costs nothing when no hook is registered on it. Available to
+  `@callback` in `linch_rust` and to `Hook<P>` implementations in
+  `linch-core`.
+
 ### Changed
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out

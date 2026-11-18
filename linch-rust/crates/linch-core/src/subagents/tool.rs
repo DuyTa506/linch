@@ -198,7 +198,15 @@ impl Tool for SubagentTool {
             return background::launch(&agent, worker, prompt, &ctx).await;
         }
         let session = SessionId::new(id.as_str());
-        let outcome = run::run(&agent, definition, session.clone(), prompt, &ctx).await?;
+        let outcome = run::run(
+            &agent,
+            definition,
+            session.clone(),
+            &worker.display_name,
+            prompt,
+            &ctx,
+        )
+        .await?;
         if !addressable {
             // No one can address it again: free its session now.
             agent.close(&session);

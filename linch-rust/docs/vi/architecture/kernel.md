@@ -21,9 +21,11 @@ Linch bản Python dựng cùng các bảo đảm này trên một IoC container
 - `Disposable` là `Registration`. `dispose` của nó là đồng bộ và chạy phần hoàn tác
   một lần; hoàn tác thất bại sẽ không được thử lại (`crates/linch-core/src/registration.rs:38-48`).
 - Các dispatcher `emit`, `serial` và `waterfall` của Python không có tương đương trong
-  Rust. Các điểm mở rộng là bảy chuỗi hook có kiểu, mỗi chuỗi cho một `HookPoint`,
+  Rust. Các điểm mở rộng là mười chín chuỗi hook có kiểu, mỗi chuỗi cho một `HookPoint`,
   mỗi chuỗi có quy tắc riêng để kết hợp các câu trả lời
-  ([chuỗi hook](#chuỗi-hook)).
+  ([chuỗi hook](#chuỗi-hook)). Mười hai trong số đó chỉ quan sát: được thêm
+  để tương đương với các lifecycle hook của Python, chúng trả lời `()`/`{}`
+  và không thể fail closed (`hooks/observe.rs`).
 - Không có `ToolPipeline` với các seam `tools/pre-execute`, `tools/execute` và
   `tools/post-execute`. Một batch chạy qua `plan` và `execute`
   (`crates/linch-core/src/scheduler.rs:1-22`); các chuỗi `pre_tool_use` và
@@ -127,6 +129,7 @@ Mỗi chuỗi tự quyết định cách kết hợp các câu trả lời. Mộ
 | `post_tool_use` | Một bản thay thế được chuyển cho hook kế tiếp. Một lỗi closed giữ lại kết quả và dừng chuỗi (`hooks/tool.rs:312-336`) | open |
 | `stop` | Hook đầu tiên giữ run tiếp tục sẽ dừng chuỗi. Một lỗi closed làm run thất bại (`hooks/turn.rs:246-250`) | open |
 | `post_turn` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/turn.rs:310-312`) | open |
+| `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/observe.rs`) | open |
 
 Các giá trị mặc định nằm trong `HookPoint::default_fail_mode` (`policy.rs:140-149`).
 Việc xử lý lỗi nằm trong `Entry::invoke` và `failed` (`hooks/chain.rs:208-259`):

@@ -8,16 +8,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use common::hooks::hook;
 use common::*;
 use futures::StreamExt;
 use linch_core::events::kinds::CompactionEvent;
 use linch_core::events::model_call::{CallDisposition, ModelCallKind};
+use linch_core::hooks::{PostCompact, PostCompactRequest, PreCompact, PreCompactRequest};
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, CompactionSpec, ContentBlock, Envelope, Event, LogEntry, Message, PermissionMode,
-    Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunBudget, RunId, RunOptions,
-    RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolChoice, ToolScope, Usage,
+    Agent, AgentBuilder, CompactionSpec, ContentBlock, Envelope, Event, Hooks, LogEntry, Message,
+    PermissionMode, Provider, ProviderError, ProviderRequest, ProviderStream, Role, RunBudget,
+    RunId, RunOptions, RunStatus, RunStore, SessionId, SessionLog, SessionStore, ToolChoice,
+    ToolScope, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -221,6 +224,67 @@ async fn compaction_logs_a_projection_and_keeps_the_prefix() {
     // 3 tool turns and the answer (18), plus two writes per compaction.
     assert_eq!(stores.runs.writes().commit, 18 + 2 * 2);
     assert_eq!(stores.sessions.writes().append, 8 + 2);
+}
+
+/// `pre_compact` fires once per compacting turn, before the summary call,
+/// with the view as it stood; `post_compact` fires once it replaced the
+/// view with a summary, with the before/after counts.
+#[tokio::test]
+async fn pre_compact_and_post_compact_bracket_a_successful_compaction() {
+    let stores = Arc::new(Stores::default());
+    let provider = Keyed::new();
+    let runs = Runs::default();
+
+    let pre: Arc<Mutex<Vec<PreCompactRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let post: Arc<Mutex<Vec<PostCompactRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let hooks = Hooks::default();
+    let log_pre = Arc::clone(&pre);
+    let on_pre = hook::<PreCompact>("watch", move |request| {
+        log_pre.lock().unwrap().push(request.clone());
+        Ok(())
+    });
+    let _ = hooks.pre_compact.register(on_pre.arc()).unwrap();
+    let log_post = Arc::clone(&post);
+    let on_post = hook::<PostCompact>("watch", move |request| {
+        log_post.lock().unwrap().push(request.clone());
+        Ok(())
+    });
+    let _ = hooks.post_compact.register(on_post.arc()).unwrap();
+
+    let mut spec = spec();
+    spec.compaction = Some(CompactionSpec {
+        keep_recent_turns: 1,
+        ..CompactionSpec::new(1)
+    });
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let agent = AgentBuilder::new(spec)
+        .provider(provider)
+        .tools(tools)
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .hooks(Arc::new(hooks))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .build()
+        .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let _ = finish(stream).await;
+
+    let pre = pre.lock().unwrap();
+    let post = post.lock().unwrap();
+    assert_eq!(pre.len(), 2, "turns 2 and 3 compact");
+    assert_eq!(post.len(), 2);
+    for (pre, post) in pre.iter().zip(post.iter()) {
+        assert_eq!(pre.run_id, run_id);
+        assert_eq!(post.run_id, run_id);
+        assert_eq!(pre.turn, post.turn);
+        assert_eq!(pre.strategy, "summary");
+        assert_eq!(post.strategy, "summary");
+        assert_eq!(pre.messages, post.messages_before);
+        assert_eq!(pre.tokens, post.tokens_before);
+        assert!(post.messages_after < post.messages_before);
+    }
 }
 
 /// A spent budget refuses the summary call as well as the primary one.

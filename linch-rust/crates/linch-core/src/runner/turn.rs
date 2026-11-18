@@ -199,7 +199,7 @@ impl Runner {
                     if !appended {
                         self.append_prompt(prompt, moved).await?;
                     }
-                    Some(self.turn_start())
+                    Some(self.turn_start().await)
                 }
                 Step::Compact { attempt, abandoned } => self.compact(attempt, abandoned).await?,
                 Step::Compacted {
@@ -222,7 +222,7 @@ impl Runner {
                     // start.
                     self.post_turn(self.stop_reason).await;
                     self.turn += 1;
-                    Some(self.turn_start())
+                    Some(self.turn_start().await)
                 }
             };
             self.settle_peers(false).await;
@@ -233,8 +233,10 @@ impl Runner {
         }
     }
 
-    /// The first step of a turn: compaction when the spec turns it on.
-    fn turn_start(&self) -> Step {
+    /// The first step of a turn: fire `turn_start`, then compaction when the
+    /// spec turns it on.
+    async fn turn_start(&self) -> Step {
+        self.turn_start_hook(self.turn).await;
         match self.agent.spec.compaction {
             Some(_) => Step::Compact {
                 attempt: 1,
@@ -303,6 +305,8 @@ impl Runner {
         self.save(Phase::ProviderPending { attempt }).await?;
         let ready = self.journal.flush().await?;
         self.outbox.deliver(ready).await;
+        let call_model = request.model.clone();
+        self.provider_call_start(self.turn, &call_model).await;
         let outcome = {
             let (journal, outbox) = (&mut self.journal, &self.outbox);
             let mut on_delta = |delta| {
@@ -319,6 +323,14 @@ impl Runner {
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);
         let served = receipt.actual_model.clone();
+        self.provider_call_stop(
+            self.turn,
+            served.as_deref().unwrap_or(&call_model),
+            receipt.disposition,
+            usage,
+            receipt.duration_ms,
+        )
+        .await;
         let empty = matches!(&outcome.result, Ok(assembly) if cut_empty(assembly));
         if empty {
             receipt.disposition = CallDisposition::Rejected;

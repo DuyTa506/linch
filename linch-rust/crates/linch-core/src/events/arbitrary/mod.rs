@@ -157,6 +157,18 @@ fn hook_event() -> impl Strategy<Value = HookEvent> {
         Just(HookPoint::PostToolUse),
         Just(HookPoint::Stop),
         Just(HookPoint::PostTurn),
+        Just(HookPoint::AgentStart),
+        Just(HookPoint::AgentStop),
+        Just(HookPoint::TurnStart),
+        Just(HookPoint::ProviderCallStart),
+        Just(HookPoint::ProviderCallStop),
+        Just(HookPoint::ToolUseStart),
+        Just(HookPoint::ToolUseStop),
+        Just(HookPoint::PostToolUseFailure),
+        Just(HookPoint::PreCompact),
+        Just(HookPoint::PostCompact),
+        Just(HookPoint::SubagentStart),
+        Just(HookPoint::SubagentStop),
     ];
     let fail_mode = prop_oneof![Just(FailMode::Open), Just(FailMode::Closed)];
     let outcome = prop_oneof![

@@ -191,8 +191,14 @@ impl Runner {
             cancel: self.cancel.clone(),
         };
         let run_id = self.run.run_id.clone();
-        let sink = JournalSink::new(&mut self.journal, &self.outbox, run_id);
         let hooks = &self.agent.hooks;
+        let sink = JournalSink::new(
+            &mut self.journal,
+            &self.outbox,
+            run_id,
+            self.run.session_id.clone(),
+            hooks,
+        );
         Ok(scheduler::execute(plan, &sink, hooks, &self.run, &options).await?)
     }
 

@@ -11,7 +11,7 @@ use common::*;
 use linch::Event;
 use linch::events::kinds::ResultSubtype;
 use linch_rpc::protocol::{AgentOpened, method};
-use linch_rpc::{ClientError, code};
+use linch_rpc::{ClientError, ErrorObject, code};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -331,6 +331,118 @@ async fn turn_point_callbacks_cross_the_connection() {
         .expect("the prompt is blocked");
     assert_eq!(error.code, code::PROMPT_BLOCKED);
     assert_eq!(error.data.unwrap()["reason"], "no prompts today");
+}
+
+/// The observe-only points added for parity with Python's lifecycle hooks
+/// cross the connection like any other callback: `agent_start`/`agent_stop`
+/// bracket the run, `turn_start` fires before each turn's dispatch, and
+/// `tool_use_start`/`tool_use_stop`/`post_tool_use_failure` bracket a call
+/// that runs and errors. None of them can change the run (their answer is
+/// `{}`), so a `null` answer from the client (meaning "hang") is never used
+/// here; an empty object is enough.
+#[tokio::test]
+async fn observe_only_points_cross_the_connection() {
+    let (mut rpc, log) = client(json!({
+        "agent_start": {}, "agent_stop": {}, "turn_start": {},
+        "tool_use_start": {}, "tool_use_stop": {}, "post_tool_use_failure": {},
+    }));
+    let extra = json!({
+        "tools": [host_tool("lookup", "read")],
+        "callbacks": [
+            {"point": "agent_start", "policy_id": "a", "policy_version": 1},
+            {"point": "agent_stop", "policy_id": "b", "policy_version": 1},
+            {"point": "turn_start", "policy_id": "c", "policy_version": 1},
+            {"point": "tool_use_start", "policy_id": "d", "policy_version": 1},
+            {"point": "tool_use_stop", "policy_id": "e", "policy_version": 1},
+            {"point": "post_tool_use_failure", "policy_id": "f", "policy_version": 1},
+        ],
+    });
+    let ended = run(&mut rpc, lookup_turns(), extra).await;
+    // Not `finished(&ended)`: `agent_stop` fires after `end()` delivers the
+    // result, so its own stream-only hook record is the last envelope.
+    assert!(
+        ended.kinds().contains(&"result".to_owned()),
+        "{:?}",
+        ended.kinds()
+    );
+    assert_eq!(
+        ended.kinds().last(),
+        Some(&"hook".to_owned()),
+        "{:?}",
+        ended.kinds()
+    );
+    assert_eq!(
+        log.methods(),
+        [
+            "hook.call:agent_start",
+            "hook.call:turn_start",
+            "hook.call:tool_use_start",
+            "tool.call",
+            "hook.call:tool_use_stop",
+            "hook.call:turn_start",
+            "hook.call:agent_stop",
+        ],
+        "agent_start/agent_stop bracket the run; turn_start fires once per \
+         turn; post_tool_use_failure is silent because the call succeeded"
+    );
+    let agent_start = log.params(0)["request"].clone();
+    assert_eq!(agent_start["model"], MODEL);
+    assert_eq!(agent_start["prompt"], "Go.");
+    assert_eq!(agent_start["tools"], json!(["lookup"]));
+    assert_eq!(log.params(1)["request"]["turn"], 0);
+    let tool_start = log.params(2)["request"].clone();
+    assert_eq!(tool_start["tool_use_id"], "call_1");
+    assert_eq!(tool_start["tool_name"], "lookup");
+    let tool_stop = log.params(4)["request"].clone();
+    assert_eq!(tool_stop["tool_use_id"], "call_1");
+    assert_eq!(tool_stop["is_error"], false);
+    assert_eq!(log.params(5)["request"]["turn"], 1);
+    let agent_stop = log.params(6)["request"].clone();
+    assert_eq!(agent_stop["status"], "completed");
+    assert_eq!(agent_stop["stop_reason"], "end_turn");
+
+    // A call that errors fires post_tool_use_failure too, after its
+    // tool_use_stop.
+    let log = Log::default();
+    let seen = log.clone();
+    let mut rpc = Rpc::with_handler(handler(move |method, params, _| {
+        let seen = seen.clone();
+        async move {
+            let request = json!({"method": method, "params": Value::Object(params)});
+            seen.requests.lock().unwrap().push(request);
+            if method == method::TOOL_CALL {
+                return Err(ErrorObject::new(7, "no cats here"));
+            }
+            Ok(json!({}))
+        }
+    }));
+    let extra = json!({
+        "tools": [host_tool("lookup", "read")],
+        "callbacks": [
+            {"point": "tool_use_stop", "policy_id": "e", "policy_version": 1},
+            {"point": "post_tool_use_failure", "policy_id": "f", "policy_version": 1},
+        ],
+    });
+    let ended = run(&mut rpc, lookup_turns(), extra).await;
+    let results = tool_results(&ended);
+    assert!(
+        results[0].to_string().contains("no cats here"),
+        "{results:?}"
+    );
+    assert!(finished(&ended), "a failed tool keeps the run going");
+    assert_eq!(
+        log.methods(),
+        [
+            "tool.call",
+            "hook.call:post_tool_use_failure",
+            "hook.call:tool_use_stop"
+        ],
+        "post_tool_use_failure fires where post_tool_use would, before the \
+         call's own tool_use_stop"
+    );
+    let failure = log.params(1)["request"].clone();
+    assert_eq!(failure["tool_name"], "lookup");
+    assert_eq!(failure["error"]["message"], "no cats here");
 }
 
 #[tokio::test(start_paused = true)]

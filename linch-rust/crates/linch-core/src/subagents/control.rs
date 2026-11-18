@@ -161,7 +161,15 @@ impl Tool for ContinueTool {
         let message = input.get("message").and_then(JsonValue::as_str);
         let message = message.unwrap_or("").to_owned();
         let session = SessionId::new(worker.id.as_str());
-        let outcome = run::run(&agent, &worker.definition, session, message, &ctx).await?;
+        let outcome = run::run(
+            &agent,
+            &worker.definition,
+            session,
+            &worker.display_name,
+            message,
+            &ctx,
+        )
+        .await?;
         outcome.result("Worker")
     }
 }

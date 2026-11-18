@@ -1,9 +1,12 @@
 //! Per-point semantics, registration errors, and the policy digest.
 
+use crate::events::kinds::ResultSubtype;
+use crate::events::model_call::CallDisposition;
 use crate::message::{ContentBlock, TextBlock};
 use crate::policy::{PermissionDecision, Principal};
-use crate::run::StopReason;
+use crate::run::{RunStatus, StopReason};
 use crate::tool::ToolOutputError;
+use crate::usage::Usage;
 
 use super::*;
 
@@ -311,6 +314,186 @@ async fn post_turn_observes_every_hook_and_records_failures() {
     );
 }
 
+/// Every observe-only point runs its whole chain, in order, and records a
+/// failure instead of letting it stop later hooks: the same shape as
+/// [`post_turn_observes_every_hook_and_records_failures`], once per point.
+macro_rules! observe_point_test {
+    ($test_name:ident, $chain:ident, $request:expr) => {
+        #[tokio::test]
+        async fn $test_name() {
+            let hooks = Hooks::default();
+            let log = new_log();
+            let _ = register(&hooks.$chain, Scripted::new("dead", &log, |_| Act::Fail));
+            let _ = register(
+                &hooks.$chain,
+                Scripted::new("audit", &log, |_| Act::Answer(())),
+            );
+            let request = $request;
+            let done = hooks.$chain.run(&request).await;
+            assert_eq!(calls(&log), ["dead", "audit"]);
+            assert!(matches!(done.records[0].status, HookStatus::Failed { .. }));
+            assert_eq!(
+                done.records[1].status,
+                HookStatus::Answered { verdict: "observe" }
+            );
+        }
+    };
+}
+
+observe_point_test!(
+    agent_start_observes_every_hook_and_records_failures,
+    agent_start,
+    AgentStartRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        model: "gpt-5".into(),
+        prompt: "hi".into(),
+        tools: vec!["Read".into()],
+    }
+);
+
+observe_point_test!(
+    agent_stop_observes_every_hook_and_records_failures,
+    agent_stop,
+    AgentStopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        status: RunStatus::Completed,
+        stop_reason: StopReason::EndTurn,
+    }
+);
+
+observe_point_test!(
+    turn_start_observes_every_hook_and_records_failures,
+    turn_start,
+    TurnStartRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+    }
+);
+
+observe_point_test!(
+    provider_call_start_observes_every_hook_and_records_failures,
+    provider_call_start,
+    ProviderCallStartRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        model: "gpt-5".into(),
+    }
+);
+
+observe_point_test!(
+    provider_call_stop_observes_every_hook_and_records_failures,
+    provider_call_stop,
+    ProviderCallStopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        model: "gpt-5".into(),
+        disposition: CallDisposition::Accepted,
+        usage: Some(Usage::default()),
+        duration_ms: 12,
+    }
+);
+
+observe_point_test!(
+    tool_use_start_observes_every_hook_and_records_failures,
+    tool_use_start,
+    ToolUseStartRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        tool_use_id: "toolu_1".into(),
+        tool_name: "Read".into(),
+        input: JsonObject::new(),
+    }
+);
+
+observe_point_test!(
+    tool_use_stop_observes_every_hook_and_records_failures,
+    tool_use_stop,
+    ToolUseStopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        tool_use_id: "toolu_1".into(),
+        tool_name: "Read".into(),
+        is_error: false,
+        duration_ms: 12,
+    }
+);
+
+observe_point_test!(
+    post_tool_use_failure_observes_every_hook_and_records_failures,
+    post_tool_use_failure,
+    PostToolUseFailureRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        tool_use_id: "toolu_1".into(),
+        tool_name: "Read".into(),
+        input: JsonObject::new(),
+        error: ToolOutputError::new("boom"),
+    }
+);
+
+observe_point_test!(
+    pre_compact_observes_every_hook_and_records_failures,
+    pre_compact,
+    PreCompactRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        messages: 40,
+        tokens: 9000,
+        strategy: "summary".into(),
+    }
+);
+
+observe_point_test!(
+    post_compact_observes_every_hook_and_records_failures,
+    post_compact,
+    PostCompactRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        messages_before: 40,
+        messages_after: 3,
+        tokens_before: 9000,
+        tokens_after: 500,
+        strategy: "summary".into(),
+    }
+);
+
+observe_point_test!(
+    subagent_start_observes_every_hook_and_records_failures,
+    subagent_start,
+    SubagentStartRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        child_session_id: SessionId::from("child"),
+        subagent_run_id: RunId::from("r:toolu_1"),
+        subagent_type: "general-purpose".into(),
+        display_name: "Agent #1".into(),
+        prompt: "look into it".into(),
+    }
+);
+
+observe_point_test!(
+    subagent_stop_observes_every_hook_and_records_failures,
+    subagent_stop,
+    SubagentStopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        child_session_id: SessionId::from("child"),
+        subagent_run_id: RunId::from("r:toolu_1"),
+        subagent_type: "general-purpose".into(),
+        display_name: "Agent #1".into(),
+        subtype: ResultSubtype::Success,
+        text: "done".into(),
+        error: None,
+    }
+);
+
 #[test]
 fn registration_rejects_bad_settings() {
     let hooks = Hooks::default();
@@ -338,6 +521,40 @@ fn registration_rejects_bad_settings() {
     let closed = Scripted::new("c", &log, |_| Act::Answer(())).fail_mode(FailMode::Closed);
     assert!(hooks.post_turn.register(Arc::new(closed)).is_err());
     assert!(hooks.context_build.is_empty() && hooks.post_turn.is_empty());
+}
+
+/// None of the twelve observe-only points has a blocking verdict, so a
+/// closed fail mode is refused at every one of them, the same way it is at
+/// `post_turn`.
+#[test]
+fn every_observe_only_point_rejects_a_closed_fail_mode() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    macro_rules! assert_rejects_closed {
+        ($chain:ident) => {
+            let closed = Scripted::new("c", &log, |_| Act::Answer(())).fail_mode(FailMode::Closed);
+            assert!(
+                matches!(
+                    hooks.$chain.register(Arc::new(closed)),
+                    Err(HookError::FailClosedNotSupported { .. })
+                ),
+                "{} should refuse a closed fail mode",
+                stringify!($chain)
+            );
+        };
+    }
+    assert_rejects_closed!(agent_start);
+    assert_rejects_closed!(agent_stop);
+    assert_rejects_closed!(turn_start);
+    assert_rejects_closed!(provider_call_start);
+    assert_rejects_closed!(provider_call_stop);
+    assert_rejects_closed!(tool_use_start);
+    assert_rejects_closed!(tool_use_stop);
+    assert_rejects_closed!(post_tool_use_failure);
+    assert_rejects_closed!(pre_compact);
+    assert_rejects_closed!(post_compact);
+    assert_rejects_closed!(subagent_start);
+    assert_rejects_closed!(subagent_stop);
 }
 
 #[test]
@@ -382,6 +599,45 @@ fn the_digest_covers_each_points_chain_in_order_and_pins_its_encoding() {
     assert_eq!(
         hooks.policy_digest(),
         digest_with_domain(POLICY_DOMAIN, &after).unwrap()
+    );
+}
+
+/// The digest's fixed point order was extended for the twelve observe-only
+/// points, each contributing its own `(point, id, version)` triples after
+/// `post_turn`.
+#[test]
+fn the_digest_covers_the_observe_only_points_too() {
+    let log = new_log();
+    let hooks = Hooks::default();
+    let before = hooks.policy_digest();
+    let registration = register(
+        &hooks.agent_start,
+        Scripted::new("audit", &log, |_| Act::Answer(())),
+    );
+    let with_agent_start = hooks.policy_digest();
+    assert_ne!(before, with_agent_start);
+    let expected = json!([["agent_start", "audit", 1]]);
+    assert_eq!(
+        with_agent_start,
+        digest_with_domain(POLICY_DOMAIN, &expected).unwrap()
+    );
+    let _ = register(
+        &hooks.subagent_stop,
+        Scripted::new("notify", &log, |_| Act::Answer(())),
+    );
+    let with_both = hooks.policy_digest();
+    assert_ne!(with_both, with_agent_start);
+    let expected = json!([["agent_start", "audit", 1], ["subagent_stop", "notify", 1]]);
+    assert_eq!(
+        with_both,
+        digest_with_domain(POLICY_DOMAIN, &expected).unwrap()
+    );
+
+    registration.dispose();
+    let expected = json!([["subagent_stop", "notify", 1]]);
+    assert_eq!(
+        hooks.policy_digest(),
+        digest_with_domain(POLICY_DOMAIN, &expected).unwrap()
     );
 }
 

@@ -19,6 +19,18 @@ Point = Literal[
     "post_tool_use",
     "stop",
     "post_turn",
+    "agent_start",
+    "agent_stop",
+    "turn_start",
+    "provider_call_start",
+    "provider_call_stop",
+    "tool_use_start",
+    "tool_use_stop",
+    "post_tool_use_failure",
+    "pre_compact",
+    "post_compact",
+    "subagent_start",
+    "subagent_stop",
 ]
 FailMode = Literal["open", "closed"]
 CallbackFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]

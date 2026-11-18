@@ -434,9 +434,32 @@ request has `session_id` and `run_id`:
 A tool result in a request or an answer is `{"output": {"value",
 "metadata"?}}` or `{"error": {"message", "code"?, "details"?}}`.
 
+Twelve more points only observe: the callback cannot change anything they
+report, so the answer is always `{}` and none of them can fail closed.
+
+| `point` | The request also has |
+|---|---|
+| `agent_start` | `model`, `prompt`, `tools` |
+| `agent_stop` | `status`, `stop_reason` |
+| `turn_start` | `turn` |
+| `provider_call_start` | `turn`, `model` |
+| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?`, `duration_ms` |
+| `tool_use_start` | `tool_use_id`, `tool_name`, `input` |
+| `tool_use_stop` | `tool_use_id`, `tool_name`, `is_error`, `duration_ms` |
+| `post_tool_use_failure` | `tool_use_id`, `tool_name`, `input`, `error` |
+| `pre_compact` | `turn`, `messages`, `tokens`, `strategy` |
+| `post_compact` | `turn`, `messages_before`, `messages_after`, `tokens_before`, `tokens_after`, `strategy` |
+| `subagent_start` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `prompt` |
+| `subagent_stop` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `subtype`, `text`, `error?` |
+
+`tool_use_start`/`tool_use_stop` bracket a call that actually runs (not one
+served or blocked by `pre_tool_use`); `post_tool_use_failure` fires beside
+`post_tool_use` when the result is an error. `subagent_start`/`subagent_stop`
+fire on the parent's callbacks, not the child's.
+
 | Argument | Default | What it controls |
 |---|---|---|
-| `point` | required | One of the seven points above |
+| `point` | required | One of the nineteen points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
 | `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |
