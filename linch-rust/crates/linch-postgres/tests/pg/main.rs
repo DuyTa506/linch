@@ -7,6 +7,7 @@ mod common;
 mod conformance;
 mod crash;
 mod exhausted;
+mod fence;
 mod files;
 mod heartbeat;
 mod idle;
