@@ -173,6 +173,12 @@ pub mod code {
     /// This connection drives no workflow with that id: it never sent
     /// `workflow.start` for it, or already finished it.
     pub const WORKFLOW_NOT_FOUND: i64 = -32048;
+    /// `workflow.start` carried `resume` answers for a workflow whose journal
+    /// holds nothing: it never ran here, or its journal lived in another
+    /// connection (a memory-store agent's does), so it would run again from
+    /// its first step with answers that have nothing to answer. Nothing was
+    /// claimed; start it without `resume`, or use Postgres stores.
+    pub const WORKFLOW_NO_JOURNAL: i64 = -32049;
 }
 
 impl ErrorObject {

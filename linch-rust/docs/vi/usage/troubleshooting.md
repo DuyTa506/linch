@@ -41,6 +41,11 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 | `[Errno 2] No such file or directory: <path>` (`FileNotFoundError`) | `LINCH_SERVER_BIN` hoặc `binary=` trỏ tới một tệp không tồn tại | Trỏ nó tới binary đã build |
 | Một trường được ghi trong tài liệu này bị từ chối vì không xác định (`ProtocolError`, -32602) | Binary của server cũ hơn client: một wheel cũ, hoặc một bản build cargo lỗi thời mà bước tìm kiếm vẫn ưu tiên | Cài lại wheel, hoặc build lại bằng `cargo build -p linch-server` |
 
+Server ghi log của chính nó ra stderr: cảnh báo và lỗi theo mặc định, nhiều hơn với
+`LINCH_LOG=info` (hoặc `debug`). Một job được lập lịch thất bại, một lần retry, một lỗi dọn
+dẹp và một lỗi journal workflow chỉ hiện ở đó và không ở đâu khác ([Server](./server.md#log)).
+Một server do `Server()` khởi động ghi nó ra stderr của process của bạn.
+
 ## Đối tượng `Server`
 
 | Thông báo | Nguyên nhân | Cách khắc phục |
@@ -57,7 +62,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 | `a server address is unix:PATH, ws://HOST:PORT/rpc or wss://...` (`ValueError`) | Dùng scheme khác, như `http://`, hoặc một đường dẫn trần | Sao chép địa chỉ mà server in ra khi khởi động |
 | `[Errno 2] No such file or directory` hoặc `[Errno 111] Connect call failed` (`OSError`) | Không có gì lắng nghe ở đó | Khởi động `linch-server --config`, hoặc sửa đường dẫn hay cổng |
 | `authentication required: the first message must be connection.auth with a valid token (code -32003)` trên socket, `the server refused the token (HTTP 401) (code -32003)` trên WebSocket (`Unauthenticated`) | Token không có trong cấu hình của server | Dùng token có trong cấu hình; server đọc các biến của nó khi khởi động |
-| `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | Tenant đang giữ `max_connections` kết nối | Đóng một kết nối, hoặc tăng `max_connections` của tenant |
+| `at most <n> connections at once; try again once one ends` (`LimitReached`, `kind == "connections"`) | Tenant đang giữ `max_connections` kết nối, trong đó có thể có một client đã biến mất mà không đóng, mà server kết thúc sau khoảng một phút ([liveness](./server.md#liveness)) | Đóng một kết nối, hoặc tăng `max_connections` của tenant; thử lại sau một phút nếu một client đã chết |
 | `at most <n> logins at once; try again once one ends` (`LimitReached`, `kind == "logins"`) | 32 kết nối socket cùng chờ đăng nhập | Thử lại với backoff; server đang bận, không phải đã biến mất |
 | `at most <n> agents at once; try again once one ends` (`LimitReached`, `kind == "agents"`) từ `open_agent` | Tenant đang giữ mở `max_agents` agent, trên tất cả các kết nối của nó | Đóng các agent không còn dùng, hoặc tăng `max_agents` của tenant |
 | `stores.max_connections <n> is above the tenant's max_pool_connections <max>` (`NotAllowed`, `kind == "pool_connections"`) từ `open_agent` | Cấu hình yêu cầu pool Postgres lớn hơn mức tenant được phép có | Yêu cầu tối đa `<max>`, bỏ `max_connections` đi, hoặc tăng `max_pool_connections` của tenant (xem [Kho lưu trữ](./stores.md#kết-nối-và-pool) trước khi vượt quá 32) |

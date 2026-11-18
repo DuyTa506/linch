@@ -133,6 +133,7 @@ def test_a_resumed_init_names_the_turn_it_continues_in() -> None:
     assert isinstance(again, InitEvent) and (again.resumed, again.turn) == (True, 2)
 
 
+@pytest.mark.source
 def test_the_golden_accounting_samples_decode_to_typed_events() -> None:
     samples = json.loads(GOLDEN.read_text(encoding="utf-8"))
     fire, delivery, receipt, settlement, cancelled = (decode_event(raw) for raw in samples)

@@ -937,7 +937,15 @@ server khác cache.
 một miss: model không bao giờ thấy nó. Việc hủy run cũng cắt ngắn một lần lookup. Một lần
 xóa thất bại hoặc hết thời gian có thể để lại mục cũ, nên việc cache chấm dứt cho agent.
 Lần xóa sau một lần ghi không bị hủy cắt, vì lần ghi có thể đã đổi trạng thái; nó vẫn bị
-giới hạn bởi 2 giây.
+giới hạn bởi 2 giây. Một lần xóa thất bại được thử thêm một lần trước khi việc cache chấm
+dứt, và server ghi một cảnh báo `tracing` khi đó (`the tool cache stopped for an agent`, kèm
+lý do; xem [Server](./server.md#log)).
+
+**Khoảng hở sau một lần xóa thất bại.** Việc ngừng cache chỉ bảo vệ agent đã xóa thất bại: các
+mục vẫn nằm trong bảng, nên một agent khác của namespace, và một server khác dùng chung cache
+Postgres, vẫn phục vụ chúng đến hết ttl (mặc định một giờ với một tenant), dù một lần ghi đã
+đổi thứ chúng giữ. Hãy giữ `ttl_ms` ngắn nơi một câu trả lời cũ gây tốn kém, và để `tool_cache`
+tắt trên một workspace mà nhiều server cùng ghi.
 
 **Giới hạn.** Các mục bị giới hạn theo namespace (`max_entries`, `max_value_bytes`). Một
 lần put Postgres cũng xóa một lô có giới hạn các hàng hết hạn của bất kỳ namespace nào, nên

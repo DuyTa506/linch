@@ -197,6 +197,12 @@ pub async fn jobs(
 /// `older_than` ago: each is readable with [`job`] and [`jobs`] for as long
 /// as the other.
 ///
+/// A row that names a stored agent definition stays while its run is not
+/// terminal (a run suspended for an approval or an answer, or one whose job
+/// failed), however old: it is the only record of which definition
+/// [`crate::enqueue_approve`] and [`crate::enqueue_resume`] continue the run
+/// with. It goes with the next prune after the run ends.
+///
 /// Returns:
 ///     How many history rows and failed jobs were deleted.
 ///
@@ -205,15 +211,23 @@ pub async fn jobs(
 pub async fn prune_history(pool: &PgPool, older_than: Duration) -> Result<u64, WorkerError> {
     let millis = i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX);
     let history = sqlx::query(
-        "DELETE FROM linch_worker_history \
-         WHERE finished_at < now() - $1 * interval '1 millisecond'",
+        "DELETE FROM linch_worker_history AS h \
+         WHERE finished_at < now() - $1 * interval '1 millisecond' \
+           AND NOT (h.agent IS NOT NULL AND EXISTS ( \
+               SELECT 1 FROM linch_runs AS r \
+               WHERE r.namespace = h.namespace AND r.run_id = h.run_id \
+                 AND r.status NOT IN ('completed', 'failed', 'aborted')))",
     )
     .bind(millis)
     .execute(pool)
     .await?;
     let failed = sqlx::query(
-        "DELETE FROM linch_worker_jobs \
-         WHERE failed_at < now() - $1 * interval '1 millisecond'",
+        "DELETE FROM linch_worker_jobs AS j \
+         WHERE failed_at < now() - $1 * interval '1 millisecond' \
+           AND NOT (j.agent IS NOT NULL AND EXISTS ( \
+               SELECT 1 FROM linch_runs AS r \
+               WHERE r.namespace = j.namespace AND r.run_id = j.run_id \
+                 AND r.status NOT IN ('completed', 'failed', 'aborted')))",
     )
     .bind(millis)
     .execute(pool)

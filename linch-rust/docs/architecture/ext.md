@@ -130,7 +130,8 @@ Nothing is spawned; every branch runs in the caller's task. `phase(title)`
 emits a progress event. Every call emits a `WorkflowEvent` to the optional
 `on_event` sink, with a kind of `phase`, `step_start`, `step_end`,
 `step_replayed`, `agent_start`, `agent_end`, `agent_replayed`,
-`interrupt_requested`, `interrupt_resolved` or `interrupt_replayed`
+`interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` or
+`interrupt_stale`
 (`crates/linch-core/src/events/kinds/skills.rs:50`).
 
 ### Replay rule
@@ -138,9 +139,13 @@ emits a progress event. Every call emits a `WorkflowEvent` to the optional
 A call is identified by a content key plus its occurrence: how many calls with
 that key came before it in this run (`workflow.rs:43-51`). Keys are
 domain-separated digests: `step_key` of the name and the optional input key,
-`agent_key` of the name and the prompt, `interrupt_key` of the key alone, so a
-payload may change across resumes without losing the answer
-(`journal.rs:164-196`). The function must take the same path again: branching
+`agent_key` of the name and the prompt, `interrupt_key` of the key alone, so an
+answer already journaled replays whatever the payload is. An answer not
+journaled yet (`resume`) applies only to the question the workflow was parked
+on: the stored interrupt's key and the canonical digest of its payload must
+equal the call's, or the answer is dropped with an `interrupt_stale` event and
+the interrupt asks again (`interrupt.rs`, `is_awaited`; `engine.rs` reads the
+stored interrupt when it claims the workflow). The function must take the same path again: branching
 on a journaled value is fine, branching on the clock, randomness or the
 environment is not unless the value comes from a step.
 

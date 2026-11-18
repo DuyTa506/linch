@@ -81,7 +81,8 @@ returns what it returns. `wf` is a `WorkflowContext`:
 `step_timeout_ms`, `deadline_ms`, `resume` (answers to interrupts),
 `principal` (below) and `on_event`, which receives `WorkflowEvent`s: `phase`, `agent_start`,
 `agent_end`, `agent_replayed`, `step_start`, `step_end`, `step_replayed`,
-`interrupt_requested`, `interrupt_resolved` and `interrupt_replayed`.
+`interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` and
+`interrupt_stale`.
 
 `parallel`, `settled` and `pipeline` run in the client. Each branch counts
 its own calls, under its branch path, so branches that reach their calls in
@@ -98,7 +99,7 @@ holds. The key is a digest of:
 |---|---|
 | `wf.agent` | `name` (or the subagent's name), the prompt, the `subagent`, the `output_schema`, the `fork` session; with `key=` only the name and the key |
 | `wf.step` | the step name and its `key` |
-| `wf.interrupt` | the interrupt key only; the payload may change |
+| `wf.interrupt` | the interrupt key only: an answer already journaled replays whatever the payload is, but an answer not journaled yet also needs the payload to match ([below](#an-answer-is-for-the-question-that-was-asked)) |
 
 Editing one prompt makes only that call miss its record; the calls before
 and after it, whose keys still match, replay. Renaming a step does the same
@@ -184,6 +185,21 @@ async def sign_flow(wf: WorkflowContext) -> str:
 same id with `resume={"approve": True}` (from any process). The answer is
 journaled, so it is never asked again.
 
+### An answer is for the question that was asked
+
+An answer applies only to the question the workflow was parked on: the same
+key and an equal payload (compared by canonical digest). If the draft was
+edited between the question and the resume, the call asks again with the
+payload it has now: the stale answer is dropped, an `interrupt_stale` event reports it,
+nothing is journaled, and the workflow is stored as `awaiting_input` with
+that question. Answer that one. So answer the interrupt `workflow_status`
+names, with the payload the function will rebuild; a resume that carries an
+answer for a workflow that was never parked, or for another interrupt than
+the stored one (a second interrupt in the same resume), asks again too. If
+the server crashed after it took the workflow and before the answer was
+journaled, the stored question is gone (the status is `running`): ask and
+answer again.
+
 A crash after the signer ran but before the step's record landed makes the
 resume run the function again. The journal cannot tell "never ran" from
 "ran, then crashed", so the guard is the key: the function is called again
@@ -244,6 +260,20 @@ which refuses a stale writer's records. `workflow.finish` (sent when
 dies leaves it to its connection ending, so retry a start that gets
 `WorkflowHeld` after a crash.
 
+A client that vanishes without closing its connection (a power cut, a
+dropped route) ends the same way once the server notices: it sets TCP
+keepalive on every accepted socket (30 s idle, 3 probes 10 s apart, so about a
+minute) and a TCP user timeout of the same length, pings each WebSocket every
+30 s, and ends one that sent nothing for 60 s. Until then the connection keeps
+its place among the tenant's `max_connections` and the workflow's hold, so a
+replacement start gets `WorkflowHeld` for about a minute; the times are the
+[`liveness`](./server.md#liveness) section of the server config. The hold's
+own database connection sets the Postgres keepalives (`tcp_keepalives_idle`
+30 s, `tcp_keepalives_interval` 10 s, `tcp_keepalives_count` 3), so a server
+host that vanishes frees the lock in about a minute and not after the
+operating system's default (two hours). A Unix socket needs neither: the
+kernel closes it when the peer's process ends.
+
 A killed server leaves the child run of the call it was driving at its last
 durable state, with its lease (1 s to minutes, `stores.lease_ttl_ms`). The
 resumed call waits the lease out and **continues that run**, so its model
@@ -294,7 +324,14 @@ node can be retried any number of times and the run happens once.
 - The deadline and step timeouts are enforced in the client; a client that
   dies keeps none of them. An agent call's `timeout_ms` is enforced by the
   server.
-- A memory-store agent journals only for the life of its connection.
+- A memory-store agent journals only for the life of its connection: after a
+  new connection (or a server restart) the workflow runs again from its first
+  step, **steps included**, because the journal is empty. A `workflow.start`
+  that carries `resume` answers for a workflow whose journal holds nothing is
+  refused (`-32049`, `WorkflowNoJournal`) instead of running everything again
+  with answers that have nothing to answer. A start without answers is not
+  refused: it is how a workflow starts. Use Postgres stores for a workflow
+  that must survive a connection.
 
 The wire methods are in [RPC](../architecture/rpc.md#workflow-methods) and
 the engine in [Extensions](../architecture/ext.md#workflows-over-rpc).

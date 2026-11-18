@@ -265,7 +265,7 @@ class RunLeased(RunError):
 
 
 class WorkflowError(RpcError):
-    """A workflow call was refused or failed (-32045 to -32048)."""
+    """A workflow call was refused or failed (-32045 to -32049)."""
 
 
 class WorkflowHeld(WorkflowError):
@@ -310,6 +310,14 @@ class WorkflowCallFailed(WorkflowError):
 
 class WorkflowNotFound(WorkflowError):
     """This connection drives no workflow with that id (-32048)."""
+
+
+class WorkflowNoJournal(WorkflowError):
+    """`workflow.start` carried `resume` answers for a workflow whose journal
+    holds nothing (-32049): it never ran, or a memory-store agent's journal
+    ended with its connection, so it would run again from its first step with
+    answers that have nothing to answer. Nothing was claimed. Start it without
+    `resume`, or open the agent on Postgres stores."""
 
 
 class SchedulerError(RpcError):
@@ -424,6 +432,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32046: WorkflowBudgetExceeded,
     -32047: WorkflowCallFailed,
     -32048: WorkflowNotFound,
+    -32049: WorkflowNoJournal,
     -32022: LeaseLost,
     -32025: ContractMismatch,
     -32026: RunTerminal,
@@ -451,7 +460,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = RunError
         elif -32037 <= code <= -32035:
             cls = ProviderInfoError
-        elif -32048 <= code <= -32045:
+        elif -32049 <= code <= -32045:
             cls = WorkflowError
         else:
             cls = RpcError

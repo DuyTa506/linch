@@ -102,6 +102,7 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 | `tenants.<name>.tokens` | Các bearer token của tenant, mỗi token là `{"env": "VAR"}` (đọc khi khởi động) hoặc `{"value": "..."}` |
 | `tenants.<name>.allow` | Các allowlist của tenant, bên dưới |
 | `worker` | Chạy một worker trong tiến trình này: nó kích hoạt các lịch và chạy các job nền ([Scheduler](./scheduler.md#chạy-một-worker)). Không có: không chạy gì |
+| `liveness` | Cách listener HTTP nhận ra một client đã biến mất: TCP keepalive và ping WebSocket ([bên dưới](#liveness)). Mọi trường đều có mặc định |
 
 Bắt buộc có ít nhất một trong `socket`, `http` và `worker`, và với một listener thì cần
 ít nhất một token. Một token chỉ thuộc đúng một tenant: cùng một token xuất hiện hai lần
@@ -316,6 +317,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Thời gian chờ đăng nhập | 10 giây | `-32003` và kết nối đóng |
 | Kết nối HTTP đang chờ nâng cấp | 32, trên toàn server; kết nối đã nâng cấp trả lại chỗ | Kết nối bị đóng mà không đọc |
 | Phần đầu request HTTP | 10 giây cho mỗi phần đầu trước khi nâng cấp | Kết nối đóng mà không trả lời |
+| Một client HTTP đã biến mất | TCP keepalive (30 giây nhàn rỗi, 3 probe cách nhau 10 giây) và TCP user timeout 60 giây; một ping WebSocket mỗi 30 giây và 60 giây im lặng ([Liveness](#liveness)) | Kết nối kết thúc, giải phóng chỗ `max_connections`, các hold workflow và các lời gọi của nó |
 | Một message | 16 MiB | Request nhận `-32600` |
 | Một pool Postgres | Một pool cho mỗi tenant và đích, `stores.max_connections` kết nối (số core, trong khoảng 10 đến 32, nếu không đặt) | Các truy vấn chờ một kết nối; lần mở của tenant đã kết nối pool của nó đặt kích thước, và các lần mở sau của tenant dùng chung ([Kho lưu trữ](./stores.md#kết-nối-và-pool)) |
 | `max_pool_connections` | Kích thước pool mặc định cho mỗi tenant nếu không đặt | `agent.open` yêu cầu `stores.max_connections` lớn hơn nhận `-32004`, `data: {"kind": "pool_connections", "max": ...}`; không có gì được kết nối |
@@ -405,6 +407,65 @@ chối:
   một prerequisite, nên đây không phải cưỡng chế đối với host của chính tenant.
 
 ---
+
+## Log
+
+Các bản ghi `tracing` của server (job thất bại, retry và lỗi dọn dẹp của worker, lịch bị
+pause của scheduler, journal workflow bị lỗi, một lời gọi tool lịch thất bại ở store) đi ra
+**stderr**, không bao giờ ra stdout, nơi mang giao thức trên stdio. Mặc định chỉ ghi cảnh báo
+và lỗi. `LINCH_LOG` đặt bộ lọc (`RUST_LOG` được đọc khi nó chưa đặt), theo cú pháp directive
+của `tracing-subscriber`:
+
+```bash
+LINCH_LOG=info linch-server --config server.json            # ghi thêm các lần bỏ qua và retry
+LINCH_LOG=linch_worker=debug,warn linch-server --config server.json
+```
+
+Một giá trị không phải bộ lọc hợp lệ được báo trên stderr và `warn` được dùng. Các bản ghi có
+thể trích lại những gì một provider, một tool hay cơ sở dữ liệu đã nói, mà một endpoint có thể
+đã lặp lại một credential vào đó: hãy giữ log riêng tư như cơ sở dữ liệu. Nó không mang token
+nào và không mang key nào mà server tự đọc. Dưới systemd hoặc runtime container, stderr đã được
+thu thập; với `Server()` của client Python, thứ khởi động binary cho bạn, nó là stderr của
+process cha.
+
+## Liveness
+
+Một client biến mất mà không đóng kết nối (mất điện, đứt route, một VM bị kill) sẽ giữ chỗ
+trong `max_connections` của tenant, hold của các workflow và các lời gọi đang chạy của nó cho đến
+khi server khởi động lại. Vì vậy listener HTTP:
+
+- đặt **TCP keepalive** trên mọi socket được chấp nhận và một **TCP user timeout** dài bằng thời
+  gian keepalive mất để bỏ cuộc, nên kernel bỏ một peer không trả lời cả probe lẫn dữ liệu;
+- ping mỗi WebSocket cứ `ping_interval_ms` và kết thúc cái nào không gửi gì cả (không frame, không
+  pong) trong `pong_timeout_ms`. Một probe được kernel của peer trả lời, nên một client còn sống nhưng
+  bị treo vẫn qua được; một ping được code WebSocket của client trả lời, nên một client treo thì
+  không.
+
+Kết thúc một kết nối giống như input của nó kết thúc: các run của nó bị bỏ (một run Postgres giữ
+trạng thái bền vững cuối cùng và có thể resume), các lời gọi của nó được trả lời, và các chỗ của nó
+được giải phóng.
+
+**Một client đang bận nhưng còn sống phải giữ cho event loop của nó chạy.** Pong đến từ code
+WebSocket của client, chạy trên event loop của nó. Một client Python có loop bị chặn lâu hơn
+`pong_timeout_ms` (mặc định 60 giây) bởi một host tool đồng bộ sẽ không trả lời ping nào, nên
+server kết thúc kết nối; lời gọi kế tiếp của client ném `ConnectionClosed`, và các run của nó bị
+bỏ như trên. Một tool chờ bằng `await` hoặc chạy trong một thread (`asyncio.to_thread`) để loop
+rảnh, và kết nối vẫn còn. Vì vậy hãy chạy một host tool chặn lâu trong một thread. Điều này chỉ áp
+dụng cho WebSocket: client Python khởi động server qua stdio và một Unix socket không có kiểm tra
+liveness, nên cả hai đều không cắt một client đang bận. `test_remote.py` ghim quy tắc này với hai
+mốc thời gian được rút ngắn (timeout 400 ms và một client bị chặn 1 giây).
+
+| Trường `liveness` | Mặc định | Ý nghĩa |
+|---|---|---|
+| `keepalive_idle_ms` | 30000 | Thời gian nhàn rỗi trước probe đầu tiên |
+| `keepalive_interval_ms` | 10000 | Thời gian giữa các probe |
+| `keepalive_probes` | 3 | Số probe không được trả lời trước khi kết nối bị bỏ, tức tổng cộng khoảng 60 giây |
+| `ping_interval_ms` | 30000 | Thời gian giữa các ping WebSocket |
+| `pong_timeout_ms` | 60000 | Thời gian im lặng sau đó một WebSocket bị kết thúc; giữ nó lớn hơn `ping_interval_ms` |
+
+Mỗi trường ít nhất là 1. Một **Unix socket** không có cả hai: kernel đóng nó khi process của đầu
+bên kia kết thúc, bất kể lý do, nên nó không cần probe. Kết nối Postgres giữ một workflow đặt các
+keepalive riêng của cơ sở dữ liệu ([Workflows](./workflows.md#một-driver-cho-mỗi-workflow)).
 
 ## Môi trường của server bảo vệ những gì
 

@@ -681,7 +681,9 @@ mailbox message: the model cannot send one.
   once, emits it, then answers `{queued, id}`. So the answer is durable, and
   waits for the step in progress (a model call or tool batch holds the
   journal). A resent id is answered without a second event; more than 16
-  unread steers is `SteerQueueFull`.
+  unread steers is `SteerQueueFull`. The inbox is a channel of 16: a steer
+  that finds it full is refused at once with the same error
+  (`Steering::send`, `Unsent::Full`), so no caller waits behind 16 others.
 - **A suspended run** (approval or answer) that no runner of this process
   drives is claimed, gets the event written under the claim, and is put back
   to its status (`steer_stored`). A live lease elsewhere is `RunLeased`; a

@@ -35,6 +35,7 @@ from linch_rust import (
     WorkflowBudgetExceeded,
     WorkflowCallFailed,
     WorkflowHeld,
+    WorkflowNoJournal,
     WorkflowNotFound,
     _rpc,
 )
@@ -275,6 +276,7 @@ def test_envelopes_and_results_carry_their_time_and_cost() -> None:
         (-32046, WorkflowBudgetExceeded),
         (-32047, WorkflowCallFailed),
         (-32048, WorkflowNotFound),
+        (-32049, WorkflowNoJournal),
         (-32033, RunLeased),
         (-32040, NotBackground),
         (-32041, ScheduleNotFound),

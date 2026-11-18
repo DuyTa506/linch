@@ -382,6 +382,14 @@ Recall chạy trước mỗi lời gọi provider nên được thiết kế r�
 
 - Hook có timeout 300 ms. Một store không trả lời kịp làm request mất chừng đó, và request đi
   mà không có recall.
+- **Thời gian recall tăng theo posting list lớn nhất của scope**, tức các memory của một scope
+  chứa một từ của tin nhắn (đo trên một scope, Postgres cùng máy: khoảng 80 ms ở 60.000 memory
+  và khoảng 630 ms ở 600.000). Trên khoảng 200.000 memory trong một scope, recall hết thời gian
+  ở mọi lượt: mỗi lượt mất 300 ms và đi mà không có recall, còn run vẫn tiếp tục, nên một scope
+  quá lớn hiện ra là recall lặng lẽ ngừng, không phải một lỗi. Hãy chọn `max_memories_per_scope`
+  (một phần tư `max_memories` khi chưa đặt) để scope lớn nhất còn xa mức đó, chẳng hạn 100.000,
+  và nhớ rằng `max_memories` trên 800.000 cho phép một scope vượt 200.000 với mặc định.
+  `MemorySearch`, không có hook 300 ms mà chỉ có statement timeout 2 giây, chậm theo cùng cách.
 - Nó tìm bằng các từ của tin nhắn có tính chọn lọc: bỏ các từ chức năng tiếng Anh (`the`,
   `and`, `what`, `with`, ...), từ tiếng Anh dưới 3 chữ cái, và vài tiểu từ tiếng Việt (`và`,
   `của`, `là`, `những`, `các`, `một`, `này`, `thì`, `mà`). Từ ngắn có dấu (`ăn`, `mẹ`, `đi`) và

@@ -26,7 +26,14 @@ struct Sidecar {
 
 impl Sidecar {
     fn spawn() -> Self {
+        Self::spawn_with(&[])
+    }
+
+    fn spawn_with(env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_linch-server"))
+            .env_remove("LINCH_LOG")
+            .env_remove("RUST_LOG")
+            .envs(env.iter().copied())
             .env("DEEPSEEK_API_KEY", SECRET)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -67,6 +74,26 @@ impl Sidecar {
         let response = self.line().await;
         assert_eq!(response["id"], self.next_id, "{response}");
         response
+    }
+
+    /// [`Self::call`], reading past the notifications (`workflow.event`)
+    /// that come before the response.
+    async fn call_through(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let request = json!({"jsonrpc": "2.0", "id": self.next_id, "method": method,
+                             "params": params});
+        let stdin = self.stdin.as_mut().unwrap();
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        stdin.flush().await.unwrap();
+        loop {
+            let line = self.line().await;
+            if line["id"] == self.next_id {
+                return line;
+            }
+        }
     }
 
     /// The run's envelopes until `run.end`, which must carry no error.
@@ -148,6 +175,60 @@ async fn the_binary_serves_runs_over_stdio_and_never_echoes_keys() {
             "a client key echoed: {text}"
         );
     }
+}
+
+/// A workflow call whose agent cannot reach its provider: the server logs
+/// `a workflow call failed` with `tracing::warn!`. Returns what the server
+/// wrote to stderr once it exited; stdout carried only protocol lines.
+async fn stderr_after_a_failed_workflow_call(env: &[(&str, &str)]) -> String {
+    let mut server = Sidecar::spawn_with(env);
+    let deepseek = json!({"namespace": "stdio",
+                          "spec": {"model": "deepseek-flash", "provider_retry": {"max_attempts": 1}},
+                          "provider": {"id": "deepseek", "base_url": "http://127.0.0.1:1"}});
+    let opened = server.call("agent.open", deepseek).await;
+    let agent = opened["result"]["agent"].clone();
+    let started = server
+        .call_through("workflow.start", json!({"agent": agent, "run_id": "w"}))
+        .await;
+    assert!(started["result"].is_object(), "{started}");
+    let failed = server
+        .call_through("workflow.agent", json!({"run_id": "w", "prompt": "hi"}))
+        .await;
+    assert_eq!(
+        failed["error"]["code"],
+        linch_rpc::code::WORKFLOW_CALL_FAILED,
+        "{failed}"
+    );
+    server
+        .call_through("workflow.finish", json!({"run_id": "w", "ok": false}))
+        .await;
+    drop(server.stdin.take());
+    let status = timeout(Duration::from_secs(20), server.child.wait())
+        .await
+        .expect("server did not exit after stdin closed")
+        .unwrap();
+    assert!(status.success(), "{status}");
+    let mut stderr = String::new();
+    let mut pipe = server.child.stderr.take().unwrap();
+    pipe.read_to_string(&mut stderr).await.unwrap();
+    assert!(!stderr.contains(SECRET), "the key leaked: {stderr}");
+    stderr
+}
+
+/// The server's `tracing` records go to stderr (warnings by default), and
+/// `LINCH_LOG` filters them: without a subscriber every `tracing::warn!`
+/// went nowhere.
+#[tokio::test]
+async fn the_servers_log_goes_to_stderr_and_linch_log_filters_it() {
+    let stderr = stderr_after_a_failed_workflow_call(&[]).await;
+    assert!(stderr.contains("a workflow call failed"), "{stderr}");
+    assert!(stderr.contains("WARN"), "{stderr}");
+
+    let quiet = stderr_after_a_failed_workflow_call(&[("LINCH_LOG", "error")]).await;
+    assert!(!quiet.contains("a workflow call failed"), "{quiet}");
+    // RUST_LOG is read when LINCH_LOG is not set.
+    let off = stderr_after_a_failed_workflow_call(&[("RUST_LOG", "off")]).await;
+    assert!(!off.contains("a workflow call failed"), "{off}");
 }
 
 /// Stdio that is not a pipe (files here) falls back to tokio's stdin and

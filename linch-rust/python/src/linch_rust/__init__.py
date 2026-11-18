@@ -93,6 +93,7 @@ from .errors import (
     WorkflowCallFailed,
     WorkflowError,
     WorkflowHeld,
+    WorkflowNoJournal,
     WorkflowNotFound,
 )
 from .events import (
@@ -184,6 +185,7 @@ __all__ = [
     "WorkflowContext",
     "WorkflowError",
     "WorkflowHeld",
+    "WorkflowNoJournal",
     "WorkflowNotFound",
     "WorkflowStatus",
     "WorkflowSuspended",

@@ -72,7 +72,7 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` when the list lacks it |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` on the agent; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown}`; an unknown run is `-32021` |
-| `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, tenant caps, then `WorkflowSession::open_held`; `-32045` while another client drives it | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
+| `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, tenant caps, then `WorkflowSession::open_held`; `-32045` while another client drives it, `-32049` for `resume` answers when the journal holds nothing | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` on the branch; dropped with the connection like a run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; the ticket is held by the server | `{replayed, value?, ticket?}`, `{}` |
 | `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
@@ -115,7 +115,7 @@ docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
 | -32020 to -32034, -32038 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema` or `tool_choice` (`-32034`), an answer that does not fit (`-32032`, `data.reason`), a lost lease (`-32022`, from a claim or a fenced journal write), a run another process leases (`-32033`, `data: {run_id, owner, expires_in_ms}`), a steer that is blank, too long or has an unusable id (`-32038`, `data.reason`) |
 | -32035 to -32037 | The provider methods: a provider with no model list (`-32035`, `data.provider`), a model its list lacks (`-32036`, `data.model`, and `data.truncated` when the list was cut), a request that failed or an error answer (`-32037`, `data: {kind, status?}`, `kind` one of `unreachable` (connect, reset and timeout alike), `status`, `invalid_request`, `other`; the message is one fixed text per kind, never the key, the URL or the vendor's words). A missing key is `-32013` with `data.env`. A tenant needs `allow.provider_info` and an allowed `base_url` (`-32004`, `kind` `provider_info` or `provider_base_url`) |
 | -32040 to -32044 | The scheduler methods: an agent that cannot run in the background (`-32040`, `data.reason` `memory_store`, `host_tools` or `callbacks`), an unknown schedule (`-32041`), a taken schedule id (`-32042`), an unknown job (`-32043`), an unusable timing (`-32044`, `data.reason`) |
-| -32045 to -32048 | The workflow methods: another client drives the workflow (`-32045`), the budget is spent (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), an agent call did not produce a result (`-32047`, `data.kind` `failed`, `aborted`, `timeout`, `approval` or `invalid`), a call for a workflow this connection does not drive (`-32048`); `workflow.status` of an id the agent's namespace does not hold is `-32021`, and `workflow.start` of an existing id with another principal (or none, or one where it had none) is `-32004`, `kind: workflow_principal`. A tenant needs `allow.workflow` (`-32004`, `kind: workflow`, or `workflow_budget` above its ceiling) and meets `-32005` with `kind` `workflows`, `agent_calls_in_flight` or `journal_records` |
+| -32045 to -32049 | The workflow methods: another client drives the workflow (`-32045`), the budget is spent (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), an agent call did not produce a result (`-32047`, `data.kind` `failed`, `aborted`, `timeout`, `approval` or `invalid`), a call for a workflow this connection does not drive (`-32048`), `resume` answers for a workflow whose journal holds nothing (`-32049`); `workflow.status` of an id the agent's namespace does not hold is `-32021`, and `workflow.start` of an existing id with another principal (or none, or one where it had none) is `-32004`, `kind: workflow_principal`. A tenant needs `allow.workflow` (`-32004`, `kind: workflow`, or `workflow_budget` above its ceiling) and meets `-32005` with `kind` `workflows`, `agent_calls_in_flight` or `journal_records` |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to
@@ -278,8 +278,14 @@ the bearer token first (`401` with `WWW-Authenticate: Bearer`), then takes
 the tenant's connection place (`429`), then answers `101` naming the
 tenant in `Linch-Tenant`. A WebSocket message may be 64 MiB
 (`MAX_MESSAGE_BYTES`, `http.rs:49-52`) before the socket closes; one over
-16 MiB is refused by the core like an oversized line. The server speaks
-plain HTTP: put TLS in front of it or listen on loopback.
+16 MiB is refused by the core like an oversized line. Every accepted
+socket gets TCP keepalive and a TCP user timeout (`liveness.rs`, `tune`), and
+a WebSocket is pinged every `ping_interval` and ended after `pong_timeout` of
+silence (`http.rs`, `serve_socket`): a frame reader of its own feeds the
+connection through a channel of one, so a connection busy with 64 calls, which
+stops reading input, still reads its pongs. The times are the `liveness`
+section of the config. The server speaks plain HTTP: put TLS in front of it
+or listen on loopback.
 
 A listening server keeps no pools of its own: every connection acts for a
 tenant and uses the tenant's pools (below).

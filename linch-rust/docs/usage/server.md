@@ -101,6 +101,7 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 | `tenants.<name>.tokens` | Its bearer tokens, each `{"env": "VAR"}` (read at startup) or `{"value": "..."}` |
 | `tenants.<name>.allow` | Its allowlists, below |
 | `worker` | Run a worker in this process: it fires schedules and runs background jobs ([Scheduler](./scheduler.md#run-a-worker)). Absent: none |
+| `liveness` | How the HTTP listener notices a client that vanished: TCP keepalive and WebSocket pings ([below](#liveness)). Every field has a default |
 
 At least one of `socket`, `http` and `worker` is required, and with a
 listener at least one token. A token names exactly one tenant: the same
@@ -315,6 +316,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | Login wait | 10 seconds | `-32003` and the connection closes |
 | HTTP connections waiting for their upgrade | 32, across the server; an upgraded one gives its place back | The connection is closed unread |
 | HTTP request head | 10 seconds for each head before the upgrade | The connection closes without an answer |
+| A vanished HTTP client | TCP keepalive (30 s idle, 3 probes 10 s apart) and a TCP user timeout of 60 s; a WebSocket ping every 30 s and 60 s of silence ([Liveness](#liveness)) | The connection ends, freeing its `max_connections` place, its workflow holds and its calls |
 | One message | 16 MiB | The request gets `-32600` |
 | A Postgres pool | One per tenant and target, `stores.max_connections` connections (the number of cores, between 10 and 32, unless set) | Queries wait for a connection; the tenant's open that connects its pool sets the size and its later opens share it ([Stores](./stores.md#connections-and-pools)) |
 | `max_pool_connections` | The default pool size per tenant unless set | `agent.open` asking for a larger `stores.max_connections` gets `-32004`, `data: {"kind": "pool_connections", "max": ...}`; nothing connects |
@@ -407,6 +409,73 @@ silently instead:
   against the tenant's own host.
 
 ---
+
+## Logging
+
+The server's `tracing` records (the worker's failed jobs, retries and
+pruning errors, the scheduler's paused schedules, a workflow journal that
+failed, a schedule tool call that failed in the store) go to **stderr**, never
+to stdout, which carries the protocol on stdio. By default only warnings and
+errors are written. `LINCH_LOG` sets the filter (`RUST_LOG` is read when it
+is unset), in the directive syntax of `tracing-subscriber`:
+
+```bash
+LINCH_LOG=info linch-server --config server.json            # also skips and retries
+LINCH_LOG=linch_worker=debug,warn linch-server --config server.json
+```
+
+A value that is not a valid filter is reported on stderr and `warn` is used.
+Records can quote what a provider, a tool or the database said, which an
+endpoint may have echoed a credential into: keep the log as private as the
+database. It carries no token and no key the server read itself. Under
+systemd or a container runtime stderr is already collected; with the
+Python client's `Server()`, which starts the binary for you, it is the
+parent's stderr.
+
+## Liveness
+
+A client that vanishes without closing its connection (a power cut, a dropped
+route, a killed VM) would keep its place among the tenant's `max_connections`,
+its workflows' holds and its calls in flight until the server restarted. The
+HTTP listener therefore:
+
+- sets **TCP keepalive** on every accepted socket and a **TCP user timeout**
+  as long as the keepalive takes to give up, so the kernel drops a peer that
+  answers neither probes nor data;
+- pings each WebSocket every `ping_interval_ms` and ends one that sent
+  nothing at all (no frame, no pong) for `pong_timeout_ms`. A probe is
+  answered by the peer's kernel, so a client that is alive but hung passes it;
+  a ping is answered by the client's WebSocket code, so a hung client does
+  not.
+
+Ending a connection is the same as its input ending: its runs are dropped (a
+Postgres run keeps its last durable state and can be resumed), its calls are
+answered, and its places are freed.
+
+**A client that is busy but alive must keep its event loop running.** The
+pong comes from the client's WebSocket code, which runs on its event loop. A
+Python client whose loop is blocked for longer than `pong_timeout_ms` (60 s by
+default) by a synchronous host tool answers no ping, so the server ends the
+connection; the client's next call raises `ConnectionClosed`, and its runs are
+dropped as above. A tool that waits (`await`) or runs in a thread
+(`asyncio.to_thread`) leaves the loop free and the connection stays. So run a
+long blocking host tool in a thread. This applies to the WebSocket only: the
+Python client spawns a server over stdio and a Unix socket has no liveness
+check, so neither cuts a busy client. `test_remote.py` pins the rule with the
+two times shortened (a 400 ms timeout and a client blocked for 1 s).
+
+| `liveness` field | Default | Meaning |
+|---|---|---|
+| `keepalive_idle_ms` | 30000 | Idle time before the first probe |
+| `keepalive_interval_ms` | 10000 | Time between probes |
+| `keepalive_probes` | 3 | Unanswered probes before the connection is dropped, so about 60 s in all |
+| `ping_interval_ms` | 30000 | Time between WebSocket pings |
+| `pong_timeout_ms` | 60000 | Silence after which a WebSocket is ended; keep it above `ping_interval_ms` |
+
+Each is at least 1. A **Unix socket** has neither: the kernel closes it when
+the peer's process ends, whatever the cause, so it needs no probe. The
+Postgres connection that holds a workflow sets the database's own keepalives
+([Workflows](./workflows.md#one-driver-per-workflow)).
 
 ## What the server's environment protects
 

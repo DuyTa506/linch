@@ -306,9 +306,10 @@ pub fn agent_key_with(
     Ok(digest_with_domain("agent", &value)?.to_string())
 }
 
-/// The content key of one `interrupt` call. Only the key is hashed: the
-/// payload may be rebuilt differently across resumes without losing the
-/// stored answer.
+/// The content key of one `interrupt` call. Only the key is hashed: an
+/// answer already journaled replays whatever payload the call is made with.
+/// An answer given to a resume that has not been journaled yet is matched
+/// on the payload too (see `WorkflowContext::interrupt`).
 pub fn interrupt_key(key: &str) -> String {
     digest_with_domain("interrupt", &JsonValue::String(key.to_owned()))
         .expect("a JSON string always encodes")

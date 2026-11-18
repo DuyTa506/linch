@@ -256,6 +256,16 @@ async fn bounded<T>(call: impl Future<Output = Result<T, ToolCacheError>>) -> Op
     tokio::time::timeout(STORE_TIMEOUT, call).await.ok()?.ok()
 }
 
+/// Clear `cache`'s namespace, once more when the first try fails or times
+/// out: a transient error should not end caching for the agent, and what a
+/// failed clear leaves behind is served to other agents until the ttl.
+async fn clear_retrying(cache: &ToolCacheHandle) -> Option<()> {
+    match bounded(cache.store.clear(&cache.namespace)).await {
+        Some(()) => Some(()),
+        None => bounded(cache.store.clear(&cache.namespace)).await,
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -427,7 +437,7 @@ impl<S: ToolSink> Runner<'_, S> {
         let launches =
             (call.tool.as_ref()).is_some_and(|tool| tool.tool().launches_background(&call.input));
         if launches {
-            cache.stop();
+            cache.stop("a tool started work that outlives the call");
         }
     }
 
@@ -442,18 +452,18 @@ impl<S: ToolSink> Runner<'_, S> {
 
     /// Clear the namespace's entries before a write or exec tool starts.
     /// Whether the run abort fired first, so the tool must not start. A
-    /// clear that fails or times out leaves entries that may be stale, so
-    /// caching ends for the agent.
+    /// clear that fails or times out is tried once more; if that fails too
+    /// it leaves entries that may be stale, so caching ends for the agent.
     async fn clear_before(&self, call: &PlannedCall) -> bool {
         let Some(cache) = self.clearing(call) else {
             return false;
         };
-        let clearing = bounded(cache.store.clear(&cache.namespace));
+        let clearing = clear_retrying(cache);
         match self.options.cancel.run_until_cancelled(clearing).await {
             None => true,
             Some(Some(())) => false,
             Some(None) => {
-                cache.stop();
+                cache.stop("clearing the entries before a write failed");
                 false
             }
         }
@@ -466,8 +476,8 @@ impl<S: ToolSink> Runner<'_, S> {
         let Some(cache) = self.clearing(call) else {
             return;
         };
-        if bounded(cache.store.clear(&cache.namespace)).await.is_none() {
-            cache.stop();
+        if clear_retrying(cache).await.is_none() {
+            cache.stop("clearing the entries after a write failed");
         }
     }
 

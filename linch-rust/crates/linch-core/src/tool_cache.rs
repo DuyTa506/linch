@@ -60,7 +60,15 @@
 //!   background work in a workspace other servers cache.
 //! - **A store failure or a timeout is a miss**, never model-visible text:
 //!   every store call is bounded by [`STORE_TIMEOUT`]. A clear that fails
-//!   also ends caching for the run's agent, as stale entries may remain.
+//!   is tried once more, then also ends caching for the run's agent (a
+//!   `tracing` warning says so, once), as stale entries may remain.
+//! - **A failed clear leaves a window.** Stopping caching protects only the
+//!   agent whose clear failed: the entries stay in the store, so another
+//!   agent of the namespace, and another server that shares a Postgres
+//!   cache, serves them until their ttl although a write changed what they
+//!   hold. Keep [`ToolCache::ttl_ms`] short where a stale answer costs
+//!   something, and leave the cache off a workspace that several servers
+//!   write to.
 //! - **Bytes are bounded** per namespace by [`ToolCache::max_entries`] and
 //!   by [`ToolCache::max_value_bytes`] a result, and per group of
 //!   namespaces by [`ToolCache::quota`] (the oldest entries go first); a
@@ -321,9 +329,16 @@ impl ToolCacheHandle {
         }
     }
 
-    /// End caching for the agent.
-    pub(crate) fn stop(&self) {
-        self.stopped.store(true, Ordering::Release);
+    /// End caching for the agent, and say why, once: a result that stops
+    /// being reused for no visible reason is hard to find otherwise.
+    pub(crate) fn stop(&self, reason: &str) {
+        if !self.stopped.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                namespace = %self.namespace,
+                reason,
+                "the tool cache stopped for an agent"
+            );
+        }
     }
 
     /// Whether caching has ended for the agent.

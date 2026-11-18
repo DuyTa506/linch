@@ -276,6 +276,7 @@ impl JournalStore for PgJournalStore {
         // Detached, so its slot returns to the pool and the connection
         // closes (freeing the lock) when the hold drops.
         let mut connection = self.pool.acquire().await.map_err(backend)?.detach();
+        keepalives(&mut connection).await.map_err(backend)?;
         // The schema is part of the name, so two schemas of one database
         // (as parallel tests use) never share a hold.
         let name = format!(
@@ -296,6 +297,23 @@ impl JournalStore for PgJournalStore {
         }
         Ok(WorkflowHold::new(PgHold(Some(connection))))
     }
+}
+
+/// Make Postgres notice a vanished host: the lock of a hold lives as long as
+/// the connection, and a server whose host loses power sends no FIN, so
+/// without keepalives the backend waits for the operating system's default
+/// (two hours) before it frees the lock. Idle 30 s, a probe every 10 s, 3
+/// probes: about a minute. Set for this session only, on a connection that
+/// is closed with the hold; a Unix-socket connection ignores them.
+async fn keepalives(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT set_config('tcp_keepalives_idle', '30', false), \
+                set_config('tcp_keepalives_interval', '10', false), \
+                set_config('tcp_keepalives_count', '3', false)",
+    )
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 /// The connection that holds a workflow's advisory lock.
@@ -323,5 +341,39 @@ impl Drop for PgHold {
                 let _ = connection.close().await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::{Connection as _, PgConnection};
+
+    use super::keepalives;
+
+    /// The hold's connection asks Postgres to probe its client: 30 s idle, a
+    /// probe every 10 s, 3 of them. Skipped without `LINCH_TEST_PG_DSN`.
+    #[tokio::test]
+    async fn a_hold_connection_sets_the_database_keepalives() {
+        let Ok(dsn) = std::env::var("LINCH_TEST_PG_DSN") else {
+            return;
+        };
+        let mut connection = PgConnection::connect(&dsn).await.unwrap();
+        keepalives(&mut connection).await.unwrap();
+        let idle: String = sqlx::query_scalar("SHOW tcp_keepalives_idle")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        let interval: String = sqlx::query_scalar("SHOW tcp_keepalives_interval")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        let count: String = sqlx::query_scalar("SHOW tcp_keepalives_count")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            (idle.as_str(), interval.as_str(), count.as_str()),
+            ("30", "10", "3")
+        );
     }
 }

@@ -278,8 +278,9 @@
 //! drives is `-32033`, a finished one `-32026`, an unknown one (or one of
 //! another tenant) `-32021`, a blank or over-long (16 KiB) text or an
 //! unusable id, or an idle run (queued, or running with no server driving it:
-//! resume it first) `-32035`, and a run with 16 unread steers `-32005` (`kind`
-//! `steers`). It is not routed to another server.
+//! resume it first) `-32038`, and a run with 16 steers waiting or unread
+//! `-32005` (`kind` `steers`), answered at once. It is not routed to another
+//! server.
 //!
 //! **`run.cancel`** `{run_id, agent?}` ([`CancelParams`](protocol::CancelParams))
 //! aborts a run the connection drives: it ends with a `result` envelope of
@@ -530,6 +531,7 @@
 //! | -32046 | workflow budget | the workflow's budget is spent; `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}` |
 //! | -32047 | workflow call failed | a `workflow.agent` call's run failed, was aborted, timed out or waits for an approval, or its subagent is unknown; `data: {kind}` |
 //! | -32048 | workflow not found | this connection drives no workflow with that id |
+//! | -32049 | workflow has no journal | `workflow.start` carried `resume` answers for a workflow whose journal holds nothing (it never ran, or a memory-store agent's journal ended with its connection); nothing was claimed; `data: {run_id}` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.

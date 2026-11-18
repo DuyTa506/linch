@@ -10,8 +10,8 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 use linch_core::{Commit, LogEntry, MessageEntry, RunId, RunStore, SessionId, SessionStore};
-use linch_core::{Message, StoreError};
-use linch_postgres::{PgRunStore, PgSessionStore};
+use linch_core::{MemoryError, MemoryStore, Message, NewMemory, StoreError};
+use linch_postgres::{PgMemoryStore, PgRunStore, PgSessionStore};
 use sqlx::AssertSqlSafe;
 
 use crate::common::{TestDb, checkpoint, envelope, new_run};
@@ -137,4 +137,53 @@ async fn a_crash_inside_append_changes_nothing() {
         "the length rolled back"
     );
     db.finish().await;
+}
+
+/// A memory save is one transaction whose only write is one row (content,
+/// tags and the words the index reads together): a connection that dies at
+/// the insert leaves no row and no words, the cap's advisory lock is not
+/// left held, and the same save then stores exactly one memory.
+#[tokio::test]
+async fn a_crash_inside_a_memory_save_leaves_nothing_and_the_retry_stores_one() {
+    for capped in [false, true] {
+        let name = format!("crash_memory_{capped}");
+        let Some(db) = TestDb::migrated(&name).await else {
+            return;
+        };
+        let mut store = PgMemoryStore::new(db.pool.clone(), "ns");
+        if capped {
+            store = store.with_cap(10);
+        }
+        let memory = NewMemory::new("k1", "the deploy key lives in vault", &["ops".into()]);
+        let memory = memory.unwrap();
+        let saving = store.save(Some("p1"), memory.clone());
+        let result = crash_on_insert(&db, "linch_memories", saving).await;
+        assert!(matches!(result, Err(MemoryError::Backend(_))), "{result:?}");
+        let rows = "SELECT count(*) FROM linch_memories";
+        let held: i64 = sqlx::query_scalar(rows).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(held, 0, "capped {capped}: the row rolled back");
+        let found = store
+            .search(Some("p1"), "deploy vault", 5, 1)
+            .await
+            .unwrap();
+        assert!(found.is_empty(), "capped {capped}: no words left behind");
+
+        let saved = store.save(Some("p1"), memory.clone()).await;
+        let saved = saved.expect("the same save succeeds, so no lock leaked");
+        let again = store.save(Some("p1"), memory).await.unwrap();
+        assert_eq!(again.id, saved.id, "capped {capped}: replay is one row");
+        let held: i64 = sqlx::query_scalar(rows).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(held, 1, "capped {capped}");
+        let words: i32 = sqlx::query_scalar("SELECT cardinality(terms) FROM linch_memories")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert!(words >= 4, "capped {capped}: {words} words in the row");
+        let found = store
+            .search(Some("p1"), "deploy vault", 5, 1)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "capped {capped}");
+        db.finish().await;
+    }
 }

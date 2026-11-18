@@ -117,7 +117,7 @@ docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32020 đến -32034, -32038 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` hoặc `tool_choice` không dùng được (`-32034`), một câu trả lời không khớp (`-32032`, `data.reason`), một lease đã mất (`-32022`, từ một claim hoặc một lần ghi journal bị fence), một run mà process khác đang giữ lease (`-32033`, `data: {run_id, owner, expires_in_ms}`), một steer để trống, quá dài hoặc có id không dùng được (`-32038`, `data.reason`) |
 | -32035 đến -32037 | Các method provider: một provider không có danh sách model (`-32035`, `data.provider`), một model mà danh sách của nó không có (`-32036`, `data.model`, và `data.truncated` khi danh sách bị cắt), một request thất bại hoặc một câu trả lời lỗi (`-32037`, `data: {kind, status?}`, `kind` là một trong `unreachable` (kết nối, reset và timeout như nhau), `status`, `invalid_request`, `other`; message là một văn bản cố định cho mỗi kind, không bao giờ chứa key, URL hay lời của vendor). Thiếu key là `-32013` với `data.env`. Một tenant cần `allow.provider_info` và một `base_url` được cho phép (`-32004`, `kind` là `provider_info` hoặc `provider_base_url`) |
 | -32040 đến -32044 | Các method của scheduler: một agent không thể chạy nền (`-32040`, `data.reason` là `memory_store`, `host_tools` hoặc `callbacks`), một lịch không biết (`-32041`), một id lịch đã dùng (`-32042`), một job không biết (`-32043`), một timing không dùng được (`-32044`, `data.reason`) |
-| -32045 đến -32048 | Các method workflow: một client khác đang drive workflow (`-32045`), budget đã hết (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), một lời gọi agent không tạo ra kết quả (`-32047`, `data.kind` là `failed`, `aborted`, `timeout`, `approval` hoặc `invalid`), một lời gọi cho workflow mà kết nối này không drive (`-32048`); `workflow.status` của một id mà namespace của agent không có là `-32021`, và `workflow.start` của một id đã có với principal khác (hoặc không có, hoặc có ở chỗ trước đó không có) là `-32004`, `kind: workflow_principal`. Một tenant cần `allow.workflow` (`-32004`, `kind: workflow`, hoặc `workflow_budget` khi vượt mức trần của nó) và gặp `-32005` với `kind` là `workflows`, `agent_calls_in_flight` hoặc `journal_records` |
+| -32045 đến -32049 | Các method workflow: một client khác đang drive workflow (`-32045`), budget đã hết (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), một lời gọi agent không tạo ra kết quả (`-32047`, `data.kind` là `failed`, `aborted`, `timeout`, `approval` hoặc `invalid`), một lời gọi cho workflow mà kết nối này không drive (`-32048`), các câu trả lời `resume` cho một workflow mà journal không có gì (`-32049`); `workflow.status` của một id mà namespace của agent không có là `-32021`, và `workflow.start` của một id đã có với principal khác (hoặc không có, hoặc có ở chỗ trước đó không có) là `-32004`, `kind: workflow_principal`. Một tenant cần `allow.workflow` (`-32004`, `kind: workflow`, hoặc `workflow_budget` khi vượt mức trần của nó) và gặp `-32005` với `kind` là `workflows`, `agent_calls_in_flight` hoặc `journal_records` |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
@@ -275,8 +275,12 @@ bearer token trước (`401` với `WWW-Authenticate: Bearer`), rồi lấy
 chỗ kết nối của tenant (`429`), rồi trả lời `101` nêu tên
 tenant trong `Linch-Tenant`. Một message WebSocket có thể dài 64 MiB
 (`MAX_MESSAGE_BYTES`, `http.rs:49-52`) trước khi socket đóng; một message trên
-16 MiB bị lõi từ chối như một dòng quá khổ. Server nói HTTP thuần:
-hãy đặt TLS phía trước nó hoặc listen trên loopback.
+16 MiB bị lõi từ chối như một dòng quá khổ. Mỗi socket được chấp nhận có TCP keepalive và
+một TCP user timeout (`liveness.rs`, `tune`), và một WebSocket được ping mỗi `ping_interval` và bị
+kết thúc sau `pong_timeout` im lặng (`http.rs`, `serve_socket`): một vòng đọc frame riêng nạp
+kết nối qua một channel dung lượng một, nên một kết nối đang bận 64 lời gọi, thứ ngừng đọc input,
+vẫn đọc được các pong của nó. Các mốc thời gian là phần `liveness` của cấu hình. Server nói HTTP
+thuần: hãy đặt TLS phía trước nó hoặc listen trên loopback.
 
 Một server đang listen không giữ pool riêng: mọi kết nối hành động thay cho một tenant
 và dùng các pool của tenant đó (bên dưới).

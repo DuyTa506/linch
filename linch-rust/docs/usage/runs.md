@@ -536,6 +536,11 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   steer, and a resumed run reads what is still pending back from its journal:
   a steer is logged once, whatever write a crash cut. With memory stores
   nothing survives the process, so neither does a steer.
+- **A steer that fails after its claim.** A suspended run is claimed for the
+  write and put back. If the write that puts it back fails, the run can show
+  `running` although it is still suspended and nobody drives it. It is not
+  stuck: `approve`, `answer`, `cancel` and `resume` each still end or
+  continue it, and a steer sent again with the same id is taken once.
 - **A call sent again.** `steer_id` names the steer (letters, digits and
   `-_.:`, at most 128 bytes). Sent again with the same id after a dropped
   answer, the steer is taken once. A call that fails with the run stopped
@@ -545,8 +550,10 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   gets `RunLeased` (with `expires_in`), as `approve` does, and so does one for
   a run whose crashed server's lease has not run out.
 - **Bounds.** At most 16 KiB of text, not blank (`InvalidSteer`, -32038,
-  `reason`), and at most 16 steers a run has not read yet (`LimitReached`,
-  `kind` `steers`). A tenant steers only the runs of its own agents: a run id
+  `reason`), and at most 16 steers a run has not read yet, counting
+  those still waiting for its next step (`LimitReached`, `kind` `steers`):
+  past 16 the call is refused at once, so waiting steers never hold the
+  connection's request places and a `cancel` on it is always read. A tenant steers only the runs of its own agents: a run id
   of another namespace is `RunNotFound`.
 - **Prompt checks.** Prompt redaction and the `user_prompt_submit` callbacks
   see a steer as they see a prompt, with `source` `"steer"` in the callback's

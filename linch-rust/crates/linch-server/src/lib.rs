@@ -112,6 +112,8 @@
 mod config;
 mod http;
 mod listen;
+mod liveness;
+mod logging;
 mod worker;
 
 pub use config::{
@@ -119,4 +121,6 @@ pub use config::{
 };
 pub use http::{HEADER_READ_TIMEOUT, MAX_PENDING_UPGRADES, PATH};
 pub use listen::Listeners;
+pub use liveness::LivenessConfig;
+pub use logging::{init_logging, log_filter};
 pub use worker::{BackgroundWorker, WorkerStartError};

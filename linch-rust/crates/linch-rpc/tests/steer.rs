@@ -145,6 +145,85 @@ async fn a_tenant_steers_only_its_own_runs() {
     assert_eq!(code_of(error), code::TERMINAL);
 }
 
+/// A steer waits for the run's next step boundary and holds one of the
+/// connection's request places meanwhile. Steers waiting on a run that is in
+/// a long tool must not keep the same connection from cancelling it.
+#[tokio::test]
+async fn steers_waiting_on_a_long_tool_do_not_hold_up_a_cancel() {
+    let rpc = Rpc::with_handler(handler(|_, _, _cancel| {
+        std::future::pending::<Result<Value, linch_rpc::ErrorObject>>()
+    }));
+    let turns = vec![
+        tool_turn("call_1", "lookup", json!({"q": "cats"})),
+        text_turn("Done."),
+    ];
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let agent = rpc.open(hosted(turns, "default", tools)).await;
+    let run_id = rpc.start(&agent, "s1", "Find cats").await;
+    // Give the run time to reach the hanging tool.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let steers = futures::future::join_all((0..64).map(|n| {
+        let id = format!("s{n}");
+        let params = json!({"agent": agent, "run_id": run_id, "text": "hi", "id": id});
+        rpc.call(method::RUN_STEER, params)
+    }));
+    tokio::pin!(steers);
+    let cancel = async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let params = json!({"agent": agent, "run_id": run_id});
+        let cancel = rpc.call(method::RUN_CANCEL, params);
+        tokio::time::timeout(std::time::Duration::from_secs(3), cancel).await
+    };
+    // Biased: the cancel's answer ends the run, which answers the waiting
+    // steers at the same moment; only an answer that comes first is wrong.
+    tokio::select! {
+        biased;
+        cancelled = cancel => {
+            let answered = cancelled.expect("the cancel was never read: 64 steers hold every place");
+            assert_eq!(answered.unwrap()["cancelled"], json!(true));
+        }
+        _ = &mut steers => panic!("a steer was answered before the run reached a boundary"),
+    }
+}
+
+/// The steers waiting for a run in a long tool are bounded like the ones it
+/// holds unread: past 16 an arrival is refused at once, not queued behind a
+/// caller that waits for the run's next step.
+#[tokio::test]
+async fn the_seventeenth_waiting_steer_is_refused_at_once() {
+    let rpc = Rpc::with_handler(handler(|_, _, _cancel| {
+        std::future::pending::<Result<Value, linch_rpc::ErrorObject>>()
+    }));
+    let turns = vec![
+        tool_turn("call_1", "lookup", json!({"q": "cats"})),
+        text_turn("Done."),
+    ];
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let agent = rpc.open(hosted(turns, "default", tools)).await;
+    let run_id = rpc.start(&agent, "s1", "Find cats").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let steer = |n: usize| {
+        let id = format!("w{n}");
+        let params = json!({"agent": agent, "run_id": run_id, "text": "hi", "id": id});
+        rpc.call(method::RUN_STEER, params)
+    };
+    let waiting = futures::future::join_all((0..16).map(steer));
+    tokio::pin!(waiting);
+    let refused = async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), steer(16)).await
+    };
+    tokio::select! {
+        biased;
+        refused = refused => {
+            let error = refused.expect("the 17th steer was held, not refused").unwrap_err();
+            assert_eq!(refusal(error), (code::LIMIT_REACHED, Some("steers".to_owned())));
+        }
+        _ = &mut waiting => panic!("a steer was answered before the run reached a boundary"),
+    }
+}
+
 fn config_in(namespace: &str) -> Value {
     let mut config = scripted(vec![text_turn("Done.")], None, "");
     config["namespace"] = json!(namespace);
