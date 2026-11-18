@@ -173,13 +173,18 @@ fn a_view_clips_from_its_start_index_and_keeps_what_comes_before() {
 
 #[test]
 fn budgets_halve_with_each_refusal() {
-    // The first delivery reads what the window leaves after the output.
-    assert_eq!(folded_budget(8000, 4096, 0, 3300), 3904);
+    // The first request reads what the window leaves after the output, at
+    // most half of it.
+    assert_eq!(folded_budget(8000, 4096, 0, 3300), 4000);
+    assert_eq!(folded_budget(8000, 1000, 0, 3300), 7000);
     // Then half of what the part weighs, or of that room if it is smaller.
     assert_eq!(folded_budget(8000, 4096, 1, 3300), 1650);
     assert_eq!(folded_budget(8000, 4096, 2, 3300), 825);
-    assert_eq!(folded_budget(8000, 4096, 1, 90_000), 1952);
-    assert_eq!(folded_budget(100, 4096, 3, 50), 1, "never zero");
+    assert_eq!(folded_budget(8000, 4096, 1, 90_000), 2000);
+    assert_eq!(folded_budget(10, 4096, 3, 5), 1, "never zero");
+    // An output limit at or over the window still leaves half of it.
+    assert_eq!(folded_budget(8192, 8192, 0, 3000), 4096);
+    assert_eq!(folded_budget(8192, 100_000, 0, 3000), 4096);
     assert_eq!(last_turn_budget(8000, 0), Some(4000));
     assert_eq!(last_turn_budget(8000, 2), Some(1000));
     assert_eq!(last_turn_budget(8000, MAX_CLIP_ROUNDS + 1), None);

@@ -284,7 +284,7 @@ pub fn reconcile(
             // again on less of the older part while it has tries left.
             if receipt {
                 if forced.latest_forced {
-                    if forced.refused && forced.tries < crate::compaction::MAX_SUMMARY_TRIES {
+                    if forced.refused && forced.refusals < crate::compaction::MAX_SUMMARY_TRIES {
                         return Ok(Recovery::Recompact {
                             attempt: attempt + 1,
                             abandoned: None,

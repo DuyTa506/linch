@@ -157,8 +157,8 @@ impl Runner {
         };
         let strategy = compaction::STRATEGY;
         // A retry of a refused summary is the same compaction: its hooks
-        // fired with the first try.
-        if self.summary_tries == 0 {
+        // fired with the first request.
+        if self.summary_refusals == 0 {
             self.pre_compact(self.turn, view.len() as u64, tokens_before, strategy)
                 .await;
         }
@@ -182,11 +182,11 @@ impl Runner {
         // the cache holds.
         let mut clipped_bytes = None;
         if forced {
-            let (window, tries) = (agent.context_window(), self.summary_tries);
+            let (window, refusals) = (agent.context_window(), self.summary_refusals);
             let budget = compaction::folded_budget(
                 window,
                 spec.max_output_tokens,
-                tries,
+                refusals,
                 estimate_tokens(folded_view),
             );
             match compaction::clip(folded_view, budget, compaction::Scope::Texts) {
@@ -195,7 +195,7 @@ impl Runner {
                     older = clipped.messages.iter().map(|m| Message::clone(m)).collect();
                 }
                 // Nothing left to cut: the request would go as it did.
-                None if tries > 0 => {
+                None if refusals > 0 => {
                     self.unshortened().await?;
                     return Ok(None);
                 }
@@ -217,7 +217,6 @@ impl Runner {
         let call =
             ModelCall::prepare_compaction(&self.run.run_id, self.turn, attempt, &request.model);
         self.summary_calls = self.summary_calls.max(attempt);
-        self.summary_tries += 1;
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::CompactionPending { attempt }).await?;
@@ -240,6 +239,7 @@ impl Runner {
         let refused = forced
             && (outcome.result.as_ref())
                 .is_err_and(|failure| matches!(failure.error, ProviderError::ContextLength { .. }));
+        self.size_refused = refused;
         // A reply that is not a summary has no text to use, or a tool call.
         let (text, called, answered) = match outcome.result {
             Ok(assembly) => {
@@ -402,8 +402,8 @@ impl Runner {
         attempt: u32,
         mut event: CompactionEvent,
     ) -> Result<bool, RunError> {
-        let retry = self.summary_tries < compaction::MAX_SUMMARY_TRIES;
-        self.size_refused = true;
+        self.summary_refusals += 1;
+        let retry = self.summary_refusals < compaction::MAX_SUMMARY_TRIES;
         event.rejected = Some(format!(
             "{}: the summary request was refused as longer than the context window{}",
             compaction::SIZE_REFUSED,
@@ -473,7 +473,7 @@ impl Runner {
         // each further refusal of the turn.
         let start = compaction::last_turn_start(&view).unwrap_or(1);
         let window = agent.context_window();
-        if let Some(budget) = compaction::last_turn_budget(window, attempt - 1)
+        if let Some(budget) = compaction::last_turn_budget(window, self.forced_steps)
             && let Some(clipped) = compaction::clip_from(&view, start, budget)
         {
             let clip = Some((budget, clipped.bytes));
@@ -497,6 +497,7 @@ impl Runner {
 
     /// Stage the `compaction` event, which also moves the anchor.
     fn stage_compaction(&mut self, event: CompactionEvent) {
+        self.forced_steps += u32::from(event.forced && event.rejected.is_none());
         let event = Event::Compaction(event);
         self.anchor.observe(&event);
         self.journal.stage(event);

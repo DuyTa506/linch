@@ -469,14 +469,20 @@ pub(crate) struct Forced {
     pub(crate) primary_calls: u32,
     /// Whether the latest summary of turn `turn` is a forced one.
     pub(crate) latest_forced: bool,
-    /// Summary deliveries of turn `turn` since its last primary delivery: a
-    /// forced summary's tries, each reading less of the folded part than the
-    /// one before.
-    pub(crate) tries: u32,
-    /// Whether the last thing the run recorded of turn `turn` is a summary
-    /// the provider refused as longer than its window (a `compaction` event
-    /// whose `rejected` starts with [`SIZE_REFUSED`]).
+    /// Summary requests of turn `turn` the provider refused as longer than
+    /// its window since the turn's last primary delivery (`compaction` events
+    /// whose `rejected` starts with [`SIZE_REFUSED`]): each makes the next
+    /// request read less of the folded part. A delivery a crash left
+    /// unsettled is not one.
+    pub(crate) refusals: u32,
+    /// Whether the last thing the run recorded of turn `turn` is such a
+    /// refusal, so the summary it left goes again.
     pub(crate) refused: bool,
+    /// Forced compactions of turn `turn` that changed the view (a clear, a
+    /// clip or a summary): how many refusals of the turn's primary call the
+    /// run has answered, whatever the provider retries between them. Each
+    /// halves the budget a clip of the last turn allows.
+    pub(crate) steps: u32,
 }
 
 impl Forced {
@@ -484,24 +490,31 @@ impl Forced {
     pub(crate) fn of(events: &[Envelope], turn: u32) -> Self {
         let mut forced = Self::default();
         let mut previous: Option<(ModelCallKind, Option<u64>)> = None;
+        // Whether a delivery of turn `turn` was seen: the events of its forced
+        // compactions come after its primary delivery.
+        let mut started = false;
         for envelope in events {
-            if let Event::Compaction(event) = &envelope.event {
+            if let Event::Compaction(event) = &envelope.event
+                && started
+            {
                 forced.refused = is_size_refusal(event);
+                forced.refusals += u32::from(forced.refused);
+                forced.steps += u32::from(event.forced && event.rejected.is_none());
             }
             let Event::ModelCallDelivery(delivery) = &envelope.event else {
                 continue;
             };
             let this_turn = delivery.turn_index == Some(u64::from(turn));
+            started |= this_turn;
             forced.refused &= !this_turn;
             match delivery.kind {
                 ModelCallKind::Primary => {
                     forced.primary_calls += u32::from(this_turn);
                     if this_turn {
-                        forced.tries = 0;
+                        forced.refusals = 0;
                     }
                 }
                 ModelCallKind::Compaction => {
-                    forced.tries += u32::from(this_turn);
                     let after = previous.filter(|(_, at)| *at == delivery.turn_index);
                     let begins = after.is_none_or(|(kind, _)| kind == ModelCallKind::Primary);
                     let is_forced = matches!(after, Some((ModelCallKind::Primary, _)));

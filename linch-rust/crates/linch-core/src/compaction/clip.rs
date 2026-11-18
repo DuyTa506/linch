@@ -22,8 +22,8 @@ use crate::message::{ContentBlock, Message, ToolResultPart};
 
 use super::estimate_tokens;
 
-/// Deliveries of one forced summary: the first, then up to three more, each
-/// reading half the folded part the one before it did.
+/// Requests of one forced summary: it goes again after a refusal as too long,
+/// on half the folded part, until the fourth is refused.
 pub(crate) const MAX_SUMMARY_TRIES: u32 = 4;
 
 /// Refusals of one turn's primary call that a clip of the last turn answers,
@@ -66,15 +66,22 @@ pub(crate) enum Scope {
 }
 
 /// Tokens (estimated) of the folded part a forced summary request may carry
-/// on its delivery number `tries` (0 for the first): the window less the
-/// summary's own output at first, then half of what the part weighs, again
-/// and again, since the estimate says nothing of how far under the window the
-/// request really is. `folded` is the part's estimate.
-pub(crate) fn folded_budget(window: u64, max_output_tokens: u32, tries: u32, folded: u64) -> u64 {
-    let room = window.saturating_sub(u64::from(max_output_tokens));
-    match tries {
+/// after `refusals` refusals of it as too long (0 for the first request): the
+/// window less the summary's own output (at most half the window, so a large
+/// output limit on a small window still leaves room) at first, then half of
+/// what the part weighs, again and again, since the estimate says nothing of
+/// how far under the window the request really is. `folded` is the part's
+/// estimate.
+pub(crate) fn folded_budget(
+    window: u64,
+    max_output_tokens: u32,
+    refusals: u32,
+    folded: u64,
+) -> u64 {
+    let room = window - u64::from(max_output_tokens).min(window / 2);
+    match refusals {
         0 => room.max(1),
-        tries => (room.min(folded) >> tries.min(63)).max(1),
+        refusals => (room.min(folded) >> refusals.min(63)).max(1),
     }
 }
 

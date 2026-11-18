@@ -179,15 +179,20 @@ pub(super) struct Runner {
     /// Summary deliveries of the current turn, so the next one takes the
     /// next attempt id.
     pub(super) summary_calls: u32,
-    /// Summary deliveries since the turn's last primary delivery: a forced
-    /// summary's tries, which set how much of the older part the next one
-    /// reads (see [`crate::compaction::folded_budget`]). Counted from the
-    /// durable deliveries on a resume.
-    pub(super) summary_tries: u32,
-    /// Whether the last summary of the turn was refused by the provider as
-    /// longer than its context window, read back from the durable events on a
-    /// resume.
+    /// Summary requests the provider refused as longer than its context
+    /// window since the turn's last primary delivery: they set how much of
+    /// the older part the next one reads (see
+    /// [`crate::compaction::folded_budget`]). Counted from the durable events
+    /// on a resume.
+    pub(super) summary_refusals: u32,
+    /// Whether the last summary request was refused so, read back from the
+    /// durable events on a resume.
     pub(super) size_refused: bool,
+    /// Forced compactions of the turn that changed the view, which set the
+    /// budget a clip of the last turn allows (see
+    /// [`crate::compaction::last_turn_budget`]). Counted from the durable
+    /// events on a resume.
+    pub(super) forced_steps: u32,
     /// The summaries the run asked for and had rejected in a row (see
     /// [`crate::compaction::Rejections`]), counted from its durable events on a
     /// resume.
@@ -268,8 +273,9 @@ impl Runner {
             verify_retries: 0,
             forced: 0,
             summary_calls: 0,
-            summary_tries: 0,
+            summary_refusals: 0,
             size_refused: false,
+            forced_steps: 0,
             rejections: crate::compaction::Rejections::default(),
             anchor: crate::compaction::Anchor::default(),
             truncations: 0,
@@ -380,8 +386,8 @@ impl Runner {
                                 // next turn's start.
                                 self.post_turn(self.stop_reason).await;
                                 self.turn += 1;
-                                (self.summary_calls, self.summary_tries) = (0, 0);
-                                self.size_refused = false;
+                                (self.summary_calls, self.forced_steps) = (0, 0);
+                                (self.summary_refusals, self.size_refused) = (0, false);
                                 Some(self.turn_start().await)
                             }
                         },
@@ -533,7 +539,7 @@ impl Runner {
         };
         self.stage_context(&request, context);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
-        (self.summary_tries, self.size_refused) = (0, false);
+        (self.summary_refusals, self.size_refused) = (0, false);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
         let ready = self.journal.flush().await?;

@@ -371,8 +371,8 @@ event's `kind` is `context_length`.
    the view with its tool results clipped, as a logged projection (strategy
    `clip`, reason `clip`, `Cleared` with a `clip`
    budget): a summary cannot help a turn that is too big by itself. The
-   budget is half the window in estimated tokens at the first refusal of the
-   turn, then a quarter, an eighth and a sixteenth at the next ones
+   budget is half the window in estimated tokens for the turn's first forced
+   step, then a quarter, an eighth and a sixteenth for the next ones
    (`compaction::last_turn_budget`); past that no clip follows.
 3. Else, while fewer than `max_forced` forced summaries were made and
    `forced_keep_from` finds a point to fold, the run makes a summary with
@@ -390,8 +390,8 @@ the trigger). So a forced summary reads it clipped
 head and tail kept around a marker `[... N bytes omitted ...]`, cut at UTF-8
 boundaries by one cap across all the texts, the largest that brings the
 estimate under the budget (no message is dropped and every `tool_use_id`
-stays paired). The first delivery's budget is the window less the summary's
-`max_output_tokens`, and a part that fits under it is sent whole, so a forced
+stays paired). The first request's budget is the window less the summary's
+`max_output_tokens` (at most half the window), and a part that fits under it is sent whole, so a forced
 summary of a view that fits is unchanged. The estimate counts up to 2x fewer
 tokens than a provider does, so the budget is not trusted: when the provider
 refuses the summary request as longer than its window too, a `compaction` event
@@ -419,10 +419,12 @@ shape (`ProviderError`, `context_length`, `retryable` false, the provider's
 the system prompt and tools and of the conversation left, then the provider's
 own words: "the prompt exceeds the model's context window of 8000 tokens and
 nothing is left to shorten: the system prompt and tools take about 40
-estimated tokens and the conversation 170, after summarizing and clipping it
-as far as it goes. Shrink the system prompt or the tool set, or use a model
-with a larger window (the provider said: ...)". The sizes are the harness's
-estimates, not the provider's count (`Runner::overflow_message`).
+estimated tokens and the conversation 170. Shrink the system prompt or the
+tool set, or use a model with a larger window (the provider said: ...)".
+When the history still folds but `max_forced` is spent, the same message says
+"compaction.max_forced (3) is spent" instead, and advises raising it. The
+sizes are the harness's estimates, not the provider's count
+(`Runner::overflow_message`).
 
 The next primary call is the next delivery attempt of the same turn. It is
 not a provider retry: no `provider_retry` event, and the retry policy's
@@ -437,10 +439,14 @@ Nothing is kept in memory. `Forced::of` reads it from the durable deliveries
 and events (`compaction.rs`): a summary delivery that comes after a primary
 delivery of the same turn was forced; the count of those is the run's spent
 `max_forced`; the turn's primary and summary delivery counts give the next
-attempt numbers; the summary deliveries since the turn's last primary delivery
-are the forced summary's tries (so which budget the next one reads); and a
-`compaction` event whose `rejected` starts `context_length`, with no delivery
-after it, says the last summary was refused as too long (`tries`, `refused`).
+attempt numbers; the `compaction` events whose `rejected` starts
+`context_length` since the turn's last primary delivery count the summary
+requests refused as too long (so which budget the next one reads; a delivery a
+crash left unsettled is not one), and one with no delivery after it says the
+last summary was refused so and goes again (`refusals`, `refused`); the
+forced compaction events that changed the view in the turn count its steps,
+which halve the clip budget whatever the provider retries in between
+(`steps`).
 `runner/start.rs` sets the runner's counters from it, so a resumed run neither
 forgets a forced summary nor reuses a delivery id, and a refusal recorded
 before a crash is not mistaken for another kind of failure. Those refusal

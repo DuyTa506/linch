@@ -46,6 +46,10 @@ struct World {
     /// A turn whose tool returns this many characters, from a call that
     /// names the size, so the big result is not also a big call.
     giant: Option<(usize, usize)>,
+    /// Primary requests answered `503` before the first one after the
+    /// giant turn's result is judged, so the turn's attempts run ahead of
+    /// its refusals.
+    busy: u32,
 }
 
 /// Twice the estimate and 1500 over, tool results growing with the run.
@@ -57,6 +61,7 @@ const UNDERCOUNTED: World = World {
     base: 300,
     grow: 40,
     giant: None,
+    busy: 0,
 };
 
 /// What the provider saw, by request kind.
@@ -67,6 +72,8 @@ struct Seen {
     refused_primary: u32,
     refused_summaries: u32,
     biggest: u64,
+    /// `503` answers sent so far (see `World::busy`).
+    busy_sent: u32,
     /// Every summary request served, as the provider got it.
     summary_requests: Vec<serde_json::Value>,
     /// Messages and real tokens of the last primary request served.
@@ -146,10 +153,20 @@ impl Provider for Counting {
             base,
             grow,
             giant,
+            busy,
         } = self.world;
         let real = estimate(&request.messages) * num / den + overhead;
         let summarizing = is_summary_call(&request);
         let mut seen = self.seen.lock().unwrap();
+        let after_giant = giant.is_some_and(|(at, _)| primary_turn(&request) == at + 1);
+        if !summarizing && after_giant && seen.busy_sent < busy {
+            seen.busy_sent += 1;
+            return Err(ProviderError::Status {
+                status: 503,
+                retry_after: None,
+                message: "busy".into(),
+            });
+        }
         if real > WINDOW {
             match summarizing {
                 true => seen.refused_summaries += 1,
@@ -221,6 +238,9 @@ fn agent_on<S: RunStore + linch_core::SessionStore + 'static>(
     stores: Arc<S>,
 ) -> Agent {
     let mut spec = spec();
+    // A retry waits a millisecond, not a second.
+    spec.provider_retry.base_delay_ms = 1;
+    spec.provider_retry.jitter = 0.0;
     spec.compaction = Some(compaction);
     let tools = registry(vec![Echo::new("Read", ToolScope::Read, &Runs::default())]);
     agent_with(
@@ -576,6 +596,36 @@ async fn a_giant_result_in_the_kept_turn_is_clipped_in_the_view() {
     assert!(marked, "{stats}");
 }
 
+/// The provider's retries of a turn come before its refusals and spend
+/// attempts, but not the clip's budget: four `503`s, then the refusal, end
+/// as they would with none.
+#[tokio::test]
+async fn retries_before_a_refusal_do_not_shrink_the_clip() {
+    let world = World {
+        busy: 4,
+        ..KEPT_GIANT
+    };
+    let stores = Arc::new(Stores::default());
+    let provider = provider(world);
+    let agent = agent_on(provider.clone(), window_trigger(), stores.clone());
+    let (_, status, events) = run(&agent, &stores).await;
+    let stats = stats_of(status, &provider.seen.lock().unwrap(), &events);
+    eprintln!("{stats}");
+    assert_eq!(status, RunStatus::Completed, "{stats}");
+    assert_eq!(provider.seen.lock().unwrap().busy_sent, 4, "{stats}");
+    let sizes: Vec<(u64, u64)> = (events.iter())
+        .filter_map(|e| match &e.event {
+            Event::Compaction(c) if c.strategy == "clip" => Some((c.tokens_before, c.tokens_after)),
+            _ => None,
+        })
+        .collect();
+    // The first clip is to half the window, the second to a quarter: the
+    // same two the run makes with no retries.
+    assert_eq!(sizes.len(), 2, "{stats}");
+    assert_eq!(sizes[0], (5634, 4622), "{stats}");
+    assert_eq!(sizes[1].0, 4622, "{stats}");
+}
+
 /// A trigger at the window can never be reached by a view the provider
 /// accepts: the refused prompt forces the summary, which is clipped to fit
 /// like any forced one.
@@ -623,6 +673,37 @@ async fn an_overhead_that_alone_exceeds_the_window_ends_with_a_clear_error() {
     assert!(message.contains(&WINDOW.to_string()), "{message}");
     let seen = provider.seen.lock().unwrap();
     assert_eq!((seen.refused_primary, seen.summaries), (1, 0));
+}
+
+/// Results under the cut floor (about 300 bytes) in the older part, and a
+/// last turn heavy enough that its refusal is not the summary's: the summary
+/// request fits as it is, so a resume that re-asks one a crash left unsettled
+/// must send it as it was, there being nothing in it to cut.
+const SMALL_FOLDED: World = World {
+    overhead: 5500,
+    turns: 14,
+    base: 100,
+    grow: 0,
+    giant: Some((12, 3000)),
+    ..UNDERCOUNTED
+};
+
+#[tokio::test]
+async fn a_forced_summary_with_nothing_to_cut_completes_and_survives_a_crash() {
+    let stores = Arc::new(Stores::default());
+    let provider = provider(SMALL_FOLDED);
+    let agent = agent_on(provider.clone(), forced_only(), stores.clone());
+    let (_, status, events) = run(&agent, &stores).await;
+    let stats = stats_of(status, &provider.seen.lock().unwrap(), &events);
+    eprintln!("{stats}");
+    assert_eq!(status, RunStatus::Completed, "{stats}");
+    {
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen.refused_summaries, 0, "{stats}");
+        assert!(seen.summaries >= 1, "{stats}");
+        assert!(!seen.summary_requests.iter().any(clipped), "{stats}");
+    }
+    crash_everywhere(SMALL_FOLDED, forced_only(), RunStatus::Completed).await;
 }
 
 /// A system prompt and tools of 7400 tokens leave room for a first turn or
@@ -678,6 +759,15 @@ async fn crash_everywhere(world: World, compaction: CompactionSpec, want: RunSta
                 let message = error["message"].as_str().unwrap();
                 assert!(message.contains("nothing is left to shorten"), "{context}");
             }
+            // A summary request refused at every size is made four times, and
+            // once more when a crash left a delivery unsettled.
+            let deliveries = (events.iter())
+                .filter(|e| match &e.event {
+                    Event::ModelCallDelivery(d) => d.kind == ModelCallKind::Compaction,
+                    _ => false,
+                })
+                .count();
+            assert!(deliveries <= 5, "{context}: {deliveries} summary requests");
             let mut ids = HashSet::new();
             let mut paid = HashMap::<String, u32>::new();
             for envelope in &events {

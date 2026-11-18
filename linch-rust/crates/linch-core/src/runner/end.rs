@@ -8,6 +8,7 @@ use serde_json::json;
 use super::turn::Runner;
 use crate::agent::RunError;
 use crate::budget::Refusal;
+use crate::compaction;
 use crate::events::Event;
 use crate::events::kinds::{
     ChildRunStatusEvent, ErrorEvent, LoopGuardAction, LoopGuardEvent, LoopGuardReason, ResultEvent,
@@ -179,13 +180,30 @@ impl Runner {
             .map(|tool| serde_json::to_string(tool).map_or(0, |json| json.len()))
             .sum();
         let fixed = (system + tools) as u64 / 4;
-        let conversation = crate::compaction::estimate_tokens(&self.log.provider_view());
+        let view = self.log.provider_view();
+        let conversation = compaction::estimate_tokens(&view);
+        // The summaries a run may force are the only step left that a bigger
+        // bound would give back.
+        let spec = self.agent.spec.compaction.as_ref();
+        let spent = spec.filter(|spec| {
+            let folds = compaction::forced_keep_from(&view, spec.keep_recent_turns).is_some();
+            folds && self.forced >= spec.max_forced
+        });
+        let (cause, advice) = match spent {
+            Some(spec) => (
+                format!("compaction.max_forced ({}) is spent", spec.max_forced),
+                "Raise compaction.max_forced, shrink the system prompt or the tool set, or use \
+                 a model with a larger window",
+            ),
+            None => (
+                "nothing is left to shorten".to_owned(),
+                "Shrink the system prompt or the tool set, or use a model with a larger window",
+            ),
+        };
         format!(
-            "the prompt exceeds the model's context window of {window} tokens and nothing is \
-             left to shorten: the system prompt and tools take about {fixed} estimated tokens \
-             and the conversation {conversation}, after summarizing and clipping it as far as \
-             it goes. Shrink the system prompt or the tool set, or use a model with a larger \
-             window"
+            "the prompt exceeds the model's context window of {window} tokens and {cause}: the \
+             system prompt and tools take about {fixed} estimated tokens and the conversation \
+             {conversation}. {advice}"
         )
     }
 

@@ -350,7 +350,7 @@ phí, như mọi lần từ chối kiểu đó (`provider/call.rs:257`). `kind` 
 2. Nếu không, khi lượt cuối (từ message assistant cuối trở đi, phần duy nhất một bản tóm
    tắt không bao giờ gộp) nặng hơn ngân sách cắt, `clear` ghi lại view với kết quả tool của
    nó đã bị cắt, như một projection có ghi log (strategy `clip`, lý do `clip`, `Cleared`
-   với ngân sách `clip`): một bản tóm tắt không giúp được một lượt vốn đã quá lớn. Ngân sách là một nửa cửa sổ tính bằng token ước lượng ở lần từ chối đầu
+   với ngân sách `clip`): một bản tóm tắt không giúp được một lượt vốn đã quá lớn. Ngân sách là một nửa cửa sổ tính bằng token ước lượng cho bước bắt buộc đầu
    của lượt, rồi một phần tư, một phần tám và một phần mười sáu ở các lần sau
    (`compaction::last_turn_budget`); quá đó thì không còn lần cắt nào.
 3. Nếu không, chừng nào số bản tóm tắt bắt buộc đã tạo còn ít hơn `max_forced` và
@@ -367,8 +367,8 @@ nhiều kết quả cỡ vừa trong một view chưa bao giờ chạm ngưỡng
 bắt buộc đọc nó đã cắt (`compaction/clip.rs`): kết quả tool trước, rồi văn bản của bất kỳ
 message nào, giữ đầu và đuôi quanh một dấu `[... N bytes omitted ...]`, cắt ở ranh giới
 UTF-8 bằng một mức cắt chung cho mọi văn bản, mức lớn nhất đưa ước lượng xuống dưới ngân
-sách (không message nào bị bỏ và mọi `tool_use_id` vẫn ghép cặp). Ngân sách của delivery
-đầu là cửa sổ trừ `max_output_tokens` của bản tóm tắt, và một phần vừa dưới mức đó được
+sách (không message nào bị bỏ và mọi `tool_use_id` vẫn ghép cặp). Ngân sách của request
+đầu là cửa sổ trừ `max_output_tokens` của bản tóm tắt (tối đa một nửa cửa sổ), và một phần vừa dưới mức đó được
 gửi nguyên, nên một bản tóm tắt bắt buộc của view đã vừa không đổi. Ước lượng đếm ít hơn
 provider tới 2x, nên ngân sách không được tin: khi provider cũng từ chối request tóm tắt
 vì quá dài cửa sổ, một event `compaction` ghi lại điều đó (`rejected` bắt đầu bằng
@@ -391,10 +391,11 @@ run kết thúc `failed` với cùng dạng `error` (`ProviderError`, `context_l
 false, `status` của provider được giữ) và một thông báo nêu cửa sổ cùng số token ước lượng
 của system prompt, tool và phần hội thoại còn lại, rồi lời của chính provider: "the prompt
 exceeds the model's context window of 8000 tokens and nothing is left to shorten: the system
-prompt and tools take about 40 estimated tokens and the conversation 170, after summarizing
-and clipping it as far as it goes. Shrink the system prompt or the tool set, or use a model
-with a larger window (the provider said: ...)". Các kích thước là ước lượng của harness,
-không phải số đếm của provider (`Runner::overflow_message`).
+prompt and tools take about 40 estimated tokens and the conversation 170. Shrink the system
+prompt or the tool set, or use a model with a larger window (the provider said: ...)". Khi
+lịch sử vẫn gộp được nhưng `max_forced` đã hết, cũng thông báo đó nói "compaction.max_forced
+(3) is spent" và khuyên tăng nó. Các kích thước là ước lượng của harness, không phải số đếm
+của provider (`Runner::overflow_message`).
 
 Lời gọi chính kế tiếp là attempt delivery kế tiếp của cùng lượt đó. Nó không phải một
 retry của provider: không có event `provider_retry`, và số lần thử của retry policy không
@@ -407,10 +408,12 @@ số điểm có thể gộp giới hạn một lượt.
 Không có gì được giữ trong bộ nhớ. `Forced::of` đọc nó từ các delivery và event bền vững
 (`compaction.rs`): một delivery tóm tắt đến sau một delivery chính của cùng lượt là bắt
 buộc; số lượng những cái đó là `max_forced` đã tiêu của run; số delivery chính và tóm tắt
-của lượt cho ra các attempt kế tiếp; các delivery tóm tắt kể từ delivery chính cuối của
-lượt là số lần thử của bản tóm tắt bắt buộc (nên delivery kế tiếp đọc ngân sách nào); và
-một event `compaction` có `rejected` bắt đầu bằng `context_length`, không có delivery nào
-sau nó, nói rằng bản tóm tắt cuối bị từ chối vì quá dài (`tries`, `refused`).
+của lượt cho ra các attempt kế tiếp; các event `compaction` có `rejected` bắt đầu bằng `context_length` kể từ delivery chính
+cuối của lượt đếm số request tóm tắt bị từ chối vì quá dài (nên delivery kế tiếp đọc ngân
+sách nào; một delivery bị crash bỏ dở không tính), và một event không có delivery nào sau
+nó nói rằng bản tóm tắt cuối bị từ chối như vậy và sẽ đi lại (`refusals`, `refused`); các
+event compaction bắt buộc đã đổi view trong lượt đếm số bước của nó, mỗi bước giảm một nửa
+ngân sách cắt dù provider có retry ở giữa (`steps`).
 `runner/start.rs` đặt các bộ đếm của runner từ nó, nên một run được resume không quên một
 bản tóm tắt bắt buộc, không dùng lại một delivery id, và một lần từ chối đã ghi trước khi
 crash không bị nhầm với một loại lỗi khác. Các event từ chối đó bị loại khỏi việc giữ theo
