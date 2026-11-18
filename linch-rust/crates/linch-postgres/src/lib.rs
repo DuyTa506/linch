@@ -41,6 +41,7 @@ use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 
 mod codec;
 mod files;
+mod lease_line;
 mod mailbox;
 mod memory;
 mod pool_size;
@@ -51,6 +52,7 @@ mod tool_cache;
 
 pub use codec::CodecError;
 pub use files::PgFileBackend;
+pub use lease_line::LeaseLine;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
 pub use memory::{DEFAULT_STATEMENT_TIMEOUT, PgMemoryStore};
 pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};

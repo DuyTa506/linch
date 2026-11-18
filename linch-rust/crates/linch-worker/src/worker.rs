@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use linch_core::Agent;
-use linch_postgres::{PgPool, PgRunStore};
+use linch_postgres::{LeaseLine, PgPool, PgRunStore};
 use sqlx::postgres::PgListener;
 use tokio::sync::Notify;
 use tokio::task::{JoinError, JoinHandle, JoinSet};
@@ -194,6 +194,7 @@ impl Worker {
         };
         let shared = Arc::new(Shared {
             pool: self.pool.clone(),
+            line: LeaseLine::new(&self.pool, self.config.visibility_timeout / 3),
             runs: PgRunStore::new(self.pool.clone()),
             agents: self.agents,
             factory: self.factory,

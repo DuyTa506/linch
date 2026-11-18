@@ -1,10 +1,10 @@
 //! What a run's heartbeat needs from its process: a connection from the
-//! agent's pool and one durable commit, every third of the lease. Two
-//! `#[ignore]`d checks: a RED test for the pool, and a probe that times each
-//! part of a beat.
+//! agent's pool and one durable commit, every third of the lease. A pool
+//! whose connections are all busy must not starve the beat; one `#[ignore]`d
+//! probe times each part of a beat.
 //!
 //! ```text
-//! LINCH_TEST_PG_DSN=... cargo test -p linch-postgres --test pg heartbeat -- --ignored --nocapture
+//! LINCH_TEST_PG_DSN=... cargo test -p linch-postgres --test pg heartbeat_latency_probe -- --ignored --nocapture
 //! ```
 
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use crate::common::TestDb;
 use crate::idle::Gated;
 
 const MODEL: &str = "scripted-model";
-const TTL: Duration = Duration::from_millis(600);
+const TTL: Duration = Duration::from_secs(4);
 
 /// An agent on `pool` whose model call waits at the returned gate.
 fn agent_on(pool: &PgPool) -> (Arc<Gated>, Agent) {
@@ -70,16 +70,14 @@ async fn pool_of(db: &TestDb, size: u32) -> PgPool {
     pool.await.expect("connect")
 }
 
-/// RED. A's process is healthy, its model call is in flight, and every
-/// connection of its pool is busy with run work that waits (a row lock held
-/// elsewhere, a slow query, a stalled disk): the beat's `renew` queues for a
-/// connection behind that work, the lease runs out, and B takes the run over
-/// while A is alive, so the model call is paid twice.
-#[tokio::test]
-#[ignore = "RED: the heartbeat shares the run work's pool, so a saturated pool starves it"]
-async fn a_saturated_pool_does_not_starve_the_heartbeat() {
-    let Some(db) = TestDb::migrated("hb_saturated").await else {
-        return;
+/// A's process is healthy, its model call is in flight, and `busy` of the 3
+/// connections of its pool are held by run work that waits (a row lock held
+/// elsewhere, a slow query, a stalled disk). Whether B takes the run over
+/// while A's stream is polled for two leases: the model call is then paid
+/// twice.
+async fn taken_over_with_busy_connections(name: &str, busy: usize) -> bool {
+    let Some(db) = TestDb::migrated(name).await else {
+        return false;
     };
     let pool_a = pool_of(&db, 3).await;
     let (gate_a, a) = agent_on(&pool_a);
@@ -88,8 +86,8 @@ async fn a_saturated_pool_does_not_starve_the_heartbeat() {
     let mut stream_a = at_the_gate(&gate_a, &a).await;
     let run_id: RunId = stream_a.run_id().clone();
 
-    // Run work that holds all 3 connections for 3 leases.
-    let busy: Vec<_> = (0..3)
+    // Run work that holds the connections for 3 leases.
+    let busy: Vec<_> = (0..busy)
         .map(|_| {
             let pool = pool_a.clone();
             tokio::spawn(async move {
@@ -114,11 +112,26 @@ async fn a_saturated_pool_does_not_starve_the_heartbeat() {
         items.as_slice(),
         [Err(RunError::Store(StoreError::RunLeased { .. }))]
     );
-    assert!(refused, "B took over a run whose holder is alive");
     for task in busy {
         let _ = task.await;
     }
     db.finish().await;
+    !refused
+}
+
+/// Two of three connections busy leave one for run work: the control.
+#[tokio::test]
+async fn a_pool_with_a_free_connection_keeps_the_heartbeat() {
+    let taken = taken_over_with_busy_connections("hb_two_busy", 2).await;
+    assert!(!taken, "B took over a run whose holder is alive");
+}
+
+/// Every connection busy: the beat's `renew` must not queue behind the run
+/// work, or the lease runs out and B takes the run over while A is alive.
+#[tokio::test]
+async fn a_saturated_pool_does_not_starve_the_heartbeat() {
+    let taken = taken_over_with_busy_connections("hb_saturated", 3).await;
+    assert!(!taken, "B took over a run whose holder is alive");
 }
 
 fn quantiles(mut samples: Vec<f64>) -> String {

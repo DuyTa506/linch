@@ -11,6 +11,7 @@ mod heartbeat;
 mod idle;
 mod isolation;
 mod lease;
+mod lease_line;
 mod mailbox;
 mod memory;
 mod migrations;

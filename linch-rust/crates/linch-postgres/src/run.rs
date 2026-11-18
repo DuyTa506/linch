@@ -13,6 +13,7 @@
 //! that has not run out. Renewals and releases are single statements that
 //! match the lease's epoch. Commits are fenced by the epoch alone.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,6 +27,7 @@ use crate::codec::{
     encode_events, encode_principal, not_found, parse_contract, parse_status, status_name, to_i64,
     to_u64,
 };
+use crate::lease_line::LeaseLine;
 
 /// How long a run claim holds without a renewal, unless set with
 /// [`PgRunStore::with_lease_ttl`]. A run's driver renews it every third
@@ -49,13 +51,22 @@ pub struct PgRunStore {
     /// This store's identity in `lease_holder`.
     holder: String,
     lease_ttl: Duration,
+    /// Renewals and releases, which never queue behind run work in `pool`.
+    line: Arc<LeaseLine>,
 }
 
 impl PgRunStore {
     /// A store that runs its queries on `pool`: a new lease holder, with
     /// leases [`DEFAULT_RUN_LEASE_TTL`] long.
+    ///
+    /// Renewing and releasing leases use one connection of the store's own,
+    /// opened outside `pool` on the first renewal, so a pool whose
+    /// connections are all busy (or waiting on a row lock) does not delay a
+    /// beat: budget one connection per store beyond `pool`'s maximum. Each
+    /// of those writes gives up after a third of the lease.
     pub fn new(pool: PgPool) -> Self {
         Self {
+            line: Arc::new(LeaseLine::new(&pool, DEFAULT_RUN_LEASE_TTL / 3)),
             pool,
             holder: uuid::Uuid::new_v4().to_string(),
             lease_ttl: DEFAULT_RUN_LEASE_TTL,
@@ -74,6 +85,7 @@ impl PgRunStore {
             "a run lease lasts at least 1 ms"
         );
         self.lease_ttl = ttl;
+        self.line = Arc::new(LeaseLine::new(&self.pool, ttl / 3));
         self
     }
 
@@ -351,15 +363,17 @@ impl PgRunStore {
         };
         let mut cause = None;
         for _ in 0..crate::WRITE_TRIES {
-            let query = (sqlx::query(sql).bind(&lease.namespace))
-                .bind(lease.run_id.as_str())
-                .bind(epoch);
-            let query = match ttl_ms {
-                Some(ms) => query.bind(ms),
-                None => query,
+            let query = || {
+                let query = (sqlx::query(sql).bind(&lease.namespace))
+                    .bind(lease.run_id.as_str())
+                    .bind(epoch);
+                match ttl_ms {
+                    Some(ms) => query.bind(ms),
+                    None => query,
+                }
             };
-            match query.execute(&self.pool).await {
-                Ok(done) => return Ok(done.rows_affected() == 1),
+            match self.line.execute(query).await {
+                Ok(rows) => return Ok(rows == 1),
                 Err(error) if crate::serialization_failure(&error) => cause = Some(error),
                 Err(error) => return Err(backend(error)),
             }
