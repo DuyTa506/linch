@@ -174,7 +174,11 @@ The OpenAI Responses API. Each request carries the full history; no
 ```
 
 Use `spec.effort` (`low` to `max`) for reasoning depth; the OpenAI adapters
-ignore `spec.thinking`.
+ignore `spec.thinking`. The servers (`vllm`, `sglang`, `llamacpp`) pass effort
+to the model's chat template, which decides what it accepts. vLLM's Qwen3
+template takes only `low`, `medium` and `xhigh`, so `high` and `max` are sent
+as `xhigh`; SGLang takes every level (it only switches thinking on) and llama.cpp lets the
+model's template refuse levels; both send the level as it is.
 
 ### `anthropic`
 
@@ -392,6 +396,20 @@ kind, never the key, the URL or the vendor's own words), and `OpenError`
 (`provider_base_urls`; see [Server](./server.md)), and may make 10
 `list_models` and `model_info` calls a minute, then gets `LimitReached`
 (`kind` `provider_calls`).
+
+## Temperature
+
+`spec.temperature` (0 to 2) goes with every request when set, `0` included, and
+stays off the wire when unset. `agent.open` fails for a value outside 0 to 2, or
+above 1 on `anthropic`. Each adapter sends it as given (checked 2026-11-17 against
+the vendor references):
+
+| Provider | Field | Notes |
+|---|---|---|
+| `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 to 2. OpenAI says parameter support varies by model; a model that refuses it answers with an HTTP error, which Linch does not predict. |
+| `anthropic` | `temperature` | 0 to 1. Claude Opus 4.7 and later, Sonnet 5 and later and Haiku 5.5 answer 400 to a non-default value on every request; older models refuse it only while thinking is on; API version `2026-10-21` removes it. |
+| `deepseek` | `temperature` | 0 to 2. Has no effect in thinking mode (the default), where it is sent and ignored. |
+| `gemini` | `generationConfig.temperature` | 0.0 to 2.0. Silently ignored on Gemini 3.6 Flash and newer models. |
 
 ## Failures and retries
 

@@ -80,6 +80,21 @@ config: AgentConfig = {
 }
 ```
 
+**DeepSeek** không có hàng trong bảng: giá API của nó đổi theo giờ (giờ thấp điểm
+bằng nửa giá cao điểm; cao điểm là 01:00 đến 04:00 và 06:00 đến 10:00 UTC các ngày
+trong tuần, trừ ngày lễ của Trung Quốc), nên một mức giá dựng sẵn sẽ sai một nửa
+thời gian. Hãy đặt mức giá bạn trả, với giá cache hit là `cache_read`. Các mức dưới
+đây là giá cao điểm đọc ngày 2026-11-17 từ
+https://api-docs.deepseek.com/quick_start/pricing, USD trên một triệu token; hãy
+kiểm tra lại trang đó trước khi dựa vào chúng:
+
+```python
+"pricing": {
+    "deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006},
+    "deepseek-v4-pro": {"input": 1.32, "output": 3.96, "cache_read": 0.044},
+},
+```
+
 `input` và `output` là bắt buộc; `cache_read` và `cache_creation` mặc định bằng
 `input`, nên một token được cache không bao giờ rẻ hơn mức bạn đã nêu. Đơn giá
 phải hữu hạn và không âm; mọi giá trị khác bị từ chối khi agent được mở.

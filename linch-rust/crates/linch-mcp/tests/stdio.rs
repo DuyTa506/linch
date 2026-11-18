@@ -253,3 +253,67 @@ wait"#;
     assert_ne!(second, first);
     server.disconnect().await;
 }
+
+/// Whether `pid` is running (a zombie is not).
+fn is_running(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // The state follows the command name, which is in parentheses.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        stat.rsplit(')')
+            .next()
+            .map(str::trim_start)
+            .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('Z'))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let state = String::from_utf8_lossy(&ps.stdout);
+        !state.trim().is_empty() && !state.trim().starts_with('Z')
+    }
+}
+
+#[tokio::test]
+async fn a_stdio_server_does_not_outlive_a_killed_client() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let dir = std::env::temp_dir().join(format!("linch-mcp-parent-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("server.pid");
+    let mut client = std::process::Command::new(example("stdio_parent"))
+        .arg(&pid_file)
+        .arg(stdio_server())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start the client process");
+    let mut ready = String::new();
+    BufReader::new(client.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .expect("read the client's first line");
+    assert_eq!(ready.trim(), "ready");
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the server wrote its pid")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(is_running(pid), "the server is up while the client lives");
+
+    // The server ignores SIGTERM and keeps running after its input ends, so
+    // only a signal it cannot ignore, sent for it, ends it.
+    client.kill().expect("SIGKILL the client");
+    client.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while is_running(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let survived = is_running(pid);
+    if survived {
+        signal("KILL", pid);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!survived, "the server outlived its killed client");
+}

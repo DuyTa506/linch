@@ -3,6 +3,8 @@
 //! Wire rules, checked against `api-docs.deepseek.com` on 2026-11-06:
 //! - `thinking: {"type": "enabled" | "disabled"}` is always sent, because
 //!   DeepSeek thinks by default; it takes precedence over `reasoning_effort`.
+//! - `temperature` takes 0 to 2; checked 2026-11-17, the reference says it
+//!   "has no effect in thinking mode", where it is sent and ignored.
 //! - `reasoning_effort` takes `low`, `high` or `max`, sent only with
 //!   thinking on.
 //! - With tools in the request, every earlier assistant turn's reasoning

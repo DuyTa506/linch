@@ -1,12 +1,17 @@
-//! Live vLLM model list and capabilities. Skips when `LINCH_TEST_VLLM_URL`
-//! (the server's `/v1` URL) is unset; `LINCH_TEST_VLLM_MODEL` names the
-//! model it serves.
+//! Live vLLM model list, capabilities and reasoning effort. Skips when
+//! `LINCH_TEST_VLLM_URL` (the server's `/v1` URL) is unset;
+//! `LINCH_TEST_VLLM_MODEL` names the model it serves.
 //!
 //! `LINCH_TEST_VLLM_URL=http://127.0.0.1:8201/v1 LINCH_TEST_VLLM_MODEL=qwen3.6-35b-a3b \
 //!  cargo test -p linch-providers --test live_vllm -- --nocapture`
 
-use linch_core::{ContextSource, OutputSchemaMode, Provider};
+use futures::StreamExt;
+use linch_core::provider::Thinking;
+use linch_core::{
+    Assembler, ContextSource, Message, OutputSchemaMode, Provider, ProviderRequest, ReasoningEffort,
+};
 use linch_providers::{OpenAiChat, Server, ServerOptions};
+use tokio_util::sync::CancellationToken;
 
 fn vllm(test: &str) -> Option<(OpenAiChat, String)> {
     let Ok(url) = std::env::var("LINCH_TEST_VLLM_URL") else {
@@ -50,4 +55,55 @@ async fn a_live_servers_capabilities_name_its_window_as_the_servers() {
     // called, so a run offers its final tool instead.
     assert_eq!(caps.output_schema, OutputSchemaMode::FinalTool);
     assert!(caps.declared);
+}
+
+/// Every effort level is accepted by a Qwen3 template, `high` and `max`
+/// included: they go out as `xhigh`.
+#[tokio::test]
+async fn every_effort_level_is_accepted() {
+    let Some((provider, model)) = vllm("every_effort_level_is_accepted") else {
+        return;
+    };
+    for effort in [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let request = ProviderRequest {
+            model: model.clone(),
+            system: vec![],
+            tools: vec![],
+            appended_tools: vec![],
+            messages: vec![Message::user_text("Say hi.")],
+            context_tail: 0,
+            max_output_tokens: Some(16),
+            temperature: None,
+            stop_sequences: vec![],
+            effort: Some(effort),
+            thinking: Some(Thinking::Enabled {
+                budget_tokens: None,
+                display: None,
+            }),
+            cache_control: None,
+            output_schema: None,
+            tool_choice: None,
+        };
+        let mut stream = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap_or_else(|error| panic!("{effort:?} refused: {error}"));
+        let mut assembler = Assembler::new();
+        while let Some(event) = stream.next().await {
+            assembler
+                .push(event.unwrap_or_else(|error| panic!("{effort:?}: {error}")))
+                .expect("valid stream");
+        }
+        let turn = assembler.finish().expect("complete stream");
+        eprintln!(
+            "{effort:?}: stop={:?} usage={:?}",
+            turn.stop_reason, turn.usage
+        );
+    }
 }

@@ -35,6 +35,12 @@ fn request() -> ProviderRequest {
 }
 
 #[test]
+fn anthropic_takes_temperatures_up_to_one() {
+    let provider = Anthropic::new(AnthropicOptions::new(ApiKey::new(SECRET).unwrap())).unwrap();
+    assert_eq!(provider.max_temperature(), 1.0);
+}
+
+#[test]
 fn debug_output_never_shows_the_key() {
     let options = AnthropicOptions::new(ApiKey::new(SECRET).unwrap());
     let provider = Anthropic::new(options.clone()).unwrap();

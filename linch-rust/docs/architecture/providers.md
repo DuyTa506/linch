@@ -96,7 +96,7 @@ required fields and optional controls an adapter may ignore or refuse:
 | Field | Notes |
 |---|---|
 | `model`, `system`, `tools`, `messages` | Always set by the runner. |
-| `max_output_tokens`, `temperature`, `stop_sequences` | Optional. |
+| `max_output_tokens`, `temperature`, `stop_sequences` | Optional. `temperature` is `spec.temperature`; every adapter sends it when set, `0` included, and `Provider::max_temperature` (2, Anthropic 1) bounds it when the agent is built. |
 | `effort` (`ReasoningEffort`), `thinking` (`Thinking`) | `None` keeps the provider default. Each adapter maps them itself. |
 | `cache_control` | Set (no TTL) on every primary call of a run, as Python's `cache_prompt=True`; a compaction summary call has none (`crates/linch-core/src/agent.rs`). |
 | `output_schema`, `tool_choice` | Optional. |
@@ -412,7 +412,11 @@ A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
 (`crates/linch-providers/src/servers.rs:76`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
-left out (`profile.rs:144-154`). An `output_schema` is sent as
+left out (`profile.rs:144-154`). The profile's `reasoning_effort` writes the
+effort: OpenAI, SGLang and llama.cpp send `low` to `max` as they are; vLLM
+sends `high` and `max` as `xhigh`, because the Qwen3 chat template behind it
+takes only `low`, `medium` and `xhigh` and answers HTTP 400 otherwise
+(`servers/vllm.rs`). An `output_schema` is sent as
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` when the profile's `json_schema` rule is on, which only
 OpenAI's is; vLLM, SGLang and llama.cpp refuse it locally as `InvalidRequest`

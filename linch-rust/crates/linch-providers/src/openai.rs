@@ -26,6 +26,10 @@
 //! - An error after the 200 arrives as a `data: {"error": {...}}` frame.
 //! - Auth is `Authorization: Bearer <key>`, and the key is required.
 //!   `Retry-After` is whole seconds.
+//! - `temperature` takes 0 to 2 (checked 2026-11-17 against the reference,
+//!   which says parameter support varies by model, and the reasoning
+//!   guide, which does not mention it): whether a reasoning model takes
+//!   it is left to the API. The server profiles send it as given.
 //! - Structured output (checked 2026-11-17) is the native
 //!   `response_format` `{"type": "json_schema", "json_schema": {name,
 //!   strict, schema, description?}}`. It shapes only the text answer, so
@@ -252,7 +256,7 @@ impl Provider for OpenAiChat {
                 // The switch sends nothing when its kwargs are empty.
                 disable: profile.template_thinking_switch && !self.thinking_off.is_empty(),
                 budget: false,
-                effort: profile.reasoning_effort,
+                effort: profile.reasoning_effort.is_some(),
                 reasoning_text: profile.reasoning_field.is_some(),
             },
             vision: profile.vision,

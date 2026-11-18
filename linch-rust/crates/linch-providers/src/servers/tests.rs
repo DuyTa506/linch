@@ -111,7 +111,7 @@ fn thinking_off_sends_the_template_switch_and_drops_effort() {
             server,
             &ProviderRequest {
                 thinking: Some(Thinking::Disabled {}),
-                effort: Some(ReasoningEffort::High),
+                effort: Some(ReasoningEffort::Medium),
                 ..request("m")
             },
         )
@@ -123,13 +123,58 @@ fn thinking_off_sends_the_template_switch_and_drops_effort() {
             server,
             &ProviderRequest {
                 thinking: Some(Thinking::Adaptive { display: None }),
-                effort: Some(ReasoningEffort::High),
+                effort: Some(ReasoningEffort::Medium),
                 ..request("m")
             },
         )
         .unwrap();
         assert!(on.get("chat_template_kwargs").is_none(), "{server:?}");
-        assert_eq!(on["reasoning_effort"], "high", "{server:?}");
+        assert_eq!(on["reasoning_effort"], "medium", "{server:?}");
+    }
+}
+
+#[test]
+fn vllm_maps_effort_onto_the_values_its_template_accepts() {
+    // The Qwen chat template behind vLLM takes only low, medium and xhigh.
+    for (effort, wire) in [
+        (ReasoningEffort::Low, "low"),
+        (ReasoningEffort::Medium, "medium"),
+        (ReasoningEffort::High, "xhigh"),
+        (ReasoningEffort::Xhigh, "xhigh"),
+        (ReasoningEffort::Max, "xhigh"),
+    ] {
+        let body = body(
+            Server::Vllm,
+            &ProviderRequest {
+                effort: Some(effort),
+                ..request("m")
+            },
+        )
+        .unwrap();
+        assert_eq!(body["reasoning_effort"], wire, "{effort:?}");
+    }
+}
+
+#[test]
+fn sglang_and_llamacpp_pass_effort_to_the_template_unchanged() {
+    for server in [Server::SgLang, Server::LlamaCpp] {
+        for (effort, wire) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::Xhigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let body = body(
+                server,
+                &ProviderRequest {
+                    effort: Some(effort),
+                    ..request("m")
+                },
+            )
+            .unwrap();
+            assert_eq!(body["reasoning_effort"], wire, "{server:?} {effort:?}");
+        }
     }
 }
 

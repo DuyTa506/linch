@@ -432,6 +432,11 @@ async fn the_final_tool_call_ends_the_run_with_its_input() {
         panic!("a run starts with init");
     };
     assert_eq!(init.final_tool.as_deref(), Some("invoice"));
+    assert_eq!(
+        init.tools,
+        ["Read", "invoice"],
+        "init lists what is offered"
+    );
     for request in provider.requests() {
         assert_eq!(request.output_schema, None, "the provider cannot take it");
         let names: Vec<_> = request.tools.iter().map(|t| t.name.as_str()).collect();
@@ -578,6 +583,14 @@ async fn a_named_final_tool_ends_the_run_without_running() {
     assert!(runs.lock().unwrap().is_empty());
     let request = &provider.requests()[0];
     assert_eq!(request.tools.len(), 1, "nothing is made");
+    let Event::Init(init) = &envelopes[0].event else {
+        panic!("a run starts with init");
+    };
+    assert_eq!(
+        init.tools,
+        ["Read"],
+        "a registered final tool is listed once"
+    );
 }
 
 #[tokio::test]
@@ -977,6 +990,12 @@ async fn a_crash_at_any_write_ends_where_the_clean_run_did() {
                 assert_eq!(log, want, "{context}");
                 let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
                 assert_eq!(verifications(&events), want_verifications, "{context}");
+                for envelope in &events {
+                    if let Event::Init(init) = &envelope.event {
+                        let tools = ["Read", "invoice"];
+                        assert_eq!(init.tools, tools, "{context}: init, resumed or not");
+                    }
+                }
                 let got = result(&events);
                 assert_eq!(got.structured_output, want_result.structured_output);
                 assert_eq!(got.structured_error, want_result.structured_error);

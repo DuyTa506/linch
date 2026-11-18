@@ -17,6 +17,9 @@
 //! - `thinkingBudget` is only sent when the request names one; Gemini 3
 //!   and later prefer `thinkingLevel`, which effort maps to, and the two
 //!   cannot be combined.
+//! - `temperature` goes in `generationConfig` and takes 0.0 to 2.0; checked
+//!   2026-11-17, the reference says it "is silently ignored" on Gemini 3.6
+//!   Flash and newer models.
 //! - Usage: `promptTokenCount` includes cached tokens and
 //!   `candidatesTokenCount` excludes thoughts.
 //! - Caching is implicit on Gemini, so `cache_control` is ignored.

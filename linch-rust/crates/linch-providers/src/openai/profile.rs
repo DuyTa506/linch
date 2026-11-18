@@ -34,8 +34,9 @@ pub(crate) struct ChatProfile {
     /// `json_schema` `response_format`; a target without it refuses the
     /// request.
     pub json_schema: bool,
-    /// Whether [`ProviderRequest::effort`] is sent as `reasoning_effort`.
-    pub reasoning_effort: bool,
+    /// How [`ProviderRequest::effort`] is written as `reasoning_effort`;
+    /// `None` sends no effort.
+    pub reasoning_effort: Option<fn(ReasoningEffort) -> &'static str>,
     /// Whether [`Thinking::Disabled`] sends the configured
     /// `chat_template_kwargs`.
     pub template_thinking_switch: bool,
@@ -90,7 +91,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     },
     max_tokens_field: "max_completion_tokens",
     json_schema: true,
-    reasoning_effort: true,
+    reasoning_effort: Some(effort_value),
     template_thinking_switch: false,
     usage: openai_usage,
     context: ContextRule::Known(OPENAI_CONTEXT),
@@ -201,8 +202,8 @@ pub(crate) fn build_payload(
         if !thinking_off.is_empty() {
             body["chat_template_kwargs"] = thinking_off.clone().into();
         }
-    } else if let (true, Some(effort)) = (profile.reasoning_effort, request.effort) {
-        body["reasoning_effort"] = effort_value(effort).into();
+    } else if let (Some(wire), Some(effort)) = (profile.reasoning_effort, request.effort) {
+        body["reasoning_effort"] = wire(effort).into();
     }
     Ok(body)
 }

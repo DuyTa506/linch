@@ -6,6 +6,10 @@
 //! - **Thinking off:** `chat_template_kwargs` `enable_thinking: false`, the
 //!   README's own example; the server reads that flag itself.
 //! - **`reasoning_effort`** is accepted and passed to the template.
+//!   Checked 2026-11-17 in `tools/server/server-common.cpp` at master: the
+//!   server answers 400 for a value the chat template lists as rejected
+//!   and passes any other to it as `reasoning_effort`, so the model's
+//!   template decides. Linch sends its level as is.
 //! - **`tool_choice`:** `auto`, `none` and `required` only. A named
 //!   function silently becomes `auto`, so it fails locally instead.
 //!   Rechecked 2026-11-17 in the source at master: `common/chat.cpp`
@@ -40,7 +44,7 @@ use serde_json::json;
 use super::{kwargs, llamacpp_usage};
 use crate::context::ContextRule;
 use crate::models::OpenAiRow;
-use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport};
+use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport, effort_value};
 use crate::openai_compat::stream::ReasoningField;
 use linch_core::{PromptCache, Support};
 
@@ -54,7 +58,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     },
     max_tokens_field: "max_tokens",
     json_schema: false,
-    reasoning_effort: true,
+    reasoning_effort: Some(effort_value),
     template_thinking_switch: true,
     usage: llamacpp_usage,
     context: ContextRule::Props,

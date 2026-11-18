@@ -144,6 +144,12 @@ Với một server stdio:
   của nó. `KillGroup` gửi `SIGKILL` cho cả group ngay khi server đã thoát,
   nên một server thoát khi stdin gặp EOF không để lại tiến trình con nào
   (`connector.rs:190-232`).
+- **Lifeline.** Mỗi server có một watchdog `/bin/sh` nhỏ đọc stdin của chính nó,
+  một pipe mà chỉ client giữ đầu ghi, và kill group của server khi nó gặp EOF.
+  Kernel đóng pipe đó khi client chết, kể cả bằng `SIGKILL`, nên một server bỏ
+  qua EOF của stdin và `SIGTERM` không sống lâu hơn client, như lifeline của tool
+  `Bash`. Watchdog đứng ngoài group của server, chỉ dùng builtin, và bị kill khi
+  kết nối bị drop (`connector.rs`, `start_lifeline`).
 - **Đóng có giới hạn.** Việc đóng của chính rmcp mất tối đa khoảng 6 s (3 s sau khi
   stdin đóng, 3 s nữa sau `SIGTERM`). Khi server đã ngừng đọc và một lần ghi đã làm
   đầy stdin của nó, việc đóng đó sẽ chờ mãi; `BoundedClose` bỏ cuộc sau 10 s và drop

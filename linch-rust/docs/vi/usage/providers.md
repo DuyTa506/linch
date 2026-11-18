@@ -174,7 +174,11 @@ OpenAI Responses API. Mỗi request mang toàn bộ lịch sử; không gửi
 ```
 
 Dùng `spec.effort` (`low` đến `max`) cho độ sâu suy luận; các adapter OpenAI bỏ
-qua `spec.thinking`.
+qua `spec.thinking`. Các server (`vllm`, `sglang`, `llamacpp`) chuyển effort cho
+chat template của model, nơi quyết định giá trị nào được nhận. Template Qwen3
+của vLLM chỉ nhận `low`, `medium` và `xhigh`, nên `high` và `max` được gửi là
+`xhigh`; SGLang nhận mọi mức (nó chỉ bật thinking) và llama.cpp để template của model từ
+chối mức; cả hai gửi nguyên mức.
 
 ### `anthropic`
 
@@ -390,6 +394,20 @@ bao giờ là key, URL hay lời của vendor), và `OpenError` (-32013) khi key
 `base_url` được cho phép cả origin lẫn path (`provider_base_urls`; xem
 [Server](./server.md)), và được gọi `list_models` và `model_info` 10 lần một
 phút, sau đó nhận `LimitReached` (`kind` là `provider_calls`).
+
+## Temperature
+
+`spec.temperature` (0 đến 2) đi kèm mọi request khi được đặt, kể cả `0`, và không
+xuất hiện trên wire khi không đặt. `agent.open` thất bại với giá trị ngoài 0 đến 2,
+hoặc trên 1 với `anthropic`. Mỗi adapter gửi nguyên giá trị (đối chiếu với tài liệu
+của nhà cung cấp ngày 2026-11-17):
+
+| Provider | Trường | Ghi chú |
+|---|---|---|
+| `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 đến 2. OpenAI nói mức hỗ trợ tham số khác nhau theo model; model từ chối nó sẽ trả lỗi HTTP, Linch không đoán trước. |
+| `anthropic` | `temperature` | 0 đến 1. Claude Opus 4.7 trở lên, Sonnet 5 trở lên và Haiku 5.5 trả 400 với giá trị khác mặc định ở mọi request; model cũ hơn chỉ từ chối khi thinking bật; API version `2026-10-21` bỏ nó. |
+| `deepseek` | `temperature` | 0 đến 2. Không có tác dụng ở chế độ thinking (mặc định), nơi nó được gửi và bị bỏ qua. |
+| `gemini` | `generationConfig.temperature` | 0.0 đến 2.0. Bị bỏ qua im lặng trên Gemini 3.6 Flash và các model mới hơn. |
 
 ## Lỗi và thử lại
 

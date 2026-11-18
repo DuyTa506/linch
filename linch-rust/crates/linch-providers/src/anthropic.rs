@@ -4,6 +4,12 @@
 //! - Auth is `x-api-key`; `anthropic-version` is pinned to [`API_VERSION`].
 //!   `2026-10-21` removes `temperature`, which [`ProviderRequest`] carries,
 //!   so the adapter stays on `2023-06-01` until that field is dropped.
+//! - `temperature` takes 0.0 to 1.0 ([`Provider::max_temperature`]).
+//!   Checked 2026-11-17 against the thinking page: Claude Opus 4.7 and
+//!   later, Sonnet 5 and later and Haiku 5.5 answer 400 to a non-default
+//!   `temperature` on every request; older models refuse it only while
+//!   thinking is on. The adapter sends what the spec sets and the API
+//!   decides.
 //! - `max_tokens` is required; [`DEFAULT_MAX_TOKENS`] fills it.
 //! - Thinking: `enabled` needs `budget_tokens` below `max_tokens` and
 //!   rejects a forced `tool_choice`; an unbudgeted request is `adaptive`.
@@ -138,6 +144,11 @@ impl Provider for Anthropic {
     /// 200000 for every model, as Python's table and fallback say.
     fn context_window(&self, _model: &str) -> u64 {
         CONTEXT_WINDOW
+    }
+
+    /// The Messages API takes 0.0 to 1.0.
+    fn max_temperature(&self) -> f64 {
+        1.0
     }
 
     fn tool_choice_refusal(

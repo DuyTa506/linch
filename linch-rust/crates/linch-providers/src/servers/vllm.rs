@@ -8,7 +8,12 @@
 //! - **Thinking off:** `chat_template_kwargs` `enable_thinking: false`, as
 //!   the reasoning docs give for Qwen3.
 //! - **`reasoning_effort`** takes `none` to `max` and is passed to the
-//!   template; any value but `none` sets `enable_thinking`.
+//!   template; any value but `none` sets `enable_thinking`. The template
+//!   decides what it accepts: the Qwen3 one (checked live 2026-11-17 on
+//!   `qwen3.6-35b-a3b`) takes only `low`, `medium` and `xhigh` and answers
+//!   HTTP 400 for `high` and `max`, so Linch sends `high` and `max` as
+//!   `xhigh`. A model whose template takes other values is not served by
+//!   this map.
 //! - **`tool_choice`:** `auto`, `none`, `required` and a named function.
 //!   In practice all but `none` need `--enable-auto-tool-choice` and
 //!   `--tool-call-parser`; without them the server answers 400.
@@ -35,7 +40,7 @@
 //!   capabilities say `output_schema: final_tool`, so a run with a schema
 //!   offers its final tool instead.
 
-use linch_core::{JsonObject, Usage};
+use linch_core::{JsonObject, ReasoningEffort, Usage};
 use serde_json::json;
 
 use super::kwargs;
@@ -55,7 +60,7 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     },
     max_tokens_field: "max_completion_tokens",
     json_schema: false,
-    reasoning_effort: true,
+    reasoning_effort: Some(effort),
     template_thinking_switch: true,
     usage,
     context: ContextRule::Models,
@@ -76,6 +81,16 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
 
 pub(super) fn thinking_off_kwargs() -> JsonObject {
     kwargs(json!({"enable_thinking": false}))
+}
+
+/// The efforts vLLM's chat template takes: `low`, `medium` and `xhigh`.
+/// `high` rounds up to `xhigh`, and `max` has no level above it.
+fn effort(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High | ReasoningEffort::Xhigh | ReasoningEffort::Max => "xhigh",
+    }
 }
 
 /// `prompt_tokens` includes cache reads (`cached_tokens`) and the tokens

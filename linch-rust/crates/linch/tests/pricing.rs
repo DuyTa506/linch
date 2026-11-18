@@ -67,6 +67,23 @@ async fn an_override_replaces_the_table_for_its_model_only() {
     assert_eq!(cost_of("claude-haiku-4-5", rates, usage).await, published);
 }
 
+/// DeepSeek has no built-in rates: its price changes with the hour (peak
+/// and off-peak differ by 2x), so no single row is right. An agent states
+/// the rates it pays, and a cache hit is priced apart from a miss.
+#[tokio::test]
+async fn deepseek_costs_nothing_known_until_the_config_states_its_rates() {
+    // The peak rates of https://api-docs.deepseek.com/quick_start/pricing,
+    // read 2026-11-17, USD per million tokens.
+    let usage = million(1_000_000, 1_000_000);
+    for model in ["deepseek-flash", "deepseek-v4-pro"] {
+        assert_eq!(cost_of(model, Value::Null, usage).await, None, "{model}");
+    }
+    let rates = json!({"deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006}});
+    let cost = cost_of("deepseek-flash", rates, usage).await.unwrap();
+    // 1M missed input + 1M output + 1M cache hits.
+    assert!((cost - (0.3 + 1.2 + 0.006)).abs() < 1e-9, "{cost}");
+}
+
 /// Cache rates left out are the input rate: a cached token costs what an
 /// uncached one does, never less than the config said.
 #[tokio::test]
