@@ -18,7 +18,7 @@
 //! always was: no copy, no extra entry.
 //!
 //! With the cap on, the agent also has the `ReadToolResult` tool
-//! ([`reader::ReadToolResultTool`]), which returns any slice of a result
+//! (`reader::ReadToolResultTool`), which returns any slice of a result
 //! the session logged, in the same bounded size, so a slice never needs a
 //! cap of its own.
 //!
