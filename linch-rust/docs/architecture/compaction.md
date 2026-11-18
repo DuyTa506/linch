@@ -137,16 +137,21 @@ nothing.
   measure as `measured_tokens` (off the wire when the estimate was the
   measure), so a resume reads the same judgment back.
 
-Known gap: a summary call at a turn's start sends the whole view, so a
-trigger above what fits the window (a `threshold_tokens` near or over it)
-meets a refusal of that call. The summary then goes again like a forced one
-(the folded part only, clipped, half as much at each refusal), without
-spending `max_forced`, so that refusal no longer ends a run; it does cost a
-refused request at each such due turn. What a trigger at or over the window
-still leaves to chance is a refused primary prompt (the view grew past the
-window between two measures), which forces a summary and spends
-`max_forced`: a run that compacts only that way ends `failed` at the fourth
-(default `max_forced` 3), so such a trigger wants a higher `max_forced`. The
+A `threshold_tokens` at or above a known window does not build
+(`CompactionSpec::window_problem`, checked in `AgentBuilder::build` against
+`Provider::capabilities`; a window whose `context_source` is `default` is a
+guess and is not checked): such a trigger never fires, since the provider
+refuses the prompt first, and each refusal forces a summary and spends
+`max_forced`. Known gap: a summary call at a turn's start sends the whole
+view, so a trigger near the window meets a refusal of that call. The summary
+then goes again like a forced one (the folded part only, clipped, half as much
+at each refusal), without spending `max_forced`, so that refusal no longer
+ends a run; it does cost a refused request at each such due turn. What a
+trigger with little headroom under the window still leaves to chance is a
+refused primary prompt (the view grew past the window between two measures),
+which forces a summary and spends `max_forced`: a run that compacts only that
+way ends `failed` at the fourth (default `max_forced` 3), so a trigger wants
+room for a turn's growth (7/8 of the window or less in the tests). The
 window-derived trigger leaves a fifth of the window for the summary call. A
 trigger below what the kept turns and the provider's overhead weigh is held
 after two summaries, as above. The only size case that ends `failed` by
@@ -569,7 +574,7 @@ answer counts once its feedback is durable (`truncation.rs`,
 - `crates/linch-core/tests/e2e_compaction_estimator.rs`: besides the anchor,
   a giant result in the folded part (the summary request is clipped and
   retried), in the last turn (clipped in the view, whole in the session), a
-  trigger at the window, a summary refused at every size, an overhead that
+  trigger near the window, a summary refused at every size, an overhead that
   alone exceeds the window, a proactive summary request pinned byte for byte
   (`tests/golden/compaction_proactive_request.json`), and a crash at every
   write of each, including the hold read back from `measured_tokens`.

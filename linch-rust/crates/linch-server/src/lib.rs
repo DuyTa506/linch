@@ -117,7 +117,8 @@ mod logging;
 mod worker;
 
 pub use config::{
-    AllowConfig, Built, ConfigError, ServerConfig, TenantConfig, TokenSource, WorkerSection,
+    AllowConfig, Built, ConfigError, RetentionSection, ServerConfig, TenantConfig, TokenSource,
+    WorkerSection,
 };
 pub use http::{HEADER_READ_TIMEOUT, MAX_PENDING_UPGRADES, PATH};
 pub use listen::Listeners;

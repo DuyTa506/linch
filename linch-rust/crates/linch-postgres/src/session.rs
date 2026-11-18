@@ -15,7 +15,7 @@ use crate::codec::{backend, decode_entry, encode_entry, not_found, to_u64};
 /// entries are inserted from the moved row, so they land with it or not at
 /// all.
 const APPEND: &str = "WITH moved AS ( \
-         UPDATE linch_sessions SET len = len + cardinality($4::text[]) \
+         UPDATE linch_sessions SET len = len + cardinality($4::text[]), updated_at = now() \
          WHERE namespace = $1 AND session_id = $2 AND len = $3 RETURNING len \
      ), inserted AS ( \
          INSERT INTO linch_session_entries (namespace, session_id, position, entry) \

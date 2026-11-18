@@ -86,6 +86,26 @@ async fn an_oversized_result_is_stored_and_replaced_by_a_pointer() {
     assert_eq!(output.metadata["source"], "search", "tool metadata kept");
 }
 
+/// One very long line (a minified file) is not a ten-line preview: the
+/// replacement must be far smaller than the result it replaces.
+#[tokio::test]
+async fn a_single_huge_line_is_not_previewed_whole() {
+    let hook = offload(Arc::new(MemorySessions::new()), 100);
+    let payload = "x".repeat(200_000);
+    let response = hook
+        .call(&request("web_search", Ok(ToolOutput::new(payload))))
+        .await
+        .unwrap();
+    let JsonValue::String(shown) = replaced(response).expect("offloaded").value else {
+        panic!("a string pointer");
+    };
+    assert!(
+        shown.len() < 4_000,
+        "the pointer holds {} bytes",
+        shown.len()
+    );
+}
+
 #[tokio::test]
 async fn results_that_are_not_offloaded_continue() {
     let sessions = Arc::new(MemorySessions::new());

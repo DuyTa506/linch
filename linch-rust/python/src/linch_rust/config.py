@@ -342,7 +342,8 @@ class Compaction(TypedDict, total=False):
     Attributes:
         threshold_tokens: Compact a view estimated at this many tokens or
             more (four characters per token). Absent: once the estimate plus
-            an output reserve reaches 80% of the context window.
+            an output reserve reaches 80% of the context window. At or above
+            a known context window the agent does not open (`OpenError`).
         keep_recent_turns: Assistant turns kept verbatim; 10 when absent.
         prompt: Instructions for the summary call; a general default when
             absent.

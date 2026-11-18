@@ -480,7 +480,7 @@ host adds it to the system prompt when it offers these tools.
 `ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:72`) is a
 `post_tool_use` hook. A successful result whose value is a string and is
 estimated above `threshold_tokens` (four bytes per token) is written whole to
-`/offload/{tool}_{tool_use_id}.txt` and replaced by its first 10 lines and a
+`/offload/{tool}_{tool_use_id}.txt` and replaced by its first 10 lines (at most 2000 bytes) and a
 pointer the model can follow with `read_file`. Errors, structured values and
 the four virtual filesystem tools are never offloaded, so reading an offloaded
 file back is never offloaded again (`offload.rs:51-62`).

@@ -469,7 +469,7 @@ thêm nó vào system prompt khi cung cấp các tool này.
 `ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:72`) là một hook
 `post_tool_use`. Một kết quả thành công có giá trị là chuỗi và ước lượng vượt
 `threshold_tokens` (bốn byte cho mỗi token) được ghi nguyên vẹn vào
-`/offload/{tool}_{tool_use_id}.txt` và được thay bằng 10 dòng đầu cùng
+`/offload/{tool}_{tool_use_id}.txt` và được thay bằng 10 dòng đầu (tối đa 2000 byte) cùng
 một con trỏ mà model có thể theo bằng `read_file`. Lỗi, giá trị có cấu trúc và
 bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài, nên đọc lại một tệp
 đã chuyển ra ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:51-62`).

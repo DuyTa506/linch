@@ -14,7 +14,7 @@ use crate::ids::SessionId;
 use crate::json::JsonObject;
 use crate::message::SystemBlock;
 use crate::permissions::PermissionEngine;
-use crate::provider::{Provider, ProviderGate};
+use crate::provider::{ContextSource, Provider, ProviderGate};
 use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
@@ -339,6 +339,15 @@ impl AgentBuilder {
         let provider = self.provider.ok_or(BuildError::Missing("provider"))?;
         if let Some(problem) = (self.spec.temperature)
             .and_then(|temperature| spec::temperature_problem(temperature, &*provider))
+        {
+            return Err(BuildError::Invalid(problem));
+        }
+        // The provider's default window is a guess, so only a window it
+        // reports for sure bounds the trigger.
+        let capabilities = provider.capabilities(&self.spec.model);
+        if capabilities.context_source != ContextSource::Default
+            && let Some(problem) = (self.spec.compaction.as_ref())
+                .and_then(|c| c.window_problem(capabilities.context_window))
         {
             return Err(BuildError::Invalid(problem));
         }

@@ -135,7 +135,8 @@ lại trên phiên bản cũ.
   `linch_` bằng tay khi các run còn đang chạy.
 - Payload được lưu dưới dạng `TEXT`, không phải `JSONB`, nên các byte mà mô hình đã
   thấy chính là các byte được đọc lại.
-- Client không có lệnh gọi nào xóa run hay session.
+- Client không có lệnh gọi nào xóa run hay session. Chỉ [retention](#retention)
+  của server làm việc đó, khi bạn bật nó.
 
 Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
 [trang kiến trúc về kho lưu trữ](../architecture/stores.md#postgres-stores).
@@ -224,6 +225,141 @@ lời gọi `Bash`, 24 MB sau 25 run và 32 MB sau 100; đóng agent không làm
 dùng store Postgres cho một agent sống lâu hoặc phục vụ nhiều run.
 
 <a id="the-virtual-filesystem"></a>
+
+## Retention
+
+Postgres giữ mọi run, event và session cho đến khi có thứ gì đó xóa chúng. Một
+schedule bắn mỗi phút thêm một run và một session mỗi phút (1440 mỗi ngày), và
+mỗi lượt tool thêm khoảng 8 hàng event. Retention là cách riêng, tùy chọn của
+server để chặn mức tăng đó. Nó tắt trừ khi phần `worker` của config server có
+đối tượng `retention`:
+
+```json
+{"worker": {"dsn": {"env": "LINCH_DSN"},
+            "retention": {"terminal_runs_days": 30, "idle_sessions_days": 90}}}
+```
+
+| Trường | Mặc định | Ý nghĩa |
+|---|---|---|
+| `terminal_runs_days` | không có | Xóa run (bản ghi và mọi event của nó) đã kết thúc quá chừng này ngày |
+| `idle_sessions_days` | không có | Xóa session (log, task và các cạnh task của nó) mà không có gì ghi vào trong chừng này ngày |
+| `tombstone_days` | 30 | Một run đã xóa được nhớ bao lâu (xem [client thấy gì](#client-thấy-gì)) |
+| `batch_size` | 500 | Số run hoặc session nhiều nhất mà một transaction xóa (1 đến 10000) |
+| `interval_secs` | 3600 | Khoảng cách tối thiểu giữa hai đợt (ít nhất 60) |
+
+Cần ít nhất một trong hai cửa sổ, cửa sổ là số ngày nguyên (không phải 0), và
+một giá trị sai làm server dừng ngay lúc khởi động. Worker chạy một đợt trong
+task riêng, nên một đợt dài không bao giờ làm chậm một lượt poll, và cả fleet
+chỉ chạy một đợt tại một thời điểm: đợt thấy đợt của server khác đang chạy sẽ
+dừng và thử lại ở interval kế tiếp. Cần có phần `worker`; server không có nó
+thì không xóa gì.
+
+### Cái gì bị xóa và cái gì được giữ
+
+Hai cửa sổ là hai quyết định riêng. Một session có thể được người dùng tiếp tục
+rất lâu sau khi các run của nó kết thúc, nên xóa run của một session cũ không
+xóa session, và ngược lại.
+
+| Luôn được giữ, bất kể cửa sổ | Vì sao |
+|---|---|
+| Run chưa terminal (`pending`, `running`, `awaiting_approval`, `awaiting_input`) | Một run bị tạm dừng chờ người dùng bao lâu cũng được; xóa nó sẽ kết thúc nó mà không có câu trả lời. Chính lệnh xóa cũng kiểm tra lại trạng thái |
+| Run con (của subagent) khi run cha chưa terminal | Run cha đọc event của các con khi resume; thiếu chúng nó sẽ khởi động lại subagent |
+| Run và session agent của workflow (id `wf-`) | Workflow được resume đọc run này khi journal chưa có bản ghi của lời gọi; thiếu nó agent sẽ chạy lại |
+| Run mà một job đang xếp hàng hoặc đang chạy còn gọi tên | Job start được thử lại mà không thấy run sẽ bắt đầu một run khác |
+| Session có run chưa terminal | Một run trong đó vẫn đọc log |
+
+Các hàng bị xóa theo lô, mỗi lô một transaction riêng: một run cùng event của nó
+(và một tombstone), một session cùng log, task và các cạnh task. Một lần crash
+giữa các lô để mọi run và session còn nguyên hoặc đã mất hẳn. Đợt đi qua mỗi
+bảng đúng một lần theo thứ tự khóa, nên hàng nó không xóa được không bị đọc lại
+cho đến đợt sau.
+
+Không có gì khác bị đụng đến. Lịch sử job và job thất bại có
+`history_retention_ms` riêng; schedule, definition, file, bộ nhớ dài hạn,
+mailbox, tool cache và journal workflow không thuộc retention. Hàng lịch sử của
+job còn sống lâu hơn run nó gọi tên, nên `job.list` giống hệt trước và sau một
+đợt, và lần bắn kế tiếp của schedule không bị dời.
+
+Retention xóa dữ liệu kiểm toán: hết cửa sổ thì không ai đọc được event hay
+report của run. Hãy chọn cửa sổ đủ dài cho những gì bạn cần nhìn lại, hoặc sao
+chép thứ phải giữ trước khi hết hạn.
+
+Session bị xóa vì nhàn rỗi là mất hẳn: bắt đầu một run trong id session đó sau
+đó sẽ bắt đầu một session trống. Hoạt động của session là của riêng nó: session
+cha còn dùng không giữ cho session của các subagent của nó sống, nên hãy để
+`idle_sessions_days` dài hơn khoảng nghỉ dài nhất mà sau đó vẫn có người quay
+lại.
+
+### Client thấy gì
+
+Đọc, resume, approve, answer, steer, cancel hay report một run đã xóa là
+`RunPruned` (mã -32050, lớp con của `RunNotFound`; `data.run_id`), chứ không phải
+"not found" thường, trong `tombstone_days`. Sau đó server đã quên nó và run đọc
+ra là `RunNotFound`. Một id sai luôn là `RunNotFound`.
+
+### Nâng cấp
+
+Migration 10 thêm `linch_runs.ended_at` (đặt bởi commit làm run thành terminal),
+`linch_sessions.updated_at` (đặt khi tạo session và mỗi lần append) và
+`linch_pruned_runs`. Nó không ghi lại hàng nào, nên mất xấp xỉ cùng thời gian
+trên database hàng triệu run như trên database trống (thời gian dựng hai index
+ở [Vận hành](#vận-hành)). Các run đã terminal trước nó không có thời điểm kết
+thúc: đợt đầu tiên có `terminal_runs_days` gán cho mỗi run thời điểm của đợt đó,
+nên cửa sổ của nó bắt đầu từ đó, và đồng hồ của mọi session hiện có bắt đầu từ
+migration. Những hàng đầu tiên bị xóa sau một cửa sổ kể từ lúc bạn bật
+retention, không phải lúc nâng cấp.
+
+### Vận hành
+
+Đo trên một máy dùng chung 64 lõi, Postgres 16.15 cấu hình mặc định (`shared_buffers` 128 MB) ở cùng máy,
+trên database có 520k run (4,2M event), 516k session (1,6M mục log) và 300k
+hàng history, trong lúc đợt retention xóa và 4 client bắt đầu các run scripted
+trên cùng schema:
+
+- Trước khi xóa, các bảng có 2,0 GB event (4,0M hàng, 500 byte một hàng kèm
+  index), 0,3 GB run (505k hàng, 600 byte), 0,09 GB session (500k hàng, 180
+  byte) và 0,47 GB mục log (1,5M hàng, 310 byte). Một run scripted chỉ có văn
+  bản (8 event, 1 session, 3 mục) để lại khoảng 5,7 KB: một schedule bắn mỗi
+  phút thêm 8 MB mỗi ngày.
+- Một đợt xóa 67k run cùng 536k event của chúng và 66k session cùng 214k mục
+  log (khoảng 0,9M hàng) trong 187 giây, 4,7k hàng/giây, với lô 500 hàng và
+  quãng nghỉ bên dưới. Một đợt trên 263k run và 259k session (3,4M hàng) mất
+  24 phút với quãng nghỉ, trên máy bận hơn (một mẫu duy nhất; một job của
+  người dùng khác đang chạy).
+- Sau mỗi lô là một quãng nghỉ bằng thời gian lô đó chạy, nên một đợt chỉ làm
+  database bận tối đa một nửa. Thông lượng run của 4 client (lô 100 run) trung
+  bình 58 run/giây trong đợt và 67 run/giây ở một cửa sổ đối chứng không có
+  đợt (mỗi bên một mẫu, trên database nhỏ hơn bốn lần, giữa các lô dao động từ
+  3 đến 123 run/giây: chỉ mang tính tham khảo, không phải một cận), và mọi run
+  đều thành công. Gán thời điểm kết thúc cho 500k run mà không nghỉ làm cùng
+  các client đó giảm xuống trung bình 24 run/giây, vì vậy đợt có quãng nghỉ.
+- Chọn một lô run đọc 500 mục index trong khoảng 5 ms ở mọi độ sâu của đợt; một
+  đợt không có gì để xóa tốn 0,05 ms. Chọn một lô session mất 7 ms; quét session
+  khi không có gì để xóa là quét đủ theo thứ tự khóa, 0,45 giây ở 516k session,
+  mỗi đợt một lần.
+- Migration không ghi lại hàng nào (mở một database 518k run, migrate hết 1,3
+  giây). Index một phần trên run terminal tốn khoảng 77 byte mỗi hàng (39 MB
+  cho 500k run) và được ghi một lần mỗi run, khi nó kết thúc.
+- Xóa không làm file nhỏ lại: Postgres dùng lại các trang đã giải phóng sau khi
+  autovacuum đã thấy chúng, còn `VACUUM FULL` hoặc `pg_repack` trả dung lượng
+  cho hệ điều hành. Một đợt tạo hàng chết với tốc độ lô của nó, nên với bảng
+  hàng triệu hàng hãy tăng ngưỡng autovacuum cho đợt đầu hoặc chạy
+  `VACUUM (ANALYZE)` sau nó.
+- `batch_size` lớn hơn xóa nhanh hơn và giữ khóa của các hàng nó xóa lâu hơn;
+  mặc định là 500.
+
+Các hàng terminal không làm chậm một run theo cách đo được: với 520k run và
+4,2M event này trong schema và chưa xóa gì, thông lượng run scripted ở 1, 4 và
+16 client (trung vị của ba lô 600 run, hai chuỗi mỗi bên) là 43, 159 đến 221 và
+539 đến 728 run/giây so với 44 đến 46, 187 đến 204 và 583 đến 649 run/giây trên
+schema trống: các chuỗi chồng lên nhau và nhiễu của máy lớn hơn mọi chênh lệch.
+(Chuỗi đầu tiên gồm các lô 200 run đọc được 481 run/giây ở 16 client so với 709
+trên schema trống; các chuỗi 600 run không lặp lại điều đó.) Các truy vấn
+claim, lease, hết hạn và due-fire giữ nguyên kế hoạch (0,02 đến 1,4 ms) vì chúng
+đọc các index một phần trên hàng còn sống; một lần resume run, từ lúc spawn
+server đến kết quả, mất 80 ms ở cả hai. Cái giá của việc giữ mọi run là đĩa
+(các kích thước ở trên) và các lượt quét đọc cả một namespace như `job.list`
+(205 ms ở 180k hàng history), không phải đường đi của run.
 
 ## Hệ thống tệp ảo
 

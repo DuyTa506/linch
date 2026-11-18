@@ -761,6 +761,44 @@ are never offloaded. Where the files live
 follows the stores: per session in memory, or shared by every session of the
 namespace in Postgres ([Stores](./stores.md#the-virtual-filesystem)).
 
+## Long tool results
+
+A result goes into the model's view whole unless a bound applies, and the
+view is what compaction and the context window pay for. Some tools bound
+their own output:
+
+| Tool | Bound |
+|---|---|
+| `Bash`, `BashOutput` | the first 4000 and the last 26000 bytes of each stream |
+| `Grep` | 250 entries by default, 30000 bytes of output |
+| `Glob` | 1000 paths |
+| An MCP tool | 30000 bytes of result text |
+| `memory_recall` | 8 KiB of recalled context per request |
+| `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (the offload below keeps the pointer small, but `read_file` is line-based too, so reading that line back returns it whole) |
+
+A host tool has no bound of its own. For these, and for any result a bound
+above lets through, the one mechanism is the filesystem offload:
+`filesystem: {"offload_threshold_tokens": 8000}` (or
+`offload_threshold_fraction`) writes a text result estimated above the
+threshold to a file and leaves the model its first ten lines (at most 2000
+bytes) and the path
+([Virtual filesystem](#virtual-filesystem)). 8000 is the recommended value:
+a result under it, about 32 KB, is cheap enough to keep whole.
+
+In a scripted run of 30 turns, each with a tool result of 2, 12, 60 or 200 KB
+and no compaction, the last request weighed 484956 estimated tokens without a
+bound and 141961 with every result held to about 8000 tokens, and the 30
+requests together 7384454 and 2190541, about 70% fewer. These were measured
+with the scripted test harness against a cut that kept the head and tail of
+each result in the view, not with a live model and not with the offload
+itself; the offload keeps only ten lines of a long result, so the saving is
+at least as large, less what the model chooses to read back.
+
+Offload does not reach every result: an error, a value that is not a string
+and the four filesystem tools' own results pass through whole. With memory
+stores the files live only as long as the process, so a run resumed elsewhere
+finds the pointer but not the file ([Stores](./stores.md#the-virtual-filesystem)).
+
 ## MCP tools
 
 Each entry of `mcp_servers` is connected when the agent opens; a server that

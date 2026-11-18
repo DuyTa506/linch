@@ -70,3 +70,29 @@ async fn a_compaction_makes_the_model_read_again_before_an_edit() {
     assert!(failed, "{text}");
     assert!(text.contains("Read"), "{text}");
 }
+
+/// A trigger at a window the config sets does not open (`-32011` over RPC);
+/// one below it does.
+#[tokio::test]
+async fn a_trigger_at_the_configured_window_does_not_open() {
+    let open = |threshold: u64| {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "namespace": "t",
+            "spec": {"model": MODEL, "compaction": {"threshold_tokens": threshold}},
+            "provider": {"id": "scripted", "turns": [], "context_window": 8000},
+            "permissions": {"mode": "skip_dangerous", "project_root": "/"},
+        }))
+        .unwrap();
+        async move { config.open().await }
+    };
+    match open(8000).await {
+        Err(linch::OpenError::Build(linch::BuildError::Invalid(reason))) => assert!(
+            reason.contains(
+                "compaction.threshold_tokens (8000) must be below the context window (8000)"
+            ),
+            "{reason}"
+        ),
+        other => panic!("opened or failed another way: {:?}", other.map(|_| ())),
+    }
+    assert!(open(7000).await.is_ok());
+}

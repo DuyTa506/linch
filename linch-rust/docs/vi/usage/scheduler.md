@@ -54,6 +54,7 @@ worker (không có `socket` hay `http`); khi đó các tenant của nó không c
 | `visibility_timeout_ms` | 30000 | Một job đã được nhận vẫn bị ẩn bao lâu khi không có heartbeat. Hãy giữ `stores.lease_ttl_ms` của các agent không dài hơn mức này |
 | `retry_delay_ms` | 5000 | Thời gian chờ trước lần thử kế tiếp của một job thất bại; nhân đôi mỗi lần, tối đa 5 phút |
 | `history_retention_ms` | 7 ngày | Các job đã kết thúc và job thất bại còn đọc được bao lâu bằng `job` và `jobs`; job của một run chưa terminal được giữ lâu hơn ([cái gì bị dọn](#cái-gì-bị-dọn)) |
+| `retention` | vắng: không xóa gì | Xóa những gì run đã kết thúc và session nhàn rỗi để lại, theo từng lô nhỏ: `{"terminal_runs_days": 30, "idle_sessions_days": 90}`, thêm tùy chọn `tombstone_days` (30), `batch_size` (500) và `interval_secs` (3600). Mỗi lúc chỉ một đợt chạy trên mọi worker của database. [Stores: Retention](./stores.md#retention) nói cái gì bị xóa và cái gì được giữ |
 | `local_namespaces` | không có | Các namespace root nằm ngoài mọi tenant mà nó cũng chạy job của, không kiểm tra (các lịch do một client stdio tạo); `dev` bao gồm `dev` và `dev/...` |
 
 Bạn có thể chạy bao nhiêu server như vậy trên một cơ sở dữ liệu tùy ý: mỗi lần kích hoạt

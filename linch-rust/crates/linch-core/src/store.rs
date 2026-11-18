@@ -117,7 +117,10 @@ impl Commit {
 #[derive(Debug, Error)]
 pub enum StoreError {
     /// No record with that key.
-    #[error("{kind} {id} not found in namespace {namespace}")]
+    #[error(
+        "{kind} {id} not found in namespace {namespace}{}",
+        if *.pruned { " (deleted by the retention policy)" } else { "" }
+    )]
     NotFound {
         /// `run` or `session`.
         kind: &'static str,
@@ -125,6 +128,10 @@ pub enum StoreError {
         namespace: String,
         /// Missing id.
         id: String,
+        /// Whether the record existed and a retention pass deleted it, so
+        /// that it is gone for good and not a wrong id. Only a store that
+        /// keeps a record of what it pruned says so.
+        pruned: bool,
     },
     /// The lease was fenced out by a newer claim.
     #[error("lease on run {run_id} lost (epoch {epoch})")]

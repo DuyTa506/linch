@@ -762,6 +762,41 @@ Nơi các tệp nằm tuân theo kho lưu trữ: theo từng session trong memor
 chung cho mọi session của namespace trong Postgres
 ([Kho lưu trữ](./stores.md#the-virtual-filesystem)).
 
+<a id="long-tool-results"></a>
+
+## Kết quả tool dài
+
+Một kết quả đi vào view của model nguyên vẹn trừ khi có một giới hạn áp dụng, mà view là
+thứ compaction và context window phải trả giá. Một số tool tự giới hạn đầu ra của mình:
+
+| Tool | Giới hạn |
+|---|---|
+| `Bash`, `BashOutput` | 4000 byte đầu và 26000 byte cuối của mỗi luồng |
+| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte |
+| `Glob` | 1000 đường dẫn |
+| Một tool MCP | 30000 byte văn bản kết quả |
+| `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |
+| `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (offload bên dưới giữ con trỏ nhỏ, nhưng `read_file` cũng theo dòng, nên đọc lại dòng đó vẫn trả về nguyên vẹn) |
+
+Một host tool không có giới hạn riêng. Với các tool đó, và với mọi kết quả mà một giới hạn ở
+trên cho qua, cơ chế duy nhất là offload sang hệ thống tệp:
+`filesystem: {"offload_threshold_tokens": 8000}` (hoặc `offload_threshold_fraction`) ghi một
+kết quả văn bản có ước lượng trên ngưỡng vào một tệp và để lại cho model mười dòng đầu (tối đa 2000
+byte) cùng đường dẫn ([Hệ thống tệp ảo](#hệ-thống-tệp-ảo)). 8000 là giá trị khuyến nghị: một kết quả dưới
+ngưỡng đó, khoảng 32 KB, đủ rẻ để giữ nguyên vẹn.
+
+Trong một lần chạy kịch bản 30 lượt, mỗi lượt có một kết quả tool 2, 12, 60 hoặc 200 KB và
+không có compaction, request cuối nặng 484956 token ước lượng khi không có giới hạn và 141961
+khi mọi kết quả bị giữ ở khoảng 8000 token, còn tổng 30 request là 7384454 và 2190541, ít hơn
+khoảng 70%. Các số này được đo bằng bộ test kịch bản với một cách cắt giữ đầu và đuôi mỗi kết
+quả trong view, không phải với model thật và không phải với chính offload; offload chỉ giữ mười
+dòng của một kết quả dài, nên mức tiết kiệm ít nhất cũng bằng, trừ phần model chọn đọc lại.
+
+Offload không phủ mọi kết quả: lỗi, giá trị không phải chuỗi và chính kết quả của bốn tool hệ
+thống tệp đi qua nguyên vẹn. Với store trong bộ nhớ, các tệp chỉ sống bằng tiến trình, nên một
+run được resume ở nơi khác thấy con trỏ nhưng không thấy tệp
+([Kho lưu trữ](./stores.md#the-virtual-filesystem)).
+
 ## MCP tool
 
 Mỗi phần tử của `mcp_servers` được kết nối khi agent được mở; một server không kết

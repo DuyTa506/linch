@@ -234,6 +234,19 @@ impl CompactionSpec {
         }
         None
     }
+
+    /// Why the trigger cannot fire under a context `window` the provider
+    /// reports for sure, if it cannot: a trigger at or above it is never
+    /// reached, because the provider refuses the prompt first, and each
+    /// refusal then forces a summary and spends `max_forced`.
+    pub(crate) fn window_problem(&self, window: u64) -> Option<String> {
+        // A window of 0 is a provider that reports none.
+        let threshold = (self.threshold_tokens).filter(|&t| window > 0 && t >= window)?;
+        Some(format!(
+            "compaction.threshold_tokens ({threshold}) must be below the context window \
+             ({window}); lower it, or leave it out to follow the window"
+        ))
+    }
 }
 
 /// Estimated tokens of `messages`: text, tool inputs and tool results at

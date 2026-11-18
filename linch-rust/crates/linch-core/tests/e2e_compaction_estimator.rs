@@ -631,22 +631,23 @@ async fn retries_before_a_refusal_do_not_shrink_the_clip() {
     assert_eq!(busy, quiet, "{stats}");
 }
 
-/// A trigger at the window: a view due for a summary has a prompt over the
-/// window, so the turn-start summary of the whole view is refused. It goes
-/// again like a forced one, on the folded part clipped, without spending
-/// `max_forced`; the run ends `success` however long it is. (A refused
-/// primary prompt, which a trigger this high leaves to chance, does spend
-/// `max_forced`: it is raised here so that bound is not what this reads.)
+/// A trigger near the window (one at or above it does not build): the view
+/// is due while its real prompt, which the estimate undercounts, is already
+/// over the window, so the turn-start summary of the whole view is refused.
+/// It goes again like a forced one, on the folded part clipped, without
+/// spending `max_forced`; the run ends `success` however long it is, at the
+/// default `max_forced`. (At `WINDOW - 1` there is no room for a turn's
+/// growth: a primary prompt is refused too, and the fourth such refusal ends
+/// the run, which is why a trigger is set with headroom.)
 fn at_the_window() -> CompactionSpec {
     CompactionSpec {
         keep_recent_turns: 1,
-        max_forced: 100,
-        ..CompactionSpec::new(WINDOW)
+        ..CompactionSpec::new(WINDOW / 8 * 7)
     }
 }
 
 #[tokio::test]
-async fn a_trigger_at_the_window_falls_through_to_the_forced_shape() {
+async fn a_trigger_near_the_window_falls_through_to_the_forced_shape() {
     let world = World {
         turns: 60,
         ..UNDERCOUNTED

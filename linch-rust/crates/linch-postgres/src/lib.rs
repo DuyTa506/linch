@@ -236,6 +236,13 @@ fn migrator() -> Migrator {
             include_str!("../migrations/0009_memories.sql").into_sql_str(),
             false,
         ),
+        Migration::new(
+            10,
+            Cow::Borrowed("retention"),
+            MigrationType::Simple,
+            include_str!("../migrations/0010_retention.sql").into_sql_str(),
+            false,
+        ),
     ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),

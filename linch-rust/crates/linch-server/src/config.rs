@@ -89,11 +89,41 @@ pub struct WorkerSection {
     /// 7 days.
     #[serde(default)]
     pub history_retention_ms: Option<u64>,
+    /// Deleting what ended runs and idle sessions leave in the stores; off
+    /// when absent. Every worker of the fleet may carry it: one pass runs at
+    /// a time.
+    #[serde(default)]
+    pub retention: Option<RetentionSection>,
     /// Namespace roots outside every tenant whose jobs it also runs,
     /// without checks (those a stdio client scheduled): a root `dev`
     /// covers `dev` and `dev/...`.
     #[serde(default)]
     pub local_namespaces: Vec<String>,
+}
+
+/// The `worker.retention` section. At least one of `terminal_runs_days` and
+/// `idle_sessions_days` is required; each is a window in whole days.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionSection {
+    /// Delete a run (its record and events) that ended more than this many
+    /// days ago and is terminal; never one that is running or suspended.
+    #[serde(default)]
+    pub terminal_runs_days: Option<u32>,
+    /// Delete a session (its log and tasks) that nothing wrote to for this
+    /// many days and that has no run that is not terminal.
+    #[serde(default)]
+    pub idle_sessions_days: Option<u32>,
+    /// How many days a deleted run is remembered as pruned (then it reads as
+    /// not found); 30.
+    #[serde(default)]
+    pub tombstone_days: Option<u32>,
+    /// The most runs or sessions one transaction deletes; 500.
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    /// The least seconds between two passes; 3600.
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
 }
 
 /// One tenant: the tokens that name it and what its agents may use.

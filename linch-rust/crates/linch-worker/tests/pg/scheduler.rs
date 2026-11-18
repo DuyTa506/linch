@@ -655,9 +655,9 @@ async fn a_background_run_acts_for_its_principal() {
 /// Opens, for every definition, the probe agent under a rule that denies
 /// `Write` to all but `admin`: an admin's write asks, anyone else's is
 /// denied.
-struct AdminsOnly {
-    pool: PgPool,
-    probe: Probe,
+pub(crate) struct AdminsOnly {
+    pub(crate) pool: PgPool,
+    pub(crate) probe: Probe,
 }
 
 impl AgentFactory for AdminsOnly {
@@ -737,7 +737,7 @@ async fn an_approve_job_continues_a_scheduled_run_with_its_agent_and_principal()
 /// A scheduled run that suspended for an approval, its fire's job acked, its
 /// schedule deleted and the worker stopped; the history then pruned, as it is
 /// after the retention (7 days by default) with nobody having answered.
-async fn suspended_past_the_history(db: &TestDb) -> RunId {
+pub(crate) async fn suspended_past_the_history(db: &TestDb) -> RunId {
     let probe = Probe::new("Write", ToolScope::Write, Hold::None);
     let factory = AdminsOnly {
         pool: db.pool.clone(),
@@ -773,7 +773,7 @@ async fn suspended_past_the_history(db: &TestDb) -> RunId {
     run_id
 }
 
-fn allow_call_0() -> [(String, ApprovalResponse); 1] {
+pub(crate) fn allow_call_0() -> [(String, ApprovalResponse); 1] {
     [("call_0".to_owned(), ApprovalResponse::Allow)]
 }
 
