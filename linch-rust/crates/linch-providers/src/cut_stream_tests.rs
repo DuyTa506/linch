@@ -13,7 +13,7 @@ use crate::{
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ResponsesOptions, Server, ServerOptions,
 };
 
-const SECRET: &str = "sk-cut-stream-test-secret";
+const SECRET: &str = "sk-unit-test-cut-stream";
 
 fn key() -> ApiKey {
     ApiKey::new(SECRET).unwrap()

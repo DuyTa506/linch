@@ -669,11 +669,10 @@ fn provider(
             Server::Vllm,
             base_url,
             context_window,
-            &request,
+            request_options(&request, clients)?,
             &chat,
             "VLLM_API_KEY",
             keyed,
-            clients,
         )?,
         ProviderConfig::SgLang {
             base_url,
@@ -684,11 +683,10 @@ fn provider(
             Server::SgLang,
             base_url,
             context_window,
-            &request,
+            request_options(&request, clients)?,
             &chat,
             "SGLANG_API_KEY",
             keyed,
-            clients,
         )?,
         ProviderConfig::LlamaCpp {
             base_url,
@@ -699,11 +697,10 @@ fn provider(
             Server::LlamaCpp,
             base_url,
             context_window,
-            &request,
+            request_options(&request, clients)?,
             &chat,
             "LLAMA_API_KEY",
             keyed,
-            clients,
         )?,
     };
     Ok(built)
@@ -779,16 +776,15 @@ fn server(
     server: Server,
     base_url: String,
     context_window: Option<u64>,
-    request: &RequestConfig,
+    request: RequestOptions,
     chat: &ChatConfig,
     env: &'static str,
     keyed: bool,
-    clients: Option<&HttpClients>,
 ) -> Result<Arc<dyn Provider>, OpenError> {
     let mut options = ServerOptions::new(server, base_url);
     options.api_key = ApiKey::from_env(env).filter(|_| keyed);
     options.context_window = context_window;
-    options.request = request_options(request, clients)?;
+    options.request = request;
     options.chat = chat.options();
     Ok(Arc::new(
         OpenAiChat::server(options).map_err(OpenError::Provider)?,

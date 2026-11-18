@@ -782,21 +782,43 @@ async fn observe_only_points_cross_the_connection() {
     assert_eq!(failure["error"]["message"], "no cats here");
 }
 
+/// Python never times a hook out, so at the points with no default an hour
+/// of silence is not a failure.
 #[tokio::test(start_paused = true)]
 async fn a_callback_without_timeout_ms_waits_as_long_as_the_client_takes() {
-    let (mut rpc, log) = client(json!({"permission_request": null}));
-    let approver = json!({"point": "permission_request", "policy_id": "approver",
-                          "policy_version": 1});
-    let extra = json!({"tools": [host_tool("poke", "exec")], "callbacks": [approver]});
-    let turns = vec![tool_turn("call_1", "poke", json!({})), text_turn("OK.")];
-    // Python never times a hook out, so an hour of silence is not a failure.
+    let (mut rpc, log) = client(json!({"user_prompt_submit": null}));
+    let filter = json!({"point": "user_prompt_submit", "policy_id": "filter",
+                        "policy_version": 1});
+    let extra = json!({"callbacks": [filter]});
+    let turns = vec![text_turn("OK.")];
     let waited = tokio::time::timeout(
         std::time::Duration::from_secs(3600),
         run(&mut rpc, turns, extra),
     )
     .await;
-    assert!(waited.is_err(), "the run is still waiting for the approver");
+    assert!(waited.is_err(), "the run is still waiting for the filter");
     assert!(log.hung().iter().all(|token| !token.is_cancelled()));
+}
+
+/// The two gates are the exception: a `pre_tool_use` or
+/// `permission_request` callback with no `timeout_ms` is cut at 30 s, so a
+/// client that never answers cannot hold the run, and the call is denied.
+#[tokio::test(start_paused = true)]
+async fn a_gate_without_timeout_ms_is_cut_at_the_default() {
+    for point in ["permission_request", "pre_tool_use"] {
+        let (mut rpc, log) = client(json!({point: null}));
+        let gate = json!({"point": point, "policy_id": "gate", "policy_version": 1});
+        let extra = json!({"tools": [host_tool("poke", "exec")], "callbacks": [gate]});
+        let turns = vec![tool_turn("call_1", "poke", json!({})), text_turn("OK.")];
+        let ended = run(&mut rpc, turns, extra).await;
+        let results = tool_results(&ended);
+        assert!(
+            results[0].to_string().contains("hook `gate` timed out"),
+            "{point}: {results:?}"
+        );
+        assert!(finished(&ended), "{point}: denied, not suspended");
+        assert!(log.hung()[0].is_cancelled(), "{point}: the client was told");
+    }
 }
 
 fn structured(ended: &Ended) -> Value {

@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch::hooks::{ContextBuild, ContextBuildRequest, ContextBuildResponse};
 use linch::provider::scripted::TurnBuilder;
-use linch::{AgentConfig, CallbackError, Hook, Hooks, ToolRegistry};
+use linch::{
+    AgentConfig, Hooks, JsonObject, Tool, ToolContext, ToolOutput, ToolRegistry, ToolResult,
+    ToolScope,
+};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -58,39 +60,57 @@ async fn past_the_cap_the_read_loop_waits_for_a_call_to_finish() {
     );
 }
 
-/// A `context_build` hook that panics. A panicking tool no longer panics
-/// the run (it becomes a tool error); a hook still does.
-struct Panics;
+/// A tool whose summary panics, which the planner asks for outside the
+/// tool's own run. A panicking hook or tool body no longer panics the run
+/// (a hook fails by its fail mode, a tool body becomes a tool error).
+struct Panics {
+    schema: JsonObject,
+}
 
 #[async_trait]
-impl Hook<ContextBuild> for Panics {
-    fn policy_id(&self) -> &str {
-        "panics"
+impl Tool for Panics {
+    fn name(&self) -> &str {
+        "Boom"
     }
 
-    fn policy_version(&self) -> u32 {
-        1
+    fn description(&self) -> &str {
+        "panics when summarized"
     }
 
-    async fn call(&self, _: &ContextBuildRequest) -> Result<ContextBuildResponse, CallbackError> {
-        panic!("a hook bug");
+    fn input_schema(&self) -> &JsonObject {
+        &self.schema
+    }
+
+    fn scope(&self) -> ToolScope {
+        ToolScope::Read
+    }
+
+    fn summarize(&self, _: &JsonObject) -> String {
+        panic!("a summary bug");
+    }
+
+    async fn execute(&self, _: JsonObject, _: ToolContext) -> ToolResult {
+        Ok(ToolOutput::new(json!("unreachable")))
     }
 }
 
 #[tokio::test]
 async fn a_run_that_panics_ends_with_an_error_and_frees_its_id() {
     let (server, mut lines) = server();
-    let turn = TurnBuilder::new("m").text("done").build();
+    let turn = TurnBuilder::new("m")
+        .tool_call("c1", "Boom", &json!({}))
+        .build();
     let config: AgentConfig = serde_json::from_value(json!({
         "namespace": "t", "spec": {"model": "m"},
         "provider": {"id": "scripted", "turns": [turn]}}))
     .unwrap();
-    let hooks = Hooks::default();
-    let _ = hooks.context_build.register(Arc::new(Panics)).unwrap();
+    let tools = ToolRegistry::new();
+    let schema = json!({"type": "object"}).as_object().cloned().unwrap();
+    let _ = tools.register(Arc::new(Panics { schema })).unwrap();
     let opened = config
         .open_with(
-            Arc::new(ToolRegistry::new()),
-            Arc::new(hooks),
+            Arc::new(tools),
+            Arc::new(Hooks::default()),
             &linch::PgPools::new(),
         )
         .await
