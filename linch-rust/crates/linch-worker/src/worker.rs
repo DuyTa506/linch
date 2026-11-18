@@ -14,13 +14,22 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::CHANNEL;
+use crate::definition::prune_definitions;
 use crate::error::{WorkerError, chain, non_blank};
 use crate::execute::{Shared, execute};
-use crate::lease::dequeue;
+use crate::factory::AgentFactory;
+use crate::lease::{Served, dequeue};
 use crate::schedule::fire_due_schedules;
+use crate::status::prune_history;
 
 /// Pause after a failed `LISTEN` receive before trying again.
 const LISTEN_RETRY: Duration = Duration::from_secs(1);
+
+/// How long ended jobs stay in the history by default: 7 days.
+pub const HISTORY_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Least time between two prunes of the history.
+const PRUNE_EVERY: Duration = Duration::from_secs(600);
 
 /// How a [`Worker`] takes and holds jobs.
 #[derive(Debug, Clone)]
@@ -45,11 +54,15 @@ pub struct WorkerConfig {
     /// job whose attempts failed 5 times is failed for good, and so is its
     /// run; waiting for a busy session never counts.
     pub retry_delay: Duration,
+    /// How long the history of ended jobs is kept; `None` keeps it. The
+    /// worker prunes it at most once every 10 minutes.
+    pub history_retention: Option<Duration>,
 }
 
 impl WorkerConfig {
     /// Settings for `owner`: queue `default`, 32 jobs at once, a 30 s
-    /// visibility timeout, a 1 s poll and a 5 s retry delay.
+    /// visibility timeout, a 1 s poll, a 5 s retry delay and 7 days of job
+    /// history.
     pub fn new(owner: impl Into<String>) -> Self {
         Self {
             owner: owner.into(),
@@ -58,6 +71,7 @@ impl WorkerConfig {
             visibility_timeout: Duration::from_secs(30),
             poll_interval: Duration::from_secs(1),
             retry_delay: Duration::from_secs(5),
+            history_retention: Some(HISTORY_RETENTION),
         }
     }
 
@@ -92,6 +106,8 @@ pub struct Worker {
     pool: PgPool,
     config: WorkerConfig,
     agents: HashMap<String, Agent>,
+    roots: Vec<String>,
+    factory: Option<Arc<dyn AgentFactory>>,
 }
 
 impl Worker {
@@ -101,6 +117,8 @@ impl Worker {
             pool,
             config,
             agents: HashMap::new(),
+            roots: Vec::new(),
+            factory: None,
         }
     }
 
@@ -109,6 +127,20 @@ impl Worker {
     /// namespace needs an agent of the same contract.
     pub fn agent(mut self, agent: Agent) -> Self {
         self.agents.insert(agent.namespace().to_owned(), agent);
+        self
+    }
+
+    /// Serve the jobs that carry a stored agent definition (a schedule's
+    /// fires, a run queued with one) in every namespace under `roots`, a
+    /// namespace's root being its first `/`-separated segment, opening each
+    /// job's agent with `factory`. Replaces roots and a factory given before.
+    pub fn definitions(
+        mut self,
+        roots: impl IntoIterator<Item = String>,
+        factory: Arc<dyn AgentFactory>,
+    ) -> Self {
+        self.roots = roots.into_iter().collect();
+        self.factory = Some(factory);
         self
     }
 
@@ -121,28 +153,36 @@ impl Worker {
     /// are logged and retried on the next poll.
     ///
     /// Raises:
-    ///     WorkerError: If the configuration is invalid, there is no agent,
-    ///         or the `LISTEN` connection cannot be opened.
+    ///     WorkerError: If the configuration is invalid, there is neither an
+    ///         agent nor a factory, or the `LISTEN` connection cannot be
+    ///         opened.
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
         self.config.check()?;
-        if self.agents.is_empty() {
-            return Err(WorkerError::Invalid("a worker needs an agent".into()));
+        if self.agents.is_empty() && self.factory.is_none() {
+            return Err(WorkerError::Invalid(
+                "a worker needs an agent or an agent factory".into(),
+            ));
         }
         let mut listener = PgListener::connect_with(&self.pool).await?;
         listener.listen(CHANNEL).await?;
         let wake = Arc::new(Notify::new());
         let _listening = AbortOnDrop(tokio::spawn(listen(listener, Arc::clone(&wake))));
-        let namespaces: Vec<String> = self.agents.keys().cloned().collect();
+        let served = Served {
+            namespaces: self.agents.keys().cloned().collect(),
+            roots: self.roots,
+        };
         let shared = Arc::new(Shared {
             pool: self.pool.clone(),
             runs: PgRunStore::new(self.pool.clone()),
             agents: self.agents,
+            factory: self.factory,
             owner: self.config.owner.clone(),
             timeout: self.config.visibility_timeout,
             retry_delay: self.config.retry_delay,
         });
         let mut jobs = JoinSet::new();
         let mut fired = None;
+        let mut pruned = None;
         while !shutdown.is_cancelled() {
             if schedules_due(fired, self.config.poll_interval) {
                 fired = Some(Instant::now());
@@ -150,7 +190,18 @@ impl Worker {
                     tracing::warn!(error = chain(&error), "firing schedules failed");
                 }
             }
-            poll(&self.config, &shared, &namespaces, &mut jobs).await;
+            if schedules_due(pruned, PRUNE_EVERY) {
+                pruned = Some(Instant::now());
+                if let Some(retention) = self.config.history_retention
+                    && let Err(error) = prune_history(&shared.pool, retention).await
+                {
+                    tracing::warn!(error = chain(&error), "pruning the job history failed");
+                }
+                if let Err(error) = prune_definitions(&shared.pool).await {
+                    tracing::warn!(error = chain(&error), "pruning agent definitions failed");
+                }
+            }
+            poll(&self.config, &shared, &served, &mut jobs).await;
             tokio::select! {
                 () = shutdown.cancelled() => {}
                 () = wake.notified() => {}
@@ -176,7 +227,7 @@ fn schedules_due(last: Option<Instant>, interval: Duration) -> bool {
 async fn poll(
     config: &WorkerConfig,
     shared: &Arc<Shared>,
-    namespaces: &[String],
+    served: &Served,
     jobs: &mut JoinSet<()>,
 ) {
     let mut queues: Vec<&String> = config.queues.iter().collect();
@@ -190,7 +241,7 @@ async fn poll(
             let taken = dequeue(
                 &shared.pool,
                 queue,
-                namespaces,
+                served,
                 &config.owner,
                 config.visibility_timeout,
             )

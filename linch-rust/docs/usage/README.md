@@ -72,6 +72,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Observability](./observability.md) | OpenTelemetry spans and metrics from the client |
 | [Monitoring](./monitoring.md) | What is traced, how cost is computed and priced, running an eval, reading a run report |
 | [Server](./server.md) | Running `linch-server` for remote tenants, and `Server.connect`: tokens, allowlists, limits |
+| [Scheduler](./scheduler.md) | Cron and interval schedules in a time zone, heartbeats on one session, one-off background runs, job status, the worker that runs them |
 
 Coming later:
 

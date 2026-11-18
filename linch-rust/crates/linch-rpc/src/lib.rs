@@ -44,7 +44,8 @@
 //! - `agent.open`: the `namespace` is the tenant's name or starts with
 //!   `<tenant>/`. Stores are scoped by namespace, so on a shared Postgres
 //!   another tenant's runs and sessions look missing (`-32021`).
-//! - `run.start`, `run.resume`, `run.approve`, `run.answer`: a `principal`, if given, has
+//! - `run.start`, `run.resume`, `run.approve`, `run.answer`, `schedule.create`,
+//!   `job.enqueue`: a `principal`, if given, has
 //!   the tenant's name as its `tenant`. The server does not fill one in.
 //! - `agent.open`: the config passes the tenant's [`Allowlists`]:
 //!   - the scripted provider only if allowed, and a client-chosen provider
@@ -273,6 +274,55 @@
 //! greater than `after_seq` (default 0), in order, for replay after a
 //! reconnect.
 //!
+//! ## Scheduler
+//!
+//! These methods queue runs that a worker runs in the background, never
+//! this connection: `linch-server` with a `worker` section, on the same
+//! database and schema (a stdio server never runs them). Each names an
+//! open `agent` with Postgres stores and no host tools or callbacks
+//! (else `-32040`, `data.reason` `memory_store`, `host_tools` or
+//! `callbacks`). Its namespace scopes the schedules and jobs, and its
+//! config as opened, without its store DSN, is stored with each one: the
+//! worker opens it again for every attempt and checks it against the
+//! tenant's allowlists again. Its secrets stay in that stored config,
+//! which is deleted once nothing names it. A `principal`, as for
+//! `run.start`, is stored too and every attempt acts for it. Times are
+//! RFC 3339 strings in UTC.
+//!
+//! **`schedule.create`** `{agent, prompt, id?, cron?, timezone?,
+//! interval_ms?, session_id?, queue?, principal?}`
+//! ([`ScheduleCreateParams`](protocol::ScheduleCreateParams)) stores a
+//! schedule and returns it ([`ScheduleInfo`](protocol::ScheduleInfo)).
+//! Exactly one of `cron` (five fields, or six with seconds, read in the
+//! IANA `timezone`, default `UTC`) and `interval_ms`, else `-32044`. With a
+//! `session_id` every fire is a new run in that session (a heartbeat), and
+//! a fire is skipped while an earlier fire's job is unfinished or the
+//! session has a live run; without one each fire starts the session
+//! `schedule:<id>:<fire time>`. Missed fires are caught up in order after
+//! downtime. A tenant needs `max_schedules` (`-32004`, `kind: schedules`;
+//! `-32005` at the cap, counted over its namespaces) and fires at least
+//! `min_schedule_interval_ms` apart (`-32004`, `kind: schedule_interval`).
+//! A taken `id` is `-32042`.
+//!
+//! **`schedule.list`** `{agent}` returns `{"schedules": [...]}` by id.
+//! **`schedule.pause`**, **`schedule.resume`** `{agent, id}` return the
+//! schedule (`-32041` when there is none); a resumed schedule fires from
+//! now on, without the fires it missed while paused.
+//! **`schedule.delete`** `{agent, id}` returns `{"deleted": bool}`; its
+//! queued and running jobs go on.
+//!
+//! **`job.enqueue`** `{agent, session_id, prompt, queue?, principal?}`
+//! ([`JobEnqueueParams`](protocol::JobEnqueueParams)) queues a one-off
+//! background run and returns its job ([`JobInfo`](protocol::JobInfo)). A
+//! tenant needs `max_queued_jobs` (`-32004`, `kind: background_runs`;
+//! `-32005`, `kind: jobs`, when that many are unfinished).
+//! **`job.get`** `{agent, job_id}` returns the job, its `state` one of
+//! `queued`, `running`, `retrying`, `failed`, `done` and `superseded`, its
+//! `run_id` once started (read it with `run.events`), or `-32043`.
+//! **`job.list`** `{agent, schedule_id?, limit?}` returns `{"jobs": [...]}`
+//! newest first (50 by default, at most 500). Ended jobs are kept 7 days
+//! by default.
+//!
 //! # Server requests
 //!
 //! The server sends these to the client, which answers each with a
@@ -403,6 +453,11 @@
 //! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
 //! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
 //! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
+//! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
+//! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
+//! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |
+//! | -32043 | job not found | no job with that id in the agent's namespace, or its history was pruned |
+//! | -32044 | invalid schedule | the timing does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `data: {reason}` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
@@ -420,6 +475,7 @@
 #![forbid(unsafe_code)]
 
 mod access;
+mod background;
 mod client;
 mod error;
 mod lines;
@@ -429,8 +485,10 @@ mod server;
 
 pub use access::{
     Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_RUNS, MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens,
+    DEFAULT_MAX_RUNS, DEFAULT_MIN_SCHEDULE_INTERVAL, MAX_PENDING_LOGINS, McpCommand, Tenant,
+    Tokens,
 };
+pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};

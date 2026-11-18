@@ -57,9 +57,12 @@ impl Db {
         let session = SessionId::new(queue);
         let enqueued = enqueue_run(&self.pool, queue, "ns", &session, "go").await;
         enqueued.expect("enqueue");
-        let namespaces = ["ns".to_owned()];
+        let served = Served {
+            namespaces: vec!["ns".to_owned()],
+            roots: Vec::new(),
+        };
         let timeout = Duration::from_secs(30);
-        let lease = dequeue(&self.repeatable_read, queue, &namespaces, "w", timeout).await;
+        let lease = dequeue(&self.repeatable_read, queue, &served, "w", timeout).await;
         lease.expect("dequeue").expect("a visible job")
     }
 
@@ -128,7 +131,7 @@ async fn under_repeatable_read_a_fenced_write_behind_an_update_lands() {
     let done = done.await;
     assert!(matches!(done, Ok(true)), "record_run: {done:?}");
     let lease = db.held("ack").await;
-    let done = db.behind_an_update(&lease, lease.ack(pool)).await;
+    let done = db.behind_an_update(&lease, lease.ack(pool, "done")).await;
     assert!(matches!(done, Ok(true)), "ack: {done:?}");
     let lease = db.held("release").await;
     let done = db.behind_an_update(&lease, lease.release(pool, timeout, "error", true));

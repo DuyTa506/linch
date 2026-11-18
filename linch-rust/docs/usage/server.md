@@ -100,9 +100,11 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 | `tenants` | Each tenant by name: 1 to 64 ASCII letters, digits, `.`, `_` or `-` |
 | `tenants.<name>.tokens` | Its bearer tokens, each `{"env": "VAR"}` (read at startup) or `{"value": "..."}` |
 | `tenants.<name>.allow` | Its allowlists, below |
+| `worker` | Run a worker in this process: it fires schedules and runs background jobs ([Scheduler](./scheduler.md#run-a-worker)). Absent: none |
 
-At least one of `socket` and `http` is required, and at least one token. A
-token names exactly one tenant: the same token twice is refused.
+At least one of `socket`, `http` and `worker` is required, and with a
+listener at least one token. A token names exactly one tenant: the same
+token twice is refused. A tenant only a worker serves needs no token.
 
 | `allow` field | When absent | What it allows |
 |---|---|---|
@@ -118,6 +120,9 @@ token names exactly one tenant: the same token twice is refused.
 | `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
 | `mcp_commands` | none | MCP stdio servers, `{"command", "args", "env"}`: the command and argument list must match exactly, and the transport may set only the `env` names listed |
 | `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
+| `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)) |
+| `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
+| `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
 
 The live providers at their public endpoints and the memory stores need no
 entry. A `postgres_dsns` entry without a user stands for the server's own

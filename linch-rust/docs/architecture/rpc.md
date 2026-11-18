@@ -37,10 +37,13 @@ package `linch_rust` (`python/src/linch_rust/`) is a client of this server.
 | `crates/linch-rpc/src/server/outgoing.rs` | How a run's envelopes join into one `run.event` |
 | `crates/linch-rpc/src/server/login.rs` | The socket's `connection.auth` |
 | `crates/linch-rpc/src/server/agents.rs`, `server/run.rs` | The method handlers |
+| `crates/linch-rpc/src/protocol/schedule.rs`, `crates/linch-rpc/src/server/schedule.rs` | The scheduler methods: params, results and handlers |
+| `crates/linch-rpc/src/background.rs` | `BackgroundAgents`, the worker's `AgentFactory` |
 | `crates/linch-rpc/src/server/peer.rs`, `server/host.rs`, `server/callback.rs` | Requests from the server: host tools (`tool.call`) and callbacks (`hook.call`) |
 | `crates/linch-rpc/src/client.rs` | The Rust `Client` |
 | `crates/linch-server/src/main.rs` | The binary: stdio, or the listeners with `--config FILE` |
 | `crates/linch-server/src/{config,listen,http}.rs` | The config, the Unix socket and the HTTP transport |
+| `crates/linch-server/src/worker.rs` | `BackgroundWorker`: the config's `worker` section run in the process |
 | `crates/linch/src/pools.rs` | `PgPools`: Postgres pools by target; each tenant has its own set, and a local connection brings one in `Access::Local` |
 
 ## Methods and messages
@@ -65,6 +68,13 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, the durable envelopes after `after_seq` |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` on the agent; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown}`; an unknown run is `-32021` |
+| `schedule.create` | `ScheduleCreateParams` (`protocol/schedule.rs`) | `Server::create_schedule` (`server/schedule.rs`) | `ScheduleInfo` |
+| `schedule.list` | `ScheduleListParams` | `server/schedule.rs` | `{schedules}` |
+| `schedule.pause`, `schedule.resume` | `ScheduleIdParams` | `server/schedule.rs`; `-32041` for an unknown id | `ScheduleInfo` |
+| `schedule.delete` | `ScheduleIdParams` | `server/schedule.rs` | `{deleted}` |
+| `job.enqueue` | `JobEnqueueParams` | `server/schedule.rs` | `JobInfo` |
+| `job.get` | `JobGetParams` | `server/schedule.rs`; `-32043` for an unknown id | `JobInfo` |
+| `job.list` | `JobListParams` | `server/schedule.rs` | `{jobs}` |
 
 The server sends two notifications. `run.event` `{run_id, envelopes}`
 (`RunEvent`, `protocol.rs:256`) carries one or more consecutive envelopes
@@ -92,6 +102,7 @@ docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
 | -32005 | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 to -32015 | `agent.open`: `BuildError`s, provider, store and MCP server unavailable |
 | -32020 to -32033 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema`, an answer that does not fit (`-32032`, `data.reason`), a lost lease (`-32022`, from a claim or a fenced journal write), a run another process leases (`-32033`, `data: {run_id, owner, expires_in_ms}`) |
+| -32040 to -32044 | The scheduler methods: an agent that cannot run in the background (`-32040`, `data.reason` `memory_store`, `host_tools` or `callbacks`), an unknown schedule (`-32041`), a taken schedule id (`-32042`), an unknown job (`-32043`), an unusable timing (`-32044`, `data.reason`) |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to
@@ -300,6 +311,60 @@ the open that connected it (`pools.rs:94-112`); the connect gives up after
 `PATH`, `HOME` or the variables known to choose what code a program loads
 (`CODE_LOADING_ENV` and its prefixes, `allowlists.rs:76-113`). The list is
 best effort.
+
+## Background runs
+
+The scheduler methods queue work a worker runs, never the connection that
+asked ([usage](../usage/scheduler.md)).
+
+- **Which agent.** `agent.open` computes a `Background` for each agent
+  (`server/schedule.rs`): its stored definition, the admitted config
+  serialized with its secrets (the MCP env and header values) and with the
+  store DSN blanked, or why it has none: memory stores, host tools or
+  callbacks, which need this connection. Every scheduler method names an
+  open agent; its Postgres pool (`OpenedAgent::pool`) holds the rows, its
+  namespace scopes them, and the queue tables are migrated on its database
+  at the first scheduler call (once per agent), so a server that never
+  schedules never creates them.
+- **Tenant checks.** Before any query: `max_schedules` and
+  `max_queued_jobs` must be set (`-32004`, kinds `schedules` and
+  `background_runs`), and a schedule's `Timing::shortest_gap` must be at
+  least `min_schedule_interval` (`kind: schedule_interval`). The counts
+  themselves are `linch_worker::Cap`s over the tenant's name as namespace
+  root, taken in the insert's transaction under an advisory lock, so they
+  hold across servers on one database (`-32005`, kinds `schedules`, `jobs`).
+- **Who runs them.** `linch-server --config` with a `worker` section runs a
+  `BackgroundWorker` (`crates/linch-server/src/worker.rs`) next to its
+  listeners, on the section's DSN, sharing the listeners' `Arc<Tenant>`s;
+  without the section it runs nothing. stdio never does.
+- **At every attempt.** `BackgroundAgents::open_job`
+  (`crates/linch-rpc/src/background.rs`) decodes the definition, checks its
+  namespace, runs `Tenant::admit` on it with the store set aside (the store
+  is the worker's DSN, the operator's choice, not a client's), takes one of
+  the tenant's `max_runs` places for the attempt (none free: the job waits,
+  `Busy`), caps the pool size at `max_pool_connections`, and opens it with
+  the tenant's pools and no host tools or hooks. A namespace whose root is
+  neither a tenant nor one of `local_namespaces` is refused, and the worker
+  does not even dequeue it.
+- **Principal.** `schedule.create` and `job.enqueue` take a `principal`,
+  checked by `Tenant::admit_principal` as for `run.start`, and stored with
+  the schedule or job; the worker gives it to every attempt of the run
+  ([worker](./worker.md#principals)).
+- **Secrets.** The stored definition keeps the config's secrets
+  (`to_value_with_secrets`, the DSN blanked); only `linch_worker_agents`
+  holds them, rows elsewhere name the digest, and no answer or error
+  carries them (`tests/schedule.rs`, a sentinel in an MCP env value). A
+  definition nothing names any more is pruned.
+- **Which database.** Rows go to the opened agent's own pool, so a
+  schedule lives with its agent's runs; a worker serves only its section's
+  DSN and opens its runs there, so a fire never runs against a database
+  other than the one it was stored in.
+
+The worker lives in the sidecar so one config holds the tenants, their
+allowlists and the worker, and background runs share the tenants' run caps
+and pools with interactive ones. A config with only a `worker` section is
+the separate-process shape: a server that listens on nothing and only runs
+jobs, scaled apart from the listening servers.
 
 ## Limits
 

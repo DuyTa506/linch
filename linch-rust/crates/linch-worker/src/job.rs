@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use linch_core::hooks::ApprovalResponse;
-use linch_core::{RunId, SessionId};
+use linch_core::{Principal, RunId, SessionId};
 use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
 
 use crate::CHANNEL;
+use crate::definition::{self, Cap, Counted};
 use crate::error::{WorkerError, non_blank};
 
 /// Id of a queued job (the `linch_worker_jobs` primary key).
@@ -29,6 +31,13 @@ pub(crate) struct NewJob<'a> {
     pub(crate) run_id: Option<&'a str>,
     pub(crate) approvals: Option<String>,
     pub(crate) dedupe_key: Option<String>,
+    /// Digest of the stored agent definition the job runs with.
+    pub(crate) agent: Option<&'a str>,
+    /// The schedule and fire time that made the job.
+    pub(crate) schedule_id: Option<&'a str>,
+    pub(crate) fire_at: Option<DateTime<Utc>>,
+    /// The principal the run acts for, as JSON.
+    pub(crate) principal: Option<String>,
 }
 
 /// Most inserts of a job that names its run, when the run's active job
@@ -57,14 +66,14 @@ pub(crate) async fn insert(
     // A job that names its run gives way to the run's active job; a start
     // job to an earlier job with its dedupe key.
     let sql = if job.run_id.is_some() {
-        "INSERT INTO linch_worker_jobs \
-         (queue, namespace, session_id, prompt, run_id, approvals, dedupe_key) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+        "INSERT INTO linch_worker_jobs (queue, namespace, session_id, prompt, run_id, \
+         approvals, dedupe_key, agent, schedule_id, fire_at, principal) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (namespace, run_id) WHERE failed_at IS NULL DO NOTHING RETURNING id"
     } else {
-        "INSERT INTO linch_worker_jobs \
-         (queue, namespace, session_id, prompt, run_id, approvals, dedupe_key) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+        "INSERT INTO linch_worker_jobs (queue, namespace, session_id, prompt, run_id, \
+         approvals, dedupe_key, agent, schedule_id, fire_at, principal) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (namespace, dedupe_key) DO NOTHING RETURNING id"
     };
     for _ in 0..ENQUEUE_TRIES {
@@ -76,6 +85,10 @@ pub(crate) async fn insert(
             .bind(job.run_id)
             .bind(&job.approvals)
             .bind(&job.dedupe_key)
+            .bind(job.agent)
+            .bind(job.schedule_id)
+            .bind(job.fire_at)
+            .bind(&job.principal)
             .fetch_optional(&mut **tx)
             .await?;
         if let Some(id) = id {
@@ -108,7 +121,15 @@ pub(crate) async fn insert(
     )))
 }
 
-async fn enqueue(pool: &PgPool, job: NewJob<'_>) -> Result<Inserted, WorkerError> {
+/// The stored form of a principal: its JSON.
+pub(crate) fn principal_json(principal: Option<&Principal>) -> Result<Option<String>, WorkerError> {
+    principal
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| WorkerError::Invalid(format!("the principal does not encode: {error}")))
+}
+
+async fn enqueue_one(pool: &PgPool, job: NewJob<'_>) -> Result<Inserted, WorkerError> {
     let mut tx = crate::begin(pool).await?;
     let inserted = insert(&mut tx, job).await?;
     tx.commit().await?;
@@ -158,7 +179,71 @@ pub async fn enqueue_run(
         prompt: Some(prompt),
         ..NewJob::default()
     };
-    job_id(enqueue(pool, job).await?)
+    job_id(enqueue_one(pool, job).await?)
+}
+
+/// A run to queue with [`enqueue`]: a new run of `prompt` in
+/// `session_id`, optionally with a stored agent definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRequest {
+    /// Queue name.
+    pub queue: String,
+    /// Store namespace of the agent that runs the job.
+    pub namespace: String,
+    /// Session the run belongs to; created if missing.
+    pub session_id: SessionId,
+    /// The user prompt.
+    pub prompt: String,
+    /// The agent definition the run uses, stored with the job (see
+    /// [`crate::AgentFactory`]). `None`: the worker's agent for the
+    /// namespace.
+    pub agent: Option<String>,
+    /// Who the run acts for: permission rules match on its roles, as for a
+    /// run started directly. Stored with the job.
+    pub principal: Option<Principal>,
+}
+
+/// Queue a new run, as [`enqueue_run`] does, with an optional agent
+/// definition and an optional cap on the unfinished jobs of the
+/// namespace's root.
+///
+/// Args:
+///     pool: Pool for the queue's database.
+///     request: The run.
+///     cap: The most jobs that are queued, running or waiting to retry
+///         the namespace's root may hold, counted in the same
+///         transaction; `None` for no cap.
+///
+/// Returns:
+///     The new job's id.
+///
+/// Raises:
+///     WorkerError: `LimitReached` at the cap; otherwise if a name is
+///         blank or a query fails.
+pub async fn enqueue(
+    pool: &PgPool,
+    request: &RunRequest,
+    cap: Option<&Cap>,
+) -> Result<JobId, WorkerError> {
+    non_blank(request.session_id.as_str(), "the session id")?;
+    let mut tx = crate::begin(pool).await?;
+    definition::check(&mut tx, cap, Counted::Jobs).await?;
+    let agent = match &request.agent {
+        Some(config) => Some(definition::store(&mut tx, &request.namespace, config).await?),
+        None => None,
+    };
+    let job = NewJob {
+        queue: &request.queue,
+        namespace: &request.namespace,
+        session_id: Some(request.session_id.as_str()),
+        prompt: Some(&request.prompt),
+        agent: agent.as_deref(),
+        principal: principal_json(request.principal.as_ref())?,
+        ..NewJob::default()
+    };
+    let inserted = insert(&mut tx, job).await?;
+    tx.commit().await?;
+    job_id(inserted)
 }
 
 /// Queue a continuation of an existing run, for example one whose process
@@ -191,7 +276,7 @@ pub async fn enqueue_resume(
         run_id: Some(run_id.as_str()),
         ..NewJob::default()
     };
-    job_id(enqueue(pool, job).await?)
+    job_id(enqueue_one(pool, job).await?)
 }
 
 /// Queue the host's answers for a run suspended for approval; the worker
@@ -229,7 +314,7 @@ pub async fn enqueue_approve(
         approvals: Some(approvals),
         ..NewJob::default()
     };
-    match enqueue(pool, job).await? {
+    match enqueue_one(pool, job).await? {
         Inserted::RunBusy(job) => Err(WorkerError::RunBusy {
             run_id: run_id.clone(),
             job,

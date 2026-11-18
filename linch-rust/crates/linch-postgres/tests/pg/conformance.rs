@@ -34,10 +34,12 @@ async fn run_store_passes_the_lease_suite() {
     let Some(db) = TestDb::migrated("conformance_lease").await else {
         return;
     };
-    let ttl = Duration::from_millis(600);
+    let (ttl, long) = (Duration::from_millis(600), Duration::from_secs(60));
     let a = PgRunStore::new(db.pool.clone()).with_lease_ttl(ttl);
     let b = PgRunStore::new(db.pool.clone()).with_lease_ttl(ttl);
-    run_lease_suite(&a, &b).await;
+    let long_a = PgRunStore::new(db.pool.clone()).with_lease_ttl(long);
+    let long_b = PgRunStore::new(db.pool.clone()).with_lease_ttl(long);
+    run_lease_suite((&a, &b), (&long_a, &long_b)).await;
     db.finish().await;
 }
 

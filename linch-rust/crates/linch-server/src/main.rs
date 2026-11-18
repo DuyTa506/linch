@@ -5,8 +5,10 @@
 //!   thread (file tools still use tokio's blocking threads). It exits
 //!   when stdin closes.
 //! - `linch-server --config FILE` serves the Unix socket and HTTP
-//!   listeners FILE names (see the `linch_server` crate docs) until
-//!   SIGINT or SIGTERM, then ends every connection and exits.
+//!   listeners FILE names (see the `linch_server` crate docs), and runs a
+//!   worker when FILE has a `worker` section, until SIGINT or SIGTERM,
+//!   then ends every connection, waits for the worker's jobs in flight,
+//!   and exits. A stdio server never runs a worker.
 //!
 //! Provider keys come from its environment and are not passed to the
 //! processes it starts (MCP servers, Bash), but they stay in its own
@@ -22,7 +24,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use linch_server::{Listeners, PATH, ServerConfig};
+use linch_server::{BackgroundWorker, Listeners, PATH, ServerConfig};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::unix::pipe;
 use tokio_util::sync::CancellationToken;
@@ -69,9 +71,16 @@ async fn serve(config: Option<PathBuf>) -> ExitCode {
             linch_rpc::serve(reader, writer).await
         }
         Some(path) => match listen(&path).await {
-            Ok(listeners) => {
-                listeners.serve(on_signal()).await;
-                Ok(())
+            Ok((listeners, worker)) => {
+                let stop = on_signal();
+                let working = async {
+                    match worker {
+                        Some(worker) => worker.serve(stop.clone()).await,
+                        None => Ok(()),
+                    }
+                };
+                let (_, worked) = tokio::join!(listeners.serve(stop.clone()), working);
+                worked.map_err(|error| std::io::Error::other(error.to_string()))
             }
             Err(code) => return code,
         },
@@ -122,8 +131,9 @@ fn stdio() -> (
     (reader, writer)
 }
 
-/// Read the config and bind its listeners, reporting where they listen.
-async fn listen(path: &PathBuf) -> Result<Listeners, ExitCode> {
+/// Read the config, bind its listeners, reporting where they listen, and
+/// start its worker when it has a `worker` section.
+async fn listen(path: &PathBuf) -> Result<(Listeners, Option<BackgroundWorker>), ExitCode> {
     let fail = |message: String| {
         eprintln!("linch-server: {message}");
         ExitCode::from(2)
@@ -131,9 +141,16 @@ async fn listen(path: &PathBuf) -> Result<Listeners, ExitCode> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| fail(format!("cannot read {}: {error}", path.display())))?;
     let config = ServerConfig::from_json(&text).map_err(|error| fail(error.to_string()))?;
-    let tokens = (config.tokens(|name| std::env::var(name).ok()))
-        .map_err(|error| fail(error.to_string()))?;
-    let listeners = (Listeners::bind(&config, tokens).await)
+    let env = |name: &str| std::env::var(name).ok();
+    let built = config.build(env).map_err(|error| fail(error.to_string()))?;
+    let worker = match &config.worker {
+        Some(section) => Some(
+            (BackgroundWorker::start(section, &built.tenants, env).await)
+                .map_err(|error| fail(error.to_string()))?,
+        ),
+        None => None,
+    };
+    let listeners = (Listeners::bind(&config, built.tokens).await)
         .map_err(|error| fail(format!("cannot listen: {error}")))?;
     if let Some(socket) = listeners.socket_path() {
         eprintln!("linch-server: listening on unix:{}", socket.display());
@@ -141,7 +158,11 @@ async fn listen(path: &PathBuf) -> Result<Listeners, ExitCode> {
     if let Some(address) = listeners.http_addr() {
         eprintln!("linch-server: listening on ws://{address}{PATH}");
     }
-    Ok(listeners)
+    if let Some(worker) = &worker {
+        let roots = worker.roots().join(", ");
+        eprintln!("linch-server: worker running the jobs of {roots}");
+    }
+    Ok((listeners, worker))
 }
 
 /// A token cancelled on the first SIGINT or SIGTERM.

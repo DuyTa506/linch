@@ -13,13 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use linch_core::{Agent, Phase, RunOptions, RunRecord, RunStore, RunStream};
+use linch_core::{Agent, Phase, Principal, RunOptions, RunRecord, RunStore, RunStream};
 use linch_core::{SessionId, StoreError};
 use linch_postgres::{PgPool, PgRunStore};
 use tokio::time::Instant;
 
 use crate::error::chain;
-use crate::lease::JobLease;
+use crate::factory::{AgentFactory, FactoryError, JobAgent};
+use crate::lease::{Job, JobLease};
 use crate::outcome::{Outcome, classify};
 use crate::settle::settle;
 
@@ -28,33 +29,74 @@ pub(crate) struct Shared {
     pub(crate) pool: PgPool,
     pub(crate) runs: PgRunStore,
     pub(crate) agents: HashMap<String, Agent>,
+    /// Opens the agent of a job with a stored definition.
+    pub(crate) factory: Option<Arc<dyn AgentFactory>>,
     pub(crate) owner: String,
     pub(crate) timeout: Duration,
     pub(crate) retry_delay: Duration,
 }
 
 impl Shared {
-    pub(crate) fn options(&self, session_id: SessionId) -> RunOptions {
+    pub(crate) fn options(
+        &self,
+        session_id: SessionId,
+        principal: Option<Principal>,
+    ) -> RunOptions {
         let mut options = RunOptions::new(session_id);
         options.owner = self.owner.clone();
+        options.principal = principal;
         options
     }
 }
 
-/// Run the job and settle it; the task body of one dequeued job.
+/// Run the job and settle it; the task body of one dequeued job. The agent
+/// a factory opened for it is closed once the job is settled.
 pub(crate) async fn execute(shared: Arc<Shared>, lease: JobLease) {
+    let mut opened = None;
     let outcome = tokio::select! {
-        outcome = attempt(&shared, &lease) => outcome,
+        outcome = attempt(&shared, &lease, &mut opened) => outcome,
         () = keep_alive(&shared, &lease) => Outcome::Lost,
     };
-    settle(&shared, &lease, outcome).await;
+    let agent = match &opened {
+        Some(opened) => Some(&opened.agent),
+        None => shared.agents.get(&lease.job.namespace),
+    };
+    settle(&shared, &lease, agent, outcome).await;
+    if let Some(opened) = opened {
+        opened.close().await;
+    }
 }
 
-async fn attempt(shared: &Shared, lease: &JobLease) -> Outcome {
-    let job = &lease.job;
-    let Some(agent) = shared.agents.get(&job.namespace) else {
-        let error = format!("no agent for namespace {}", job.namespace);
-        return Outcome::Retry(error);
+/// The agent of the job: the factory's for a job with a stored
+/// definition, kept in `opened`, else the worker's for its namespace.
+async fn agent<'a>(
+    shared: &'a Shared,
+    job: &Job,
+    opened: &'a mut Option<JobAgent>,
+) -> Result<&'a Agent, Outcome> {
+    let Some(definition) = &job.agent else {
+        return shared
+            .agents
+            .get(&job.namespace)
+            .ok_or_else(|| Outcome::Retry(format!("no agent for namespace {}", job.namespace)));
+    };
+    let Some(factory) = &shared.factory else {
+        return Err(Outcome::Retry(
+            "no agent factory for a stored definition".into(),
+        ));
+    };
+    match factory.open(&job.namespace, definition).await {
+        Ok(agent) => Ok(&opened.insert(agent).agent),
+        Err(FactoryError::Refused(error)) => Err(Outcome::Fail(error)),
+        Err(FactoryError::Busy(error)) => Err(Outcome::Busy(error)),
+        Err(FactoryError::Unavailable(error)) => Err(Outcome::Retry(error)),
+    }
+}
+
+async fn attempt(shared: &Shared, lease: &JobLease, opened: &mut Option<JobAgent>) -> Outcome {
+    let agent = match agent(shared, &lease.job, opened).await {
+        Ok(agent) => agent,
+        Err(outcome) => return outcome,
     };
     let mut stream = match open(shared, lease, agent).await {
         Ok(Some(stream)) => stream,
@@ -77,9 +119,20 @@ async fn open(
     agent: &Agent,
 ) -> Result<Option<RunStream>, Outcome> {
     let job = &lease.job;
+    // Every start, resume and approve acts for the job's principal: core
+    // does not keep it with the run.
+    let principal = match &job.principal {
+        None => None,
+        Some(Ok(principal)) => Some(principal.clone()),
+        Some(Err(error)) => {
+            return Err(Outcome::Fail(format!(
+                "the principal does not decode: {error}"
+            )));
+        }
+    };
     if let Some(run_id) = &job.run_id {
         match shared.runs.load(&job.namespace, run_id).await {
-            Ok(record) => return continue_run(shared, agent, lease, record),
+            Ok(record) => return continue_run(shared, agent, lease, record, principal),
             // A start job recorded this id, but the run's create never landed.
             Err(StoreError::NotFound { .. }) if job.start.is_some() => {}
             Err(StoreError::NotFound { .. }) => {
@@ -93,7 +146,10 @@ async fn open(
             "the job names neither a run nor a prompt".into(),
         ));
     };
-    let stream = agent.run(prompt.clone(), shared.options(session_id.clone()));
+    let stream = agent.run(
+        prompt.clone(),
+        shared.options(session_id.clone(), principal),
+    );
     // Nothing is written until the stream is polled, so the job knows its
     // run before the run exists.
     match lease.record_run(&shared.pool, stream.run_id()).await {
@@ -109,6 +165,7 @@ fn continue_run(
     agent: &Agent,
     lease: &JobLease,
     record: RunRecord,
+    principal: Option<Principal>,
 ) -> Result<Option<RunStream>, Outcome> {
     if record.status.is_terminal() {
         return Ok(None);
@@ -116,7 +173,7 @@ fn continue_run(
     // "Suspended" is the checkpoint phase, not the status: an approve that
     // crashed between its claim and its commit leaves the status `running`.
     let suspended = matches!(record.checkpoint.phase, Phase::AwaitingApproval { .. });
-    let options = shared.options(record.session_id);
+    let options = shared.options(record.session_id, principal);
     let (job, run_id) = (&lease.job, record.run_id);
     match (&job.approvals, suspended) {
         (Some(Err(error)), _) => Err(Outcome::Fail(format!("approvals do not decode: {error}"))),

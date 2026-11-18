@@ -3,8 +3,8 @@
 //! A host enqueues work with [`enqueue_run`], [`enqueue_resume`] or
 //! [`enqueue_approve`]; any number of [`Worker`]s, in any number of
 //! processes, take jobs off the queue and drive the runs through the public
-//! [`linch_core::Agent`] API. [`create_schedule`] adds a cron schedule whose
-//! fires enqueue new runs.
+//! [`linch_core::Agent`] API. [`create_schedule`] adds a schedule (a cron pattern in
+//! a time zone, or an interval) whose fires enqueue new runs.
 //!
 //! - **Queue.** A plain table, dequeued with `FOR UPDATE SKIP LOCKED` and
 //!   woken by `LISTEN/NOTIFY` (with polling as the fallback). A dequeued job
@@ -27,7 +27,15 @@
 //!   and is never given up on.
 //! - **Schedules.** A due schedule enqueues one start job and moves its next
 //!   fire forward in one transaction, so a fire happens once however many
-//!   workers poll.
+//!   workers poll. Missed fires are caught up; a schedule with a fixed
+//!   session (a heartbeat) skips a fire while that session is busy.
+//! - **Definitions.** A job or schedule may carry a stored agent definition,
+//!   which an [`AgentFactory`] opens for every attempt
+//!   ([`Worker::definitions`]), so the worker needs no agent built ahead;
+//!   [`prune_definitions`] deletes the ones nothing names any more. A job
+//!   or schedule may also carry the principal its runs act for.
+//! - **History.** A job that ends moves to `linch_worker_history` in the
+//!   statement that deletes it; [`job`] and [`jobs`] read both.
 //!
 //! The worker reads run records through [`linch_postgres::PgRunStore`] on
 //! its own pool, so every agent it drives must store its runs in the same
@@ -52,20 +60,31 @@ use linch_postgres::{MigrateError, PgPool};
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
+mod definition;
 mod error;
 mod execute;
+mod factory;
 mod job;
 mod lease;
 mod outcome;
 mod schedule;
 mod settle;
+mod status;
+mod timing;
 mod worker;
 
+pub use definition::{Cap, prune_definitions};
 pub use error::WorkerError;
-pub use job::{JobId, enqueue_approve, enqueue_resume, enqueue_run};
+pub use factory::{AgentFactory, FactoryError, JobAgent};
+pub use job::{JobId, RunRequest, enqueue, enqueue_approve, enqueue_resume, enqueue_run};
 pub use lease::set_queue_limit;
-pub use schedule::{Schedule, cancel_schedule, create_schedule, fire_due_schedules};
-pub use worker::{Worker, WorkerConfig};
+pub use schedule::{
+    Schedule, ScheduleInfo, create_schedule, delete_schedule, fire_due_schedules, get_schedule,
+    list_schedules, pause_schedule, resume_schedule,
+};
+pub use status::{JobInfo, JobState, MAX_JOBS_LISTED, job, jobs, prune_history};
+pub use timing::Timing;
+pub use worker::{HISTORY_RETENTION, Worker, WorkerConfig};
 
 /// Table that records which worker migrations have been applied.
 ///
@@ -114,6 +133,16 @@ fn migrator() -> Migrator {
             4,
             "queue limits",
             include_str!("../migrations/0004_queue_limits.sql"),
+        ),
+        simple(
+            5,
+            "scheduler",
+            include_str!("../migrations/0005_scheduler.sql"),
+        ),
+        simple(
+            6,
+            "background principal",
+            include_str!("../migrations/0006_background_principal.sql"),
         ),
     ];
     Migrator {

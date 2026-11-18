@@ -98,6 +98,7 @@ async fn a_run_that_panics_ends_with_an_error_and_frees_its_id() {
     let opened = Opened {
         agent: opened,
         place: None,
+        background: Default::default(),
     };
     lock(&server.0.tables)
         .agents

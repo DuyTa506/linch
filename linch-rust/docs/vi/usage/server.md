@@ -101,9 +101,11 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 | `tenants` | Từng tenant theo tên: 1 đến 64 chữ cái ASCII, chữ số, `.`, `_` hoặc `-` |
 | `tenants.<name>.tokens` | Các bearer token của tenant, mỗi token là `{"env": "VAR"}` (đọc khi khởi động) hoặc `{"value": "..."}` |
 | `tenants.<name>.allow` | Các allowlist của tenant, bên dưới |
+| `worker` | Chạy một worker trong tiến trình này: nó kích hoạt các lịch và chạy các job nền ([Scheduler](./scheduler.md#chạy-một-worker)). Không có: không chạy gì |
 
-Bắt buộc có ít nhất một trong `socket` và `http`, và ít nhất một token. Một token chỉ
-thuộc đúng một tenant: cùng một token xuất hiện hai lần sẽ bị từ chối.
+Bắt buộc có ít nhất một trong `socket`, `http` và `worker`, và với một listener thì cần
+ít nhất một token. Một token chỉ thuộc đúng một tenant: cùng một token xuất hiện hai lần
+sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cần token.
 
 | Trường `allow` | Khi không có | Cho phép gì |
 |---|---|---|
@@ -119,6 +121,9 @@ thuộc đúng một tenant: cùng một token xuất hiện hai lần sẽ bị
 | `postgres_dsns` | không có | Các đích Postgres mà DSN của kho lưu trữ có thể dùng: host, cổng hoặc socket, cơ sở dữ liệu, người dùng, tùy chọn khởi động và tệp TLS đều phải khớp một mục, và `sslmode` của nó phải bằng hoặc chặt hơn `sslmode` của mục đó |
 | `mcp_commands` | không có | Các MCP stdio server, `{"command", "args", "env"}`: lệnh và danh sách đối số phải khớp chính xác, và transport chỉ được đặt các tên `env` được liệt kê |
 | `mcp_urls` | không có | Các endpoint mà một MCP HTTP transport có thể nêu, khớp như `provider_base_urls` |
+| `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)) |
+| `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt của các lịch của nó |
+| `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không
 cần mục nào. Một mục `postgres_dsns` không có người dùng đại diện cho người dùng của

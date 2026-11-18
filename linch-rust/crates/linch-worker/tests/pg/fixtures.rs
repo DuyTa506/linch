@@ -11,9 +11,9 @@ use futures::stream::BoxStream;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     Agent, AgentBuilder, AgentSpec, ContentBlock, JsonObject, Message, PermissionEngine,
-    PermissionMode, PermissionPolicy, Provider, ProviderError, ProviderEvent, ProviderRequest,
-    ProviderStream, Role, ScriptedTurn, Tool, ToolContext, ToolOutput, ToolRegistry, ToolResult,
-    ToolScope,
+    PermissionLayer, PermissionMode, PermissionPolicy, Provider, ProviderError, ProviderEvent,
+    ProviderRequest, ProviderStream, Role, ScriptedTurn, Tool, ToolContext, ToolOutput,
+    ToolRegistry, ToolResult, ToolScope,
 };
 use linch_postgres::{PgPool, PgRunStore, PgSessionStore};
 use serde_json::json;
@@ -239,11 +239,29 @@ pub fn gated_agent(pool: &PgPool, probe: Probe, gate: Arc<Gate>) -> Agent {
     agent_with(pool, probe, Arc::new(Gated { replay, gate }))
 }
 
+/// [`agent`] whose permissions also hold `layer`.
+pub fn ruled_agent(pool: &PgPool, probe: Probe, layer: PermissionLayer) -> Agent {
+    let replay = Replay {
+        turns: script(probe.name),
+    };
+    ruled(pool, probe, Arc::new(replay), Some(layer))
+}
+
 fn agent_with(pool: &PgPool, probe: Probe, provider: Arc<dyn Provider>) -> Agent {
+    ruled(pool, probe, provider, None)
+}
+
+fn ruled(
+    pool: &PgPool,
+    probe: Probe,
+    provider: Arc<dyn Provider>,
+    layer: Option<PermissionLayer>,
+) -> Agent {
     let registry = ToolRegistry::new();
     // Dropping the handle keeps the registration.
     let _ = registry.register(Arc::new(probe)).unwrap();
-    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let mut policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    policy.layers.extend(layer);
     AgentBuilder::new(AgentSpec::new(MODEL))
         .provider(provider)
         .tools(Arc::new(registry))

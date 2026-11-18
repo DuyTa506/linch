@@ -15,6 +15,7 @@ mod call;
 mod hook;
 pub mod monitor;
 mod open;
+mod schedule;
 
 pub use call::{CancelRequestParams, ToolCallParams, tool_code};
 pub use hook::{
@@ -24,6 +25,10 @@ pub use hook::{
 };
 pub use monitor::{EvalReport, EvalRunParams, ReportParams, RunReportResult};
 pub use open::{HostToolSpec, OpenParams};
+pub use schedule::{
+    JobEnqueueParams, JobGetParams, JobInfo, JobListParams, Jobs, ScheduleCreateParams,
+    ScheduleDeleted, ScheduleIdParams, ScheduleInfo, ScheduleListParams, Schedules,
+};
 
 /// Method and notification names.
 pub mod method {
@@ -47,6 +52,22 @@ pub mod method {
     pub const RUN_CANCEL: &str = "run.cancel";
     /// Read a run's durable events after a seq.
     pub const RUN_EVENTS: &str = "run.events";
+    /// Store a schedule that runs the agent in the background.
+    pub const SCHEDULE_CREATE: &str = "schedule.create";
+    /// List the schedules of the agent's namespace.
+    pub const SCHEDULE_LIST: &str = "schedule.list";
+    /// Stop a schedule's fires.
+    pub const SCHEDULE_PAUSE: &str = "schedule.pause";
+    /// Let a paused schedule fire again, from now.
+    pub const SCHEDULE_RESUME: &str = "schedule.resume";
+    /// Delete a schedule; its queued and running jobs go on.
+    pub const SCHEDULE_DELETE: &str = "schedule.delete";
+    /// Queue a one-off run in the background.
+    pub const JOB_ENQUEUE: &str = "job.enqueue";
+    /// Read one job's state.
+    pub const JOB_GET: &str = "job.get";
+    /// List the jobs of the agent's namespace, newest first.
+    pub const JOB_LIST: &str = "job.list";
     /// Notification: one or more envelopes of an active run, in order.
     pub const RUN_EVENT: &str = "run.event";
     /// Notification: the server stopped driving a run.

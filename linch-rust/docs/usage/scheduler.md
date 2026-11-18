@@ -1,0 +1,294 @@
+# Scheduler
+
+Use this page to run an agent in the background: on a cron pattern or an
+interval, as a heartbeat that keeps checking in on one session, or once,
+queued for a worker.
+
+[<- Usage guide](./README.md)
+
+[Tiếng Việt](../vi/usage/scheduler.md)
+
+A schedule and a queued run are rows in the agent's Postgres database. They
+do nothing until a **worker** runs: a `linch-server --config FILE` whose
+config has a `worker` section on the same database and schema. The client
+connection that created them never runs them, and a stdio server (`Server()`)
+runs no worker.
+
+```text
+client ── schedule.create / job.enqueue ──> Postgres (schedules, jobs)
+                                                │
+linch-server --config (worker section) ─────────┘  fires schedules, takes jobs,
+                                                    opens the stored agent, runs it
+```
+
+## Run a worker
+
+Add a `worker` section to the [server config](./server.md#config). A
+server may run only a worker (no `socket` or `http`); its tenants then need
+no token.
+
+```json
+{
+  "socket": "/run/linch/linch.sock",
+  "worker": {"dsn": {"env": "LINCH_WORKER_DSN"}},
+  "tenants": {
+    "acme": {
+      "tokens": [{"env": "LINCH_TOKEN_ACME"}],
+      "allow": {
+        "postgres_dsns": ["postgres://linch_acme@db.internal:5432/linch"],
+        "max_schedules": 20,
+        "max_queued_jobs": 200,
+        "min_schedule_interval_ms": 60000
+      }
+    }
+  }
+}
+```
+
+| `worker` field | When absent | Meaning |
+|---|---|---|
+| `dsn` | required | `{"env": "VAR"}` or `{"value": "..."}`: the database and schema whose queue it serves. Background runs store through it |
+| `owner` | `linch-server-<pid>-<start time>` | The name its job holds and run claims carry; unique per worker |
+| `queues` | `["default"]` | The queues it takes jobs from, one from each in turn |
+| `max_jobs` | 32 | Jobs it runs at once |
+| `max_connections` | the default pool size | Its own pool for the queue; each run uses its tenant's pool |
+| `poll_interval_ms` | 1000 | Longest wait between polls; due schedules are checked once per interval |
+| `visibility_timeout_ms` | 30000 | How long a taken job stays hidden without a heartbeat. Keep the agents' `stores.lease_ttl_ms` no longer |
+| `retry_delay_ms` | 5000 | Wait before a failed job's next attempt; doubles each time, at most 5 minutes |
+| `history_retention_ms` | 7 days | How long ended jobs stay readable with `job` and `jobs` |
+| `local_namespaces` | none | Namespace roots outside every tenant whose jobs it also runs, without checks (schedules a stdio client made); `dev` covers `dev` and `dev/...` |
+
+Run as many such servers on one database as you like: each fire is queued
+once and each job runs on one worker at a time. A server without a `worker`
+section runs no loop and sends no query for it.
+
+A schedule or queued run is stored in the database and schema of the
+agent that made it, and a worker serves only those of its own `dsn`, where
+it also runs them. An agent whose store DSN names another database (or
+schema) needs a worker there: no other worker ever fires its schedules.
+Point `worker.dsn` at the same database and schema as the agents' store
+DSN. When they differ only in the user, the background runs connect as the
+worker's user.
+
+The worker runs the jobs of every tenant in the config. Each job's agent is
+checked against its tenant's allowlists again at every attempt, as
+`open_agent` would be, except the store DSN, which is the worker's. So a
+tenant whose allowlist was tightened stops running at the next fire: that
+job fails with the reason. Each background run takes one of the tenant's
+`max_runs` places while it runs; with none free the job waits.
+
+## What a tenant may schedule
+
+| `allow` field | When absent | Effect |
+|---|---|---|
+| `max_schedules` | no schedules | Schedules the tenant may keep in each database, across its namespaces. Absent: `create_schedule` raises `NotAllowed` (`kind == "schedules"`); at the cap, `LimitReached` (`kind == "schedules"`) |
+| `min_schedule_interval_ms` | 60000 | The shortest time between two fires: an interval, or the closest fires of a cron pattern (over its next 512 fires). Faster: `NotAllowed` (`kind == "schedule_interval"`) |
+| `max_queued_jobs` | no background runs | Unfinished jobs (queued, running or retrying) the tenant may have when it calls `enqueue`. Absent: `NotAllowed` (`kind == "background_runs"`); at the cap, `LimitReached` (`kind == "jobs"`). Fires are not refused, only counted |
+
+A stdio client has no tenant and no caps.
+
+## Which agents can run in the background
+
+The agent you schedule needs Postgres stores and no host tools or
+callbacks: a background run has no client to call back. Otherwise the call
+raises `NotBackground` with `reason` `memory_store`, `host_tools` or
+`callbacks`. Give the agent workspace or MCP tools instead.
+
+A schedule always runs the config it was created with; open the agent again
+and create a new schedule to change it.
+
+### What is stored at rest
+
+The agent's config, as it was opened (after the tenant's checks), is stored
+in plain text in the `linch_worker_agents` table of the agent's database,
+once per distinct config, because the worker must open the same agent
+again. Everything in it is stored **except the store DSN** (the worker
+connects with its own):
+
+- MCP stdio `env` values and arguments, and MCP HTTP URLs and header
+  values, as given;
+- the provider settings, including any request headers and extra body
+  fields the config sets;
+- the rest of the config: `spec`, permissions, workspace, profiles.
+
+Job, history and schedule rows name the config by its SHA-256 digest, and
+no `schedule.*` or `job.*` answer or error carries its values, nor does the
+error of a background run the worker could not open. A run's own error
+is another matter: it holds what the provider, a tool or an MCP server
+said, and an endpoint that quotes back a credential it was sent puts it
+there, as in a run started directly. A stored config is deleted once
+no schedule and no unfinished job names it: a worker checks from its first
+poll and every 10 minutes after (`prune_definitions`). Keep secrets out of
+a scheduled config where you can (a key the server reads from its
+environment is never stored), and protect the database as you protect
+those secrets.
+
+## Schedule a run
+
+```python
+from linch_rust import Server
+
+async with Server.connect("unix:/run/linch/linch.sock", token=token) as server:
+    agent = await server.open_agent(config)  # Postgres stores, no host tools
+
+    # Every day at 07:00 Berlin time, each fire in a new session.
+    digest = await agent.create_schedule(
+        "Write the daily digest.", cron="0 7 * * *", timezone="Europe/Berlin", id="digest"
+    )
+    print(digest["next_fire"])  # RFC 3339, UTC
+
+    # Every 15 minutes.
+    await agent.create_schedule("Check the queue.", interval_ms=15 * 60 * 1000)
+```
+
+| Call | Does |
+|---|---|
+| `await agent.create_schedule(prompt, *, cron=None, timezone=None, interval_ms=None, session_id=None, id=None, queue=None, principal=None)` | Store a schedule; give `cron` (five fields, or six with leading seconds) or `interval_ms`. `timezone` is an IANA name, UTC when absent. `id` defaults to a uuid |
+| `await agent.heartbeat(session_id, *, interval_ms=None, cron=None, timezone=None, prompt=CHECK_IN, id=None, queue=None, principal=None)` | A schedule whose fires continue one session (below) |
+| `await agent.schedules()` | The schedules of the agent's namespace, by id |
+| `await agent.pause_schedule(id)` | Stop its fires; queued runs stay queued |
+| `await agent.resume_schedule(id)` | Fire again from the next tick after now |
+| `await agent.delete_schedule(id)` | Delete it; `False` when there was none. Runs already queued or running finish |
+
+A `Schedule` is a dict: `id`, `namespace`, `queue`, `prompt`,
+`session_id` (fixed sessions only), `cron` and `timezone` or
+`interval_ms`, `paused`, `next_fire`, `last_fire`, `fires` (fires that
+queued a run), `skips` (fires skipped) and `created_at`.
+
+### Time zones
+
+A cron pattern is read in its time zone, daylight saving included. A fire
+time that does not exist (02:30 on the night clocks go forward) moves to the
+first valid time after the gap; one that happens twice (01:30 on the night
+they go back) fires once, the first time. An interval ignores time zones.
+
+### Sessions
+
+Without `session_id`, each fire starts its own session,
+`schedule:<id>:<fire time>`, so fires never share a conversation and may
+run at the same time.
+
+With `session_id`, every fire is a new run in that session: a heartbeat.
+
+### Who a background run acts for
+
+Pass the same `principal` you would pass to `agent.run`
+([permission rules](./tools.md#permission-rules)). It is stored with the schedule or queued run,
+and every fire's run (and its resume or approval by the worker) acts for
+it, so a permission rule with `role` or `unless_role` holds in the
+background as it does for a run started directly. Without one, the run
+holds no role: a rule with `role` never matches it and one with
+`unless_role` always does. A tenant's principal must name the tenant
+(`NotAllowed`, `kind == "principal"`). Schedule for a restricted caller
+with that caller's principal, never without one.
+
+## Heartbeat: one session, checked in on
+
+```python
+beat = await agent.heartbeat("ops-room", interval_ms=30 * 60 * 1000)
+```
+
+Each fire is a new run in `ops-room` prompted with `CHECK_IN` (or your
+`prompt`), so the agent sees the whole conversation so far. Two fires
+never overlap: **a fire is skipped** (counted in `skips`, not queued) while
+
+- the previous fire's job is not finished (queued, running or retrying), or
+- the session has a run that is not terminal: one in progress (yours from a
+  client, too), or one suspended for an approval or an `AskUser` answer.
+
+Skipping, not queueing behind, is deliberate: a check-in that waited behind
+a long run would only repeat the next one, and a run that waits for a person
+would otherwise stack a job per fire. To continue a suspended heartbeat run,
+read its `run_id` from `agent.jobs(schedule_id=...)` and answer it with
+`agent.approve` or `agent.answer` on an agent of the same config, or end it
+with `agent.cancel(run_id)`; the next fire after it ends runs again.
+
+An unattended run that needs approval suspends like any other: the job is
+`done`, the run waits. Use a permission mode or rules that allow what a
+background run must do.
+
+## Queue a one-off run
+
+```python
+job = await agent.enqueue("inbox", "Summarize the inbox.")
+done = await agent.wait_job(job["job_id"], timeout=300)
+if done["state"] == "done":
+    events = await agent.events(done["run_id"])
+```
+
+| Call | Does |
+|---|---|
+| `await agent.enqueue(session_id, prompt, *, queue=None, principal=None)` | Queue a run; a worker starts it. A session with a live run makes it wait (retrying) until that run ends |
+| `await agent.job(job_id)` | One job of the agent's namespace, live or ended |
+| `await agent.jobs(*, schedule_id=None, limit=None)` | Jobs newest first (50 by default, at most 500); only one schedule's with `schedule_id` |
+| `await agent.wait_job(job_id, *, poll=0.25, timeout=None)` | Poll until the job is `done`, `failed` or `superseded` |
+
+A `Job` is a dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
+(once a worker started it), `schedule_id` and `fire_at` (for a fire),
+`attempts`, `failures`, `error`, `created_at`, `finished_at`.
+
+| `state` | Means |
+|---|---|
+| `queued` | Waiting for a worker |
+| `running` | A worker holds it and drives its run |
+| `retrying` | An attempt ended without finishing it; `error` says why (a failure, or a busy session). It is tried again later |
+| `failed` | It can never succeed, or failed 5 times; `error` says why. Its run, if any, is failed too when it cannot continue |
+| `done` | Its run ended, or suspended for an approval or an answer |
+| `superseded` | Another owner claimed its run, which goes on there |
+
+The run's events are durable: read them with `agent.events(run_id)` on an
+agent of the namespace. Background runs send no live stream to any client.
+
+## Durability
+
+- **Each fire is queued exactly once.** A due schedule's row is locked, its
+  job inserted and its next fire moved in one transaction, so a worker that
+  crashes before the commit leaves nothing and the fire is made by the next
+  poll; workers that poll at once skip the locked row. Each job also has the
+  unique key `schedule:<id>:<fire time>`.
+- **Each job runs on one worker at a time.** A taken job is hidden for the
+  visibility timeout, which its worker's heartbeat extends. A crashed
+  worker's job becomes visible again and another worker takes it; the run's
+  lease and epoch fence the old holder out, and the run resumes from its
+  last durable state ([Runs](./runs.md)).
+- **Missed fires are caught up.** After every worker was down, a schedule
+  fires each tick it missed, in order, one per poll, as Python Linch does. A
+  heartbeat skips them while its first catch-up fire runs, so it runs once.
+  Fires missed while paused are not made.
+- **Deleting a schedule stops only future fires.** Its queued and running
+  jobs finish.
+
+## Errors
+
+| Raised | When |
+|---|---|
+| `NotBackground` (-32040) | The agent has memory stores, host tools or callbacks; `.reason` |
+| `ScheduleNotFound` (-32041) | `pause_schedule` or `resume_schedule` of an id the namespace lacks |
+| `ScheduleExists` (-32042) | `create_schedule` with an id the namespace has |
+| `JobNotFound` (-32043) | `job` of an id the namespace lacks, or whose history was pruned |
+| `InvalidSchedule` (-32044) | A cron pattern that does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `.reason` |
+| `NotAllowed` (-32004) | A tenant without `max_schedules` or `max_queued_jobs`, or a schedule faster than `min_schedule_interval_ms`, or a principal of another tenant; `.kind` |
+| `LimitReached` (-32005) | The tenant holds its `max_schedules` (`kind == "schedules"`) or `max_queued_jobs` (`kind == "jobs"`) |
+
+All are `SchedulerError`s except the last two.
+
+## How it differs from Python Linch
+
+| Python Linch (`linch.worker`) | linch-rust |
+|---|---|
+| `create_schedule(pool, session_id, payload, cron=..., interval_s=...)`; cron in UTC, five fields | `agent.create_schedule(prompt, cron=..., timezone=..., interval_ms=...)`: any IANA zone, five or six fields |
+| A schedule always targets one session | Without `session_id`, each fire starts its own session |
+| Fires of one session queue behind each other | A heartbeat skips a fire while its session is busy |
+| `cancel_schedule` disables future fires | `pause_schedule`, `resume_schedule` and `delete_schedule` |
+| The host passes an `agent_factory` to its `Worker` | The agent's config is stored with the schedule; the server's worker opens it |
+| `RunRequest.principal` is restored by the worker | `principal=` on `create_schedule` and `enqueue`, given to every fire's run |
+| `register_schedule_tools` lets the model schedule | Not available yet |
+| Missed fires catch up in order | The same |
+
+## Related pages
+
+- [Server](./server.md): the config, tenants and allowlists.
+- [Runs](./runs.md): resume, approve, answer, and what is durable.
+- [Stores](./stores.md): Postgres DSNs, schemas and leases.
+- [Worker architecture](../architecture/worker.md): the queue, leases and
+  schedules inside.

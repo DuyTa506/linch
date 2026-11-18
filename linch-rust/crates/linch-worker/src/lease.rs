@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use linch_core::{RunId, SessionId};
+use linch_core::{Principal, RunId, SessionId};
 use linch_postgres::PgPool;
 use tokio::time::Instant;
 
@@ -30,6 +30,20 @@ pub(crate) struct Job {
     pub(crate) run_id: Option<RunId>,
     /// Answers of an approve job; `Err` keeps a row that does not decode.
     pub(crate) approvals: Option<Result<Approvals, String>>,
+    /// The stored agent definition the job runs with; `None`: the
+    /// worker's agent for the namespace.
+    pub(crate) agent: Option<String>,
+    /// Who the run acts for; `Err` keeps a row that does not decode.
+    pub(crate) principal: Option<Result<Principal, String>>,
+}
+
+/// Which jobs a worker takes: those without an agent definition in the
+/// namespaces it has an agent for, and those with one whose namespace
+/// root (its first `/`-separated segment) it serves with a factory.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Served {
+    pub(crate) namespaces: Vec<String>,
+    pub(crate) roots: Vec<String>,
 }
 
 /// A dequeued job and the fencing token of this hold on it.
@@ -52,6 +66,8 @@ type JobRow = (
     Option<String>,
     i32,
     i32,
+    Option<String>,
+    Option<String>,
 );
 
 /// Most times a fenced write runs while it fails with a serialization
@@ -119,13 +135,13 @@ pub async fn set_queue_limit(pool: &PgPool, queue: &str, limit: u32) -> Result<(
     Ok(())
 }
 
-/// Take the oldest visible job of `queue` in one of `namespaces`, hiding it
+/// Take the oldest visible job of `queue` that `served` covers, hiding it
 /// for `timeout`. When the queue has a limit, take none while that many of
 /// its jobs are held by live workers anywhere.
 pub(crate) async fn dequeue(
     pool: &PgPool,
     queue: &str,
-    namespaces: &[String],
+    served: &Served,
     owner: &str,
     timeout: Duration,
 ) -> Result<Option<JobLease>, WorkerError> {
@@ -158,20 +174,25 @@ pub(crate) async fn dequeue(
     let row: Option<JobRow> = sqlx::query_as(
         "WITH next AS ( \
              SELECT id FROM linch_worker_jobs \
-             WHERE queue = $1 AND namespace = ANY($2) AND failed_at IS NULL \
-               AND visible_at <= now() \
+             WHERE queue = $1 AND failed_at IS NULL AND visible_at <= now() \
+               AND ((agent IS NULL AND namespace = ANY($2)) \
+                    OR (agent IS NOT NULL AND split_part(namespace, '/', 1) = ANY($5))) \
              ORDER BY visible_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          UPDATE linch_worker_jobs AS j \
          SET visible_at = now() + $3 * interval '1 millisecond', \
              attempts = j.attempts + 1, owner = $4 \
          FROM next WHERE j.id = next.id \
          RETURNING j.id, j.namespace, j.session_id, j.prompt, j.run_id, j.approvals, \
-                   j.attempts, j.failures",
+                   j.attempts, j.failures, \
+                   (SELECT a.config FROM linch_worker_agents AS a \
+                    WHERE a.namespace = j.namespace AND a.digest = j.agent), \
+                   j.principal",
     )
     .bind(queue)
-    .bind(namespaces)
+    .bind(&served.namespaces)
     .bind(millis(timeout))
     .bind(owner)
+    .bind(&served.roots)
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -179,7 +200,18 @@ pub(crate) async fn dequeue(
 }
 
 fn decode(row: JobRow, since: Instant) -> JobLease {
-    let (id, namespace, session_id, prompt, run_id, approvals, attempts, failures) = row;
+    let (
+        id,
+        namespace,
+        session_id,
+        prompt,
+        run_id,
+        approvals,
+        attempts,
+        failures,
+        agent,
+        principal,
+    ) = row;
     let start = session_id.zip(prompt).map(|(s, p)| (SessionId::new(s), p));
     let approvals = approvals
         .map(|text| serde_json::from_str::<Approvals>(&text).map_err(|error| error.to_string()));
@@ -189,6 +221,10 @@ fn decode(row: JobRow, since: Instant) -> JobLease {
         start,
         run_id: run_id.map(RunId::new),
         approvals,
+        agent,
+        principal: principal.map(|text| {
+            serde_json::from_str::<Principal>(&text).map_err(|error| error.to_string())
+        }),
     };
     JobLease {
         job,
@@ -247,13 +283,23 @@ impl JobLease {
         Ok(done.rows_affected() == 1)
     }
 
-    /// The job is done: delete it.
-    pub(crate) async fn ack(&self, pool: &PgPool) -> Result<bool, WorkerError> {
+    /// The job ended: move it to the history as `outcome` (`done` or
+    /// `superseded`), deleting it and writing its history row in one
+    /// statement.
+    pub(crate) async fn ack(&self, pool: &PgPool, outcome: &str) -> Result<bool, WorkerError> {
         let done = retried(|| {
-            sqlx::query("DELETE FROM linch_worker_jobs WHERE id = $1 AND attempts = $2")
-                .bind(self.job.id.0)
-                .bind(self.attempts)
-                .execute(pool)
+            sqlx::query(
+                "WITH ended AS (DELETE FROM linch_worker_jobs \
+                                WHERE id = $1 AND attempts = $2 RETURNING *) \
+                 INSERT INTO linch_worker_history (id, queue, namespace, session_id, run_id, \
+                     schedule_id, fire_at, attempts, created_at, outcome) \
+                 SELECT id, queue, namespace, session_id, run_id, schedule_id, fire_at, \
+                        attempts, created_at, $3 FROM ended",
+            )
+            .bind(self.job.id.0)
+            .bind(self.attempts)
+            .bind(outcome)
+            .execute(pool)
         })
         .await?;
         Ok(done.rows_affected() == 1)

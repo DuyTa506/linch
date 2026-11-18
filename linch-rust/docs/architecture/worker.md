@@ -27,11 +27,15 @@ time is the database clock (`now()`), never a worker's.
 | `0002_one_job_per_run.sql` | The partial unique index `linch_worker_jobs_one_per_run` on `(namespace, run_id)` where `failed_at IS NULL` |
 | `0003_job_failures.sql` | `failures`, counted apart from `attempts` |
 | `0004_queue_limits.sql` | `linch_worker_queues` (`name`, `max_held`) |
+| `0005_scheduler.sql` | `linch_worker_agents` (stored agent definitions by digest); interval, time-zone and fixed-session columns on schedules, with `fires`, `skips` and `last_fire`; `agent`, `schedule_id`, `fire_at` and `created_at` on jobs; `linch_worker_history` |
+| `0006_background_principal.sql` | `principal` (a `Principal` as JSON) on schedules and jobs; partial indexes on their `agent` column |
 
 A job starts a run (`session_id` and `prompt`), continues one (`run_id`), or
 approves one (`run_id` and `approvals`); check constraints keep those shapes
-(`migrations/0001_worker.sql:13-31`). A done job is deleted; a failed one keeps
-its row and error.
+(`migrations/0001_worker.sql:13-31`). A done job moves to
+`linch_worker_history` ([job status](#job-status-and-history)); a failed one
+keeps its row and error. `fire_due_schedules` reads `linch_runs` (a
+heartbeat's live run), so run `linch_postgres::migrate` on the same schema.
 
 ## Enqueueing
 
@@ -40,6 +44,7 @@ its row and error.
 | `enqueue_run(pool, queue, namespace, session_id, prompt)` | start | The worker records the run id on the job before the run's first write, so a retry after a crash continues that run (`crates/linch-worker/src/job.rs:129-163`) |
 | `enqueue_resume(pool, queue, namespace, run_id)` | continue | When the run already has an active job, that job's id comes back instead of a new one (`job.rs:164-196`) |
 | `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Approvals are stored in the core's `ApprovalResponse` wire form. `WorkerError::RunBusy` when the run has an active job, which may end without reading them; enqueue again once it has ended (`job.rs:197-239`) |
+| `enqueue(pool, &RunRequest, cap)` | start | `enqueue_run` with an optional stored agent definition and an optional [cap](#caps) on the root's unfinished jobs (`crates/linch-worker/src/job.rs`) |
 
 Each insert and its `pg_notify` on channel `linch_worker` (`lib.rs:76`) run in
 one transaction, so the wake-up is delivered when the job is committed
@@ -82,6 +87,15 @@ one `LISTEN` connection plus the job queries.
 3. takes one job from each queue in turn until it holds `max_jobs` or every
    queue is empty, and runs each job in its own task (`worker.rs:173-212`);
 4. waits for a notification, a finished job, the poll interval or `shutdown`.
+
+It also prunes the history of ended jobs older than `history_retention` (7
+days by default) at most once every 10 minutes.
+
+`Worker::definitions(roots, factory)` serves jobs that carry a stored agent
+definition: a job with one is taken only by a worker whose `roots` hold the
+namespace's first `/`-separated segment, and one without only by a worker
+with an agent for its namespace (`crates/linch-worker/src/lease.rs`,
+`dequeue`). See [agent definitions](#agent-definitions).
 
 On `shutdown` it waits for the jobs in flight. Dropping the future instead
 abandons them like a crash: their runs stay resumable and the jobs become
@@ -159,12 +173,12 @@ which `settle` (`settle.rs:32`) applies:
 
 | Outcome | From | Job |
 |---|---|---|
-| `Done` | Stream ended at `Result` or `Suspended`; run terminal | Deleted |
+| `Done` | Stream ended at `Result` or `Suspended`; run terminal | Moved to the history as `done` |
 | `Retry` | A store or journal error, including a session append conflict; no agent for the namespace | Released with back-off, counting a failure |
 | `Busy` | A start job whose session has a live run (`SessionBusy`), or a run another process holds a live lease on (`RunLeased`) | Released with back-off, not counting a failure |
 | `Fail` | A late approve (`NotSuspended`), a blocked prompt, undecodable approvals, a missing run | Failed for good |
 | `FailRun` | The run's state does not reconcile, or its contract differs from the agent's | The run is failed through `Agent::fail`, then the job |
-| `Fenced` | `LeaseLost`: another owner claimed the run | Deleted without a retry, which would take the run back |
+| `Fenced` | `LeaseLost`: another owner claimed the run | Moved to the history as `superseded`, without a retry, which would take the run back |
 | `Lost` | Another worker holds the job | Left alone |
 
 `classify` (`outcome.rs:44`) maps a `RunError` to these. The delay after
@@ -180,22 +194,106 @@ a queue limit (`lease.rs:288-302`). `error` holds the whole error chain
 the run goes first: a crash in between leaves a terminal run, which the job's
 next attempt acks (`settle.rs:46-56`).
 
+A factory that refuses a job's definition (`FactoryError::Refused`) fails
+it; one that is `Busy` (its tenant has no run place free) releases it like
+`Busy` above; one that is `Unavailable` retries it like `Retry`
+(`crates/linch-worker/src/execute.rs`, `agent`).
+
+## Job status and history
+
+A job that ends leaves `linch_worker_jobs` and enters `linch_worker_history`
+in one statement, a `DELETE ... RETURNING` feeding an `INSERT`, fenced by its
+attempt like every other write (`lease.rs`, `ack`), so a job is in exactly
+one of the two tables. `job(pool, namespace, id)` and `jobs(pool, namespace,
+schedule_id, limit)` (`crates/linch-worker/src/status.rs`) read both, scoped
+by the exact namespace (job ids are global), and name a `JobState`: `queued`,
+`running` (owned and still hidden), `retrying` (released with an error),
+`failed`, `done` or `superseded`. `prune_history(pool, older_than)` deletes
+history rows; failed jobs are never pruned.
+
 ## Schedules
 
-`create_schedule(pool, &Schedule)` (`crates/linch-worker/src/schedule.rs:80`)
-stores a cron pattern in UTC (five fields, or six with leading seconds, croner
-syntax) and returns its first fire, the first tick after the database's
-current time. `cancel_schedule` disables future fires; runs already enqueued
-stay queued.
+A `Schedule` (`crates/linch-worker/src/schedule.rs`) fires on a `Timing`
+(`crates/linch-worker/src/timing.rs`): a cron pattern (five fields, or six
+with leading seconds, croner syntax) read in an IANA time zone through
+`chrono-tz`, or a fixed interval. A cron fire in a daylight-saving gap moves
+to the first valid time after it; one in an overlap fires once, in the first
+half (croner's rules, tested in `timing.rs`). `Timing::shortest_gap` is the
+smallest gap over the next 512 fires, which the RPC layer compares with a
+tenant's minimum interval.
 
-`fire_due_schedules(pool)` (`schedule.rs:165`) locks up to 64 due rows with
-`FOR UPDATE SKIP LOCKED`, enqueues one start job per row and moves `next_fire`
-forward, all in one transaction. A fire therefore happens once however many
-workers poll. Each job also carries the dedupe key `schedule:{id}:{fire time}`
-as a second guard (`schedule.rs:1-12`). Missed fires are not replayed: a
-schedule overdue by several ticks fires once, and its next fire is the first
-tick after now. A stored pattern that no longer parses disables its schedule
-instead of blocking the others.
+`create_schedule(pool, &Schedule, cap)` stores it with its first fire, the
+first tick after the database's current time; `ScheduleExists` for a taken
+id. `list_schedules`, `get_schedule`, `pause_schedule`, `resume_schedule`
+(next fire from now: fires missed while paused are not made) and
+`delete_schedule` (queued and running jobs are left alone) complete the set.
+
+`fire_due_schedules(pool)` locks up to 64 due rows with
+`FOR UPDATE SKIP LOCKED` and, for each, enqueues one start job and moves
+`next_fire` to the first tick after **this fire** (not after now), all in one
+transaction:
+
+- **Exactly once.** A worker that crashes before the commit leaves neither
+  the job nor the move, so the next poll makes the fire; pollers at once skip
+  the locked rows. The job's dedupe key `schedule:{id}:{fire time}` is a
+  second guard. `tests/pg/scheduler.rs` aborts a fire inside its insert,
+  kills the firing backend with `pg_terminate_backend` mid-transaction, and
+  races eight firers over twenty schedules.
+- **Catch-up.** Since the next fire follows the fire just made, a schedule
+  that missed several ticks fires each, in order, one per call, as Python
+  Linch's schedules do.
+- **Sessions.** Without a `session_id`, each fire starts the session
+  `schedule:{id}:{fire time}`. With one, the fire is skipped (`skips` + 1)
+  while a job of the schedule is not failed and not ended, or the session
+  has a run that is not terminal in `linch_runs` (one suspended for approval
+  or input included). A heartbeat's catch-up therefore collapses into one
+  run, and fires never pile up behind a run that waits for a person.
+- A stored timing that no longer parses pauses its schedule (logged)
+  instead of blocking the others.
+
+### Caps
+
+`Cap { root, max }` (`crates/linch-worker/src/definition.rs`) bounds what
+the namespaces under one root (a namespace's first `/`-separated segment, a
+tenant's name) may hold: schedules for `create_schedule`, unfinished jobs
+for `enqueue`. The count runs in the insert's transaction after a
+transaction-scoped advisory lock on the root, so writers on any server count
+each other's rows; past it, `LimitReached`.
+
+## Agent definitions
+
+A job or schedule may carry an agent definition: text the queue stores once
+per `(namespace, SHA-256 digest)` in `linch_worker_agents` and names by
+digest, so a schedule's fires share one row and a definition never changes
+under a schedule. A worker given `Worker::definitions(roots, factory)` calls
+the `AgentFactory` (`crates/linch-worker/src/factory.rs`) once per attempt;
+the `JobAgent` it returns is closed after the job is settled, as Python's
+worker closes the agent its factory returns. `linch-rpc`'s
+`BackgroundAgents` is the factory `linch-server` uses: the definition is an
+agent config, re-admitted against its tenant at every attempt
+([RPC](./rpc.md#background-runs)).
+
+A definition holds the config's secrets in plain text, so
+`prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) deletes
+the ones no schedule and no unfinished job names, after setting `agent` to
+NULL on failed jobs (never run again). A worker runs it with the history
+pruning, from its first poll and every 10 minutes after, whether or not it
+keeps history. A writer storing a definition locks its row
+(`ON CONFLICT ... DO UPDATE`) until it commits, and the prune locks its
+candidates with `FOR UPDATE SKIP LOCKED`, so a definition about to be named
+is skipped; one named by a writer that committed after the prune read the
+references fails the delete's foreign key, and that prune deletes nothing
+(it runs again later).
+
+## Principals
+
+A schedule and a job may carry a principal (`Schedule::principal`,
+`RunRequest::principal`), stored as JSON; a fire copies its schedule's to
+its job. The worker decodes it at every attempt and sets it on the
+`RunOptions` of the start, resume or approve (`execute.rs`), since core keeps
+no principal with the run (a resume takes it from its options). A row whose
+principal does not decode fails its job. Python's worker restores
+`RunRequest.principal` the same way (`linch/worker/runtime.py`).
 
 ## Example
 
@@ -211,7 +309,7 @@ use linch_core::{
 };
 use linch_postgres::{PgRunStore, PgSessionStore};
 use linch_worker::{
-    Schedule, Worker, WorkerConfig, create_schedule, enqueue_run, set_queue_limit,
+    Schedule, Timing, Worker, WorkerConfig, create_schedule, enqueue_run, set_queue_limit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -244,12 +342,20 @@ async fn serve(
         namespace: "tenant-a".into(),
         id: "daily-digest".into(),
         queue: "default".into(),
-        session_id: SessionId::new("digest"),
+        // A heartbeat: every fire is a new run in this one session.
+        session_id: Some(SessionId::new("digest")),
         prompt: "Write the daily digest.".into(),
-        cron: "0 7 * * *".into(),
+        timing: Timing::Cron {
+            pattern: "0 7 * * *".into(),
+            timezone: "Europe/Berlin".into(),
+        },
+        // No stored definition: the worker's agent for the namespace runs it.
+        agent: None,
+        // Fires act for no principal: no role-gated rule applies.
+        principal: None,
     };
-    let first_fire = create_schedule(&pool, &digest).await?;
-    println!("first digest at {first_fire}");
+    let stored = create_schedule(&pool, &digest, None).await?;
+    println!("first digest at {}", stored.next_fire);
 
     let mut config = WorkerConfig::new("worker-1");
     config.max_jobs = 4;
@@ -272,7 +378,9 @@ listener; see [connecting and sizing a pool](./stores.md#connecting-and-sizing-a
 queue limits, retries and back-off, busy sessions, suspend and approve,
 takeover after a lost heartbeat (the test agents lease runs for 1.5 s,
 under the 3 s visibility timeout of a worker a test means to lose),
-schedule firing, and the `READ COMMITTED`
+schedule firing (catch-up, heartbeat skips, pause and resume, caps,
+a fire aborted or killed mid-transaction, racing firers), jobs run by an
+`AgentFactory` and their history, and the `READ COMMITTED`
 pin; `crates/linch-worker/src/lease/tests.rs` runs each fenced write behind
 another update of its job row under `REPEATABLE READ`. Each test skips when
 `LINCH_TEST_PG_DSN` is unset.

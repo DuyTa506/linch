@@ -3,6 +3,7 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use linch::PermissionMode;
 use serde::Deserialize;
@@ -28,6 +29,11 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
 /// runs its MCP stdio servers as child processes until it is closed.
 pub const DEFAULT_MAX_AGENTS: usize = 16;
 
+/// The shortest time between two fires of a tenant's schedule unless its
+/// allowlists say otherwise: every fire is a run on the server's provider
+/// key, so this bounds how fast one schedule spends it.
+pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// What a tenant may ask for, built with the methods below. A new value
 /// allows the memory stores, the permission modes `default` and
 /// `accept_edits`, the live providers at their public endpoints, and
@@ -42,7 +48,10 @@ pub struct Allowlists {
     pub(super) max_runs: usize,
     pub(super) max_agents: usize,
     pub(super) max_connections: usize,
-    pub(super) max_pool_connections: NonZeroU32,
+    pub(crate) max_pool_connections: NonZeroU32,
+    pub(crate) max_schedules: Option<u64>,
+    pub(crate) min_schedule_interval: Duration,
+    pub(crate) max_queued_jobs: Option<u64>,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
     pub(super) workspace_roots: Vec<PathBuf>,
@@ -213,6 +222,9 @@ impl Allowlists {
             max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_pool_connections: linch::postgres::default_max_connections(),
+            max_schedules: None,
+            min_schedule_interval: DEFAULT_MIN_SCHEDULE_INTERVAL,
+            max_queued_jobs: None,
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
             workspace_roots: Vec::new(),
@@ -274,6 +286,33 @@ impl Allowlists {
     /// what the tenant holds of the database's connections on each target.
     pub fn max_pool_connections(mut self, max: NonZeroU32) -> Self {
         self.max_pool_connections = max;
+        self
+    }
+
+    /// How many schedules the tenant may keep, paused ones included, in
+    /// each database its agents store in; `None` (the default) lets it
+    /// create none (`schedule.create` is refused, `kind: schedules`). One
+    /// past the cap is refused with `-32005`.
+    pub fn max_schedules(mut self, max: Option<u64>) -> Self {
+        self.max_schedules = max;
+        self
+    }
+
+    /// The shortest time a schedule may leave between two fires, an
+    /// interval or the closest fires of a cron pattern;
+    /// [`DEFAULT_MIN_SCHEDULE_INTERVAL`] unless set.
+    pub fn min_schedule_interval(mut self, min: Duration) -> Self {
+        self.min_schedule_interval = min;
+        self
+    }
+
+    /// How many jobs (one-off background runs and schedule fires) the
+    /// tenant may have queued, running or waiting to retry at once in each
+    /// database, counted when `job.enqueue` adds one; `None` (the
+    /// default) lets it enqueue none (`kind: background_runs`). Fires of
+    /// its schedules are not refused, only counted.
+    pub fn max_queued_jobs(mut self, max: Option<u64>) -> Self {
+        self.max_queued_jobs = max;
         self
     }
 

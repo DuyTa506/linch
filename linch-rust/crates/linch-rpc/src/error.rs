@@ -113,6 +113,23 @@ pub mod code {
     /// wrote nothing. `data` is `{run_id, owner, expires_in_ms}`: try again
     /// once that holder stops, at the latest after `expires_in_ms`.
     pub const RUN_LEASED: i64 = -32033;
+    /// The agent cannot run in the background, so `schedule.create` and
+    /// `job.enqueue` refuse it: `data.reason` is `memory_store` (its runs
+    /// would live in this connection only), `host_tools` or `callbacks`
+    /// (they answer on this connection, which a background run has not).
+    pub const NOT_BACKGROUND: i64 = -32040;
+    /// The agent's namespace has no schedule with that id.
+    pub const SCHEDULE_NOT_FOUND: i64 = -32041;
+    /// The agent's namespace already has a schedule with that id.
+    pub const SCHEDULE_EXISTS: i64 = -32042;
+    /// The agent's namespace has no job with that id (or its history was
+    /// pruned).
+    pub const JOB_NOT_FOUND: i64 = -32043;
+    /// The schedule's timing is unusable: a cron pattern that does not
+    /// parse or never fires, an unknown time zone, an interval out of
+    /// range, or both or neither of `cron` and `interval_ms`.
+    /// `data.reason` says which.
+    pub const INVALID_SCHEDULE: i64 = -32044;
 }
 
 impl ErrorObject {
@@ -147,7 +164,7 @@ pub(crate) fn limit_reached(kind: &str, max: usize) -> ErrorObject {
 }
 
 /// `error`'s text followed by each cause not already part of it.
-fn chain(error: &dyn Error) -> String {
+pub(crate) fn chain(error: &dyn Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {

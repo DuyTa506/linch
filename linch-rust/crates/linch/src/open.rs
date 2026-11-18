@@ -268,6 +268,13 @@ impl OpenedAgent {
         &self.mcp
     }
 
+    /// The Postgres pool the agent's stores use; `None` with memory
+    /// stores. A server writes an agent's schedules and queued runs into
+    /// this pool's database and schema.
+    pub fn pool(&self) -> Option<&linch_postgres::PgPool> {
+        self.pool.as_deref().and_then(Shared::pool)
+    }
+
     /// Wait (at most [`RELEASE_WAIT`]) for the lease releases of runs
     /// that were dropped, so another process can resume them at once (see
     /// [`Agent::released`]); then disconnect every MCP server and wait for

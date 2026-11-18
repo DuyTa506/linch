@@ -7,6 +7,7 @@ mod isolation;
 mod one_job;
 mod retry;
 mod schedule;
+mod scheduler;
 mod session;
 mod suspend;
 mod takeover;
