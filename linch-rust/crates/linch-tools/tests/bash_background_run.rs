@@ -127,3 +127,76 @@ async fn a_resumed_run_hears_its_process_no_longer_exists() {
     );
     assert_eq!(result.unwrap().final_text.as_deref(), Some("It is gone."));
 }
+
+/// The tool ends of one run of an agent that answers `turns`.
+async fn tool_ends(
+    root: &Path,
+    processes: &Arc<Processes>,
+    turns: Vec<ScriptedTurn>,
+) -> Vec<Event> {
+    let agent = AgentBuilder::new(AgentSpec::new(MODEL))
+        .provider(Arc::new(ScriptedProvider::new(turns)))
+        .tools(registry(root, processes))
+        .permissions(
+            PermissionEngine::new(PermissionPolicy::new(PermissionMode::SkipDangerous, "/"))
+                .unwrap(),
+        )
+        .run_store(Arc::new(MemoryRunStore::default()))
+        .session_store(Arc::new(MemorySessionStore::default()))
+        .namespace("t")
+        .build()
+        .unwrap();
+    let mut stream = agent.run("go", RunOptions::new("s1"));
+    let mut ends = Vec::new();
+    while let Some(item) = stream.next().await {
+        let event = item.unwrap().event;
+        if matches!(event, Event::ToolCallEnd(_)) {
+            ends.push(event);
+        }
+    }
+    ends
+}
+
+/// A background command that ended badly is an error result, and its status
+/// reaches the end event's `metadata` all the same: a client or hook reads
+/// `status` and `exit_code` from it, the model sees only the text.
+#[tokio::test]
+async fn a_failed_poll_carries_its_status_in_the_tool_end_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let processes = Arc::new(Processes::new());
+    let start = json!({"command": "echo out; exit 3", "run_in_background": true});
+    let turns = vec![
+        TurnBuilder::new(MODEL)
+            .tool_call("c1", "Bash", &start)
+            .build(),
+        TurnBuilder::new(MODEL).text("started").build(),
+    ];
+    let started = tool_ends(dir.path(), &processes, turns).await;
+    let [Event::ToolCallEnd(started)] = &started[..] else {
+        panic!("one tool end: {started:?}")
+    };
+    let id = started.metadata.as_ref().unwrap()["process_id"].clone();
+
+    let poll = json!({"process_id": id, "wait_ms": 5000});
+    let turns = vec![
+        TurnBuilder::new(MODEL)
+            .tool_call("c2", "BashOutput", &poll)
+            .build(),
+        TurnBuilder::new(MODEL).text("done").build(),
+    ];
+    let ends = tool_ends(dir.path(), &processes, turns).await;
+    let [Event::ToolCallEnd(end)] = &ends[..] else {
+        panic!("one tool end: {ends:?}")
+    };
+    assert!(end.result.is_error);
+    assert_eq!(end.error_code.as_deref(), Some("exit_status"));
+    let metadata = end.metadata.as_ref().expect("a failed call's status");
+    assert_eq!(metadata["status"], "exited");
+    assert_eq!(metadata["exit_code"], 3);
+    assert_eq!(metadata["process_id"], id);
+    let text = serde_json::to_value(&end.result).unwrap()["content"][0]["text"].clone();
+    assert_eq!(
+        text, "out\n[exit code 3]",
+        "the model-visible text is as before"
+    );
+}

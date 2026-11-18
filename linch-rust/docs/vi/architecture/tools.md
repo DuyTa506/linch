@@ -42,7 +42,8 @@ giữa các lời gọi; dữ liệu theo từng lời gọi đến qua `ToolCon
 
 `ToolOutput` giữ `value` mà model nhìn thấy và `metadata` mà model không thấy.
 `ToolOutputError` giữ `message` mà model nhìn thấy, một `code` tùy chọn dành cho host,
-và `details` tùy chọn (`tool.rs:42-83`).
+và `details` tùy chọn dành cho host: một object tới event `tool_call_end` của lời
+gọi như `metadata` của nó (`tool.rs:42-83`).
 
 `ToolContext` (`tool.rs:117`) mang session id, run id, `tool_use_id`,
 `principal` của bên gọi, một token `cancel` (bị hủy khi run abort hoặc khi

@@ -61,6 +61,16 @@ pub struct Tenant {
     workflows: Arc<Semaphore>,
     pools: Arc<PgPools>,
     provider_calls: Mutex<rate::CallWindow>,
+    /// Who claims this tenant's runs: opaque, so a refusal shown to a
+    /// tenant names no host, path or pid.
+    server_id: String,
+}
+
+/// A fresh server id: 8 random hex characters, opaque.
+pub fn new_server_id() -> String {
+    let mut id = uuid::Uuid::new_v4().simple().to_string();
+    id.truncate(8);
+    id
 }
 
 /// Most `provider.models` and `provider.model` calls a tenant makes in a
@@ -91,6 +101,7 @@ impl Tenant {
             workflows: places(allow.workflow.map_or(0, |caps| caps.max_workflows)),
             pools: Arc::new(PgPools::new()),
             provider_calls: Mutex::default(),
+            server_id: new_server_id(),
             allow,
         })
     }
@@ -164,6 +175,21 @@ impl Tenant {
     /// The tenant name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The same tenant under server id `id`: the name its connections
+    /// claim runs with, which a refused claim (`-32033`) shows as `owner`.
+    /// Give every tenant of one server process the same id, so an operator
+    /// can tell which server drives a run. A tenant made with
+    /// [`Tenant::new`] has a random one of its own.
+    pub fn with_server_id(mut self, id: impl Into<String>) -> Self {
+        self.server_id = id.into();
+        self
+    }
+
+    /// The server id the tenant's runs are claimed under.
+    pub fn server_id(&self) -> &str {
+        &self.server_id
     }
 
     /// Where this tenant's agents take their Postgres pools.

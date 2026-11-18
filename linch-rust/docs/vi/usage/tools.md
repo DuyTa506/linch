@@ -162,7 +162,8 @@ model reads: {"name":"Ada"}
 host reads: {'source': 'crm', 'cache': 'hit'}
 ```
 
-Lỗi tool không mang metadata. Một callback `post_tool_use` thay thế kết quả sẽ
+Lỗi tool không có `metadata` riêng, chỉ có `details`, và một object `details` tới event
+như `metadata` (`status` và `exit_code` của một lệnh `Bash` thất bại nằm ở đó). Một callback `post_tool_use` thay thế kết quả sẽ
 khiến event mang metadata của kết quả thay thế; một callback
 trả lời `mutate` giữ nguyên metadata và mã lỗi của kết quả và chỉ đổi
 giá trị hoặc cờ lỗi của nó.
@@ -331,6 +332,14 @@ status: final
   `accept_edits`; chỉ chín biến trong môi trường của server (`PATH`, `HOME`,
   `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`) đến được lệnh,
   nên key của provider thì không. Timeout của nó mặc định là 120 giây.
+- **Trạng thái trong event kết thúc.** `Bash`, `BashOutput` và `BashKill` đặt
+  trạng thái của lệnh vào `metadata` của event `tool_call_end`, cả khi thất bại
+  lẫn khi thành công, nên client hoặc hook đọc được mà không phải phân tích văn
+  bản (văn bản model nhìn thấy không đổi): `status` là `running`, `exited`,
+  `timed_out`, `killed`, `output_limit` hoặc `interrupted`; `exit_code` (hoặc
+  `signal`) có mặt khi lệnh tự thoát; `truncated` cho biết đầu ra có bị cắt
+  không; `process_id` của lệnh chạy nền cũng có mặt. Một lời gọi thất bại vẫn
+  giữ `error_code` của nó (`exit_status`, `timeout`, `output_limit`, ...).
 
 Các giới hạn, việc kill cả process group và mức trần của đầu ra nằm ở
 [trang tool của kiến trúc](../architecture/tools.md#workspace-tools).

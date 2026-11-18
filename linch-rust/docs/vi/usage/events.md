@@ -231,7 +231,7 @@ Request cho lời gọi model kế tiếp đã được lắp ráp; lời gọi 
 | `system_blocks` | Số system block |
 | `messages` | Số message hội thoại được gửi |
 | `selected_tools` | Tên các tool được cấp trong request này |
-| `budget` | Quyết định của [context budget](./memory.md#context-budget) cho request này: `{}` khi không có `spec.context_budget`; khi có thì gồm `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (một danh sách `{source, index, tokens}`) và `over_by` khi các block pinned vượt mức trần. `ContextBuildEvent.dropped` trong Python đọc danh sách đó |
+| `budget` | Quyết định của [context budget](./memory.md#context-budget) cho request này: `{}` khi không có `spec.context_budget`; khi có thì gồm `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (một danh sách `{source, index, tokens}`, sắp theo callback và `index`, không theo thứ tự budget đã loại) và `over_by` khi các block pinned vượt mức trần. `ContextBuildEvent.dropped` trong Python đọc danh sách đó |
 | `metadata` | Những gì các callback `context_build` trả về trong `metadata`, được gộp lại, key của callback đến sau thắng; `{}` nếu không có. Ở lượt mà `tool_choice` có tên không được request đưa ra, hoặc lựa chọn `required` bị một hook để lại không còn tool nào, `tool_choice_dropped` chứa tên tool (`required` cho lựa chọn đó) |
 
 ### `UsageEvent` (`usage`)
@@ -267,7 +267,7 @@ Một lời gọi tool đã kết thúc.
 | `result` | Block kết quả tool mà model đọc: `{"tool_use_id", "content": [blocks], "is_error"?}` |
 | `duration_ms` | Lời gọi mất bao lâu |
 | `canonical_output` | Giá trị có cấu trúc, với các tool khai báo output schema; ngược lại là `None` |
-| `metadata` | Chi tiết chỉ dành cho host, không bao giờ hiển thị cho model: những gì một host tool trả về trong [`ToolOutput.metadata`](./tools.md#metadata-cho-host), hoặc nơi một kết quả được offload đã đi tới; `None` với lỗi hoặc với tool không đặt gì |
+| `metadata` | Chi tiết chỉ dành cho host, không bao giờ hiển thị cho model: những gì một host tool trả về trong [`ToolOutput.metadata`](./tools.md#metadata-cho-host), hoặc nơi một kết quả được offload đã đi tới; với lời gọi thất bại, là object `details` của lỗi (`status` và `exit_code` của một lệnh `Bash`, xem [Workspace tool](./tools.md#workspace-tool)); `None` với tool không đặt gì |
 | `error_code` | Mã máy đọc được của một lời gọi thất bại (`invalid_input`, `not_found`, ...), khi tool của nó cung cấp; ngược lại là `None` |
 | `cache_hit` | Việc [`spec.tool_cache`](./tools.md#tool_cache) có phục vụ kết quả hay không: tool không chạy, và `tool_call_start` của lời gọi được ghi cùng với event này, không phải trước nó. Ngược lại là `False` |
 | `tool_use_id` | Property: `result["tool_use_id"]` |

@@ -46,7 +46,7 @@ worker (không có `socket` hay `http`); khi đó các tenant của nó không c
 | Trường `worker` | Khi không có | Ý nghĩa |
 |---|---|---|
 | `dsn` | bắt buộc | `{"env": "VAR"}` hoặc `{"value": "..."}`: cơ sở dữ liệu và schema có hàng đợi mà nó phục vụ. Các run nền lưu qua nó |
-| `owner` | `linch-server-<pid>-<start time>` | Tên mà các job và claim run của nó mang; duy nhất cho mỗi worker |
+| `owner` | `server_id` của server | Tên mà các job và claim run của nó mang; duy nhất cho mỗi worker |
 | `queues` | `["default"]` | Các hàng đợi mà nó nhận job, lần lượt một job từ mỗi hàng đợi |
 | `max_jobs` | 32 | Số job nó chạy cùng lúc |
 | `max_connections` | kích thước pool mặc định | Pool riêng của nó cho hàng đợi; mỗi run dùng pool của tenant của nó |
@@ -245,6 +245,11 @@ if done["state"] == "done":
 Một `Job` là một dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
 (khi một worker đã bắt đầu nó), `schedule_id` và `fire_at` (cho một lần kích hoạt),
 `attempts`, `failures`, `error`, `created_at`, `finished_at`.
+
+`failures` đếm các lần thử đã thất bại, gồm cả lần cuối của một job `failed` (một
+job từ bỏ sau 5 lần thử đọc là `failures: 5`). Một session bận là một lần thử lại,
+không phải một thất bại. Nó chỉ được giữ cùng job còn sống: một job `done` hoặc
+`superseded` đọc là `failures: 0`.
 
 | `state` | Nghĩa là |
 |---|---|

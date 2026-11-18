@@ -563,7 +563,9 @@ của event `context_build` báo cáo quyết định của từng request
 ([Event](./events.md#contextbuildevent-context_build)): `max_tokens`,
 `used_tokens`, `remaining_tokens`, `trimmed`, `over_by` khi các block pinned vượt
 mức trần, và `dropped`, mỗi block một `{source, index, tokens}`, với `index` là vị
-trí của block trong các block của callback của nó. `metadata["memory"]["ids"]`
+trí của block trong các block của callback của nó. Danh sách theo thứ tự các block được
+ghép (theo callback, rồi theo `index`), không theo thứ tự budget đã loại chúng.
+`metadata["memory"]["ids"]`
 của một callback retrieval vẫn liệt kê mọi chunk nó tìm thấy, nên hãy dùng
 `index` để biết chunk nào đã được gửi. Trong Python, `ContextBuildEvent.dropped`
 đưa chúng ra dưới dạng các `DroppedContext`.

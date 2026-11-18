@@ -163,7 +163,9 @@ model reads: {"name":"Ada"}
 host reads: {'source': 'crm', 'cache': 'hit'}
 ```
 
-A tool error carries no metadata. A `post_tool_use` callback that replaces
+A tool error has no `metadata` of its own, only `details`, and a `details`
+object reaches the event as `metadata` (a failed `Bash` command's `status` and
+`exit_code` are there). A `post_tool_use` callback that replaces
 the result gives the event the metadata of its replacement; one that
 answers `mutate` keeps the result's metadata and error code and changes only
 its value or error flag.
@@ -331,6 +333,15 @@ status: final
   `accept_edits`; only nine variables of the server's environment (`PATH`,
   `HOME`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`)
   reach the command, so provider keys do not. Its timeout is 120 s by default.
+- **Status in the end event.** `Bash`, `BashOutput` and `BashKill` put the
+  command's state in the `metadata` of the call's `tool_call_end` event, for a
+  failure as well as a success, so a client or hook reads it without parsing
+  the text (the model-visible text is unchanged): `status` is `running`,
+  `exited`, `timed_out`, `killed`, `output_limit` or `interrupted`;
+  `exit_code` (or `signal`) is there once the command exited by itself;
+  `truncated` says whether the output was cut; a background command's
+  `process_id` is there too. A failed call keeps its `error_code`
+  (`exit_status`, `timeout`, `output_limit`, ...).
 
 Limits, the process-group kill and the output caps are in the
 [architecture tools page](../architecture/tools.md#workspace-tools).

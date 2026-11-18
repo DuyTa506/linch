@@ -56,9 +56,11 @@ async fn a_job_that_keeps_failing_is_failed_with_its_run() {
         job_row(&db).await.3
     })
     .await;
-    let (attempts, _, error, _) = job_row(&db).await;
+    let (attempts, failures, error, _) = job_row(&db).await;
     let error = error.unwrap();
     assert_eq!(attempts, 5, "{error}");
+    // `job.list` shows the count next to "gave up after 5 failed attempts".
+    assert_eq!(failures, 5, "{error}");
     assert!(
         error.starts_with("gave up after 5 failed attempts"),
         "{error}"

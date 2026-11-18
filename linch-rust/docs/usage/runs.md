@@ -555,6 +555,13 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
   past 16 the call is refused at once, so waiting steers never hold the
   connection's request places and a `cancel` on it is always read. A tenant steers only the runs of its own agents: a run id
   of another namespace is `RunNotFound`.
+- **A cancel with steers waiting.** A steer is durable before its call
+  answers, so a run cancelled while steers wait keeps them: the waiting steers
+  are journaled and still answer with their ids (measured: 16 waiting
+  steers, 16 `steer_received` rows, 16 answers), and each appears as an
+  `alignment` event in the aborted run. The session's next run sees them as
+  part of the conversation, so a steer sent before a cancel is not lost, and
+  one you did not mean to keep has to be corrected by the next prompt.
 - **Prompt checks.** Prompt redaction and the `user_prompt_submit` callbacks
   see a steer as they see a prompt, with `source` `"steer"` in the callback's
   request. A steer a callback blocks is dropped; its `hook` records are

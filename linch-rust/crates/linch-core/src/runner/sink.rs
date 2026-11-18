@@ -34,7 +34,7 @@ use crate::json::JsonValue;
 use crate::loop_guard::Watch;
 use crate::scheduler::{CallOutcome, PlannedAction, PlannedCall, Retrying, ToolSink};
 use crate::skills::{SKILL_TOOL, requested};
-use crate::tool::ToolProgress;
+use crate::tool::{ToolOutputError, ToolProgress};
 
 /// Makes each tool start and end durable and hands it to the caller.
 pub(super) struct JournalSink<'a> {
@@ -267,6 +267,11 @@ impl ToolSink for JournalSink<'_> {
                 Ok(output) if !output.metadata.is_empty() => {
                     Some(Box::new(output.metadata.clone()))
                 }
+                // A failed call's host-facing facts are its `details` object.
+                Err(ToolOutputError {
+                    details: Some(JsonValue::Object(details)),
+                    ..
+                }) if !details.is_empty() => Some(Box::new(details.clone())),
                 _ => None,
             },
             error_code: match &outcome.result {

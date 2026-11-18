@@ -135,7 +135,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32030 | `SESSION_BUSY` | `SessionBusy` | The session already has a run that is not terminal; `data: {session_id, run_id}` |
 | -32031 | `INVALID_OUTPUT_SCHEMA` | `InvalidOutputSchema` | The `output_schema` of `run.start` does not compile, or its root is not an object; `data.reason` |
 | -32032 | `INVALID_ANSWER` | `InvalidAnswer` | A `run.answer` that does not fit the pending input requests; `data.reason`. The run still awaits input |
-| -32033 | `RUN_LEASED` | `RunLeased` | Another process drives the run and keeps its lease alive; `data: {run_id, owner, expires_in_ms}` |
+| -32033 | `RUN_LEASED` | `RunLeased` | Another process drives the run and keeps its lease alive; `data: {run_id, owner, expires_in_ms}`; `owner` is that server's id (the tenant's `Tenant::server_id`: 8 random hex characters, or the config's `server_id`), never a host name, path or pid |
 | -32034 | `INVALID_TOOL_CHOICE` | `InvalidToolChoice` | The `tool_choice` of `run.start` names a tool the run does not offer, or the provider refuses it; `data.reason` |
 | -32035 | `MODELS_UNSUPPORTED` | `ModelsUnsupported` | `provider.models` or `provider.model` named a provider with no model list (`scripted`); `data.provider` |
 | -32036 | `MODEL_NOT_FOUND` | `ModelNotFound` | `provider.model` named a model the list lacks; `data.model`, and `data.truncated` when the list was cut short |

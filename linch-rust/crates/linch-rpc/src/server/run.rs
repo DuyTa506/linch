@@ -14,9 +14,6 @@ use crate::protocol::{
     AnswerParams, ApproveParams, CancelParams, Cancelled, ResumeParams, RunEnd, StartParams, method,
 };
 
-/// Lease owner written with each claim this server makes.
-const OWNER: &str = "linch-rpc";
-
 impl Server {
     pub(super) fn start(&self, params: StartParams) -> Result<Reply, ErrorObject> {
         self.admit_principal(params.principal.as_ref())?;
@@ -26,7 +23,7 @@ impl Server {
         options.trace_id = params.trace_id;
         options.output_schema = params.output_schema;
         options.tool_choice = params.tool_choice;
-        options.owner = OWNER.into();
+        options.owner = self.0.owner.clone();
         let cancel = options.cancel.clone();
         let mut tables = lock(&self.0.tables);
         let agent = tables.agent(&params.agent)?;
@@ -119,7 +116,7 @@ impl Server {
             (agent, cancelling, kept)
         };
         let mut options = RunOptions::new("");
-        options.owner = OWNER.into();
+        options.owner = self.0.owner.clone();
         let cancelled = agent.cancel(run_id.clone(), options).await;
         drop(kept);
         match cancelled {
@@ -150,7 +147,7 @@ impl Server {
         // Resume and approve use the session stored with the run.
         let mut options = RunOptions::new("");
         options.principal = principal;
-        options.owner = OWNER.into();
+        options.owner = self.0.owner.clone();
         let driven = Driven {
             agent: handle,
             cancel: options.cancel.clone(),

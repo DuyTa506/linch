@@ -240,6 +240,14 @@ của vLLM chỉ nhận `low`, `medium` và `xhigh`, nên `high` và `max` đư�
 chối mức; cả hai gửi nguyên mức. Với model vLLM mà template không nhận `xhigh`, hãy tự
 đặt mức trong `request.extra_body.reasoning_effort`: nó thay giá trị đã ánh xạ.
 
+`effort` là một yêu cầu, không phải một đảm bảo. Một lần kiểm tra thật trên vLLM với model
+Qwen3 (2026-11-18, 3 lần chạy mỗi mức, một prompt) chạy mọi mức đến có kết quả, và số token
+suy luận tăng từ `low` lên `medium` nhưng không tăng thêm trên đó: trung bình là 167 (`low`),
+196 (`medium`), 175 (`high`, gửi là `xhigh`), 197 (`xhigh`) và 167 (`max`, gửi là `xhigh`),
+so với 0 khi tắt thinking. Hai mức được gửi cùng một giá trị mà chênh nhau chừng đó cho thấy
+độ dao động của một mức. Hãy đo một mức trên model và prompt của bạn trước khi trông cậy vào
+nó để có thêm suy luận.
+
 ### `anthropic`
 
 Anthropic Messages API. Endpoint là `base_url`, nếu không thì `ANTHROPIC_BASE_URL`
@@ -464,7 +472,9 @@ phút, sau đó nhận `LimitReached` (`kind` là `provider_calls`).
 
 `spec.temperature` (0 đến 2) đi kèm mọi request khi được đặt, kể cả `0`, và không
 xuất hiện trên wire khi không đặt. `agent.open` thất bại với giá trị ngoài 0 đến 2,
-hoặc trên 1 với `anthropic`. Mỗi adapter gửi nguyên giá trị (đối chiếu với tài liệu
+hoặc trên 1 với `anthropic`. Khoảng giá trị được kiểm tra trên server, nên đúng với mọi
+client; client Python gửi JSON nghiêm ngặt và hoàn toàn không thể gửi NaN, nên với một client
+gửi được thì kiểm tra của server là kiểm tra duy nhất. Mỗi adapter gửi nguyên giá trị (đối chiếu với tài liệu
 của nhà cung cấp ngày 2026-11-17):
 
 | Provider | Trường | Ghi chú |

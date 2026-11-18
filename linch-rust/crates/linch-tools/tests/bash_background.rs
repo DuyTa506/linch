@@ -311,3 +311,49 @@ async fn the_foreground_is_unchanged() {
     let out = text(call_in(&tools.bash, "s1", value).await);
     assert_eq!(out, "hi\n[exit code 0]");
 }
+
+/// A failed command's status is in the error's details, where the call's
+/// end event reads it (a `BashOutput` that read a failure has no metadata).
+#[tokio::test]
+async fn a_failed_background_command_reports_its_status_in_the_error_details() {
+    let ws = Workspace::new();
+    let tools = tools(&ws);
+    let (id, _) = start(&tools, "echo out; exit 3").await;
+    let failed = read(&tools, &id, 5_000).await.unwrap_err();
+    assert_eq!(
+        failed.details,
+        Some(json!({"status": "exited", "exit_code": 3, "process_id": id, "truncated": false}))
+    );
+
+    let value = json!({"command": "sleep 30", "run_in_background": true, "timeout_ms": 200});
+    let (id, _) = ids(&call_in(&tools.bash, "s1", value).await.unwrap());
+    let timed_out = read(&tools, &id, 5_000).await.unwrap_err();
+    assert_eq!(
+        timed_out.details,
+        Some(json!({"status": "timed_out", "process_id": id, "truncated": false}))
+    );
+}
+
+/// The foreground names its status the same way: a success in the output's
+/// metadata, a failure in the error's details.
+#[tokio::test]
+async fn a_foreground_command_reports_its_status() {
+    let ws = Workspace::new();
+    let tools = tools(&ws);
+    let ok = call_in(&tools.bash, "s1", json!({"command": "echo hi"})).await;
+    let ok = ok.unwrap();
+    assert_eq!(ok.metadata["status"], "exited");
+    assert_eq!(ok.metadata["exit_code"], 0);
+
+    let failed = call_in(&tools.bash, "s1", json!({"command": "exit 3"})).await;
+    assert_eq!(
+        failed.unwrap_err().details,
+        Some(json!({"status": "exited", "exit_code": 3, "truncated": false}))
+    );
+    let value = json!({"command": "sleep 30", "timeout_ms": 200});
+    let timed_out = call_in(&tools.bash, "s1", value).await.unwrap_err();
+    assert_eq!(
+        timed_out.details,
+        Some(json!({"status": "timed_out", "truncated": false}))
+    );
+}

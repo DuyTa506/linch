@@ -383,7 +383,7 @@ async fn a_busy_loop_hits_the_cpu_limit_and_a_big_file_the_size_limit() {
     // SIGXCPU.
     assert_eq!(
         busy.details,
-        Some(json!({"signal": 24})),
+        Some(json!({"status": "exited", "signal": 24, "truncated": false})),
         "{}",
         busy.message
     );

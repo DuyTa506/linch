@@ -5,7 +5,7 @@
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use linch_rpc::{BackgroundAgents, Tenant};
 use linch_worker::{Worker, WorkerConfig, WorkerError};
@@ -52,6 +52,8 @@ impl BackgroundWorker {
     ///     section: The config's `worker` section.
     ///     tenants: The tenants the listeners serve (share the same `Arc`s,
     ///         so background runs count against their run caps).
+    ///     server_id: The server's name, the worker's owner name unless
+    ///         the section sets one.
     ///     env: Looks up one environment variable, for the DSN.
     ///
     /// Raises:
@@ -60,6 +62,7 @@ impl BackgroundWorker {
     pub async fn start(
         section: &WorkerSection,
         tenants: &[Arc<Tenant>],
+        server_id: &str,
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, WorkerStartError> {
         let dsn = match &section.dsn {
@@ -73,7 +76,7 @@ impl BackgroundWorker {
                 .ok_or_else(|| WorkerStartError::Invalid("max_connections is 0".into()))?,
             None => linch::postgres::default_max_connections(),
         };
-        let config = worker_config(section)?;
+        let config = worker_config(section, server_id)?;
         let database = |error: &dyn std::error::Error| WorkerStartError::Database(chain(error));
         let pool = linch::postgres::connect(&dsn, linch::postgres::CONNECT_TIMEOUT, size)
             .await
@@ -113,12 +116,15 @@ impl BackgroundWorker {
     }
 }
 
-fn worker_config(section: &WorkerSection) -> Result<WorkerConfig, WorkerStartError> {
-    let owner = section.owner.clone().unwrap_or_else(|| {
-        let started = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = started.map_or(0, |since| since.as_nanos());
-        format!("linch-server-{}-{nanos}", std::process::id())
-    });
+fn worker_config(
+    section: &WorkerSection,
+    server_id: &str,
+) -> Result<WorkerConfig, WorkerStartError> {
+    // Not a pid or a start time: a tenant reads this in a refused resume.
+    let owner = section
+        .owner
+        .clone()
+        .unwrap_or_else(|| server_id.to_owned());
     let mut config = WorkerConfig::new(owner);
     if let Some(queues) = &section.queues {
         config.queues.clone_from(queues);

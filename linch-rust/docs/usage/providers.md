@@ -243,6 +243,15 @@ model's template refuse levels; both send the level as it is. For a vLLM model
 whose template does not accept `xhigh`, set the level yourself in
 `request.extra_body.reasoning_effort`: it replaces the mapped value.
 
+`effort` is a request, not a guarantee. A live check on vLLM with a Qwen3
+model (2026-11-18, 3 runs per level, one prompt) ran every level to a result,
+and the reasoning tokens rose from `low` to `medium` but not above it: the
+means were 167 (`low`), 196 (`medium`), 175 (`high`, sent as `xhigh`), 197
+(`xhigh`) and 167 (`max`, sent as `xhigh`), against 0 with thinking off. Two
+levels sent as the same value differing by that much shows the spread of one
+level. Measure a level on your model and prompt before relying on it to buy
+more reasoning.
+
 ### `anthropic`
 
 The Anthropic Messages API. The endpoint is `base_url`, else the server's
@@ -470,7 +479,9 @@ kind, never the key, the URL or the vendor's own words), and `OpenError`
 
 `spec.temperature` (0 to 2) goes with every request when set, `0` included, and
 stays off the wire when unset. `agent.open` fails for a value outside 0 to 2, or
-above 1 on `anthropic`. Each adapter sends it as given (checked 2026-11-17 against
+above 1 on `anthropic`. The range is checked on the server, so it holds for
+every client; the Python client sends strict JSON and cannot send NaN at all,
+so for a client that can, the server's check is the only one. Each adapter sends it as given (checked 2026-11-17 against
 the vendor references):
 
 | Provider | Field | Notes |

@@ -167,7 +167,7 @@ through the host.
   background process reads `status: output_limit`). If the host does not
   confirm that kill, the call is `interrupted` instead.
 - **Background commands** have no pid on the server (`metadata` has
-  `process_id` only), die with their session (`session.close`), `BashKill`
+  `process_id` and `status`, no `pid`), die with their session (`session.close`), `BashKill`
   and the agent, and, through the host, with the connection.
 - Output is bounded as for every backend: the first 4000 and last 26000 bytes
   of each stream reach the model.

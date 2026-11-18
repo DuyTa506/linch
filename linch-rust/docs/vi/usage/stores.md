@@ -188,7 +188,8 @@ approve hoặc answer một run giữ lease của nó và gia hạn mỗi một 
 trong khi điều khiển run, nên một lần gọi mô hình hay tool dài vẫn giữ được nó. Cho đến
 khi run đó dừng, kết thúc, hoặc chờ một phê duyệt hay một câu trả lời, `resume`,
 `approve` hoặc `answer` của agent khác bị từ chối với `RunLeased` (mã -32033) và không
-ghi gì; `.owner` nêu owner của holder và `.expires_in` là số giây lease của nó còn lại.
+ghi gì; `.owner` là id của server đang giữ nó (mờ đục: 8 ký tự hex ngẫu nhiên, hoặc `server_id` của server;
+[Server nào điều khiển một run](./server.md#server-nào-điều-khiển-một-run)) và `.expires_in` là số giây lease của nó còn lại.
 
 - Một run có stream kết thúc với lỗi, hoặc có kết nối bị đứt, được release ngay: server
   khác có thể resume nó liền. Các run của một server thoát bình thường (đầu vào của nó
@@ -216,6 +217,11 @@ ghi gì; `.owner` nêu owner của holder và `.expires_in` là số giây lease
 
 Store memory không có lease: mỗi tiến trình có các run riêng, và agent giữ chúng là
 agent duy nhất điều khiển được chúng.
+
+Store memory giữ lịch sử của mọi run chừng nào agent còn sống, nên bộ nhớ của server tăng
+theo số run: khoảng 110 KB mỗi run trong một lần đo trên server release (100 run, mỗi run một
+lời gọi `Bash`, 24 MB sau 25 run và 32 MB sau 100; đóng agent không làm process nhỏ lại). Hãy
+dùng store Postgres cho một agent sống lâu hoặc phục vụ nhiều run.
 
 <a id="the-virtual-filesystem"></a>
 

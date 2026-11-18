@@ -184,47 +184,42 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
     let (stdout, out_cut) = stdout.render();
     let (stderr, err_cut) = stderr.render();
     let mut metadata = JsonObject::new();
-    let (status, failure): (String, Option<(&str, JsonValue)>) = match end {
+    // Whether the command is over for good (a repeated read is a repeat).
+    let mut done = false;
+    let (status, state, failure): (String, &str, Option<&str>) = match end {
         None => {
-            metadata.insert("status".into(), "running".into());
             let line = format!(
                 "[{} still running; read more with BashOutput, stop it with BashKill]",
                 proc.id
             );
-            (line, None)
+            (line, "running", None)
         }
         Some(End::Exited(Exit::Code(code))) => {
-            metadata.insert("status".into(), "exited".into());
             metadata.insert("exit_code".into(), code.into());
-            metadata.insert(POLL_DONE.into(), true.into());
-            let failure = (code != 0).then(|| ("exit_status", json!({"exit_code": code})));
-            (format!("[exit code {code}]"), failure)
+            done = true;
+            let failure = (code != 0).then_some("exit_status");
+            (format!("[exit code {code}]"), "exited", failure)
         }
         Some(End::Exited(Exit::Signal(signal))) => {
-            metadata.insert("status".into(), "exited".into());
-            let failure = Some(("exit_status", json!({"signal": signal})));
-            (format!("[killed by signal {signal}]"), failure)
+            metadata.insert("signal".into(), signal.into());
+            let line = format!("[killed by signal {signal}]");
+            (line, "exited", Some("exit_status"))
         }
         Some(End::TimedOut) => {
-            metadata.insert("status".into(), "timed_out".into());
             let ms = proc.timeout.as_millis();
             let line = format!("[timed out after {ms} ms; process group killed]");
-            (line, Some(("timeout", JsonValue::Null)))
+            (line, "timed_out", Some("timeout"))
         }
         Some(End::Aborted) => {
-            metadata.insert("status".into(), "killed".into());
-            metadata.insert(POLL_DONE.into(), true.into());
-            ("[killed; process group killed]".into(), None)
+            done = true;
+            ("[killed; process group killed]".into(), "killed", None)
         }
-        Some(End::OutputLimit) => {
-            metadata.insert("status".into(), "output_limit".into());
-            (OUTPUT_LIMIT.into(), Some(("output_limit", JsonValue::Null)))
-        }
-        Some(End::Interrupted) => {
-            metadata.insert("status".into(), "interrupted".into());
-            (INTERRUPTED.into(), Some(("interrupted", JsonValue::Null)))
-        }
+        Some(End::OutputLimit) => (OUTPUT_LIMIT.into(), "output_limit", Some("output_limit")),
+        Some(End::Interrupted) => (INTERRUPTED.into(), "interrupted", Some("interrupted")),
     };
+    metadata.insert("status".into(), state.into());
+    metadata.insert("process_id".into(), proc.id.clone().into());
+    metadata.insert("truncated".into(), (out_cut || err_cut).into());
     let mut parts = Vec::new();
     if !stdout.is_empty() {
         parts.push(stdout);
@@ -237,15 +232,16 @@ fn render(proc: &Proc, unread: Unread) -> ToolResult {
     match failure {
         None => {
             let mut output = ToolOutput::new(text);
-            metadata.insert("process_id".into(), proc.id.clone().into());
-            metadata.insert("truncated".into(), (out_cut || err_cut).into());
+            if done {
+                metadata.insert(POLL_DONE.into(), true.into());
+            }
             output.metadata = metadata;
             Ok(output)
         }
-        Some((code, details)) => Err(ToolOutputError {
+        Some(code) => Err(ToolOutputError {
             message: text,
             code: Some(code.to_owned()),
-            details: (!details.is_null()).then_some(details),
+            details: Some(JsonValue::Object(metadata)),
         }),
     }
 }

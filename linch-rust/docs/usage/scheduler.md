@@ -48,7 +48,7 @@ no token.
 | `worker` field | When absent | Meaning |
 |---|---|---|
 | `dsn` | required | `{"env": "VAR"}` or `{"value": "..."}`: the database and schema whose queue it serves. Background runs store through it |
-| `owner` | `linch-server-<pid>-<start time>` | The name its job holds and run claims carry; unique per worker |
+| `owner` | the server's `server_id` | The name its job holds and run claims carry; unique per worker |
 | `queues` | `["default"]` | The queues it takes jobs from, one from each in turn |
 | `max_jobs` | 32 | Jobs it runs at once |
 | `max_connections` | the default pool size | Its own pool for the queue; each run uses its tenant's pool |
@@ -259,6 +259,11 @@ if done["state"] == "done":
 A `Job` is a dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
 (once a worker started it), `schedule_id` and `fire_at` (for a fire),
 `attempts`, `failures`, `error`, `created_at`, `finished_at`.
+
+`failures` counts the attempts that failed, the last one of a job that
+`failed` included (a job that gave up after 5 attempts reads `failures: 5`).
+A busy session is a retry, not a failure. It is kept with the live job only:
+a `done` or `superseded` job reads `failures: 0`.
 
 | `state` | Means |
 |---|---|

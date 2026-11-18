@@ -25,7 +25,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::access::Tenant;
+use crate::access::{Tenant, new_server_id};
 use crate::error::{ErrorObject, code, invalid_params, invalid_request};
 use crate::message::{Id, Request, Response};
 use crate::protocol::{RunAccepted, method};
@@ -65,6 +65,10 @@ struct State {
     /// The tenant a remote client acts for; `None` for a local client,
     /// which is not checked.
     tenant: Option<Arc<Tenant>>,
+    /// The lease owner of every claim this connection makes: the tenant's
+    /// server id, or an id of its own for a local client. Opaque; a refused
+    /// claim shows it to the client that asked.
+    owner: String,
     /// The journal of the workflows of agents with memory stores.
     journal: Arc<linch::ext::workflow::MemoryJournalStore>,
     /// Postgres pools: the tenant's own for a remote client, else the
@@ -149,10 +153,14 @@ impl Server {
         pools: Arc<PgPools>,
         stop: &CancellationToken,
     ) -> Self {
+        let owner = tenant
+            .as_ref()
+            .map_or_else(new_server_id, |tenant| tenant.server_id().to_owned());
         Self(Arc::new(State {
             tables: Mutex::default(),
             next_agent: AtomicU64::new(0),
             tenant,
+            owner,
             journal: Arc::default(),
             pools,
             peer: Peer::new(outbox.clone()),

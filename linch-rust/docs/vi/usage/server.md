@@ -429,6 +429,18 @@ nào và không mang key nào mà server tự đọc. Dưới systemd hoặc run
 thu thập; với `Server()` của client Python, thứ khởi động binary cho bạn, nó là stderr của
 process cha.
 
+## Server nào điều khiển một run
+
+Một run trên Postgres chỉ do một server điều khiển tại một thời điểm. Một resume, approve
+hay answer gửi tới server khác bị từ chối với `RunLeased` (-32033), mà `owner` của nó nêu tên
+server đang giữ run, để operator biết nên xem server nào. Tên đó là id của server: 8 ký tự hex
+ngẫu nhiên tạo lúc khởi động và in ra stderr (`linch-server: server id 3fa91c0b`), hoặc
+`server_id` của config (1 đến 64 chữ cái ASCII, chữ số, `.`, `_` hoặc `-`). Nó giống nhau cho
+mọi tenant và kết nối của process server đó và cho các hàng run mà nó claim, và đổi sau mỗi
+lần khởi động trừ khi được đặt. Tenant thấy nó trong lời từ chối, nên nó không chứa tên host,
+đường dẫn hay pid: một giá trị cấu hình cũng không nên. Hãy cho mỗi process server một id riêng;
+`worker.owner` mặc định là nó. Qua stdio mỗi process có một kết nối và id là của kết nối đó.
+
 ## Liveness
 
 Một client biến mất mà không đóng kết nối (mất điện, đứt route, một VM bị kill) sẽ giữ chỗ
@@ -438,7 +450,9 @@ khi server khởi động lại. Vì vậy listener HTTP:
 - đặt **TCP keepalive** trên mọi socket được chấp nhận và một **TCP user timeout** dài bằng thời
   gian keepalive mất để bỏ cuộc, nên kernel bỏ một peer không trả lời cả probe lẫn dữ liệu;
 - ping mỗi WebSocket cứ `ping_interval_ms` và kết thúc cái nào không gửi gì cả (không frame, không
-  pong) trong `pong_timeout_ms`. Một probe được kernel của peer trả lời, nên một client còn sống nhưng
+  pong) trong `pong_timeout_ms`. Sự im lặng được xét ngay khi nó kéo dài, không chỉ lúc một ping
+  được gửi: kết nối kết thúc `pong_timeout_ms` sau frame cuối cùng client gửi (60 giây với mặc
+  định), bất kể `ping_interval_ms` là bao nhiêu. Một probe được kernel của peer trả lời, nên một client còn sống nhưng
   bị treo vẫn qua được; một ping được code WebSocket của client trả lời, nên một client treo thì
   không.
 
@@ -458,13 +472,13 @@ mốc thời gian được rút ngắn (timeout 400 ms và một client bị ch�
 
 | Trường `liveness` | Mặc định | Ý nghĩa |
 |---|---|---|
-| `keepalive_idle_ms` | 30000 | Thời gian nhàn rỗi trước probe đầu tiên |
-| `keepalive_interval_ms` | 10000 | Thời gian giữa các probe |
-| `keepalive_probes` | 3 | Số probe không được trả lời trước khi kết nối bị bỏ, tức tổng cộng khoảng 60 giây |
+| `keepalive_idle_secs` | 30 | Thời gian nhàn rỗi trước probe đầu tiên, tính bằng giây nguyên (1 đến 32767) |
+| `keepalive_interval_secs` | 10 | Thời gian giữa các probe, tính bằng giây nguyên (1 đến 32767) |
+| `keepalive_probes` | 3 | Số probe không được trả lời trước khi kết nối bị bỏ (1 đến 127), tức tổng cộng khoảng 60 giây |
 | `ping_interval_ms` | 30000 | Thời gian giữa các ping WebSocket |
 | `pong_timeout_ms` | 60000 | Thời gian im lặng sau đó một WebSocket bị kết thúc; giữ nó lớn hơn `ping_interval_ms` |
 
-Mỗi trường ít nhất là 1. Một **Unix socket** không có cả hai: kernel đóng nó khi process của đầu
+Mỗi trường ít nhất là 1, và một trường keepalive có giá trị lớn nhất mà các tùy chọn TCP của Linux nhận (ghi ở trên), nên một config mà kernel sẽ từ chối bị từ chối ngay khi nạp. Thời gian keepalive là giây nguyên vì đó là đơn vị của kernel; không có dạng mili giây, và tên `_ms` cho chúng là một trường không xác định. Một **Unix socket** không có cả hai: kernel đóng nó khi process của đầu
 bên kia kết thúc, bất kể lý do, nên nó không cần probe. Kết nối Postgres giữ một workflow đặt các
 keepalive riêng của cơ sở dữ liệu ([Workflows](./workflows.md#một-driver-cho-mỗi-workflow)).
 

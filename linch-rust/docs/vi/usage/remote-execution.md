@@ -149,7 +149,7 @@ backend khác; một agent không có backend giữ hợp đồng mà nó đã c
   thúc lời gọi với mã `output_limit` và `[output limit reached (256 MiB); the command was
   killed]` (một process nền hiển thị `status: output_limit`). Nếu host không xác nhận lần
   kill đó, lời gọi là `interrupted`.
-- **Lệnh nền** không có pid trên server (`metadata` chỉ có `process_id`), chết cùng
+- **Lệnh nền** không có pid trên server (`metadata` có `process_id` và `status`, không có `pid`), chết cùng
   session của chúng (`session.close`), `BashKill` và agent, và, qua host, cùng kết nối.
 - Output bị giới hạn như mọi backend: 4000 byte đầu và 26000 byte cuối của mỗi stream
   tới được model.

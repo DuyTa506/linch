@@ -433,6 +433,21 @@ systemd or a container runtime stderr is already collected; with the
 Python client's `Server()`, which starts the binary for you, it is the
 parent's stderr.
 
+## Which server drives a run
+
+A run on Postgres is driven by one server at a time. A resume, approve or
+answer sent to another server is refused with `RunLeased` (-32033), whose
+`owner` names the server that holds the run, so an operator can tell which
+one to look at. The name is the server's id: 8 random hex characters made at
+startup and printed on stderr (`linch-server: server id 3fa91c0b`), or the
+`server_id` of the config (1 to 64 ASCII letters, digits, `.`, `_` or `-`).
+It is the same for every tenant and connection of that server process and
+for the run rows it claims, and it changes at each restart unless it is set.
+A tenant sees it in the refusal, so it holds no host name, path or pid: a
+configured one should not either. Give each server process its own;
+`worker.owner` defaults to it. Over stdio there is one connection per
+process and the id is that connection's.
+
 ## Liveness
 
 A client that vanishes without closing its connection (a power cut, a dropped
@@ -444,10 +459,12 @@ HTTP listener therefore:
   as long as the keepalive takes to give up, so the kernel drops a peer that
   answers neither probes nor data;
 - pings each WebSocket every `ping_interval_ms` and ends one that sent
-  nothing at all (no frame, no pong) for `pong_timeout_ms`. A probe is
-  answered by the peer's kernel, so a client that is alive but hung passes it;
-  a ping is answered by the client's WebSocket code, so a hung client does
-  not.
+  nothing at all (no frame, no pong) for `pong_timeout_ms`. Silence is judged
+  as it grows, not only when a ping goes out: the connection ends
+  `pong_timeout_ms` after the last frame the client sent (60 s with the
+  defaults), whatever `ping_interval_ms` is. A probe is answered by the peer's
+  kernel, so a client that is alive but hung passes it; a ping is answered by
+  the client's WebSocket code, so a hung client does not.
 
 Ending a connection is the same as its input ending: its runs are dropped (a
 Postgres run keeps its last durable state and can be resumed), its calls are
@@ -467,13 +484,13 @@ two times shortened (a 400 ms timeout and a client blocked for 1 s).
 
 | `liveness` field | Default | Meaning |
 |---|---|---|
-| `keepalive_idle_ms` | 30000 | Idle time before the first probe |
-| `keepalive_interval_ms` | 10000 | Time between probes |
-| `keepalive_probes` | 3 | Unanswered probes before the connection is dropped, so about 60 s in all |
+| `keepalive_idle_secs` | 30 | Idle time before the first probe, in whole seconds (1 to 32767) |
+| `keepalive_interval_secs` | 10 | Time between probes, in whole seconds (1 to 32767) |
+| `keepalive_probes` | 3 | Unanswered probes before the connection is dropped (1 to 127), so about 60 s in all |
 | `ping_interval_ms` | 30000 | Time between WebSocket pings |
 | `pong_timeout_ms` | 60000 | Silence after which a WebSocket is ended; keep it above `ping_interval_ms` |
 
-Each is at least 1. A **Unix socket** has neither: the kernel closes it when
+Each is at least 1, and a keepalive field has the largest value Linux's TCP options take (shown above), so a config the kernel would refuse is refused when it loads. The keepalive times are whole seconds because that is the kernel's unit; there is no millisecond form, and an `_ms` name for them is an unknown field. A **Unix socket** has neither: the kernel closes it when
 the peer's process ends, whatever the cause, so it needs no probe. The
 Postgres connection that holds a workflow sets the database's own keepalives
 ([Workflows](./workflows.md#one-driver-per-workflow)).
