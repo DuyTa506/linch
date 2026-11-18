@@ -104,13 +104,16 @@ pub(crate) static VLLM: Overflow = Overflow {
 /// SGLang: a 400 `BadRequest`, `Input length (N tokens) exceeds the maximum
 /// allowed length (M tokens). This model's maximum context length is ...`
 /// for the prompt alone, or `Requested token count exceeds the model's
-/// maximum context length of N tokens. ...` with the completion.
+/// maximum context length of N tokens. ...` with the completion, and
+/// `The input (N tokens) is longer than the model's context length (M
+/// tokens).` from 0.5.23's tokenizer manager.
 pub(crate) static SGLANG: Overflow = Overflow {
     statuses: &[400],
     labels: &[],
     phrases: &[
         "maximum context length",
         "exceeds the maximum allowed length",
+        "is longer than the model's context length",
     ],
 };
 

@@ -545,13 +545,16 @@ fn salt_targets() -> Vec<(&'static str, Option<&'static str>, Make)> {
         };
         targets.push((name, field, make));
     }
-    for (name, server) in [("sglang", Server::SgLang), ("llamacpp", Server::LlamaCpp)] {
+    for (name, field, server) in [
+        ("sglang", Some("cache_salt"), Server::SgLang),
+        ("llamacpp", None, Server::LlamaCpp),
+    ] {
         let make: Make = Box::new(move |url, request| {
             let mut o = ServerOptions::new(server, url);
             o.request = request;
             Box::new(OpenAiChat::server(o).unwrap())
         });
-        targets.push((name, None, make));
+        targets.push((name, field, make));
     }
     targets
 }

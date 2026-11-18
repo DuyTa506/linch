@@ -470,12 +470,11 @@ impl ProviderConfig {
     /// and `scripted` makes no request.
     pub fn cache_isolation_field(&self) -> Option<&'static str> {
         match self {
-            Self::Vllm { .. } => Some("cache_salt"),
+            Self::Vllm { .. } | Self::SgLang { .. } => Some("cache_salt"),
             Self::OpenAiChat { .. } | Self::OpenAiResponses { .. } => Some("prompt_cache_key"),
             Self::DeepSeek { .. }
             | Self::Anthropic { .. }
             | Self::Gemini { .. }
-            | Self::SgLang { .. }
             | Self::LlamaCpp { .. }
             | Self::Scripted { .. } => None,
         }

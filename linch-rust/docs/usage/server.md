@@ -118,7 +118,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `provider_info` | `false` | `provider.capabilities`, `provider.models` and `provider.model`: the model calls send the server's key to the provider's `base_url`, which must be allowed too. `provider.models` and `provider.model` are limited to 10 a minute per tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` sends no key |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands through the agent's execution backend |
 | `task_ledger` | `false` | A config's `task_ledger`: one task list shared by all the tenant's sessions, whose open tasks every request carries ([Tasks](./tasks.md#a-ledger-that-outlives-sessions)) |
-| `cache_isolation` | `false` | Keeps the tenant's provider prompt cache apart from other tenants' on the same key: every agent sends a salt derived from the tenant's name (`cache_salt` to `vllm`, `prompt_cache_key` to `openai-chat` and `openai-responses`), and an agent on a provider with no such field is refused. It needs the config's top-level `cache_salt_secret` ([below](#tenants-and-namespaces)) |
+| `cache_isolation` | `false` | Keeps the tenant's provider prompt cache apart from other tenants' on the same key: every agent sends a salt derived from the tenant's name (`cache_salt` to `vllm` and `sglang`, `prompt_cache_key` to `openai-chat` and `openai-responses`), and an agent on a provider with no such field is refused. It needs the config's top-level `cache_salt_secret` ([below](#tenants-and-namespaces)) |
 | `provider_request` | `false` | A provider's `request` (body fields, headers, a timeout) and `chat` settings ([Providers](./providers.md#request-settings)). Credential, `proxy-*` and forwarding headers stay refused, and the counts and sizes are bounded |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
@@ -366,7 +366,7 @@ What the key does not do, and what to do about it:
 With the config's `cache_salt_secret` and `allow.cache_isolation` on for a
 tenant, admission puts a salt into every agent of that tenant: the lower-case
 hex HMAC-SHA256 of the tenant's name under the secret (64 characters, 256
-bits), in the field the provider has for it: `cache_salt` on `vllm` and
+bits), in the field the provider has for it: `cache_salt` on `vllm`, `sglang` and
 `prompt_cache_key` on `openai-chat` and `openai-responses`. The same tenant
 sends the same salt on every run, from every server and worker that has the
 same secret, so its own cache hits are what they were; two tenants send
@@ -436,7 +436,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `namespace` | The namespace is not the tenant's | Stores are scoped by namespace |
 | `principal` | `principal.tenant` is another tenant | A client cannot act for another tenant |
 | `provider` | The `scripted` provider without `scripted_provider` | It is for tests and evals |
-| `cache_isolation` | `allow.cache_isolation` is on and the agent's provider has no request field for a cache salt (`deepseek`, `anthropic`, `gemini`, `sglang`, `llamacpp`) | The operator asked for an isolated cache and the vendor offers no way to give one; see [Providers](./providers.md#keep-one-tenants-prompt-cache-from-anothers) |
+| `cache_isolation` | `allow.cache_isolation` is on and the agent's provider has no request field for a cache salt (`deepseek`, `anthropic`, `gemini`, `llamacpp`) | The operator asked for an isolated cache and the vendor offers no way to give one; see [Providers](./providers.md#keep-one-tenants-prompt-cache-from-anothers) |
 | `provider_base_url` | A `base_url` outside `provider_base_urls` (origin or path), or one that is not plain (query, fragment, userinfo, escape, dot segments); vLLM, SGLang and llama.cpp always name one | The server's key would be sent there, or to another path of that origin |
 | `permission_mode` | A mode outside `permission_modes` | The mode decides what runs without asking |
 | `auto_allow` | `auto_allow` entries, `tasks: True` or a `deep_agent`, without `skip_dangerous` in `permission_modes` | They let calls run without asking, as `skip_dangerous` does; `tasks` and `deep_agent` add the four task tools to `auto_allow` |

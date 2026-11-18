@@ -215,6 +215,19 @@ async fn a_tenant_cannot_choose_or_replace_its_salt() {
 }
 
 #[tokio::test]
+async fn an_isolated_tenant_on_sglang_sends_its_salt_in_cache_salt() {
+    let (url, bodies) = echoing_server();
+    let mut rpc = Rpc::remote(tenant_access("acme", &url, true));
+    let mut config = vllm_config("acme", &url);
+    config["provider"] = json!({"id": "sglang", "base_url": url});
+    let agent = rpc.open(config).await;
+    let run_id = rpc.start(&agent, "s1", "hello").await;
+    rpc.until_end(&run_id).await;
+    let sent = salts(&bodies);
+    assert!(!sent.is_empty() && sent.iter().all(|salt| salt.len() == 64));
+}
+
+#[tokio::test]
 async fn a_provider_with_no_field_for_it_is_refused_not_left_shared() {
     let (url, _) = echoing_server();
     let rpc = Rpc::remote(tenant_access("acme", &url, true));
@@ -222,7 +235,6 @@ async fn a_provider_with_no_field_for_it_is_refused_not_left_shared() {
         json!({"id": "anthropic", "base_url": url}),
         json!({"id": "gemini", "base_url": url}),
         json!({"id": "deepseek", "base_url": url}),
-        json!({"id": "sglang", "base_url": url}),
         json!({"id": "llamacpp", "base_url": url}),
     ] {
         let mut config = vllm_config("acme", &url);

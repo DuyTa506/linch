@@ -681,9 +681,10 @@ một kênh phụ. Điều mỗi nhà cung cấp cho phép, kiểm tra ngày 202
 | Provider | Trường | Tài liệu nói gì |
 |---|---|---|
 | `vllm` | `cache_salt`, trường cấp cao nhất của `/v1/chat/completions` | Salt được đưa vào hash của block đầu, nên chỉ các request cùng salt mới dùng lại block đã cache; thêm từ vLLM 0.9.0 (engine V1; V0 từ chối trường này), có trong trang thiết kế prefix caching. vLLM khuyên dùng salt ngẫu nhiên 256 bit. Dùng endpoint chat: một `cache_salt` bị bỏ rơi ở phần tiếp nối của Responses trên vLLM từng là một advisory đã công bố |
+| `sglang` | `cache_salt`, trường cấp cao nhất của `/v1/chat/completions` | `ChatCompletionRequest.cache_salt` có trong protocol của SGLang và cô lập radix cache của nó: đo trực tiếp trên SGLang 0.5.23, một prompt 2907 token đọc 0 token cached với salt A, 2880 với salt A lần nữa, 0 với salt B và 0 khi không có salt. Nó áp dụng cho radix cache trong tiến trình; issue #37160 của SGLang báo salt bị bỏ trên đường LMCache, nên đừng dựa vào nó ở đó |
 | `openai-chat`, `openai-responses` | `prompt_cache_key` | OpenAI không chia sẻ cache giữa các organization. Trong một organization, key tách việc tái sử dụng cache của các nhóm request, nhưng OpenAI mô tả nó là ảnh hưởng tới routing, không phải bảo đảm. Coi nó là một phân vùng, không phải bức tường; muốn có bức tường, dùng một project và key riêng cho mỗi tenant |
 | `anthropic` | không có | Cache được cô lập theo organization và, trên Claude API, theo workspace. Không có gì cho từng request: các tenant dùng chung key và workspace thì dùng chung cache. Dùng một workspace và key cho mỗi tenant |
-| `deepseek`, `gemini`, `sglang`, `llamacpp` | không có | Không có trường request nào được tài liệu hóa cho việc này. Một key cho mỗi tenant là cách tách duy nhất |
+| `deepseek`, `gemini`, `llamacpp` | không có | Không có trường request nào được tài liệu hóa cho việc này. Một key cho mỗi tenant là cách tách duy nhất |
 
 Linch gửi trường đó khi có, từ một tenant của server có `allow.cache_isolation` bật
 ([Server](./server.md#cô-lập-prompt-cache)): HMAC-SHA256 của tên tenant dưới secret của
@@ -692,8 +693,8 @@ secret đó, và khác nhau giữa các tenant. Trong một tenant, cache vẫn 
 tenant, các tiền tố giống hệt nhau (ví dụ system prompt dùng chung) không còn trúng entry của
 nhau, nên một triển khai dựa vào việc chia sẻ chéo tenant đó sẽ mất nó. Vì vậy tính năng
 mặc định tắt. Trường chỉ được gửi tới các adapter liệt kê ở trên, mỗi adapter được khai
-báo thủ công, không bao giờ thừa hưởng từ server tương thích OpenAI khác: `deepseek`,
-`sglang` và `llamacpp` không gửi gì. Một gateway sau `openai-chat` hoặc vLLM cũ hơn 0.9.0
+báo thủ công, không bao giờ thừa hưởng từ server tương thích OpenAI khác: `deepseek`
+và `llamacpp` không gửi gì. Một gateway sau `openai-chat` hoặc vLLM cũ hơn 0.9.0
 từ chối trường request lạ sẽ từ chối cả trường này: hãy để `allow.cache_isolation` tắt
 với tenant dùng chúng. Agent trên provider không có trường như vậy bị từ chối (`NotAllowed`, `kind`
 là `cache_isolation`) thay vì để dùng chung. Salt không nằm trong config, run contract,
