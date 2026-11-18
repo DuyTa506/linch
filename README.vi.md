@@ -31,6 +31,34 @@ Postgres là backend lưu trữ bền vững. Các kho InMemory dành cho kiểm
 Tool có phạm vi đọc có thể chạy song song. Predicate `parallel` xét đầu vào còn
 cho phép gọi subagent chỉ đọc; tool ghi/thực thi dùng cờ boolean vẫn chạy tuần tự.
 
+## linch-rust
+
+Thư mục [`linch-rust/`](linch-rust/) chứa một kernel Rust có cùng mô hình agent với
+package này. Kernel chạy dưới dạng `linch-server` qua JSON-RPC, và client Python
+`linch_rust` khởi động và điều khiển nó. Kernel cung cấp run bền vững trên Postgres,
+worker cho lịch và job nền, workflow, hook, MCP và OpenTelemetry. Đây là một SDK để
+nhúng, không phải sản phẩm agent làm sẵn: ứng dụng của bạn quản lý HTTP API, TLS và
+metrics, đồng thời chọn cách cô lập các lệnh.
+
+Hai bản được phát triển song song. Package Python vẫn được hỗ trợ; hướng Rust là hướng
+dành cho quy mô production. Bắt đầu với
+[hướng dẫn sử dụng](linch-rust/docs/vi/usage/README.md)
+([English](linch-rust/docs/usage/README.md)),
+[quickstart](linch-rust/docs/vi/usage/quickstart.md) hoặc
+[mục lục kiến trúc](linch-rust/docs/vi/architecture/README.md):
+
+```sh
+pip install linch-rust              # client và binary linch-server
+pip install 'linch-rust[otel]'      # kèm span và metric OpenTelemetry
+linch-rust new my-agent             # dự án chạy và kiểm thử ngoại tuyến
+linch-rust docs path                # nơi cài đặt tài liệu
+```
+
+Trạng thái: linch-rust đang ở phiên bản 0.1 (bản phát hành mới nhất là 0.1.1), nên hãy
+đọc [changelog](linch-rust/CHANGELOG.md) của nó trước mỗi lần nâng cấp. Benchmark so
+sánh Python và Rust vẫn đang được hoàn thiện và chưa được công bố; số đo duy nhất đã
+công bố cho đến nay là [số liệu định cỡ](linch-rust/docs/vi/usage/embedding.md#định-cỡ-những-gì-đã-được-đo) của chính SDK.
+
 ## Cài đặt
 
 Từ một bản checkout:
