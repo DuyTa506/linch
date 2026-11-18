@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::SessionId;
+use linch_core::{Principal, SessionId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
@@ -292,6 +292,8 @@ pub(crate) struct Launch<'a> {
     /// The session the call belongs to (the sandbox keys its homes on it).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub session: &'a SessionId,
+    /// Who the run acts for; only a remote host is told.
+    pub principal: Option<&'a Principal>,
     /// Whether the command runs under the lifeline wrapper (background).
     pub lifeline: bool,
 }

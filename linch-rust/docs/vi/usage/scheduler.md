@@ -70,7 +70,13 @@ bằng user của worker.
 Worker chạy các job của mọi tenant trong cấu hình. Agent của mỗi job được kiểm tra lại với
 các allowlist của tenant của nó ở mỗi lần thử, như `open_agent` sẽ làm, ngoại trừ DSN của
 store, vốn là của worker. Vì vậy một tenant bị siết allowlist sẽ ngừng chạy ở lần kích hoạt
-kế tiếp: job đó thất bại kèm lý do. Mỗi run nền chiếm một trong các chỗ `max_runs` của
+kế tiếp: job đó thất bại kèm lý do. Điều này cũng đúng với một definition đã lưu từ trước khi
+tenant phải giới hạn run của mình (xem `run_bound` trong
+[Server](./server.md#những-gì-admission-từ-chối-và-lý-do)): definition không có
+`max_turns` lẫn giới hạn budget sẽ làm job trong hàng đợi, và mỗi lần kích hoạt của
+lịch của nó, thất bại với một lý do nêu tên cả hai thiết lập, mà `job.list` hiển thị;
+worker vẫn tiếp tục các job khác. Hãy đặt `max_turns` hoặc budget cho agent rồi mở lại
+để lập lịch lại. Mỗi run nền chiếm một trong các chỗ `max_runs` của
 tenant trong lúc chạy; khi không còn chỗ, job chờ.
 
 ## Tenant được lập lịch gì
@@ -265,7 +271,7 @@ theo dõi tiếp ("kiểm tra deploy mỗi giờ"):
 ```python
 config = {
     "namespace": "acme",
-    "spec": {"model": "deepseek-chat"},
+    "spec": {"model": "deepseek-chat", "max_turns": 20},
     "provider": {"id": "deepseek"},
     "stores": {"type": "postgres", "dsn": dsn},
     "schedule_tools": True,

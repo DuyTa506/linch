@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common::{Workspace, ctx, input, text};
-use linch_core::{Tool, ToolResult};
+use linch_core::{Principal, RunId, SessionId, Tool, ToolContext, ToolResult};
 use linch_tools::{
     Bash, BashKill, BashOutput, ExecutionBackend, ExecutionConfig, ExecutionError, Exit, Processes,
     RemoteChunk, RemoteCommand, RemoteError, RemoteExec, RemotePolicy, workspace_tools,
@@ -23,6 +23,7 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 /// One command the host runs.
 struct Running {
@@ -262,6 +263,44 @@ async fn the_host_gets_no_server_identity_and_the_policys_cwd() {
         assert!(!keys.contains(&server_only), "{keys:?}");
     }
     assert_eq!(sent.env["K"], "v");
+}
+
+/// A host that serves several principals needs to know whose command it
+/// starts: the run's principal goes with a foreground and a background
+/// command, and a run with none sends none.
+#[tokio::test]
+async fn the_host_is_told_the_principal_of_each_command() {
+    let ws = Workspace::new();
+    let (bash, host, _) = bash(&ws);
+    let principal = |user: &str| Principal::new("acme", user, ["support"]).unwrap();
+    for (user, background) in [("ada", false), ("bob", true), ("eve", false)] {
+        let mut value = json!({"command": "true", "timeout_ms": 10_000});
+        if background {
+            value["run_in_background"] = json!(true);
+        }
+        let context = ToolContext::new(
+            SessionId::from("s1"),
+            RunId::from("run"),
+            "toolu_1",
+            Some(principal(user)),
+            CancellationToken::new(),
+            None,
+        );
+        let _ = bash.execute(input(value), context).await;
+    }
+    let _ = run(&bash, "true", 10_000).await;
+    let seen: Vec<Option<String>> = (host.started().iter())
+        .map(|command| command.principal.as_ref().map(|p| p.user().to_owned()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            Some("ada".into()),
+            Some("bob".into()),
+            Some("eve".into()),
+            None
+        ]
+    );
 }
 
 #[tokio::test]

@@ -68,6 +68,18 @@ pub enum WorkflowError {
         /// The USD cap, if the budget has one.
         max_cost_usd: Option<f64>,
     },
+    /// The workflow has a USD cap, which cannot count a call of a model
+    /// that has no price: the agent's pricing has none for `model`, or a
+    /// finished call was served by it without a cost. No further agent call
+    /// starts; set `pricing` for the model or cap `max_tokens` instead.
+    #[error(
+        "workflow budget max_cost_usd cannot count calls of model {model:?}, which has no \
+         price: set `pricing` for it or cap max_tokens instead"
+    )]
+    BudgetUnpriced {
+        /// The model with no price.
+        model: String,
+    },
     /// A cap on what one workflow may do is reached (see
     /// [`WorkflowOptions::max_records`](super::WorkflowOptions::max_records)).
     #[error("workflow limit reached: at most {max} {what}")]

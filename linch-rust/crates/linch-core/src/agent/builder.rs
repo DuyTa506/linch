@@ -3,7 +3,10 @@
 use std::sync::{Arc, OnceLock};
 
 use super::spec::{self, AgentSpec};
-use super::{Agent, AgentInner, BuildError, Pricing, SessionClose, Versions, tool_choice_problem};
+use super::{
+    Agent, AgentInner, BuildError, Pricing, SessionClose, Versions, first_unpriced,
+    tool_choice_problem,
+};
 use crate::coordination::{Mailbox, SendMessageTool};
 use crate::gates::Rules;
 use crate::hooks::Hooks;
@@ -240,12 +243,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Whether the host's pricing has a finite price for `model`.
-    fn prices(&self, model: &str) -> bool {
-        let price = (self.pricing.as_ref()).and_then(|price| price(model, &Usage::default()));
-        price.is_some_and(f64::is_finite)
-    }
-
     /// Build the agent and compute its contract digest from the spec, the
     /// tools registered now, the hook policies, the skills and the
     /// subagents.
@@ -293,11 +290,10 @@ impl AgentBuilder {
             return Err(BuildError::Invalid(problem.into()));
         }
         let costed = (self.spec.budget.as_ref()).is_some_and(|b| b.max_cost_usd.is_some());
-        if costed && !self.prices(&self.spec.model) {
+        if let Some(model) = first_unpriced(self.pricing.as_ref(), &self.spec).filter(|_| costed) {
             return Err(BuildError::Invalid(format!(
-                "budget.max_cost_usd needs a price for the model {:?}, which has none: set \
-                 `pricing` for it or cap budget.max_tokens instead",
-                self.spec.model
+                "budget.max_cost_usd needs a price for the model {model:?}, which has none: set \
+                 `pricing` for it or cap budget.max_tokens instead"
             )));
         }
         if let Some(problem) = self.spec.call_timeout_problem() {

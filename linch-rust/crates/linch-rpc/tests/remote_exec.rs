@@ -128,6 +128,51 @@ async fn a_command_runs_in_the_client_and_its_output_comes_back() {
     assert!(read.wait_ms > 0);
 }
 
+/// Two principals on one agent share the client's exec host: each command
+/// reaches it with the principal of the run that made it, so a host that
+/// serves several principals can scope or deny per principal. A run with no
+/// principal sends none.
+#[tokio::test]
+async fn each_command_reaches_the_host_with_its_runs_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut rpc, mut calls) = host(Script::Quick);
+    let input = json!({"command": "echo hi", "timeout_ms": 5000});
+    let mut config = bash_config(dir.path(), input.clone(), remote());
+    let call = |id: &str| tool_turn(id, "Bash", input.clone());
+    let turns = [
+        call("c1"),
+        text_turn("a"),
+        call("c2"),
+        text_turn("b"),
+        call("c3"),
+        text_turn("c"),
+    ];
+    config["provider"]["turns"] = json!(turns);
+    let agent = rpc.open(config).await;
+    let ada = json!({"tenant": "acme", "user": "ada", "roles": ["support"]});
+    let bob = json!({"tenant": "acme", "user": "bob"});
+    for (session, principal) in [("s1", Some(&ada)), ("s2", Some(&bob)), ("s3", None)] {
+        let mut params = json!({"agent": agent, "session_id": session, "prompt": "go"});
+        if let Some(principal) = principal {
+            params["principal"] = principal.clone();
+        }
+        let run_id = rpc.accepted(method::RUN_START, params).await;
+        rpc.until_end(&run_id).await;
+    }
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        seen.push(next(&mut calls, "exec.start").await);
+    }
+    assert_eq!(seen[0]["principal"], ada);
+    assert_eq!(
+        seen[1]["principal"],
+        json!({"tenant": "acme", "user": "bob", "roles": []})
+    );
+    assert_eq!(seen[2].get("principal"), None, "a run with none sends none");
+    let start: ExecStartParams = serde_json::from_value(seen[0].clone()).unwrap();
+    assert_eq!(start.principal.unwrap().user(), "ada");
+}
+
 #[tokio::test]
 async fn a_run_cancel_tells_the_host_to_kill() {
     let dir = tempfile::tempdir().unwrap();

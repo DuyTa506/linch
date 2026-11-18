@@ -198,7 +198,7 @@ async def save_note(text: str) -> str:
 def support(turns: list[dict]) -> AgentConfig:
     return {
         "namespace": "acme/support",
-        "spec": {"model": MODEL},
+        "spec": {"model": MODEL, "max_turns": 20},
         "provider": {"id": "scripted", "turns": turns},
     }
 
@@ -374,6 +374,7 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `tool_retry` | `spec.tool_retry.max_attempts` lớn hơn 5, `max_delay_ms` lớn hơn 60000, hoặc một danh sách dài quá 32 tên | Mỗi lần retry là một lần ghi bền và một khoảng chờ mà run giữ một slot suốt thời gian đó. Không có `allow.tool_retry`: một lần retry chỉ lặp lại một tool mà agent vốn đã gọi được, nên các mức trần là toàn bộ cơ chế kiểm soát |
 | `policy` | Hơn 32 prerequisite hoặc gate, hơn 32 tool hoặc keyword trong một mục, một văn bản dài quá 1024 byte, `max_corrections` lớn hơn 16, hoặc một gate định nghĩa lại gate của `required_policy` | Server kiểm tra từng rule trên mọi batch tool và mọi câu trả lời cuối cùng, và mỗi lần sửa là một lời gọi provider mà policy yêu cầu; các gate của operator không thuộc quyền thay đổi của tenant |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` lớn hơn 25 | Mỗi lượt không có lời gọi provider là một lần ghi và một lần nối session trên server mà không budget nào đếm |
+| `run_bound` | `spec.max_turns` không đặt, `spec.budget` không đặt `max_tokens` lẫn `max_cost_usd`, và cả `profile` lẫn profile `deep_agent` đều không cấp `max_turns` | Run của tenant phải có một giới hạn nào đó: một model cứ gọi tool mãi sẽ chạy trên key của operator cho đến khi loop guard dừng nó, mà một input luôn thay đổi thì né được loop guard (xem [loop guard](./agent.md#loop_guard)). Văn bản từ chối nêu tên cả hai thiết lập. Không có gì được thêm vào spec nên run contract không đổi; một root `local_namespaces` tin cậy và một client stdio không bị ràng buộc bởi quy tắc này |
 | `tool_choice` | Một `tool_choice` bị ép (`required`, hoặc một tool không phải final tool), trong spec hoặc trong `run.start`, trên một agent không có `max_turns` và không có `final_tool_name` (riêng output schema không kết thúc run trên mọi provider) | Model bị ép gọi một tool mỗi lượt sẽ không bao giờ trả lời, và không budget nào kết thúc run |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client

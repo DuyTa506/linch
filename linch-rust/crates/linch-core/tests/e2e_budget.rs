@@ -241,6 +241,35 @@ async fn a_cost_cap_on_an_unpriced_model_is_refused_at_build() {
     assert!(tokens_only.is_ok());
 }
 
+/// A fallback model can serve a call too, so a cost cap needs a price for
+/// each of them: refused at build, naming the one that has none.
+#[tokio::test]
+async fn a_cost_cap_on_an_unpriced_fallback_model_is_refused_at_build() {
+    let stores = Arc::new(Stores::default());
+    let build = |fallbacks: &[&str]| {
+        let mut spec = capped(None, Some(0.05), 0.9);
+        spec.fallback_models = fallbacks.iter().map(|model| (*model).to_owned()).collect();
+        AgentBuilder::new(spec)
+            .provider(Arc::new(Replay::new(script(0, 0, "Echo"))))
+            .permissions(policy(SKIP))
+            .run_store(stores.clone())
+            .session_store(stores.clone())
+            .namespace(NS)
+            .pricing(|model, _| (model != "cheap-fallback").then_some(0.0))
+            .build()
+    };
+    // The unpriced one is named, whichever place it holds in the list.
+    for fallbacks in [&["cheap-fallback"][..], &["priced-first", "cheap-fallback"]] {
+        let Some(BuildError::Invalid(message)) = build(fallbacks).err() else {
+            panic!("a cost cap with an unpriced fallback built: {fallbacks:?}");
+        };
+        assert!(message.contains("cheap-fallback"), "{message}");
+        assert!(message.contains("pricing"), "{message}");
+        assert!(message.contains("max_tokens"), "{message}");
+    }
+    assert!(build(&["priced-fallback", "priced-second"]).is_ok());
+}
+
 /// A pricing that has no rate for the model.
 fn unpriced_model() -> Result<Agent, BuildError> {
     let stores = Arc::new(Stores::default());

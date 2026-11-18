@@ -74,7 +74,13 @@ The worker runs the jobs of every tenant in the config. Each job's agent is
 checked against its tenant's allowlists again at every attempt, as
 `open_agent` would be, except the store DSN, which is the worker's. So a
 tenant whose allowlist was tightened stops running at the next fire: that
-job fails with the reason. Each background run takes one of the tenant's
+job fails with the reason. The same holds for a stored definition made before
+a tenant had to bound its runs (see `run_bound` in
+[Server](./server.md#what-admission-refuses-and-why)): one with neither
+`max_turns` nor a budget cap fails its queued job, and each fire of its
+schedule, with a reason that names both settings, which `job.list` shows; the
+worker goes on with the other jobs. Set `max_turns` or a budget on the agent
+and open it again to schedule it anew. Each background run takes one of the tenant's
 `max_runs` places while it runs; with none free the job waits.
 
 ## What a tenant may schedule
@@ -278,7 +284,7 @@ it can schedule its own follow-ups ("check the deploy every hour"):
 ```python
 config = {
     "namespace": "acme",
-    "spec": {"model": "deepseek-chat"},
+    "spec": {"model": "deepseek-chat", "max_turns": 20},
     "provider": {"id": "deepseek"},
     "stores": {"type": "postgres", "dsn": dsn},
     "schedule_tools": True,

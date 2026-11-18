@@ -56,6 +56,9 @@ pub(super) struct Inner {
     pub(super) budget: Option<WorkflowBudget>,
     /// Tokens and USD the workflow's agent calls have spent so far.
     pub(super) spent: Mutex<(u64, f64)>,
+    /// The model of a finished call that had usage and no cost, so a USD
+    /// cap could not count it.
+    pub(super) unpriced: Mutex<Option<String>>,
     max_records: Option<u64>,
     max_record_bytes: Option<usize>,
     pub(super) live_gate: Option<LiveGate>,
@@ -100,6 +103,7 @@ impl WorkflowContext {
             awaiting: Mutex::new(awaiting),
             budget: options.budget,
             spent: Mutex::new((0, 0.0)),
+            unpriced: Mutex::new(None),
             max_records: options.max_records,
             max_record_bytes: options.max_record_bytes,
             live_gate: options.live_gate.clone(),

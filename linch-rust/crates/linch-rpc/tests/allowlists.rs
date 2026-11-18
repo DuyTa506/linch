@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use common::*;
 use linch_rpc::protocol::method;
-use linch_rpc::{Access, Allowlists, McpCommand, code};
+use linch_rpc::{Access, Allowlists, ClientError, McpCommand, code};
 use serde_json::{Value, json};
 
 /// `cargo test` builds the examples next to the test binaries' `deps`
@@ -227,7 +227,7 @@ async fn an_mcp_stdio_server_must_match_an_entry_exactly() {
 async fn a_local_connection_checks_no_allowlist() {
     let dir = tempfile::tempdir().unwrap();
     let rpc = Rpc::new();
-    let open = json!({"namespace": "anything", "spec": {"model": MODEL},
+    let open = json!({"namespace": "anything", "spec": {"model": MODEL, "max_turns": 100},
                       "provider": {"id": "vllm", "base_url": "http://127.0.0.1:10/v1"},
                       "workspace": dir.path()});
     rpc.open(open).await;
@@ -475,6 +475,46 @@ async fn a_task_ledger_needs_the_tenants_allowlist() {
         allow.permission_modes(&modes).task_ledger(true)
     }));
     assert!(allowed.call(method::AGENT_OPEN, ledger).await.is_ok());
+}
+
+/// A tenant's run has to end on `max_turns` or a budget cap: a model that
+/// keeps calling a tool would otherwise run on the operator's key until the
+/// loop guard, which an input that keeps changing evades. A local connection
+/// is not held to it.
+#[tokio::test]
+async fn a_tenant_agent_needs_max_turns_or_a_budget_cap() {
+    let unbounded = || {
+        let mut config = config(json!({}));
+        config["spec"].as_object_mut().unwrap().remove("max_turns");
+        config
+    };
+    let tenant = Rpc::remote(acme(|allow| allow));
+    let error = tenant
+        .call(method::AGENT_OPEN, unbounded())
+        .await
+        .unwrap_err();
+    let ClientError::Rpc(error) = error else {
+        panic!("not an error object");
+    };
+    assert_eq!(error.code, code::NOT_ALLOWED);
+    assert_eq!(error.data, Some(json!({"kind": "run_bound"})));
+    assert!(error.message.contains("max_turns"), "{}", error.message);
+    assert!(error.message.contains("budget"), "{}", error.message);
+    for bound in [
+        json!({"max_turns": 8}),
+        json!({"budget": {"max_tokens": 1000}}),
+        json!({"budget": {"max_cost_usd": 1.0}}),
+    ] {
+        let mut config = unbounded();
+        for (key, value) in bound.as_object().unwrap() {
+            config["spec"][key] = value.clone();
+        }
+        // Admission passes; a cost cap on the unpriced scripted model then
+        // fails the build, which is another refusal.
+        assert_eq!(refused(&tenant, config).await, None, "{bound}");
+    }
+    // A trusted local connection keeps its behaviour.
+    Rpc::new().open(unbounded()).await;
 }
 
 /// A vLLM provider at the one URL the tenant may use, with `extra` merged

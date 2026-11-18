@@ -416,6 +416,7 @@ mod tests {
             cwd: &root,
             env: &env,
             session: &session,
+            principal: None,
             lifeline: true,
         };
         let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap().into_process();
@@ -442,6 +443,7 @@ mod tests {
             cwd: root,
             env: &env,
             session: &session,
+            principal: None,
             lifeline: false,
         };
         let child = shell.spawn(launch).await.unwrap().into_process().child;

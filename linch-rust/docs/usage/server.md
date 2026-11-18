@@ -196,7 +196,7 @@ async def save_note(text: str) -> str:
 def support(turns: list[dict]) -> AgentConfig:
     return {
         "namespace": "acme/support",
-        "spec": {"model": MODEL},
+        "spec": {"model": MODEL, "max_turns": 20},
         "provider": {"id": "scripted", "turns": turns},
     }
 
@@ -373,6 +373,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `tool_retry` | `spec.tool_retry.max_attempts` above 5, `max_delay_ms` above 60000, or a list over 32 names | Every retry is a durable write and a wait the run holds a slot through. There is no `allow.tool_retry`: a retry only repeats a tool the agent could already call, so the caps are the whole control |
 | `policy` | More than 32 prerequisites or gates, more than 32 tools or keywords in one, a text over 1024 bytes, `max_corrections` above 16, or a gate that redefines one of `required_policy`'s | The server checks each rule on every tool batch and final answer, and each correction is a provider call the policy asks for; the operator's gates are not the tenant's to change |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
+| `run_bound` | `spec.max_turns` is unset, the `spec.budget` sets neither `max_tokens` nor `max_cost_usd`, and neither the `profile` nor the `deep_agent` profile supplies `max_turns` | A tenant's run must have some bound: a model that keeps calling a tool would run on the operator's key until the loop guard, which an input that keeps changing evades (see [loop guard](./agent.md#loop_guard)). The refusal text names both settings. Nothing is added to the spec, so the run contract is unchanged; a trusted `local_namespaces` root and a stdio client are not held to it |
 | `tool_choice` | A forced `tool_choice` (`required`, or a tool that is not the final tool), in the spec or in `run.start`, on an agent with no `max_turns` and no `final_tool_name` (an output schema alone does not end the run on every provider) | A model forced to call a tool every turn never answers, and no budget ends the run |
 
 A path that does not exist is refused like one outside the roots, so a

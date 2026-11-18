@@ -370,6 +370,13 @@ answer changes on every call (an elapsed time in a status line) is kept out of
 every count, so it is bounded by `max_turns` and the budget alone. Set
 `max_turns` (and a budget) on a run that must end.
 
+On a server with tenants this is a rule, not advice: `agent.open` of a tenant
+is refused (`-32004`, `kind: run_bound`) when the spec has neither `max_turns`
+nor a `budget` with `max_tokens` or `max_cost_usd` (the `profile`'s and a deep-agent profile's
+`max_turns` count), and the message names both settings
+([Server](./server.md#what-admission-refuses-and-why)). A trusted local
+connection keeps the unbounded default.
+
 ### `policy`
 
 `spec.policy` states what a run must do in order: which tools may only run
@@ -482,7 +489,7 @@ the model's call order, not the tenant's host
 | Field | Default | What it controls |
 |---|---|---|
 | `max_tokens` | none: no token cap | Most tokens the run and its subagents may spend, all four usage buckets summed |
-| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); the model needs a price (the built-in table or the agent's `pricing`), or `agent.open` fails with an invalid-agent error (`-32011`) that names the model; cap `max_tokens` instead for a model without one |
+| `max_cost_usd` | none: no cost cap | Most USD they may spend, priced from the [built-in table](./events.md#usage-and-cost); every model that can serve a call (`model` and each of `fallback_models`) needs a price (the built-in table or the agent's `pricing`), or `agent.open` fails with an invalid-agent error (`-32011`) that names the model without one; cap `max_tokens` instead for a model without one |
 | `warn_ratio` | `0.9` | Fraction of either cap at which one `budget` event of kind `warning` fires |
 
 As in Python Linch, every provider call is charged once it ends, and the run

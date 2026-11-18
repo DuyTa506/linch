@@ -64,7 +64,7 @@ impl Running {
 /// A scripted agent config in namespace `acme` answering `text`.
 pub fn scripted(text: &str) -> Value {
     let turn = TurnBuilder::new("scripted-model").text(text).build();
-    json!({"namespace": "acme", "spec": {"model": "scripted-model"},
+    json!({"namespace": "acme", "spec": {"model": "scripted-model", "max_turns": 100},
            "provider": {"id": "scripted", "turns": [turn]}})
 }
 

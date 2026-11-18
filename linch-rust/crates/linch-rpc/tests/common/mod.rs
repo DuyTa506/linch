@@ -230,7 +230,7 @@ pub fn kind(event: &Event) -> String {
 pub fn scripted(turns: Vec<ScriptedTurn>, workspace: Option<&Path>, mode: &str) -> Value {
     let mut config = json!({
         "namespace": "rpc",
-        "spec": {"model": MODEL},
+        "spec": {"model": MODEL, "max_turns": 100},
         "provider": {"id": "scripted", "turns": turns},
     });
     if let Some(root) = workspace {

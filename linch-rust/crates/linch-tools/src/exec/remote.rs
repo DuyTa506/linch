@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::SessionId;
+use linch_core::{Principal, SessionId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::{Instant, sleep_until, timeout};
@@ -116,6 +116,9 @@ pub struct RemoteCommand {
     pub background: bool,
     /// The session the call belongs to.
     pub session: SessionId,
+    /// Who the run acts for, when the host that started it named one. A host
+    /// that serves several principals scopes or denies the command by it.
+    pub principal: Option<Principal>,
 }
 
 /// Why the host did not do what the server asked.
@@ -265,6 +268,7 @@ impl Shell for RemoteShell {
             env,
             background: launch.lifeline,
             session: launch.session.clone(),
+            principal: launch.principal.cloned(),
         };
         // Dropped while the host starts it: the host may have, so stop it.
         let mut run = RemoteRun::new(Arc::clone(&self.host), id);

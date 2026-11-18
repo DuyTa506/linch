@@ -20,7 +20,7 @@ fn config(cache: Value) -> Value {
         turns,
         "default",
         json!({"tools": [host_tool("lookup", "read")],
-               "spec": {"model": MODEL, "tool_cache": cache}}),
+               "spec": {"model": MODEL, "max_turns": 100, "tool_cache": cache}}),
     )
 }
 

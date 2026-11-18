@@ -329,10 +329,31 @@ impl Drop for AgentInner {
     }
 }
 
+/// The first model `spec` can be served by (its own, then each fallback)
+/// that `pricing` has no finite price for.
+pub(crate) fn first_unpriced<'a>(
+    pricing: Option<&Pricing>,
+    spec: &'a AgentSpec,
+) -> Option<&'a str> {
+    let priced = |model: &str| {
+        let price = pricing.and_then(|price| price(model, &Usage::default()));
+        price.is_some_and(f64::is_finite)
+    };
+    let models = std::iter::once(&spec.model).chain(&spec.fallback_models);
+    models.map(String::as_str).find(|model| !priced(model))
+}
+
 impl Agent {
     /// The spec this agent was built from.
     pub fn spec(&self) -> &AgentSpec {
         &self.inner.spec
+    }
+
+    /// The first model that can serve this agent's calls (its own, then each
+    /// fallback) that the host's pricing has no price for, if any. A USD cap
+    /// cannot count a call of such a model.
+    pub fn unpriced_model(&self) -> Option<&str> {
+        first_unpriced(self.inner.pricing.as_ref(), &self.inner.spec)
     }
 
     /// The contract digest every run of this agent stores.

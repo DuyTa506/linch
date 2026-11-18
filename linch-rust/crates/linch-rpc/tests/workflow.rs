@@ -466,6 +466,65 @@ async fn the_budget_stops_the_next_call_and_counts_replays() {
     );
 }
 
+/// An unpriced agent adds 0 USD per call, so a USD cap on its workflow could
+/// never trip: `workflow.start` refuses it, naming the model; a price, or a
+/// token cap alone, starts.
+#[tokio::test]
+async fn a_cost_cap_on_a_workflow_of_an_unpriced_agent_does_not_start() {
+    let rpc = Rpc::new();
+    let unpriced = rpc.open(scripted(vec![priced("a")], None, "")).await;
+    let mut config = scripted(vec![priced("a")], None, "");
+    config["pricing"] = json!({MODEL: {"input": 1.0, "output": 2.0}});
+    let with_price = rpc.open(config).await;
+    let refused = rpc
+        .call(
+            method::WORKFLOW_START,
+            json!({"agent": unpriced, "run_id": "w", "budget": {"max_cost_usd": 1.0}}),
+        )
+        .await;
+    let ClientError::Rpc(error) = refused.unwrap_err() else {
+        panic!("not an error object");
+    };
+    assert_eq!(error.code, code::BUILD_INVALID);
+    assert!(error.message.contains(MODEL), "{}", error.message);
+    assert!(error.message.contains("max_tokens"), "{}", error.message);
+    let tokens = json!({"agent": unpriced, "run_id": "w", "budget": {"max_tokens": 100}});
+    rpc.call(method::WORKFLOW_START, tokens).await.unwrap();
+    let usd = json!({"agent": with_price, "run_id": "w2", "budget": {"max_cost_usd": 1.0}});
+    rpc.call(method::WORKFLOW_START, usd).await.unwrap();
+}
+
+/// A call a priced agent had served by a model the pricing lacks cannot be
+/// counted by a USD cap: the next agent call fails with `-32046`, `kind:
+/// unpriced`, naming the model.
+#[tokio::test]
+async fn a_call_served_by_an_unpriced_model_ends_a_cost_capped_workflow() {
+    let rpc = Rpc::new();
+    let usage = Usage {
+        input_tokens: 10,
+        output_tokens: 5,
+        ..Usage::default()
+    };
+    let served = |text: &str| {
+        TurnBuilder::new("other-model")
+            .text(text)
+            .usage(usage)
+            .build()
+    };
+    let mut config = scripted(vec![served("a"), served("b")], None, "");
+    config["pricing"] = json!({MODEL: {"input": 1.0, "output": 2.0}});
+    let agent = rpc.open(config).await;
+    let params = json!({"agent": agent, "run_id": "w", "budget": {"max_cost_usd": 1.0}});
+    rpc.call(method::WORKFLOW_START, params).await.unwrap();
+    call(&rpc, "w", "p1", json!({})).await.unwrap();
+    let (kind, data) = code_of_call(call(&rpc, "w", "p2", json!({})).await);
+    assert_eq!(kind, code::WORKFLOW_BUDGET);
+    assert_eq!(
+        (data["kind"].clone(), data["model"].clone()),
+        (json!("unpriced"), json!("other-model"))
+    );
+}
+
 #[tokio::test]
 async fn a_cancelled_call_aborts_its_run_and_journals_nothing() {
     let dir = tempfile::tempdir().unwrap();

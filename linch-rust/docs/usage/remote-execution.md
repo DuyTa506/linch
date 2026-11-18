@@ -82,6 +82,23 @@ The host is the connection. So an agent whose `Bash` runs on a remote backend
   message that says so, and the Python client raises `ValueError` before
   opening.
 
+### One host, several principals
+
+The host is the client that opened the agent, so the runs of every principal
+on that agent (each `run` with its own `principal`) reach the same host. The
+server does not scope a command by principal: `exec.start` only names the
+agent and the session. It carries the `principal` of the run that made the
+call (`{tenant, user, roles}`, the one given to `run.start`; absent when the
+run has none), so a host that serves more than one principal can scope or deny
+the command by it (a working directory, an account or a container for each).
+Python: `ExecStart.principal`. `SubprocessHost` ignores it and runs every
+command as this process's user in the same way: do not share one between
+principals that must be kept apart. `exec.read` and `exec.kill` name only the
+command; its `exec_id` is the one the host saw at `exec.start`, so a host that
+tracks the principal there knows it later too. On a tenant's connection the
+principal's tenant is the connection's own; its `user` and `roles` are what
+the client claims, as for permission rules.
+
 ## Files: the file tools act on the server
 
 Read this before enabling it. `Read`, `Write`, `Edit`, `Grep` and `Glob` run
@@ -163,7 +180,7 @@ the config's `execution` is the declaration.
 
 | Request | Params | Result |
 |---|---|---|
-| `exec.start` | `agent, exec_id, command, cwd?, env?, background?, session_id` | `{}` |
+| `exec.start` | `agent, exec_id, command, cwd?, env?, background?, session_id, principal?` | `{}` |
 | `exec.read` | `agent, exec_id, wait_ms` | `{stdout?, stderr?, exit?}` |
 | `exec.kill` | `agent, exec_id` | `{stdout?, stderr?, exit?}` |
 

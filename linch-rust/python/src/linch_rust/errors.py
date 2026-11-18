@@ -278,7 +278,11 @@ class WorkflowBudgetExceeded(WorkflowError):
     """The workflow's budget is spent, so no further agent call starts (-32046).
 
     The calls that finished stay journaled; raise the budget and start the
-    workflow again to continue.
+    workflow again to continue. A `max_cost_usd` budget on a model with no
+    price also raises this from an agent call, with `data["kind"] == "unpriced"`
+    and the model in `data["model"]` (`spent_tokens` and `spent_usd` are then
+    `None`): set `pricing` or cap `max_tokens` instead. `workflow.start` refuses
+    that case up front, with the `-32011` that `agent.open` uses.
     """
 
     @property

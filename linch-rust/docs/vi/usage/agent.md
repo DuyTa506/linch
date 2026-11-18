@@ -367,7 +367,14 @@ hạn) không bao giờ đạt 10 trong 50 và không bị bắt: chỉ `max_tur
 kết thúc một run như vậy, và cả hai mặc định đều không có. Một tool `polls` của
 [MCP](#mcp_servers) mà câu trả lời đổi ở mọi lần gọi (một thời gian đã trôi trong dòng trạng
 thái) nằm ngoài mọi bộ đếm, nên chỉ `max_turns` và budget giới hạn nó. Hãy đặt `max_turns`
-(và một budget) cho một run phải kết thúc.
+`max_turns` (và một budget) cho một run phải kết thúc.
+
+Trên một server có tenant, đây là quy tắc chứ không phải lời khuyên: `agent.open`
+của một tenant bị từ chối (`-32004`, `kind: run_bound`) khi spec không có
+`max_turns` lẫn một `budget` có `max_tokens` hoặc `max_cost_usd` (`max_turns` của
+`profile` và của profile deep agent được tính), và thông báo nêu tên cả hai thiết lập
+([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)). Một kết nối local
+tin cậy vẫn giữ mặc định không giới hạn.
 
 ### `policy`
 
@@ -475,7 +482,7 @@ lời gọi của model, không ràng buộc host của tenant
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `max_tokens` | không có: không giới hạn token | Số token nhiều nhất mà run và các subagent của nó được tiêu, cộng cả bốn nhóm usage |
-| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); model cần có giá (bảng tích hợp sẵn hoặc `pricing` của agent), nếu không `agent.open` thất bại với lỗi agent không hợp lệ (`-32011`) nêu tên model; với model không có giá, hãy đặt giới hạn `max_tokens` |
+| `max_cost_usd` | không có: không giới hạn chi phí | Số USD nhiều nhất chúng được tiêu, tính giá từ [bảng tích hợp sẵn](./events.md#mức-sử-dụng-và-chi-phí); mọi model có thể phục vụ một lời gọi (`model` và từng model trong `fallback_models`) cần có giá (bảng tích hợp sẵn hoặc `pricing` của agent), nếu không `agent.open` thất bại với lỗi agent không hợp lệ (`-32011`) nêu tên model không có giá; với model không có giá, hãy đặt giới hạn `max_tokens` |
 | `warn_ratio` | `0.9` | Tỷ lệ của một trong hai giới hạn mà tại đó một event `budget` loại `warning` được phát ra |
 
 Giống Python Linch, mỗi lời gọi provider được tính phí một lần khi nó kết thúc, và

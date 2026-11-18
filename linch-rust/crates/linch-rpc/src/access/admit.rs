@@ -200,7 +200,7 @@ impl Tenant {
                 return Err(refused(kind, message));
             }
         }
-        Ok(())
+        admit_run_bound(config)
     }
 
     /// Refuse a run's own forced `tool_choice` that nothing would end (see
@@ -636,6 +636,34 @@ fn admit_guardrails(
         }
     }
     Ok(())
+}
+
+/// Refuse a config whose runs nothing bounds: no `spec.max_turns` (the
+/// `profile`'s and the deep agent profile's count, as they are applied after
+/// admission) and no
+/// `spec.budget` cap (`max_tokens` or `max_cost_usd`). A tenant's model that
+/// keeps calling a tool would run until the loop guard, which an input that
+/// keeps changing evades, on the operator's key. A trusted local root is
+/// not admitted here and keeps its behaviour. Nothing is injected into the
+/// spec: a default would change its contract digest.
+fn admit_run_bound(config: &AgentConfig) -> Result<(), ErrorObject> {
+    let spec = &config.spec;
+    let capped =
+        (spec.budget.as_ref()).is_some_and(|b| b.max_tokens.is_some() || b.max_cost_usd.is_some());
+    // A profile that does not resolve fails the open on its own.
+    let profile_turns = (config.deep_agent.as_ref())
+        .and_then(|deep| deep.resolve().ok())
+        .and_then(|deep| deep.profile.max_turns);
+    let domain_turns = config
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.max_turns);
+    if spec.max_turns.is_some() || profile_turns.is_some() || domain_turns.is_some() || capped {
+        return Ok(());
+    }
+    let message = "a tenant agent needs a bound on its runs: set spec.max_turns or a spec.budget \
+                   cap (max_tokens or max_cost_usd), or the run could go on without end";
+    Err(refused("run_bound", message.into()))
 }
 
 /// Refuse a forced tool choice (`required`, or a named tool that is not the

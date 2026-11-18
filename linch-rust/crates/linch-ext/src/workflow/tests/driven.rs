@@ -8,7 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::json;
 
 use super::*;
-use crate::test_support::{scripted, scripted_priced, text_turn};
+use linch_core::provider::scripted::TurnBuilder;
+
+use crate::test_support::{
+    MODEL, scripted, scripted_priced, scripted_priced_for_model_only, text_turn, usage,
+};
 
 #[tokio::test]
 async fn a_held_workflow_refuses_a_second_driver_and_leaves_the_first_writing() {
@@ -168,6 +172,99 @@ async fn the_budget_counts_replayed_calls_and_stops_the_next_live_one() {
     let failed = run_workflow(again, flow).await;
     assert!(matches!(failed, Err(WorkflowError::BudgetExceeded { .. })));
     assert_eq!(fixture.provider.requests().len(), 1);
+}
+
+/// An unpriced agent adds 0 USD per call, so a workflow USD cap could never
+/// trip: the call is refused before it runs, naming the model.
+#[tokio::test]
+async fn a_cost_cap_refuses_a_call_of_an_unpriced_agent() {
+    let fixture = scripted(vec![text_turn("a")]);
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut capped = options(&store, "w1", &Recorder::default());
+    capped.budget = Some(WorkflowBudget {
+        max_tokens: None,
+        max_cost_usd: Some(1.0),
+    });
+    let failed = run_workflow(capped, |wf| {
+        let agent = fixture.agent.clone();
+        async move { wf.agent(&agent, "one", "p1").await }
+    })
+    .await;
+    let Err(WorkflowError::BudgetUnpriced { model }) = failed else {
+        panic!("an unpriced agent ran under a cost cap: {failed:?}");
+    };
+    assert_eq!(model, MODEL);
+    assert!(fixture.provider.requests().is_empty(), "no call was made");
+    // A token cap alone does not need a price.
+    let mut tokens = options(&store, "w2", &Recorder::default());
+    tokens.budget = Some(WorkflowBudget {
+        max_tokens: Some(1000),
+        max_cost_usd: None,
+    });
+    let ran = run_workflow(tokens, |wf| {
+        let agent = fixture.agent.clone();
+        async move { wf.agent(&agent, "one", "p1").await }
+    })
+    .await;
+    assert_eq!(ran.unwrap(), "a");
+}
+
+/// A fallback model with no price can serve a call too.
+#[tokio::test]
+async fn a_cost_cap_refuses_an_agent_with_an_unpriced_fallback() {
+    let fixture = scripted_priced_for_model_only(vec![text_turn("a")], &["other-model"]);
+    assert_eq!(fixture.agent.unpriced_model(), Some("other-model"));
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut capped = options(&store, "w1", &Recorder::default());
+    capped.budget = Some(WorkflowBudget {
+        max_tokens: None,
+        max_cost_usd: Some(1.0),
+    });
+    let failed = run_workflow(capped, |wf| {
+        let agent = fixture.agent.clone();
+        async move { wf.agent(&agent, "one", "p1").await }
+    })
+    .await;
+    let Err(WorkflowError::BudgetUnpriced { model }) = failed else {
+        panic!("an unpriced fallback ran under a cost cap: {failed:?}");
+    };
+    assert_eq!(model, "other-model");
+    assert!(fixture.provider.requests().is_empty(), "no call was made");
+}
+
+/// The agent's price lookup passed, but a model with no rate served the
+/// call: its cost is unknown, so the cap cannot count it and the next call
+/// is refused, on a resume too (which replays the journal).
+#[tokio::test]
+async fn a_cost_cap_ends_the_workflow_after_a_call_with_no_price() {
+    let served = TurnBuilder::new("served-model")
+        .text("a")
+        .usage(usage(10, 5))
+        .build();
+    let fixture = scripted_priced_for_model_only(vec![served, text_turn("b")], &[]);
+    let store = Arc::new(MemoryJournalStore::default());
+    let budget = WorkflowBudget {
+        max_tokens: None,
+        max_cost_usd: Some(1.0),
+    };
+    let flow = |wf: WorkflowContext| {
+        let agent = fixture.agent.clone();
+        async move {
+            let first = wf.agent(&agent, "one", "p1").await?;
+            let second = wf.agent(&agent, "two", "p2").await?;
+            Ok(first + &second)
+        }
+    };
+    for _ in 0..2 {
+        let mut run = options(&store, "w1", &Recorder::default());
+        run.budget = Some(budget);
+        let failed = run_workflow(run, flow).await;
+        let Err(WorkflowError::BudgetUnpriced { model }) = failed else {
+            panic!("a call with no price passed a cost cap: {failed:?}");
+        };
+        assert_eq!(model, "served-model");
+        assert_eq!(fixture.provider.requests().len(), 1, "the second never ran");
+    }
 }
 
 #[tokio::test]

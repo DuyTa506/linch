@@ -84,6 +84,16 @@ returns what it returns. `wf` is a `WorkflowContext`:
 `interrupt_requested`, `interrupt_resolved`, `interrupt_replayed` and
 `interrupt_stale`.
 
+A `budget` with `max_cost_usd` needs a price for every model the agent can
+use (its own and each of `fallback_models`, from the built-in table or the
+agent's `pricing`), because an unpriced call would count as free and the cap
+could never trip. `workflow.start` refuses it (`-32011`, naming the model), and
+a call whose run had usage and no cost (a provider that served a model the
+pricing lacks) ends the workflow's next agent call with `-32046`, `data.kind:
+unpriced` (`WorkflowBudgetExceeded`, `WorkflowError::BudgetUnpriced`); the call
+stays journaled, and a resume refuses again. Set `pricing` or cap `max_tokens`
+instead. A tenant's `max_cost_usd` ceiling (below) is a `max_cost_usd` too.
+
 `parallel`, `settled` and `pipeline` run in the client. Each branch counts
 its own calls, under its branch path, so branches that reach their calls in
 another order on a resume still find their own records.
