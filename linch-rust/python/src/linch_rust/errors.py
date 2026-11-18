@@ -109,6 +109,21 @@ class RunNotFound(RunError):
     """No such run or session in the agent's stores (-32021)."""
 
 
+class RunPruned(RunNotFound):
+    """The run existed and the server's retention policy deleted it (-32050).
+
+    Its record and its events are gone for good, so a read, resume, approve
+    or report of it cannot succeed; it is a `RunNotFound`, told apart from a
+    wrong id. The server remembers a pruned run for its tombstone period
+    (30 days by default); after that the run reads as `RunNotFound`.
+    """
+
+    @property
+    def run_id(self) -> str:
+        """The id of the pruned run."""
+        return _field(self.data, "run_id")
+
+
 class LeaseLost(RunError):
     """Another process took the run over, or failed it, while this one
     drove it (-32022).
@@ -438,6 +453,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32047: WorkflowCallFailed,
     -32048: WorkflowNotFound,
     -32049: WorkflowNoJournal,
+    -32050: RunPruned,
     -32022: LeaseLost,
     -32025: ContractMismatch,
     -32026: RunTerminal,

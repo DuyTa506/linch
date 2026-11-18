@@ -306,6 +306,35 @@ is skipped; one named by a writer that committed after the prune read the
 references fails the delete's foreign key, and that prune deletes nothing
 (it runs again later).
 
+## Retention
+
+`prune_retained(pool, &Retention)` (`crates/linch-worker/src/retention.rs`)
+is the opt-in delete of what ended runs and idle sessions leave behind; a
+worker runs it in a task of its own every `Retention::interval` when
+`WorkerConfig::retention` is set (`worker.retention` in the server config).
+Each batch is one transaction: a keyset pick in index order after the pass's
+cursor (`FOR UPDATE ... SKIP LOCKED`, `batch_size` rows), then one statement
+that deletes the run (or session), its events (or log, tasks and edges) and
+writes the tombstone, with the terminal status (or the idle clock and the
+absence of a live run) checked again in the delete. A pass holds a
+session-level try-lock keyed by database and schema on one pool connection
+from its first batch to its last, so one pruner runs at a time across the
+fleet, a second pass cannot start in the pauses between batches (each batch
+is followed by a pause as long as it took, which keeps the pass at most half
+as busy as the database), and a crashed pruner's connection releases the lock.
+A pass that finds the lock taken deletes nothing and reports `contended`.
+
+What it never deletes follows from what other code reads of a run later: a
+run that is not terminal; a child run while its parent is not terminal (the
+parent's resume reads `<run>:<tool_use_id>` and starts the subagent again if
+it is gone); a `wf-` run and session (a resumed workflow reads the run when
+its journal has no record yet); a run a live job names (a retried start job
+starts another run if its run is missing). No code reads the events of an
+earlier run of the same session, so session continuation does not depend on
+run events, and the two windows are independent. Runs that were terminal
+before migration 10 are stamped by the first pass that has a run window.
+`job.list`, the history and the schedules are not touched.
+
 ## Principals
 
 A schedule and a job may carry a principal (`Schedule::principal`,

@@ -61,19 +61,25 @@ pub async fn prune_definitions(pool: &PgPool) -> Result<u64, WorkerError> {
     )
     .execute(&mut *tx)
     .await?;
+    // The history rows of live runs are found from the live runs (few, on
+    // the partial index) and not by walking the history of each definition
+    // (every ended job of a schedule) and probing the run of each row.
     let deleted = sqlx::query(
         "DELETE FROM linch_worker_agents WHERE (namespace, digest) IN ( \
+             WITH live AS MATERIALIZED ( \
+                 SELECT DISTINCT h.namespace, h.agent FROM linch_runs AS r \
+                 JOIN linch_worker_history AS h \
+                   ON h.namespace = r.namespace AND h.run_id = r.run_id \
+                 WHERE r.status NOT IN ('completed', 'failed', 'aborted') \
+                   AND h.agent IS NOT NULL) \
              SELECT a.namespace, a.digest FROM linch_worker_agents AS a \
              WHERE NOT EXISTS (SELECT 1 FROM linch_worker_schedules AS s \
                                WHERE s.namespace = a.namespace AND s.agent = a.digest) \
                AND NOT EXISTS (SELECT 1 FROM linch_worker_jobs AS j \
                                WHERE j.namespace = a.namespace AND j.agent = a.digest) \
-               AND NOT EXISTS (SELECT 1 FROM linch_worker_history AS h \
-                               JOIN linch_runs AS r \
-                                 ON r.namespace = h.namespace AND r.run_id = h.run_id \
-                               WHERE h.namespace = a.namespace AND h.agent = a.digest \
-                                 AND r.status NOT IN ('completed', 'failed', 'aborted')) \
-             FOR UPDATE SKIP LOCKED)",
+               AND NOT EXISTS (SELECT 1 FROM live \
+                               WHERE live.namespace = a.namespace AND live.agent = a.digest) \
+             FOR UPDATE OF a SKIP LOCKED)",
     )
     .execute(&mut *tx)
     .await;

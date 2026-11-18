@@ -15,5 +15,6 @@ mod memory;
 mod migrations;
 mod pool;
 mod refusals;
+mod retention;
 mod tasks;
 mod tool_cache;

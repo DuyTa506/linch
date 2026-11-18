@@ -116,6 +116,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | Exception | Code | When |
 |---|---|---|
 | `RunNotFound` | -32021 | No such run in the agent's stores (with memory stores: not in this handle) |
+| `RunPruned` | -32050 | The run existed and the server's [retention](./stores.md#retention) deleted it; a `RunNotFound` subclass, `run_id` names it. After the tombstone period it reads as `RunNotFound` |
 | `RunExists` | -32023 | `run_id` is already stored; `run_or_resume` handles it ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data["expected"]` is the run's contract and `data["found"]` this agent's, as the message names them |
 | `RunTerminal` | -32026 | The run already finished; `data.status` is its status |

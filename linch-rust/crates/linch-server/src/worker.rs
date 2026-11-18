@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use linch_rpc::{BackgroundAgents, Tenant};
-use linch_worker::{Worker, WorkerConfig, WorkerError};
+use linch_worker::{Retention, Worker, WorkerConfig, WorkerError};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{TokenSource, WorkerSection};
+use crate::config::{RetentionSection, TokenSource, WorkerSection};
 
 /// The worker could not start.
 #[derive(Debug, Error)]
@@ -149,7 +149,38 @@ fn worker_config(
     if let Some(keep) = millis(section.history_retention_ms, "history_retention_ms")? {
         config.history_retention = Some(keep);
     }
+    if let Some(section) = &section.retention {
+        config.retention = Some(retention(section)?);
+    }
     Ok(config)
+}
+
+/// The retention settings of `section`; each window is whole days, and a
+/// zero or an unusable value is refused at startup.
+fn retention(section: &RetentionSection) -> Result<Retention, WorkerStartError> {
+    let days = |value: Option<u32>, field: &str| match value {
+        Some(0) => Err(WorkerStartError::Invalid(format!("retention.{field} is 0"))),
+        Some(days) => Ok(Some(Duration::from_secs(u64::from(days) * 86_400))),
+        None => Ok(None),
+    };
+    let mut retention = Retention {
+        terminal_runs: days(section.terminal_runs_days, "terminal_runs_days")?,
+        idle_sessions: days(section.idle_sessions_days, "idle_sessions_days")?,
+        ..Retention::default()
+    };
+    if let Some(period) = days(section.tombstone_days, "tombstone_days")? {
+        retention.tombstones = period;
+    }
+    if let Some(batch) = section.batch_size {
+        retention.batch_size = batch;
+    }
+    if let Some(secs) = section.interval_secs {
+        retention.interval = Duration::from_secs(secs);
+    }
+    retention
+        .check()
+        .map_err(|error| WorkerStartError::Invalid(error.to_string()))?;
+    Ok(retention)
 }
 
 fn chain(error: &dyn std::error::Error) -> String {
@@ -161,4 +192,81 @@ fn chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section(retention: &str) -> WorkerSection {
+        let text = format!(r#"{{"dsn": {{"value": "postgres://x"}}, "retention": {retention}}}"#);
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn config(retention: &str) -> Result<WorkerConfig, WorkerStartError> {
+        worker_config(&section(retention), "srv")
+    }
+
+    #[test]
+    fn retention_is_off_unless_the_section_is_there() {
+        let text = r#"{"dsn": {"value": "postgres://x"}}"#;
+        let section: WorkerSection = serde_json::from_str(text).unwrap();
+        assert_eq!(worker_config(&section, "srv").unwrap().retention, None);
+    }
+
+    #[test]
+    fn retention_windows_are_days_and_the_rest_defaults() {
+        let retention = config(r#"{"terminal_runs_days": 14, "idle_sessions_days": 90}"#)
+            .unwrap()
+            .retention
+            .unwrap();
+        let day = Duration::from_secs(86_400);
+        assert_eq!(retention.terminal_runs, Some(14 * day));
+        assert_eq!(retention.idle_sessions, Some(90 * day));
+        assert_eq!(retention.tombstones, linch_worker::TOMBSTONE_PERIOD);
+        assert_eq!(retention.batch_size, linch_worker::BATCH_SIZE);
+        assert_eq!(retention.interval, linch_worker::PASS_EVERY);
+        let custom = config(
+            r#"{"terminal_runs_days": 1, "tombstone_days": 2, "batch_size": 50, "interval_secs": 120}"#,
+        )
+        .unwrap()
+        .retention
+        .unwrap();
+        assert_eq!(custom.idle_sessions, None);
+        assert_eq!(
+            (custom.tombstones, custom.batch_size, custom.interval),
+            (2 * day, 50, Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn a_retention_that_deletes_nothing_or_cannot_work_is_refused_at_startup() {
+        for (text, wanted) in [
+            ("{}", "terminal_runs or idle_sessions"),
+            (r#"{"terminal_runs_days": 0}"#, "terminal_runs_days is 0"),
+            (
+                r#"{"idle_sessions_days": 1, "tombstone_days": 0}"#,
+                "tombstone_days is 0",
+            ),
+            (
+                r#"{"idle_sessions_days": 1, "batch_size": 0}"#,
+                "batch_size",
+            ),
+            (
+                r#"{"idle_sessions_days": 1, "batch_size": 10001}"#,
+                "batch_size",
+            ),
+            (
+                r#"{"idle_sessions_days": 1, "interval_secs": 59}"#,
+                "interval",
+            ),
+        ] {
+            let error = config(text).unwrap_err().to_string();
+            assert!(error.contains(wanted), "{text}: {error}");
+        }
+        let unknown: Result<WorkerSection, _> = serde_json::from_str(
+            r#"{"dsn": {"value": "p"}, "retention": {"terminal_runs_days": 1, "days": 3}}"#,
+        );
+        assert!(unknown.is_err(), "a misspelled field is an error");
+    }
 }

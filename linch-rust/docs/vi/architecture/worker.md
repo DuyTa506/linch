@@ -294,6 +294,34 @@ viên của nó bằng `FOR UPDATE SKIP LOCKED`, nên một định nghĩa sắp
 một định nghĩa được gọi tên bởi một writer đã commit sau khi prune đọc các tham chiếu sẽ làm
 foreign key của lệnh xóa thất bại, và lần prune đó không xóa gì (nó chạy lại sau).
 
+## Retention
+
+`prune_retained(pool, &Retention)` (`crates/linch-worker/src/retention.rs`) là
+phần xóa tùy chọn những gì run đã kết thúc và session nhàn rỗi để lại; worker
+chạy nó trong một task riêng mỗi `Retention::interval` khi
+`WorkerConfig::retention` được đặt (`worker.retention` trong config server).
+Mỗi lô là một transaction: một lượt chọn keyset theo thứ tự index sau con trỏ
+của đợt (`FOR UPDATE ... SKIP LOCKED`, `batch_size` hàng), rồi một câu lệnh
+xóa run (hoặc session), event của nó (hoặc log, task và cạnh) và ghi tombstone,
+trong đó trạng thái terminal (hoặc đồng hồ nhàn rỗi và việc không có run còn
+sống) được kiểm tra lại ngay trong lệnh xóa. Một đợt giữ một try-lock
+mức session, khóa theo database và schema, trên một connection của pool từ lô
+đầu đến lô cuối, nên cả fleet chỉ có một pruner chạy tại một thời điểm, đợt thứ
+hai không thể xen vào các quãng nghỉ giữa các lô (sau mỗi lô là một quãng nghỉ
+bằng thời gian lô đó chạy, giữ cho đợt bận tối đa một nửa so với database), và
+connection của pruner bị crash nhả khóa. Đợt thấy khóa đã bị giữ không xóa gì
+và báo `contended`.
+
+Những gì không bao giờ bị xóa suy ra từ việc code khác đọc gì của một run về
+sau: run chưa terminal; run con khi run cha chưa terminal (resume của cha đọc
+`<run>:<tool_use_id>` và khởi động lại subagent nếu nó mất); run và session
+`wf-` (workflow được resume đọc run khi journal chưa có bản ghi); run mà một job
+còn sống gọi tên (job start được thử lại sẽ bắt đầu run khác nếu run mất). Không
+có code nào đọc event của một run trước đó trong cùng session, nên việc tiếp
+tục session không phụ thuộc event của run, và hai cửa sổ độc lập nhau. Các run
+đã terminal trước migration 10 được gán thời điểm kết thúc ở đợt đầu tiên có
+cửa sổ cho run. `job.list`, history và schedule không bị đụng đến.
+
 ## Principal
 
 Một lịch và một job có thể mang một principal (`Schedule::principal`,

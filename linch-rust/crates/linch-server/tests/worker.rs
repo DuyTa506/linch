@@ -13,8 +13,8 @@ use std::time::Duration;
 use common::TOKEN;
 use common::pg::TestDb;
 use linch::provider::scripted::TurnBuilder;
-use linch_rpc::Client;
 use linch_rpc::protocol::{AgentOpened, JobInfo, ScheduleInfo, method};
+use linch_rpc::{Client, ClientError, code};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -373,5 +373,69 @@ async fn a_run_whose_server_was_killed_finishes_on_another() {
     assert_eq!(job_run, run_id, "the same run, one job");
     assert!(attempts >= 2);
     assert_eq!(scalar(&pool, "SELECT count(*) FROM linch_runs").await, 1);
+    db.drop().await;
+}
+
+/// With `worker.retention` a server deletes the runs and sessions that
+/// ended or idled past the windows, and a client that asks for a deleted
+/// run gets the code of its own (`-32050`), not a plain not-found (`-32021`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_with_retention_prunes_and_clients_see_a_pruned_run() {
+    let Some(db) = TestDb::empty("retention").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (first, socket) = server(dir.path(), "a", &server_config(&db, false, json!({}))).await;
+    let a = client(&socket).await;
+    let turns = vec![TurnBuilder::new(MODEL).text("hi").build()];
+    let config = agent_config(&db, turns, json!({}));
+    let agent = open(&a, &config).await;
+    let start = json!({"agent": agent, "session_id": "s1", "prompt": "go"});
+    let _: Value = a.call(method::RUN_START, &start).await.unwrap();
+    let pool = pool(&db).await;
+    let completed = "SELECT count(*) FROM linch_runs WHERE status = 'completed'";
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while scalar(&pool, completed).await == 0 {
+        assert!(Instant::now() < deadline, "the run never completed");
+        sleep(Duration::from_millis(20)).await;
+    }
+    let run_id: String = sqlx::query_scalar("SELECT run_id FROM linch_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    terminate(first).await;
+    // Two days on: the run ended and its session was last written then.
+    for sql in [
+        "UPDATE linch_runs SET ended_at = now() - interval '2 days'",
+        "UPDATE linch_sessions SET updated_at = now() - interval '2 days'",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    let mut with_worker = server_config(&db, true, json!({}));
+    with_worker["worker"]["retention"] = json!({"terminal_runs_days": 1, "idle_sessions_days": 1});
+    let (second, socket) = server(dir.path(), "b", &with_worker).await;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let both = "SELECT (SELECT count(*) FROM linch_runs) + (SELECT count(*) FROM linch_sessions)";
+    while scalar(&pool, both).await != 0 {
+        assert!(Instant::now() < deadline, "the pass never deleted them");
+        sleep(Duration::from_millis(50)).await;
+    }
+    let b = client(&socket).await;
+    let agent = open(&b, &config).await;
+    let by_id = json!({"agent": agent, "run_id": run_id});
+    let read = b.call::<_, Value>(method::RUN_EVENTS, &by_id).await;
+    assert!(
+        matches!(&read, Err(ClientError::Rpc(e)) if e.code == code::RUN_PRUNED),
+        "{read:?}"
+    );
+    // A wrong id is the plain not-found.
+    let wrong = json!({"agent": agent, "run_id": "no-such-run"});
+    let missing = b.call::<_, Value>(method::RUN_EVENTS, &wrong).await;
+    assert!(
+        matches!(&missing, Err(ClientError::Rpc(e)) if e.code == code::NOT_FOUND),
+        "{missing:?}"
+    );
+    terminate(second).await;
     db.drop().await;
 }

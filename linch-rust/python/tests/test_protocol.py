@@ -25,6 +25,8 @@ from linch_rust import (
     RunError,
     RunExists,
     RunLeased,
+    RunNotFound,
+    RunPruned,
     RunTerminal,
     ScheduleExists,
     ScheduleNotFound,
@@ -277,6 +279,7 @@ def test_envelopes_and_results_carry_their_time_and_cost() -> None:
         (-32047, WorkflowCallFailed),
         (-32048, WorkflowNotFound),
         (-32049, WorkflowNoJournal),
+        (-32050, RunPruned),
         (-32033, RunLeased),
         (-32040, NotBackground),
         (-32041, ScheduleNotFound),
@@ -291,6 +294,15 @@ def test_error_codes_map_to_the_exception_tree(code: int, cls: type[RpcError]) -
 
     assert type(error) is cls
     assert (error.code, error.message, error.data) == (code, "boom", {"status": "completed"})
+
+
+def test_a_pruned_run_is_a_run_not_found_that_names_its_id() -> None:
+    error = error_from({"code": -32050, "message": "gone", "data": {"run_id": "r-1"}})
+
+    assert isinstance(error, RunPruned) and isinstance(error, RunNotFound)
+    assert error.run_id == "r-1"
+    plain = error_from({"code": -32021, "message": "no run"})
+    assert type(plain) is RunNotFound and not isinstance(plain, RunPruned)
 
 
 def test_a_blocked_prompt_carries_its_reason() -> None:

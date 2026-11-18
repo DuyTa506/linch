@@ -14,7 +14,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 |---|---|---|
 | `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | Một cấu hình hoặc khai báo mà server không đọc được (-32602); một method mà binary của server không có (-32601: binary cũ hơn client); một lỗi của server (-32603: báo cáo kèm stderr của server) |
 | `OpenError` | -32010 đến -32015 | `open_agent`: cấu hình, provider, kho lưu trữ hoặc một MCP server bị lỗi; -32012 là run contract không tính được digest (hãy báo cáo) |
-| `RunError` và các lớp con | -32020 đến -32034 và -32038 | Cuối stream của một run, hoặc `agent.events` |
+| `RunError` và các lớp con | -32020 đến -32034, -32038 và -32050 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
 | `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | Token, các kiểm tra tenant và giới hạn của server từ xa ([Server từ xa](#server-từ-xa-serverconnect)) |
 | `ProviderInfoError` và các lớp con | -32035 đến -32037 | `provider.models` và `provider.model`, hỏi trước khi mở agent |
@@ -141,6 +141,7 @@ raise chúng.
 | `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | Session có một run đang chạy hoặc đang chờ phê duyệt hay câu trả lời | Resume, phê duyệt, trả lời hoặc hủy `busy.run_id` trước, hoặc xếp prompt vào hàng đợi ([Run](./runs.md#one-live-run-per-session)) |
 | `RunExists` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` dùng lại một id | Dùng id mới, hoặc `resume` run hiện có |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | Không có run đó trong kho lưu trữ của agent; với kho trong bộ nhớ, một handle `Agent` khác đã bắt đầu nó, hoặc server đã khởi động lại | Với kho trong bộ nhớ, dùng handle đã bắt đầu run; với Postgres, kiểm tra namespace và DSN |
+| `RunPruned` (-32050) | `run <id> not found in namespace <namespace> (deleted by the retention policy)` | [Retention](./stores.md#retention) của server đã xóa run, gồm bản ghi và event của nó (lớp con của `RunNotFound`; `.run_id`); id là đúng | Bắt đầu một run mới; giữ bản sao thứ bạn cần trước khi hết cửa sổ, hoặc kéo dài `terminal_runs_days` |
 | `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` hoặc `answer` một run đã kết thúc, kể cả run đã bị hủy (`data["status"]` là `aborted`); `data["status"]` là trạng thái của nó | Bắt đầu một run mới trong session |
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (tên các khóa của `data`) | Spec, tool, callback hoặc (khi không phải mặc định) permission policy của agent khác với những gì run đã bắt đầu; sau một lần nâng cấp, một run do binary cũ hơn bắt đầu dưới một policy không mặc định | Mở lại với cấu hình gốc, hoặc để run kết thúc trước; một run bị tạm dừng vẫn có thể được kết thúc bằng `agent.cancel` ([Hợp đồng của run](./agent.md#the-run-contract)) |
 | `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | Một approve hoặc answer được gửi lại sau khi nó đã được commit (tiến trình hoặc kết nối của bạn đã chết), hoặc một câu trả lời cho run đang chờ phê duyệt | Gọi `agent.resume(run_id)` ([Run](./runs.md#approve)) |

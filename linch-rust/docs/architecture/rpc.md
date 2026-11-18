@@ -151,6 +151,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32047 | `WORKFLOW_CALL_FAILED` | `WorkflowCallFailed` | A `workflow.agent` call produced no result; `data.kind` is `failed`, `aborted`, `timeout`, `approval` or `invalid` |
 | -32048 | `WORKFLOW_NOT_FOUND` | `WorkflowNotFound` | This connection drives no workflow with that id: it never sent `workflow.start` for it, or already finished it |
 | -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` with `resume` answers for a workflow whose journal holds nothing (it never ran here, or a memory-store agent's journal lived in another connection). Nothing was claimed |
+| -32050 | `RUN_PRUNED` | `RunPruned` (a `RunNotFound`) | A run a retention pass deleted (its record and events): `run.events`, a resume, approve, answer, steer, cancel or report of it. `data.run_id`. The server remembers a pruned run for its tombstone period (30 days by default); after that the same read is `-32021`. A wrong id is always `-32021` |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to

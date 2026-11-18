@@ -38,6 +38,9 @@
 //!   or schedule may also carry the principal its runs act for.
 //! - **History.** A job that ends moves to `linch_worker_history` in the
 //!   statement that deletes it; [`job`] and [`jobs`] read both.
+//! - **Retention.** Off by default. With [`WorkerConfig::retention`] set, a
+//!   worker deletes ended runs (and their events) and idle sessions in small
+//!   transactions, never a run that is not terminal ([`prune_retained`]).
 //!
 //! The worker reads run records through [`linch_postgres::PgRunStore`] on
 //! its own pool, so every agent it drives must store its runs in the same
@@ -69,6 +72,7 @@ mod factory;
 mod job;
 mod lease;
 mod outcome;
+mod retention;
 mod schedule;
 mod settle;
 mod status;
@@ -80,6 +84,10 @@ pub use error::WorkerError;
 pub use factory::{AgentFactory, FactoryError, JobAgent};
 pub use job::{JobId, RunRequest, enqueue, enqueue_approve, enqueue_resume, enqueue_run};
 pub use lease::set_queue_limit;
+pub use retention::{
+    BATCH_SIZE, MAX_BATCH_SIZE, MIN_PASS_EVERY, PASS_EVERY, Pruned, Retention, TOMBSTONE_PERIOD,
+    prune_retained,
+};
 pub use schedule::{
     Schedule, ScheduleInfo, create_schedule, delete_agent_schedule, delete_schedule,
     fire_due_schedules, get_schedule, list_agent_schedules, list_schedules, pause_schedule,
