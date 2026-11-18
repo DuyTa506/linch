@@ -113,7 +113,7 @@ for over 60 s is cut, so run such tools in a thread.
 
 **Context.** Prefer host tools, MCP servers or a `context_build` callback that adds retrieved
 blocks over stuffing data into the prompt (`usage/agent.md`). Long sessions need
-`spec.compaction`; large tool results need `spec.tool_result_cap` (or `filesystem` offload); a large tool catalog needs
+`spec.compaction`; large tool results need `filesystem` offload; a large tool catalog needs
 `tool_search`.
 
 **Long runs.** A run that lasts hours loses its goal to compaction, its process to a restart and

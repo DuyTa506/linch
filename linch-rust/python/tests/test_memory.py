@@ -21,17 +21,13 @@ from linch_rust import (
     ErrorEvent,
     ResultEvent,
     Server,
-    ToolCallEndEvent,
-    ToolResultCap,
     TruncationRecovery,
     callback,
-    tool,
 )
 from linch_rust.memory import Chunk, latest_question, render, retrieval
 
 COMPACTION_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/compaction.rs"
 TRUNCATION_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/truncation.rs"
-RESULT_CAP_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/result_cap.rs"
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/external_memory.py"
 
 
@@ -112,8 +108,6 @@ async def test_a_ladder_that_cannot_run_fails_the_open() -> None:
     for spec in [
         {"model": MODEL, "truncation_recovery": {"max_attempts": 0}},
         {"model": MODEL, "compaction": {"keep_recent_turns": 0}},
-        {"model": MODEL, "tool_result_cap": {"max_tokens": 10}},
-        {"model": MODEL, "tool_result_cap": {"max_tokens": 500, "head_fraction": 1.5}},
     ]:
         cfg = config([])
         cfg["spec"] = spec
@@ -122,68 +116,16 @@ async def test_a_ladder_that_cannot_run_fails_the_open() -> None:
                 await server.open_agent(cfg)
 
 
-async def test_a_long_host_result_is_cut_in_the_view_and_read_back_in_slices() -> None:
-    @tool(scope="read")
-    async def export_logs(service: str) -> str:
-        """Return a service's log."""
-        return "".join(f"{service} line {n:05d}\n" for n in range(1, 2001))
-
-    full = "".join(f"api line {n:05d}\n" for n in range(1, 2001))
-    cap: ToolResultCap = {"max_tokens": 128}
-    turns = [
-        tool_turn("c1", "export_logs", {"service": "api"}),
-        tool_turn("c2", "ReadToolResult", {"tool_use_id": "c1", "offset": 1000, "limit": 40}),
-        tool_turn("c3", "ReadToolResult", {"tool_use_id": "nope"}),
-        text_turn("done"),
-    ]
-    cfg = config(turns, mode="default")
-    cfg["spec"] = {"model": MODEL, "tool_result_cap": cap}
-    sent: list[dict[str, Any]] = []
-
-    @callback("before_provider_call", "spy", 1)
-    async def spy(request: dict[str, Any]) -> dict[str, Any]:
-        sent.append(request["request"])
-        return {"action": "continue"}
-
-    async with Server() as server:
-        agent = await server.open_agent(cfg, tools=[export_logs], callbacks=[spy])
-        envelopes = [e async for e in await agent.run("s1", "go")]
-
-    ends = {
-        e.event.tool_use_id: e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)
-    }
-
-    def text(end: ToolCallEndEvent) -> str:
-        return "".join(part.get("text", "") for part in end.result["content"])
-
-    # The event holds the whole result; the model's next request held a cut one.
-    assert text(ends["c1"]) == full
-    results = [
-        block["content"][0]["text"]
-        for message in sent[1]["messages"]
-        for block in message["content"]
-        if block["type"] == "tool_result"
-    ]
-    [shown] = results
-    assert len(shown) <= 512
-    assert 'omitted; read them with ReadToolResult(tool_use_id="c1", offset=' in shown
-    # An ordinary tool call reads a slice of the whole result by offset.
-    assert text(ends["c2"]).startswith(full[1000:1040] + "\n[... bytes 1000..1040 of 30000;")
-    assert ends["c3"].is_error and "no tool result" in text(ends["c3"])
-    assert final(envelopes).final_text == "done"
-
-
 @pytest.mark.source
 def test_the_typed_specs_name_every_field_the_server_reads() -> None:
     for path, name, typed in [
         (COMPACTION_RS, "CompactionSpec", Compaction),
         (TRUNCATION_RS, "TruncationRecovery", TruncationRecovery),
-        (RESULT_CAP_RS, "ToolResultCap", ToolResultCap),
     ]:
         source = path.read_text(encoding="utf-8")
         body = source.split(f"pub struct {name} {{", 1)[1].split("\n}", 1)[0]
         fields = set(re.findall(r"^\s*pub (\w+):", body, re.MULTILINE))
-        assert fields == typed.__optional_keys__ | typed.__required_keys__, name
+        assert fields == typed.__optional_keys__, name
 
 
 @pytest.mark.source

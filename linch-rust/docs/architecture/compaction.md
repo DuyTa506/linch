@@ -538,13 +538,6 @@ provider view and not in the full history.
 The model never sees the folded or cleared content again. It stays in
 `full_history` and in the session store, for audit and replay.
 
-`spec.tool_result_cap` cuts one result in the view without a projection: the
-results message is appended as two entries, the whole one for `full_history`
-only and the cut one for `provider_view` only (see
-[Tools](./tools.md#tool-result-cap)). Everything here that reads the view
-(the estimate, `Anchor::measure`, `tokens_before` and `tokens_after`, micro
-compaction, the clip) reads the cut result.
-
 ## Cut-off answers
 
 `AgentSpec::truncation_recovery` (`crates/linch-core/src/truncation.rs`,

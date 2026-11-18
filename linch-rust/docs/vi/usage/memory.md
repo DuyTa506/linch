@@ -95,10 +95,6 @@ lần `max_forced`; hãy chừa chỗ trống (các test dùng 7/8 cửa sổ, t
 [bên dưới](#when-the-prompt-does-not-fit) nói
 ([Kiến trúc](../architecture/compaction.md#due-đo-cái-gì)).
 
-Một kết quả tool vượt [`tool_result_cap`](./tools.md#long-tool-results) bị cắt trong view trước
-khi bất cứ điều nào ở trên đo nó, nên ước lượng, ngưỡng và `tokens_before` đếm những gì model
-đang giữ; kết quả đầy đủ vẫn nằm trong log.
-
 Spec compaction là một phần của [run contract](./agent.md#the-run-contract): một run bắt
 đầu dưới một cài đặt không được resume dưới một cài đặt khác.
 

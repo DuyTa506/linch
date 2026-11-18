@@ -500,11 +500,6 @@ catalog trong bản tóm tắt nằm trong provider view chứ không nằm tron
 Model không bao giờ thấy lại nội dung đã gộp hoặc đã xóa. Nó vẫn nằm trong
 `full_history` và trong session store, để kiểm toán và phát lại.
 
-`spec.tool_result_cap` cắt một kết quả trong view mà không cần projection: message kết quả được
-append thành hai entry, bản đầy đủ chỉ cho `full_history` và bản đã cắt chỉ cho `provider_view`
-(xem [Tool](./tools.md#tool-result-cap)). Mọi thứ ở đây đọc view (ước lượng, `Anchor::measure`,
-`tokens_before` và `tokens_after`, micro-compaction, clip) đều đọc kết quả đã cắt.
-
 <a id="cut-off-answers"></a>
 
 ## Câu trả lời bị cắt

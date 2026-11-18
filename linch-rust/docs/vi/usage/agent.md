@@ -223,7 +223,6 @@ có, trừ `bash`.
 | `policy` | không có: không kiểm tra gì | Các tool chỉ được chạy sau khi những tool khác đã thành công, và điều một câu trả lời cuối cùng phải thỏa, `{"prerequisites"?, "gates"?, "max_corrections"?}` ([bên dưới](#policy)) |
 | `tool_retry` | không có: lời gọi lỗi không được chạy lại | Chạy lại một tool sau kết quả lỗi có `code` nằm trong danh sách, chỉ với tool tự khai là idempotent, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "retry_on"?, "tools"?}` ([Tool](./tools.md#tool_retry)) |
 | `tool_cache` | không có: mọi lời gọi đều chạy | Trả một lời gọi giống hệt của tool đọc có tên từ cache, `{"tools", "ttl_ms"?, "max_entries"?, "max_value_bytes"?, "invalidate_on_write"?, "scope"?}` ([Tool](./tools.md#tool_cache)) |
-| `tool_result_cap` | không có: kết quả đi vào nguyên vẹn | Cắt một kết quả tool nặng hơn `max_tokens` token ước lượng thành phần đầu và đuôi quanh một marker trong view của model, giữ bản đầy đủ trong log, và thêm tool `ReadToolResult`, `{"max_tokens", "head_fraction"?}` ([Tool](./tools.md#long-tool-results)) |
 
 ### System block
 

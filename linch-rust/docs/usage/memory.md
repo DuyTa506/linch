@@ -100,10 +100,6 @@ tests use 7/8 of the window, in a scripted world whose estimate counts half). A 
 is shortened as [below](#when-the-prompt-does-not-fit) says
 ([Architecture](../architecture/compaction.md#what-due-measures)).
 
-A tool result over [`tool_result_cap`](./tools.md#long-tool-results) is cut in
-the view before any of this measures it, so the estimate, the trigger and
-`tokens_before` count what the model holds; the whole result stays in the log.
-
 The compaction spec is part of the [run contract](./agent.md#the-run-contract):
 a run started under one setting is not resumed under another.
 
