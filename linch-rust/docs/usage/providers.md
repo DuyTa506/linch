@@ -256,9 +256,10 @@ The `model` of a turn's `message_start` is the model that served the call, so
 `text_turn("Hi.", model="claude-sonnet-4-6")` exercises the cost fields.
 
 A turn may also end with an `error`, to test how your host handles a failed
-call: `transport` (`message`), `status` (`status`, `message`,
-`retry_after_ms?`) or `invalid_request` (`message`). With no `events`, the
-call fails before any output:
+call: `connect` (`message`), `transport` (`message`), `status` (`status`,
+`message`, `retry_after_ms?`) or `invalid_request` (`message`). With no
+`events`, the call fails before any output. Runs retry a retryable failure by
+default, so this one turns retries off to see the failure end the run:
 
 ```python
 import asyncio
@@ -268,7 +269,7 @@ from linch_rust.scripted import MODEL
 
 config: AgentConfig = {
     "namespace": "test",
-    "spec": {"model": MODEL},
+    "spec": {"model": MODEL, "provider_retry": {"max_attempts": 1}},
     "provider": {
         "id": "scripted",
         "turns": [{"error": {"type": "status", "status": 503, "message": "busy"}}],
@@ -289,8 +290,11 @@ asyncio.run(main())
 
 ```text
 ErrorEvent(error={'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503})
-ResultEvent(subtype='error', stop_reason='error', total_usage={...}, usage_complete=False, ...)
+ResultEvent(subtype='error', stop_reason='error', total_usage={...}, usage_complete=True, ...)
 ```
+
+`usage_complete` is true: a call the provider refused with a status before
+any output cost nothing ([below](#failures-and-retries)).
 
 A run that needs more turns than the script holds ends with an `error` event
 (`scripted provider ran out of turns after N`) and a `result` of subtype
@@ -341,13 +345,131 @@ asyncio.run(main())
 
 ## Failures and retries
 
-Nothing retries a provider call: not the adapter, not the run. A failed call
-(connect error, HTTP status, a stream that breaks its rules) ends the run with
-an `error` event and a `result` of subtype `error`. The error event's `error`
-dict carries `retryable` and, for HTTP failures, `status`, so you can decide
-to start a new run. A cancelled call ends the run `aborted`. Each adapter has
-a 30 s connect timeout and a read timeout between reads (300 s or 600 s); there
-is no deadline on a whole call.
+A run retries a provider call that failed with an error another call may
+fix: no connection or no response at all (refused, reset, timeout), an HTTP
+408, 429 or 5xx (Anthropic's 529 overload included), or an error the provider
+sent inside its stream with one of those statuses. Adapters never retry; the
+run does. A failure it does not retry ends the run with an `error` event and
+a `result` of subtype `error`; the error event's `error` dict carries `kind`
+(`connect`, `transport`, `status`, `invalid_request`, `stream`),
+`retryable` and, for HTTP failures, `status`. A cancelled call ends the run
+`aborted`. Each adapter has a 30 s connect timeout and a read timeout between
+reads (300 s or 600 s); there is no deadline on a whole call.
+
+Two [`spec`](./agent.md#spec) fields shape this:
+
+| Field | Default | What it controls |
+|---|---|---|
+| `provider_retry` | on, with the defaults below | Call the same model again after a wait: `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, typed as `ProviderRetry`. Set only the fields to change. `{"max_attempts": 1}` turns retries off |
+| `fallback_models` | `[]` | Models to fail over to, in order, once a model has no retry left. Not blank, not `model`, no repeats |
+
+| `provider_retry` field | Default | What it controls |
+|---|---|---|
+| `max_attempts` | `5` | Most calls to one model in one turn, the first included; `1` never retries |
+| `base_delay_ms` | `1000` | Wait before the first retry; each later retry waits twice as long |
+| `max_delay_ms` | `30000` | Longest wait. A server's `Retry-After` is waited as given, unjittered; one longer than this ends the retries on that model rather than hold the run |
+| `jitter` | `0.2` | Fraction of each wait added or taken away, from 0 to 1, so runs that failed together do not call again together |
+
+The defaults are Python Linch's `RetryOptions`: at most 1 + 2 + 4 + 8 = 15 s
+of waiting (±20%) before a model is given up, unless the server asks for
+longer.
+
+What a run does after a retryable failure:
+
+1. While the model has calls left this turn, the run sends a
+   `ProviderRetryEvent` (`model`, `retry` from 1, `delay_ms`, `error`), waits,
+   and calls the model again. Text the failed call streamed is void: the next
+   call answers from the start, so drop what you showed of it.
+2. Then, with a fallback left, it sends a `ModelFallbackEvent` (`from_model`,
+   `to_model`, `error`) and calls the fallback at once, with its own retries.
+   The run keeps that model for the rest of the run, compaction included. A
+   turn that failed over calls the fallback even if a skill set its model.
+3. Otherwise the run ends with the last failure's `error`.
+
+A failure that is not retryable (400, 401, 403, 404, a request the adapter
+refused) ends the run at once, without a retry or a failover. A cancel during
+a wait ends the run `aborted` at once.
+
+```python
+import asyncio
+
+from linch_rust import (
+    AgentConfig,
+    ModelFallbackEvent,
+    ProviderRetryEvent,
+    ResultEvent,
+    Server,
+    UsageEvent,
+)
+from linch_rust.scripted import MODEL, text_turn
+
+overloaded = {"error": {"type": "status", "status": 529, "message": "overloaded"}}
+config: AgentConfig = {
+    "namespace": "test",
+    "spec": {
+        "model": MODEL,
+        # Two calls per model, 0.5 s apart; jitter 0 waits exactly.
+        "provider_retry": {"max_attempts": 2, "base_delay_ms": 500, "jitter": 0},
+        "fallback_models": ["backup-model"],
+    },
+    "provider": {
+        "id": "scripted",
+        "turns": [overloaded, overloaded, text_turn("Done.", model="backup-model")],
+    },
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config)
+        async for envelope in await agent.run("s1", "Hi"):
+            event = envelope.event
+            if isinstance(event, ProviderRetryEvent):
+                print(f"retry {event.retry} of {event.model} in {event.delay_ms} ms")
+            elif isinstance(event, ModelFallbackEvent):
+                print(f"{event.from_model} -> {event.to_model}: {event.error['message']}")
+            elif isinstance(event, UsageEvent):
+                print(f"answered by {event.actual_model}")
+            elif isinstance(event, ResultEvent):
+                print(event.subtype, event.final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+retry 1 of scripted-model in 500 ms
+scripted-model -> backup-model: provider returned HTTP 529: overloaded
+answered by backup-model
+success Done.
+```
+
+The `usage` event's `actual_model` and the cost fields name the model that
+answered. The fallback models run on the agent's one provider, so list models
+that provider serves.
+
+Each attempt is its own durable call, so a crash never buys an answer twice:
+
+- A run resumed after a crash during a wait calls again at once, without
+  waiting the rest, and keeps counting the turn's retries.
+- A run that failed over resumes on its fallback.
+- A failed attempt that cost nothing, a connection never made or an error
+  status before any output, counts as zero usage: it sends no `usage` event
+  and leaves `usage_complete` true.
+- A request that went out with nothing back (a reset, a read timeout), or a
+  failure after output began, may have been billed, so its usage is unknown
+  and the run's `result` has `usage_complete` false.
+- Under a capped [`budget`](./agent.md#budget), a call of unknown usage means
+  the cap can no longer be kept, so the run is not retried after one: it ends
+  with the provider's error. A call that cost nothing is retried as usual.
+  Python Linch counts every failed call as unknown, so under a cap it never
+  retries.
+
+Both fields are part of the [run contract](./agent.md#the-run-contract), and
+a subagent's runs use them too. The defaults leave the contract as it was
+before retries existed, and `{"max_attempts": 1}` changes it. Python Linch
+also recovers from a prompt that is too long by compacting and calling
+again; this server does not.
 
 ## Cost
 

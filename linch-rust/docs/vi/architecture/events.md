@@ -53,6 +53,8 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:105` | yes | yes | |
 | `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó |
+| `provider_retry` | `ProviderRetryEvent`, `kinds/reliability.rs:13` | yes | yes | Một `provider_retry` của spec (`crates/linch-core/src/reliability.rs`): trước lúc chờ, trong cùng một lần ghi với receipt thất bại |
+| `model_fallback` | `ModelFallbackEvent`, `kinds/reliability.rs:31` | yes | yes | `fallback_models` của một spec: cùng receipt thất bại, trên barrier dispatch của model fallback |
 | `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:168` | yes | yes | Chưa được phát ở revision này |
 | `skills_loaded` | `SkillsLoadedEvent`, `kinds/skills.rs:10` | yes | yes | |
 | `skill_invoked` | `SkillInvokedEvent`, `kinds/skills.rs:18` | yes | yes | |

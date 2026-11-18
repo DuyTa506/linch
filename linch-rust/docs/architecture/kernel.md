@@ -42,7 +42,7 @@ binding (`agent.rs:101-105`). `AgentInner` holds what a run reads from it
 
 | Field | What it is |
 |---|---|
-| `spec` | The serde `AgentSpec`: model, prompts, limits, compaction, budget (`agent/spec.rs:29-68`) |
+| `spec` | The serde `AgentSpec`: model, prompts, limits, compaction, budget, provider retry and fallback models (`agent/spec.rs:30-78`) |
 | `provider`, `permissions`, `runs`, `sessions` | The bindings the builder requires |
 | `tools` | The `ToolRegistry` of this agent |
 | `hooks` | The `Hooks` chains of this agent |
@@ -71,7 +71,13 @@ order (`hooks.rs:84-100`), so changing a hook's behavior means bumping its
 `retry` included. The kernel's own limit on `stop` retries (one per run
 call) is a constant, not a setting, so it is not in the digest; it is not
 checkpointed either, and a resume starts it afresh, as Python's
-`_MAX_FINAL_ANSWER_REENTRIES` does.
+`_MAX_FINAL_ANSWER_REENTRIES` does. The spec's `provider_retry` and
+`fallback_models` are in the digest with the rest of the spec, so a resumed
+run's fallback, read back from its `model_fallback` events by its place in
+the list, names the same model. Retries are on by default, but the default
+policy is left off the wire, so an unset `provider_retry` (and an empty
+`fallback_models`) leave the spec's wire form, and so the digest, as it was
+before they existed; `{"max_attempts": 1}`, retries off, changes it.
 
 ## Registrations
 
@@ -182,7 +188,7 @@ To add behavior to tool execution, use one of these:
 - A `Tool` wrapper registered with `ToolRegistry::replace`, which hides the
   wrapped tool and is undone with its `Registration`.
 - `call_timeout_ms` and `max_tool_concurrency` in the spec for timeouts and
-  the parallel limit (`agent/spec.rs:53-59`).
+  the parallel limit (`agent/spec.rs:54-60`).
 
 Do not edit `scheduler/` or `runner/` for a new gate.
 

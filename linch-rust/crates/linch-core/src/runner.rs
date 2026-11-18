@@ -66,6 +66,7 @@ mod family;
 mod hooks;
 mod inbox;
 mod progress;
+mod retry;
 mod sink;
 mod start;
 mod turn;

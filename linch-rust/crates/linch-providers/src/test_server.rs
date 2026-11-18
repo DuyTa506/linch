@@ -45,6 +45,20 @@ pub(crate) fn serve_stalled_error(prefix: &str) -> String {
     url
 }
 
+/// A base URL on a local port nothing listens on.
+pub(crate) fn closed_url() -> String {
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("http://{}", closed.local_addr().unwrap())
+}
+
+/// The call failed to connect, so the request never went out: a
+/// retryable [`ProviderError::Connect`], not a transport error that may
+/// have been paid.
+pub(crate) fn assert_never_connected(err: &ProviderError) {
+    assert!(matches!(err, ProviderError::Connect { .. }), "{err:?}");
+    assert!(err.retryable());
+}
+
 /// The call failed on the redirect itself rather than following it.
 pub(crate) fn assert_redirect_refused(err: &ProviderError) {
     assert!(

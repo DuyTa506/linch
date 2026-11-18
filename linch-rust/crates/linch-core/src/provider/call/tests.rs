@@ -158,13 +158,45 @@ async fn every_failure_path_settles_one_receipt() {
     ];
     let cases = [
         Case {
-            name: "call fails before any event",
+            name: "an error status before any event costs nothing",
             turn: ScriptedTurn::failing(ScriptedError::Status {
                 status: 503,
                 retry_after_ms: None,
                 message: "busy".into(),
             }),
             model: None,
+            usage: Some(Usage::default()),
+            stream_error: false,
+        },
+        Case {
+            name: "a connection never made costs nothing",
+            turn: ScriptedTurn::failing(ScriptedError::Connect {
+                message: "connection refused".into(),
+            }),
+            model: None,
+            usage: Some(Usage::default()),
+            stream_error: false,
+        },
+        Case {
+            name: "a request with no answer may have been paid",
+            turn: ScriptedTurn::failing(ScriptedError::Transport {
+                message: "reset".into(),
+            }),
+            model: None,
+            usage: None,
+            stream_error: false,
+        },
+        Case {
+            name: "an error status after the stream began may have been paid",
+            turn: ScriptedTurn {
+                events: vec![start()],
+                error: Some(ScriptedError::Status {
+                    status: 529,
+                    retry_after_ms: None,
+                    message: "overloaded".into(),
+                }),
+            },
+            model: Some("m"),
             usage: None,
             stream_error: false,
         },

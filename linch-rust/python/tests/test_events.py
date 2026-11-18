@@ -14,6 +14,8 @@ from linch_rust import (
     CompactionEvent,
     Event,
     InitEvent,
+    ModelFallbackEvent,
+    ProviderRetryEvent,
     SkillCompletedEvent,
     SkillInvokedEvent,
     SubagentEvent,
@@ -54,6 +56,19 @@ def test_skill_events_decode_to_their_classes() -> None:
     assert bare == SkillInvokedEvent(name="notes", model_override=None, allowed_tools=None)
     assert completed == SkillCompletedEvent(name="notes", is_error=False)
     assert isinstance(failed, SkillCompletedEvent) and failed.is_error
+
+
+def test_reliability_events_decode_to_their_classes() -> None:
+    error = {"name": "ProviderError", "kind": "status", "status": 529, "retryable": True}
+    retried = decode_event(
+        {"type": "provider_retry", "model": "m", "retry": 2, "delay_ms": 2000, "error": error}
+    )
+    fallback = decode_event(
+        {"type": "model_fallback", "from_model": "m", "to_model": "n", "error": error}
+    )
+
+    assert retried == ProviderRetryEvent(model="m", retry=2, delay_ms=2000, error=error)
+    assert fallback == ModelFallbackEvent(from_model="m", to_model="n", error=error)
 
 
 def test_a_child_run_status_names_the_child_and_its_status() -> None:

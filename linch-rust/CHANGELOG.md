@@ -48,8 +48,16 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `stop` can retry the final answer once per run call, as Python's `before_final_answer` `retry` (`_MAX_FINAL_ANSWER_REENTRIES`); a spent retry counts as `allow`. `{"action": "retry", "feedback"}` on the wire, `StopResponse::Retry` in `linch-core`.
 - `stop` accepts `{"action": "force_continue", "feedback"}`, Python's name for its `continue`.
 - `Phase::AssistantReceived` records an `after_provider_call` retry in an optional `retry_feedback`, durable with the paid response; checkpoints without one are unchanged, but a binary older than this one cannot resume a run whose checkpoint has one.
+- `spec.provider_retry` retries a provider call that failed with a retryable error (no connection or no response, 408, 429, 5xx) on the same model, after an exponential, jittered wait that honours `Retry-After`: `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, on by default with Python's `RetryOptions` (5, 1000, 30000, 0.2); `{"max_attempts": 1}` turns it off. The default stays off the wire, so a spec that does not set it keeps its run contract. Each attempt is its own durable delivery; a crash during the wait resumes with the next attempt and keeps the turn's count. `ProviderRetry` in `linch-core` and the Python client.
+- A run that retried or failed over holds `provider_retry` / `model_fallback` events, which a binary older than this one refuses as an unknown event type: it cannot read or resume such a run (the error is explicit; nothing is resumed wrongly). Since retries are on by default, any run that met a retryable failure is one, so roll back only once those runs have ended.
+- `ProviderError::Connect`: a connection never made (refused, DNS, TLS handshake, connect timeout), so the request never went out; its error event's `kind` is `connect`, and a scripted turn can fail with `{"type": "connect", "message"}`.
+- A call that failed before costing anything (`Connect`, or an error status before any stream event) settles with a zero usage instead of an unknown one: no `usage` event, `usage_complete` stays true, and a capped budget may retry it. A reset, a read timeout or a failure after output began stays unknown and, under a cap, still ends the run.
+- `spec.fallback_models` fails a run over to the next model, in order, once a model has no retry left; the run keeps that model, a resumed run included, and its usage and cost name it. Empty by default.
+- `provider_retry` and `model_fallback` events report each retry (`model`, `retry`, `delay_ms`, `error`) and each failover (`from_model`, `to_model`, `error`); the Python client decodes them as `ProviderRetryEvent` and `ModelFallbackEvent`.
 
 ### Changed
+
+- `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
 
 - `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.
 

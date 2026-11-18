@@ -91,6 +91,11 @@ impl ScriptedTurn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptedError {
+    /// [`ProviderError::Connect`].
+    Connect {
+        /// Error message.
+        message: String,
+    },
     /// [`ProviderError::Transport`].
     Transport {
         /// Error message.
@@ -116,6 +121,7 @@ pub enum ScriptedError {
 impl From<ScriptedError> for ProviderError {
     fn from(error: ScriptedError) -> Self {
         match error {
+            ScriptedError::Connect { message } => Self::Connect { message },
             ScriptedError::Transport { message } => Self::Transport { message },
             ScriptedError::Status {
                 status,

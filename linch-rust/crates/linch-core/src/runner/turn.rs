@@ -10,6 +10,7 @@ use super::end::cut_empty;
 use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
+use super::retry::Recovered;
 use super::write::session_log;
 use super::{Family, Outbox};
 use crate::agent::{AgentInner, RunError};
@@ -23,6 +24,7 @@ use crate::message::Message;
 use crate::provider::call::ModelCall;
 use crate::provider::{AssistantAssembly, ProviderError};
 use crate::registry::ToolSnapshot;
+use crate::reliability::Standing;
 use crate::run::{Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
@@ -122,6 +124,9 @@ pub(super) struct Runner {
     pub(super) peers: Option<HeldPeers>,
     /// `stop` retries honoured in this run call (see `runner/hooks.rs`).
     pub(super) final_answer_retries: u32,
+    /// Where the run stands on its fallback models and in this turn's
+    /// provider retries (see `runner/retry.rs`).
+    pub(super) standing: Standing,
 }
 
 impl Runner {
@@ -158,6 +163,7 @@ impl Runner {
             budget: None,
             peers: None,
             final_answer_retries: 0,
+            standing: progress.standing,
         };
         runner.narrow();
         runner
@@ -301,8 +307,8 @@ impl Runner {
         };
         add_context(&mut messages, context.blocks);
         let mut request = self.request(messages);
-        if let Some(model) = model {
-            request.model = skills::model_override(&model, &request.model);
+        if model.is_some() || self.standing.fallbacks > 0 {
+            request.model = self.call_model(model);
         }
         let request = match self.before_provider_call(request, self.turn).await {
             BeforeCall::Send(request) => *request,
@@ -364,11 +370,19 @@ impl Runner {
             Ok(assembly) => return self.accept(assembly, cost, served).await,
             Err(failure) => failure,
         };
-        // A call that failed or was cancelled may still have been paid.
-        self.stage_usage(usage, cost, served);
+        // A call that failed or was cancelled may still have been paid; one
+        // known to have cost nothing reports no usage, as Python's does not.
+        if !failure.free {
+            self.stage_usage(usage, cost, served);
+        }
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);
+        }
+        match self.recover(&failure, attempt, &call_model).await? {
+            Recovered::Call(next) => return Ok(Some(next)),
+            Recovered::Ended => return Ok(None),
+            Recovered::Failed => {}
         }
         // One terminal write: receipt, usage, error, status and result.
         self.journal.stage(Event::Error(failure.event));
@@ -406,6 +420,9 @@ impl Runner {
             usage,
             ..
         } = assembly;
+        // The turn's call is answered: the next turn has its own retries.
+        self.standing.retries = 0;
+        self.standing.failed_over = false;
         self.journal.stage(Event::Assistant(AssistantEvent {
             message: message.clone(),
             stop_reason,

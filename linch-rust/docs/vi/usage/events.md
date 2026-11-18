@@ -299,6 +299,22 @@ Run chạm giới hạn lượt của nó: `reason` (`max_turns`), `detail` (ví
 `Maximum turns (20) reached.`) và `action` (`stop`). Một event `error` và một
 `result` có subtype `error` theo sau.
 
+### `ProviderRetryEvent` (`provider_retry`)
+
+Một lời gọi provider thất bại với lỗi có thể thử lại và run gọi lại cùng model
+([`spec.provider_retry`](./providers.md#lỗi-và-thử-lại)): `model`, `retry` (lần
+thử lại của model này trong turn, từ 1), `delay_ms` (thời gian chờ trước lời gọi
+kế tiếp) và `error` (lỗi, có hình dạng như `error` của `ErrorEvent`). Event đến
+trước lúc chờ. Hãy bỏ phần text dang dở của lời gọi lỗi: lời gọi kế tiếp trả lời
+lại từ đầu.
+
+### `ModelFallbackEvent` (`model_fallback`)
+
+Run đã bỏ một model và gọi model kế tiếp trong
+[`spec.fallback_models`](./providers.md#lỗi-và-thử-lại) cho đến hết run:
+`from_model`, `to_model` và `error` (lỗi đã kết thúc các lời gọi của `from_model`).
+Event của Python Linch có chuỗi `reason` thay cho `error`.
+
 ### `BudgetEvent` (`budget`)
 
 [Budget](./agent.md#budget) của run đã vượt tỷ lệ cảnh báo (`kind` là `warning`,
@@ -320,8 +336,8 @@ Một lời gọi [callback](./agent.md#callback) và cách nó kết thúc.
 ### `ErrorEvent` (`error`)
 
 Một lỗi mà run đã ghi lại. `error` là một dict có `name`, `message` và
-`retryable`; lỗi của provider còn có `kind` (`transport`, `status`,
-`invalid_request`, `stream`) và, với lỗi HTTP, cả `status`:
+`retryable`; lỗi của provider còn có `kind` (`connect`, `transport`,
+`status`, `invalid_request`, `stream`) và, với lỗi HTTP, cả `status`:
 
 ```text
 {'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503}

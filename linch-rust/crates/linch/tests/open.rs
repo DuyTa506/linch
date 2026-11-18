@@ -128,6 +128,53 @@ async fn a_run_on_a_priced_model_reports_its_cost() {
     }
 }
 
+/// A spec's `provider_retry` and `fallback_models` reach the opened agent:
+/// the model is called again, then the run fails over, and the result is
+/// priced as the fallback that answered.
+#[tokio::test]
+async fn a_config_retries_then_fails_over_and_prices_the_model_that_answered() {
+    let model = "claude-opus-4-8";
+    let usage = Usage {
+        input_tokens: 1_000,
+        output_tokens: 100,
+        ..Usage::default()
+    };
+    let overloaded = json!({"error": {"type": "status", "status": 529, "message": "overloaded"}});
+    let answer = TurnBuilder::new(model).text("hi").usage(usage).build();
+    let turns = json!([overloaded, overloaded, answer]);
+    let mut value = serde_json::to_value(scripted(turns, None)).unwrap();
+    value["spec"]["provider_retry"] = json!({"max_attempts": 2, "base_delay_ms": 1, "jitter": 0});
+    value["spec"]["fallback_models"] = json!([model]);
+    let opened = config(value).open().await.unwrap();
+    let mut stream = opened.agent().run("go", RunOptions::new("s1"));
+    let mut events = Vec::new();
+    while let Some(item) = stream.next().await {
+        events.push(item.unwrap().event);
+    }
+    let kinds: Vec<_> = events.iter().map(|e| e.type_name().to_owned()).collect();
+    let retry = kinds.iter().position(|k| k == "provider_retry");
+    let fallback = kinds.iter().position(|k| k == "model_fallback");
+    assert!(retry.is_some() && retry < fallback, "{kinds:?}");
+    let Some(Event::ModelFallback(fallback)) = fallback.map(|at| &events[at]) else {
+        unreachable!()
+    };
+    assert_eq!(
+        (fallback.from_model.as_str(), fallback.to_model.as_str()),
+        ("scripted-model", model)
+    );
+    let expected = linch_providers::cost(model, &usage).expect("a priced model");
+    match events.last().unwrap() {
+        Event::Result(result) => assert_eq!(result.total_cost_usd, Some(expected)),
+        other => panic!("last event {other:?}"),
+    }
+    let mut bad = scripted(json!([]), None);
+    bad.spec.provider_retry.max_attempts = 0;
+    assert!(matches!(
+        bad.open().await,
+        Err(OpenError::Build(BuildError::Invalid(_)))
+    ));
+}
+
 #[tokio::test]
 async fn a_scripted_agent_reads_a_workspace_file() {
     let dir = tempfile::tempdir().unwrap();

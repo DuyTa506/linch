@@ -45,7 +45,9 @@ pub struct ModelCall {
 /// `receipt` is present on every path. Its disposition is `accepted` when
 /// `result` is `Ok`, `cancelled` for [`ProviderError::Cancelled`], and
 /// `failed` otherwise. Its usage is the usage the provider reported, even on
-/// a failed call, and `None` when the provider never reported any.
+/// a failed call; a zero usage when the call failed before costing anything
+/// (no connection, or an error status before any event); and `None` when
+/// it is unknown.
 #[derive(Debug)]
 pub struct CallOutcome {
     /// The one receipt for this delivery.
@@ -62,6 +64,10 @@ pub struct CallFailure {
     /// The error as an event payload: `name`, `kind`, `message`,
     /// `retryable`, and `status` for an HTTP status error.
     pub event: ErrorEvent,
+    /// Whether the call is known to have cost nothing: the connection was
+    /// never made, or the provider answered with an error status before any
+    /// event. Its receipt's usage is then a zero.
+    pub free: bool,
 }
 
 /// What the stream revealed before it ended, kept for the receipt.
@@ -71,6 +77,8 @@ struct Observed {
     usage: Option<Usage>,
     /// Whether a `message_end` arrived, with or without usage.
     ended: bool,
+    /// Whether the stream yielded any event.
+    began: bool,
 }
 
 impl ModelCall {
@@ -158,6 +166,10 @@ impl ModelCall {
             // A provider may report an abort as some other error.
             result = Err(ProviderError::Cancelled);
         }
+        let free = (result.as_ref()).is_err_and(|error| costs_nothing(error, &seen));
+        if free && seen.usage.is_none() {
+            seen.usage = Some(Usage::default());
+        }
         let disposition = match &result {
             Ok(_) => CallDisposition::Accepted,
             Err(ProviderError::Cancelled) => CallDisposition::Cancelled,
@@ -184,6 +196,7 @@ impl ModelCall {
         let result = result.map_err(|error| CallFailure {
             event: error_event(&error),
             error,
+            free,
         });
         CallOutcome { receipt, result }
     }
@@ -205,6 +218,7 @@ async fn consume(
             return Err(ProviderError::Cancelled);
         }
         let event = item?;
+        seen.began = true;
         let delta = on_delta.as_ref().and_then(|_| partial(&event));
         let model = match &event {
             ProviderEvent::MessageStart(start) => Some(start.model.clone()),
@@ -231,6 +245,18 @@ async fn consume(
         }
     }
     Ok(assembler.finish()?)
+}
+
+/// Whether a failed call is known to have cost nothing: the connection was
+/// never made, or the provider answered with an error status before any
+/// event. A request that got no answer, or a stream that broke after it
+/// began, may have been billed, so its usage stays unknown.
+fn costs_nothing(error: &ProviderError, seen: &Observed) -> bool {
+    match error {
+        ProviderError::Connect { .. } => true,
+        ProviderError::Status { .. } => !seen.began,
+        _ => false,
+    }
 }
 
 /// Before a cancel takes effect, keep the usage of a `message_end` the
@@ -293,6 +319,7 @@ fn partial(event: &ProviderEvent) -> Option<PartialAssistantEvent> {
 
 fn error_event(error: &ProviderError) -> ErrorEvent {
     let kind = match error {
+        ProviderError::Connect { .. } => "connect",
         ProviderError::Transport { .. } => "transport",
         ProviderError::Status { .. } => "status",
         ProviderError::InvalidRequest { .. } => "invalid_request",

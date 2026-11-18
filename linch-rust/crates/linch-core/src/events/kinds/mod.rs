@@ -11,6 +11,7 @@
 mod control;
 mod hook;
 mod lifecycle;
+mod reliability;
 mod skills;
 mod suspend;
 mod tooling;
@@ -18,6 +19,7 @@ mod tooling;
 pub use control::*;
 pub use hook::*;
 pub use lifecycle::*;
+pub use reliability::*;
 pub use skills::*;
 pub use suspend::*;
 pub use tooling::*;

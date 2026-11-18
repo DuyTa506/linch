@@ -74,6 +74,36 @@ class ToolSearch(TypedDict, total=False):
     max_skills: int
 
 
+class ProviderRetry(TypedDict, total=False):
+    """How a provider call that failed with a retryable error is retried, as `spec.provider_retry`.
+
+    Retryable is no connection or no response at all (refused, reset,
+    timeout), a 408, a 429 or a 5xx. Retries are on by default, with these
+    defaults, which are Python Linch's `RetryOptions`; set only the fields
+    to change, and `{"max_attempts": 1}` to turn retries off. Each retry
+    waits, then calls the same model again; once a model has had
+    `max_attempts` calls in a turn, the run fails over to the next of
+    `spec.fallback_models` (keeping it for the rest of the run) or fails
+    with the last error.
+
+    Attributes:
+        max_attempts: Most calls to one model in one turn, the first
+            included; 5 when absent, 1 never retries.
+        base_delay_ms: Wait before the first retry; each later one waits
+            twice as long. 1000 when absent.
+        max_delay_ms: Longest wait; 30000 when absent. A server's
+            `Retry-After` is waited as given, and one longer than this ends
+            the retries on that model rather than hold the run.
+        jitter: Fraction of each doubled wait added or taken away, between
+            0 and 1; 0.2 when absent, 0 waits exactly.
+    """
+
+    max_attempts: int
+    base_delay_ms: int
+    max_delay_ms: int
+    jitter: float
+
+
 class DeepAgentProfile(TypedDict):
     """A deep agent profile written out in full; every key is required.
 
@@ -173,7 +203,9 @@ class AgentConfig(TypedDict, total=False):
         namespace: Store key space for this agent's runs and sessions.
         spec: The model, instructions and loop limits, such as
             `{"model": "deepseek-flash", "system_prompt": "Be brief."}`;
-            `system_blocks` and a token or USD `budget` go here too.
+            `system_blocks`, a token or USD `budget`, a `provider_retry`
+            policy (see `ProviderRetry`) and `fallback_models`, the models
+            to fail over to in order, go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

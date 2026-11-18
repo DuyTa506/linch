@@ -209,6 +209,37 @@ class BudgetEvent:
 
 
 @dataclass(frozen=True)
+class ProviderRetryEvent:
+    """A provider call failed with a retryable error; the run calls `model` again.
+
+    It waits `delay_ms` first. `retry` counts this model's retries in the
+    turn, from 1. `error` is the failure in an `ErrorEvent`'s shape (`kind`,
+    `message`, `retryable`, `status` for an HTTP status). The deltas the
+    failed call streamed are void: the next call answers from the start.
+    """
+
+    type: ClassVar[str] = "provider_retry"
+    model: str
+    retry: int
+    delay_ms: int
+    error: JsonObject
+
+
+@dataclass(frozen=True)
+class ModelFallbackEvent:
+    """The run gave up on `from_model` and calls `to_model` for the rest of the run.
+
+    `error` is the failure that ended `from_model`'s calls, in an
+    `ErrorEvent`'s shape.
+    """
+
+    type: ClassVar[str] = "model_fallback"
+    from_model: str
+    to_model: str
+    error: JsonObject
+
+
+@dataclass(frozen=True)
 class PromptCacheAdvisoryEvent:
     """A change broke the provider's prompt cache (`tool_set_changed`, `model_changed`)."""
 
@@ -362,6 +393,8 @@ Event = (
     | CompactionEvent
     | LoopGuardEvent
     | BudgetEvent
+    | ProviderRetryEvent
+    | ModelFallbackEvent
     | PromptCacheAdvisoryEvent
     | VerificationEvent
     | SkillsLoadedEvent
@@ -394,6 +427,8 @@ _KINDS: dict[str, type[Any]] = {
         CompactionEvent,
         LoopGuardEvent,
         BudgetEvent,
+        ProviderRetryEvent,
+        ModelFallbackEvent,
         PromptCacheAdvisoryEvent,
         VerificationEvent,
         SkillsLoadedEvent,

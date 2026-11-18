@@ -15,17 +15,22 @@ from linch_rust import (
     Envelope,
     ErrorEvent,
     InitEvent,
+    ModelFallbackEvent,
     OpenError,
     Profile,
+    ProviderRetry,
+    ProviderRetryEvent,
     ResultEvent,
     Server,
     ToolCallEndEvent,
+    UsageEvent,
     UserEvent,
     tool,
 )
 
 TASKS = ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"]
 CONFIG_RS = Path(__file__).resolve().parents[2] / "crates/linch/src/config.rs"
+RELIABILITY_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/reliability.rs"
 
 
 async def run_once(cfg: AgentConfig, session_id: str = "s1") -> list[Envelope]:
@@ -109,6 +114,77 @@ async def test_a_spec_budget_caps_the_run_and_its_children(tmp_path: Path) -> No
     [error] = [e.event for e in envelopes if isinstance(e.event, ErrorEvent)]
     assert error.error["name"] == "BudgetExceededError"
     assert (final(envelopes).subtype, final(envelopes).stop_reason) == ("error", "error")
+
+
+def overloaded() -> dict[str, Any]:
+    """A scripted call that fails with a retryable 529 before any event."""
+    return {"error": {"type": "status", "status": 529, "message": "overloaded"}}
+
+
+async def test_a_spec_retries_a_failed_call_then_fails_over() -> None:
+    turns = [overloaded(), overloaded(), text_turn("done", model="fallback-model")]
+    retry: ProviderRetry = {"max_attempts": 2, "base_delay_ms": 1, "jitter": 0.0}
+    cfg = config(turns)
+    cfg["spec"] = {"model": MODEL, "provider_retry": retry, "fallback_models": ["fallback-model"]}
+    envelopes = await run_once(cfg)
+
+    [retried] = [e.event for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
+    assert (retried.model, retried.retry, retried.delay_ms) == (MODEL, 1, 1)
+    assert retried.error["status"] == 529 and retried.error["retryable"]
+    [fallback] = [e.event for e in envelopes if isinstance(e.event, ModelFallbackEvent)]
+    assert (fallback.from_model, fallback.to_model) == (MODEL, "fallback-model")
+    [usage] = [e.event for e in envelopes if isinstance(e.event, UsageEvent)]
+    assert usage.actual_model == "fallback-model"
+    assert final(envelopes).final_text == "done"
+
+
+async def test_a_capped_budget_retries_a_call_that_cost_nothing() -> None:
+    refused = {"error": {"type": "connect", "message": "connection refused"}}
+    retry: ProviderRetry = {"base_delay_ms": 1, "jitter": 0.0}
+    cfg = config([refused, overloaded(), text_turn("done")])
+    cfg["spec"] = {"model": MODEL, "provider_retry": retry, "budget": {"max_tokens": 100}}
+    envelopes = await run_once(cfg)
+
+    retried = [e.event for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
+    assert [r.error["kind"] for r in retried] == ["connect", "status"]
+    assert final(envelopes).final_text == "done"
+    assert final(envelopes).usage_complete
+
+
+async def test_a_spec_that_says_nothing_retries_a_rate_limit() -> None:
+    limited = {"error": {"type": "status", "status": 429, "retry_after_ms": 1, "message": "slow"}}
+    envelopes = await run_once(config([limited, text_turn("done")]))
+
+    [retried] = [e.event for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
+    assert (retried.retry, retried.delay_ms, retried.error["status"]) == (1, 1, 429)
+    assert final(envelopes).final_text == "done"
+
+
+async def test_one_attempt_turns_retries_off() -> None:
+    cfg = config([overloaded(), text_turn("never")])
+    cfg["spec"] = {"model": MODEL, "provider_retry": {"max_attempts": 1}}
+    envelopes = await run_once(cfg)
+
+    assert not [e for e in envelopes if isinstance(e.event, ProviderRetryEvent)]
+    [error] = [e.event for e in envelopes if isinstance(e.event, ErrorEvent)]
+    assert (error.error["status"], error.error["retryable"]) == (529, True)
+    assert final(envelopes).subtype == "error"
+
+
+async def test_a_retry_policy_that_cannot_run_fails_the_open() -> None:
+    cfg = config([])
+    cfg["spec"] = {"model": MODEL, "provider_retry": {"max_attempts": 0}}
+    async with Server() as server:
+        with pytest.raises(OpenError):
+            await server.open_agent(cfg)
+
+
+@pytest.mark.source
+def test_the_typed_retry_policy_names_every_field_the_server_reads() -> None:
+    source = RELIABILITY_RS.read_text(encoding="utf-8")
+    body = source.split("pub struct ProviderRetry {", 1)[1].split("\n}", 1)[0]
+    fields = set(re.findall(r"^\s*pub (\w+):", body, re.MULTILINE))
+    assert fields == ProviderRetry.__optional_keys__
 
 
 async def test_retained_workers_answer_with_their_worker_id(tmp_path: Path) -> None:

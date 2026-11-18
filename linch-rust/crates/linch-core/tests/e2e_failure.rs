@@ -32,7 +32,13 @@ fn failing_turns() -> Vec<ScriptedTurn> {
 fn failing_agent<S: linch_core::SessionStore + RunStore + 'static>(stores: Arc<S>) -> Agent {
     let provider = Arc::new(ScriptedProvider::new(failing_turns()));
     let permissions = policy(PermissionMode::SkipDangerous);
-    agent(provider, registry(vec![]), permissions, stores)
+    agent_with(
+        single_attempt(),
+        provider,
+        registry(vec![]),
+        permissions,
+        stores,
+    )
 }
 
 #[tokio::test]

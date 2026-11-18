@@ -33,6 +33,7 @@ pub mod policy;
 pub mod provider;
 pub mod registration;
 pub mod registry;
+pub mod reliability;
 pub mod run;
 pub mod runner;
 pub mod scheduler;
@@ -83,6 +84,7 @@ pub use registration::Registration;
 pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
 };
+pub use reliability::ProviderRetry;
 pub use run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
 pub use runner::RunStream;
 pub use scheduler::{

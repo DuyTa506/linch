@@ -200,6 +200,8 @@ có, trừ `bash`.
 | `call_timeout_ms` | không có: chờ | Thời gian dài nhất một lời gọi tool được chạy, tính bằng mili giây; quá mức đó, lời gọi kết thúc bằng lỗi timeout mà model đọc được |
 | `compaction` | không có: không bao giờ nén | Khi nào tóm tắt phần cũ của cuộc hội thoại ([bên dưới](#compaction)) |
 | `budget` | không có: không giới hạn | Giới hạn token và USD cho mỗi run và các subagent của nó, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([bên dưới](#budget)) |
+| `provider_retry` | bật: 5 lần thử, từ 1 giây gấp đôi đến 30 giây, jitter 0.2 | Gọi lại cùng model sau một lỗi có thể thử lại, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, là các mặc định của Python; `{"max_attempts": 1}` tắt nó ([providers](./providers.md#lỗi-và-thử-lại)) |
+| `fallback_models` | `[]` | Các model để chuyển sang, theo thứ tự, khi một model hết lượt thử lại; run giữ model mà nó đã chuyển sang ([providers](./providers.md#lỗi-và-thử-lại)) |
 
 ### System block
 
@@ -260,10 +262,13 @@ loại `exceeded`, một `error` tên `BudgetExceededError` và một `result` c
 `error`, `stop_reason` là `error`. Run con của một subagent tính phí vào budget
 của run cha, nên một budget giới hạn cả cây, và cảnh báo chỉ phát ra một lần cho
 cả cây, ở run nào có lời gọi vượt qua tỷ lệ. Khi có đặt giới hạn, một lời gọi mà
-usage không xác định (nó thất bại hoặc bị cắt trước khi provider báo cáo gì) nghĩa
-là không còn giữ được giới hạn nữa: lời gọi kế tiếp bị từ chối với một lỗi tên
-`BudgetAccountingError`. Một run bị crash giữa chừng một lời gọi sẽ resume vào
-đúng lỗi đó.
+usage không xác định (nó không nhận được câu trả lời, hoặc bị cắt sau khi output đã
+bắt đầu, trước khi provider báo cáo gì) nghĩa là không còn giữ được giới hạn nữa:
+lời gọi kế tiếp, kể cả một lần [thử lại](./providers.md#lỗi-và-thử-lại), bị từ chối
+với một lỗi tên `BudgetAccountingError`. Một lời gọi thất bại trước khi tốn bất cứ
+thứ gì (không kết nối được, hoặc lỗi status trước khi có output) được tính bằng
+không và vẫn được thử lại như thường. Một run bị crash giữa chừng một lời gọi sẽ
+resume vào đúng lỗi đó.
 
 Mỗi run của agent bắt đầu với mức chi tiêu bằng không. Một run được resume bắt đầu
 từ mức chi tiêu mà bản ghi bền vững của nó và của các run con cho biết, nên một
@@ -451,7 +456,7 @@ fail closed.
 | `agent_stop` | `status`, `stop_reason` |
 | `turn_start` | `turn` |
 | `provider_call_start` | `turn`, `model` |
-| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?`, `duration_ms` |
+| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?` (vắng khi không xác định; bằng không với một lời gọi thất bại mà không tốn gì), `duration_ms` |
 | `tool_use_start` | `tool_use_id`, `tool_name`, `input` |
 | `tool_use_stop` | `tool_use_id`, `tool_name`, `is_error`, `duration_ms` |
 | `post_tool_use_failure` | `tool_use_id`, `tool_name`, `input`, `error` |

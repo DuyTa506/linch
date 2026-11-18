@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+pub mod flaky;
 pub mod hooks;
 pub mod subagents;
 
@@ -137,6 +138,13 @@ pub fn registry(tools: Vec<Echo>) -> Arc<ToolRegistry> {
 pub fn spec() -> AgentSpec {
     let mut spec = AgentSpec::new(MODEL);
     spec.system_prompt = "You are a test agent.".into();
+    spec
+}
+
+/// [`spec`] with provider retries off: a failed call ends the run at once.
+pub fn single_attempt() -> AgentSpec {
+    let mut spec = spec();
+    spec.provider_retry.max_attempts = 1;
     spec
 }
 

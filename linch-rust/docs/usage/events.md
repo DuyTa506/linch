@@ -296,6 +296,23 @@ The run hit its turn limit: `reason` (`max_turns`), `detail` (for example
 `Maximum turns (20) reached.`) and `action` (`stop`). An `error` event and a
 `result` of subtype `error` follow.
 
+### `ProviderRetryEvent` (`provider_retry`)
+
+A provider call failed with a retryable error and the run calls the same
+model again ([`spec.provider_retry`](./providers.md#failures-and-retries)):
+`model`, `retry` (this model's retry in the turn, from 1), `delay_ms` (the
+wait before the next call) and `error` (the failure, shaped as an
+`ErrorEvent`'s `error`). It arrives before the wait. Discard the partial text
+of the failed call: the next call answers from the start.
+
+### `ModelFallbackEvent` (`model_fallback`)
+
+The run gave up on a model and calls the next of
+[`spec.fallback_models`](./providers.md#failures-and-retries) for the rest of
+the run: `from_model`, `to_model` and `error` (the failure that ended
+`from_model`'s calls). Python Linch's event has a `reason` string in place of
+`error`.
+
 ### `BudgetEvent` (`budget`)
 
 The run's [budget](./agent.md#budget) crossed its warning ratio (`kind`
@@ -317,7 +334,7 @@ One [callback](./agent.md#callbacks) call and how it ended.
 ### `ErrorEvent` (`error`)
 
 An error the run recorded. `error` is a dict with `name` and `message`, and
-`retryable`; a provider failure also has `kind` (`transport`, `status`,
+`retryable`; a provider failure also has `kind` (`connect`, `transport`, `status`,
 `invalid_request`, `stream`) and, for an HTTP failure, `status`:
 
 ```text

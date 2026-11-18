@@ -201,9 +201,10 @@ impl AgentBuilder {
     ///
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
-    ///         namespace is blank, the compaction or budget settings cannot run, a
-    ///         built-in tool's name is taken, or the tool schemas cannot be
-    ///         digested.
+    ///         namespace is blank, the compaction, budget or provider retry
+    ///         settings cannot run, a fallback model is blank or repeats a
+    ///         model, a built-in tool's name is taken, or the tool schemas
+    ///         cannot be digested.
     pub fn build(self) -> Result<Agent, BuildError> {
         if self.spec.model.trim().is_empty() {
             return Err(BuildError::Invalid("the model must not be blank".into()));
@@ -217,6 +218,13 @@ impl AgentBuilder {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        if let Some(problem) = self.spec.provider_retry.problem() {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        let (model, fallbacks) = (&self.spec.model, &self.spec.fallback_models);
+        if let Some(problem) = crate::reliability::fallback_problem(model, fallbacks) {
             return Err(BuildError::Invalid(problem.into()));
         }
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;

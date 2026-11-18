@@ -196,6 +196,8 @@ absent, except `bash`.
 | `call_timeout_ms` | none: wait | Longest one tool call may run, in milliseconds; past it the call ends with a timeout error the model reads |
 | `compaction` | none: never compact | When to summarize the older part of the conversation ([below](#compaction)) |
 | `budget` | none: no cap | A token and USD cap for each run and its subagents, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([below](#budget)) |
+| `provider_retry` | on: 5 attempts, from 1 s doubling to 30 s, jitter 0.2 | Call the same model again after a retryable failure, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, Python's defaults; `{"max_attempts": 1}` turns it off ([providers](./providers.md#failures-and-retries)) |
+| `fallback_models` | `[]` | Models to fail over to, in order, once a model has no retry left; the run keeps the one it fails over to ([providers](./providers.md#failures-and-retries)) |
 
 ### System blocks
 
@@ -257,10 +259,13 @@ A run whose spend reached a cap stops there with a `budget` event of kind
 `error`, `stop_reason` `error`. A subagent's child run charges its parent's
 budget, so one budget caps the whole tree, and the warning fires once for it,
 in whichever run's call crossed the ratio. With a cap set, a call whose usage
-is unknown (it failed or was cut off before the provider reported any) means
-the cap can no longer be kept: the next call is refused with an error named
-`BudgetAccountingError`. A run that crashed during a call resumes into that
-error.
+is unknown (it got no answer, or was cut off after output began, before the
+provider reported any) means the cap can no longer be kept: the next call,
+a [retry](./providers.md#failures-and-retries) included, is refused with an
+error named `BudgetAccountingError`. A call that failed before costing
+anything (no connection, or an error status before any output) counts as
+zero and is retried as usual. A run that crashed during a call resumes into
+that error.
 
 Each run of the agent starts with nothing spent. A resumed run starts from
 what its durable record and its children's say was spent, so a crash never
@@ -445,7 +450,7 @@ report, so the answer is always `{}` and none of them can fail closed.
 | `agent_stop` | `status`, `stop_reason` |
 | `turn_start` | `turn` |
 | `provider_call_start` | `turn`, `model` |
-| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?`, `duration_ms` |
+| `provider_call_stop` | `turn`, `model`, `disposition`, `usage?` (absent when unknown; zero for a failed call that cost nothing), `duration_ms` |
 | `tool_use_start` | `tool_use_id`, `tool_name`, `input` |
 | `tool_use_stop` | `tool_use_id`, `tool_name`, `is_error`, `duration_ms` |
 | `post_tool_use_failure` | `tool_use_id`, `tool_name`, `input`, `error` |

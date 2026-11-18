@@ -76,6 +76,10 @@ pub enum Event {
     LoopGuard(LoopGuardEvent),
     /// A run budget crossed its warning ratio or was exhausted.
     Budget(BudgetEvent),
+    /// A failed provider call is retried on the same model.
+    ProviderRetry(ProviderRetryEvent),
+    /// The run failed over to the next fallback model.
+    ModelFallback(ModelFallbackEvent),
     /// A prefix-breaking change invalidated the provider's prompt cache.
     PromptCacheAdvisory(PromptCacheAdvisoryEvent),
     /// The skills loaded for a request or session.
@@ -202,6 +206,8 @@ impl Event {
             "compaction" => Ok(Event::Compaction(payload("compaction", obj)?)),
             "loop_guard" => Ok(Event::LoopGuard(payload("loop_guard", obj)?)),
             "budget" => Ok(Event::Budget(payload("budget", obj)?)),
+            "provider_retry" => Ok(Event::ProviderRetry(payload("provider_retry", obj)?)),
+            "model_fallback" => Ok(Event::ModelFallback(payload("model_fallback", obj)?)),
             "prompt_cache_advisory" => Ok(Event::PromptCacheAdvisory(payload(
                 "prompt_cache_advisory",
                 obj,
@@ -301,6 +307,8 @@ impl Event {
             Event::Compaction(_) => Both,
             Event::LoopGuard(_) => Both,
             Event::Budget(_) => Both,
+            Event::ProviderRetry(_) => Both,
+            Event::ModelFallback(_) => Both,
             Event::PromptCacheAdvisory(_) => Both,
             Event::SkillsLoaded(_) => Both,
             Event::SkillInvoked(_) => Both,
@@ -353,6 +361,8 @@ impl Serialize for Event {
             Event::Compaction(e) => tagged("compaction", e).serialize(serializer),
             Event::LoopGuard(e) => tagged("loop_guard", e).serialize(serializer),
             Event::Budget(e) => tagged("budget", e).serialize(serializer),
+            Event::ProviderRetry(e) => tagged("provider_retry", e).serialize(serializer),
+            Event::ModelFallback(e) => tagged("model_fallback", e).serialize(serializer),
             Event::PromptCacheAdvisory(e) => {
                 tagged("prompt_cache_advisory", e).serialize(serializer)
             }
