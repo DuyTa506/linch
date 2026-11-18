@@ -233,6 +233,16 @@ mod tests {
         ));
     }
 
+    /// SGLang 0.5.23 (`tokenizer_manager.py`, live on Qwen3.6-35B-A3B): a prompt
+    /// longer than `--context-length` answers 400 `BadRequestError` with this
+    /// exact text, which carries neither of the profile's phrases.
+    #[test]
+    fn sglang_prompt_longer_than_the_context_length_is_a_context_overflow() {
+        let live = "The input (40029 tokens) is longer than the model's context length \
+                    (32768 tokens).";
+        assert!(refused(&SGLANG, 400, &[], live));
+    }
+
     #[test]
     fn anything_else_passes_through() {
         let busy = ProviderError::Transport {
