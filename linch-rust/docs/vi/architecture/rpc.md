@@ -62,7 +62,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` khi kết nối đang điều khiển một run của nó | `{}` sau khi các MCP server của nó đã tắt |
 | `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (quên các lần đọc của session, kill các lệnh `Bash` chạy nền của nó) | `{}` |
-| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, chỉ được gửi khi run đã được lưu (`Server::until_stored`: `init` của stream, đến sau commit của create) hoặc đã kết thúc bằng lỗi, rồi các notification. `run.resume`, `run.approve` và `run.answer` trả lời ngay |
+| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:19-48`) | `RunAccepted` `{run_id}`, chỉ được gửi khi run đã được lưu (`Server::until_stored`: `init` của stream, đến sau commit của create) hoặc đã kết thúc bằng lỗi, rồi các notification. `run.resume`, `run.approve` và `run.answer` trả lời ngay |
 | `run.resume` | `ResumeParams` (`protocol.rs:215`) | `run.rs:45-50`, qua `claim` | như trên |
 | `run.approve` | `ApproveParams` (`protocol.rs:228`) | `run.rs:52-58`, qua `claim` | như trên |
 | `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |

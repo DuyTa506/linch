@@ -105,7 +105,8 @@ busy with True
   hoặc sau khi process của bạn đã ngừng chờ): hãy `resume` id bạn đã chọn, thử lại
   `RunNotFound` trong giây lát, và chỉ khởi động lại với cùng id nếu nó vẫn thiếu
   (`RunExists` khi đó nghĩa là nó đã được ghi trong lúc ấy). `run_or_resume`
-  ([Workflows](./workflows.md#run_or_resume)) làm việc này. Một lần start bị từ chối
+  ([Workflows](./workflows.md#run_or_resume)) làm nửa sau cho một job được thử lại:
+  nó start với id rồi resume khi gặp `RunExists`. Một lần start bị từ chối
   (session bận, prompt bị chặn) vẫn trả về, và sự từ chối đến ở cuối stream.
   `resume`, `approve` và `answer` trả về ngay.
 - Nhiều run của một server stream cùng lúc; mỗi `Run` chỉ nhận envelope của chính
@@ -435,9 +436,15 @@ Vì vậy một tool chạy tối đa một lần cho mỗi lời gọi, và lin
 bố đúng một lần: khoảng giữa tác động và lần ghi end của nó không thể đóng lại từ
 bên ngoài tool. Host đóng nó trong các tool của chính mình:
 
-- Dùng `ctx.idempotency_key` (`run_id:tool_use_id`) làm khóa idempotency của tác
+- Dùng `ctx.idempotency_key` (`run_id:tool_use_id`, trường của `ToolContext` trong
+  [Tools](./tools.md#tool-đang-phục-vụ-lời-gọi-nào)) làm khóa idempotency của tác
   động. `tool_use_id` là của provider và giữ nguyên sau resume, nên một side effect
-  được khóa bằng nó chỉ xảy ra một lần dù lời gọi được thử bao nhiêu lần.
+  được khóa bằng nó chỉ xảy ra một lần dù lời gọi được thử bao nhiêu lần. Điều này
+  đúng với các host tool bạn viết. `Bash` tích hợp sẵn và execution host từ xa hiện
+  không mang khóa như vậy (id của một lệnh từ xa là bộ đếm của shell của nó, và
+  `exec.start` không có run hay tool id), nên một lệnh có side effect chỉ chạy tối
+  đa một lần mà không có khử trùng lặp: hãy làm cho chính lệnh đó idempotent, hoặc
+  kiểm tra tác động của nó trước khi chạy lại.
 - Tìm các lời gọi cần đối soát bằng các event `tool_call_end` có `error_code` là
   `tool_interrupted`, và hỏi hệ thống mà tool nói chuyện cùng xem khóa đã được áp
   dụng chưa.
@@ -452,20 +459,20 @@ import asyncio
 
 from linch_rust import Agent, ToolCallEndEvent, ToolContext, tool
 
-charged: dict[str, str] = {}  # bản ghi idempotency của hệ thống thanh toán
+charged: dict[str, str] = {}  # your payment system's idempotency records
 
 
 @tool(scope="write")
 async def charge(order: str, ctx: ToolContext) -> str:
     """Charge an order once, however often the call is attempted."""
     key = ctx.idempotency_key
-    if key not in charged:  # kiểm tra thật là khóa của chính API thanh toán
+    if key not in charged:  # the real check is the payment API's own key
         charged[key] = f"receipt-{order}"
     return charged[key]
 
 
 async def interrupted_calls(agent: Agent, run_id: str) -> list[str]:
-    """Các tool_use_id mà một crash để lại tác động không rõ, cần đối soát."""
+    """The tool_use_ids whose effect a crash left unknown, to reconcile."""
     ends = [e.event for e in await agent.events(run_id)]
     return [
         end.tool_use_id

@@ -49,6 +49,7 @@ encoding.
 | `tool_call_start` | `ToolCallStartEvent`, `kinds/tooling.rs:11` | yes | yes | |
 | `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` and `is_error` live in `result`. `cache_hit` (left out when false) marks a result `spec.tool_cache` served: its `tool_call_start` is written with it, not before |
 | `tool_retry` | `ToolRetryEvent`, `kinds/tooling.rs` | yes | yes | A spec `tool_retry` (`crates/linch-core/src/tool_retry.rs`): flushed before the wait and the next attempt, so a crash after it leaves a started call a resume reports interrupted and never runs again |
+| `tool_interrupted` | `ToolInterruptedEvent`, `kinds/tooling.rs` | yes | yes | A call that started and whose end a crash lost: written by the resume (`runner/batch.rs`, `runner/cancel.rs`) next to the `tool_call_end` placeholder (`error_code` `tool_interrupted`), so a host finds the calls whose effect is unknown; the call is not run again |
 | `tool_progress` | `ToolProgressEvent`, `kinds/tooling.rs:98` | no | yes | |
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
 | `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | One per `AskUser` call before a `suspended` of status `awaiting_input`; `questions` is new and left out when empty |

@@ -103,7 +103,8 @@ busy with True
   process stopped waiting): `resume` the id you chose, retrying `RunNotFound`
   for a moment, and start it again with the same id only if it stays missing
   (`RunExists` then means it landed meanwhile). `run_or_resume`
-  ([Workflows](./workflows.md#run_or_resume)) does this. A refused start (a
+  ([Workflows](./workflows.md#run_or_resume)) does the second half for a
+  retried job: it starts with the id and resumes on `RunExists`. A refused start (a
   busy session, a blocked prompt) still returns, and the refusal arrives as
   the end of the stream. `resume`, `approve` and `answer` return at once.
 - Many runs of one server stream at once; each `Run` gets only its own
@@ -430,9 +431,15 @@ So a tool runs at most once per call, and linch never claims exactly once: the
 window between the effect and the write of its end cannot be closed from
 outside the tool. A host closes it in its own tools:
 
-- Use `ctx.idempotency_key` (`run_id:tool_use_id`) as the idempotency key of the
+- Use `ctx.idempotency_key` (`run_id:tool_use_id`, the `ToolContext` field of
+  [Tools](./tools.md#which-call-a-tool-serves)) as the idempotency key of the
   effect. The `tool_use_id` is the provider's and is the same after a resume, so
   a side effect keyed by it is done once however often the call is attempted.
+  This holds for host tools you write. The built-in `Bash` and the remote
+  execution host carry no such key today (a remote command's id is a counter of
+  its shell, and `exec.start` has no run or tool id), so a command with side
+  effects is at most once with no deduplication: make the command itself
+  idempotent, or check its effect before running it again.
 - Find the calls to reconcile with the `tool_call_end` events whose
   `error_code` is `tool_interrupted`, and ask the system the tool talks to
   whether the key was applied.

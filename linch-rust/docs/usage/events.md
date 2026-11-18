@@ -356,6 +356,17 @@ retries, and the call runs again after a wait: `tool_use_id`, `tool_name`,
 error's `code`, or `timeout`), `error` (the failed attempt's message, run
 through `spec.redaction` when it covers tool results and then cut to 512
 bytes) and `delay_ms`. It is durable before the wait.
+
+### `ToolInterruptedEvent` (`tool_interrupted`)
+
+A call that started and whose end a crash lost: `tool_use_id` and
+`tool_name`. A resume writes it with the `tool_call_end` that stands in for
+the lost one (an error whose `error_code` is `tool_interrupted`, and whose
+text tells the model the effect is unknown), then does not run the call
+again. Its `tool_use_id` is the same after the resume: the key to ask the
+system the tool talks to whether the effect landed ([Runs: Tools run at most
+once](./runs.md#tools-run-at-most-once-never-exactly-once)). An older client
+reads it as an unknown event.
 ### `PolicyEvent` (`policy`)
 
 The [reliability policy](./agent.md#policy) decided. `rule` is

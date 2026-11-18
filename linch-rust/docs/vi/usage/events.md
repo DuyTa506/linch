@@ -354,6 +354,16 @@ retry, và lời gọi chạy lại sau một khoảng chờ: `tool_use_id`, `to
 lỗi, hoặc `timeout`), `error` (thông điệp của lần thử thất bại, đã qua
 `spec.redaction` khi nó bao phủ kết quả tool rồi cắt còn 512 byte) và
 `delay_ms`. Nó được ghi bền trước khi chờ.
+
+### `ToolInterruptedEvent` (`tool_interrupted`)
+
+Một lời gọi đã bắt đầu mà phần end của nó bị một crash làm mất: `tool_use_id` và
+`tool_name`. Một lần resume ghi nó cùng với `tool_call_end` thay thế cho phần đã
+mất (một lỗi có `error_code` là `tool_interrupted`, và văn bản của nó cho model
+biết tác động là không rõ), rồi không chạy lại lời gọi. `tool_use_id` của nó giữ
+nguyên sau resume: khóa để hỏi hệ thống mà tool nói chuyện cùng xem tác động đã xảy
+ra chưa ([Runs: Tool chạy tối đa một lần](./runs.md#tools-run-at-most-once-never-exactly-once)).
+Một client cũ đọc nó như một event không xác định.
 ### `PolicyEvent` (`policy`)
 
 [Reliability policy](./agent.md#policy) đã quyết định. `rule` là `prerequisite` hoặc

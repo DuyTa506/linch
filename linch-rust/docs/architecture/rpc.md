@@ -60,7 +60,7 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` while the connection drives a run of it | `{}` once its MCP servers are gone |
 | `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (forgets the session's reads, kills its background `Bash` commands) | `{}` |
-| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, sent only once the run is stored (`Server::until_stored`: the stream's `init`, which follows the create commit) or has ended with an error, then notifications. `run.resume`, `run.approve` and `run.answer` answer at once |
+| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:19-48`) | `RunAccepted` `{run_id}`, sent only once the run is stored (`Server::until_stored`: the stream's `init`, which follows the create commit) or has ended with an error, then notifications. `run.resume`, `run.approve` and `run.answer` answer at once |
 | `run.resume` | `ResumeParams` (`protocol.rs:215`) | `run.rs:45-50`, through `claim` | the same |
 | `run.approve` | `ApproveParams` (`protocol.rs:228`) | `run.rs:52-58`, through `claim` | the same |
 | `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |

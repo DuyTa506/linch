@@ -244,7 +244,8 @@ before an upgrade, and let suspended runs finish first.
     the database's limit, or put a pooler such as PgBouncer in front.
 - A call that finds every connection of its pool busy waits 30 seconds, then
   fails with `pool timed out after 30s: raise max_pool_connections or lower
-  concurrent runs`. A run that hits it stays at its last durable state;
+  concurrent runs; a run already created stays at its last durable state:
+  resume it`. A run that hits it stays at its last durable state;
   resume it. The server also logs one `warn` line per run that hit it, with
   the tenant, the pool's maximum, its open connections and how many were in
   use (`LINCH_LOG=warn`, the default level, shows it).

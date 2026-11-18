@@ -235,7 +235,8 @@ thúc trước.
     giới hạn 100. Chỉ tăng `stores.max_connections` quá 32 sau khi đã tăng giới hạn của cơ sở
     dữ liệu, hoặc đặt một pooler như PgBouncer phía trước.
 - Một lệnh gọi thấy mọi kết nối của pool đều bận sẽ chờ 30 giây, rồi lỗi với `pool timed out
-  after 30s: raise max_pool_connections or lower concurrent runs`. Một run gặp lỗi này dừng ở
+  after 30s: raise max_pool_connections or lower concurrent runs; a run already created
+  stays at its last durable state: resume it`. Một run gặp lỗi này dừng ở
   trạng thái bền vững cuối cùng của nó; hãy resume nó. Server cũng ghi log một dòng `warn`
   cho mỗi run gặp lỗi này, kèm tenant, mức tối đa của pool, số kết nối đang mở và số đang
   dùng (`LINCH_LOG=warn`, mức mặc định, sẽ hiển thị nó).
