@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use linch::{ExecutionConfig, PermissionMode};
+use linch::{ExecutionConfig, PermissionMode, SystemConfig, SystemSection};
 use serde::Deserialize;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::{Origin, Url};
@@ -61,6 +61,7 @@ pub struct Allowlists {
     pub(super) mcp_commands: Vec<McpCommand>,
     pub(super) mcp_origins: Vec<Origin>,
     pub(super) execution: Vec<ExecutionConfig>,
+    pub(super) system_sections: Vec<SystemSection>,
 }
 
 /// One MCP `stdio` server a tenant may start: its program and arguments,
@@ -236,6 +237,7 @@ impl Allowlists {
             mcp_commands: Vec::new(),
             mcp_origins: Vec::new(),
             execution: vec![ExecutionConfig::Local {}],
+            system_sections: Vec::new(),
         }
     }
 
@@ -355,6 +357,36 @@ impl Allowlists {
     pub fn execution(mut self, backends: &[ExecutionConfig]) -> Self {
         self.execution = backends.to_vec();
         self
+    }
+
+    /// System prompt sections the operator sets for every agent of the
+    /// tenant, sent with the tenant's own, sorted by their `order` (a tie
+    /// goes to these). Each `agent.open` and each stored background config
+    /// has them added at admission, and a section of the config with the
+    /// same name is replaced by the operator's, so a tenant can neither
+    /// remove nor change one, and re-admitting a config that already holds
+    /// them adds them once. `replace_defaults` does not remove them, and
+    /// the bounds on the tenant's own sections (16 sections of at most
+    /// 16 KiB, 64 KiB with `append`) do not count them.
+    ///
+    /// Changing them changes the run contract of the tenant's agents, so
+    /// their in-flight runs are refused on resume (`contract mismatch`)
+    /// until they finish or are started again. A section that is not
+    /// cacheable must have an `order` after every cacheable block of the
+    /// tenant's, or the agent does not open.
+    ///
+    /// Raises:
+    ///     AccessError: If a name is blank or repeated, or a text is blank.
+    pub fn system_sections(mut self, sections: &[SystemSection]) -> Result<Self, AccessError> {
+        let config = SystemConfig {
+            sections: sections.to_vec(),
+            ..SystemConfig::default()
+        };
+        if let Some(problem) = config.problem(&[]) {
+            return Err(AccessError::SystemSections { problem });
+        }
+        self.system_sections = sections.to_vec();
+        Ok(self)
     }
 
     /// The permission modes a config may choose, replacing the default

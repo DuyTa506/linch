@@ -196,6 +196,8 @@ có, trừ `bash`.
 | `model` | bắt buộc | Model id gửi kèm mọi request; không được để trống |
 | `system_prompt` | `""` | System prompt; để trống thì không gửi system block |
 | `system_blocks` | `[]` | Các system block của riêng bạn, `{"text": str, "cacheable": bool}` (`cacheable` là `False` khi không có), gửi theo thứ tự trước system prompt ([bên dưới](#system-block)) |
+| `system` | không có | Các phần system prompt có tên, văn bản thêm vào sau prompt, và việc có bỏ văn bản prompt của các preset hay không, `{"sections"?, "append"?, "replace_defaults"?}`, là `SystemPromptConfig` của Python ([bên dưới](#system-sections)) |
+| `context_budget` | không có: không giới hạn | Mức trần cho context mà các callback `context_build` thêm vào một request và những gì bị bỏ trước, `{"max_tokens", "drop_order"?, "pinned"?}`, là `ContextBudget` của Python ([Memory](./memory.md#context-budget)) |
 | `max_turns` | không có: không giới hạn | Số lần gọi provider nhiều nhất mà một run được thực hiện. Một run cần thêm một lần nữa sẽ kết thúc bằng event `loop_guard` (`reason: "max_turns"`) và một `result` có subtype `error`. [Loop guard](#loop_guard) kết thúc một run bị kẹt mà không cần nó |
 | `thinking` | không có: mặc định của provider | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` hoặc `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` là `summarized` hoặc `omitted`. Cách mỗi provider ánh xạ nó nằm ở [trang providers của kiến trúc](../architecture/providers.md#the-adapters) |
 | `effort` | không có | Mức nỗ lực suy luận: `low`, `medium`, `high`, `xhigh` hoặc `max`, cho các provider hỗ trợ |
@@ -239,6 +241,60 @@ spec = {
     ],
 }
 ```
+
+<a id="system-sections"></a>
+
+### Các system section
+
+`spec.system` dựng system prompt từ các lớp có tên, là `SystemPromptConfig` của
+Python Linch:
+
+| Trường | Mặc định | Điều khiển gì |
+|---|---|---|
+| `sections` | `[]` | Các lớp có tên, mỗi lớp `{"name", "text", "order"?, "cacheable"?}`. `name` dành cho operator và không bao giờ được gửi; nó là duy nhất và không được để trống, `text` cũng vậy. `order` (mặc định `0`) sắp xếp các section, thấp nhất trước, khi bằng nhau thì giữ thứ tự bạn viết. `cacheable` mặc định là `True` |
+| `append` | không có | Văn bản được gửi làm system block cuối cùng, sau prompt và danh sách skill, không bao giờ cacheable |
+| `replace_defaults` | `False` | Bỏ văn bản prompt mà các preset thêm vào `system_prompt`: chỉ dẫn của deep agent, ghi chú của các filesystem tool và `system_prompt` của một profile. Core không có prompt mặc định của riêng nó, nên đây chính là các mặc định ở đây |
+
+Một request gửi: các section theo `order`, rồi `system_blocks`, rồi
+`system_prompt` (cùng những gì các preset đã thêm vào), rồi danh sách skill khi
+bật `skills`, rồi `append`. Một subagent nhận cùng những thứ đó, theo sau là chỉ
+dẫn trong định nghĩa của nó. Các section là một phần của [hợp đồng của
+run](#hợp-đồng-của-run): một run không được resume bởi một agent có section khác,
+và một spec không có chúng giữ nguyên contract như trước đây.
+
+Provider nhận một cache breakpoint (Anthropic) đặt nó ở block cacheable cuối
+cùng, nên mọi thứ trước đó cũng được cache. Vì vậy một section không cacheable
+không được đứng trước một section cacheable hay một trong các `system_blocks`
+của bạn; agent từ chối mở (`BuildError`) thay vì cache văn bản bạn đã đánh dấu là
+hay thay đổi. Hãy cho section đó một `order` cao hơn.
+
+`append` của Python Linch thay thế `system_prompt`; ở đây nó được thêm vào, nên
+văn bản mà một preset đặt vào prompt không bị mất. `placement` của Python (trước
+các mặc định, sau chúng, sau block môi trường) không có tương ứng: không có block
+môi trường, và `order` chỉ đặt một section so với các section khác, tất cả đều đi
+trước `system_blocks` và prompt của bạn.
+
+```python
+spec = {
+    "model": "claude-sonnet-4-6",
+    "system_prompt": "Answer billing questions.",
+    "system": {
+        "sections": [
+            {"name": "policy", "text": "Company policy: ...", "order": 1},
+            {"name": "tone", "text": "Be brief.", "order": 2},
+        ],
+        "append": "Today's promotions: ...",
+    },
+}
+```
+
+Một tenant từ xa được có tối đa 16 section, mỗi section tối đa 16 KiB (tên tối đa
+64 byte) và tổng cộng 64 KiB cùng `append`, vì chúng đi kèm mọi request
+([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)). Operator có thể thêm
+section riêng của mình vào mọi agent của một tenant; chúng được gửi cùng với của
+tenant, không thể bị gỡ hay đổi tên, và `replace_defaults` để chúng lại. Thay đổi
+chúng làm thay đổi contract của các agent của tenant, nên các run đang chạy của
+chúng bị từ chối khi resume cho đến khi kết thúc.
 
 ### `compaction`
 
@@ -421,6 +477,8 @@ khi bắt đầu, và `resume` cùng `approve` từ chối một agent có contr
 (`ContractMismatch`, code -32025). Nó bao gồm:
 
 - `spec`, cùng những gì `profile`, `deep_agent` và `filesystem` thêm vào;
+  `system` và `context_budget` của nó được tính khi được đặt, và không được đưa lên
+  wire (để digest không đổi) khi không đặt;
 - mọi tool được đăng ký lúc mở, theo thứ tự (host tool, rồi workspace tool, task
   tool, filesystem tool và MCP tool), mỗi tool kèm name, description, schema và
   scope;

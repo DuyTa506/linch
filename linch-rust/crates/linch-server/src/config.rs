@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use linch::{ExecutionConfig, PermissionMode};
+use linch::{ExecutionConfig, PermissionMode, SystemSection};
 use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
 use serde::Deserialize;
 use thiserror::Error;
@@ -178,6 +178,10 @@ pub struct AllowConfig {
     /// first. `[{"backend": "local"}]` when absent; list only a sandbox to
     /// hold the tenant to it.
     pub execution: Option<Vec<ExecutionConfig>>,
+    /// System prompt sections the operator adds to every agent of the
+    /// tenant, each `{"name", "text", "order"?, "cacheable"?}`; a tenant
+    /// cannot remove or rename them. None when absent.
+    pub system_sections: Vec<SystemSection>,
 }
 
 /// The server config could not be read or set up. No message holds a
@@ -353,7 +357,8 @@ impl AllowConfig {
             .mcp_commands(&self.mcp_commands)?
             .mcp_urls(&self.mcp_urls)?
             .max_schedules(self.max_schedules)
-            .max_queued_jobs(self.max_queued_jobs);
+            .max_queued_jobs(self.max_queued_jobs)
+            .system_sections(&self.system_sections)?;
         if let Some(ms) = self.min_schedule_interval_ms {
             allow = allow.min_schedule_interval(Duration::from_millis(ms));
         }

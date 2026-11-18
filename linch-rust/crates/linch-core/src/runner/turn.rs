@@ -425,22 +425,23 @@ impl Runner {
         let view = self.log.provider_view();
         let mut messages: Vec<Message> =
             view.iter().map(|message| Message::clone(message)).collect();
-        let Some(context) = self.context(view).await else {
+        let Some(mut context) = self.context(view).await else {
             self.abort().await?;
             return Ok(None);
         };
-        add_context(&mut messages, context.blocks);
+        add_context(&mut messages, std::mem::take(&mut context.blocks));
         let mut request = self.request(messages);
         if model.is_some() || self.standing.fallbacks > 0 {
             request.model = self.call_model(model);
         }
-        let mut metadata = context.metadata;
         let request = match self.before_provider_call(request, self.turn).await {
             BeforeCall::Send(request) => {
                 let mut request = *request;
                 // After the hooks: one may have changed the tools.
                 if let Some(name) = Self::drop_unoffered_choice(&mut request) {
-                    metadata.insert("tool_choice_dropped".into(), name.into());
+                    context
+                        .metadata
+                        .insert("tool_choice_dropped".into(), name.into());
                 }
                 request
             }
@@ -476,7 +477,7 @@ impl Runner {
             }
             held => held,
         };
-        self.stage_context(&request, metadata);
+        self.stage_context(&request, context);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;

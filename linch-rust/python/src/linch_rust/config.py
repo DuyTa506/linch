@@ -347,6 +347,92 @@ class LoopGuard(TypedDict, total=False):
     max_idle_turns: int
 
 
+class SystemSection(TypedDict, total=False):
+    """One named layer of the system prompt, sent as one system block.
+
+    Attributes:
+        name: A name for operators, never sent to the model; unique among
+            the sections, not blank. Required.
+        text: The text of the block; not blank. Required.
+        order: Where it goes among the sections, lowest first; a tie keeps
+            the order declared. 0 when absent.
+        cacheable: Whether the prompt prefix ending at this block may be
+            cached. True when absent. A provider with one cache breakpoint
+            (Anthropic) puts it on the last cacheable block, so everything
+            before it is cached too: a section that is not cacheable may not
+            come before a cacheable block, or the agent does not open.
+    """
+
+    name: Required[str]
+    text: Required[str]
+    order: int
+    cacheable: bool
+
+
+class System(TypedDict, total=False):
+    """Named system prompt sections, as `spec.system`.
+
+    Python Linch's `SystemPromptConfig`. The request's system is the
+    sections by `order`, then `spec.system_blocks`, then `spec.system_prompt`
+    (with the text the presets add to it), then the skill listing when the
+    agent has skills, then `append`. The sections are part of the run
+    contract: a run is not resumed by an agent with other ones. A remote
+    tenant may hold at most 16 sections of 16 KiB each and 64 KiB with
+    `append`, and the server's own sections are added to every agent of the
+    tenant and cannot be removed or renamed.
+
+    Attributes:
+        sections: See `SystemSection`; none when absent.
+        append: Text sent as the last system block, not cacheable. It is
+            added to the prompt, not a replacement for it (Python's
+            `append` replaces `system_prompt`).
+        replace_defaults: Whether the presets' own prompt text (the deep
+            agent's instructions, the filesystem tools' notes, a profile's
+            `system_prompt`) is left out, so the prompt and sections you
+            wrote stand alone. Off when absent.
+    """
+
+    sections: Sequence[SystemSection]
+    append: str
+    replace_defaults: bool
+
+
+class ContextBudget(TypedDict, total=False):
+    """A cap on the context the `context_build` callbacks add, as `spec.context_budget`.
+
+    Python Linch's `ContextBudget`. It counts only what `context_build`
+    callbacks and hooks add to a request (retrieved memory, file memory,
+    anything else they add) at four characters per token, rounded up per
+    block; the system prompt, the tools and the logged history are not
+    counted (compaction owns the history). When the blocks do not fit, whole
+    blocks are dropped, and the run never fails for it. A callback is named
+    by its `policy_id` (`retrieval()` sets `memory` unless told otherwise;
+    the file memory of a deep agent is
+    `linch.deep-agent.file-memory-context`). Dropped first: the blocks of
+    callbacks listed in neither list, the later callback's first; then
+    those in `drop_order`, the first listed first. Inside one callback the
+    last block goes first, so list the best chunk first. A callback in
+    `pinned` is never dropped; if the pinned blocks alone are over the cap
+    the request goes over and the event's `budget` reports `over_by`.
+
+    The `context_build` event's `budget` reports each request's decision
+    (`max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, and
+    `dropped`: the `source`, `index` among that callback's blocks and
+    `tokens` of each); it is recomputed for every request and not stored
+    for recovery. The budget is part of the run contract.
+
+    Attributes:
+        max_tokens: Most estimated tokens the callbacks may add to one
+            request; at least 1. Required.
+        drop_order: Policy ids, the one dropped first at the front.
+        pinned: Policy ids never dropped. A id is in one list at most.
+    """
+
+    max_tokens: Required[int]
+    drop_order: Sequence[str]
+    pinned: Sequence[str]
+
+
 class DeepAgentProfile(TypedDict):
     """A deep agent profile written out in full; every key is required.
 
@@ -637,8 +723,9 @@ class AgentConfig(TypedDict, total=False):
             `tool_choice` (see `ToolChoice`), a `final_tool_name` (a
             registered tool whose call ends the run, its input the answer), a
             `redaction` (see `Redaction`), a `verification` (see
-            `Verification`) and a `loop_guard` (see `LoopGuard`) go here
-            too.
+            `Verification`), a `loop_guard` (see `LoopGuard`), `system`
+            sections (see `System`) and a `context_budget` (see
+            `ContextBudget`) go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

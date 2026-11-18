@@ -124,6 +124,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)); without it an agent with `schedule_tools` is refused |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
+| `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
 | `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |
 
 The live providers at their public endpoints and the memory stores need no
@@ -353,11 +354,13 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `redaction` | More than 32 `spec.redaction` rules, or a pattern over 1024 bytes | The server compiles each pattern and runs it on every response and tool result |
 | `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
 | `provider_concurrency` | `max_provider_concurrency` above the tenant's | The tenant's runs would make more calls at once on the server's key than the operator allows; `data.max` is the cap |
+| `system` | More than 16 `spec.system` sections, a name over 64 bytes, a section or `append` over 16 KiB, or over 64 KiB together | Sections ride every request of every run |
+| `context_budget` | More than 32 ids in `drop_order` or `pinned`, or an id over 128 bytes | The server keeps them per agent |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
 | `tool_choice` | A forced `tool_choice` (`required`, or a tool that is not the final tool), in the spec or in `run.start`, on an agent with no `max_turns` and no `final_tool_name` (an output schema alone does not end the run on every provider) | A model forced to call a tool every turn never answers, and no budget ends the run |
 
 A path that does not exist is refused like one outside the roots, so a
-client cannot probe the server's file system. Five changes are made
+client cannot probe the server's file system. Six changes are made
 silently instead:
 
 - Without `exec_tools`, the config's `bash` is turned off and the agent opens
@@ -370,6 +373,10 @@ silently instead:
 - A Postgres store without `max_connections` gets the default pool size or
   the tenant's `max_pool_connections`, whichever is smaller.
 - A config without `max_provider_concurrency` gets the tenant's, when it has one.
+- The operator's `system_sections` are added to the config's own, and a
+  section of the config with the same name is replaced by the operator's
+  (`allow.system_sections`). They are not counted against the bound
+  above, and `replace_defaults` leaves them in.
 
 ---
 

@@ -105,13 +105,16 @@ impl DeepAgent {
     /// `spec` for a deep agent: [`Self::system_prompt`], then a blank line
     /// and the host's prompt when it has one, and the profile's
     /// `max_turns` when the spec sets none. Python put the preset's section
-    /// before the host's instructions too.
+    /// before the host's instructions too. A spec with
+    /// `system.replace_defaults` keeps its own prompt alone.
     pub fn spec(&self, mut spec: AgentSpec) -> AgentSpec {
         let prompt = self.system_prompt();
-        spec.system_prompt = match spec.system_prompt.is_empty() {
-            true => prompt.to_owned(),
-            false => format!("{prompt}\n\n{}", spec.system_prompt),
-        };
+        if !spec.replaces_defaults() {
+            spec.system_prompt = match spec.system_prompt.is_empty() {
+                true => prompt.to_owned(),
+                false => format!("{prompt}\n\n{}", spec.system_prompt),
+            };
+        }
         spec.max_turns = spec.max_turns.or(self.profile.max_turns);
         spec
     }

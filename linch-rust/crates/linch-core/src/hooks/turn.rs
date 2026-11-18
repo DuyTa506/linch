@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::context_budget::Sourced;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, TextBlock};
@@ -156,28 +157,49 @@ impl HookChain<ContextBuild> {
     /// closed.
     pub async fn run(&self, request: &ContextBuildRequest) -> ChainResult<ContextBuildResponse> {
         let mut records = Vec::new();
-        let outcome = self.run_into(request, &mut records).await;
+        let sourced = self.run_into(request, &mut records).await;
+        let outcome = ContextBuildResponse {
+            blocks: sourced.blocks.into_iter().map(|b| b.block).collect(),
+            metadata: sourced.metadata,
+        };
         ChainResult { outcome, records }
     }
 
     /// [`Self::run`], pushing each record into `records` as its hook
-    /// returns, so a dropped chain keeps the records of the hooks that did.
+    /// returns, so a dropped chain keeps the records of the hooks that did,
+    /// and naming the hook that added each block (for the context budget).
     pub(crate) async fn run_into(
         &self,
         request: &ContextBuildRequest,
         records: &mut Vec<HookRecord>,
-    ) -> ContextBuildResponse {
-        let mut merged = ContextBuildResponse::default();
+    ) -> SourcedContext {
+        let mut merged = SourcedContext::default();
         for entry in self.entries().iter() {
             // `Closed` cannot occur: registration rejects a closed fail mode
             // here.
             if let Step::Answer(response) = entry.invoke(request, records).await {
-                merged.blocks.extend(response.blocks);
+                let source = records.last().map(|record| Arc::clone(&record.policy_id));
+                let source = source.unwrap_or_else(|| Arc::from(""));
+                for (index, block) in response.blocks.into_iter().enumerate() {
+                    merged.blocks.push(Sourced {
+                        source: Arc::clone(&source),
+                        index,
+                        block,
+                    });
+                }
                 merged.metadata.extend(response.metadata);
             }
         }
         merged
     }
+}
+
+/// What the `context_build` hooks added: each block with the hook that
+/// added it, and the metadata merged.
+#[derive(Debug, Default)]
+pub(crate) struct SourcedContext {
+    pub blocks: Vec<Sourced>,
+    pub metadata: JsonObject,
 }
 
 /// Marker for [`HookPoint::Stop`].

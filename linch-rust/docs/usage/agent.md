@@ -192,6 +192,8 @@ absent, except `bash`.
 | `model` | required | Model id sent with every request; not blank |
 | `system_prompt` | `""` | The system prompt; empty sends no system block |
 | `system_blocks` | `[]` | Your own system blocks, `{"text": str, "cacheable": bool}` (`cacheable` `False` when absent), sent in order before the system prompt ([below](#system-blocks)) |
+| `system` | none | Named system prompt sections, text added after the prompt, and whether the presets' prompt text is left out, `{"sections"?, "append"?, "replace_defaults"?}`, Python's `SystemPromptConfig` ([below](#system-sections)) |
+| `context_budget` | none: no cap | A cap on the context the `context_build` callbacks add to a request and what is dropped first, `{"max_tokens", "drop_order"?, "pinned"?}`, Python's `ContextBudget` ([Memory](./memory.md#context-budget)) |
 | `max_turns` | none: no limit | Most provider calls one run may make. A run that needs one more ends with a `loop_guard` event (`reason: "max_turns"`) and a `result` of subtype `error`. The [loop guard](#loop_guard) ends a stuck run without it |
 | `thinking` | none: the provider's default | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` or `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` is `summarized` or `omitted`. How each provider maps it is in the [architecture providers page](../architecture/providers.md#the-adapters) |
 | `effort` | none | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`, for providers that support it |
@@ -236,6 +238,58 @@ spec = {
     ],
 }
 ```
+
+### System sections
+
+`spec.system` builds the system prompt from named layers, Python Linch's
+`SystemPromptConfig`:
+
+| Field | Default | What it controls |
+|---|---|---|
+| `sections` | `[]` | Named layers, each `{"name", "text", "order"?, "cacheable"?}`. `name` is for operators and is never sent; it is unique and not blank, as is `text`. `order` (default `0`) sorts the sections, lowest first, a tie keeping the order you wrote. `cacheable` defaults to `True` |
+| `append` | none | Text sent as the last system block, after the prompt and the skill listing, never cacheable |
+| `replace_defaults` | `False` | Leave out the prompt text the presets add to `system_prompt`: the deep agent's instructions, the filesystem tools' notes and a profile's `system_prompt`. Core has no default prompt of its own, so these are the defaults here |
+
+A request sends: the sections by `order`, then `system_blocks`, then
+`system_prompt` (with whatever the presets added), then the skill listing when
+`skills` is on, then `append`. A subagent gets the same, followed by its
+definition's instructions. The sections are part of the [run
+contract](#the-run-contract): a run is not resumed by an agent with other
+sections, and a spec without them keeps the contract it always had.
+
+A provider that takes one cache breakpoint (Anthropic) puts it on the last
+cacheable block, so everything before it is cached too. A section that is not
+cacheable therefore may not come before a cacheable section or one of your
+`system_blocks`; the agent refuses to open (`BuildError`) rather than cache
+text you marked volatile. Give such a section a higher `order`.
+
+Python Linch's `append` replaces `system_prompt`; here it is added, so the
+text a preset put in the prompt is not lost. Python's `placement` (before the
+defaults, after them, after the environment block) has no counterpart: there
+is no environment block, and `order` places a section relative to the other
+sections only, which all go before your `system_blocks` and prompt.
+
+```python
+spec = {
+    "model": "claude-sonnet-4-6",
+    "system_prompt": "Answer billing questions.",
+    "system": {
+        "sections": [
+            {"name": "policy", "text": "Company policy: ...", "order": 1},
+            {"name": "tone", "text": "Be brief.", "order": 2},
+        ],
+        "append": "Today's promotions: ...",
+    },
+}
+```
+
+A remote tenant may hold at most 16 sections of at most 16 KiB (names up to
+64 bytes) and 64 KiB in all with `append`, since they ride every request
+([Server](./server.md#what-admission-refuses-and-why)). The operator can add its own
+sections to every agent of a tenant; they are sent with the tenant's, cannot be
+removed or renamed, and `replace_defaults` leaves them in. Changing them
+changes the contract of the tenant's agents, so their in-flight runs are
+refused on resume until they finish.
 
 ### `compaction`
 
@@ -420,6 +474,8 @@ starts, and `resume` and `approve` refuse an agent whose contract differs
 (`ContractMismatch`, code -32025). It covers:
 
 - the `spec`, with what `profile`, `deep_agent` and `filesystem` add to it;
+  its `system` sections and `context_budget` count when set, and are left off
+  the wire (so the digest does not move) when not;
 - every tool registered at open, in order (host tools, then workspace, task,
   filesystem and MCP tools), each with its name, description, schema and
   scope;

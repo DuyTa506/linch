@@ -348,6 +348,59 @@ over it, and a `remember` tool. It runs offline with the scripted provider,
 and `tests/test_memory.py` runs it, checking that a note saved in one run is
 recalled in the next and that no recalled text is in the session.
 
+### Context budget
+
+Every block a `context_build` callback adds costs tokens on every request. A
+`spec.context_budget` caps them, Python Linch's `ContextBudget`:
+
+```python
+spec = {
+    "model": "claude-sonnet-4-6",
+    "context_budget": {
+        "max_tokens": 2000,
+        "pinned": ["policy"],
+        "drop_order": ["memory", "linch.deep-agent.file-memory-context"],
+    },
+}
+```
+
+| Field | What it controls |
+|---|---|
+| `max_tokens` | Most estimated tokens (four characters per token, rounded up per block) the callbacks may add to one request; at least 1 |
+| `drop_order` | `policy_id`s of callbacks, the one dropped first at the front |
+| `pinned` | `policy_id`s of callbacks whose blocks are never dropped; an id is in one list at most |
+
+**What it counts.** Only what `context_build` callbacks add: retrieved memory
+(`retrieval`, policy id `memory` unless you set one), the deep agent's file
+memory (`linch.deep-agent.file-memory-context`), and anything else a
+callback returns, all against one cap. The system prompt, the tools and the
+logged conversation are not counted: the spec owns the first two, and
+[compaction](#compaction) owns the conversation.
+
+**What goes first.** Whole blocks are dropped until the rest fits, and no more
+than that. Blocks of callbacks named in neither list go first, the later
+callback's before the earlier one's; then those in `drop_order`, the first
+listed first; a `pinned` callback's never. Inside one callback the last block
+goes first, so a retrieval store that returns its best chunk first keeps it
+longest. If the pinned blocks alone are over the cap, they stay and the request
+goes over by that much.
+
+**What an overflow does.** It never fails the run, compacts nothing and
+changes nothing in the session: the dropped blocks are simply not sent. The
+`context_build` event's `budget` reports each request's decision
+([Events](./events.md#contextbuildevent-context_build)): `max_tokens`,
+`used_tokens`, `remaining_tokens`, `trimmed`, `over_by` when pinned blocks
+exceed the cap, and `dropped`, one `{source, index, tokens}` per block, `index`
+being the block's position among its callback's blocks. A retrieval callback's
+`metadata["memory"]["ids"]` still lists every chunk it found, so use `index` to
+tell which of them were sent. In Python, `ContextBuildEvent.dropped` gives
+these as `DroppedContext`s.
+
+**Durability.** The budget is part of the run contract, so a run is not
+resumed under another budget. The decision itself is recomputed for every
+request from the callbacks' answers and is not stored for recovery; a resumed
+run decides again. With no budget, `budget` is `{}` and nothing is counted.
+
 ### Why a callback and not a connector type
 
 Python Linch has `RagConnector`, a protocol the context builder calls, and
@@ -371,6 +424,9 @@ rides the tail of the request, so retrieval never moves the cached prefix.
 | `reset_read_tracker` after a compaction | Built in for workspace agents |
 | `TruncationRecovery` | `spec.truncation_recovery` |
 | `RagConnector`, `ContextBuilder`, `FileMemoryContextBuilder` | A `context_build` callback; `linch_rust.memory.retrieval` |
+| `ContextBudget` on a builder's result | `spec.context_budget`, on the callbacks' blocks, by a declared `drop_order` and `pinned` (Python drops oldest messages, then oldest system blocks) |
+| `SystemPromptConfig` | `spec.system` ([Agent config](./agent.md#system-sections)) |
+| `register_grounding_check` | Not built: it needs the ids retrieved in the run, shared by two callbacks, and a correction budget; `stop` retries are bounded to one per run call unless `spec.verification` is set |
 
 ## Related pages
 

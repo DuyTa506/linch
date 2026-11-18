@@ -281,6 +281,7 @@ config, refusing unknown fields and a cap of 0; `tokens`
 | `stores.max_connections` at most the tenant's `max_pool_connections` (default: the server's default pool size); absent, it is set to the default or the cap, whichever is smaller | `pool_connections`, with `data.max` the cap | `admit.rs:90-105` |
 | An MCP stdio server only with an entry's `command` and `args`, setting only the `env` names it lists; an MCP URL only at an allowed origin | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |
 | At most `MAX_GUARDRAILS` (32) redaction rules and verifiers, and keywords per verifier, each pattern at most `MAX_PATTERN_BYTES` (1024) bytes: the server compiles and runs them on every response | `redaction`, `verification` | `admit_guardrails` in `admit.rs` |
+| At most 16 `spec.system` sections (names up to 64 bytes, texts up to 16 KiB, 64 KiB in all with `append`), and at most 32 ids of 128 bytes in each `context_budget` list; the operator's `system_sections` replace a same-named section and are added first, on every admission | `system`, `context_budget` | `admit_system` in `admit.rs` |
 
 A run method's `principal`, when given, must name the tenant
 (`admit_principal`, `admit.rs:138-152`). A resume, approve or answer

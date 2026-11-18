@@ -221,7 +221,7 @@ Request cho lời gọi model kế tiếp đã được lắp ráp; lời gọi 
 | `system_blocks` | Số system block |
 | `messages` | Số message hội thoại được gửi |
 | `selected_tools` | Tên các tool được cấp trong request này |
-| `budget` | Kế toán context; `{}`, vì server không cắt bớt context |
+| `budget` | Quyết định của [context budget](./memory.md#context-budget) cho request này: `{}` khi không có `spec.context_budget`; khi có thì gồm `max_tokens`, `used_tokens`, `remaining_tokens`, `trimmed`, `dropped` (một danh sách `{source, index, tokens}`) và `over_by` khi các block pinned vượt mức trần. `ContextBuildEvent.dropped` trong Python đọc danh sách đó |
 | `metadata` | Những gì các callback `context_build` trả về trong `metadata`, được gộp lại, key của callback đến sau thắng; `{}` nếu không có. Ở lượt mà `tool_choice` có tên không được request đưa ra, `tool_choice_dropped` chứa tên tool |
 
 ### `UsageEvent` (`usage`)

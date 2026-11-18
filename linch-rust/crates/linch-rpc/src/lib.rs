@@ -372,7 +372,7 @@
 //! | `permission_request` | `tool_use_id, tool_name, input, reason?, principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
 //! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 //! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
-//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning |
+//! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning; the blocks count against `spec.context_budget` when set, by the callback's `policy_id`, and the event's `budget` reports what was dropped |
 //! | `before_provider_call` | `turn, request` (the provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}` |
 //! | `after_provider_call` | `turn, assembly` (the response just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}` (or `"force_continue"`), `{"action": "block", "reason"}` |
 //! | `stop` | `text`, `structured_output` (only with an output schema: `text` parsed and checked) | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |

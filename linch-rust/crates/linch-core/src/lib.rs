@@ -22,6 +22,7 @@ pub mod budget;
 pub mod canonical;
 pub(crate) mod catalog;
 pub mod compaction;
+pub mod context_budget;
 pub mod coordination;
 pub mod events;
 pub mod hooks;
@@ -45,6 +46,7 @@ pub mod skills;
 pub mod store;
 mod structured;
 pub mod subagents;
+pub mod system;
 pub mod tool;
 pub mod tool_search;
 pub mod truncation;
@@ -59,6 +61,7 @@ pub use canonical::{
     digest_with_domain, to_canonical_string,
 };
 pub use compaction::CompactionSpec;
+pub use context_budget::ContextBudget;
 pub use coordination::{Correlator, InMemoryMailbox, Mailbox, MailboxError, MailboxMessage};
 pub use events::{
     Envelope, Event, EventError, IgnorableEvent, Persistence, SubagentEvent, WIRE_VERSION,
@@ -107,6 +110,7 @@ pub use store::{
     TaskStatus, TaskStore,
 };
 pub use subagents::{SubagentDefinition, Workers};
+pub use system::{SystemConfig, SystemSection};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };

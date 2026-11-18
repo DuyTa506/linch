@@ -196,3 +196,29 @@ async fn a_tenant_may_lower_the_provider_concurrency_not_raise_it() {
         assert_eq!(config.max_provider_concurrency.map(NonZeroU32::get), asked);
     }
 }
+
+/// Admitting a config twice, as a stored background config is admitted
+/// again, adds the operator's sections once and keeps the tenant's.
+#[tokio::test]
+async fn admitting_a_config_again_adds_the_operator_sections_once() {
+    use linch::{AgentConfig, SystemSection};
+
+    let policy = SystemSection::new("policy", "Company policy.").order(-1);
+    let allow = Allowlists::new()
+        .scripted_provider(true)
+        .system_sections(std::slice::from_ref(&policy))
+        .unwrap();
+    let tenant = Tenant::new("acme", allow).unwrap();
+    let mut config: AgentConfig = serde_json::from_value(serde_json::json!({
+        "namespace": "acme",
+        "spec": {"model": "m", "system": {"sections": [
+            {"name": "policy", "text": "Mine."}, {"name": "tone", "text": "Brief."}]}},
+        "provider": {"id": "scripted", "turns": []},
+    }))
+    .unwrap();
+    tenant.admit(&mut config).await.unwrap();
+    let once = config.spec.system.sections.clone();
+    assert_eq!(once, [policy, SystemSection::new("tone", "Brief.")]);
+    tenant.admit(&mut config).await.unwrap();
+    assert_eq!(config.spec.system.sections, once);
+}

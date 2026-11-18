@@ -50,7 +50,7 @@ encoding.
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
 | `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | One per `AskUser` call before a `suspended` of status `awaiting_input`; `questions` is new and left out when empty |
 | `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Ends a suspended run's stream instead of `result`; status `awaiting_approval` or `awaiting_input` |
-| `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | |
+| `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | `budget` is `{}` unless `spec.context_budget` is set |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:113` | yes | yes | |
 | `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | A spec `budget` (`crates/linch-core/src/budget.rs`): `warning` right after the `usage` that crossed the ratio, once per run tree; `exceeded` in the terminal write, before its `error` |
