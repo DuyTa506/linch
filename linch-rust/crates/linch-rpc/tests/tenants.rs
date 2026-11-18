@@ -63,6 +63,7 @@ async fn a_principal_must_name_the_connections_tenant() {
             method::RUN_APPROVE,
             json!({"run_id": "r1", "decisions": {}}),
         ),
+        (method::RUN_ANSWER, json!({"run_id": "r1", "answers": {}})),
     ];
     for (name, mut params) in calls {
         params["agent"] = json!(agent);

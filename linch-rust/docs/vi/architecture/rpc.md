@@ -58,10 +58,11 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `connection.auth` | `AuthParams` (`protocol.rs:62`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), chỉ là message đầu tiên trên socket; ở nơi khác là `-32600` | `Authenticated` `{tenant}` |
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:19-48`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:51-75`; `-32002` khi kết nối đang điều khiển một run của nó | `{}` sau khi các MCP server của nó đã tắt |
-| `session.close` | `SessionCloseParams` | `agents.rs:76-85`: `Agent::close_session` | `{}` |
+| `session.close` | `SessionCloseParams` | `agents.rs:76-86`: `Agent::close_session` (quên các lần đọc của session, kill các lệnh `Bash` chạy nền của nó) | `{}` |
 | `run.start` | `StartParams` (`protocol.rs:154`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, rồi các notification |
 | `run.resume` | `ResumeParams` (`protocol.rs:178`) | `run.rs:45-50`, qua `claim` | như trên |
 | `run.approve` | `ApproveParams` (`protocol.rs:191`) | `run.rs:52-58`, qua `claim` | như trên |
+| `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
 | `run.cancel` | `CancelParams` | `run.rs:60-69`: hủy một run mà kết nối này điều khiển | `{cancelled}` |
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, các envelope bền vững sau `after_seq` |
 
@@ -90,7 +91,7 @@ docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32004 | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó |
 | -32005 | Đạt một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 đến -32015 | `agent.open`: `BuildError`, provider, store và MCP server không khả dụng |
-| -32020 đến -32031 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` không dùng được |
+| -32020 đến -32032 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` không dùng được, một câu trả lời không khớp (`-32032`, `data.reason`) |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng

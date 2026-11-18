@@ -38,6 +38,27 @@ impl BatchPlan {
             .any(|call| matches!(call.action, PlannedAction::AwaitingApproval { .. }))
     }
 
+    /// Whether an `AskUser` call waits for the user. Once no call awaits
+    /// approval, the run must then suspend for input without executing the
+    /// plan.
+    pub fn is_awaiting_input(&self) -> bool {
+        self.calls
+            .iter()
+            .any(|call| matches!(call.action, PlannedAction::AwaitingInput))
+    }
+
+    /// Give every call awaiting input the error `message`, for a run that
+    /// cannot suspend (a subagent's).
+    pub(crate) fn refuse_inputs(&mut self, message: &str) {
+        for call in &mut self.calls {
+            if matches!(call.action, PlannedAction::AwaitingInput) {
+                call.action = PlannedAction::Error {
+                    error: ToolOutputError::new(message),
+                };
+            }
+        }
+    }
+
     /// Refuse each call whose tool did not resolve with the error
     /// `message` gives for its name, when it gives one.
     pub(crate) fn refuse_unresolved(&mut self, message: impl Fn(&str) -> Option<String>) {
@@ -118,6 +139,9 @@ pub enum PlannedAction {
         /// Why approval is needed, for the approval prompt.
         reason: Option<String>,
     },
+    /// Permission allowed an `AskUser` call ([`crate::Tool::asks_user`]);
+    /// it waits for the user's answer, and the run suspends for input.
+    AwaitingInput,
 }
 
 /// Decide every call in `blocks`, in order, without running any tool.
@@ -133,8 +157,12 @@ pub enum PlannedAction {
 /// recorded deny always denies (whatever the input), and nothing overrides
 /// a fresh deny.
 ///
+/// An allowed call of a tool that asks the user ([`crate::Tool::asks_user`])
+/// awaits input instead of running, unless a hook served its result.
+///
 /// Returns one entry per block, in order. When any entry awaits approval
-/// ([`BatchPlan::is_awaiting_approval`]) the run must suspend instead of
+/// ([`BatchPlan::is_awaiting_approval`]) or input
+/// ([`BatchPlan::is_awaiting_input`]) the run must suspend instead of
 /// calling [`super::execute`].
 pub async fn plan(
     blocks: &[ToolUseBlock],
@@ -196,6 +224,12 @@ impl Planner<'_> {
         // An allow keeps `Run`, or the `Serve` a hook asked for; a deny or an
         // ask discards a served result.
         match self.permission(&mut call, tool).await {
+            // A hook may serve the answer; otherwise the user gives it.
+            PermissionDecision::Allow {}
+                if tool.tool().asks_user() && call.action == PlannedAction::Run =>
+            {
+                call.action = PlannedAction::AwaitingInput;
+            }
             PermissionDecision::Allow {} => {}
             PermissionDecision::Deny { reason } => call.action = PlannedAction::Denied { reason },
             PermissionDecision::Ask { reason } => {

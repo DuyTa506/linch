@@ -62,12 +62,20 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `InvalidOutputSchema` (code -32031, `RunError::InvalidOutputSchema`): a run's own schema does not compile or its root is not an object; nothing is written.
 - `InitEvent.output_schema`: only the first `init` of a run started with its own schema has it; other events are unchanged, but a binary older than this one cannot read the events of a run whose `init` has one.
 - Anthropic, OpenAI Chat, OpenAI Responses and Gemini send the output schema in their native structured-output form (`output_config.format`, `response_format`, `text.format`, `responseMimeType` with `responseJsonSchema`); no forced final tool. The shapes follow each vendor's API docs and have not been run against a live API. A fallback model (`spec.fallback_models`) is sent the same schema and its answers are checked the same way.
+- `AskUser` (config `ask_user: true`, off by default, as Python's opt-in `AskUserPlugin`): 1 to 4 questions with 2 to 4 options each; a call suspends the run with an `input_request` event (its `questions`) and a `suspended` event of status `awaiting_input`. A subagent's call gets an error instead.
+- `Agent.answer(run_id, {tool_use_id: Answer(...)})`, `run.answer` and `Agent::answer` commit each answer as its call's result and continue the run; a request left out is asked again, `Answer.declined(note)` declines. The answer is durable before the run goes on, so a crash never asks twice or answers twice.
+- `InvalidAnswer` (code -32032, `RunError::InvalidAnswer`): an answer that names no pending request, misses a question or answers a single-select question with a list; nothing is written.
+- `Phase::AwaitingInput` and `InputRequestEvent.questions` are new in the journal; other checkpoints and events are unchanged, but a binary older than this one cannot resume a run waiting for input.
+- `Bash` takes `run_in_background`: the command runs on after the call returns its `process_id`; `BashOutput` (read scope) returns what it printed since the last read, waiting up to `wait_ms` for it to end, and `BashKill` (exec scope) kills its process group. At most 4 run at once per session; each is killed after `timeout_ms` (30 minutes by default), when its session closes, when its agent closes and when the server dies, even by SIGKILL.
+- A background process does not survive a server restart: `BashOutput` and `BashKill` on an id from before it fail with `no_such_process`, saying so.
 
 ### Changed
 
 - `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
 
 - `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.
+- A workspace agent now also has `BashOutput` and `BashKill` (`bash: false` leaves all three out), so its run contract changes: a run started under an older binary cannot be resumed.
+- `agent.close_session` and `session.close` also kill the session's background `Bash` commands.
 - DeepSeek and the vLLM, SGLang and llama.cpp profiles still refuse an output schema, now saying why: no native JSON-schema response format that carries the schema.
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
@@ -77,6 +85,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   hooks do; a plain function runs in a worker thread.
 - `Edit` accepts an empty `old_string`, as Python's does, instead of refusing it as invalid input: an empty file takes `new_string`; a non-empty file is refused as ambiguous unless `replace_all` is set, which inserts at every position and needs the whole file read.
 - `Edit` and `Write` on a file changed since it was read now say `Read this file again before editing it.` / `Read this file again before writing it.` (were `<path> changed since it was last read; Read it again.`), and `Read` of a file that changed mid-read says `File changed while reading; Read this file again.`, the words Python's tools use. The error codes are unchanged.
+
+### Upgrading
+
+- Runs of workspace agents started before this release cannot be resumed: the workspace tool list gained `BashOutput` and `BashKill`, so the run contract changed and a resume ends with `ContractMismatch`. Let those runs finish on the old binary, or start new runs.
 
 ## 0.1.1 - 2026-11-07
 

@@ -162,6 +162,7 @@ write happens.
 |---|---|---|
 | `Started`, `AssistantReceived`, `Compacted` | Through, at once | unchanged |
 | `AwaitingApproval` | Through, at once | `awaiting_approval` |
+| `AwaitingInput` | Through, at once | `awaiting_input` |
 | `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` | Held | unchanged |
 
 A held checkpoint is a snapshot: it covers only the events pending when it
@@ -195,8 +196,8 @@ write past a barrier. Three kinds of write do not wait for the next barrier:
 - A tool end. It is flushed right after the tool returns, from
   `tool_finished`, so a resume finds the result and does not run the tool
   again (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).
-- A suspend. `AwaitingApproval` writes through with its status
-  (`journal.rs:195`).
+- A suspend. `AwaitingApproval` and `AwaitingInput` write through with
+  their status (`journal.rs:196-197`).
 
 A call that runs no tool (served by a hook, refused, denied or aborted) has
 its start and end staged without a flush. They reach the store with the next
@@ -272,24 +273,37 @@ A call that still needs approval after the `permission_request` chain
 suspends the run. `suspend` stages a `permission_request` event and a
 `suspended` event, parks the subagent family (if the agent has subagents) so
 its children outlive the stream, and saves `AwaitingApproval` with the pending ids
-(`batch.rs:147-183`). That write-through sets the status
+(`batch.rs:155-183`). That write-through sets the status
 `awaiting_approval` (`journal.rs:195`). The stream ends with `Suspended`
 instead of `Result`. The run then waits in the store with status
 `awaiting_approval`; only a claim takes it back to `running`
 ([stores](./stores.md#run-store)). A failed write takes the park back
-(`batch.rs:177-182`).
+(`batch.rs:217-229`).
+
+An `AskUser` call ([tools](./tools.md#askuser)) suspends the same way once
+no call of the batch still needs approval: the plan marks it
+`PlannedAction::AwaitingInput`, and `suspend_for_input` stages one
+`input_request` per call (its questions) and a `suspended` event, then saves
+`AwaitingInput` with the pending ids, which sets `awaiting_input`
+(`batch.rs:188-217`). The other calls of that batch wait with it. A child
+run cannot wait for the user: its `AskUser` calls are refused with an error
+result before the batch runs (`batch.rs:76`).
 
 ### Resume and approve
 
 `Agent::resume` continues a run after a crash, a lost lease or a dropped
 stream. `Agent::approve` answers the pending calls of a suspended run and
-continues it (`agent.rs:253-288`). Both enter `continue_run`
+continues it, and `Agent::answer` answers its pending `AskUser` calls
+(`agent.rs:272-332`). All three enter `continue_run`
 (`runner/start.rs:175-333`):
 
 1. A token that is already cancelled does nothing: no claim, no write
    (`start.rs:185-187`).
-2. `check` refuses a terminal run, a run of another contract, and an approve
-   on a run that is not awaiting approval. It runs before the claim, so a
+2. `check` refuses a terminal run, a run of another contract, an approve
+   on a run that is not awaiting approval, and an answer on one that is not
+   awaiting input (`start.rs:534-563`). `check_answers` refuses an answer
+   that does not fit the latest `input_request` questions with
+   `InvalidAnswer` (`start.rs:565`). It runs before the claim, so a
    mistaken call does not fence a live owner, and again after it
    (`start.rs:189-207`, `414-439`).
 3. `claim` takes the lease and adds 1 to the epoch, which fences out the
@@ -301,6 +315,12 @@ continues it (`agent.rs:253-288`). Both enter `continue_run`
 6. For an approve, the host's answers are recorded as decisions and committed
    with a `ToolBatch` checkpoint before the run goes on, so a crash after
    that keeps them (`start.rs:259-261, 329-331`, `batch.rs:199-214`).
+   For an answer, each answered call's `tool_call_start` and
+   `tool_call_end` (the rendered answer) are staged after the `init` and
+   committed with a `ToolBatch` checkpoint before the run goes on
+   (`start.rs:220`, `306-330`). The model then reads a durable result, as
+   for any tool that ran. No `pre_tool_use`, `post_tool_use` or
+   `tool_use_start`/`tool_use_stop` hook sees an answer.
 
 What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 
@@ -311,6 +331,7 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 | `AssistantReceived` | `Received` | Append the response unless it is in the session, then branch on its tool calls; with `retry_feedback`, send that feedback instead, without asking the hook again |
 | `ToolBatch` | `ToolBatch` | Each call: its durable result, a placeholder, or a re-plan |
 | `AwaitingApproval` | `AwaitingApproval` | Re-plan with the recorded decisions; suspend again if one still needs an answer |
+| `AwaitingInput` | `AwaitingInput` | With an answer, its results, then the rest of the batch; without one (a resume), suspend again with the same pending ids |
 | `ToolResults` | `ToolResults` | Append the message unless it is in the session, then the next turn |
 | `CompactionPending` | `Recompact` or `Redispatch` | Another summary attempt, or the primary call when the summary call already settled without a summary |
 | `Compacted` | `Compacted` | Append the projection unless it is in the session, then dispatch |
@@ -332,8 +353,8 @@ A recorded allow covers only the input the host saw, and a recorded deny
 always denies (`scheduler.rs:59-66`). Reconcile fails when the session log
 does not fit the checkpoint (`journal/reconcile/session.rs:9-22`).
 
-A retried approve gets `NotSuspended`: once an approve has committed its
-answers the run is in `ToolBatch`, and the host continues it with `resume`
+A retried approve or answer gets `NotSuspended`: once it has committed the
+run is in `ToolBatch`, and the host continues it with `resume`
 (`agent.rs:262-273`, `start.rs:432-437`).
 
 ## Terminals

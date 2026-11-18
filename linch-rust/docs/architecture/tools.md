@@ -168,9 +168,10 @@ its start and end staged and written with the next barrier. See
 
 ## Workspace tools
 
-`workspace_tools(fs, reads)` (`crates/linch-tools/src/lib.rs:51`) returns
-`Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash` over one `LocalFs`, sharing
-one `ReadTracker`. The crate is Unix-only because Bash uses process groups.
+`workspace_tools(fs, reads, processes)` (`crates/linch-tools/src/lib.rs:55`)
+returns `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
+`BashKill` over one `LocalFs`, sharing one `ReadTracker` and one `Processes`
+registry. The crate is Unix-only because Bash uses process groups.
 
 | Tool | Scope | Behavior |
 |---|---|---|
@@ -180,6 +181,8 @@ one `ReadTracker`. The crate is Unix-only because Bash uses process groups.
 | `Grep` | read | ripgrep's engine in process; modes `files_with_matches`, `count`, `content`; default 250 entries, output capped at 30 000 bytes (`crates/linch-tools/src/grep.rs:15-25`) |
 | `Glob` | read | ripgrep glob rules, newest first, at most 1000 paths (`crates/linch-tools/src/glob.rs:13`) |
 | `Bash` | exec | `/bin/sh -c` in the root; see below |
+| `BashOutput` | read | Unread output of a background command; see [below](#background-bash) |
+| `BashKill` | exec | Kills a background command's group |
 
 Grep and Glob skip ignored files and do not follow symlinks; Grep also skips
 hidden and binary files, and Glob lists hidden files only when the pattern
@@ -217,20 +220,56 @@ Use the permission engine (it asks for `exec` by default) or a sandboxed
 execution world when that matters. What it does guarantee:
 
 - stdin is closed and the command leads a new process group
-  (`crates/linch-tools/src/bash/process.rs:66`);
+  (`crates/linch-tools/src/bash/process.rs:91-117`);
 - the whole group gets `SIGKILL` on timeout, on cancel, when the call's future
   is dropped, and when the shell exits, so background jobs never outlive the
-  call (`process.rs:135-148`);
+  call (`process.rs:122-170`);
 - only nine host variables pass through (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), so host credentials stay
   out of the environment (`bash.rs:33`); `with_env` adds more (`bash.rs:82`);
-- the timeout defaults to 120 s and is capped at 30 min (`bash.rs:22-25`);
+- the timeout defaults to 120 s (30 min in the background) and is capped at
+  30 min (`bash.rs:29-32`);
   with a call deadline it ends 100 ms before it, so the output so far reaches
   the model instead of a generic timeout (`bash.rs:140`);
 - each stream keeps its first 4000 and last 26 000 bytes
   (`bash/capture.rs:5-8`);
 - any exit status but 0 is an error result carrying the same text, with code
-  `exit_status`, `timeout` or `aborted` (`bash.rs:151`).
+  `exit_status`, `timeout` or `aborted` (`bash.rs:240-244`).
+
+### Background Bash
+
+`run_in_background: true` hands the command to the agent's `Processes`
+registry (`crates/linch-tools/src/bash/background.rs:48`) and returns its id
+at once. The registry belongs to one opened agent (no process global), keys
+processes by session, and lets each session run at most `MAX_RUNNING` (4) at
+once, keeping up to 16 finished ones for a last read (`background.rs:28-32`).
+Ids are `bash_` and 12 random hex digits, so an id from before a restart
+never names a new process.
+
+- One supervisor task per process owns the `Child`: it runs the same
+  `supervise` as a foreground call, pumping each stream into a bounded capture
+  that a read takes from (head 4000 and tail 26 000 bytes of what is unread),
+  and reaps the shell whatever ends it.
+- It ends on exit, its timeout, `BashKill`, `Processes::close_session` (wired
+  to `Agent::close_session`), `Processes::close` and the registry's `Drop`
+  (the agent closing). Each kills the whole group and waits for the reap.
+- **The lifeline.** A background command runs under a small `/bin/sh` wrapper
+  (`process.rs:34`) whose stdin is a pipe the server holds. A watchdog in the
+  command's group blocks on that pipe with the `read` builtin and kills the
+  group when it closes, which the kernel does when the server dies, even by
+  `SIGKILL`. It needs nothing on the command's `PATH`. A foreground command
+  has no lifeline: it dies with its call, but a server killed mid-call leaves
+  it running.
+- `BashOutput` (read scope, parallel) waits up to `wait_ms` (at most
+  600 000, cut to the call's deadline) for the end, then returns the unread
+  output; a running process is a success ending in `still running`, an ended
+  one renders as a foreground result. `BashKill` is exec scope like `Bash`.
+  Both are in `crates/linch-tools/src/bash/control.rs`.
+- **Restart.** Processes live in memory only and die with the server, so a
+  resumed run's `BashOutput` or `BashKill` on an earlier id fails with code
+  `no_such_process` (`control.rs:22`) and a message that says background
+  processes do not survive a restart. Nothing about them is journaled: the
+  start call's durable result keeps its id, and the model starts it again.
 
 ## Virtual filesystem and result offload
 
@@ -291,6 +330,29 @@ file back is never offloaded again (`offload.rs:51-62`).
 
 With `MemorySessions`, a run resumed in another process finds the pointer but
 not the file.
+
+## AskUser
+
+`AskUser` (`crates/linch-core/src/ask_user.rs`) lives in `linch-core`,
+because the runner has to know it: it is the one tool whose `asks_user()`
+(a defaulted `Tool` method, `false` elsewhere) is `true`. `AgentConfig`
+registers it when `ask_user` is on; it is off by default, as Python's
+`AskUserPlugin` is opt-in.
+
+- Its input is 1 to 4 questions (`id`, `header` of at most 12 characters,
+  `question`, 2 to 4 options of `label` and `description`, `multi_select`);
+  ids and labels must be unique. Scope `read`, never parallel.
+- The planner turns an allowed `AskUser` call into
+  `PlannedAction::AwaitingInput` instead of running it; a `pre_tool_use` hook
+  that resolves it keeps its answer. The run then suspends for input
+  ([turn lifecycle](./turn-lifecycle.md#suspend)). `execute` itself only
+  returns the "cannot wait" error, which is what a child run's call gets.
+- `AskUserAnswer::check` holds an answer to its questions: accepted, every
+  question answered (a non-empty string, or a non-empty list for
+  `multi_select`); declined, no answers. A choice is not checked against the
+  labels, so the user can write their own, as in Python.
+- `AskUserAnswer::render` is the call's result: `{"answers": {...}}` (and
+  `note`) as JSON text, or Python's decline text.
 
 ## Session task tools
 
@@ -418,16 +480,17 @@ use std::sync::Arc;
 
 use linch_core::{Hooks, Registration, ToolRegistry};
 use linch_tools::vfs::{MemorySessions, OffloadConfig, ResultOffload, SessionFiles, vfs_tools};
-use linch_tools::{LocalFs, ReadTracker, workspace_tools};
+use linch_tools::{LocalFs, Processes, ReadTracker, workspace_tools};
 
 /// Register the workspace tools over `root`, the virtual filesystem tools,
 /// and the offload hook. Keep the handles to undo every registration.
 fn wire(root: &Path, tools: &ToolRegistry, hooks: &Hooks) -> Vec<Registration> {
     let fs = Arc::new(LocalFs::new(root).expect("an existing directory"));
     let reads = Arc::new(ReadTracker::new());
+    let processes = Arc::new(Processes::new());
     let files: Arc<dyn SessionFiles> = Arc::new(MemorySessions::new());
     let mut registrations = Vec::new();
-    for tool in workspace_tools(fs, reads).into_iter().chain(vfs_tools(Arc::clone(&files))) {
+    for tool in workspace_tools(fs, reads, processes).into_iter().chain(vfs_tools(Arc::clone(&files))) {
         registrations.push(tools.register(tool).expect("names are free"));
     }
     let offload = ResultOffload::new(files, OffloadConfig::new(8_000)).expect("a valid prefix");
@@ -438,7 +501,7 @@ fn wire(root: &Path, tools: &ToolRegistry, hooks: &Hooks) -> Vec<Registration> {
 fn main() {
     let (tools, hooks) = (ToolRegistry::new(), Hooks::default());
     let registrations = wire(&std::env::temp_dir(), &tools, &hooks);
-    assert_eq!(tools.snapshot().definitions().len(), 10);
+    assert_eq!(tools.snapshot().definitions().len(), 12);
     for registration in &registrations {
         registration.dispose();
     }

@@ -1,5 +1,6 @@
-//! The `bash` switch: a workspace agent has `Bash` unless its config turns
-//! it off, and the switch is left out of a config's echo while it is on.
+//! The `bash` switch: a workspace agent has `Bash`, `BashOutput` and
+//! `BashKill` unless its config turns it off, and the switch is left out
+//! of a config's echo while it is on.
 
 use futures::StreamExt;
 use linch::provider::scripted::TurnBuilder;
@@ -36,7 +37,10 @@ async fn bash_is_a_workspace_tool_unless_the_config_turns_it_off() {
     assert!(all.iter().any(|tool| tool == "Bash"), "{all:?}");
     assert_eq!(tools(json!({"bash": true})).await, all);
     let without = tools(json!({"bash": false})).await;
-    let expected: Vec<String> = all.into_iter().filter(|tool| tool != "Bash").collect();
+    let bash = ["Bash", "BashOutput", "BashKill"];
+    let expected: Vec<String> = (all.into_iter())
+        .filter(|tool| !bash.contains(&tool.as_str()))
+        .collect();
     assert_eq!(without, expected);
 }
 

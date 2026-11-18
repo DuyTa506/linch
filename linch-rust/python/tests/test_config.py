@@ -262,8 +262,8 @@ async def test_bash_off_leaves_it_out_of_the_workspace_tools(tmp_path: Path) -> 
     on = tools_of(await run_once(config([text_turn("hi")], workspace=str(tmp_path))))
     off = tools_of(await run_once(config([text_turn("hi")], workspace=str(tmp_path), bash=False)))
 
-    assert "Bash" in on and "Read" in on
-    assert off == [name for name in on if name != "Bash"]
+    assert "Bash" in on and "BashOutput" in on and "BashKill" in on and "Read" in on
+    assert off == [name for name in on if name not in ("Bash", "BashOutput", "BashKill")]
 
 
 async def test_the_filesystem_tools_keep_files_for_the_session() -> None:

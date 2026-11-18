@@ -9,7 +9,8 @@ which calls run, ask or are denied.
 | Tools | Where they run | Turned on by |
 |---|---|---|
 | Host tools | In your Python process, called back by the server | `open_agent(config, tools=[...])` |
-| Workspace tools: `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash` | In the server, over one directory | `workspace` (and `bash`) |
+| Workspace tools: `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput`, `BashKill` | In the server, over one directory | `workspace` (and `bash`) |
+| `AskUser` | Suspends the run until you [answer](#ask-the-user) | `ask_user` |
 | Virtual filesystem: `ls`, `read_file`, `write_file`, `edit_file` | In the server, over text files kept in the stores | `filesystem` |
 | MCP tools: `mcp__<server>__<tool>` | In the MCP server | `mcp_servers` |
 | Session tasks: `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate` | In the server | `tasks` ([Tasks](./tasks.md)) |
@@ -235,7 +236,7 @@ next to other calls.
 ## Workspace tools
 
 `workspace` names an existing directory. The agent then has these tools over
-it (`bash: False` leaves out `Bash`):
+it (`bash: False` leaves out `Bash`, `BashOutput` and `BashKill`):
 
 | Tool | Scope | What it does |
 |---|---|---|
@@ -244,7 +245,9 @@ it (`bash: False` leaves out `Bash`):
 | `Edit` | write | Replaces exact text, once unless `replace_all` |
 | `Grep` | read | ripgrep's engine; modes `files_with_matches`, `count`, `content` |
 | `Glob` | read | ripgrep glob rules, newest first, at most 1000 paths |
-| `Bash` | exec | `/bin/sh -c` in the workspace root |
+| `Bash` | exec | `/bin/sh -c` in the workspace root; with `run_in_background` it returns at once ([below](#background-commands)) |
+| `BashOutput` | read | What a background command printed since the last read, and whether it ended |
+| `BashKill` | exec | Kills a background command's process group |
 
 ```python
 import asyncio
@@ -320,6 +323,42 @@ status: final
 
 Limits, the process-group kill and the output caps are in the
 [architecture tools page](../architecture/tools.md#workspace-tools).
+
+### Background commands
+
+`Bash` with `"run_in_background": true` starts the command and returns at
+once with its `process_id` (also in the call's `metadata`, with its `pid`):
+
+```text
+[started background process bash_add697562a64; read its output with BashOutput, stop it with BashKill; it is killed after 1800000 ms, when the session closes, or when the server stops]
+```
+
+The model then calls `BashOutput` with that `process_id`, which returns what
+the command printed since the last read. With `wait_ms` (up to 600000) it
+waits that long for the command to end first. A command still running reads
+as a success ending in `[bash_... still running; ...]`; an ended one reads as
+a foreground `Bash` result would (`[exit code 0]`, or an error for a nonzero
+exit or a timeout). `BashKill` kills its process group and returns the rest of
+its output.
+
+- **Lifetime.** A background command belongs to its session in this agent
+  handle and outlives the run that started it. It is killed after
+  `timeout_ms` (30 minutes by default, at most 30 minutes), by `BashKill`, by
+  `agent.close_session(session_id)`, by `agent.close()`, and when the server
+  stops, even by SIGKILL: a watchdog in its process group kills the group when
+  the server's end of a pipe closes.
+- **No restart survives it.** After a server restart, or from another agent
+  handle, its id names nothing: `BashOutput` and `BashKill` fail with
+  `no_such_process` and tell the model so. A resumed run that started one has
+  to start it again.
+- **At most 4 at once** per session; a fifth fails with `too_many_processes`.
+  Each read returns at most the first 4000 and the last 26000 bytes of each
+  stream's unread output.
+- **Permissions.** `BashOutput` is read scope, so it runs in every mode and in
+  parallel. `BashKill` is exec scope like `Bash`, so it asks in `default` and
+  `accept_edits`; allow it with `auto_allow: ["BashKill"]` or a `tool` rule.
+  Python Linch has one exec-scope `BashProcess` tool (`wait`, `status`,
+  `kill`) instead, so there even reading output asks.
 
 ## Permissions
 
@@ -533,6 +572,95 @@ One refund done, one needs a manager.
 To decide in code without suspending, declare a `permission_request`
 [callback](./agent.md#callbacks): it answers `allow` or `deny` before the run
 would suspend, and when it gives no answer the call asks as usual.
+
+## Ask the user
+
+`ask_user: True` gives the model `AskUser`: one to four questions, each with a
+short `header` (at most 12 characters), two to four options (`label`,
+`description`) and `multi_select`. A call does not run: it ends the stream with
+an `input_request` event (`kind` `ask_user`, `request_id` the call's
+`tool_use_id`, the `questions`) and a `suspended` event of status
+`awaiting_input`. Nothing waits in memory: answer when you are ready with
+`agent.answer(run_id, answers)`, which continues the run and returns its new
+stream.
+
+```python
+import asyncio
+
+from linch_rust import AgentConfig, Answer, InputRequestEvent, ResultEvent, Server
+from linch_rust.scripted import MODEL, text_turn, tool_turn
+
+QUESTIONS = {
+    "questions": [
+        {
+            "id": "db",
+            "header": "Database",
+            "question": "Which database should the service use?",
+            "options": [
+                {"label": "Postgres", "description": "Durable, shared by every server"},
+                {"label": "Memory", "description": "For tests; gone on restart"},
+            ],
+        }
+    ]
+}
+
+config: AgentConfig = {
+    "namespace": "ask-demo",
+    "spec": {"model": MODEL},
+    "provider": {
+        "id": "scripted",
+        "turns": [tool_turn("ask_1", "AskUser", QUESTIONS), text_turn("Postgres it is.")],
+    },
+    "ask_user": True,
+}
+
+
+async def main() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config)
+        run = await agent.run("s1", "Set up storage")
+        answers: dict[str, Answer] = {}
+        async for envelope in run:
+            event = envelope.event
+            if isinstance(event, InputRequestEvent):
+                for question in event.questions:
+                    labels = [option["label"] for option in question["options"]]
+                    print(question["question"], labels)
+                # A UI would show the options and wait for the user.
+                answers[event.request_id] = Answer({"db": "Postgres"})
+        # The stream ended with `suspended` (status `awaiting_input`).
+        result = await (await agent.answer(run.id, answers)).result()
+        assert isinstance(result, ResultEvent)
+        print(result.final_text)
+
+
+asyncio.run(main())
+```
+
+```text
+Which database should the service use? ['Postgres', 'Memory']
+Postgres it is.
+```
+
+- `Answer({question_id: choice})` answers every question: a string, or a list
+  of strings for a `multi_select` one. A choice is normally an option's label,
+  but the user may write their own. `note=` adds a free note.
+- `Answer.declined(note)` declines: the model is told to go on with stated
+  assumptions.
+- The model reads the answer as the call's result, as JSON:
+  `{"answers": {"db": "Postgres"}}`, with `"note"` when there is one.
+- A pending request with no answer is asked again: the run suspends once more.
+  An answer that names no pending request, leaves a question out or gives a
+  list to a single-select question raises `InvalidAnswer` (code -32032) and
+  writes nothing; the run still waits.
+- The answer is written before the run goes on, so after a crash
+  `agent.resume(run_id)` continues with it, and the same answer sent again is
+  `NotSuspended` ([Runs](./runs.md#answer)).
+- A `pre_tool_use` [callback](./agent.md#callbacks) that resolves the call
+  answers for the user, and the run does not suspend. A subagent cannot ask:
+  its call gets an error saying the run cannot wait for the user.
+- A response that both asks and needs an approval suspends for the approval
+  first, then for the answer.
 
 ## Virtual filesystem
 

@@ -13,7 +13,7 @@ exception class tells you its family:
 |---|---|---|
 | `ProtocolError` | -32700 to -32600 | A config or declaration the server cannot read |
 | `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed |
-| `RunError` and its subclasses | -32020 to -32031 | The end of a run's stream, or `agent.events` |
+| `RunError` and its subclasses | -32020 to -32032 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
 | `ConnectionClosed` | none | Any call or stream, when the server went away |
 | `LinchError` | none | The base of all of these, and misuse of `Server` |
@@ -119,14 +119,15 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 
 | Exception | Message | Cause | Fix |
 |---|---|---|---|
-| `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | The session has a run that is running or waiting for approval | Resume, approve or cancel `busy.run_id` first, or queue the prompt ([Runs](./runs.md#one-live-run-per-session)) |
+| `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | The session has a run that is running or waiting for an approval or an answer | Resume, approve, answer or cancel `busy.run_id` first, or queue the prompt ([Runs](./runs.md#one-live-run-per-session)) |
 | `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | No such run in the agent's stores; with memory stores, a different `Agent` handle started it, or the server restarted | With memory stores use the handle that started the run; with Postgres check the namespace and DSN |
-| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume` or `approve` of a finished run; `data["status"]` is its status | Start a new run in the session |
+| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` or `answer` of a finished run; `data["status"]` is its status | Start a new run in the session |
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (the names of `data`'s keys) | The agent's spec, tools or callbacks differ from the ones the run started with | Reopen with the original config, or let the run finish first ([The run contract](./agent.md#the-run-contract)) |
-| `NotSuspended` (-32027) | `run <id> is not awaiting approval; if an approve already committed its answers, continue the run with resume` | An approve sent again after its answers were committed (your process or the connection died) | Call `agent.resume(run_id)` ([Runs](./runs.md#approve)) |
+| `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | An approve or answer sent again after it was committed (your process or the connection died), or an answer to a run waiting for an approval | Call `agent.resume(run_id)` ([Runs](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | the callback's reason, in `.reason` | A `user_prompt_submit` callback blocked the prompt | Nothing was written; change the prompt or the callback |
 | `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` got a schema that does not compile, or whose root is not `{"type": "object"}` | Nothing was written; fix the schema ([Structured output](./structured-output.md)) |
+| `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (the reason in `.reason`) | `agent.answer` named a request that is not pending, left a question unanswered, or gave a list to a single-select question | Nothing was written and the run still waits; answer again ([Tools](./tools.md#ask-the-user)) |
 
 Raised by the call itself:
 
@@ -162,6 +163,9 @@ the run goes on.
 | `Read <path> before changing it.` | `Write` over an existing file or `Edit` without a `Read` in this session, or after `close_session` or a restart | Expected; the model reads, then writes |
 | `Read this file again before editing it.` / `... before writing it.` | The file changed on disk after the model read it | Expected; the model reads again, then retries |
 | `Tool execution was interrupted before a result was recorded; not re-running automatically on resume.` | The process died while the call ran | Check whether the effect happened before acting again |
+| `Background process <id> no longer exists in this session: ...` (code `no_such_process`) | `BashOutput` or `BashKill` named an id this agent handle does not know: the session was closed, the server restarted, or another handle started it | Expected after a restart; the model starts the command again ([Tools](./tools.md#background-commands)) |
+| `4 background processes already run in this session; ...` (code `too_many_processes`) | A fifth background `Bash` in one session | The model reads or kills one first |
+| `AskUser is not available here: this run cannot wait for the user...` | A subagent called `AskUser` | Expected; only the top-level run can ask |
 
 `@tool` itself raises at import time: `ValueError` for a scope that is not
 `read`, `write` or `exec` or a timeout that is not positive, and `TypeError`

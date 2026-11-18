@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use linch_core::ask_user::AskUser;
 use linch_core::{
     Agent, AgentBuilder, Hooks, InMemoryMailbox, Mailbox, MemoryRunStore, MemorySessionStore,
     PermissionEngine, PermissionMode, PermissionPolicy, Provider, RunStore, ScriptedProvider,
@@ -17,7 +18,7 @@ use linch_providers::{
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
     ServerOptions, anthropic, deepseek, gemini, openai,
 };
-use linch_tools::{LocalFs, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools};
+use linch_tools::{LocalFs, Processes, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools};
 
 use crate::config::{AgentConfig, McpConfig, ProviderConfig, ReasoningSummaryConfig, StoreConfig};
 use crate::deep;
@@ -59,7 +60,8 @@ impl AgentConfig {
     /// (for Postgres: takes the pool for the DSN from `pools`, connecting it
     /// and running the migrations when no open agent uses one), registers
     /// the session task tools over the session store when `tasks` is on
-    /// (kept on a failed open, as the workspace tools are), registers the
+    /// (kept on a failed open, as the workspace tools are), and `AskUser`
+    /// when `ask_user` is on, registers the
     /// virtual filesystem tools and the offload hook when the config
     /// turns them on (see [`FilesystemConfig`](crate::FilesystemConfig); a
     /// failed open takes them back), connects
@@ -68,7 +70,8 @@ impl AgentConfig {
     /// tool registered by then; see [`OpenedAgent::skipped`] for those
     /// left out), then builds the agent. Nothing is written to the stores. [`Agent::close_session`] drops what the workspace
     /// tools recorded as read in that session, so its next write must read
-    /// again, and the session's in-memory virtual files.
+    /// again, and the session's in-memory virtual files, and kills (and
+    /// reaps) its background `Bash` commands.
     ///
     /// Args:
     ///     tools: Registry the agent runs with. Tools already in it come
@@ -110,10 +113,11 @@ impl AgentConfig {
         provider.prepare().await;
         let window = provider.context_window(&self.spec.model);
         let reads = Arc::new(ReadTracker::new());
+        let processes = Arc::new(Processes::new());
         let root = match self.workspace {
             Some(root) => {
-                let reads = Arc::clone(&reads);
-                Some(register_workspace(&tools, root, reads, self.bash).await?)
+                let (reads, processes) = (Arc::clone(&reads), Arc::clone(&processes));
+                Some(register_workspace(&tools, root, reads, processes, self.bash).await?)
             }
             None => None,
         };
@@ -134,6 +138,10 @@ impl AgentConfig {
                 // The registry lives as long as the agent; the handle is not needed.
                 let _ = tools.register(tool)?;
             }
+        }
+        if self.ask_user {
+            // The registry lives as long as the agent; the handle is not needed.
+            let _ = tools.register(Arc::new(AskUser::new()))?;
         }
         let pg = pool.as_deref().and_then(Shared::pool);
         // Postgres stores keep the messages in a table too.
@@ -174,6 +182,7 @@ impl AgentConfig {
             .pricing(linch_providers::cost)
             .on_session_close(move |session| {
                 reads.forget(session);
+                processes.close_session(session);
                 forget(session);
             });
         if let Some(skills) = project.skills {
@@ -300,12 +309,14 @@ async fn disconnect(servers: Vec<McpServer>) {
     }
 }
 
-/// Register the workspace tools over `root`, sharing `reads`, with `Bash`
+/// Register the workspace tools over `root`, sharing `reads` and
+/// `processes`, with `Bash`, `BashOutput` and `BashKill`
 /// only when `bash` is on; returns the canonical root as a string.
 async fn register_workspace(
     tools: &ToolRegistry,
     root: PathBuf,
     reads: Arc<ReadTracker>,
+    processes: Arc<Processes>,
     bash: bool,
 ) -> Result<String, OpenError> {
     // `LocalFs::new` canonicalizes the root: blocking file system calls.
@@ -315,13 +326,20 @@ async fn register_workspace(
     };
     let fs = Arc::new(fs);
     let canonical = fs.root().display().to_string();
-    let wanted = |tool: &Arc<dyn Tool>| bash || tool.name() != "Bash";
-    for tool in workspace_tools(fs, reads).into_iter().filter(wanted) {
+    let wanted = |tool: &Arc<dyn Tool>| bash || !BASH_TOOLS.contains(&tool.name());
+    for tool in workspace_tools(fs, reads, processes)
+        .into_iter()
+        .filter(wanted)
+    {
         // The registry lives as long as the agent; the handle is not needed.
         let _ = tools.register(tool)?;
     }
     Ok(canonical)
 }
+
+/// The workspace tools that run commands, which the `bash` switch turns off
+/// together.
+const BASH_TOOLS: [&str; 3] = ["Bash", "BashOutput", "BashKill"];
 
 /// The run and session stores, the session store again as the task
 /// store, and for Postgres the pool's slot in `pools`, which the opened

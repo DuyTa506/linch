@@ -240,7 +240,7 @@ impl Allowlists {
     }
 
     /// How many runs the tenant's connections may drive at once, all
-    /// together: a `run.start`, `run.resume` or `run.approve` past it is
+    /// together: a `run.start`, `run.resume`, `run.approve` or `run.answer` past it is
     /// refused with `-32005`. A run holds its place until its `run.end`; a
     /// run that suspends with background subagents running keeps it until
     /// they end, or until its approve or resume takes it over.
@@ -278,8 +278,9 @@ impl Allowlists {
     }
 
     /// Whether a workspace agent gets `Bash`, which runs commands
-    /// unconfined, as the server's user. Off by default: the agent then
-    /// has no `Bash`, whatever its config's `bash` says.
+    /// unconfined, as the server's user, with `BashOutput` and `BashKill`
+    /// for its background commands. Off by default: the agent then has
+    /// none of the three, whatever its config's `bash` says.
     pub fn exec_tools(mut self, allowed: bool) -> Self {
         self.exec_tools = allowed;
         self

@@ -170,8 +170,9 @@ có, trừ `bash`.
 | `spec` | bắt buộc | Model, chỉ dẫn và giới hạn của vòng lặp ([bên dưới](#spec)) |
 | `provider` | bắt buộc | Provider của model, theo `id` ([Provider](./providers.md)) |
 | `stores` | `{"type": "memory"}` | Nơi run và session được lưu ([Kho lưu trữ](./stores.md)) |
-| `workspace` | không có: không có workspace tool | Một thư mục đã tồn tại, là gốc của `Read`, `Write`, `Edit`, `Grep`, `Glob` và `Bash` ([Tool](./tools.md#workspace-tool)). Đường dẫn tương đối được phân giải theo thư mục làm việc của server, cũng chính là của process này |
-| `bash` | `True` | Workspace tool có gồm `Bash` hay không. Không dùng tới nếu không có workspace |
+| `workspace` | không có: không có workspace tool | Một thư mục đã tồn tại, là gốc của `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` và `BashKill` ([Tool](./tools.md#workspace-tool)). Đường dẫn tương đối được phân giải theo thư mục làm việc của server, cũng chính là của process này |
+| `bash` | `True` | Workspace tool có gồm `Bash`, `BashOutput` và `BashKill` hay không. Không dùng tới nếu không có workspace |
+| `ask_user` | `False` | Model có `AskUser` hay không; tool này tạm dừng run cho đến khi bạn trả lời ([Tool](./tools.md#hỏi-người-dùng)) |
 | `permissions` | mode `default`, project root là workspace (hoặc `/`) | Lời gọi nào chạy, hỏi hay bị từ chối ([bên dưới](#permissions)) |
 | `mcp_servers` | `[]` | Các MCP server được kết nối lần lượt khi agent được mở ([bên dưới](#mcp_servers)) |
 | `skills` | `False` | Tool `Skill`, với skill `verify` tích hợp sẵn và các skill trong `config_dir/skills` ([Skill](./skills.md)) |

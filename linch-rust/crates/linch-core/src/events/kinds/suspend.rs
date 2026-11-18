@@ -1,6 +1,7 @@
 //! Suspension kinds: external input requests, the suspended-run marker,
 //! and child-run lifecycle status.
 
+use crate::ask_user::AskUserQuestion;
 use crate::ids::RunId;
 use crate::run::RunStatus;
 use serde::{Deserialize, Serialize};
@@ -21,12 +22,18 @@ pub enum InputRequestKind {
 #[serde(deny_unknown_fields)]
 pub struct InputRequestEvent {
     /// Identifier for the pending request, answered through the `answer`
-    /// API call. Echoed in [`SuspendedEvent::pending_request_ids`].
+    /// API call. Echoed in [`SuspendedEvent::pending_request_ids`]. For
+    /// `ask_user` it is the `AskUser` call's `tool_use_id`.
     pub request_id: String,
     /// Origin of the request.
     pub kind: InputRequestKind,
-    /// Human-readable question or prompt shown to the answerer.
+    /// Human-readable question or prompt shown to the answerer; for
+    /// `ask_user`, the questions, one per line.
     pub prompt: String,
+    /// The questions of an `ask_user` request, with their options. Absent
+    /// (empty) for other kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<AskUserQuestion>,
 }
 
 /// Why a run suspended, matching [`RunStatus::is_awaiting`].

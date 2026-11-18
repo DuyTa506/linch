@@ -91,7 +91,7 @@ class OpenError(RpcError):
 
 
 class RunError(RpcError):
-    """The run could not continue durably (-32020 to -32031), or failed
+    """The run could not continue durably (-32020 to -32032), or failed
     inside the server (-32603 in `run.end`); it stays resumable."""
 
 
@@ -108,12 +108,29 @@ class RunTerminal(RunError):
 
 
 class NotSuspended(RunError):
-    """`Agent.approve` on a run that is not waiting for an approval (-32027).
+    """`Agent.approve` on a run not waiting for an approval, or `Agent.answer`
+    on one not waiting for input (-32027).
 
     An approve sent again after its answers were committed (after a crash
     or a dropped connection) gets this and writes nothing; continue the
     run with `Agent.resume`, which keeps the committed decisions.
     """
+
+
+class InvalidAnswer(RunError):
+    """`Agent.answer` with an answer that does not fit the run (-32032).
+
+    No answers, a request that is not pending, or an answer that does not
+    fit its questions. Nothing was written: the run still waits for input.
+    """
+
+    @property
+    def reason(self) -> str:
+        """What is wrong with the answer."""
+        try:
+            return str(self.data["reason"])
+        except (TypeError, KeyError):
+            return ""
 
 
 class PromptBlocked(RunError):
@@ -182,6 +199,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32029: PromptBlocked,
     -32030: SessionBusy,
     -32031: InvalidOutputSchema,
+    -32032: InvalidAnswer,
 }
 
 
@@ -194,7 +212,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = ProtocolError
         elif -32015 <= code <= -32010:
             cls = OpenError
-        elif -32031 <= code <= -32020:
+        elif -32032 <= code <= -32020:
             cls = RunError
         else:
             cls = RpcError

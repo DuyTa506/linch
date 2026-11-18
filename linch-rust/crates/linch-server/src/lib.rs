@@ -46,7 +46,8 @@
 //! name of an environment variable read at startup. Every `allow` list
 //! is empty when absent (it allows nothing), except `permission_modes`,
 //! which defaults to `default` and `accept_edits`; `scripted_provider`
-//! and `exec_tools` (`Bash` for workspace agents) are off when absent;
+//! and `exec_tools` (`Bash`, `BashOutput` and `BashKill` for workspace
+//! agents) are off when absent;
 //! `max_runs`, `max_agents` and `max_connections`, the tenant's caps
 //! across all its connections, default to 16, 16 and 8;
 //! `max_pool_connections`, the largest `stores.max_connections` it may

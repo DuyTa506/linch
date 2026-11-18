@@ -56,6 +56,8 @@ pub(crate) fn classify(error: &RunError, run_id: &RunId) -> Outcome {
         },
         // An approve that came late: the run itself is fine.
         RunError::NotSuspended { .. }
+        // A retry sends the same answer.
+        | RunError::InvalidAnswer { .. }
         // A user_prompt_submit hook refused the prompt; a retry sends the same prompt.
         | RunError::PromptBlocked { .. }
         // A retry sends the same schema.

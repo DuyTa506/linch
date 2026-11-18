@@ -1,12 +1,12 @@
 # Runs
 
-Use this page to start, stream, resume, approve and cancel runs, and to know
+Use this page to start, stream, resume, approve, answer and cancel runs, and to know
 what survives a crash.
 
 [<- Usage guide](./README.md)
 
-A run is one prompt in one session. `agent.run`, `agent.resume` and
-`agent.approve` each return a `Run` as soon as the server accepts the call;
+A run is one prompt in one session. `agent.run`, `agent.resume`,
+`agent.approve` and `agent.answer` each return a `Run` as soon as the server accepts the call;
 the run's events then stream in as `Envelope`s.
 
 | Call | Does |
@@ -14,6 +14,7 @@ the run's events then stream in as `Envelope`s.
 | `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None)` | Start a run; the session is created when missing. `trace_id` is yours, echoed on the run's `init` and `result` events ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` replaces the agent's for this run ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
 | `await agent.resume(run_id, *, principal=None)` | Continue a run after a crash or a dropped stream |
 | `await agent.approve(run_id, decisions, *, principal=None)` | Answer a suspended run's pending calls and continue it |
+| `await agent.answer(run_id, answers, *, principal=None)` | Answer a suspended run's `AskUser` questions and continue it |
 | `async for envelope in run` | Every envelope of this call, in order, ending after `result` or `suspended` |
 | `await run.result()` | Read the rest and return the `ResultEvent` or `SuspendedEvent` |
 | `await run.cancel()` | Abort the run; `True` when the server was driving it |
@@ -81,7 +82,8 @@ busy with True
 ```
 
 - A stream ends with `result` when the run finished, or `suspended` when it
-  waits for an approval. `result.subtype` is `success`, `error`, `aborted` or
+  waits for an approval (status `awaiting_approval`) or an answer (status
+  `awaiting_input`). `result.subtype` is `success`, `error`, `aborted` or
   `interrupted`.
 - You can iterate part of a run and call `result()` for the rest. Stopping
   iteration does not stop the run: the server goes on driving it and its
@@ -96,14 +98,14 @@ busy with True
 ### One live run per session
 
 A session has at most one run that is not finished: one running or waiting for
-approval. Starting another ends the new run with `SessionBusy` (code -32030)
+an approval or an answer. Starting another ends the new run with `SessionBusy` (code -32030)
 before anything is written; `busy.session_id` and `busy.run_id` name the live
-run. Resume, approve or cancel that run first, or queue the prompt. With
+run. Resume, approve, answer or cancel that run first, or queue the prompt. With
 Postgres the rule holds across every server on the database.
 
 ## Errors arrive at the end of the stream
 
-`run()`, `resume()` and `approve()` return before the server has done
+`run()`, `resume()`, `approve()` and `answer()` return before the server has done
 anything but accept the call. A refusal (a busy session, an unknown run, a
 contract that differs) and a failure to continue durably arrive as the end of
 the stream: iterating, or `result()`, raises a `RunError` subclass.
@@ -114,10 +116,11 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `RunError` | -32023 | `run_id` is already stored |
 | `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data["expected"]` is the run's contract and `data["found"]` this agent's, as the message names them |
 | `RunTerminal` | -32026 | The run already finished; `data.status` is its status |
-| `NotSuspended` | -32027 | `approve` on a run that is not waiting for approval ([below](#approve)) |
+| `NotSuspended` | -32027 | `approve` on a run that is not waiting for approval, or `answer` on one not waiting for an answer ([below](#approve)) |
 | `PromptBlocked` | -32029 | A `user_prompt_submit` callback refused the prompt; `.reason` says why. No run or session was created |
 | `SessionBusy` | -32030 | The session has a live run |
 | `InvalidOutputSchema` | -32031 | The run's `output_schema` does not compile or its root is not an object; `.reason` says why. No run or session was created |
+| `InvalidAnswer` | -32032 | The answers do not fit the pending `AskUser` questions; `.reason` says why. Nothing was written: the run still waits ([below](#answer)) |
 | `RunError` | -32020 to -32028 | A store or journal write failed, or the stored state does not fit together; the run stays at its last durable state |
 | `ConnectionClosed` | none | The server went away mid-stream |
 
@@ -207,14 +210,14 @@ while it waits, so it never waits on itself.
 
 `resume(run_id)` continues a run from its last durable state. Use it after
 your process or the server crashed, after the stream dropped, or to pick up a
-run another process started. A run waiting for approval suspends again at
-once. Resume only after the earlier stream ended (its iteration finished or
+run another process started. A run waiting for an approval or an answer
+suspends again at once. Resume only after the earlier stream ended (its iteration finished or
 raised); while a server still drives the run, `resume` is `RunBusy`.
 
 Which handle can resume depends on the stores:
 
 - **Memory stores**: the run lives in the agent handle that started it. Resume
-  and approve it through that same `Agent`; it is gone when the server stops.
+  and approve or answer it through that same `Agent`; it is gone when the server stops.
 - **Postgres stores**: any agent opened with the same config and tools (so the
   same contract), on any server, can resume it.
 
@@ -379,6 +382,20 @@ lost the server; did the approve land?
 Deploy was interrupted.
 ```
 
+## Answer
+
+`answer(run_id, answers)` takes an `Answer(...)` or `Answer.declined(note)`
+per `request_id` of the `input_request` events (the `suspended` event's
+`pending_request_ids`); a request left out is asked again. How to ask and what
+the model reads are on [Tools](./tools.md#ask-the-user).
+
+It follows the approve rules: only a run waiting for an answer takes one; the
+answer is written as the call's result before the run goes on, so the same
+answer sent again after a crash ends with `NotSuspended` and writes nothing,
+and `resume` continues the run with the committed answer. An answer on a
+finished run is `RunTerminal`. With Postgres stores the answer can come from
+another process or a later day.
+
 ## Acting for a principal
 
 `principal` says who a run acts for: `{"tenant", "user", "roles"?}` (the
@@ -473,5 +490,6 @@ process. How many writes a turn costs and how they are grouped is in the
 
 - [Events](./events.md): every event in the stream.
 - [Tools](./tools.md#approvals): approval loops and permission rules.
+- [Tools](./tools.md#ask-the-user): `AskUser` and its answers.
 - [Stores](./stores.md): memory and Postgres.
 - [Troubleshooting](./troubleshooting.md#runs): run errors and fixes.

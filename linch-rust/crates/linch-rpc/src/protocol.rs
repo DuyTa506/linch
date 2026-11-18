@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use linch::ask_user::AskUserAnswer;
 use linch::hooks::ApprovalResponse;
 use linch::{Envelope, OutputSchema, Principal, RunId, SessionId};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,8 @@ pub mod method {
     pub const RUN_RESUME: &str = "run.resume";
     /// Answer a suspended run's approvals and continue it.
     pub const RUN_APPROVE: &str = "run.approve";
+    /// Answer a run's pending `AskUser` questions and continue it.
+    pub const RUN_ANSWER: &str = "run.answer";
     /// Cancel an active run.
     pub const RUN_CANCEL: &str = "run.cancel";
     /// Read a run's durable events after a seq.
@@ -210,7 +213,26 @@ pub struct ApproveParams {
     pub principal: Option<Principal>,
 }
 
-/// Result of `run.start`, `run.resume` and `run.approve`.
+/// Params of `run.answer`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerParams {
+    /// Agent handle from `agent.open`.
+    pub agent: String,
+    /// A run suspended awaiting input.
+    pub run_id: RunId,
+    /// The user's answer per pending `request_id` (an `input_request`'s,
+    /// the `AskUser` call's `tool_use_id`), in the core wire form:
+    /// `{"accepted"?: bool, "answers": {question_id: "label" | ["label", ...]},
+    /// "note"?: "..."}`. At least one; a pending request left out is asked
+    /// again.
+    pub answers: BTreeMap<String, AskUserAnswer>,
+    /// Caller identity for permission rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
+}
+
+/// Result of `run.start`, `run.resume`, `run.approve` and `run.answer`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunAccepted {

@@ -47,8 +47,8 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` và `is_error` nằm trong `result` |
 | `tool_progress` | `ToolProgressEvent`, `kinds/tooling.rs:98` | no | yes | |
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
-| `input_request` | `InputRequestEvent`, `kinds/suspend.rs:22` | yes | yes | Chưa được phát ở revision này |
-| `suspended` | `SuspendedEvent`, `kinds/suspend.rs:53` | yes | yes | Kết thúc stream của một run đã suspend thay cho `result` |
+| `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | Một event cho mỗi lời gọi `AskUser`, trước một `suspended` có trạng thái `awaiting_input`; `questions` là trường mới và bị bỏ khi rỗng |
+| `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Kết thúc stream của một run đã suspend thay cho `result`; trạng thái `awaiting_approval` hoặc `awaiting_input` |
 | `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:105` | yes | yes | |

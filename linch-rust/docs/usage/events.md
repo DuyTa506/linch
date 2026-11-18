@@ -152,7 +152,7 @@ reads exactly what it missed.
 | Every other kind | Yes: sent once it is durable |
 
 A run's stream ends with `result` (finished) or `suspended` (waiting for
-`approve`).
+`approve` or `answer`).
 
 ## Event types
 
@@ -280,8 +280,20 @@ The run stopped to wait; its stream ends here.
 
 | Field | What it is |
 |---|---|
-| `status` | `awaiting_approval` |
-| `pending_request_ids` | The `tool_use_id`s to answer with `agent.approve` |
+| `status` | `awaiting_approval`, or `awaiting_input` for `AskUser` questions |
+| `pending_request_ids` | The `tool_use_id`s to answer with `agent.approve`, or with `agent.answer` when `awaiting_input` |
+
+### `InputRequestEvent` (`input_request`)
+
+An `AskUser` call waits for the user: one per call, before the `suspended`
+event of status `awaiting_input`. See [Tools](./tools.md#ask-the-user).
+
+| Field | What it is |
+|---|---|
+| `request_id` | The call's `tool_use_id`, the key of its `Answer` in `agent.answer` |
+| `kind` | `ask_user` |
+| `prompt` | The questions' texts, one per line |
+| `questions` | The questions, each `{"id", "header", "question", "options", "multi_select"}`, an option being `{"label", "description"}` |
 
 ### `CompactionEvent` (`compaction`)
 
@@ -413,7 +425,6 @@ but no run emits them today:
 
 | Class (`type`) | Fields |
 |---|---|
-| `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` or `workflow_interrupt`), `prompt` |
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
 | `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt`. The [output schema](./structured-output.md#what-the-run-checks) check emits it with `verifier` `output_schema` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |

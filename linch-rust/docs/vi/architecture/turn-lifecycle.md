@@ -157,6 +157,7 @@ Một `Journal` giữ các event và checkpoint của một run trong bộ nhớ
 |---|---|---|
 | `Started`, `AssistantReceived`, `Compacted` | Write-through, ngay lập tức | không đổi |
 | `AwaitingApproval` | Write-through, ngay lập tức | `awaiting_approval` |
+| `AwaitingInput` | Write-through, ngay lập tức | `awaiting_input` |
 | `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` | Giữ lại | không đổi |
 
 Một checkpoint được giữ lại là một snapshot: nó chỉ bao phủ các event đang chờ khi nó
@@ -190,8 +191,8 @@ Ba loại ghi không chờ barrier kế tiếp:
 - Phần kết thúc của một tool. Nó được flush ngay sau khi tool trả về, từ
   `tool_finished`, nên một lần resume tìm thấy kết quả và không chạy lại tool
   (`sink.rs:179-181`, `journal/reconcile.rs:316-320`).
-- Một lần suspend. `AwaitingApproval` ghi write-through cùng trạng thái của nó
-  (`journal.rs:195`).
+- Một lần suspend. `AwaitingApproval` và `AwaitingInput` ghi write-through cùng
+  trạng thái của chúng (`journal.rs:196-197`).
 
 Một lời gọi không chạy tool nào (được hook phục vụ, bị từ chối, bị deny hoặc bị abort)
 có phần bắt đầu và kết thúc được stage mà không flush. Chúng đến store cùng barrier kế tiếp
@@ -266,24 +267,35 @@ tool sau đó không chạy, và các tool đang chạy trong nhóm bị hủy
 Một lời gọi vẫn cần phê duyệt sau chuỗi `permission_request` sẽ làm run suspend. `suspend`
 stage một event `permission_request` và một event `suspended`, park subagent family
 (nếu agent có subagent) để các run con của nó sống lâu hơn stream, và lưu
-`AwaitingApproval` cùng các id đang chờ (`batch.rs:147-183`). Lần ghi write-through đó đặt
+`AwaitingApproval` cùng các id đang chờ (`batch.rs:155-183`). Lần ghi write-through đó đặt
 trạng thái `awaiting_approval` (`journal.rs:195`). Stream kết thúc bằng `Suspended` thay
 vì `Result`. Sau đó run chờ trong store với trạng thái `awaiting_approval`; chỉ một lần
 claim mới đưa nó về `running`
 ([stores](./stores.md#run-store)). Một lần ghi thất bại sẽ lấy lại phần park
-(`batch.rs:177-182`).
+(`batch.rs:217-229`).
+
+Một lời gọi `AskUser` ([tools](./tools.md#askuser)) suspend theo cách tương tự khi không
+còn lời gọi nào của batch cần phê duyệt: plan đánh dấu nó là
+`PlannedAction::AwaitingInput`, và `suspend_for_input` stage một `input_request` cho mỗi
+lời gọi (các câu hỏi của nó) và một event `suspended`, rồi lưu `AwaitingInput` cùng các
+id đang chờ, việc đặt trạng thái `awaiting_input` (`batch.rs:188-217`). Các lời gọi khác
+của batch đó chờ cùng nó. Một run con không thể chờ người dùng: các lời gọi `AskUser` của
+nó bị từ chối bằng một kết quả lỗi trước khi batch chạy (`batch.rs:76`).
 
 ### Resume và approve
 
 `Agent::resume` tiếp tục một run sau sự cố, mất lease hoặc stream bị drop.
-`Agent::approve` trả lời các lời gọi đang chờ của một run đã suspend và tiếp tục nó
-(`agent.rs:253-288`). Cả hai đều vào `continue_run`
+`Agent::approve` trả lời các lời gọi đang chờ của một run đã suspend và tiếp tục nó, và `Agent::answer` trả lời các lời gọi `AskUser` đang chờ của nó
+(`agent.rs:272-332`). Cả ba đều vào `continue_run`
 (`runner/start.rs:175-333`):
 
 1. Một token đã bị hủy từ trước thì không làm gì: không claim, không ghi
    (`start.rs:185-187`).
-2. `check` từ chối một run đã ở terminal, một run thuộc contract khác, và một approve
-   trên run không ở trạng thái chờ phê duyệt. Nó chạy trước claim, để một lời gọi nhầm
+2. `check` từ chối một run đã ở terminal, một run thuộc contract khác, một approve
+   trên run không ở trạng thái chờ phê duyệt, và một answer trên run không ở trạng thái
+   chờ input (`start.rs:534-563`). `check_answers` từ chối một câu trả lời không khớp
+   với các câu hỏi `input_request` mới nhất bằng `InvalidAnswer` (`start.rs:565`). Nó
+   chạy trước claim, để một lời gọi nhầm
    không fence một owner đang sống, và chạy lại sau claim
    (`start.rs:189-207`, `414-439`).
 3. `claim` lấy lease và cộng 1 vào epoch, thứ fence owner trước đó
@@ -295,6 +307,11 @@ claim mới đưa nó về `running`
 6. Với approve, các câu trả lời của host được ghi lại thành các quyết định và commit
    cùng một checkpoint `ToolBatch` trước khi run tiếp tục, nên một sự cố sau đó vẫn giữ
    được chúng (`start.rs:259-261, 329-331`, `batch.rs:199-214`).
+   Với answer, `tool_call_start` và `tool_call_end` (câu trả lời đã hiển thị) của mỗi lời
+   gọi được trả lời được stage sau `init` và commit cùng một checkpoint `ToolBatch` trước
+   khi run tiếp tục (`start.rs:220`, `306-330`). Khi đó model đọc một kết quả bền vững,
+   như với mọi tool đã chạy. Không hook `pre_tool_use`, `post_tool_use` hay
+   `tool_use_start`/`tool_use_stop` nào thấy một câu trả lời.
 
 Những gì `reconcile` làm với từng phase (`journal/reconcile.rs:170-231`):
 
@@ -305,6 +322,7 @@ Những gì `reconcile` làm với từng phase (`journal/reconcile.rs:170-231`)
 | `AssistantReceived` | `Received` | Nối response trừ khi nó đã có trong session, rồi rẽ nhánh theo các lời gọi tool của nó; khi có `retry_feedback`, gửi phản hồi đó thay vào, không hỏi lại hook |
 | `ToolBatch` | `ToolBatch` | Với mỗi lời gọi: kết quả bền vững của nó, một placeholder, hoặc một lần plan lại |
 | `AwaitingApproval` | `AwaitingApproval` | Plan lại với các quyết định đã ghi; suspend lần nữa nếu còn lời gọi cần câu trả lời |
+| `AwaitingInput` | `AwaitingInput` | Với một câu trả lời: kết quả của chúng, rồi phần còn lại của batch; không có câu trả lời (một resume): suspend lần nữa với cùng các id đang chờ |
 | `ToolResults` | `ToolResults` | Nối message trừ khi nó đã có trong session, rồi đến lượt kế tiếp |
 | `CompactionPending` | `Recompact` hoặc `Redispatch` | Một lần tóm tắt khác, hoặc lời gọi chính khi lời gọi tóm tắt đã kết thúc mà không có bản tóm tắt |
 | `Compacted` | `Compacted` | Nối projection trừ khi nó đã có trong session, rồi dispatch |
@@ -325,8 +343,8 @@ Một allow đã ghi chỉ bao phủ input mà host đã thấy, và một deny 
 (`scheduler.rs:59-66`). Reconcile thất bại khi session log không khớp với checkpoint
 (`journal/reconcile/session.rs:9-22`).
 
-Một approve được thử lại nhận `NotSuspended`: khi một approve đã commit các câu trả lời
-của nó thì run ở `ToolBatch`, và host tiếp tục nó bằng `resume`
+Một approve hoặc answer được thử lại nhận `NotSuspended`: khi nó đã commit thì run ở
+`ToolBatch`, và host tiếp tục nó bằng `resume`
 (`agent.rs:262-273`, `start.rs:432-437`).
 
 ## Các terminal

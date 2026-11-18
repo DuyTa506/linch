@@ -124,11 +124,34 @@ pub(super) fn input_request_event() -> impl Strategy<Value = InputRequestEvent> 
             Just(InputRequestKind::WorkflowInterrupt)
         ],
         short_string(),
+        vec(ask_user_question(), 0..3),
     )
-        .prop_map(|(request_id, kind, prompt)| InputRequestEvent {
+        .prop_map(|(request_id, kind, prompt, questions)| InputRequestEvent {
             request_id,
             kind,
             prompt,
+            questions,
+        })
+}
+
+fn ask_user_question() -> impl Strategy<Value = crate::ask_user::AskUserQuestion> {
+    let option = (short_string(), short_string())
+        .prop_map(|(label, description)| crate::ask_user::AskUserOption { label, description });
+    (
+        short_string(),
+        short_string(),
+        short_string(),
+        vec(option, 0..3),
+        any::<bool>(),
+    )
+        .prop_map(|(id, header, question, options, multi_select)| {
+            crate::ask_user::AskUserQuestion {
+                id,
+                header,
+                question,
+                options,
+                multi_select,
+            }
         })
 }
 

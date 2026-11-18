@@ -38,7 +38,7 @@
 //! caller polls the stream. The one task the core spawns drives the
 //! background subagents of a run suspended for approval (see `family`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -51,10 +51,10 @@ use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::budget::Meter;
 
 use crate::events::Envelope;
-use crate::hooks::ApprovalResponse;
 use crate::ids::RunId;
 pub(crate) use fail::fail;
 pub(crate) use family::{Families, Family};
+pub(crate) use start::Reply;
 pub(crate) use write::session_log;
 
 mod batch;
@@ -197,14 +197,15 @@ fn start_under(
     RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 
-/// Resume a run, or approve its pending calls when `answers` is set.
+/// Resume a run, or approve or answer its pending requests when `reply`
+/// is set.
 pub(crate) fn resume(
     agent: Arc<AgentInner>,
     run_id: RunId,
-    answers: Option<HashMap<String, ApprovalResponse>>,
+    reply: Option<start::Reply>,
     options: RunOptions,
 ) -> RunStream {
-    resume_under(agent, run_id, answers, options, None)
+    resume_under(agent, run_id, reply, options, None)
 }
 
 /// Resume a subagent's child run, charging its parent's `budget` when it
@@ -221,13 +222,13 @@ pub(crate) fn resume_child(
 fn resume_under(
     agent: Arc<AgentInner>,
     run_id: RunId,
-    answers: Option<HashMap<String, ApprovalResponse>>,
+    reply: Option<start::Reply>,
     options: RunOptions,
     budget: Option<Meter>,
 ) -> RunStream {
     let shared = Shared::default();
     let (outbox, driving) = (shared.outbox.clone(), shared.driving.clone());
-    let run = start::continue_run(agent, run_id.clone(), answers, options, shared, budget);
+    let run = start::continue_run(agent, run_id.clone(), reply, options, shared, budget);
     RunStream::new(run_id, outbox, Box::pin(run), driving)
 }
 

@@ -14,7 +14,7 @@ agent declared::
 """
 
 from ._binary import find_server
-from .agent import Agent, Allow, Decision, Deny, Skipped
+from .agent import Agent, Allow, Answer, Decision, Deny, Skipped
 from .callbacks import Callback, FailMode, Point, callback
 from .config import (
     AgentConfig,
@@ -32,6 +32,7 @@ from .errors import (
     AgentNotFound,
     ConnectionClosed,
     ContractMismatch,
+    InvalidAnswer,
     InvalidOutputSchema,
     LimitReached,
     LinchError,
@@ -90,6 +91,7 @@ __all__ = [
     "AgentConfig",
     "AgentNotFound",
     "Allow",
+    "Answer",
     "AssistantEvent",
     "BudgetEvent",
     "Callback",
@@ -111,6 +113,7 @@ __all__ = [
     "HostTool",
     "InitEvent",
     "InputRequestEvent",
+    "InvalidAnswer",
     "InvalidOutputSchema",
     "LimitReached",
     "LinchError",

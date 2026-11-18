@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod ask_user;
 pub mod budget;
 pub mod canonical;
 pub(crate) mod catalog;

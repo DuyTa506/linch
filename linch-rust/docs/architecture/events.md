@@ -48,8 +48,8 @@ encoding.
 | `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` and `is_error` live in `result` |
 | `tool_progress` | `ToolProgressEvent`, `kinds/tooling.rs:98` | no | yes | |
 | `permission_request` | `PermissionRequestEvent`, `kinds/tooling.rs:127` | yes | yes | |
-| `input_request` | `InputRequestEvent`, `kinds/suspend.rs:22` | yes | yes | Not emitted at this revision |
-| `suspended` | `SuspendedEvent`, `kinds/suspend.rs:53` | yes | yes | Ends a suspended run's stream instead of `result` |
+| `input_request` | `InputRequestEvent`, `kinds/suspend.rs:23` | yes | yes | One per `AskUser` call before a `suspended` of status `awaiting_input`; `questions` is new and left out when empty |
+| `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Ends a suspended run's stream instead of `result`; status `awaiting_approval` or `awaiting_input` |
 | `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:105` | yes | yes | |

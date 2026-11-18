@@ -40,14 +40,16 @@ pub struct AgentConfig {
     #[serde(default)]
     pub stores: StoreConfig,
     /// Workspace root for the built-in tools (`Read`, `Write`, `Edit`,
-    /// `Grep`, `Glob`, and `Bash` unless `bash` is off). It must be an
-    /// existing directory; a relative path resolves against the process's
-    /// working directory. Absent: the agent has no tools.
+    /// `Grep`, `Glob`, and `Bash`, `BashOutput` and `BashKill` unless
+    /// `bash` is off). It must be an existing directory; a relative path
+    /// resolves against the process's working directory. Absent: the agent
+    /// has no tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
-    /// Whether the workspace tools include `Bash`, which runs commands
-    /// unconfined, as the process's user. On when absent; unused without a
-    /// workspace.
+    /// Whether the workspace tools include `Bash` (which runs commands
+    /// unconfined, as the process's user) and `BashOutput` and `BashKill`,
+    /// which read and stop its background commands. On when absent; unused
+    /// without a workspace.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub bash: bool,
     /// Permission rules. Absent: mode `default` (read tools run, write and
@@ -103,6 +105,12 @@ pub struct AgentConfig {
     /// `auto_allow` gets their names. Off when absent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub tasks: bool,
+    /// Whether the agent has the `AskUser` tool (see
+    /// [`linch_core::ask_user`]): a call suspends the run with an
+    /// `input_request` until the host answers it. Scope `read`, so it runs
+    /// unasked in modes that allow reads. Off when absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ask_user: bool,
     /// The deep agent preset: planning, a subagent roster, kept workers and
     /// file memory (see [`DeepAgentConfig`] for what it turns on). Off
     /// when absent.

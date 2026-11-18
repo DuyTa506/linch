@@ -56,10 +56,11 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `connection.auth` | `AuthParams` (`protocol.rs:62`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), first message on the socket only; elsewhere `-32600` | `Authenticated` `{tenant}` |
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:19-48`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:51-75`; `-32002` while the connection drives a run of it | `{}` once its MCP servers are gone |
-| `session.close` | `SessionCloseParams` | `agents.rs:76-85`: `Agent::close_session` | `{}` |
+| `session.close` | `SessionCloseParams` | `agents.rs:76-86`: `Agent::close_session` (forgets the session's reads, kills its background `Bash` commands) | `{}` |
 | `run.start` | `StartParams` (`protocol.rs:154`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, then notifications |
 | `run.resume` | `ResumeParams` (`protocol.rs:178`) | `run.rs:45-50`, through `claim` | the same |
 | `run.approve` | `ApproveParams` (`protocol.rs:191`) | `run.rs:52-58`, through `claim` | the same |
+| `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |
 | `run.cancel` | `CancelParams` | `run.rs:60-69`: cancels a run this connection drives | `{cancelled}` |
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, the durable envelopes after `after_seq` |
 
@@ -88,7 +89,7 @@ docs (`lib.rs:328-364`) and the codes in `crates/linch-rpc/src/error.rs:24-100`.
 | -32004 | A tenant check refused; `data.kind` names it |
 | -32005 | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins` (`limit_reached`, `error.rs:126-131`) |
 | -32010 to -32015 | `agent.open`: `BuildError`s, provider, store and MCP server unavailable |
-| -32020 to -32031 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema` |
+| -32020 to -32032 | A run, in `run.end`, and `run.events`: store errors, `RunError`s, session busy, an unusable `output_schema`, an answer that does not fit (`-32032`, `data.reason`) |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to

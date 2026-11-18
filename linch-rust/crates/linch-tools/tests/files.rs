@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use common::{Workspace, call, code, ctx, input, text};
 use linch_core::{Tool, ToolScope};
-use linch_tools::{Edit, Read, Write, workspace_tools};
+use linch_tools::{Edit, Processes, Read, Write, workspace_tools};
 use serde_json::json;
 
 struct Tools {
@@ -323,7 +323,7 @@ async fn tools_work_behind_shared_trait_objects() {
 async fn workspace_tools_share_one_tracker_and_declare_scopes() {
     let ws = Workspace::new();
     ws.put("a.txt", "one\n");
-    let tools = workspace_tools(ws.fs.clone(), ws.reads.clone());
+    let tools = workspace_tools(ws.fs.clone(), ws.reads.clone(), Arc::new(Processes::new()));
     let named: Vec<(&str, ToolScope)> = tools.iter().map(|t| (t.name(), t.scope())).collect();
     assert_eq!(
         named,
@@ -334,6 +334,8 @@ async fn workspace_tools_share_one_tracker_and_declare_scopes() {
             ("Grep", ToolScope::Read),
             ("Glob", ToolScope::Read),
             ("Bash", ToolScope::Exec),
+            ("BashOutput", ToolScope::Read),
+            ("BashKill", ToolScope::Exec),
         ]
     );
     call(tools[0].as_ref(), json!({"file_path": "a.txt"}))

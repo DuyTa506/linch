@@ -242,11 +242,12 @@ class AgentConfig(TypedDict, total=False):
             of cores between 10 and 32. A remote tenant may ask for at most
             its `max_pool_connections`.
         workspace: An existing directory, the root of the built-in tools
-            `Read`, `Write`, `Edit`, `Grep`, `Glob` and `Bash`; a relative
-            path resolves against the server's working directory. Absent: no
+            `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
+            `BashKill`; a relative path resolves against the server's working directory. Absent: no
             workspace tools.
         bash: Whether the workspace tools include `Bash`, which runs
-            commands as the server's user. On when absent.
+            commands as the server's user, and `BashOutput` and `BashKill`
+            for its background commands. On when absent.
         permissions: `{"mode": ..., "project_root": ...}` and rules.
             `project_root` is required and must be an absolute path: path
             rules resolve against it. Mode `default` (read tools run, write
@@ -272,6 +273,9 @@ class AgentConfig(TypedDict, total=False):
         tasks: Whether the agent has the session task tools (`TaskCreate`,
             `TaskList`, `TaskGet`, `TaskUpdate`), kept in the session store.
             They run without approval in every permission mode.
+        ask_user: Whether the agent has the `AskUser` tool: a call suspends
+            the run with an `input_request` until `Agent.answer`. Off when
+            absent.
         deep_agent: The deep agent preset; see `DeepAgent`.
         profile: The domain profile its runs take; see `Profile`.
     """
@@ -292,5 +296,6 @@ class AgentConfig(TypedDict, total=False):
     config_dir: str
     filesystem: Filesystem
     tasks: bool
+    ask_user: bool
     deep_agent: DeepAgent
     profile: Profile

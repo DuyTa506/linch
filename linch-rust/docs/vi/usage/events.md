@@ -154,7 +154,7 @@ stream sẽ đọc đúng những gì nó đã bỏ lỡ.
 | Mọi loại khác | Có: gửi khi nó đã bền vững |
 
 Stream của một run kết thúc bằng `result` (đã xong) hoặc `suspended` (đang chờ
-`approve`).
+`approve` hoặc `answer`).
 
 ## Các loại event
 
@@ -283,8 +283,20 @@ Run dừng lại để chờ; stream của nó kết thúc ở đây.
 
 | Trường | Ý nghĩa |
 |---|---|
-| `status` | `awaiting_approval` |
-| `pending_request_ids` | Các `tool_use_id` cần trả lời bằng `agent.approve` |
+| `status` | `awaiting_approval`, hoặc `awaiting_input` với các câu hỏi `AskUser` |
+| `pending_request_ids` | Các `tool_use_id` cần trả lời bằng `agent.approve`, hoặc bằng `agent.answer` khi là `awaiting_input` |
+
+### `InputRequestEvent` (`input_request`)
+
+Một lời gọi `AskUser` đang chờ người dùng: một event cho mỗi lời gọi, trước event
+`suspended` có status `awaiting_input`. Xem [Tool](./tools.md#hỏi-người-dùng).
+
+| Trường | Ý nghĩa |
+|---|---|
+| `request_id` | `tool_use_id` của lời gọi, là khóa của `Answer` của nó trong `agent.answer` |
+| `kind` | `ask_user` |
+| `prompt` | Nội dung các câu hỏi, mỗi câu một dòng |
+| `questions` | Các câu hỏi, mỗi câu là `{"id", "header", "question", "options", "multi_select"}`, một option là `{"label", "description"}` |
 
 ### `CompactionEvent` (`compaction`)
 
@@ -415,7 +427,6 @@ nhưng hiện chưa có run nào phát chúng:
 
 | Class (`type`) | Trường |
 |---|---|
-| `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` hoặc `workflow_interrupt`), `prompt` |
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` hoặc `model_changed`), `detail` |
 | `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback`, `attempt`. Việc kiểm tra [output schema](./structured-output.md#what-the-run-checks) phát nó với `verifier` là `output_schema` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |

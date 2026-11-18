@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +23,17 @@ const DRAIN: Duration = Duration::from_secs(1);
 /// How long to wait for the killed shell to be reaped.
 const REAP: Duration = Duration::from_secs(2);
 
+/// The shell a background command starts under. Its stdin is a pipe whose
+/// write end only this process holds: the shell moves it to fd 3 for a
+/// watchdog in the command's group and gives the command `/dev/null`. When
+/// this process dies, even by `SIGKILL`, the pipe reaches end of file and
+/// the watchdog kills the whole group, so a background command never
+/// outlives the server. `exec` keeps the shell's pid, the group leader's.
+/// The watchdog uses only builtins (nothing ever writes the pipe, so
+/// `read` returns at end of file), so it works whatever the `PATH`.
+const LIFELINE: &str = "exec 3<&0 </dev/null; (read -r _ <&3; kill -KILL 0) >/dev/null 2>&1 & \
+                        exec 3<&-; exec /bin/sh -c \"$1\"";
+
 /// Why the command stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum End {
@@ -30,7 +41,7 @@ pub(super) enum End {
     Exited(ExitStatus),
     /// The timeout fired first.
     TimedOut,
-    /// The call was cancelled first.
+    /// The call was cancelled (or the process killed) first.
     Aborted,
 }
 
@@ -42,7 +53,8 @@ pub(super) struct Finished {
     pub stderr: Capture,
 }
 
-/// Run `command` with `/bin/sh -c` in `cwd` with exactly `env`.
+/// Run `command` with `/bin/sh -c` in `cwd` with exactly `env`, stdin
+/// closed, keeping the captured output.
 ///
 /// The shell leads a new process group. When the shell exits, times out or
 /// is cancelled, the whole group gets `SIGKILL`, so nothing it started
@@ -54,30 +66,79 @@ pub(super) async fn run(
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> io::Result<Finished> {
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
+    let child = spawn(command, cwd, env, false)?;
+    let mut out = Capture::default();
+    let mut err = Capture::default();
+    let end = supervise(
+        child,
+        timeout,
+        cancel,
+        |chunk| out.push(chunk),
+        |chunk| err.push(chunk),
+    )
+    .await?;
+    Ok(Finished {
+        end,
+        stdout: out,
+        stderr: err,
+    })
+}
+
+/// Start `command` under `/bin/sh` in `cwd` with exactly `env`, as the
+/// leader of a new process group, stdout and stderr piped. With `lifeline`
+/// the command runs under [`LIFELINE`], so it dies with this process;
+/// otherwise its stdin is closed.
+pub(super) fn spawn(
+    command: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    lifeline: bool,
+) -> io::Result<Child> {
+    let mut shell = Command::new("/bin/sh");
+    if lifeline {
+        shell
+            .arg("-c")
+            .arg(LIFELINE)
+            .arg("linch-bash")
+            .arg(command)
+            .stdin(Stdio::piped());
+    } else {
+        shell.arg("-c").arg(command).stdin(Stdio::null());
+    }
+    shell
         .current_dir(cwd)
         .env_clear()
         .envs(env)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true)
-        .spawn()?;
+        .spawn()
+}
+
+/// Pump `child`'s output into `on_out` and `on_err` until it exits, times
+/// out or `cancel` fires; then kill its whole group, drain what is left
+/// and reap the shell. Dropping the future kills the group too.
+pub(super) async fn supervise(
+    mut child: Child,
+    timeout: Duration,
+    cancel: &CancellationToken,
+    mut on_out: impl FnMut(&[u8]),
+    mut on_err: impl FnMut(&[u8]),
+) -> io::Result<End> {
     // Declared after `child`, so on drop it kills the group before the
     // child handle goes.
     let mut group = Group::of(child.id());
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         unreachable!("both streams are piped");
     };
-    let mut out = Capture::default();
-    let mut err = Capture::default();
+    // A lifeline's write end, held out of `child`: `Child::wait` closes the
+    // stdin it holds, which would fire the watchdog at once.
+    let _lifeline = child.stdin.take();
     let deadline = Instant::now() + timeout;
     let end = {
         let mut pumps = pin!(async {
-            tokio::join!(pump(stdout, &mut out), pump(stderr, &mut err));
+            tokio::join!(pump(stdout, &mut on_out), pump(stderr, &mut on_err));
         });
         let mut pumped = false;
         let end = loop {
@@ -103,18 +164,14 @@ pub(super) async fn run(
     // The shell is reaped (or left to tokio's reaper), so its id may be
     // reused: never signal the group again.
     group.disarm();
-    Ok(Finished {
-        end,
-        stdout: out,
-        stderr: err,
-    })
+    Ok(end)
 }
 
-/// Copy a pipe into `capture` until end of file or a read error.
-async fn pump(mut pipe: impl AsyncRead + Unpin, capture: &mut Capture) {
+/// Copy a pipe into `push` until end of file or a read error.
+async fn pump(mut pipe: impl AsyncRead + Unpin, push: &mut impl FnMut(&[u8])) {
     let mut buffer = vec![0; 64 * 1024];
     while let Ok(read @ 1..) = pipe.read(&mut buffer).await {
-        capture.push(&buffer[..read]);
+        push(&buffer[..read]);
     }
 }
 
@@ -147,5 +204,34 @@ impl Group {
 impl Drop for Group {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
+    use super::*;
+
+    /// The server dying closes the lifeline's write end; the watchdog then
+    /// kills the whole group, with nobody signalling it. It needs nothing
+    /// on the `PATH`.
+    #[tokio::test]
+    async fn closing_the_lifeline_kills_the_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = BTreeMap::from([("PATH".to_owned(), "/nonexistent".to_owned())]);
+        let mut child = spawn("/bin/sleep 30", dir.path(), &env, true).unwrap();
+        let mut held = child.stdin.take();
+        let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
+        assert!(
+            alive.is_err(),
+            "the command runs while the lifeline is held"
+        );
+        held.take();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("the watchdog killed the group")
+            .unwrap();
+        assert_eq!(status.signal(), Some(9));
     }
 }

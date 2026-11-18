@@ -109,7 +109,10 @@ async fn a_late_approve_leaves_the_runs_owner_alone() {
     })
     .await;
     let error = failed_job_error(&db).await.unwrap();
-    assert!(error.contains("not awaiting approval"), "{error}");
+    assert!(
+        error.contains("is not awaiting this approval or answer"),
+        "{error}"
+    );
     assert_eq!(
         db.record(&run_id).await.epoch,
         epoch,

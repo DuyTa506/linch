@@ -84,8 +84,9 @@ pub mod code {
     pub const CONTRACT_MISMATCH: i64 = -32025;
     /// `RunError::Terminal`; `data.status` is the final status.
     pub const TERMINAL: i64 = -32026;
-    /// `RunError::NotSuspended`: approve on a run not awaiting approval; a
-    /// host that retried an approve continues the run with `run.resume`.
+    /// `RunError::NotSuspended`: approve on a run not awaiting approval, or
+    /// answer on one not awaiting input; a host that retried an approve or
+    /// an answer continues the run with `run.resume`.
     pub const NOT_SUSPENDED: i64 = -32027;
     /// `RunError::Reconcile`: durable state does not fit together.
     pub const RECONCILE: i64 = -32028;
@@ -101,6 +102,10 @@ pub mod code {
     /// does not compile, or its root is not an object; `data.reason` says
     /// why. Nothing was written.
     pub const INVALID_OUTPUT_SCHEMA: i64 = -32031;
+    /// `RunError::InvalidAnswer`: a `run.answer` that does not fit the
+    /// run's pending input requests; `data.reason` says why. Nothing was
+    /// written: the run still awaits input.
+    pub const INVALID_ANSWER: i64 = -32032;
 }
 
 impl ErrorObject {
@@ -178,6 +183,9 @@ impl From<&RunError> for ErrorObject {
             RunError::InvalidOutputSchema { reason, .. } => {
                 Self::new(code::INVALID_OUTPUT_SCHEMA, message)
                     .with_data(json!({ "reason": reason }))
+            }
+            RunError::InvalidAnswer { reason, .. } => {
+                Self::new(code::INVALID_ANSWER, message).with_data(json!({ "reason": reason }))
             }
         }
     }
