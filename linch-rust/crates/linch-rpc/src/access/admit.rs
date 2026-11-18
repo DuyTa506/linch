@@ -39,6 +39,29 @@ impl Tenant {
         }
     }
 
+    /// With cache isolation on, give `provider` the tenant's cache salt, set
+    /// again on every admission (a stored definition never holds it). A
+    /// provider whose vendor has no field for it is refused rather than
+    /// left sharing a cache the operator asked to isolate; `scripted` makes
+    /// no request and is left alone.
+    fn admit_cache_isolation(&self, provider: &mut ProviderConfig) -> Result<(), ErrorObject> {
+        let Some(salt) = self.cache_salt() else {
+            return Ok(());
+        };
+        if matches!(provider, ProviderConfig::Scripted { .. }) {
+            return Ok(());
+        }
+        if provider.cache_isolation_field().is_none() {
+            let message = "the tenant's prompt cache is isolated, and this provider has no \
+                           request field for it (only vllm, openai-chat and openai-responses do)";
+            return Err(refused("cache_isolation", message.into()));
+        }
+        if let Some(request) = provider.request_mut() {
+            request.cache_salt = Some(salt.clone());
+        }
+        Ok(())
+    }
+
     /// Refuse a provider question (`provider.capabilities`, `provider.models`,
     /// `provider.model`) unless the tenant may ask them and the provider
     /// is one it may use: the same `base_url` check as `agent.open`, since
@@ -73,6 +96,7 @@ impl Tenant {
         }
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
+        self.admit_cache_isolation(&mut config.provider)?;
         admit_guardrails(&mut config.spec, allow, &self.name)?;
         admit_policy(&mut config.spec, allow.required_policy.as_ref())?;
         allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;

@@ -89,6 +89,34 @@ fn holds_credential(name: &str) -> bool {
     is_key_header(name) || CREDENTIAL_NAMES.iter().any(|part| name.contains(part))
 }
 
+/// A per-tenant value that keeps a provider's prompt-prefix cache from being
+/// shared with another tenant on the same key and endpoint.
+///
+/// It is secret: `Debug` hides it, an error text a server echoes back is
+/// scrubbed of it, and it is set at open, never read from a config. See
+/// [`RequestOptions::cache_salt`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct CacheSalt(String);
+
+impl CacheSalt {
+    /// A salt of `value`; `None` when it is empty, which no wire takes.
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    /// The salt as sent on the wire.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CacheSalt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CacheSalt([redacted])")
+    }
+}
+
 /// Extra request settings, the same for every adapter.
 ///
 /// The default adds nothing: no body fields, no headers, the adapter's own
@@ -104,6 +132,13 @@ pub struct RequestOptions {
     /// Longest silence, between two chunks of the response, before the
     /// call fails; `None` keeps the adapter's own limit.
     pub timeout: Option<Duration>,
+    /// Keeps this agent's prompt-prefix cache apart from other tenants' on
+    /// the same provider key. Sent where the vendor has a field for it:
+    /// `cache_salt` to a vLLM server, `prompt_cache_key` to OpenAI (Chat
+    /// Completions and Responses); never sent to the other adapters, which
+    /// have none. It goes in after `extra_body`, which cannot replace it.
+    /// `None` sends nothing.
+    pub cache_salt: Option<CacheSalt>,
     headers: HeaderMap,
     /// Where the HTTP client comes from, when a holder shares them.
     clients: Option<HttpClients>,
@@ -161,6 +196,9 @@ impl RequestOptions {
     /// even when the provider key is not.
     pub(crate) fn scrub(&self, text: &str) -> String {
         let mut text = text.to_owned();
+        if let Some(salt) = &self.cache_salt {
+            text = text.replace(salt.expose(), REDACTED);
+        }
         for (name, value) in &self.headers {
             if let Ok(value) = value.to_str()
                 && !value.is_empty()
@@ -174,7 +212,7 @@ impl RequestOptions {
 
     /// `err` with its message scrubbed of the header values.
     pub(crate) fn scrub_error(&self, err: ProviderError) -> ProviderError {
-        if self.headers.is_empty() {
+        if self.headers.is_empty() && self.cache_salt.is_none() {
             return err;
         }
         match err {
@@ -200,7 +238,7 @@ impl RequestOptions {
 
     /// `stream` with the errors it yields scrubbed of the header values.
     pub(crate) fn scrub_stream(&self, stream: ProviderStream) -> ProviderStream {
-        if self.headers.is_empty() {
+        if self.headers.is_empty() && self.cache_salt.is_none() {
             return stream;
         }
         let options = self.clone();
@@ -213,6 +251,18 @@ impl RequestOptions {
     pub(crate) fn merge_body(&self, body: &mut JsonValue) {
         if let Some(object) = body.as_object_mut() {
             merge(object, &self.extra_body);
+        }
+    }
+
+    /// Put the cache salt in `body` as `field`, the vendor's name for it,
+    /// after `extra_body` and the sampling fields, so neither replaces it.
+    /// Nothing when no salt is set.
+    pub(crate) fn apply_cache_salt(&self, body: &mut JsonValue, field: &str) {
+        if let (Some(salt), Some(object)) = (&self.cache_salt, body.as_object_mut()) {
+            object.insert(
+                field.to_owned(),
+                JsonValue::String(salt.expose().to_owned()),
+            );
         }
     }
 

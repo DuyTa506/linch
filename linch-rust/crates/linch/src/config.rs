@@ -419,6 +419,40 @@ impl ProviderConfig {
         }
     }
 
+    /// The request settings of a live provider, to change; `None` for
+    /// `scripted`.
+    pub fn request_mut(&mut self) -> Option<&mut RequestConfig> {
+        match self {
+            Self::DeepSeek { request, .. }
+            | Self::OpenAiChat { request, .. }
+            | Self::OpenAiResponses { request, .. }
+            | Self::Anthropic { request, .. }
+            | Self::Gemini { request, .. }
+            | Self::Vllm { request, .. }
+            | Self::SgLang { request, .. }
+            | Self::LlamaCpp { request, .. } => Some(request),
+            Self::Scripted { .. } => None,
+        }
+    }
+
+    /// The body field this provider takes a [`RequestConfig::cache_salt`]
+    /// in, or `None` when its vendor has no field for one: `cache_salt` for
+    /// `vllm`, `prompt_cache_key` for `openai-chat` and `openai-responses`.
+    /// `deepseek`, `anthropic`, `gemini`, `sglang` and `llamacpp` have none,
+    /// and `scripted` makes no request.
+    pub fn cache_isolation_field(&self) -> Option<&'static str> {
+        match self {
+            Self::Vllm { .. } => Some("cache_salt"),
+            Self::OpenAiChat { .. } | Self::OpenAiResponses { .. } => Some("prompt_cache_key"),
+            Self::DeepSeek { .. }
+            | Self::Anthropic { .. }
+            | Self::Gemini { .. }
+            | Self::SgLang { .. }
+            | Self::LlamaCpp { .. }
+            | Self::Scripted { .. } => None,
+        }
+    }
+
     /// The Chat Completions settings of `deepseek`, `openai-chat`, `vllm`,
     /// `sglang` and `llamacpp`; `None` for the others.
     pub fn chat(&self) -> Option<&ChatConfig> {

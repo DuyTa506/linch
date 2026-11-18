@@ -18,7 +18,10 @@ use crate::error::{ErrorObject, limit_reached, rate_limited};
 
 mod admit;
 mod allowlists;
+mod cache_salt;
 mod rate;
+
+pub use cache_salt::MIN_SECRET_BYTES;
 
 pub use allowlists::{
     Allowlists, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
@@ -64,6 +67,10 @@ pub struct Tenant {
     /// Who claims this tenant's runs: opaque, so a refusal shown to a
     /// tenant names no host, path or pid.
     server_id: String,
+    /// What admission puts in each of the tenant's agents so its provider
+    /// prompt cache is not shared with another tenant's; `None` when the
+    /// operator did not turn that on.
+    cache_salt: Option<linch::providers::CacheSalt>,
 }
 
 /// A fresh server id: 8 random hex characters, opaque.
@@ -102,6 +109,7 @@ impl Tenant {
             pools: Arc::new(PgPools::new()),
             provider_calls: Mutex::default(),
             server_id: new_server_id(),
+            cache_salt: None,
             allow,
         })
     }
@@ -185,6 +193,38 @@ impl Tenant {
     pub fn with_server_id(mut self, id: impl Into<String>) -> Self {
         self.server_id = id.into();
         self
+    }
+
+    /// The same tenant with prompt-cache isolation on: every agent it opens
+    /// sends a salt that is the HMAC-SHA256 of the tenant's name under
+    /// `secret`, in the field its provider has for one (`cache_salt` for
+    /// `vllm`, `prompt_cache_key` for `openai-chat` and `openai-responses`),
+    /// and an agent on a provider with no such field is refused
+    /// (`NotAllowed`, `kind` `cache_isolation`). The same secret gives the
+    /// same salt in every process, so a worker and a server agree and a
+    /// restart keeps the tenant's cache; neither the secret nor the salt is
+    /// sent to a client, an event or a log. See [`MIN_SECRET_BYTES`].
+    ///
+    /// Raises:
+    ///     AccessError: If `secret` is under [`MIN_SECRET_BYTES`] bytes.
+    pub fn with_cache_isolation(mut self, secret: &[u8]) -> Result<Self, AccessError> {
+        if secret.len() < MIN_SECRET_BYTES {
+            return Err(AccessError::CacheSecret {
+                min: MIN_SECRET_BYTES,
+            });
+        }
+        self.cache_salt = cache_salt::derive(secret, &self.name);
+        Ok(self)
+    }
+
+    /// Whether [`Tenant::with_cache_isolation`] is on for this tenant.
+    pub fn cache_isolated(&self) -> bool {
+        self.cache_salt.is_some()
+    }
+
+    /// The salt admission gives each agent, when isolation is on.
+    pub(crate) fn cache_salt(&self) -> Option<&linch::providers::CacheSalt> {
+        self.cache_salt.as_ref()
     }
 
     /// The server id the tenant's runs are claimed under.
@@ -359,6 +399,12 @@ pub enum AccessError {
     DuplicateToken {
         /// The tenant of the second occurrence.
         tenant: String,
+    },
+    /// The secret for prompt-cache isolation is too short to resist a guess.
+    #[error("the cache isolation secret must be at least {min} bytes")]
+    CacheSecret {
+        /// The least bytes it may have.
+        min: usize,
     },
     /// The `required_policy` has a gate check that cannot be used (a
     /// pattern that does not compile, a blank keyword).

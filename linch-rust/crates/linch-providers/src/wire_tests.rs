@@ -521,3 +521,101 @@ async fn a_gemini_generation_config_gains_fields_but_keeps_the_requests() {
     assert_eq!(body["generationConfig"]["temperature"], 0.25);
     assert_eq!(body["generationConfig"]["topK"], 40);
 }
+
+const SALT: &str = "3f1c9a77b2d04e55a1f0c3b6d8e9a2417c5b60d3e8f4a9b1c2d3e4f5a6b7c8d9";
+
+fn salted() -> RequestOptions {
+    RequestOptions {
+        cache_salt: crate::CacheSalt::new(SALT),
+        ..RequestOptions::default()
+    }
+}
+
+/// Every adapter, the field it sends a cache salt in (none when the vendor
+/// has no field), and a way to make it.
+fn salt_targets() -> Vec<(&'static str, Option<&'static str>, Make)> {
+    let mut targets: Vec<(&'static str, Option<&'static str>, Make)> = Vec::new();
+    for (name, _, make) in adapters() {
+        let field = match name {
+            "vllm" => Some("cache_salt"),
+            "openai-chat" | "responses" => Some("prompt_cache_key"),
+            _ => None,
+        };
+        targets.push((name, field, make));
+    }
+    for (name, server) in [("sglang", Server::SgLang), ("llamacpp", Server::LlamaCpp)] {
+        let make: Make = Box::new(move |url, request| {
+            let mut o = ServerOptions::new(server, url);
+            o.request = request;
+            Box::new(OpenAiChat::server(o).unwrap())
+        });
+        targets.push((name, None, make));
+    }
+    targets
+}
+
+#[tokio::test]
+async fn a_cache_salt_goes_where_the_vendor_has_a_field_and_nowhere_else() {
+    for (name, field, make) in salt_targets() {
+        let (url, handle) = serve_once(bad_request());
+        let (head, body) = sent(make(url, salted()).as_ref(), handle, request("m")).await;
+        assert!(!head.contains(SALT), "{name}: the salt is not a header");
+        match field {
+            Some(field) => assert_eq!(body[field], SALT, "{name}: {body}"),
+            None => assert!(!body.to_string().contains(SALT), "{name}: {body}"),
+        }
+        let (url, handle) = serve_once(bad_request());
+        let (_, plain) = sent(
+            make(url, RequestOptions::default()).as_ref(),
+            handle,
+            request("m"),
+        )
+        .await;
+        for field in ["cache_salt", "prompt_cache_key"] {
+            assert!(plain.get(field).is_none(), "{name}: no salt, no {field}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn extra_body_cannot_replace_or_remove_the_cache_salt() {
+    for (name, field, make) in salt_targets() {
+        let Some(field) = field else { continue };
+        let mut options = salted();
+        options.extra_body = json!({"cache_salt": "tenant-chosen", "prompt_cache_key": null})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let (url, handle) = serve_once(bad_request());
+        let (_, body) = sent(make(url, options).as_ref(), handle, request("m")).await;
+        assert_eq!(body[field], SALT, "{name}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn a_cache_salt_an_error_echoes_never_reaches_the_caller() {
+    let echo = || {
+        error_response(
+            "400 Bad Request",
+            "",
+            &format!(r#"{{"error":{{"message":"bad request {{\"cache_salt\": \"{SALT}\"}}"}}}}"#),
+        )
+    };
+    for (name, _, make) in salt_targets() {
+        let (url, handle) = serve_once(echo());
+        let err = make(url, salted())
+            .stream(rich_request(), CancellationToken::new())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        handle.join().unwrap();
+        assert!(!format!("{err} {err:?}").contains(SALT), "{name}: {err:?}");
+    }
+}
+
+#[test]
+fn a_cache_salt_is_hidden_from_debug_and_an_empty_one_is_none() {
+    let options = salted();
+    assert!(!format!("{options:?}").contains(SALT));
+    assert!(crate::CacheSalt::new("").is_none());
+}
