@@ -36,6 +36,7 @@ giữa các lời gọi; dữ liệu theo từng lời gọi đến qua `ToolCon
 | `output_schema()` | `None` | Khi được đặt, một giá trị thành công phải thỏa mãn nó |
 | `validate(input)` | identity | Các kiểm tra ngoài schema; chạy sau khi xác thực schema và chạy lại sau khi một hook `pre_tool_use` viết lại input |
 | `parallel(input)` | `scope().is_parallel_safe()` | Lời gọi này có được chạy cùng các lời gọi đọc khác hay không |
+| `polls()` | `false` | Tool có thăm dò (poll) một thứ đang chạy tiếp hay không, để loop guard không bao giờ đếm các lời gọi của nó là lặp ([vòng đời của lượt](./turn-lifecycle.md#loop-guard)); `BashOutput` trả về true |
 | `summarize(input)` | tên tool | Một dòng cho event và lời nhắc phê duyệt |
 | `execute(input, ctx)` | bắt buộc | Chạy trên input đã xác thực; trả về nhanh khi `ctx.cancel` kích hoạt |
 
@@ -269,7 +270,8 @@ tới một process mới.
   600 000, bị cắt theo deadline của lời gọi) cho tới khi kết thúc, rồi trả về đầu ra
   chưa đọc; một process đang chạy là một kết quả thành công kết thúc bằng
   `still running`, một process đã kết thúc được hiển thị như kết quả foreground.
-  `BashKill` có scope exec như `Bash`. Cả hai nằm trong
+  Nó là một poll (`polls()`): loop guard không bao giờ đếm một lần đọc lệnh đang
+  chạy là lặp. `BashKill` có scope exec như `Bash`. Cả hai nằm trong
   `crates/linch-tools/src/bash/control.rs`.
 - **Restart.** Process chỉ sống trong bộ nhớ và chết cùng server, nên `BashOutput`
   hoặc `BashKill` của một run được resume trên một id cũ thất bại với mã

@@ -116,7 +116,7 @@ impl Runner {
         let notice = self.catalog_loads(&blocks);
         blocks.extend(notice);
         let message = Message::new(Role::User, blocks);
-        self.journal.stage(Event::User(UserEvent {
+        self.stage_seen(Event::User(UserEvent {
             message: message.clone(),
             subtype: UserEventSubtype::ToolResult,
         }));

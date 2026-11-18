@@ -91,6 +91,11 @@ impl Tool for BashOutput {
         ToolScope::Read
     }
 
+    /// Reading a command that runs on asks the same thing until it ends.
+    fn polls(&self) -> bool {
+        true
+    }
+
     fn summarize(&self, input: &JsonObject) -> String {
         let id = input.get("process_id").and_then(JsonValue::as_str);
         format!("BashOutput: {}", id.unwrap_or(""))

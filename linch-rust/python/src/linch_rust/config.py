@@ -287,6 +287,37 @@ class TruncationRecovery(TypedDict, total=False):
     feedback: str
 
 
+class LoopGuard(TypedDict, total=False):
+    """When a stuck run ends, as `spec.loop_guard`.
+
+    Python Linch's `LoopGuard`, on by default with these defaults; set only
+    the fields to change. A run that trips it ends failed with a
+    `LoopGuardEvent` (its `reason` is `repeated_tool_call`,
+    `repeated_failures` or `idle_turns`), an `ErrorEvent` named
+    `LoopGuardError`, and a `ResultEvent` of subtype `error`, before its
+    next provider call. Python counts identical inputs whatever the
+    result; here a repeat must also return the same result, an error result
+    is the failure streak's, a built-in tool that polls (`BashOutput`) never
+    repeats, and there is no `force_final_answer`.
+
+    Attributes:
+        max_identical_tool_calls: Calls of one tool with the same input
+            and the same result, not an error, that end the run; the one
+            that reaches it runs first. A call whose result changed is
+            progress. 3 when absent, 0 never.
+        max_consecutive_failures: Tool batches in a row whose every call
+            failed that end the run. 3 when absent, 0 never.
+        max_idle_turns: Most turns in a row that may end without a provider
+            call (a `before_provider_call` `force_continue`); the next one
+            ends the run. 25 when absent, at least 1: always on. A remote
+            tenant may not raise it above 25.
+    """
+
+    max_identical_tool_calls: int
+    max_consecutive_failures: int
+    max_idle_turns: int
+
+
 class DeepAgentProfile(TypedDict):
     """A deep agent profile written out in full; every key is required.
 
@@ -546,8 +577,9 @@ class AgentConfig(TypedDict, total=False):
             policy (see `ProviderRetry`), `fallback_models`, the models to
             fail over to in order, an `output_schema` (see
             `OutputSchema`) with its `structured_output_retries`, a
-            `redaction` (see `Redaction`) and a `verification` (see
-            `Verification`) go here too.
+            `redaction` (see `Redaction`), a `verification` (see
+            `Verification`) and a `loop_guard` (see `LoopGuard`) go here
+            too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

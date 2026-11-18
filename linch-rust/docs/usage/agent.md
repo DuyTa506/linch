@@ -191,7 +191,7 @@ absent, except `bash`.
 | `model` | required | Model id sent with every request; not blank |
 | `system_prompt` | `""` | The system prompt; empty sends no system block |
 | `system_blocks` | `[]` | Your own system blocks, `{"text": str, "cacheable": bool}` (`cacheable` `False` when absent), sent in order before the system prompt ([below](#system-blocks)) |
-| `max_turns` | none: no limit | Most provider calls one run may make. A run that needs one more ends with a `loop_guard` event (`reason: "max_turns"`) and a `result` of subtype `error` |
+| `max_turns` | none: no limit | Most provider calls one run may make. A run that needs one more ends with a `loop_guard` event (`reason: "max_turns"`) and a `result` of subtype `error`. The [loop guard](#loop_guard) ends a stuck run without it |
 | `thinking` | none: the provider's default | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` or `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` is `summarized` or `omitted`. How each provider maps it is in the [architecture providers page](../architecture/providers.md#the-adapters) |
 | `effort` | none | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`, for providers that support it |
 | `max_output_tokens` | none: the provider's default | Most tokens one response may generate |
@@ -206,6 +206,7 @@ absent, except `bash`.
 | `redaction` | none | Regex rules that scrub responses, tool results and optionally the prompt before anything logs, streams or sees them, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Security](./security.md#redaction)) |
 | `verification` | none | Checks the final answer must pass and the retry budget they share with `stop` callbacks, `{"max_retries"?, "verifiers"?}` ([Security](./security.md#verifiers)) |
 | `truncation_recovery` | none: a cut answer is final | Continue a text answer the output limit cut off, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
+| `loop_guard` | on: 3 identical calls with the same result, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
 
 ### System blocks
 
@@ -256,6 +257,40 @@ and the run reports it with a `compaction` [event](./events.md). With
 compaction on, a prompt the provider refuses as too long is shortened and
 sent again; without it, the refusal ends the run. [Memory](./memory.md)
 covers both, and external memory.
+
+### `loop_guard`
+
+The loop guard ends a run that is stuck, before its next provider call,
+with `max_turns` unset as well. It is on unless you change it; set only the
+fields to change.
+
+| Field | Default | The run ends when |
+|---|---|---|
+| `max_identical_tool_calls` | `3` | The same call got the same result this many times: one tool, the same input, the same result, not an error. The call that reaches it runs first. A call whose result changed (a file read again after an edit) is progress and does not count. `0` turns this check off |
+| `max_consecutive_failures` | `3` | This many tool batches in a row had every call fail. A batch with one success starts the count again. `0` turns this check off |
+| `max_idle_turns` | `25` | One more turn in a row would end without a provider call, which only a `before_provider_call` callback answering `force_continue` does. At least `1`: this check is always on |
+
+A run that trips it streams a `loop_guard` event (`reason`
+`repeated_tool_call`, `repeated_failures` or `idle_turns`), an `error` named
+`LoopGuardError` and a `result` of subtype `error`, and ends `failed`. The
+counts are read back from the run's log on a resume, so a crash does not
+reset them.
+
+```python
+spec = {"model": "deepseek-flash", "loop_guard": {"max_identical_tool_calls": 5}}
+```
+
+Python Linch counts identical inputs whatever the result, failed calls
+included. Here a repeat must also return the same result, a failed call is
+the failure count's (Linch tells the model to repeat some refused calls, a
+deferred tool), and a tool that polls never repeats: `BashOutput` can read
+a running background command as often as the model needs. Python's
+`force_final_answer` is not available. A remote tenant may not raise
+`max_idle_turns` above 25.
+
+The default is not written into the spec, so leaving `loop_guard` out keeps
+the [run contract](#the-run-contract) of an agent from before the guard,
+and its runs still resume; any other value changes the contract.
 
 ### `budget`
 
@@ -454,7 +489,7 @@ request has `session_id` and `run_id`:
 | `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
-| `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called. `force_continue` skips the call: `feedback` goes to the model in a `<system-reminder>` and the run takes another turn, bounded only by `max_turns`, as in Python. `retry` is refused here (Python ignores it) |
+| `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called. `force_continue` skips the call: `feedback` goes to the model in a `<system-reminder>` and the run takes another turn, bounded by `max_turns` and by the [loop guard](#loop_guard)'s `max_idle_turns` (25 turns in a row by default). `retry` is refused here (Python ignores it) |
 | `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: what the provider call just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}`, `{"action": "block", "reason"}`; a rewrite is what gets staged and appended to the session, and a block ends the run before the response is staged. A retry (`"force_continue"` is the same, as in Python) keeps the response, runs none of its tool calls, and sends `feedback` to the model before another turn: in a `<system-reminder>`, or, when the response called tools, as the error result of the first call (the others read "Tool not executed; revise and resubmit your final answer."). Only `max_turns` bounds it |
 | `stop` | `text` (the final-answer text so far, the model's or a prior rewrite) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; a rewrite replaces the run's final-answer text (not the assistant message, already appended to the session by the time `stop` runs), and a block ends the run failed. This is also where Python's `before_final_answer` lives: there is no separate point. `continue` (or `"force_continue"`, Python's name for it at `stop`) sends `feedback` in a `<system-reminder>` and takes another turn, bounded only by `max_turns`. `retry` is Python's `before_final_answer` retry: honoured once per run call (with `spec.verification`, up to its `max_retries` per run, each a `verification` event; see [Security](./security.md#a-verifier-in-your-process)), after which it counts as `allow` and the callbacks after it decide. Declare a retrying callback before the others, as Python runs `before_final_answer` before `stop`. A Python `before_final_answer` hook that answers `force_continue` must answer `retry` here: `force_continue` at `stop` is the unbounded `continue` |
 | `post_turn` | `turn`, `stop_reason` | `{}` |

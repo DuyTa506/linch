@@ -18,8 +18,10 @@ What differs in Rust:
   durable checkpoint and picks the step; it does not replay the loop.
 - The run advances only while its stream is polled. Dropping the stream drops
   the run where it stands, like a crash (`runner.rs:83-87`).
-- Python's loop guard (repeated calls, repeated failures) is not in the
-  runner. It emits `loop_guard` only for `max_turns` (`runner/end.rs:93-108`).
+- The loop guard ends a stuck run before its next provider call
+  ([below](#the-loop-guard)): Python's repeated-call and repeated-failure
+  checks, on by default, and a bound on turns without a provider call that
+  is always on (`loop_guard.rs`, `runner/end.rs:156-170`).
 - Hook points are the twenty-two in the [kernel](./kernel.md#hook-chains),
   thirteen of which only observe. `before_provider_call` can rewrite or
   block the request about to be sent, and `after_provider_call` can rewrite
@@ -32,7 +34,8 @@ What differs in Rust:
   `before_final_answer` `retry`); its `continue` is Python's stop
   `force_continue`. Python's `force_continue` at `before_provider_call`
   skips the call: the feedback is logged as a stop feedback is and the
-  run takes another turn, bounded only by `max_turns`. Python also fires
+  run takes another turn, bounded by `max_turns` and by the loop guard's
+  `max_idle_turns`. Python also fires
   that point on a resumed response whose tool calls have no results yet,
   answering them with the feedback (`src/linch/loop/runner.py:767-783`); a
   Rust resume of that response goes on to its tool calls and never comes
@@ -198,7 +201,57 @@ run's final text joins the parts
   `structured_output` (`turn.rs:441-448`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
-is not made and the run fails with `TurnLimitError` (`runner/end.rs:93-108`).
+is not made and the run fails with `TurnLimitError` (`runner/end.rs:138-154`).
+
+### The loop guard
+
+`spec.loop_guard` (`loop_guard.rs:66`) ends a run that is stuck, with
+`max_turns` unset as well. It is on by default; the default is left off the
+wire, so it does not change the contract of a spec that does not set it.
+
+| Check | Default | Trips | Checked |
+|---|---|---|---|
+| `max_identical_tool_calls` | 3 | The same call with the same result this many times in the run: one tool, the same input and the same result content (both canonical JSON), not an error, and not a tool that polls | At `Step::Results`, after the batch's results are appended (`turn.rs:303`) |
+| `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
+| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:415`) |
+
+0 turns one of the first two off; `max_idle_turns` is at least 1, so the
+idle bound is always on. Such a turn never reaches the budget and appends
+to the session every time, so without the bound a hook that always skips
+the call loops until the run is cancelled.
+
+A trip is one terminal write: the `loop_guard` event (`reason`
+`repeated_tool_call`, `repeated_failures` or `idle_turns`, `action` `stop`),
+an `Error` named `LoopGuardError` with the event's `detail`, and a failed
+`Result` with `stop_reason` `error` (`end.rs:156-170`). A tool trip comes
+after the results are in the session, so it stays paired; no `post_turn`
+runs for that turn.
+
+A repeat is the same call with the same result. A call whose result differs
+from every earlier identical call's made progress (a file read again after
+an edit, a status that moved on) and starts a count of its own; going back
+to an earlier result is a repeat of that result. An error result is never a
+repeat, because Linch itself asks the model to repeat some refused calls (a
+deferred tool: `call tool_search with select:X first`); calls that keep
+failing are the failure streak's. A tool whose `polls()` is true
+(`tool.rs:279`; `BashOutput`, which reads a background command until it
+ends) is never a repeat either; its failures still count toward the streak.
+Python counts identical inputs whatever the result, failed and refused
+calls included. Python's `force_final_answer` (one more turn with no tools)
+is not ported: a trip stops.
+
+Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:145`)
+folds the run's durable events: an `assistant` event names the calls of its
+response (less those of tools that poll, which the runner reads from the
+registry), the next `tool_result` user event counts those that did not fail
+by their result content and moves the failure streak, and a primary
+`model_call_delivery` records its turn. The live run folds the same events as it stages them
+(`Runner::stage_seen`, `turn.rs:350`), and a resume folds the stored ones
+(`start.rs:473`). Each is durable before the step that checks it (the
+results with the `ToolResults` checkpoint, a delivery before its call), and
+the turn comes from the checkpoint, so a crash at any write resumes with
+the counts the run had and trips at the same point
+(`tests/e2e_loop_guard.rs`).
 
 ## Barriers and group commit
 
@@ -527,7 +580,8 @@ child runs, stages their final status, builds the `Result` and calls
 | Abort | `aborted` | The cancel token fired (`end.rs:61-64`), or `Agent::cancel` ended a suspended run (`runner/cancel.rs`) |
 | Hook failed closed | `failed` | A `stop` hook failed closed (`end.rs:66-74`) |
 | Output limit | `failed` | The response held no text or whole tool call (`end.rs:76-90`) |
-| Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:92-108`) |
+| Turn limit | `failed` | `max_turns` reached, with a `loop_guard` event (`end.rs:138-154`) |
+| Loop guard | `failed` | The loop guard tripped, with a `loop_guard` event and a `LoopGuardError` (`end.rs:156-170`, [above](#the-loop-guard)) |
 | Budget | `failed` | The budget admits no more calls (`end.rs:110-122`) |
 | Provider error | `failed` | The call failed, and no retry or fallback model took it (`turn.rs:343-346`, `runner/retry.rs`) |
 

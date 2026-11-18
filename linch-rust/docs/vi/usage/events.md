@@ -310,9 +310,13 @@ dài ([Memory](./memory.md#when-the-prompt-does-not-fit)).
 
 ### `LoopGuardEvent` (`loop_guard`)
 
-Run chạm giới hạn lượt của nó: `reason` (`max_turns`), `detail` (ví dụ
-`Maximum turns (20) reached.`) và `action` (`stop`). Một event `error` và một
-`result` có subtype `error` theo sau.
+Run chạm giới hạn lượt của nó hoặc [loop guard](./agent.md#loop_guard) kích hoạt:
+`reason` (`max_turns`, `repeated_tool_call`, `repeated_failures` hoặc
+`idle_turns`), `detail` (ví dụ `Maximum turns (20) reached.` hoặc
+`Tool 'Read' called with identical inputs and the same result 3 time(s)
+(limit: 3).`) và
+`action` (`stop`). Một event `error` (`TurnLimitError` hoặc `LoopGuardError`)
+và một `result` có subtype `error` theo sau.
 
 ### `ProviderRetryEvent` (`provider_retry`)
 

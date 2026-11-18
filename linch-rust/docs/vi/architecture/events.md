@@ -51,7 +51,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Kết thúc stream của một run đã suspend thay cho `result`; trạng thái `awaiting_approval` hoặc `awaiting_input` |
 | `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
-| `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:105` | yes | yes | |
+| `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:113` | yes | yes | |
 | `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó |
 | `provider_retry` | `ProviderRetryEvent`, `kinds/reliability.rs:13` | yes | yes | Một `provider_retry` của spec (`crates/linch-core/src/reliability.rs`): trước lúc chờ, trong cùng một lần ghi với receipt thất bại |
 | `model_fallback` | `ModelFallbackEvent`, `kinds/reliability.rs:31` | yes | yes | `fallback_models` của một spec: cùng receipt thất bại, trên barrier dispatch của model fallback |

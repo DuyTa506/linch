@@ -134,8 +134,8 @@ pub enum BeforeProviderCallAnswer {
         request: Box<ProviderRequest>,
     },
     /// Do not send the call, and take another turn instead: `feedback`
-    /// goes to the model first. Python's `force_continue` here; bounded
-    /// only by `max_turns`.
+    /// goes to the model first. Python's `force_continue` here; bounded by
+    /// `max_turns` and by the loop guard's `max_idle_turns`.
     ForceContinue {
         /// What the model is told before the next turn's call.
         feedback: String,

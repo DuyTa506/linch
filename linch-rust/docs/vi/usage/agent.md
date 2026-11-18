@@ -195,7 +195,7 @@ có, trừ `bash`.
 | `model` | bắt buộc | Model id gửi kèm mọi request; không được để trống |
 | `system_prompt` | `""` | System prompt; để trống thì không gửi system block |
 | `system_blocks` | `[]` | Các system block của riêng bạn, `{"text": str, "cacheable": bool}` (`cacheable` là `False` khi không có), gửi theo thứ tự trước system prompt ([bên dưới](#system-block)) |
-| `max_turns` | không có: không giới hạn | Số lần gọi provider nhiều nhất mà một run được thực hiện. Một run cần thêm một lần nữa sẽ kết thúc bằng event `loop_guard` (`reason: "max_turns"`) và một `result` có subtype `error` |
+| `max_turns` | không có: không giới hạn | Số lần gọi provider nhiều nhất mà một run được thực hiện. Một run cần thêm một lần nữa sẽ kết thúc bằng event `loop_guard` (`reason: "max_turns"`) và một `result` có subtype `error`. [Loop guard](#loop_guard) kết thúc một run bị kẹt mà không cần nó |
 | `thinking` | không có: mặc định của provider | `{"type": "disabled"}`, `{"type": "adaptive", "display"?}` hoặc `{"type": "enabled", "budget_tokens"?, "display"?}`; `display` là `summarized` hoặc `omitted`. Cách mỗi provider ánh xạ nó nằm ở [trang providers của kiến trúc](../architecture/providers.md#the-adapters) |
 | `effort` | không có | Mức nỗ lực suy luận: `low`, `medium`, `high`, `xhigh` hoặc `max`, cho các provider hỗ trợ |
 | `max_output_tokens` | không có: mặc định của provider | Số token nhiều nhất mà một phản hồi được sinh ra |
@@ -210,6 +210,7 @@ có, trừ `bash`.
 | `redaction` | không có | Các regex rule che response, kết quả tool và tùy chọn cả prompt trước khi bất cứ thứ gì ghi log, stream hay nhìn thấy chúng, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Bảo mật](./security.md#redaction)) |
 | `verification` | không có | Các kiểm tra mà câu trả lời cuối cùng phải qua, và ngân sách retry mà chúng dùng chung với các callback `stop`, `{"max_retries"?, "verifiers"?}` ([Bảo mật](./security.md#verifiers)) |
 | `truncation_recovery` | không có: câu trả lời bị cắt là câu cuối | Tiếp tục một câu trả lời văn bản bị giới hạn đầu ra cắt, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
+| `loop_guard` | bật: 3 lời gọi giống nhau với cùng kết quả, 3 batch lỗi, 25 lượt không có lời gọi | Kết thúc một run bị kẹt, `{"max_identical_tool_calls"?, "max_consecutive_failures"?, "max_idle_turns"?}`, là `LoopGuard` của Python ([bên dưới](#loop_guard)) |
 
 ### System block
 
@@ -258,6 +259,37 @@ Compaction thực hiện thêm một lời gọi provider trên provider và mod
 và run báo cáo nó bằng một [event](./events.md) `compaction`. Khi compaction bật, một prompt bị
 provider từ chối vì quá dài sẽ được rút ngắn và gửi lại; khi tắt, lần từ chối kết thúc run.
 [Memory](./memory.md) nói về cả hai, và về bộ nhớ ngoài.
+
+### `loop_guard`
+
+Loop guard kết thúc một run bị kẹt, trước lời gọi provider kế tiếp, kể cả khi
+`max_turns` chưa đặt. Nó bật trừ khi bạn thay đổi; chỉ đặt những trường cần đổi.
+
+| Trường | Mặc định | Run kết thúc khi |
+|---|---|---|
+| `max_identical_tool_calls` | `3` | Cùng một lời gọi nhận cùng kết quả chừng này lần: một tool, cùng input, cùng kết quả, không phải lỗi. Lời gọi chạm tới ngưỡng vẫn chạy trước. Một lời gọi có kết quả đã đổi (một file đọc lại sau khi sửa) là có tiến triển và không được đếm. `0` tắt kiểm tra này |
+| `max_consecutive_failures` | `3` | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi. Một batch có một lời gọi thành công thì đếm lại từ đầu. `0` tắt kiểm tra này |
+| `max_idle_turns` | `25` | Thêm một lượt liên tiếp nữa sẽ kết thúc mà không có lời gọi provider, điều mà chỉ một callback `before_provider_call` trả lời `force_continue` mới gây ra. Tối thiểu `1`: kiểm tra này luôn bật |
+
+Một run kích hoạt nó sẽ stream một event `loop_guard` (`reason`
+`repeated_tool_call`, `repeated_failures` hoặc `idle_turns`), một `error` tên
+`LoopGuardError` và một `result` có subtype `error`, rồi kết thúc `failed`. Các con
+số được đọc lại từ log của run khi resume, nên một sự cố không đặt lại chúng.
+
+```python
+spec = {"model": "deepseek-flash", "loop_guard": {"max_identical_tool_calls": 5}}
+```
+
+Python Linch đếm các input giống nhau bất kể kết quả, kể cả lời gọi lỗi. Ở đây một
+lần lặp còn phải trả về cùng kết quả, một lời gọi lỗi thuộc về số lần lỗi (Linch bảo
+model lặp lại một số lời gọi bị từ chối, một tool bị hoãn), và một tool poll không bao
+giờ lặp: `BashOutput` có thể đọc một lệnh nền đang chạy bao nhiêu lần model cần.
+`force_final_answer` của Python không có. Một tenant từ xa không được nâng
+`max_idle_turns` quá 25.
+
+Giá trị mặc định không được ghi vào spec, nên bỏ `loop_guard` đi thì giữ nguyên
+[hợp đồng của run](#hợp-đồng-của-run) của một agent từ trước khi có guard, và các run
+của nó vẫn resume được; mọi giá trị khác đều đổi hợp đồng.
 
 ### `budget`
 
@@ -457,7 +489,7 @@ Hàm nhận dict request và trả về câu trả lời của điểm đó. M�
 | `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 | `user_prompt_submit` | `content` (các content block) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (cuộc hội thoại mà model sẽ thấy) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` dành cho observer và eval: nó nằm trên `ContextBuildEvent` của lời gọi, key của callback đến sau thắng, và model không bao giờ thấy nó |
-| `before_provider_call` | `turn`, `request` (toàn bộ provider request sắp được gửi) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}`; một rewrite là thứ được gửi đi và được `context_build` ghi lại, và một block kết thúc run trước khi provider được gọi. `force_continue` bỏ qua lời gọi: `feedback` đi tới model trong một `<system-reminder>` và run chạy thêm một lượt, chỉ bị giới hạn bởi `max_turns`, như trong Python. `retry` bị từ chối ở đây (Python bỏ qua nó) |
+| `before_provider_call` | `turn`, `request` (toàn bộ provider request sắp được gửi) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}`; một rewrite là thứ được gửi đi và được `context_build` ghi lại, và một block kết thúc run trước khi provider được gọi. `force_continue` bỏ qua lời gọi: `feedback` đi tới model trong một `<system-reminder>` và run chạy thêm một lượt, bị giới hạn bởi `max_turns` và bởi `max_idle_turns` của [loop guard](#loop_guard) (mặc định 25 lượt liên tiếp). `retry` bị từ chối ở đây (Python bỏ qua nó) |
 | `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: thứ lời gọi provider vừa dựng xong) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}`, `{"action": "block", "reason"}`; một rewrite là thứ được stage và nối vào session, và một block kết thúc run trước khi response được stage. Một retry (`"force_continue"` cũng vậy, như trong Python) giữ response, không chạy lời gọi tool nào của nó, và gửi `feedback` cho model trước một lượt khác: trong một `<system-reminder>`, hoặc, khi response có gọi tool, dưới dạng kết quả lỗi của lời gọi đầu tiên (các lời gọi còn lại ghi "Tool not executed; revise and resubmit your final answer."). Chỉ `max_turns` giới hạn nó |
 | `stop` | `text` (văn bản trả lời cuối cùng cho đến lúc này, của model hoặc của một rewrite trước đó) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; một rewrite thay văn bản trả lời cuối cùng của run (không phải tin nhắn assistant, đã được nối vào session trước khi `stop` chạy), và một block kết thúc run với trạng thái failed. Đây cũng là nơi `before_final_answer` của Python nằm: không có point riêng. `continue` (hoặc `"force_continue"`, tên Python dùng cho nó ở `stop`) gửi `feedback` trong một `<system-reminder>` và chạy thêm một lượt, chỉ bị giới hạn bởi `max_turns`. `retry` là retry của `before_final_answer` trong Python: được chấp nhận một lần cho mỗi lần gọi run (với `spec.verification`, tối đa `max_retries` của nó cho mỗi run, mỗi lần là một event `verification`; xem [Bảo mật](./security.md#a-verifier-in-your-process)), sau đó được tính như `allow` và các callback phía sau quyết định. Hãy khai báo callback retry trước các callback khác, vì Python chạy `before_final_answer` trước `stop`. Một hook `before_final_answer` của Python trả lời `force_continue` thì ở đây phải trả lời `retry`: `force_continue` ở `stop` là `continue` không giới hạn |
 | `post_turn` | `turn`, `stop_reason` | `{}` |

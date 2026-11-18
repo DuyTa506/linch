@@ -222,7 +222,8 @@ impl AgentBuilder {
     ///         its root is not an object), a redaction rule or verifier
     ///         cannot run, the
     ///         compaction, budget or
-    ///         provider retry settings cannot run, a fallback model is blank
+    ///         provider retry settings cannot run, the loop guard allows no
+    ///         turn without a provider call, a fallback model is blank
     ///         or repeats a model, a built-in tool's name is taken, or the
     ///         tool schemas cannot be digested.
     pub fn build(self) -> Result<Agent, BuildError> {
@@ -242,6 +243,9 @@ impl AgentBuilder {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        if let Some(problem) = self.spec.loop_guard.problem() {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.provider_retry.problem() {

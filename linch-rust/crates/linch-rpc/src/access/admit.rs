@@ -304,9 +304,20 @@ pub const MAX_GUARDRAILS: usize = 32;
 /// core bounds what one compiles to as well.
 pub const MAX_PATTERN_BYTES: usize = 1024;
 
+/// Most turns in a row a tenant's run may take without a provider call
+/// (the loop guard's default `max_idle_turns`): each such turn is a write
+/// and a session append on the server that no budget counts.
+pub const MAX_IDLE_TURNS: u32 = 25;
+
 /// Refuse redaction rules and verifiers past [`MAX_GUARDRAILS`] or
-/// [`MAX_PATTERN_BYTES`]. What they match is the tenant's own business.
+/// [`MAX_PATTERN_BYTES`], and a loop guard that allows more turns without
+/// a provider call than [`MAX_IDLE_TURNS`]. What the patterns match is the
+/// tenant's own business.
 fn admit_guardrails(spec: &AgentSpec) -> Result<(), ErrorObject> {
+    if spec.loop_guard.max_idle_turns > MAX_IDLE_TURNS {
+        let message = format!("loop_guard.max_idle_turns may be at most {MAX_IDLE_TURNS}");
+        return Err(refused("loop_guard", message));
+    }
     let too_long = |pattern: &str| pattern.len() > MAX_PATTERN_BYTES;
     if let Some(redaction) = &spec.redaction
         && (redaction.rules.len() > MAX_GUARDRAILS
