@@ -200,6 +200,57 @@ workspace được giữ lại giữa các lệnh. Daemon là của root, nên m
 nó thì làm được mọi thứ; hãy giữ socket của nó xa các tenant (backend sandbox từ chối
 Unix socket vì lý do đó).
 
+### Các mức cô lập
+
+Một container dùng chung kernel của host. Các system call mà một lệnh thực hiện đi vào
+kernel đó, nên một lỗi trong nó có thể để một lệnh thoát ra khỏi container. Backend `sandbox`
+có cùng rủi ro còn lại (Landlock và seccomp cũng là tính năng của kernel). Với các lệnh đến từ
+nội dung không đáng tin, hoặc trên một server được nhiều tenant dùng chung, hãy chạy các
+container dưới một runtime mạnh hơn. Từ yếu nhất đến mạnh nhất:
+
+| Mức | Cô lập | Ghi chú |
+|---|---|---|
+| `local` | Không gì ngoài user của server | Chỉ cho agent đáng tin |
+| `sandbox` | Landlock, seccomp, rlimit trên kernel của host | Không có daemon; Linux 6.12 trở lên |
+| `docker` với `runc` (mặc định của Docker) | Namespace, cgroup, capability bị bỏ, trên kernel của host | Rủi ro còn lại là một lỗi thoát qua kernel hoặc runtime |
+| `docker` với gVisor (`runsc`) | Một kernel ở user-space trả lời các system call của container; ít cái chạm tới host | Chỉ Linux; xem các chi phí bên dưới |
+| `docker` với một runtime VM (Kata Containers, Firecracker) | Một guest kernel trong một máy ảo | Mạnh nhất; cần ảo hóa trên host |
+
+gVisor không cần thay đổi gì ở linch-rust, vì nó là một runtime của Docker. Hãy cài `runsc`
+và đăng ký nó với daemon, rồi hoặc đặt nó làm mặc định của daemon, trong
+`/etc/docker/daemon.json`, để mọi `docker run` mà backend phát ra đều dùng nó:
+
+```json
+{"runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}}, "default-runtime": "runsc"}
+```
+
+hoặc để nguyên mặc định và trỏ `docker_path` của policy tới một wrapper chỉ thêm runtime vào
+`run`:
+
+```sh
+#!/bin/sh
+# /usr/local/bin/docker-runsc
+if [ "$1" = run ]; then shift; exec docker run --runtime=runsc "$@"; fi
+exec docker "$@"
+```
+
+```python
+execution = {"backend": "docker", "docker_path": "/usr/local/bin/docker-runsc"}
+```
+
+Trên một server, hãy đặt cùng `docker_path` đó trong mục `allow.execution` của tenant, mục mà
+một cấu hình phải khớp.
+
+Chi phí của gVisor: một lệnh thực hiện nhiều system call chạy chậm hơn (các báo cáo cho thấy
+chậm hơn hàng chục phần trăm với loại việc đó) và một container khởi động lâu hơn; một số
+system call và tệp `/proc` và `/sys` chưa được cài đặt, nên một tool cần chúng sẽ lỗi; nó chỉ
+chạy trên Linux. Hãy đo các lệnh của chính bạn trước khi dựa vào nó. Với một runtime cấp VM,
+hãy đăng ký nó với daemon theo cách tương tự và dùng nó thay cho `runsc`.
+
+Backend docker không được kiểm chứng với một Docker daemon trong CI của linch-rust, và hoàn
+toàn không được kiểm chứng với gVisor hay một runtime VM: hãy thử cấu hình của bạn với một lệnh
+bắt buộc phải lỗi (đọc một tệp ngoài workspace) trước khi tin vào nó.
+
 ## Trên server
 
 Một tenant từ xa chỉ được dùng các backend mà server của nó liệt kê, mỗi cái với

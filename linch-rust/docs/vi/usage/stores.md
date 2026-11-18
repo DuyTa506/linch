@@ -108,11 +108,12 @@ hãy cấp cho máy chạy server đường mạng và thông tin xác thực.
 
 ### Bảng và migration
 
-Agent đầu tiên mở trên một DSN sẽ kết nối và áp dụng các migration. Việc này an toàn
-ở mọi lần khởi động: các migration đã áp dụng được bỏ qua, và các lần mở đồng thời
-chờ trên một khóa cơ sở dữ liệu. Các phiên bản đã áp dụng được ghi trong
-`linch_migrations`, nên bảng của công cụ migration riêng của bạn trong cùng schema
-sẽ không xung đột.
+Hãy chạy các migration như một bước deploy ([bên dưới](#migration-như-một-bước-deploy)).
+Một agent mở trên một DSN cũng áp dụng những migration còn thiếu, nên một môi trường phát
+triển không cần gì khác; việc này an toàn ở mọi lần khởi động: các migration đã áp dụng được
+bỏ qua, và các lần mở đồng thời chờ trên một khóa cơ sở dữ liệu. Các phiên bản đã áp dụng
+được ghi trong `linch_migrations` (của worker trong `linch_worker_migrations`), nên bảng của
+công cụ migration riêng của bạn trong cùng schema sẽ không xung đột.
 
 | Bảng | Chứa |
 |---|---|
@@ -122,13 +123,12 @@ sẽ không xung đột.
 | `linch_tasks`, `linch_task_edges` | Task của session và các phụ thuộc của chúng |
 
 Migration 6 thêm hai cột nullable vào `linch_runs` (`lease_holder`, `lease_until`) cho
-[run leases](#run-leases). Nó không viết lại hàng nào và không giữ khóa lâu. Một server
-của phiên bản cũ hơn từ chối khởi động trên một cơ sở dữ liệu đã migrate vượt qua nó,
-như với mọi migration: hãy nâng cấp mọi server trước khi một trong số chúng khởi động
-lại trên phiên bản cũ.
+[run leases](#run-leases). Nó không viết lại hàng nào và không giữ khóa lâu.
 
-- Role trong DSN cần quyền tạo bảng và index trong schema của nó ở lần đầu; sau đó
-  nó chỉ đọc và ghi các hàng.
+- Role trong DSN cần quyền tạo bảng và index trong schema của nó ở lần đầu và ở mỗi lần
+  nâng cấp có thêm một migration; ngoài ra nó chỉ đọc và ghi các hàng. Hãy chạy
+  [`migrate`](#migration-như-một-bước-deploy) bằng một role có các quyền đó và đưa cho các
+  server một role không có chúng.
 - Một migration không hoàn tất trong 30 giây làm việc mở thất bại với `OpenError`
   (mã -32014); nguyên nhân thường gặp là một tiến trình khác đang giữ khóa migration.
 - Migration chỉ được thêm vào, không bao giờ sửa. Đừng sửa hay xóa các bảng
@@ -140,6 +140,71 @@ lại trên phiên bản cũ.
 
 Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
 [trang kiến trúc về kho lưu trữ](../architecture/stores.md#postgres-stores).
+
+### Migration như một bước deploy
+
+Áp dụng schema một lần cho mỗi bản phát hành, trước khi các server của bản đó khởi động:
+
+```python
+import linch_rust
+
+status = await linch_rust.migrate("postgres://admin:...@db:5432/linch?options=-c%20search_path%3Dlinch")
+assert status.is_current                      # store and worker tables, both at the latest
+status = await linch_rust.schema_status(dsn)  # read only; status.store.applied / .latest
+```
+
+Tương tự từ shell hoặc một script deploy, với DSN nằm trong một biến môi trường (không bao
+giờ trên dòng lệnh):
+
+```bash
+LINCH_DSN=postgres://admin:...@db/linch linch-server --migrate --dsn-env LINCH_DSN
+LINCH_DSN=... linch-server --check --dsn-env LINCH_DSN    # writes nothing
+linch-server --check --config /etc/linch/linch-server.json  # the DSN of its worker section
+```
+
+Mỗi lệnh in một dòng JSON, `{"current": true, "store": {"applied": 10,
+"latest": 10}, "worker": {"applied": 7, "latest": 7}}`, và thoát với một mã trạng thái mà
+script có thể rẽ nhánh theo:
+
+| Mã thoát | Ý nghĩa |
+|---|---|
+| 0 | Schema đã hiện hành |
+| 1 | Không đến được cơ sở dữ liệu, hoặc một migration thất bại |
+| 2 | Dòng lệnh hoặc cấu hình sai, hoặc một biến chưa được đặt |
+| 3 | Cơ sở dữ liệu có một migration mà binary này không biết: một bản phát hành mới hơn đã migrate nó |
+| 4 | Chỉ với `--check`: schema đứng sau binary này; hãy chạy `--migrate` |
+
+`migrate` bao gồm cả hai bảng migration, của các store và của worker. Chạy lặp lại an toàn và
+chạy từ nhiều host cùng lúc cũng an toàn. Trong Rust, nó là `linch::migrate(dsn)` và
+`linch::check(dsn)`.
+
+**Cổng kiểm tra phiên bản.** Trước khi `agent.open` chạm vào một run, và trước khi một worker
+khởi động, server đọc các migration mà cơ sở dữ liệu đã áp dụng. Nếu nó có một migration mà
+binary này không nhúng, việc mở thất bại với `OpenError` mã -32016 (`SchemaNewer` trong
+Python, với `.table`, `.applied` và `.latest`) và không có gì được đọc hay ghi; một worker từ
+chối khởi động với cùng nội dung trên stderr (thoát 2). Một lần mở bình thường trên schema
+hiện hành hoặc cũ hơn không thay đổi: nó áp dụng những gì còn thiếu, như trên.
+
+**Rolling deploy.** Migration chỉ được thêm vào, và các bảng và cột của mỗi bản phát hành
+đều mang tính cộng thêm, nên một server cũ vẫn chạy được trên một cơ sở dữ liệu mà bản mới đã
+migrate, miễn là nó không mở một pool mới: mọi đích kết nối mà nó đã mở vẫn tiếp tục chạy.
+Một server cũ mở pool của một tenant mới, hoặc khởi động lại, sẽ thấy schema mới hơn và từ
+chối với -32016. Vì vậy:
+
+1. Chạy `migrate` bằng binary mới (bước deploy ở trên).
+2. Khởi động các server mới; drain và dừng các server cũ. Client của một server đã dừng
+   resume các run của họ trên một server mới ([Server nào điều khiển một
+   run](./server.md#server-nào-điều-khiển-một-run)).
+3. Để rollback một bản phát hành đã thêm một migration, hãy khôi phục cơ sở dữ liệu từ trước
+   bước 1: một binary cũ hơn từ chối một schema mới hơn. Không có gì xóa một migration.
+
+Một bản phát hành thay đổi mô tả của một tool dựng sẵn, danh sách tool của một MCP server,
+hoặc phiên bản chính sách của một hook sẽ thay đổi [hợp đồng của
+run](./agent.md#hợp-đồng-của-run), và một run đã lưu chưa kết thúc (run chờ một phê duyệt
+hoặc một câu trả lời, hoặc run mà một lần dừng để lại giữa chừng) không thể resume dưới nó
+(`ContractMismatch`). CHANGELOG nêu tên các bản phát hành như vậy: hãy đọc các mục
+"Unreleased" và các mục phiên bản của nó trước khi nâng cấp, và để các run đang tạm dừng kết
+thúc trước.
 
 ### Kết nối và pool
 
@@ -161,11 +226,16 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
   - `max_connections` của chính Postgres (mặc định 100) được dùng chung bởi mọi pool
     của mọi tiến trình trên cơ sở dữ liệu, kể cả worker và công cụ quản trị. Đó là lý
     do mặc định dừng ở 32: ba tiến trình server ở mặc định vẫn vừa. Bốn thì không: khi đó
-    run lỗi với `pool timed out`. Với N tiến trình (sidecar) trên một cơ sở dữ liệu, đặt
-    `stores.max_connections` của mỗi tiến trình khoảng (giới hạn của cơ sở dữ liệu trừ
-    phần dự phòng) / N, ví dụ 20 cho bốn sidecar với giới hạn 100. Chỉ tăng
-    `stores.max_connections` quá 32 sau khi đã tăng giới hạn của cơ sở dữ liệu, hoặc đặt
-    một pooler như PgBouncer phía trước.
+    run lỗi với `pool timed out` (xem [Ngân sách kết nối](#ngân-sách-kết-nối)). Với N tiến
+    trình (sidecar) trên một cơ sở dữ liệu, đặt `stores.max_connections` của mỗi tiến trình
+    khoảng (giới hạn của cơ sở dữ liệu trừ phần dự phòng) / N, ví dụ 20 cho bốn sidecar với
+    giới hạn 100. Chỉ tăng `stores.max_connections` quá 32 sau khi đã tăng giới hạn của cơ sở
+    dữ liệu, hoặc đặt một pooler như PgBouncer phía trước.
+- Một lệnh gọi thấy mọi kết nối của pool đều bận sẽ chờ 30 giây, rồi lỗi với `pool timed out
+  after 30s: raise max_pool_connections or lower concurrent runs`. Một run gặp lỗi này dừng ở
+  trạng thái bền vững cuối cùng của nó; hãy resume nó. Server cũng ghi log một dòng `warn`
+  cho mỗi run gặp lỗi này, kèm tenant, mức tối đa của pool, số kết nối đang mở và số đang
+  dùng (`LINCH_LOG=warn`, mức mặc định, sẽ hiển thị nó).
 - Lần mở đã kết nối một pool đặt kích thước của nó; các agent dùng chung pool dùng
   chung kích thước đó. Nhiều tiến trình server trên cùng một cơ sở dữ liệu mỗi tiến
   trình có pool riêng.
@@ -181,6 +251,72 @@ Chi tiết schema, đường ghi và quy tắc từ chối nằm ở
   nên một run đã chờ một lệnh gọi mô hình dài vẫn ghi được câu trả lời của nó. Một
   kết nối lỗi giữa chừng một lần ghi sẽ dừng run ở trạng thái bền vững cuối cùng;
   hãy resume nó.
+
+### Ngân sách kết nối
+
+Postgres có một giới hạn cho mọi thứ kết nối vào nó: `max_connections` của chính nó (mặc
+định 100, trừ `superuser_reserved_connections`). Hãy đếm những gì fleet của bạn có thể mở
+cùng lúc:
+
+```text
+connections = servers x (tenants x max_pool_connections + worker pool)
+              + extras
+```
+
+- **servers** là số tiến trình `linch-server` (hoặc sidecar nhúng) trên cơ sở dữ liệu.
+- **tenants** là số tenant có một agent đang mở trên một server. Một tenant có một pool cho
+  mỗi đích kết nối (host, cơ sở dữ liệu, người dùng và `search_path`), và hai tenant không
+  bao giờ dùng chung một pool. Một server không có tenant (stdio) có một pool cho các agent
+  cục bộ của nó.
+- **max_pool_connections** là kích thước pool: `stores.max_connections` của tenant, tối đa
+  bằng `max_pool_connections` của nó, và giá trị đó mặc định là số core của máy của server,
+  giới hạn trong khoảng 10 đến 32. Một pool mở các kết nối của nó khi các run cần, nên một
+  tenant yên tĩnh giữ ít kết nối, nhưng một tenant bận có thể đạt mức tối đa.
+- **worker pool** là `worker.max_connections` (cùng mặc định) cho một server có phần `worker`,
+  và 0 khi không có.
+- **extras**: khóa migration chiếm một kết nối ngoài pool trong lúc một pool kết nối và
+  migrate (các lần mở đồng thời của một schema mỗi lần cần một kết nối trong khoảnh khắc đó);
+  một [workflow](./workflows.md) đang chạy giữ thêm một kết nối, ngoài mức tối đa của pool,
+  trong suốt lần chạy của nó (một advisory lock cấp session); `LISTEN` của worker giữ một kết
+  nối trong suốt thời gian nó chạy (hãy chừa chỗ cho nó trong `worker.max_connections`).
+
+Ví dụ cụ thể: 3 server, mỗi server có 5 tenant với pool 10 kết nối mặc định và một worker pool
+10 kết nối, cần tối đa `3 x (5 x 10 + 10) = 180` kết nối, so với 100 của Postgres. Đặt
+`max_pool_connections` là 4 cho mỗi tenant và `worker.max_connections` là 4, thì con số là
+`3 x (5 x 4 + 4) = 72`, vừa với chỗ dư cho 4 workflow đang chạy, một session quản trị và
+`migrate` của một lần deploy. Hãy dự trù khoảng hai kết nối cho mỗi run đang chạy cùng lúc,
+trên mỗi pool; một pool nhỏ hơn mức đó làm các run phải chờ, và quá 30 s thì lỗi với `pool
+timed out` (ở trên).
+
+Mọi giới hạn của một tenant đều tính theo từng tiến trình, và không có giới hạn trên toàn
+server:
+
+- `max_runs`, `max_agents` và `max_connections` của một tenant được đếm riêng trong từng
+  server, nên N server cho phép gấp N lần. Tương tự với `max_provider_concurrency`: một tiến
+  trình worker hay một server thứ hai tự đếm riêng.
+- Không có gì chặn tổng số trên các tenant trong một tiến trình, nên năm mươi tenant ở mặc
+  định có thể mở năm mươi pool. Hãy chọn kích thước `max_pool_connections` theo số tenant mà
+  bạn lưu trữ, không phải theo một tenant.
+
+**Một pooler.** PgBouncer ở chế độ transaction chia sẻ một vài kết nối Postgres cho nhiều
+client, phù hợp với nhiều tenant nhàn rỗi, nhưng bốn thứ trong linch-rust cần một kết nối cấp
+session hoặc một tính năng mà một transaction pooler có thể không có:
+
+- Khóa migration (`pg_advisory_lock`, giữ trên một kết nối riêng trong lúc migration chạy),
+  khóa của một workflow đang chạy và khóa của đợt retention đều là advisory lock cấp session;
+  qua một transaction pooler chúng có thể rơi vào các backend khác nhau hoặc sống lâu hơn
+  bên giữ chúng.
+- `LISTEN` của worker cần một session; một worker qua một transaction pooler mất các lần đánh
+  thức và quay lại poll mỗi `poll_interval_ms`.
+- sqlx cache các prepared statement theo từng kết nối (mặc định 100); một transaction pooler
+  cần hỗ trợ prepared statement (PgBouncer 1.21 trở lên với `max_prepared_statements`) hoặc
+  `statement-cache-capacity=0` trong DSN.
+- `options=-c search_path=...` của DSN là một tham số khởi động; pooler phải chuyển nó đi (hoặc
+  đặt `search_path` của role trong cơ sở dữ liệu thay vào đó).
+
+Cách đơn giản là kết nối trực tiếp cho các worker, `migrate` và các workflow, và pooler cho
+lưu lượng run của các server. Hãy thử pooler với cấu hình của chính bạn trước khi dựa vào nó;
+trang này không khẳng định một cách thiết lập mà các test không bao phủ.
 
 ### Run leases
 

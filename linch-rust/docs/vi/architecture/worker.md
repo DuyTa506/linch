@@ -100,8 +100,14 @@ job có định nghĩa chỉ được nhận bởi worker có `roots` chứa đo
 của nó (`crates/linch-worker/src/lease.rs`, `dequeue`). Xem
 [định nghĩa agent](#định-nghĩa-agent).
 
-Khi `shutdown`, nó chờ các job đang chạy. Thay vào đó, drop future sẽ bỏ rơi chúng như
-một sự cố: các run của chúng vẫn resume được và các job hiện lại sau visibility timeout.
+Khi `shutdown`, nó chờ tối đa `WorkerConfig::drain_timeout` (30 s) cho các job đang chạy
+(`worker.rs`, `drain`). Một job vẫn còn chạy lúc đó sẽ được trả lại: `execute` drop lần thử
+(một run stream bị drop sẽ giải phóng lease của run của nó qua `Held::drop`), chờ tối đa 5 s
+cho `agent.released()`, rồi giải phóng job với độ trễ bằng 0 và không tính thất bại
+(`Outcome::HandedBack`), nên worker kế tiếp không thấy hold nào. Một job không thể ổn định
+trong 10 giây nữa sẽ bị abort và dựa vào visibility timeout. Thay vào đó, drop future sẽ bỏ
+rơi chúng như một sự cố: các run của chúng vẫn resume được và các job hiện lại sau
+visibility timeout.
 Lỗi cơ sở dữ liệu bên trong vòng lặp được ghi log và thử lại ở lần poll kế tiếp.
 
 ### Giới hạn đồng thời

@@ -24,7 +24,11 @@ nói giao thức JSON-RPC được mô tả trong tài liệu của crate `linch
 | Client | Client đã khởi động nó | Nhiều client: `Server.connect(...)`, qua socket hoặc WebSocket |
 | Đăng nhập | Không có | `connection.auth` hoặc `Authorization: Bearer` |
 | Allowlist và giới hạn | Không có | Theo từng tenant |
-| Dừng | Khi stdin của nó đóng | Khi nhận SIGINT hoặc SIGTERM |
+| Dừng | Khi stdin của nó đóng | Khi nhận SIGINT hoặc SIGTERM: các run đang chạy bị drop, các job của worker có `worker.drain_timeout_ms` để hoàn tất ([Scheduler](./scheduler.md#dừng-một-worker)) |
+
+`linch-server --migrate` và `linch-server --check` là cách dùng thứ ba của binary: chúng áp
+dụng hoặc đọc schema cơ sở dữ liệu rồi thoát
+([Stores: Migration như một bước deploy](./stores.md#migration-như-một-bước-deploy)).
 
 ---
 
