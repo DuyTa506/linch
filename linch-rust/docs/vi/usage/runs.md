@@ -120,6 +120,7 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | Exception | Code | Khi nào |
 |---|---|---|
 | `RunNotFound` | -32021 | Không có run đó trong các kho lưu trữ của agent (với kho memory: không có trong handle này) |
+| `RunPruned` | -32050 | Run từng tồn tại và [retention](./stores.md#retention) của server đã xóa nó; lớp con của `RunNotFound`, `run_id` nêu tên nó. Hết thời hạn tombstone thì nó đọc ra là `RunNotFound` |
 | `RunExists` | -32023 | `run_id` đã được lưu; `run_or_resume` xử lý nó ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | Run đã bắt đầu dưới một contract khác ([Config của agent](./agent.md#hợp-đồng-của-run)); `data["expected"]` là contract của run và `data["found"]` là của agent này, như thông báo nêu |
 | `RunTerminal` | -32026 | Run đã kết thúc; `data.status` là trạng thái của nó |

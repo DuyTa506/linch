@@ -133,7 +133,8 @@ of them restarts on the old version.
   while runs are live.
 - Payloads are stored as `TEXT`, not `JSONB`, so the bytes the model saw are
   the bytes read back.
-- The client has no call that deletes runs or sessions.
+- The client has no call that deletes runs or sessions. The server's
+  [retention](#retention) does, when you turn it on.
 
 Schema details, write paths and the refusal rules are in the
 [architecture stores page](../architecture/stores.md#postgres-stores).
@@ -229,6 +230,132 @@ server's memory grows with the runs: about 110 KB per run in a measurement of
 a release server (100 runs of one `Bash` call each, 24 MB after 25 runs and 32
 MB after 100; closing the agent did not shrink the process). Use Postgres
 stores for an agent that lives long or serves many runs.
+
+## Retention
+
+Postgres keeps every run, event and session until something deletes it. A
+schedule that fires every minute adds a run and a session a minute (1440 a
+day), and each tool turn adds about 8 event rows. Retention is the server's
+own, opt-in way to bound that. It is off unless the `worker` section of the
+server config has a `retention` object:
+
+```json
+{"worker": {"dsn": {"env": "LINCH_DSN"},
+            "retention": {"terminal_runs_days": 30, "idle_sessions_days": 90}}}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `terminal_runs_days` | none | Delete a run (its record and every event) that ended more than this many days ago |
+| `idle_sessions_days` | none | Delete a session (its log, tasks and task edges) that nothing wrote to for this many days |
+| `tombstone_days` | 30 | How long a deleted run is remembered (see [what a client sees](#what-a-client-sees)) |
+| `batch_size` | 500 | The most runs or sessions one transaction deletes (1 to 10000) |
+| `interval_secs` | 3600 | The least time between two passes (at least 60) |
+
+At least one of the two windows is required, a window is whole days (not 0),
+and a bad value stops the server at startup. A worker runs a pass in a task of
+its own, so a long pass never delays a poll, and the fleet runs one pass at a
+time: a pass that finds another server's pass running stops and tries again at
+its next interval. The worker needs a `worker` section; a server without one
+deletes nothing.
+
+### What is deleted and what is kept
+
+The two windows are separate decisions. A session may be continued by a
+person long after its runs ended, so deleting the runs of an old session does
+not delete the session, and the other way round.
+
+| Kept, whatever the window | Why |
+|---|---|
+| A run that is not terminal (`pending`, `running`, `awaiting_approval`, `awaiting_input`) | A suspended run waits for a person for as long as it takes; deleting it would end it without an answer. The delete itself checks the status again |
+| A child run (a subagent's) while its parent run is not terminal | The parent reads its children's events when it resumes; without them it would start the subagent again |
+| A workflow's agent run and session (`wf-` ids) | A resumed workflow reads the run when its journal has no record of the call yet; without it the agent would run again |
+| A run a queued or running job still names | A retried start job that finds its run missing starts another one |
+| A session with a run that is not terminal | A run in it still reads the log |
+
+Deleted rows go in batches, each its own transaction: a run with its events
+(and a tombstone), a session with its log, its tasks and the task edges. A
+crash between batches leaves every run and session whole or gone. The pass
+walks each table once in key order, so rows it cannot delete are not read
+again until the next pass.
+
+Nothing else is touched. The job history and failed jobs keep their own
+`history_retention_ms`; schedules, definitions, files, long-term memories,
+mailbox messages, the tool cache and workflow journals are not part of
+retention. A job's history row survives the run it names, so `job.list` is
+the same before and after a pass, and a schedule's next fire is not moved.
+
+Retention deletes audit data: after the window nobody can read a run's events
+or report. Choose a window that covers what you need to look back on, or copy
+what you must keep before it ends.
+
+A session deleted for being idle is gone: starting a run in that session id
+afterwards starts an empty session. A session's activity is its own: a parent
+session that is still in use does not keep the sessions of its subagents
+alive, so keep `idle_sessions_days` longer than the longest gap after which
+anyone returns.
+
+### What a client sees
+
+A read, resume, approve, answer, steer, cancel or report of a deleted run is
+`RunPruned` (code -32050, a `RunNotFound` subclass; `data.run_id`), and not a
+plain "not found", for `tombstone_days`. After that the server has forgotten
+it and the run reads as `RunNotFound`. A wrong id is always `RunNotFound`.
+
+### Upgrading
+
+Migration 10 adds `linch_runs.ended_at` (set by the commit that makes a run
+terminal), `linch_sessions.updated_at` (set by creating a session and by every
+append) and `linch_pruned_runs`. It rewrites no row, so it takes about as long
+on a database of millions of runs as on an empty one (the time of the two
+index builds is under [Operations](#operations)). The runs that were terminal
+before it have no end time: the first pass that has `terminal_runs_days` gives
+each one the time of that pass, so its window starts there, and every
+existing session's clock starts at the migration. The first rows go one
+window after you turn retention on, not at the upgrade.
+
+### Operations
+
+Measured on a shared 64-core host with a Postgres 16.15 of default settings
+(`shared_buffers` 128 MB) on the same machine, on a database of 520k runs (4.2M events), 516k sessions
+(1.6M log entries) and 300k history rows, with the retention pass deleting
+while 4 clients started scripted runs on the same schema:
+
+- Before any deletion the tables held 2.0 GB of events (4.0M rows, 500 bytes a
+  row with its index), 0.3 GB of runs (505k rows, 600 bytes), 0.09 GB of
+  sessions (500k rows, 180 bytes) and 0.47 GB of log entries (1.5M rows, 310
+  bytes). A text-only scripted run (8 events, 1 session, 3 entries) therefore
+  leaves about 5.7 KB: a schedule that fires every minute adds 8 MB a day.
+- A pass deleted 67k runs with their 536k events and 66k sessions with their
+  214k entries (about 0.9M rows) in 187 s, 4.7k rows/s, with a 500-row batch
+  and the pause below. A pass over 263k runs and 259k sessions (3.4M rows)
+  took 24 minutes with the pause and no clients, on a busier host.
+- Each batch is followed by a pause as long as the batch took, so a pass
+  keeps the database at most half busy for it. The run throughput of the 4
+  clients (batches of 100 runs) averaged 58 runs/s during the pass and 67
+  runs/s without it, 13% lower, and every run succeeded.
+- Picking a batch of runs reads 500 index entries in about 5 ms at any
+  depth into the pass; a pass with nothing to delete costs 0.05 ms. Picking a
+  batch of sessions is 7 ms; a session scan with nothing to delete is a full
+  key-order scan, 0.45 s at 516k sessions, once per pass.
+- The migration rewrites no row (an open of 518k runs migrated in 1.3 s). A
+  partial index on a terminal run costs about 77 bytes a row (39 MB for 500k
+  runs) and is written once per run, when it ends.
+- Deleting does not shrink the files: Postgres reuses the freed pages after
+  autovacuum has seen them, and `VACUUM FULL` or `pg_repack` gives the space
+  back to the operating system. A pass makes dead rows at its batch speed,
+  so on a table of millions of rows raise autovacuum's scale for the first
+  pass, or run `VACUUM (ANALYZE)` after it.
+- A larger `batch_size` deletes faster and holds the locks of the rows it
+  deletes for longer; 500 is the default.
+
+Terminal rows do not slow a run down: with these 520k runs and 4.2M events in
+the schema and nothing deleted, the scripted-run throughput at 1, 4 and 16
+clients was 42, 173 and 481 runs/s against 48, 137 and 709 runs/s on an empty
+schema (the same noise as between two runs of either), and the claim, lease,
+expiry and due-fire queries kept their plans, because they read the partial
+indexes over live rows. Retention is therefore a disk bound (the table and
+index sizes above) and not a speed requirement.
 
 ## The virtual filesystem
 

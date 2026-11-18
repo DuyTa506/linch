@@ -56,6 +56,7 @@ no token.
 | `visibility_timeout_ms` | 30000 | How long a taken job stays hidden without a heartbeat. Keep the agents' `stores.lease_ttl_ms` no longer |
 | `retry_delay_ms` | 5000 | Wait before a failed job's next attempt; doubles each time, at most 5 minutes |
 | `history_retention_ms` | 7 days | How long ended and failed jobs stay readable with `job` and `jobs`; a job of a run that is not terminal stays longer ([what is pruned](#what-is-pruned)) |
+| `retention` | absent: nothing is deleted | Delete what ended runs and idle sessions leave behind, in small batches: `{"terminal_runs_days": 30, "idle_sessions_days": 90}`, with optional `tombstone_days` (30), `batch_size` (500) and `interval_secs` (3600). One pass runs at a time across all workers on the database. [Stores: Retention](./stores.md#retention) says what goes and what stays |
 | `local_namespaces` | none | Namespace roots outside every tenant whose jobs it also runs, without checks (schedules a stdio client made); `dev` covers `dev` and `dev/...` |
 
 Run as many such servers on one database as you like: each fire is queued

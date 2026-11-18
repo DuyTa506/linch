@@ -153,6 +153,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32047 | `WORKFLOW_CALL_FAILED` | `WorkflowCallFailed` | Một lời gọi `workflow.agent` không cho kết quả; `data.kind` là `failed`, `aborted`, `timeout`, `approval` hoặc `invalid` |
 | -32048 | `WORKFLOW_NOT_FOUND` | `WorkflowNotFound` | Connection này không điều khiển workflow nào có id đó: chưa gửi `workflow.start` cho nó, hoặc đã finish nó |
 | -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` với câu trả lời `resume` cho một workflow mà journal trống (nó chưa chạy ở đây, hoặc journal của agent memory-store nằm ở connection khác). Chưa claim gì |
+| -32050 | `RUN_PRUNED` | `RunPruned` (một `RunNotFound`) | Một run mà đợt retention đã xóa (bản ghi và event của nó): `run.events`, resume, approve, answer, steer, cancel hoặc report của nó. `data.run_id`. Server nhớ run đã bị xóa trong thời hạn tombstone (mặc định 30 ngày); sau đó cùng lần đọc ấy là `-32021`. Một id sai luôn là `-32021` |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
