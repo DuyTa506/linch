@@ -120,6 +120,74 @@ async fn every_adapter_sends_the_extra_body_and_headers() {
     assert_options_sent(&head, &body);
 }
 
+/// A history with a call whose arguments were not an object: the call goes
+/// out with empty input, and what the model wrote stays in the log.
+fn with_invalid_call() -> ProviderRequest {
+    use linch_core::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
+    let call = ToolUseBlock::invalid("c1", "get_weather", "RAW-ARGS-MARKER {".into());
+    let messages = vec![
+        Message::user_text("hi"),
+        Message::new(Role::Assistant, vec![ContentBlock::ToolUse(call)]),
+        Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult(ToolResultBlock::text(
+                "c1",
+                "invalid JSON arguments for get_weather",
+                true,
+            ))],
+        ),
+    ];
+    ProviderRequest {
+        messages,
+        ..request("m")
+    }
+}
+
+#[tokio::test]
+async fn every_adapter_replays_an_invalid_call_with_empty_input() {
+    let (url, handle) = serve_once(bad_request());
+    let mut o = OpenAiChatOptions::new(key());
+    o.base_url = url;
+    let (_, chat) = sent(&OpenAiChat::new(o).unwrap(), handle, with_invalid_call()).await;
+    let call = &chat["messages"][1]["tool_calls"][0]["function"];
+    assert_eq!(call["arguments"], "{}");
+
+    let (url, handle) = serve_once(bad_request());
+    let mut o = ResponsesOptions::new(key());
+    o.base_url = url;
+    let (_, responses) = sent(
+        &OpenAiResponses::new(o).unwrap(),
+        handle,
+        with_invalid_call(),
+    )
+    .await;
+    let call = responses["input"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["type"] == "function_call"))
+        .expect("the call is replayed");
+    assert_eq!(call["arguments"], "{}");
+
+    let (url, handle) = serve_once(bad_request());
+    let mut o = AnthropicOptions::new(key());
+    o.base_url = url;
+    let (_, anthropic) = sent(&Anthropic::new(o).unwrap(), handle, with_invalid_call()).await;
+    assert_eq!(anthropic["messages"][1]["content"][0]["input"], json!({}));
+
+    let (url, handle) = serve_once(bad_request());
+    let mut o = GeminiOptions::new(key());
+    o.base_url = url;
+    let (_, gemini) = sent(&Gemini::new(o).unwrap(), handle, with_invalid_call()).await;
+    let args = &gemini["contents"][1]["parts"][0]["functionCall"]["args"];
+    assert_eq!(args, &json!({}));
+
+    for body in [chat, responses, anthropic, gemini] {
+        assert!(
+            !body.to_string().contains("RAW-ARGS-MARKER"),
+            "the raw arguments reached a provider: {body}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn chat_options_reach_the_body_of_a_server() {
     let (url, handle) = serve_once(bad_request());

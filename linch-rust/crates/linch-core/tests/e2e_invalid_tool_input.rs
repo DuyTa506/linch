@@ -64,12 +64,12 @@ async fn invalid_final_tool_arguments_do_not_fail_the_run() {
     );
 }
 
-/// What the model reads and what it is replayed: the call stays in the
-/// log with the text it wrote, the provider is replayed `{}` for it, and
+/// What the model reads and the log keeps: the call stays in the
+/// log with the text it wrote and an empty `input`, and
 /// its result is an error that names the tool, the parse error and the
 /// start of the text. Nothing is retried: the provider is called twice.
 #[tokio::test]
-async fn the_model_reads_an_error_for_the_call_and_is_replayed_empty_input() {
+async fn the_model_reads_an_error_for_the_call_and_the_log_keeps_its_text() {
     let mut broken = TurnBuilder::new(MODEL)
         .tool_call("c1", "Read", &json!({"value": "a.txt"}))
         .build();

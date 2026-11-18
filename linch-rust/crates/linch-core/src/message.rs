@@ -332,6 +332,21 @@ mod tests {
         assert_eq!(message.text(), "hi");
     }
 
+    /// A call whose arguments were not an object keeps the model's text
+    /// next to an empty `input`; a valid call's wire form is unchanged.
+    #[test]
+    fn an_invalid_call_keeps_its_raw_arguments_on_the_wire() {
+        let call = ToolUseBlock::invalid("c1", "Read", r#"{"path": "a"#.into());
+        let wire = serde_json::to_value(ContentBlock::ToolUse(call.clone())).unwrap();
+        assert_eq!(
+            wire,
+            json!({"type": "tool_use", "id": "c1", "name": "Read", "input": {},
+                   "raw_input": "{\"path\": \"a"})
+        );
+        let back: ContentBlock = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, ContentBlock::ToolUse(call));
+    }
+
     #[test]
     fn readers_reject_unknown_fields_and_types() {
         for bad in [

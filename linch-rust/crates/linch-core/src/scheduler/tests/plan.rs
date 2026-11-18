@@ -99,6 +99,36 @@ async fn unknown_tools_and_invalid_input_skip_the_hooks() {
     assert_eq!(invalid.input, obj(json!({"x": "one"})));
 }
 
+/// A call the model wrote invalid arguments for is an error before any
+/// hook or permission, and what it answers is the same planned again, as a
+/// resumed batch plans it from the log.
+#[tokio::test]
+async fn a_call_with_invalid_arguments_is_an_error_without_hooks_or_a_run() {
+    let log = new_log();
+    let fx = Fixture::new(PermissionMode::SkipDangerous);
+    fx.tool(TestTool::new("Read", ToolScope::Read, &log));
+    let pre = hook::<PreToolUse>("pre", &log, |_| PreToolUseResponse::Continue);
+    let _pre = fx.hooks.pre_tool_use.register(pre).unwrap();
+    let block = ToolUseBlock::invalid("t1", "Read", r#"{"x": "#.into());
+
+    for _ in 0..2 {
+        let plan = fx.plan(std::slice::from_ref(&block)).await;
+        let call = &plan.calls()[0];
+        let PlannedAction::Error { error } = &call.action else {
+            panic!("{call:?}")
+        };
+        assert!(
+            error
+                .message
+                .starts_with("invalid JSON arguments for Read: "),
+            "{}",
+            error.message
+        );
+        assert!(error.message.ends_with(r#"received: {"x": "#));
+        assert!(lines(&log).is_empty(), "no hook ran: {:?}", lines(&log));
+    }
+}
+
 #[tokio::test]
 async fn a_rewrite_is_validated_again() {
     let log = new_log();

@@ -205,7 +205,7 @@ Một phản hồi hoàn chỉnh của model.
 
 | Trường | Ý nghĩa |
 |---|---|
-| `message` | `{"role": "assistant", "content": [blocks]}`: các block `text`, `thinking`, `tool_use` |
+| `message` | `{"role": "assistant", "content": [blocks]}`: các block `text`, `thinking`, `tool_use`. Một block `tool_use` là `{"type", "id", "name", "input"}`, và chỉ mang `raw_input` (các đối số đúng như model viết) khi chúng không phải một đối tượng JSON: `input` khi đó là `{}` và lời gọi được trả lời bằng lỗi, không bao giờ chạy ([Khắc phục sự cố](./troubleshooting.md)) |
 | `stop_reason` | `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `refusal`, `error`, `lease_lost` hoặc `interrupted` |
 
 ### `PartialAssistantEvent` (`partial_assistant`), chỉ có trong stream
