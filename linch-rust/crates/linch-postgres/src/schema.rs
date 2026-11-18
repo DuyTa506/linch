@@ -88,9 +88,12 @@ pub async fn check_table(
     known: &[i64],
 ) -> Result<SchemaVersion, SchemaError> {
     let latest = known.iter().copied().max().unwrap_or(0);
+    // One connection for both reads: a second acquire right after the first
+    // release would open another connection of the pool.
+    let mut connection = pool.acquire().await?;
     let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(table)
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await?;
     if !exists {
         return Ok(SchemaVersion {
@@ -101,7 +104,7 @@ pub async fn check_table(
     // `table` is a constant of a Linch crate, never a tenant's text.
     let sql = format!("SELECT version FROM {table} WHERE success ORDER BY version");
     let applied: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(sql))
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
     if let Some(unknown) = applied.iter().copied().filter(|v| !known.contains(v)).max() {
         return Err(SchemaError::Newer {
