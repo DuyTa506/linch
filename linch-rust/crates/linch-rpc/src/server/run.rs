@@ -253,24 +253,16 @@ impl Server {
     /// Poll a new run's stream until the run is stored: its `init` envelope,
     /// which comes only after the create commit, or the end of the stream
     /// (an error: nothing was stored). What it yielded meanwhile is returned
-    /// for [`Self::drive`] to forward in order. `None` when the connection
-    /// ended first: the run is dropped and the host never saw its id.
-    pub(super) async fn until_stored(&self, stream: &mut RunStream) -> Option<VecDeque<Next>> {
+    /// for [`Self::drive`] to forward in order.
+    pub(super) async fn until_stored(&self, stream: &mut RunStream) -> VecDeque<Next> {
         let mut held = VecDeque::new();
         loop {
-            let next = tokio::select! {
-                biased;
-                () = self.0.shutdown.cancelled() => {
-                    lock(&self.0.tables).runs.remove(stream.run_id());
-                    return None;
-                }
-                next = Next::poll(stream) => next,
-            };
+            let next = Next::poll(stream).await;
             let stored = matches!(&next, Next::Item(Ok(e)) if matches!(e.event, Event::Init(_)));
             let ended = !matches!(next, Next::Item(Ok(_)));
             held.push_back(next);
             if stored || ended {
-                return Some(held);
+                return held;
             }
         }
     }

@@ -75,3 +75,29 @@ async fn every_answered_run_id_is_stored_at_once() {
     }
     db.drop().await;
 }
+
+/// A start waits for its run to be stored, and with a `user_prompt_submit`
+/// callback that is the host's answer: more starts than the connection has
+/// places for, all waiting on the callback, are still all answered (a
+/// callback's answer is read without a place).
+#[tokio::test]
+async fn more_starts_than_request_places_waiting_on_a_callback_are_all_answered() {
+    let slow = handler(|_method, _params, _cancel| async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(json!({"action": "allow"}))
+    });
+    let rpc = Rpc::with_handler(slow);
+    let turns = (0..70).map(|_| text_turn("ok")).collect();
+    let callback = json!({"point": "user_prompt_submit", "policy_id": "slow", "policy_version": 1});
+    let agent = rpc
+        .open(hosted(turns, "default", json!({"callbacks": [callback]})))
+        .await;
+    let starts = (0..70).map(|n| {
+        let params = json!({"agent": agent, "session_id": format!("s{n}"), "prompt": "go"});
+        rpc.call(method::RUN_START, params)
+    });
+    let answers = futures::future::join_all(starts);
+    let answers = tokio::time::timeout(Duration::from_secs(30), answers).await;
+    let answers = answers.expect("every start is answered");
+    assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+}

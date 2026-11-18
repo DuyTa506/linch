@@ -305,15 +305,23 @@ impl Server {
                 self.0.outbox.send(&Response::ok(id, result)).await;
             }
             Ok(Reply::Run(stream)) => {
-                self.accept(id, stream, VecDeque::new()).await;
+                self.ack(id, stream.run_id().clone()).await;
+                let server = self.clone();
+                self.spawn_run(async move { server.drive(stream, VecDeque::new()).await });
             }
             // The answer carries the id of a run that exists: the host that
             // holds it finds the run after any crash, so it waits for the
-            // create commit.
+            // create commit. The wait is a task of the run, not of the call:
+            // the call's place frees at once, and the read loop that waits
+            // for a place stays free to read the answers of the callbacks
+            // (`user_prompt_submit`) that the create waits for.
             Ok(Reply::Started(mut stream)) => {
-                if let Some(held) = self.until_stored(&mut stream).await {
-                    self.accept(id, stream, held).await;
-                }
+                let server = self.clone();
+                self.spawn_run(async move {
+                    let held = server.until_stored(&mut stream).await;
+                    server.ack(id, stream.run_id().clone()).await;
+                    server.drive(stream, held).await;
+                });
             }
             Err(error) => {
                 self.0.outbox.send(&Response::err(id, error)).await;
@@ -321,17 +329,12 @@ impl Server {
         }
     }
 
-    /// Answer a call that started or continued a run with its id, then
-    /// drive the run.
-    async fn accept(&self, id: Id, stream: RunStream, held: VecDeque<run::Next>) {
-        let accepted = RunAccepted {
-            run_id: stream.run_id().clone(),
-        };
+    /// Answer a call that started or continued a run with its id.
+    async fn ack(&self, id: Id, run_id: RunId) {
+        let accepted = RunAccepted { run_id };
         // The result goes out before the run's first notification.
         let result = serde_json::to_value(&accepted).expect("a run id encodes");
         self.0.outbox.send(&Response::ok(id, result)).await;
-        let server = self.clone();
-        self.spawn_run(async move { server.drive(stream, held).await });
     }
 
     async fn dispatch(&self, name: &str, params: JsonObject) -> Result<Reply, ErrorObject> {
